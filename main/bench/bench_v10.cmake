@@ -58,6 +58,14 @@ AddCommonTargetX(
     nlohmann_json_schema_validator::validator
     TBB::tbb
     lfreist-hwinfo::hwinfo
+    # DOC0345 Patch D — minimizer_dispatch_range now wires the Vulkan segment
+    # sketch path into the target dispatch, so bioseq_modules_nopg's GPU runtime
+    # (vulkan/shader_compiler) is referenced from bioseq_bench. Same glslang set
+    # as bench_e2e.cmake / bioseq_aligner.
+    Vulkan::Vulkan
+    Vulkan::glslang
+    spirv-cross-msl
+    Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES

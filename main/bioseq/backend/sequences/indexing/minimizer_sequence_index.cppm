@@ -15,6 +15,7 @@ module;
 #include <exception>
 #include <iterator>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -23,7 +24,9 @@ import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;            // MinimizerHashmapFragmentIndex, build_from_pairs, wire_for_each_*
-import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData
+import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
+import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch E — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
+import bioseq.gpu.vulkan.runtime;                    // VulkanRuntimeError
 import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq.storage.lazy;                          // lazy_compact_sequence
 import bioseq.storage.size;                          // sequence_size_t
@@ -43,6 +46,8 @@ using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
+using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;          // DOC0345 Patch E
+using bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name;   // DOC0345 Patch E — re-export so PG modules avoid the HWY_NAMESPACE macro
 using bioseq::storage::sequence_size_t;
 using bioseq::storage::lazy_compact_sequence;
 
@@ -224,6 +229,55 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
         return;
     }
 }
+
+// DOC0345 Patch E — GPU pair geometry helpers. A single GPU window's local
+// positions must fit the 28-bit MinimapSketchData position field, so a Vulkan
+// collect spans at most `pos_field_mask` bp of core (minus the W halo).
+[[nodiscard]] inline sequence_size_t clamp_gpu_collected_bp(
+    sequence_size_t wanted_bp) noexcept
+{
+    constexpr sequence_size_t max_bp =
+        static_cast<sequence_size_t>(MinimapSketchData::pos_field_mask);
+    return wanted_bp > max_bp ? max_bp : wanted_bp;
+}
+
+[[nodiscard]] inline std::size_t gpu_fragments_per_block(
+    std::size_t scalar_fragments_per_block,
+    std::size_t frag_bp,
+    std::size_t halo_bp) noexcept
+{
+    constexpr std::size_t max_bp =
+        static_cast<std::size_t>(MinimapSketchData::pos_field_mask);
+    if (frag_bp == 0u) {
+        return 1u;
+    }
+    if (halo_bp >= max_bp) {
+        return 1u;
+    }
+    constexpr std::size_t gpu_segment_local_size = 128u;
+    constexpr std::size_t gpu_segment_max_workgroups = 65535u;
+    const std::size_t allowed_core_bp = max_bp - halo_bp;
+    const std::size_t by_pos_field =
+        std::max<std::size_t>(1u, allowed_core_bp / frag_bp);
+    const std::size_t max_dispatch_bp = gpu_segment_local_size * gpu_segment_max_workgroups;
+    const std::size_t by_dispatch =
+        halo_bp >= max_dispatch_bp
+            ? 1u
+            : std::max<std::size_t>(1u, (max_dispatch_bp - halo_bp) / frag_bp);
+    return std::max<std::size_t>(
+        1u,
+        std::min({scalar_fragments_per_block, by_pos_field, by_dispatch}));
+}
+
+[[nodiscard]] inline std::uint64_t vulkan_segment_pair_collect_peak_bytes(
+    std::uint64_t upload_bp) noexcept
+{
+    constexpr std::uint64_t kBytesPerBp = 128u;
+    constexpr std::uint64_t kFixedSlack = std::uint64_t{1} << 20;
+    return bioseq::parallelism::saturating_add(
+        bioseq::parallelism::saturating_mul(upload_bp, kBytesPerBp),
+        kFixedSlack);
+}
 }  // namespace detail
 
 template <class S>
@@ -235,7 +289,10 @@ struct MinimizerSequenceMergedIndex {
     using storage_type = S;
 
     template <class R, class Scanner>
-    static void build(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+    static void build(
+        S& storage,
+        lazy_compact_sequence<R, Scanner>& seq,
+        MinimizerSketchBackend backend) {
         using traits = typename lazy_compact_sequence<R, Scanner>::traits;
         constexpr std::size_t w = 10, k = 15;
         constexpr std::size_t lpu        = traits::letters_per_unit;
@@ -269,6 +326,7 @@ struct MinimizerSequenceMergedIndex {
             std::vector<AdmittedPairRun> runs;
             std::vector<CoreRange> deferred_for_backend_spill;
             std::exception_ptr error;
+            CoreRange error_range{};
         };
 
         auto release_untransferred_results_noexcept =
@@ -289,30 +347,80 @@ struct MinimizerSequenceMergedIndex {
             out.reserve(static_cast<std::size_t>(count));
         };
 
+        // DOC0345 Patch E — under VulkanSegment the GPU (Phase B sketch) emits
+        // the window's minimizers on-device; the globalised (kmer, encoded_pos)
+        // pairs are sorted on the HOST (the tiled GPU emit+sort over-emits for
+        // dna5 and is bypassed — see DOC0348), so there is no CPU minimizer
+        // COLLECT on this path. The scalar branch is unchanged.
         auto collect_core_range_pairs =
-            [&seq, total_bp, size_u](sequence_size_t core_lo,
-                                     sequence_size_t core_hi,
-                                     sketch_collector& collector,
-                                     std::vector<pair_t>& out) {
+            [&seq, total_bp, size_u, backend](
+                sequence_size_t core_lo,
+                sequence_size_t core_hi,
+                sketch_collector& collector,
+                std::vector<pair_t>& out) {
             if (core_hi <= core_lo) {
                 return;
             }
+
             const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
-            const sequence_size_t coll_hi = std::min(core_hi + (sequence_size_t)W, total_bp);
-            collector.clear();
-            const std::size_t lo_unit = (std::size_t)(coll_lo / lpu);
-            const std::size_t hi_unit = std::min((std::size_t)((coll_hi + lpu - 1) / lpu), size_u);
-            auto begin_iter = seq.cbegin(); begin_iter += (sequence_size_t)lo_unit;
-            auto end_iter   = seq.cbegin(); end_iter   += (sequence_size_t)hi_unit;
-            const sequence_size_t emit_base = (sequence_size_t)lo_unit * lpu;
-            const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
-            if (collect_bp >= (sequence_size_t)W) {
-                collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(collector, seq, begin_iter, end_iter, w, k);
-                for (const MinimapSketchData& m : collector.extract_sketches_data()) {
-                    const sequence_size_t gpos = (sequence_size_t)m.last_pos() + emit_base;
-                    if (gpos < core_lo || gpos >= core_hi) continue;
-                    out.emplace_back(m.kmer(), ((std::uint64_t)gpos << 1) | (std::uint64_t)m.strand());
+            const sequence_size_t coll_hi =
+                std::min(core_hi + static_cast<sequence_size_t>(W), total_bp);
+            const std::size_t lo_unit = static_cast<std::size_t>(coll_lo / lpu);
+            const std::size_t hi_unit = std::min(
+                static_cast<std::size_t>((coll_hi + lpu - 1) / lpu),
+                size_u);
+            const sequence_size_t emit_base =
+                static_cast<sequence_size_t>(lo_unit) * lpu;
+            const sequence_size_t collect_bp =
+                coll_hi > emit_base ? coll_hi - emit_base : 0;
+            if (collect_bp < static_cast<sequence_size_t>(W)) {
+                return;
+            }
+
+            if (backend == MinimizerSketchBackend::VulkanSegment) {
+                std::vector<pair_t> gpu_pairs =
+                    bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                        seq,
+                        lo_unit,
+                        hi_unit,
+                        emit_base,
+                        core_lo,
+                        core_hi,
+                        w,
+                        k);
+                if (out.empty()) {
+                    out = std::move(gpu_pairs);
+                } else {
+                    out.insert(
+                        out.end(),
+                        std::make_move_iterator(gpu_pairs.begin()),
+                        std::make_move_iterator(gpu_pairs.end()));
                 }
+                return;
+            }
+
+            collector.clear();
+            auto begin_iter = seq.cbegin();
+            begin_iter += static_cast<sequence_size_t>(lo_unit);
+            auto end_iter = seq.cbegin();
+            end_iter += static_cast<sequence_size_t>(hi_unit);
+            collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+                collector,
+                seq,
+                begin_iter,
+                end_iter,
+                w,
+                k);
+            for (const MinimapSketchData& minimizer : collector.extract_sketches_data()) {
+                const sequence_size_t global_pos =
+                    static_cast<sequence_size_t>(minimizer.last_pos()) + emit_base;
+                if (global_pos < core_lo || global_pos >= core_hi) {
+                    continue;
+                }
+                out.emplace_back(
+                    minimizer.kmer(),
+                    (static_cast<std::uint64_t>(global_pos) << 1)
+                        | static_cast<std::uint64_t>(minimizer.strand()));
             }
         };
 
@@ -353,6 +461,22 @@ struct MinimizerSequenceMergedIndex {
                 const std::uint64_t reserve_bytes =
                     bioseq::parallelism::saturating_mul(
                         bp, static_cast<std::uint64_t>(sizeof(pair_t)));
+                const std::uint64_t admission_bytes =
+                    backend == MinimizerSketchBackend::VulkanSegment
+                        ? bioseq::parallelism::saturating_add(
+                            reserve_bytes,
+                            detail::vulkan_segment_pair_collect_peak_bytes(
+                                bioseq::parallelism::saturating_add(
+                                    bp,
+                                    static_cast<std::uint64_t>(2u * W + 2u * lpu))))
+                        : reserve_bytes;
+                if (backend == MinimizerSketchBackend::VulkanSegment) {
+                    if constexpr (requires (S& s, std::uint64_t bytes) {
+                                      s.demote_resident_runs_until_available(bytes);
+                                  }) {
+                        storage.demote_resident_runs_until_available(admission_bytes);
+                    }
+                }
                 auto permit =
                     bioseq::parallelism::MemoryAdmissionController::instance()
                         .try_reserve(reserve_bytes);
@@ -360,7 +484,7 @@ struct MinimizerSequenceMergedIndex {
                     if constexpr (requires (S& s, std::uint64_t bytes) {
                                       s.demote_resident_runs_until_available(bytes);
                                   }) {
-                        storage.demote_resident_runs_until_available(reserve_bytes);
+                        storage.demote_resident_runs_until_available(admission_bytes);
                         permit = bioseq::parallelism::MemoryAdmissionController::instance()
                             .try_reserve(reserve_bytes);
                     }
@@ -379,7 +503,9 @@ struct MinimizerSequenceMergedIndex {
                     sketch_collector collector;
                     collect_core_range_pairs(
                         range.core_lo, range.core_hi, collector, scratch);
-                    detail::sort_pair_run(scratch);
+                    if (backend == MinimizerSketchBackend::Scalar) {
+                        detail::sort_pair_run(scratch);
+                    }
                     storage.spill_sorted_run(
                         std::span<const pair_t>(scratch.data(), scratch.size()));
                     return;
@@ -389,7 +515,9 @@ struct MinimizerSequenceMergedIndex {
                 sketch_collector collector;
                 collect_core_range_pairs(
                     range.core_lo, range.core_hi, collector, scratch);
-                detail::sort_pair_run(scratch);
+                if (backend == MinimizerSketchBackend::Scalar) {
+                    detail::sort_pair_run(scratch);
+                }
                 storage.spill_sorted_run(
                     std::span<const pair_t>(scratch.data(), scratch.size()));
                 permit->release();
@@ -401,12 +529,22 @@ struct MinimizerSequenceMergedIndex {
                     try {
                         std::rethrow_exception(result.error);
                     } catch (const std::exception& e) {
-                        (void)e;
-                        index_corruption_panic(
-                            "bioseq minimizers_per_sequence worker failed");
+                        const std::string message =
+                            "bioseq minimizers_per_sequence worker failed for core=["
+                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_lo))
+                            + ","
+                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_hi))
+                            + "): "
+                            + e.what();
+                        index_corruption_panic(message);
                     } catch (...) {
-                        index_corruption_panic(
-                            "bioseq minimizers_per_sequence worker failed");
+                        const std::string message =
+                            "bioseq minimizers_per_sequence worker failed for core=["
+                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_lo))
+                            + ","
+                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_hi))
+                            + "): non-std exception";
+                        index_corruption_panic(message);
                     }
                 }
                 for (AdmittedPairRun& run : result.runs) {
@@ -437,6 +575,22 @@ struct MinimizerSequenceMergedIndex {
                     const std::uint64_t reserve_bytes =
                         bioseq::parallelism::saturating_mul(
                             bp, static_cast<std::uint64_t>(sizeof(pair_t)));
+                    const std::uint64_t admission_bytes =
+                        backend == MinimizerSketchBackend::VulkanSegment
+                            ? bioseq::parallelism::saturating_add(
+                                reserve_bytes,
+                                detail::vulkan_segment_pair_collect_peak_bytes(
+                                    bioseq::parallelism::saturating_add(
+                                        bp,
+                                        static_cast<std::uint64_t>(2u * W + 2u * lpu))))
+                            : reserve_bytes;
+                    if (backend == MinimizerSketchBackend::VulkanSegment) {
+                        if constexpr (requires (S& s, std::uint64_t bytes) {
+                                          s.demote_resident_runs_until_available(bytes);
+                                      }) {
+                            storage.demote_resident_runs_until_available(admission_bytes);
+                        }
+                    }
                     auto permit =
                         bioseq::parallelism::MemoryAdmissionController::instance()
                             .try_reserve(reserve_bytes);
@@ -460,11 +614,45 @@ struct MinimizerSequenceMergedIndex {
                     sketch_collector collector;
                     collect_core_range_pairs(
                         range.core_lo, range.core_hi, collector, run.pairs);
-                    detail::sort_pair_run(run.pairs);
+                    if (backend == MinimizerSketchBackend::Scalar) {
+                        detail::sort_pair_run(run.pairs);
+                    }
                     compact_admitted_run_after_sort(run);
                     result.runs.push_back(std::move(run));
+                } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& err) {
+                    const std::string_view message{err.what()};
+                    const bool split_admission_decline =
+                        message.starts_with(
+                            "Vulkan segment minimizer pair build returned invalid ");
+                    if (backend == MinimizerSketchBackend::VulkanSegment
+                        && split_admission_decline) {
+                        constexpr sequence_size_t kMinGpuCoreBp = 4096;
+                        if (range.core_hi - range.core_lo > kMinGpuCoreBp) {
+                            const sequence_size_t mid =
+                                range.core_lo + (range.core_hi - range.core_lo) / 2;
+                            self(self, CoreRange{range.core_lo, mid}, result);
+                            self(self, CoreRange{mid, range.core_hi}, result);
+                            return;
+                        }
+                    }
+                    result.error = std::current_exception();
+                    result.error_range = range;
+                } catch (const std::bad_alloc&) {
+                    if (backend == MinimizerSketchBackend::VulkanSegment) {
+                        constexpr sequence_size_t kMinGpuCoreBp = 4096;
+                        if (range.core_hi - range.core_lo > kMinGpuCoreBp) {
+                            const sequence_size_t mid =
+                                range.core_lo + (range.core_hi - range.core_lo) / 2;
+                            self(self, CoreRange{range.core_lo, mid}, result);
+                            self(self, CoreRange{mid, range.core_hi}, result);
+                            return;
+                        }
+                    }
+                    result.error = std::current_exception();
+                    result.error_range = range;
                 } catch (...) {
                     result.error = std::current_exception();
+                    result.error_range = range;
                 }
             };
 
@@ -472,9 +660,18 @@ struct MinimizerSequenceMergedIndex {
             bioseq::parallelism::saturating_mul(
                 static_cast<std::uint64_t>(frag_bp),
                 static_cast<std::uint64_t>(sizeof(pair_t)));
-        const std::size_t fragments_per_block = std::max<std::size_t>(
+        const std::size_t scalar_fragments_per_block = std::max<std::size_t>(
             1,
             run_buffer_bytes / std::max<std::uint64_t>(1, peak_bytes_per_fragment));
+        // DOC0345 Patch E — one GPU window's local positions must fit the 28-bit
+        // field, so clamp the per-block fragment count when collecting on GPU.
+        const std::size_t fragments_per_block =
+            backend == MinimizerSketchBackend::VulkanSegment
+                ? detail::gpu_fragments_per_block(
+                    scalar_fragments_per_block,
+                    frag_bp,
+                    2u * W)
+                : scalar_fragments_per_block;
         std::vector<CoreRange> window_ranges;
         for (std::size_t frag_lo = 0; frag_lo < nfrag; frag_lo += fragments_per_block) {
             const std::size_t frag_hi = std::min(nfrag, frag_lo + fragments_per_block);
@@ -498,8 +695,11 @@ struct MinimizerSequenceMergedIndex {
         };
 
         auto& pool = bioseq::parallelism::GlobalPool::instance();
+        // DOC0345 Patch E — Vulkan serialises window submissions through the one
+        // runtime queue, so only the scalar backend may collect in parallel.
         const bool may_parallel_collect =
-            bioseq::parallelism::task_parallel(pool.mode())
+            backend == MinimizerSketchBackend::Scalar
+            && bioseq::parallelism::task_parallel(pool.mode())
             && pool.max_concurrency() > 1
             && bioseq::storage::lazy_is_worker_shareable(seq)
             && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;
@@ -615,9 +815,25 @@ struct MinimizerSequenceMergedIndex {
         storage.release_runs();
     }
 
+    // DOC0345 Patch E — scalar-default overload delegates to the explicit backend.
+    template <class R, class Scanner>
+    static void build(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+        build(storage, seq, MinimizerSketchBackend::Scalar);
+    }
+
+    template <class R, class Scanner>
+    static void rebuild(
+        S& storage,
+        lazy_compact_sequence<R, Scanner>& seq,
+        MinimizerSketchBackend backend)
+    {
+        storage.clear_entity();
+        build(storage, seq, backend);
+    }
+
     template <class R, class Scanner>
     static void rebuild(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
-        storage.clear_entity(); build(storage, seq);
+        rebuild(storage, seq, MinimizerSketchBackend::Scalar);
     }
 
     /// query-time: load ONLY the buckets containing any query kmer (§10.5).

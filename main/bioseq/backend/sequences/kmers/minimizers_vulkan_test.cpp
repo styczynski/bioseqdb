@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 import bioseq.common.mlogging;
@@ -25,6 +26,9 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.storage.scanner;   // DOC0345 §16 — sequence_scanner_test_chunked + SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT
+import bioseq.storage.lazy;      // DOC0345 §16 — lazy_compact_sequence
+import bioseq.storage.size;      // DOC0345 §16 — sequence_size_t
 import bioseq.common.testing;
 
 using namespace seq::literals;
@@ -215,6 +219,209 @@ TEST_CASE("vulkan minimizer: MinimizerRepr 16/32/64/128-bit layouts round-trip",
         ASSERT(cpu == gpu, fmt::format("u64x2 repr parity failed (cpu={} gpu={})",
                                        cpu.size(), gpu.size()), cpu.size(), gpu.size());
     }
+}
+
+// ===========================================================================
+// DOC0345 §16.1 / §16.2 — checked Vulkan segment path tests.
+// ===========================================================================
+
+TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
+          "[vulkan][minimizer][segment]") {
+    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+
+    auto run_case = []<class alphabet_t>() {
+        using config_t = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
+        using range_t = compact_sequence_range<config_t>;
+        using storage_unit = typename range_t::traits::storage_unit;
+        using scanner_t =
+            bioseq::storage::sequence_scanner_test_chunked<
+                storage_unit,
+                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+        using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
+        using MinimizerT = MinimapSketchData;
+
+        constexpr std::size_t w = 10;
+        constexpr std::size_t k = 15;
+        // DOC0345 §16.1 — exact GPU-vs-scalar parity of the GPU segment sketch.
+        // `collect_minimizers_vulkan_segment_or_throw` uses the bit-exact NON-tiled
+        // Phase B GPU sketch (the tiled emit over-emits ~8% for dna5 and is
+        // bypassed — BUGFIX DOC0348). Two test-only input conditions keep the
+        // comparison EXACT and meaningful:
+        //  (1) draw ranks from the NON-AMBIGUOUS letters only (ACGT, ranks 0..3).
+        //      The original periodic `i % alphabet_size` put an N every 5th base
+        //      for dna5 (every 15-mer spans an N → vacuous). Phase B IS bit-exact
+        //      for dna5+N (covered by the whole-window dna5/N parity test above);
+        //      ACGT here just keeps this segment case simple and aligned with
+        //      §16.3. And
+        //  (2) make the length a MULTIPLE of letters_per_unit so the trailing
+        //      unit has zero padding — otherwise the scalar unit-iterator
+        //      sub-range processes the last unit's padding slots (decoded as A)
+        //      as spurious end-of-window minimizers that the GPU (which honours
+        //      tail_padding) correctly omits. This is a separate scalar/GPU
+        //      end-of-sequence discrepancy, independent of the tiled bug.
+        constexpr std::uint8_t kNonAmbiguous =
+            range_t::traits::alphabet_size < 4u
+                ? static_cast<std::uint8_t>(range_t::traits::alphabet_size)
+                : 4u;
+        const std::size_t letter_count = range_t::traits::letters_per_unit * 50000u;
+        std::vector<typename config_t::alphabet_type> letters;
+        letters.reserve(letter_count);
+        std::uint64_t lcg = 0x9e3779b97f4a7c15ULL;
+        for (std::size_t i = 0; i < letter_count; ++i) {
+            lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
+            typename config_t::alphabet_type value{};
+            value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % kNonAmbiguous));
+            letters.push_back(value);
+        }
+        range_t range(letters);
+        lazy_t fragmented{scanner_t::from_range(range)};
+
+        const std::array<std::pair<std::size_t, std::size_t>, 4> windows{{
+            {0, 4096},
+            {17, 8192},
+            {4096, 16384},
+            {range.size() > 20000
+                 ? static_cast<std::size_t>(range.size()) - 20000
+                 : 0,
+             static_cast<std::size_t>(range.size())},
+        }};
+
+        for (const auto& window : windows) {
+            const std::size_t lo_unit = window.first;
+            const std::size_t hi_unit = std::min(
+                window.second, static_cast<std::size_t>(range.size()));
+            sketch_collector_t<MinimizerT> scalar;
+            sketch_collector_t<MinimizerT> gpu;
+
+            auto begin_iter = fragmented.cbegin();
+            begin_iter += static_cast<bioseq::storage::sequence_size_t>(lo_unit);
+            auto end_iter = fragmented.cbegin();
+            end_iter += static_cast<bioseq::storage::sequence_size_t>(hi_unit);
+            collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+                scalar, fragmented, begin_iter, end_iter, w, k);
+
+            vk::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
+                gpu, fragmented, lo_unit, hi_unit, w, k);
+
+            auto scalar_values = scalar.extract_sketches_data();
+            auto gpu_values = gpu.extract_sketches_data();
+            auto normalize = [](auto& values) {
+                std::sort(
+                    values.begin(),
+                    values.end(),
+                    [](const MinimizerT& lhs, const MinimizerT& rhs) {
+                        return std::tuple{lhs.kmer(), lhs.last_pos(), lhs.strand()}
+                            < std::tuple{rhs.kmer(), rhs.last_pos(), rhs.strand()};
+                    });
+            };
+            normalize(scalar_values);
+            normalize(gpu_values);
+            REQUIRE(gpu_values.size() == scalar_values.size());
+            for (std::size_t i = 0; i < scalar_values.size(); ++i) {
+                CHECK(gpu_values[i].kmer() == scalar_values[i].kmer());
+                CHECK(gpu_values[i].last_pos() == scalar_values[i].last_pos());
+                CHECK(gpu_values[i].strand() == scalar_values[i].strand());
+            }
+        }
+    };
+
+    run_case.template operator()<seq::dna4>();
+    run_case.template operator()<seq::dna5>();
+}
+
+TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position",
+          "[vulkan][minimizer][segment][sort]") {
+    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+
+    {
+        using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+        using range_t = compact_sequence_range<config_t>;
+        using storage_unit = typename range_t::traits::storage_unit;
+        using scanner_t =
+            bioseq::storage::sequence_scanner_test_chunked<
+                storage_unit,
+                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+        using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
+
+        std::vector<typename config_t::alphabet_type> letters;
+        letters.reserve(1u << 20);
+        std::uint64_t lcg = 0x9e3779b97f4a7c15ULL;
+        for (std::size_t i = 0; i < (1u << 20); ++i) {
+            lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
+            typename config_t::alphabet_type value{};
+            value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % 4u));
+            letters.push_back(value);
+        }
+        range_t range(letters);
+        lazy_t fragmented{scanner_t::from_range(range)};
+
+        sketch_collector_t<MinimapSketchData> scalar;
+        collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+            scalar,
+            fragmented,
+            fragmented.cbegin(),
+            fragmented.cend(),
+            10,
+            15);
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> expected;
+        for (const MinimapSketchData& minimizer : scalar.extract_sketches_data()) {
+            expected.emplace_back(
+                minimizer.kmer(),
+                (static_cast<std::uint64_t>(minimizer.last_pos()) << 1)
+                    | static_cast<std::uint64_t>(minimizer.strand()));
+        }
+        std::sort(expected.begin(), expected.end());
+
+        const auto pairs =
+            vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                fragmented,
+                0,
+                static_cast<std::size_t>(fragmented.size()),
+                0,
+                0,
+                static_cast<bioseq::storage::sequence_size_t>(fragmented.bp_size()),
+                10,
+                15);
+        REQUIRE(pairs == expected);
+    }
+
+    using config_t = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    using range_t = compact_sequence_range<config_t>;
+    using storage_unit = typename range_t::traits::storage_unit;
+    using scanner_t =
+        bioseq::storage::sequence_scanner_test_chunked<
+            storage_unit,
+            bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+    using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
+
+    std::vector<typename config_t::alphabet_type> letters;
+    letters.reserve(4u << 20);
+    // DOC0345 §16.2 — varied (LCG) ranks so the dna5 sequence actually has
+    // minimizers. `(i*7 + i/31) % 5` is periodic and puts an N (rank 4) every
+    // 5th base, so every 15-mer contains an N → zero minimizers → empty pairs.
+    std::uint64_t lcg = 0x2545f4914f6cdd1dULL;
+    for (std::size_t i = 0; i < (4u << 20); ++i) {
+        lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
+        typename config_t::alphabet_type value{};
+        value.assign_rank(static_cast<std::uint8_t>(
+            (lcg >> 33) % range_t::traits::alphabet_size));
+        letters.push_back(value);
+    }
+    range_t range(letters);
+    lazy_t fragmented{scanner_t::from_range(range)};
+
+    const auto pairs =
+        vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+            fragmented,
+            0,
+            static_cast<std::size_t>(fragmented.size()),
+            0,
+            0,
+            static_cast<bioseq::storage::sequence_size_t>(fragmented.bp_size()),
+            10,
+            15);
+    REQUIRE(!pairs.empty());
+    REQUIRE(std::is_sorted(pairs.begin(), pairs.end()));
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

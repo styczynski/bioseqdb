@@ -217,7 +217,7 @@ target_include_directories(bioseq_gpu_archive_builder PRIVATE
 if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
   install(TARGETS bioseq_gpu_archive_builder
     RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
-    COMPONENT ${EXTENSION_COMPONENT})
+    COMPONENT ${PROJECT_NAME})
 endif()
 
 # ============================================================================
