@@ -2,9 +2,9 @@
   "mcpServers": {
     "bioseq-build": {
       "type": "stdio",
-      "command": "python3",
+      "command": "/usr/local/bin/python3",
       "args": [
-        "main/build_mcp/server.py"
+        "/Users/piotr.styczynski/Code/bioseqdb/main/build_mcp/server.py"
       ]
     }
   }

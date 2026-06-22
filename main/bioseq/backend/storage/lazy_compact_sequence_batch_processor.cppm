@@ -36,18 +36,147 @@
  */
 module;
 
+// DOC0192 — anchor <hwy/highway.h> before importing the HWY-wrapped simd BMI
+// (cpu_sort_sequences calls bioseq::simd::N_NEON::compare_sequences_scalar).
+#include "common_simd.h"
 #include "common.h"
 
+#include <algorithm>
+#include <compare>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <numeric>
+#include <optional>
 #include <ranges>
 #include <span>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 export module bioseq.storage.batch_processor;
 
-import bioseq.storage.lazy;     // lazy_compact_sequence
-import bioseq.storage.scanner;  // is_valid_sequence_scanner, sequence_scanner_none
-import bioseq.sequences;        // supports_compact_sequence_range, compact_sequence_range
+import bioseq.storage.lazy;        // lazy_compact_sequence
+import bioseq.storage.scanner;     // is_valid_sequence_scanner, sequence_scanner_none
+import bioseq.sequences;           // supports_compact_sequence_range, compact_sequence_range
+import bioseq.sequences.simd;      // N_NEON::compare_sequences_scalar (CPU fallback)
+import bioseq.parallelism.pool;    // GlobalPool::parallel_sort
+// DOC0346 — the GPU sort façade. NB: this is folded INTO this module (rather than
+// the spec's separate `bioseq.gpu.sort` module) because adding a brand-new module
+// TU trips a CMake-4.3.1 `import std` generate-time toolchain re-detection bug on
+// this host; editing an existing module TU does not. The façade still lives in
+// its own `bioseq::gpu::sort` namespace and the processor consumes it across that
+// boundary, so the separation-of-concerns intent (§7.1) is preserved in source.
+import bioseq.gpu.vulkan.runtime;            // Runtime, SeqSortKernelParams, SeqDescWire, VulkanRuntimeError
+import bioseq.gpu.vulkan.phase_b_abi;        // AlphabetKernelKind
+import bioseq.sequences.kmers.vulkan;        // SequenceUploadView, make_sequence_upload_view, choose_alphabet_kernel, round_up4
+import bioseq.parallelism.memory_admission;  // MemoryAdmissionController, saturating_add/_mul
+import bioseq.common.mlogging;               // bioseq_log
+
+// ===========================================================================
+// DOC0346 — GPU sort façade (folded in; see the import note above).
+// ===========================================================================
+export namespace bioseq::gpu::sort {
+
+/// Reverse the ascending permutation for DESC (§7.4). Because the device order
+/// makes the original row index the secondary key, the reverse is identical to
+/// the CPU's symmetric DESC tiebreak even on duplicate sequences.
+[[nodiscard]] inline std::vector<std::size_t>
+apply_direction(std::vector<std::size_t> perm, bool descending) {
+    if (descending) std::reverse(perm.begin(), perm.end());
+    return perm;
+}
+
+/// Order an in-RAM lazy batch on the GPU. Returns nullopt on any decline (GUC
+/// off, no usable device, oversize), in which case the caller uses the CPU path.
+/// `Spec` is duck-typed: it must expose `.vulkan_enabled` and `.descending`.
+template <class LazyBatch, class Spec>
+[[nodiscard]] std::optional<std::vector<std::size_t>>
+gpu_sort_sequences(const LazyBatch& batch, const Spec& spec) {
+    using lazy_t  = std::ranges::range_value_t<LazyBatch>;
+    using range_t = std::remove_cvref_t<decltype(std::declval<lazy_t>().underlying())>;
+    using traits  = typename range_t::traits;
+
+    if (!spec.vulkan_enabled) return std::nullopt;
+    auto& rt = bioseq::gpu::vulkan::Runtime::instance();
+    if (!rt.usable()) return std::nullopt;
+
+    const std::size_t n = std::ranges::size(batch);
+    if (n <= 1) {
+        std::vector<std::size_t> order(n);
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        return apply_direction(std::move(order), spec.descending);
+    }
+    // The 0xffffffff bitonic sentinel + the uint32 GLSL indices require n and
+    // every bp_size below UINT32_MAX (§6.3 / §7.2).
+    if (n >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) return std::nullopt;
+
+    // Concatenate each row's packed units (4-byte aligned) + one SeqDescWire/row.
+    std::vector<std::byte> packed;
+    std::vector<bioseq::gpu::vulkan::SeqDescWire> descs;
+    descs.reserve(n);
+    const std::uint32_t lpu = static_cast<std::uint32_t>(traits::letters_per_unit);
+    for (const auto& lz : batch) {
+        const auto view = bioseq::gpu::vulkan::make_sequence_upload_view(lz.underlying());
+        if (view.bp_size > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+            return std::nullopt;
+        const std::uint32_t word_off = static_cast<std::uint32_t>(packed.size() / 4u);
+        const std::uint32_t bp = static_cast<std::uint32_t>(view.bp_size);
+        const std::uint32_t unit_count = (bp + lpu - 1u) / lpu;
+        const std::size_t before = packed.size();
+        const std::size_t add = static_cast<std::size_t>(view.byte_size);
+        packed.resize(static_cast<std::size_t>(bioseq::gpu::vulkan::round_up4(
+            static_cast<std::uint64_t>(before + add))), std::byte{0});
+        if (add > 0 && view.bytes != nullptr)
+            std::memcpy(packed.data() + before, view.bytes, add);
+        descs.push_back(bioseq::gpu::vulkan::SeqDescWire{word_off, unit_count, bp, 0u});
+    }
+
+    const std::uint64_t per_row = 8u + 8u + 16u + 4u + 256u; /* keys+vals+scr+index+hist slack */
+    const std::uint64_t reserve = bioseq::parallelism::saturating_add(
+        static_cast<std::uint64_t>(packed.size()),
+        bioseq::parallelism::saturating_mul(static_cast<std::uint64_t>(n), per_row));
+    auto permit = bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(reserve);
+    if (!permit) return std::nullopt;
+
+    const bioseq::gpu::vulkan::SeqSortKernelParams params{
+        static_cast<std::uint32_t>(bioseq::gpu::vulkan::choose_alphabet_kernel<range_t>()),
+        static_cast<std::uint32_t>(traits::unit_width),
+        static_cast<std::uint32_t>(traits::bits_per_char),
+        static_cast<std::uint32_t>(traits::letters_per_unit),
+        static_cast<std::uint32_t>(traits::char_mask),
+        static_cast<std::uint64_t>(traits::used_storage_mask)};
+
+    // Host refinement for equal-key runs > LOCAL_SIZE_X: same order as the device
+    // (ascending sequence, then ascending original row index — §7.4). Explicit
+    // captures (no [&], guideline §5).
+    const auto refine = [&batch](std::uint32_t begin, std::uint32_t len, std::uint32_t* index) {
+        std::sort(index + begin, index + begin + len,
+                  [&batch](std::uint32_t i, std::uint32_t j) {
+                      const std::strong_ordering c =
+                          bioseq::simd::N_NEON::compare_sequences_scalar(
+                              batch[i].underlying(), batch[j].underlying());
+                      if (c != 0) return c < 0;
+                      return i < j;
+                  });
+    };
+
+    std::vector<std::uint32_t> perm32;
+    try {
+        perm32 = rt.run_sequence_sort_roundtrip(packed, descs, params, refine);
+    } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& e) {
+        bioseq_log<ERR>("[gpu.sort] {}", e.what());
+        return std::nullopt;
+    }
+
+    std::vector<std::size_t> order(perm32.size());
+    for (std::size_t i = 0; i < perm32.size(); ++i)
+        order[i] = static_cast<std::size_t>(perm32[i]);
+    return apply_direction(std::move(order), spec.descending);
+}
+
+}  // namespace bioseq::gpu::sort
 
 export namespace bioseq::storage {
 
@@ -60,6 +189,8 @@ export namespace bioseq::storage {
 struct batch_sort_spec {
     bool descending  = false;   //< ORDER BY ... DESC
     bool nulls_first = false;   //< NULLS FIRST
+    bool vulkan_enabled = false;//< DOC0346: GPU sort allowed (bioseq.aligner.vulkan_enabled).
+                                //  PG-free value type; the scan node sets it from the GUC.
 };
 
 /*
@@ -85,13 +216,44 @@ struct lazy_compact_sequence_batch_processor {
     using batch_t = Batch;
 
     /*
+     * CPU fallback (DOC0346 §8): order the batch with the EXACT scalar
+     * comparator the btree/`Sort` use (`compare_sequences_scalar`), via
+     * `GlobalPool::parallel_sort` (TBB). The order is a TOTAL order whose
+     * secondary key is the original row index, with the SAME direction applied
+     * to both keys (symmetric DESC tiebreak, §7.4) so the GPU and CPU
+     * permutations are bit-identical even on duplicate sequences. Explicit
+     * captures (no `[&]`, guideline §5).
+     *
+     * This is also the refinement path for GPU declines and for equal-key runs
+     * longer than one workgroup.
+     */
+    [[nodiscard]] static std::vector<std::size_t>
+    cpu_sort_sequences(const Batch& batch, const batch_sort_spec& spec) {
+        const std::size_t n = std::ranges::size(batch);
+        std::vector<std::size_t> order(n);
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        const bool desc = spec.descending;
+        auto less = [&batch, desc](std::size_t i, std::size_t j) {
+            const std::strong_ordering c =
+                bioseq::simd::N_NEON::compare_sequences_scalar(batch[i].underlying(),
+                                                               batch[j].underlying());
+            if (c != 0) return desc ? c > 0 : c < 0;
+            return desc ? i > j : i < j;   // symmetric tiebreak (§7.4)
+        };
+        bioseq::parallelism::GlobalPool::instance().parallel_sort(order.begin(), order.end(), less);
+        return order;
+    }
+
+    /*
      * Return a permutation `order` of [0, batch.size()): the executor emits
      * batch element `order[i]` as its i-th output row.
      *
-     * PLACEHOLDER — returns the reverse permutation (`batch.reverse()`
-     * expressed as indices) instead of a real ordering, so the end-to-end
-     * custom-scan path is provable via SQL without implementing the
-     * (out-of-scope) sequence comparison.
+     * DOC0346 — REAL ordering. For the in-RAM (`sequence_scanner_none`)
+     * specialisation the GPU façade is attempted first (it declines to nullopt
+     * when the GUC is off, no device is usable, or the batch exceeds device
+     * limits); otherwise the CPU comparator orders the batch. The fragmented
+     * (out-of-core) specialisation skips the GPU and uses the CPU streaming
+     * comparator (DOC0343 §8, orthogonal).
      *
      * Returning a permutation rather than reordering the span in place is
      * deliberate on two counts: (1) the executor must reorder whole tuples —
@@ -103,13 +265,17 @@ struct lazy_compact_sequence_batch_processor {
      */
     [[nodiscard]] static std::vector<std::size_t>
     lazy_compact_sequence_batch_sort(const Batch& batch,
-                                     [[maybe_unused]] const batch_sort_spec& spec = {}) {
-        const std::size_t batch_size = std::ranges::size(batch);
-        std::vector<std::size_t> order(batch_size);
-        for (std::size_t i = 0; i < batch_size; ++i) {
-            order[i] = batch_size - 1 - i;   //< reverse: last scan row emitted first
+                                     const batch_sort_spec& spec = {}) {
+        const std::size_t n = std::ranges::size(batch);
+        std::vector<std::size_t> order(n);
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        if (n <= 1) return order;
+        if constexpr (!Scanner::supports_fragments()) {   // in-RAM only
+            if (auto gpu = bioseq::gpu::sort::gpu_sort_sequences(batch, spec)) {
+                return std::move(*gpu);
+            }
         }
-        return order;
+        return cpu_sort_sequences(batch, spec);
     }
 };
 

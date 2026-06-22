@@ -52,6 +52,7 @@ import bioseq.storage.scanner;          // sequence_scanner_none
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
 import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
+import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
 
 namespace {
 
@@ -234,6 +235,14 @@ BioseqBatchSort_BeginCustomScan(CustomScanState* node, EState* estate, int eflag
     auto* rt = new BioseqBatchSortRuntime();
     reinterpret_cast<BioseqBatchSortState*>(node)->runtime = rt;
 
+    /* DOC0346 — ORDER BY direction (planner) + GPU enablement (GUC) into the
+     * spec the batch processor consumes. custom_private = [descending, nulls_first]. */
+    if (list_length(cscan->custom_private) == 2) {
+        rt->spec.descending  = (intVal(list_nth(cscan->custom_private, 0)) != 0);
+        rt->spec.nulls_first = (intVal(list_nth(cscan->custom_private, 1)) != 0);
+    }
+    rt->spec.vulkan_enabled = bioseq_aligner_vulkan_enabled;
+
     /* Free the C++ runtime even if the executor errors out before End. */
     auto* cb = static_cast<MemoryContextCallback*>(
         MemoryContextAlloc(estate->es_query_cxt, sizeof(MemoryContextCallback)));
@@ -403,8 +412,10 @@ const CustomPathMethods BioseqBatchSortPathMethods = {
 
 create_upper_paths_hook_type PreviousCreateUpperPathsHook = nullptr;
 
-/* True iff any key in the requested ordering is of type bioseq.seq. */
-[[nodiscard]] bool sort_orders_a_sequence(PlannerInfo* root, Oid seq_oid)
+/* The first ORDER BY pathkey whose key is of type bioseq.seq, or nullptr.
+ * (DOC0346 — also the carrier of the sort DIRECTION: pk_cmptype is
+ * COMPARE_GT for DESC, COMPARE_LT for ASC in PG18.) */
+[[nodiscard]] PathKey* sort_sequence_pathkey(PlannerInfo* root, Oid seq_oid)
 {
     ListCell* pk_cell;
     foreach(pk_cell, root->sort_pathkeys) {
@@ -417,11 +428,11 @@ create_upper_paths_hook_type PreviousCreateUpperPathsHook = nullptr;
                 continue;
             }
             if (exprType(reinterpret_cast<Node*>(member->em_expr)) == seq_oid) {
-                return true;
+                return pathkey;
             }
         }
     }
-    return false;
+    return nullptr;
 }
 
 void
@@ -447,11 +458,20 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
         return;
     }
     const Oid seq_oid = bioseq_seq_type_oid();
-    if (!OidIsValid(seq_oid) || !sort_orders_a_sequence(root, seq_oid)) {
+    PathKey* seq_pk = OidIsValid(seq_oid) ? sort_sequence_pathkey(root, seq_oid) : nullptr;
+    if (seq_pk == nullptr) {
         return;   /* not sorting sequences — leave PostgreSQL's plan untouched */
     }
 
-    bioseq_log<DBG>("[bioseq] pg: BioseqBatchSort engaging for sequence ORDER BY");
+    /* DOC0346 — carry the sort direction to the executor. The sequence pathkey's
+     * pk_cmptype is COMPARE_GT for DESC (PG18 renamed the old pk_strategy /
+     * BTGreaterStrategyNumber); pk_nulls_first is the NULLS FIRST flag. Stored as
+     * a 2-int List in custom_private and read back in BeginCustomScan. */
+    const bool descending  = (seq_pk->pk_cmptype == COMPARE_GT);
+    const bool nulls_first = seq_pk->pk_nulls_first;
+
+    bioseq_log<DBG>("[bioseq] pg: BioseqBatchSort engaging for sequence ORDER BY "
+                    "(descending={}, nulls_first={})", descending, nulls_first);
 
     CustomPath* cpath = makeNode(CustomPath);
     cpath->path.pathtype = T_CustomScan;
@@ -470,7 +490,9 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
     cpath->path.pathkeys = root->sort_pathkeys;         /* we satisfy the ordering */
     cpath->flags = 0;
     cpath->custom_paths = list_make1(input_path);
-    cpath->custom_private = NIL;
+    /* [0] = descending, [1] = nulls_first (read in BeginCustomScan). */
+    cpath->custom_private = list_make2(makeInteger(descending ? 1 : 0),
+                                       makeInteger(nulls_first ? 1 : 0));
     cpath->custom_restrictinfo = NIL;
     cpath->methods = &BioseqBatchSortPathMethods;
 
