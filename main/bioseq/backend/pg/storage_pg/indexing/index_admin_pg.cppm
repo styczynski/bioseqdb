@@ -199,6 +199,31 @@ resolve_index_sketch_backend_from_gucs() noexcept
         : MinimizerSketchBackend::Scalar;
 }
 
+// DOC0350 — make the GPU runtime usable before a selected Vulkan index build.
+// bioseq is in shared_preload_libraries, so bioseq_init()'s shader-provider
+// install runs during preload and no-ops (install_pg_shader_provider_if_available
+// early-returns while process_shared_preload_libraries_in_progress). Forked
+// backends never re-run bioseq_init, and only the custom_scan QUERY path
+// re-installs the provider lazily. A bioseq.load / bioseq.update_index GPU index
+// build therefore reaches the Vulkan sketch with NO shader provider installed:
+// Runtime::create_phase_b then takes the SPIR-V source-compile branch, MoltenVK
+// calls newLibraryWithSource, and the MTLCompilerService XPC connection is
+// invalid in a fork-without-exec PG backend (DOC0344) -> VkResult -3 -> uncaught
+// VulkanRuntimeError -> SIGABRT. Installing the provider + waiting for the GPU
+// runtime cache (wait_for_runtime_ready also setenvs the binary-archive dir the
+// PSO interposer reads) before the build routes the sketch through the cached
+// metallib + .metalar archives instead, exactly like the query path.
+inline void ensure_vulkan_index_build_runtime_ready(
+    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend)
+{
+    if (backend
+        != bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::VulkanSegment) {
+        return;
+    }
+    bioseq::parallelism::pg::install_pg_shader_provider_if_available();
+    bioseq::parallelism::pg::wait_for_runtime_ready();
+}
+
 // ---- INSERT-time build (§11.2) -------------------------------------------
 inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint64_t rowno, const pgseq_t* hdr,
                                   const std::optional<seq_locator>& loc_opt, MemoryContext mctx) {
@@ -210,6 +235,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
     pg_supported_indexes idx; idx.apply_table_defaults(); idx.merge_overrides(policy_rows);
     reset_last_mps_build_stats();
     const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
+    ensure_vulkan_index_build_runtime_ready(backend);  // DOC0350
     pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width, [&]<class S>() {
         compact_sequence_range<S> rng{*hdr};
         auto lazy = bioseq::storage::make_lazy_in_memory(rng);
@@ -480,6 +506,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     const SequenceIndexType layout = layout_of_name(name);
     reset_last_mps_build_stats();
     const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
+    ensure_vulkan_index_build_runtime_ready(backend);  // DOC0350
     bioseq_log<DBG>(
         "[bioseq] index: update_index name={} backend={} vulkan_enabled={} "
         "vulkan_gpu_index_build={} minimizer_algorithm={}",

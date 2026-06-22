@@ -510,6 +510,18 @@ inline void require_mapped(std::string_view algo, const E2eInput& in,
          "target_start={}, truth={}, offset={} bp > {} tol) — the timed result is "
          "invalid; aborting", algo, in.target_bp, out.found, out.target_start,
          in.truth_target_start, out.abs_offset_bp, kPositionToleranceBp);
+    // fmtlog is async; the ERR above can be lost when std::abort() runs before
+    // the background poll flushes it. Emit a synchronous copy so the failing
+    // cell is always visible in the captured stderr.
+    std::fprintf(stderr,
+        "[bench_e2e] MAP-FAIL algo=%.*s target_bp=%llu found=%d target_start=%lld "
+        "truth=%lld offset_bp=%.1f tol=%lld — aborting\n",
+        static_cast<int>(algo.size()), algo.data(),
+        static_cast<unsigned long long>(in.target_bp), static_cast<int>(out.found),
+        static_cast<long long>(out.target_start),
+        static_cast<long long>(in.truth_target_start),
+        out.abs_offset_bp, static_cast<long long>(kPositionToleranceBp));
+    std::fflush(stderr);
     std::abort();
 }
 
