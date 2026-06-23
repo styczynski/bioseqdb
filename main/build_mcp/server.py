@@ -637,34 +637,49 @@ def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> 
                 pg_config = line.split("=", 1)[1].strip()
                 break
     if not pg_config:
-        _log("WARNING: PostgreSQL_CONFIG not in CMakeCache.txt; skipping PG restart")
-        return
+        msg = "PostgreSQL_CONFIG not in CMakeCache.txt; cannot restart PG after installing extension"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg)
 
     try:
         res = subprocess.run([pg_config, "--bindir"],
                              capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"pg_config --bindir exited {res.returncode}: {res.stderr.strip()}")
         pg_bindir = res.stdout.strip()
     except Exception as exc:
-        _log(f"WARNING: pg_config --bindir failed ({exc}); skipping PG restart")
-        return
+        msg = f"pg_config --bindir failed ({exc}); cannot restart PG after installing extension"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg) from exc
 
     pg_ctl = os.path.join(pg_bindir, "pg_ctl")
     psql   = os.path.join(pg_bindir, "psql")
     if not os.path.isfile(pg_ctl):
-        _log(f"WARNING: pg_ctl not found at {pg_ctl}; skipping PG restart")
-        return
+        msg = f"pg_ctl not found at {pg_ctl}; cannot restart PG after installing extension"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg)
+    if not os.path.isfile(psql):
+        msg = f"psql not found at {psql}; cannot locate PG data_directory for restart"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg)
 
     try:
         res = subprocess.run([psql, "-t", "-c", "SHOW data_directory;", "postgres"],
                              capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"psql SHOW data_directory exited {res.returncode}: {res.stderr.strip()}")
         data_dir = res.stdout.strip()
     except Exception as exc:
-        _log(f"WARNING: could not query data_directory ({exc}); skipping PG restart")
-        return
+        msg = f"could not query data_directory ({exc}); cannot restart PG after installing extension"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg) from exc
 
     if not data_dir or not os.path.isdir(data_dir):
-        _log(f"WARNING: data_directory '{data_dir}' is not a directory; skipping PG restart")
-        return
+        msg = f"data_directory '{data_dir}' is not a directory; cannot restart PG after installing extension"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg)
 
     # On macOS use arch -arm64 so pg_ctl (universal binary) runs natively;
     # Rosetta and dyld interact badly with arm64-only extension dylibs.
@@ -695,11 +710,17 @@ def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> 
         )
         log_handle.flush()
         if result.returncode != 0:
-            _log(f"WARNING: pg_ctl restart exited {result.returncode}; tests may load a stale dylib")
+            msg = (
+                f"pg_ctl restart exited {result.returncode}; refusing to run "
+                "with a potentially stale bioseq.dylib")
+            _log(f"ERROR: {msg}")
+            raise RuntimeError(msg)
         else:
             _log("PostgreSQL restarted — new dylib is now live")
-    except subprocess.TimeoutExpired:
-        _log("WARNING: pg_ctl restart timed out after 90s; tests may load a stale dylib")
+    except subprocess.TimeoutExpired as exc:
+        msg = "pg_ctl restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg) from exc
 
 
 # --------------------------- build worker ----------------------------------

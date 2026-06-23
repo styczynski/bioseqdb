@@ -867,6 +867,7 @@ struct MoltenVkCommandLibraryInterpose {
     ObjcRuntimeFns objc{};
     std::vector<std::byte> metallib;
     void* original_new_library_with_source = nullptr;
+    void* original_new_library_with_source_async = nullptr;
     void* sel_utf8_string = nullptr;
     void* sel_new_library_with_data_error = nullptr;
     bool installed = false;
@@ -928,6 +929,80 @@ extern "C" void* bioseq_moltenvk_new_library_with_source(
     using SourceFn = void* (*)(void*, void*, void*, void*, void**);
     return objc_msg_cast<SourceFn>(state.original_new_library_with_source)(
         self, cmd, source, options, error);
+}
+
+struct ObjcBlockLiteral {
+    void* isa = nullptr;
+    int flags = 0;
+    int reserved = 0;
+    void* invoke = nullptr;
+    void* descriptor = nullptr;
+};
+
+void invoke_metal_library_completion(void* completion, void* library, void* error) noexcept {
+    if (completion == nullptr) {
+        return;
+    }
+    auto* block = static_cast<ObjcBlockLiteral*>(completion);
+    if (block->invoke == nullptr) {
+        return;
+    }
+    using InvokeFn = void (*)(void*, void*, void*);
+    objc_msg_cast<InvokeFn>(block->invoke)(completion, library, error);
+}
+
+extern "C" void bioseq_moltenvk_new_library_with_source_async(
+    void* self, void* cmd, void* source, void* options, void* completion)
+{
+    auto& state = moltenvk_command_interpose_state();
+    using Utf8Fn = const char* (*)(void*, void*);
+    const char* text = nullptr;
+    if (source != nullptr && state.sel_utf8_string != nullptr) {
+        text = objc_msg_cast<Utf8Fn>(state.objc.msg_send)(source, state.sel_utf8_string);
+    }
+    const bool is_moltenvk_command_source =
+        text != nullptr
+        && std::strstr(text, "cmdCopyBufferBytes") != nullptr
+        && std::strstr(text, "vtxCmdBlitImage") != nullptr;
+    std::fprintf(stderr,
+                 "[bioseq-gpu-diag] newLibraryWithSource async intercepted: text=%d len=%zu is_cmd_source=%d metallib_empty=%d\n",
+                 text != nullptr ? 1 : 0,
+                 text != nullptr ? std::strlen(text) : 0u,
+                 is_moltenvk_command_source ? 1 : 0,
+                 state.metallib.empty() ? 1 : 0);
+    if (is_moltenvk_command_source && !state.metallib.empty()) {
+        using LibraryDataFn = void* (*)(void*, void*, void*, void**);
+        dispatch_data_t mtl_data = dispatch_data_create(
+            state.metallib.data(),
+            state.metallib.size(),
+            nullptr,
+            DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        if (mtl_data != nullptr) {
+            void* error = nullptr;
+            void* library = objc_msg_cast<LibraryDataFn>(state.objc.msg_send)(
+                self,
+                state.sel_new_library_with_data_error,
+                static_cast<void*>(mtl_data),
+                &error);
+            dispatch_release(mtl_data);
+            if (library != nullptr) {
+                std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: returned cached command library async (newLibraryWithData ok)\n");
+                invoke_metal_library_completion(completion, library, nullptr);
+                return;
+            }
+            std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async newLibraryWithData FAILED, falling through to source compile\n");
+        }
+    }
+
+    std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async FALL-THROUGH to real newLibraryWithSource (XPC compile)\n");
+    if (state.original_new_library_with_source_async == nullptr) {
+        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async original IMP missing; completing with null library\n");
+        invoke_metal_library_completion(completion, nullptr, nullptr);
+        return;
+    }
+    using SourceAsyncFn = void (*)(void*, void*, void*, void*, void*);
+    objc_msg_cast<SourceAsyncFn>(state.original_new_library_with_source_async)(
+        self, cmd, source, options, completion);
 }
 
 [[nodiscard]] bool read_file_bytes(
@@ -1010,28 +1085,48 @@ void install_moltenvk_command_library_interpose() noexcept {
     }
 
     void* sel_source = objc.sel_register_name("newLibraryWithSource:options:error:");
+    void* sel_source_async =
+        objc.sel_register_name("newLibraryWithSource:options:completionHandler:");
     state.sel_utf8_string = objc.sel_register_name("UTF8String");
     state.sel_new_library_with_data_error = objc.sel_register_name("newLibraryWithData:error:");
     void* cls = objc.object_get_class(device);
     void* method = nullptr;
-    while (cls != nullptr && method == nullptr) {
-        method = objc.class_get_instance_method(cls, sel_source);
+    void* method_async = nullptr;
+    while (cls != nullptr && (method == nullptr || method_async == nullptr)) {
+        if (method == nullptr) {
+            method = objc.class_get_instance_method(cls, sel_source);
+        }
+        if (method_async == nullptr) {
+            method_async = objc.class_get_instance_method(cls, sel_source_async);
+        }
         cls = objc.class_get_superclass(cls);
     }
-    if (method == nullptr) {
-        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: newLibraryWithSource:options:error: method NOT FOUND on device class\n");
+    if (method == nullptr && method_async == nullptr) {
+        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: newLibraryWithSource methods NOT FOUND on device class\n");
         return;
     }
 
     state.objc = objc;
     state.metallib = std::move(metallib);
-    state.original_new_library_with_source =
-        objc.method_set_implementation(
-            method,
-            reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source));
-    state.installed = state.original_new_library_with_source != nullptr;
-    std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: swizzle installed=%d original=%p\n",
-                 state.installed ? 1 : 0, state.original_new_library_with_source);
+    if (method != nullptr) {
+        state.original_new_library_with_source =
+            objc.method_set_implementation(
+                method,
+                reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source));
+    }
+    if (method_async != nullptr) {
+        state.original_new_library_with_source_async =
+            objc.method_set_implementation(
+                method_async,
+                reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source_async));
+    }
+    state.installed = state.original_new_library_with_source != nullptr
+        || state.original_new_library_with_source_async != nullptr;
+    std::fprintf(stderr,
+                 "[bioseq-gpu-diag] cmd-interpose: swizzle installed=%d sync_original=%p async_original=%p\n",
+                 state.installed ? 1 : 0,
+                 state.original_new_library_with_source,
+                 state.original_new_library_with_source_async);
     if (state.installed) {
         bioseq_log<DBG>(
             "[vulkan_runtime] installed MoltenVK command shader metallib interpose {}",
@@ -1636,6 +1731,15 @@ void Runtime::init() {
     // --- Instance ---
     ensure_vulkan_loader_loaded_for_runtime();
     ensure_homebrew_moltenvk_icd_visible();
+    prepare_shader_provider_runtime();
+#if defined(__APPLE__)
+    // MoltenVK can compile its internal command shaders while enumerating or
+    // creating the device. In a forked PostgreSQL backend that source compile
+    // path reaches MTLCompilerService over XPC and aborts, so install the
+    // cached command-library interpose before the first Vulkan loader query that
+    // may enter MoltenVK device setup.
+    install_moltenvk_command_library_interpose();
+#endif
     const auto inst_exts = instance_extensions();
     std::vector<const char*> enabled_inst_exts;
     VkInstanceCreateFlags inst_flags = 0;
@@ -1689,7 +1793,6 @@ void Runtime::init() {
 
     check_vk(vkCreateInstance(&inst_info, nullptr, &instance_), "vkCreateInstance");
     resolve_moltenvk_private_api();
-    prepare_shader_provider_runtime();
 
     // --- Physical device selection (compute queue + shaderInt64) ---
     std::uint32_t device_count = 0;
@@ -1763,7 +1866,6 @@ void Runtime::init() {
         enabled_dev_exts.empty() ? nullptr : enabled_dev_exts.data();
     device_info.pEnabledFeatures = &enabled_features;
 
-    install_moltenvk_command_library_interpose();
     install_metal_pipeline_archive_interpose();
     check_vk(vkCreateDevice(physical_, &device_info, nullptr, &device_), "vkCreateDevice");
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);

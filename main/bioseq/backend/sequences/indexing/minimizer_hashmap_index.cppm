@@ -719,6 +719,57 @@ struct MinimizersPerFragmentIndex {
         merged.build_from_pairs(pairs, total_bp);   // FULL target length
         return merged;
     }
+
+    /// Query-filtered segment assembly for GPU seed lookup. Only query kmers
+    /// can be probed by the seed stage, so persisted MPF does not need to
+    /// materialise unrelated buckets before uploading the segment index.
+    static MinimizerHashmapFragmentIndex assemble_segment_for_query(
+            S& storage,
+            std::span<const MinimapSketchData> query_minimizers,
+            std::size_t frag_lo, std::size_t frag_hi, sequence_size_t frag_bp,
+            sequence_size_t total_bp, sequence_size_t clip_lo_bp, sequence_size_t clip_hi_bp,
+            MinimizerAssemblyScratch& scratch) {
+        scratch.clear_query();
+        auto& pairs = scratch.pairs;
+        auto& qkmers = scratch.query_kmers;
+        qkmers.reserve(query_minimizers.size());
+        for (const MinimapSketchData& qm : query_minimizers) {
+            qkmers.push_back(qm.kmer());
+        }
+        std::sort(qkmers.begin(), qkmers.end());
+        qkmers.erase(std::unique(qkmers.begin(), qkmers.end()), qkmers.end());
+
+        clip_hi_bp = std::min(clip_hi_bp, total_bp);
+        if (clip_lo_bp > clip_hi_bp) {
+            clip_lo_bp = clip_hi_bp;
+        }
+
+        const std::size_t expected_nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
+        if (storage.number_of_chunks(DIRECTORY_SUB_KEY) != 1) storage.index_error("minimizers_per_fragment: missing manifest");
+        const auto* manifest_p = storage.template read_chunk<std::int64_t>(DIRECTORY_SUB_KEY, 0);
+        if (*manifest_p != (std::int64_t)expected_nfrag) storage.index_error("minimizers_per_fragment: manifest nfrag mismatch");
+        if (frag_hi > expected_nfrag) storage.index_error("minimizers_per_fragment: requested fragment past manifest nfrag");
+        index_sub_key_t expected_f = (index_sub_key_t)frag_lo;
+        storage.read_chunks_in_range((index_sub_key_t)frag_lo, (index_sub_key_t)frag_hi,
+                [&](index_sub_key_t f, const char* blob, std::size_t blob_bytes){
+            if (f != expected_f) storage.index_error("minimizers_per_fragment: missing or duplicate fragment chunk");
+            ++expected_f;
+            const sequence_size_t off = (sequence_size_t)f * frag_bp;
+            storage.validate_minimizer_blob_or_error(blob, blob_bytes);
+            wire_for_each_entry(blob, blob_bytes,
+                [&](std::uint64_t kmer, std::uint64_t local_encoded){
+                    if (!std::binary_search(qkmers.begin(), qkmers.end(), kmer)) return;
+                    const sequence_size_t gpos = (sequence_size_t)(local_encoded >> 1) + off;
+                    if (gpos < clip_lo_bp || gpos >= clip_hi_bp) return;
+                    pairs.emplace_back(kmer, ((std::uint64_t)gpos << 1) | (local_encoded & 1ULL));
+                });
+        });
+        if (expected_f != (index_sub_key_t)frag_hi)
+            storage.index_error("minimizers_per_fragment: missing trailing fragment chunk");
+        MinimizerHashmapFragmentIndex merged;
+        merged.build_from_pairs(pairs, total_bp);
+        return merged;
+    }
 };
 
 }  // namespace bioseq::indexing
