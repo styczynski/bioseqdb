@@ -47,6 +47,7 @@
   },
 
   "bench_io_identifier_parser": {
+    "tags": ["io", "parser"],
     "description": "Single-case parser overhead check: dumb whole-header copy versus UniProt identifier parsing on the same synthetic FASTA corpus.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
@@ -87,6 +88,7 @@
   },
 
   "bench_io_readers_fasta": {
+    "tags": ["io", "reader", "fasta"],
     "description": "FASTA reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTA corpora.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
@@ -167,6 +169,7 @@
   },
 
   "bench_io_readers_fastq": {
+    "tags": ["io", "reader", "fastq"],
     "description": "FASTQ reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTQ corpora.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
@@ -247,6 +250,7 @@
   },
 
   "bench_io_readers_gz": {
+    "tags": ["io", "reader", "gz"],
     "description": "Gzip-aware reader paths (parallel-gzip + zlib fallback) on the .fastq.gz real-data cell. Asserts pgzip beats single-thread zlib by >= 25%, and that both report the same record count and body bytes.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
@@ -293,6 +297,7 @@
   },
 
   "bench_io_writers_fasta": {
+    "tags": ["io", "writer", "fasta"],
     "description": "FASTA writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
@@ -361,6 +366,7 @@
   },
 
   "bench_io_writers_fastq": {
+    "tags": ["io", "writer", "fastq"],
     "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The dna5 SRR file is intentionally NOT included here: the bench's dna4 reader drops 'N's during slurp, so any roundtrip through dna4 is destructive on dna5 input. The reader matrix above keeps the 6 GiB dna5 cell to exercise mmap-parallel + parallel-gzip throughput; the writer matrix sticks to dna4-only corpora for byte-faithful roundtrip.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },

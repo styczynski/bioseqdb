@@ -18,6 +18,7 @@
       "description": "dna4 2 Mbp contiguous tiny no_index target (tests tiled phase_c build_gpu_index_on_device in backend)" }
   },
   "bench_e2e": {
+    "tags": ["e2e", "gpu", "tiny", "noindex"],
     "description": "TINY no_index GPU diag: does tiled phase_c (sh_05 + sort) match its .metalar archives in the PG backend?",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },

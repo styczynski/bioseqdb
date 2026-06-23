@@ -25,6 +25,7 @@
   },
 
   "bench_e2e": {
+    "tags": ["e2e", "gpu", "derisk"],
     "description": "DE-RISK GPU pass: confirm Vulkan GPU seeding runs end-to-end in the forked PG backend at the real (run-buffer-capped, ~16M bp) window size before the full 2/4 Gbp matrix.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },

@@ -20,6 +20,7 @@
   },
 
   "bench_e2e": {
+    "tags": ["e2e", "gpu", "tiny", "diag"],
     "description": "TINY GPU diagnostic pass: trigger the real PG-backend Vulkan GPU pipeline creation quickly to capture interpose diagnostics.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },

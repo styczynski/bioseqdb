@@ -29,6 +29,7 @@ module;
 #include <expected>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -357,6 +358,38 @@ struct GpuSortPlan {
     std::uint32_t pass_count = 8;
 };
 
+/// DOC0346 — GPU sequence sort wire structs. Byte layout pinned to the GLSL
+/// `P` push block and `SeqDesc`/`SeqSortRange` declarations in shader_compiler.
+struct SeqSortPush {   // 32 bytes; == GLSL pc (seq_sort kernels)
+    std::uint32_t count = 0;              // row_count (key stage) / range_count (tiebreak stage)
+    std::uint32_t unit_bits = 0;          // 8/16/32/64
+    std::uint32_t bits_per_char = 0;      // generic only
+    std::uint32_t letters_per_unit = 0;   // generic only
+    std::uint32_t char_mask = 0;          // generic only
+    std::uint32_t used_mask_lo = 0;
+    std::uint32_t used_mask_hi = 0;
+    std::uint32_t pad = 0;
+};
+static_assert(sizeof(SeqSortPush) == 32);
+
+struct SeqDescWire {   // 16 bytes; == GLSL SeqDesc. word_offset in uint32 words.
+    std::uint32_t word_offset = 0;
+    std::uint32_t unit_count = 0;
+    std::uint32_t bp_size = 0;
+    std::uint32_t pad = 0;
+};
+static_assert(sizeof(SeqDescWire) == 16);
+
+/// Resolved by the façade from compact_sequence_range<S>::traits.
+struct SeqSortKernelParams {
+    std::uint32_t alphabet_kind = 0;   // AlphabetKernelKind: dna4_nt4 -> _dna4 kinds; else _generic
+    std::uint32_t unit_bits = 0;
+    std::uint32_t bits_per_char = 0;
+    std::uint32_t letters_per_unit = 0;
+    std::uint32_t char_mask = 0;
+    std::uint64_t used_storage_mask = 0;
+};
+
 /// Result of a GPU-resident target minimizer index build (DOC0310 §12). Owns the
 /// open-addressed slot table and the hash-run-ordered positions buffer. The
 /// indexing layer adopts these into a `GpuResidentMinimizerIndex` outside the
@@ -535,6 +568,23 @@ public:
         const VulkanSketchParams& params,
         std::uint64_t max_target_minimizers);
 
+    // DOC0346 — order a batch of in-RAM compact sequences on device. Extracts a
+    // 64-bit canonical lexicographic key per row, LSD-radix-sorts (reusing the
+    // Phase C radix), then breaks equal-key ties with a per-run bitonic over the
+    // full canonical compare; equal-key runs longer than LOCAL_SIZE_X are refined
+    // on the host by `refine`. Returns the ascending permutation of [0,n).
+    // `refine(begin, len, idx)` sorts idx[begin..begin+len) by the same order the
+    // device uses (the façade supplies compare_sequences_scalar over those rows).
+    [[nodiscard]] std::vector<std::uint32_t> run_sequence_sort_roundtrip(
+        std::span<const std::byte> packed_units,
+        std::span<const SeqDescWire> descs,
+        const SeqSortKernelParams& params,
+        const std::function<void(std::uint32_t, std::uint32_t, std::uint32_t*)>& refine);
+
+    [[nodiscard]] std::uint64_t seq_sort_dispatch_count() const noexcept {
+        return seq_sort_dispatch_count_.load(std::memory_order_relaxed);
+    }
+
     // DOC0310 Phase C — GPU seed count + emit + device anchor sort (§14, §13).
     // Counts anchors on device (no host prepass), prefix-scans, emits anchors,
     // and stable-radix-sorts them by `Anchor::ref_bits()`. Returns the sorted
@@ -665,6 +715,7 @@ private:
     std::string init_error_{};
     std::atomic<std::uint64_t> chaining_dispatch_count_{0};
     std::atomic<std::uint64_t> generate_units_dispatch_count_{0};
+    std::atomic<std::uint64_t> seq_sort_dispatch_count_{0};  // DOC0346
     std::mutex mu_;
 };
 
@@ -4267,6 +4318,167 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_sorted_pair_post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return out;
+}
+
+// DOC0346 — GPU sequence sort. Two submits (modelled on the index build):
+//   1: upload seq+descs -> extract 64-bit canonical key per row -> radix sort.
+//   host: build equal-key run ranges; seed `index` from the sorted row ids.
+//   2: per-run bitonic tie-break over the full canonical compare.
+//   host: refine runs longer than LOCAL_SIZE_X; download the permutation.
+std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
+    std::span<const std::byte> packed_units,
+    std::span<const SeqDescWire> descs,
+    const SeqSortKernelParams& params,
+    const std::function<void(std::uint32_t, std::uint32_t, std::uint32_t*)>& refine)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError("run_sequence_sort_roundtrip on unavailable device");
+    }
+    const std::uint32_t n = static_cast<std::uint32_t>(descs.size());
+    if (n == 0) return {};
+    if (n == 1) return std::vector<std::uint32_t>{0u};
+
+    static constexpr std::uint32_t kSeqSortLocal = 256u;
+    const bool dna4 =
+        params.alphabet_kind == static_cast<std::uint32_t>(AlphabetKernelKind::dna4_nt4);
+    const ShaderKind key_kind = dna4 ? ShaderKind::seq_sort_extract_key_dna4
+                                     : ShaderKind::seq_sort_extract_key_generic;
+    const ShaderKind tb_kind  = dna4 ? ShaderKind::seq_sort_tiebreak_dna4
+                                     : ShaderKind::seq_sort_tiebreak_generic;
+    const PhaseBPipeline key_pipe = get_phase_b_pipeline_locked(key_kind, kSeqSortLocal, 0u);
+    const PhaseBPipeline tb_pipe  = get_phase_b_pipeline_locked(tb_kind, kSeqSortLocal, 0u);
+    const WgPlan swg = plan_workgroups(n, features_.max_workgroup_count_x);
+
+    // Device buffers (unified/host-coherent on Apple). seq is the concatenated,
+    // 4-byte-aligned per-row unit blocks viewed as `uint seq_words[]`.
+    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_units.size(), 4u);
+    Buffer seq        = create_device_buffer(seq_bytes, kPhaseBBufferUsage);
+    Buffer descs_buf  = create_device_buffer(std::uint64_t{n} * 16u, kPhaseBBufferUsage);
+    Buffer keys       = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
+    Buffer vals       = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
+    Buffer keys_scr   = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
+    Buffer vals_scr   = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
+    Buffer hist       = create_device_buffer(std::uint64_t{swg.num_workgroups} * 256u * 4u, kPhaseBBufferUsage);
+    Buffer index_buf  = create_device_buffer(std::uint64_t{n} * 4u, kPhaseBBufferUsage);
+    if (seq.mapped == nullptr || descs_buf.mapped == nullptr || keys.mapped == nullptr
+        || vals.mapped == nullptr || keys_scr.mapped == nullptr || vals_scr.mapped == nullptr
+        || hist.mapped == nullptr || index_buf.mapped == nullptr) {
+        throw VulkanRuntimeError("run_sequence_sort_roundtrip: device buffer alloc failed");
+    }
+    if (!packed_units.empty())
+        std::memcpy(seq.mapped, packed_units.data(), packed_units.size());
+    std::memcpy(descs_buf.mapped, descs.data(), descs.size() * sizeof(SeqDescWire));
+
+    const GpuArenaSlice seq_s{&seq, 0, seq.bytes};
+    const GpuArenaSlice descs_s{&descs_buf, 0, descs_buf.bytes};
+    const GpuArenaSlice keys_s{&keys, 0, keys.bytes};
+    const GpuArenaSlice vals_s{&vals, 0, vals.bytes};
+    const GpuArenaSlice keys_scr_s{&keys_scr, 0, keys_scr.bytes};
+    const GpuArenaSlice vals_scr_s{&vals_scr, 0, vals_scr.bytes};
+    const GpuArenaSlice hist_s{&hist, 0, hist.bytes};
+
+    const SeqSortPush key_push{
+        n, params.unit_bits, params.bits_per_char, params.letters_per_unit, params.char_mask,
+        static_cast<std::uint32_t>(params.used_storage_mask & 0xffffffffu),
+        static_cast<std::uint32_t>(params.used_storage_mask >> 32), 0u};
+
+    // --- Submit 1: extract keys, then radix sort (key,value=row index) ---
+    bool sorted_in_scratch = false;
+    {
+        reset_phase_c_pool_locked();
+        check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(seqsort1)");
+        VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(seqsort1)");
+        record_host_to_shader(command_buffer_);
+        const std::array<VkDescriptorBufferInfo, 4> key_infos{{
+            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+            {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
+            {keys_s.buffer->buffer, keys_s.offset, keys_s.size},
+            {vals_s.buffer->buffer, vals_s.offset, vals_s.size},
+        }};
+        record_phase_c_dispatch_locked(command_buffer_, key_pipe, key_infos,
+                                       &key_push, sizeof(key_push), ceil_div_u32(n, kSeqSortLocal));
+        record_compute_barrier(command_buffer_);
+        const GpuSortPlan sort_plan{n, 8u, 8u, 8u, 8u};   // full 64-bit key, 8 LSD passes
+        record_radix_sort_locked(command_buffer_, keys_s, vals_s, keys_scr_s, vals_scr_s, hist_s,
+                                 sort_plan, swg.num_workgroups, swg.elems_per_wg, 1u, sorted_in_scratch);
+        record_shader_to_host(command_buffer_);
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(seqsort1)");
+    }
+
+    // Sorted keys/vals live in keys/vals or their scratch, per the ping-pong parity.
+    const std::uint64_t* sorted_keys =
+        static_cast<const std::uint64_t*>((sorted_in_scratch ? keys_scr : keys).mapped);
+    const std::uint64_t* sorted_vals =
+        static_cast<const std::uint64_t*>((sorted_in_scratch ? vals_scr : vals).mapped);
+
+    // Seed `index` from the sorted row ids (ascending by key, radix-stable on ties).
+    auto* index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);
+    for (std::uint32_t i = 0; i < n; ++i)
+        index_ptr[i] = static_cast<std::uint32_t>(sorted_vals[i] & 0xffffffffu);
+
+    // Build equal-key run ranges (only runs of length > 1 need a tie-break).
+    struct RunRange { std::uint32_t begin; std::uint32_t len; };
+    std::vector<RunRange> ranges;
+    for (std::uint32_t i = 0; i < n; ) {
+        std::uint32_t j = i + 1u;
+        while (j < n && sorted_keys[j] == sorted_keys[i]) ++j;
+        if (j - i > 1u) ranges.push_back(RunRange{i, j - i});
+        i = j;
+    }
+
+    auto bump = [this]() { seq_sort_dispatch_count_.fetch_add(1, std::memory_order_relaxed); };
+
+    if (ranges.empty()) {
+        // No equal-key collisions: the 64-bit key fully ordered the batch.
+        std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
+        bump();
+        return perm;
+    }
+
+    // --- Submit 2: per-run bitonic tie-break over the full canonical compare ---
+    Buffer ranges_buf = create_device_buffer(std::uint64_t{ranges.size()} * 8u, kPhaseBBufferUsage);
+    if (ranges_buf.mapped == nullptr)
+        throw VulkanRuntimeError("run_sequence_sort_roundtrip: ranges buffer alloc failed");
+    std::memcpy(ranges_buf.mapped, ranges.data(), ranges.size() * sizeof(RunRange));
+    const GpuArenaSlice index_s{&index_buf, 0, index_buf.bytes};
+    const GpuArenaSlice ranges_s{&ranges_buf, 0, ranges_buf.bytes};
+    const SeqSortPush tb_push{
+        static_cast<std::uint32_t>(ranges.size()), params.unit_bits, params.bits_per_char,
+        params.letters_per_unit, params.char_mask,
+        static_cast<std::uint32_t>(params.used_storage_mask & 0xffffffffu),
+        static_cast<std::uint32_t>(params.used_storage_mask >> 32), 0u};
+    {
+        reset_phase_c_pool_locked();
+        check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(seqsort2)");
+        VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(seqsort2)");
+        record_host_to_shader(command_buffer_);
+        const std::array<VkDescriptorBufferInfo, 4> tb_infos{{
+            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+            {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
+            {index_s.buffer->buffer, index_s.offset, index_s.size},
+            {ranges_s.buffer->buffer, ranges_s.offset, ranges_s.size},
+        }};
+        record_phase_c_dispatch_locked(command_buffer_, tb_pipe, tb_infos,
+                                       &tb_push, sizeof(tb_push),
+                                       static_cast<std::uint32_t>(ranges.size()));
+        record_shader_to_host(command_buffer_);
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(seqsort2)");
+    }
+
+    // Host-refine equal-key runs that exceeded one workgroup (the device skipped them).
+    index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);  // mapping is stable; re-fetch defensively
+    for (const RunRange& r : ranges) {
+        if (r.len > kSeqSortLocal) refine(r.begin, r.len, index_ptr);
+    }
+
+    std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
+    bump();
+    return perm;
 }
 
 SeedLookupResult Runtime::run_phase_c_seed_roundtrip(

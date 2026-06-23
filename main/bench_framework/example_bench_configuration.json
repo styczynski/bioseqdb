@@ -50,6 +50,7 @@
     }
   },
   "bench_sort": {
+    "tags": ["example", "sort"],
     "description": "Compare std::sort vs std::stable_sort latency",
     "fast": false,
     "concurrency": {
@@ -98,6 +99,7 @@
     }
   },
   "bench_count": {
+    "tags": ["example", "count"],
     "description": "Sanity-check the even-count algorithm",
     "fast": false,
     "concurrency": {
@@ -144,6 +146,7 @@
     }
   },
   "bench_buggy_cleanup": {
+    "tags": ["example", "cleanup"],
     "description": "V12 demo: on_cleanup always throws. Drives the cleanup-retry UI and the cleanup_function_failing warning.",
     "fast": false,
     "concurrency": {

@@ -71,6 +71,7 @@
   },
 
   "bench_e2e": {
+    "tags": ["e2e", "main"],
     "description": "GPU benchmark: Vulkan GPU seeding+chaining (DOC0344 production, no XPC fallback) vs minimap2 baseline at 2/4 Gbp. bioseq via bioseq.load + SELECT mmsearch; minimap2 via CLI on the split FASTA. no_index = from-scratch build+map counted; just_index = index prebuilt untimed, then measured COLD after a PostgreSQL restart. SIMD paths excluded (run separately; see SUMMARY.md report 6/7 for SIMD numbers).",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },

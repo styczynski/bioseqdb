@@ -21,6 +21,7 @@ module;
 #include <oneapi/tbb/global_control.h>
 #include <oneapi/tbb/info.h>
 #include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/parallel_sort.h>
 #include <oneapi/tbb/task_arena.h>
 #include <oneapi/tbb/task_group.h>
 
@@ -110,6 +111,26 @@ public:
 
     void parallel_for(std::size_t begin, std::size_t end, std::size_t grain, const range_body& body);
     void parallel_for_with_context(std::size_t begin, std::size_t end, std::size_t grain, const range_body& body);
+
+    // DOC0346 — TBB parallel sort wrapped in the pool's arena (mirrors
+    // parallel_for). Defined inline because it is a template; the wrapper keeps
+    // oneTBB the ONLY module that includes its headers (guideline Top-rule).
+    template <class RandomIt, class Compare>
+    void parallel_sort(RandomIt first, RandomIt last, Compare comp) {
+        ensure_configured();
+        if (last <= first) {
+            return;
+        }
+        if (max_concurrency_ <= 1) {
+            std::sort(first, last, comp);
+            return;
+        }
+        const auto impl = impl_;
+        impl->arena->execute([first, last, &comp] {
+            otbb::parallel_sort(first, last, comp);
+        });
+    }
+
     [[nodiscard]] ScopedTaskGroup make_task_group();
 
     struct BatchTicket {
