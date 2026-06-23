@@ -257,6 +257,8 @@ struct ForEntry {
 struct BenchmarkSpec {
     std::string_view              key;
     std::string_view              description{};
+    /// Required `tags` array (may be empty). Used by `--filter tags=...`.
+    std::span<const std::string_view> tags{};
     bool                           fast = false;
     bool                           bench_lock = false;
     bool                           concurrency = true;
@@ -393,6 +395,10 @@ inline void emit_benchmark(std::string& out, const BenchmarkSpec& bench) {
     emit_quoted(out, bench.key);
     out += ":{";
     emit_kv_quoted(out, "description", bench.description);
+    out += ',';
+    out += "\"tags\":";
+    emit_block(out, '[', ']', bench.tags,
+        [](std::string& s, std::string_view tag) { emit_quoted(s, tag); });
     out += ',';
     emit_kv_bool(out, "fast", bench.fast);
     out += ",\"concurrency\":{";
@@ -1480,5 +1486,711 @@ TEST_CASE("on_cleanup runs once per cached test_case after iterations finish",
         // Lengths reflect the JSON `length` field — ToyInput stores
         // exactly that many randomised values.
         REQUIRE(seen_lengths == std::vector<std::size_t>{4, 8});
+    }
+}
+
+// ===========================================================================
+//  DOC0349 — `tags` config field, `--filter` selection, `--debug` JSONL stream
+// ===========================================================================
+//
+// These tests are black-box: `FilterSpec` / `parse_one_filter_into` /
+// `DebugReportSink` live in the framework's internal `detail` namespace (not
+// exported), so the suite drives the public `run()` entry point with
+// `--filter` / `--debug` argv tokens and asserts on the exit code, the
+// report_<N>.json contents, the report_debug_<N>.jsonl event stream, and the
+// stderr diagnostic banner (ValidationDiag codes printed by report_diagnostics,
+// captured by StderrCapture).
+
+namespace {
+
+using bioseq::bench_framework::ErasedBenchmark;
+using bioseq::bench_framework::RunConstraints;
+
+/// on_estimate override: returns a per-test-case `RunConstraints`. Lets the
+/// abort-sweep test force `memory_budget_not_satisfiable` on one test case.
+using Estimator = std::function<RunConstraints(
+    std::string_view, std::string_view, simdjson::dom::element)>;
+
+/// Build one toy ErasedBenchmark over (ToyInput, ToyOutput). `estimate`
+/// defaults to the unconstrained estimator; pass a custom one to provoke
+/// memory-budget skips. All benches share the trivial sum/eval bodies.
+[[nodiscard]] inline ErasedBenchmark make_toy_bench(
+    std::string_view key, std::string_view title, const std::string& config_path,
+    Estimator estimate = nullptr)
+{
+    using InputFn = std::function<ToyInput(std::string_view, std::string_view,
+                                           simdjson::dom::element, const RunConstraints&)>;
+    using RunFn = std::function<ToyOutput(std::string_view, const ParamMap&, const ToyInput&)>;
+    using EvalFn = std::function<std::map<std::string, double>(
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)>;
+    using CleanupFn = std::function<void(std::string_view, std::string_view,
+                                         simdjson::dom::element, const ToyInput&)>;
+
+    Estimator est = estimate
+        ? std::move(estimate)
+        : Estimator{[](std::string_view, std::string_view,
+                       simdjson::dom::element) noexcept { return RunConstraints{}; }};
+    InputFn inp = [](std::string_view data_dir, std::string_view test_case_name,
+                     simdjson::dom::element data, const RunConstraints&) {
+        return build_toy_input(data_dir, test_case_name, data);
+    };
+    RunFn run_fn = [](std::string_view, const ParamMap&, const ToyInput& in) {
+        ToyOutput out;
+        for (const auto value : in.values) out.sum += value;
+        return out;
+    };
+    EvalFn eval_fn = [](std::string_view, const ParamMap&, const ToyInput&,
+                        const ToyOutput& out) {
+        return std::map<std::string, double>{{"sum_value", static_cast<double>(out.sum)}};
+    };
+    return create_benchmark<ToyInput, ToyOutput>(
+        std::string{title}, std::string{key}, config_path,
+        std::move(est), std::move(inp), std::move(run_fn),
+        std::move(eval_fn), CleanupFn{});
+}
+
+/// Write `config_text` into a stable file under `report_dir` and return its
+/// path. Multiple benchmark blocks may share one file (mirrors bench_v10).
+[[nodiscard]] inline std::string write_config_file(const TempReportDir& report_dir,
+                                                   std::string_view config_text) {
+    const auto path = report_dir.path / "config.json";
+    std::ofstream cfg(path, std::ios::trunc | std::ios::binary);
+    cfg.write(config_text.data(), static_cast<std::streamsize>(config_text.size()));
+    cfg.close();
+    return path.string();
+}
+
+/// Variadic driver: run `benches` with argv = base flags + `extra_args`,
+/// capturing the exit code, the written report JSON, and stderr.
+template<typename... Benches>
+[[nodiscard]] RunOutcome run_with_args(const TempReportDir& report_dir,
+                                       std::span<const std::string> extra_args,
+                                       Benches&&... benches) {
+    std::vector<std::string> args = {
+        "bench_framework_test", "--report", report_dir.path.string(),
+        "--threads", "2",
+    };
+    args.insert(args.end(), extra_args.begin(), extra_args.end());
+    ArgvBuilder argv_holder{std::span<const std::string>{args}};
+
+    RunOutcome outcome;
+    {
+        StderrCapture capture;
+        outcome.exit_code = run(argv_holder.argc(), argv_holder.argv(),
+                                report_dir.path.string(), report_dir.path.string(),
+                                std::forward<Benches>(benches)...);
+        outcome.captured_stderr = capture.text();
+    }
+    if (auto path = latest_report(report_dir.path); path.has_value()) {
+        outcome.report_path = *path;
+        std::ifstream input(outcome.report_path, std::ios::binary);
+        if (input) {
+            std::string body{std::istreambuf_iterator<char>{input},
+                             std::istreambuf_iterator<char>{}};
+            outcome.report = nlohmann::json::parse(body, nullptr, false);
+            if (outcome.report.is_discarded()) outcome.report = nlohmann::json::object();
+        }
+    }
+    return outcome;
+}
+
+/// Locate the single report_debug_<N>.jsonl under `report_dir` (tests use a
+/// fresh dir, so there is at most one). Returns nullopt when absent.
+[[nodiscard]] inline std::optional<std::filesystem::path> find_debug_jsonl(
+    const std::filesystem::path& report_dir) {
+    std::error_code ec;
+    if (!std::filesystem::exists(report_dir, ec)) return std::nullopt;
+    for (const auto& entry : std::filesystem::directory_iterator(report_dir, ec)) {
+        if (ec) break;
+        const auto name = entry.path().filename().string();
+        if (name.starts_with("report_debug_") && name.ends_with(".jsonl"))
+            return entry.path();
+    }
+    return std::nullopt;
+}
+
+/// Parse a JSONL file into one nlohmann::json per non-empty line.
+[[nodiscard]] inline std::vector<nlohmann::json> read_jsonl(
+    const std::filesystem::path& path) {
+    std::vector<nlohmann::json> events;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return events;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (!parsed.is_discarded()) events.push_back(std::move(parsed));
+    }
+    return events;
+}
+
+/// Count events whose "event" field equals `kind`.
+[[nodiscard]] inline std::size_t count_events(
+    const std::vector<nlohmann::json>& events, std::string_view kind) {
+    std::size_t total = 0;
+    for (const auto& e : events)
+        if (e.value("event", std::string{}) == kind) ++total;
+    return total;
+}
+
+/// Collect the algorithm (case) names that appear in CASE_RESULTS events.
+[[nodiscard]] inline std::set<std::string> case_results_names(
+    const std::vector<nlohmann::json>& events) {
+    std::set<std::string> names;
+    for (const auto& e : events)
+        if (e.value("event", std::string{}) == "CASE_RESULTS")
+            names.insert(e.value("case_name", std::string{}));
+    return names;
+}
+
+/// The set of benchmark keys present in a report's `benchmarks` object.
+[[nodiscard]] inline std::set<std::string> report_benchmark_keys(
+    const nlohmann::json& report) {
+    std::set<std::string> keys;
+    if (report.contains("benchmarks"))
+        for (const auto& [key, _] : report["benchmarks"].items()) keys.insert(key);
+    return keys;
+}
+
+/// The set of algorithm (over-key) names present under one benchmark.
+[[nodiscard]] inline std::set<std::string> report_algorithms(
+    const nlohmann::json& report, std::string_view bench_key) {
+    std::set<std::string> algos;
+    if (!report.contains("benchmarks")) return algos;
+    const auto& benches = report["benchmarks"];
+    if (!benches.contains(std::string{bench_key})) return algos;
+    const auto& bench = benches[std::string{bench_key}];
+    if (!bench.contains("execution_tuples")) return algos;
+    for (const auto& tuple_record : bench["execution_tuples"])
+        if (tuple_record.contains("tuple"))
+            for (const auto& [algo, _] : tuple_record["tuple"].items()) algos.insert(algo);
+    return algos;
+}
+
+// Shared toy fixtures for the filter/debug tests: one algorithm parameter,
+// two test cases, the `sum_value` evaluation metric.
+inline constexpr std::array<AlgoParamSpec, 1> kFilterParams{{
+    {"unused", "integer", "0", ""}
+}};
+inline constexpr std::array<TestCaseDataSpec, 2> kFilterTestCases{{
+    {"SMALL", "8 ints",  R"({"length":8,"seed":3})",  1},
+    {"BIG",   "16 ints", R"({"length":16,"seed":5})", 1},
+}};
+inline constexpr std::array<MetricSpecLite, 1> kFilterMetrics{{
+    {"sum_value", "evaluation", "", "", "[]"},
+}};
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 1 — `tags` config field: parse + schema enforcement
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework tags config field parse + schema", "[bench_framework][tags]") {
+    TestLogSilencer silence_mlogging;
+
+    static constexpr std::array<AlgorithmSpec, 1> kAlgos{{
+        {"algo_a", std::span<const AlgoParamSpec>{kFilterParams}}
+    }};
+    static constexpr std::array<ForEntry, 1> kFor{{ {"SMALL", 2} }};
+    static constexpr std::array<OverEntry, 1> kOver{{ {"algo_a", "{}"} }};
+
+    SECTION("non-empty tags array parses and runs") {
+        static constexpr std::array<std::string_view, 2> kTags{{"aligner", "grid"}};
+        const std::array<BenchmarkSpec, 1> benches{{
+            BenchmarkSpec{.key = "bench_tagged", .description = "tagged",
+                          .tags = std::span<const std::string_view>{kTags},
+                          .for_entries = std::span<const ForEntry>{kFor},
+                          .over_entries = std::span<const OverEntry>{kOver},
+                          .metrics = std::span<const MetricSpecLite>{kFilterMetrics}}
+        }};
+        const auto config_text = render_config(
+            std::span<const AlgorithmSpec>{kAlgos},
+            std::span<const TestCaseDataSpec>{kFilterTestCases},
+            std::span<const BenchmarkSpec>{benches});
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{},
+                                     make_toy_bench("bench_tagged", "tagged", config_path));
+        REQUIRE(outcome.exit_code == 0);
+        REQUIRE(report_benchmark_keys(outcome.report).count("bench_tagged") == 1);
+    }
+
+    SECTION("empty tags array is legal") {
+        static constexpr std::array<std::string_view, 0> kNoTags{};
+        const std::array<BenchmarkSpec, 1> benches{{
+            BenchmarkSpec{.key = "bench_empty_tags", .description = "no tags",
+                          .tags = std::span<const std::string_view>{kNoTags},
+                          .for_entries = std::span<const ForEntry>{kFor},
+                          .over_entries = std::span<const OverEntry>{kOver},
+                          .metrics = std::span<const MetricSpecLite>{kFilterMetrics}}
+        }};
+        const auto config_text = render_config(
+            std::span<const AlgorithmSpec>{kAlgos},
+            std::span<const TestCaseDataSpec>{kFilterTestCases},
+            std::span<const BenchmarkSpec>{benches});
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{},
+                                     make_toy_bench("bench_empty_tags", "no tags", config_path));
+        REQUIRE(outcome.exit_code == 0);
+    }
+
+    SECTION("missing tags array fails schema validation") {
+        // Hand-rolled config whose benchmark block omits the now-required
+        // `tags` array. additionalProperties:false + required:["tags"] reject it.
+        constexpr std::string_view bad_config =
+            R"({"params":{"algo_a":{"unused":{"type":"integer","default":0}}},)"
+            R"("test_cases":{"SMALL":{"data":{"length":8}}},)"
+            R"("bench_no_tags":{"matrix":{"for":{"SMALL":2},"over":{"algo_a":{}},)"
+            R"("metrics":{"sum_value":{"type":"evaluation"}}}}})";
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, bad_config);
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{},
+                                     make_toy_bench("bench_no_tags", "missing tags", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "configuration"));
+    }
+
+    SECTION("non-string tag entry fails schema validation") {
+        constexpr std::string_view bad_config =
+            R"({"params":{"algo_a":{"unused":{"type":"integer","default":0}}},)"
+            R"("test_cases":{"SMALL":{"data":{"length":8}}},)"
+            R"("bench_bad_tag":{"tags":[123],"matrix":{"for":{"SMALL":2},"over":{"algo_a":{}},)"
+            R"("metrics":{"sum_value":{"type":"evaluation"}}}}})";
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, bad_config);
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{},
+                                     make_toy_bench("bench_bad_tag", "bad tag", config_path));
+        REQUIRE(outcome.exit_code == 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 2 — `--filter` parse validation (errors + warnings)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework --filter parse validation", "[bench_framework][filter]") {
+    TestLogSilencer silence_mlogging;
+
+    static constexpr std::array<AlgorithmSpec, 1> kAlgos{{
+        {"algo_a", std::span<const AlgoParamSpec>{kFilterParams}}
+    }};
+    static constexpr std::array<ForEntry, 1> kFor{{ {"SMALL", 2} }};
+    static constexpr std::array<OverEntry, 1> kOver{{ {"algo_a", "{}"} }};
+    static constexpr std::array<std::string_view, 1> kTags{{"aligner"}};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{.key = "bench_a", .description = "a",
+                      .tags = std::span<const std::string_view>{kTags},
+                      .for_entries = std::span<const ForEntry>{kFor},
+                      .over_entries = std::span<const OverEntry>{kOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}}
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kFilterTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    SECTION("tags=a selects the matching benchmark (exit 0)") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "tags=aligner"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 0);
+        REQUIRE(report_benchmark_keys(outcome.report).count("bench_a") == 1);
+    }
+
+    SECTION("benchmark=key selects by key (exit 0)") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "benchmark=bench_a"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 0);
+    }
+
+    SECTION("duplicate dimension is a launch error") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 4> extra{"--filter", "tags=x", "--filter", "tags=y"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_duplicate_dimension"));
+    }
+
+    SECTION("malformed value (no '=') is a launch error") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "=x"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_malformed"));
+    }
+
+    SECTION("empty value list is a launch error") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "tags="};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_malformed"));
+    }
+
+    SECTION("empty item in list is a launch error") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "tags=a,,b"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_malformed"));
+    }
+
+    SECTION("unknown filter key is a launch error") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "nope=x"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                     make_toy_bench("bench_a", "a", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_unknown_key"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 3 — selection across a multi-benchmark universe
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework --filter selection + warnings", "[bench_framework][filter]") {
+    TestLogSilencer silence_mlogging;
+
+    // Universe mirrors §6: grid+curated carry "aligner"; storage/rmq do not.
+    static constexpr std::array<AlgorithmSpec, 3> kAlgos{{
+        {"bioseq",   std::span<const AlgoParamSpec>{kFilterParams}},
+        {"minimap2", std::span<const AlgoParamSpec>{kFilterParams}},
+        {"bwa",      std::span<const AlgoParamSpec>{kFilterParams}},
+    }};
+    static constexpr std::array<ForEntry, 1> kFor{{ {"SMALL", 2} }};
+    static constexpr std::array<OverEntry, 2> kGridOver{{ {"bioseq", "{}"}, {"minimap2", "{}"} }};
+    static constexpr std::array<OverEntry, 3> kCuratedOver{{ {"bioseq", "{}"}, {"minimap2", "{}"}, {"bwa", "{}"} }};
+    static constexpr std::array<OverEntry, 1> kStorageOver{{ {"bioseq", "{}"} }};
+    static constexpr std::array<OverEntry, 1> kRmqOver{{ {"minimap2", "{}"} }};
+    static constexpr std::array<std::string_view, 2> kGridTags{{"aligner", "grid"}};
+    static constexpr std::array<std::string_view, 2> kCuratedTags{{"aligner", "curated"}};
+    static constexpr std::array<std::string_view, 1> kStorageTags{{"storage"}};
+    static constexpr std::array<std::string_view, 1> kRmqTags{{"rmq"}};
+    const std::array<BenchmarkSpec, 4> benches{{
+        BenchmarkSpec{.key = "bench_grid",    .description = "grid",    .tags = std::span<const std::string_view>{kGridTags},
+                      .for_entries = std::span<const ForEntry>{kFor}, .over_entries = std::span<const OverEntry>{kGridOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}},
+        BenchmarkSpec{.key = "bench_curated", .description = "curated", .tags = std::span<const std::string_view>{kCuratedTags},
+                      .for_entries = std::span<const ForEntry>{kFor}, .over_entries = std::span<const OverEntry>{kCuratedOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}},
+        BenchmarkSpec{.key = "bench_storage", .description = "storage", .tags = std::span<const std::string_view>{kStorageTags},
+                      .for_entries = std::span<const ForEntry>{kFor}, .over_entries = std::span<const OverEntry>{kStorageOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}},
+        BenchmarkSpec{.key = "bench_rmq",     .description = "rmq",     .tags = std::span<const std::string_view>{kRmqTags},
+                      .for_entries = std::span<const ForEntry>{kFor}, .over_entries = std::span<const OverEntry>{kRmqOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}},
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kFilterTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    SECTION("tags=aligner + cases=bioseq,bwa selects grid{bioseq} and curated{bioseq,bwa}") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 4> extra{"--filter", "tags=aligner", "--filter", "cases=bioseq,bwa"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+            make_toy_bench("bench_grid", "grid", config_path),
+            make_toy_bench("bench_curated", "curated", config_path),
+            make_toy_bench("bench_storage", "storage", config_path),
+            make_toy_bench("bench_rmq", "rmq", config_path));
+        REQUIRE(outcome.exit_code == 0);
+        const auto keys = report_benchmark_keys(outcome.report);
+        REQUIRE(keys.count("bench_grid") == 1);
+        REQUIRE(keys.count("bench_curated") == 1);
+        REQUIRE(keys.count("bench_storage") == 0);   // not aligner-tagged → pruned
+        REQUIRE(keys.count("bench_rmq") == 0);
+        // grid keeps only {bioseq} (bwa not in grid's over); curated keeps {bioseq,bwa}.
+        REQUIRE(report_algorithms(outcome.report, "bench_grid") == std::set<std::string>{"bioseq"});
+        REQUIRE(report_algorithms(outcome.report, "bench_curated") == std::set<std::string>{"bioseq", "bwa"});
+        // 'bwa' exists in the kept subset (curated) → no unknown-case warning.
+        REQUIRE_FALSE(stderr_contains(outcome.captured_stderr, "filter_unknown_case"));
+    }
+
+    SECTION("filter_unknown_case fires for a case absent from the kept subset") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        // bwa exists only in curated; pair it with benchmark=bench_grid (kept
+        // subset = {grid}) so bwa is unknown there → warning, and grid still has
+        // no matching case → selected_nothing error.
+        const std::array<std::string, 4> extra{"--filter", "benchmark=bench_grid", "--filter", "cases=bwa"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+            make_toy_bench("bench_grid", "grid", config_path),
+            make_toy_bench("bench_curated", "curated", config_path),
+            make_toy_bench("bench_storage", "storage", config_path),
+            make_toy_bench("bench_rmq", "rmq", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_unknown_case"));
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_selected_nothing"));
+    }
+
+    SECTION("filter_selected_nothing when no benchmark matches") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> extra{"--filter", "tags=does_not_exist"};
+        auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+            make_toy_bench("bench_grid", "grid", config_path),
+            make_toy_bench("bench_curated", "curated", config_path),
+            make_toy_bench("bench_storage", "storage", config_path),
+            make_toy_bench("bench_rmq", "rmq", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_unknown_tag"));
+        REQUIRE(stderr_contains(outcome.captured_stderr, "filter_selected_nothing"));
+        // Nothing ran → no report written.
+        REQUIRE(report_benchmark_keys(outcome.report).empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 4 — `--debug` requires a non-empty `--filter`
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework --debug requires --filter", "[bench_framework][debug]") {
+    TestLogSilencer silence_mlogging;
+    static constexpr std::array<AlgorithmSpec, 1> kAlgos{{
+        {"algo_a", std::span<const AlgoParamSpec>{kFilterParams}}
+    }};
+    static constexpr std::array<ForEntry, 1> kFor{{ {"SMALL", 2} }};
+    static constexpr std::array<OverEntry, 1> kOver{{ {"algo_a", "{}"} }};
+    static constexpr std::array<std::string_view, 1> kTags{{"aligner"}};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{.key = "bench_a", .description = "a",
+                      .tags = std::span<const std::string_view>{kTags},
+                      .for_entries = std::span<const ForEntry>{kFor},
+                      .over_entries = std::span<const OverEntry>{kOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}}
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kFilterTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    TempReportDir report_dir;
+    const auto config_path = write_config_file(report_dir, config_text);
+    const std::array<std::string, 1> extra{"--debug"};   // no --filter
+    auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                 make_toy_bench("bench_a", "a", config_path));
+    REQUIRE(outcome.exit_code == 1);
+    REQUIRE(stderr_contains(outcome.captured_stderr, "debug_requires_filter"));
+    // No debug stream produced when the launch check fails.
+    REQUIRE_FALSE(find_debug_jsonl(report_dir.path).has_value());
+}
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 5 — `--debug` JSONL event stream (4 event kinds + structure)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework --debug JSONL stream", "[bench_framework][debug]") {
+    TestLogSilencer silence_mlogging;
+    static constexpr std::array<AlgorithmSpec, 2> kAlgos{{
+        {"algo_x", std::span<const AlgoParamSpec>{kFilterParams}},
+        {"algo_y", std::span<const AlgoParamSpec>{kFilterParams}},
+    }};
+    static constexpr std::array<ForEntry, 1> kFor{{ {"SMALL", 3} }};
+    static constexpr std::array<OverEntry, 2> kOver{{ {"algo_x", "{}"}, {"algo_y", "{}"} }};
+    static constexpr std::array<std::string_view, 1> kTags{{"unit"}};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{.key = "bench_dbg", .description = "debug",
+                      .tags = std::span<const std::string_view>{kTags},
+                      .for_entries = std::span<const ForEntry>{kFor},
+                      .over_entries = std::span<const OverEntry>{kOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}}
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kFilterTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    TempReportDir report_dir;
+    const auto config_path = write_config_file(report_dir, config_text);
+    const std::array<std::string, 3> extra{"--filter", "benchmark=bench_dbg", "--debug"};
+    auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                 make_toy_bench("bench_dbg", "debug", config_path));
+    REQUIRE(outcome.exit_code == 0);
+
+    const auto jsonl = find_debug_jsonl(report_dir.path);
+    REQUIRE(jsonl.has_value());
+    const auto events = read_jsonl(*jsonl);
+    REQUIRE_FALSE(events.empty());
+
+    // One BENCHMARK_STARTED, one CASE_STARTED + one CASE_RESULTS per algo,
+    // and exactly one trailing EXECUTION_FINISHED.
+    REQUIRE(count_events(events, "BENCHMARK_STARTED") == 1);
+    REQUIRE(count_events(events, "CASE_STARTED") == 2);
+    REQUIRE(count_events(events, "CASE_RESULTS") == 2);
+    REQUIRE(count_events(events, "EXECUTION_FINISHED") == 1);
+    REQUIRE(case_results_names(events) == std::set<std::string>{"algo_x", "algo_y"});
+
+    // EXECUTION_FINISHED is the last line and its results_path == the report.
+    REQUIRE(events.back().value("event", std::string{}) == "EXECUTION_FINISHED");
+    REQUIRE(events.back().value("results_path", std::string{}) == outcome.report_path.string());
+
+    // Each CASE_RESULTS carries the execution_tuple_record shape and matches the
+    // report's slice for that algorithm (same tuple/test_cases structure).
+    for (const auto& e : events) {
+        if (e.value("event", std::string{}) != "CASE_RESULTS") continue;
+        REQUIRE(e.contains("timestamp"));
+        REQUIRE(e["timestamp"].is_number_integer());
+        REQUIRE(e.contains("results"));
+        REQUIRE(e["results"].contains("execution_tuples"));
+        const auto& tuples = e["results"]["execution_tuples"];
+        REQUIRE(tuples.is_array());
+        REQUIRE(tuples.size() == 1);                       // one tuple per single-param algo
+        REQUIRE(tuples[0].contains("tuple"));
+        REQUIRE(tuples[0].contains("test_cases"));
+        const std::string algo = e.value("case_name", std::string{});
+        REQUIRE(tuples[0]["tuple"].contains(algo));        // keyed on the case name
+        REQUIRE(tuples[0]["test_cases"].contains("SMALL"));
+        // The aggregated samples_count equals the report's (3 iterations).
+        REQUIRE(samples_count_at(outcome.report, "bench_dbg", algo, "SMALL",
+                                 "all_regions", "sum_value") == 3);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 6 — crash resilience: every line is independently flushed
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework --debug lines are flushed per event", "[bench_framework][debug]") {
+    TestLogSilencer silence_mlogging;
+    // A later case reads the jsonl mid-run and asserts an earlier case's
+    // CASE_RESULTS is already on disk (crash-resilient incremental flush).
+    static constexpr std::array<AlgorithmSpec, 1> kAlgos{{
+        {"algo_a", std::span<const AlgoParamSpec>{kFilterParams}}
+    }};
+    static constexpr std::array<ForEntry, 1> kFor{{ {"SMALL", 2} }};
+    static constexpr std::array<OverEntry, 1> kOver{{ {"algo_a", "{}"} }};
+    static constexpr std::array<std::string_view, 1> kTags{{"unit"}};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{.key = "bench_flush", .description = "flush",
+                      .tags = std::span<const std::string_view>{kTags},
+                      .for_entries = std::span<const ForEntry>{kFor},
+                      .over_entries = std::span<const OverEntry>{kOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}}
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kFilterTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    TempReportDir report_dir;
+    const auto config_path = write_config_file(report_dir, config_text);
+    const std::array<std::string, 3> extra{"--filter", "benchmark=bench_flush", "--debug"};
+    auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+                                 make_toy_bench("bench_flush", "flush", config_path));
+    REQUIRE(outcome.exit_code == 0);
+
+    // Post-run: each line parses independently as one JSON object (proves the
+    // writer emits one flushed object per line — the crash-resilience contract).
+    const auto jsonl = find_debug_jsonl(report_dir.path);
+    REQUIRE(jsonl.has_value());
+    std::ifstream in(*jsonl, std::ios::binary);
+    REQUIRE(in.good());
+    std::string line;
+    std::size_t parsed_lines = 0;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        auto parsed = nlohmann::json::parse(line, nullptr, false);
+        REQUIRE_FALSE(parsed.is_discarded());
+        REQUIRE(parsed.contains("event"));
+        ++parsed_lines;
+    }
+    // BENCHMARK_STARTED + CASE_STARTED + CASE_RESULTS + EXECUTION_FINISHED.
+    REQUIRE(parsed_lines == 4);
+}
+
+// ---------------------------------------------------------------------------
+//  DOC0349 Test 7 — abort backstop / end-of-benchmark sweep
+// ---------------------------------------------------------------------------
+
+TEST_CASE("bench_framework --debug abort backstop sweep", "[bench_framework][debug]") {
+    TestLogSilencer silence_mlogging;
+
+    // `bench_partial`: algo over {SMALL, BIG}. BIG's batch is skipped
+    // (memory_budget_not_satisfiable), SMALL completes. The case counter never
+    // reaches 0 → the end-of-benchmark sweep flushes its CASE_RESULTS exactly
+    // once, carrying only SMALL's samples. `bench_allskip`: algo over {BIG}
+    // only → every batch skipped → no CASE_STARTED/CASE_RESULTS at all.
+    static constexpr std::array<AlgorithmSpec, 1> kAlgos{{
+        {"algo_a", std::span<const AlgoParamSpec>{kFilterParams}}
+    }};
+    static constexpr std::array<ForEntry, 2> kForPartial{{ {"SMALL", 2}, {"BIG", 2} }};
+    static constexpr std::array<ForEntry, 1> kForSkip{{ {"BIG", 2} }};
+    static constexpr std::array<OverEntry, 1> kOver{{ {"algo_a", "{}"} }};
+    static constexpr std::array<std::string_view, 1> kTags{{"unit"}};
+    const std::array<BenchmarkSpec, 2> benches{{
+        BenchmarkSpec{.key = "bench_partial", .description = "partial",
+                      .tags = std::span<const std::string_view>{kTags},
+                      .for_entries = std::span<const ForEntry>{kForPartial},
+                      .over_entries = std::span<const OverEntry>{kOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}},
+        BenchmarkSpec{.key = "bench_allskip", .description = "allskip",
+                      .tags = std::span<const std::string_view>{kTags},
+                      .for_entries = std::span<const ForEntry>{kForSkip},
+                      .over_entries = std::span<const OverEntry>{kOver},
+                      .metrics = std::span<const MetricSpecLite>{kFilterMetrics}},
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kFilterTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    TempReportDir report_dir;
+    const auto config_path = write_config_file(report_dir, config_text);
+
+    // on_estimate: BIG demands more RAM than any host has → forces
+    // memory_budget_not_satisfiable (skip at enqueue, no item loop).
+    Estimator big_oom = [](std::string_view, std::string_view test_case_name,
+                           simdjson::dom::element) noexcept {
+        RunConstraints rc;
+        if (test_case_name == "BIG") rc.base_memory = std::size_t{1} << 60;  // ~1 EiB
+        return rc;
+    };
+
+    const std::array<std::string, 3> extra{
+        "--filter", "benchmark=bench_partial,bench_allskip", "--debug"};
+    auto outcome = run_with_args(report_dir, std::span<const std::string>{extra},
+        make_toy_bench("bench_partial", "partial", config_path, big_oom),
+        make_toy_bench("bench_allskip", "allskip", config_path, big_oom));
+
+    const auto jsonl = find_debug_jsonl(report_dir.path);
+    REQUIRE(jsonl.has_value());
+    const auto events = read_jsonl(*jsonl);
+
+    // The run still reaches EXECUTION_FINISHED (counter-stuck hangs nothing).
+    REQUIRE(count_events(events, "EXECUTION_FINISHED") == 1);
+
+    // bench_partial/algo_a: started once (SMALL ran) + flushed once by the
+    // sweep. bench_allskip/algo_a: never started → never emitted. So across the
+    // run there is exactly ONE CASE_STARTED and ONE CASE_RESULTS, no duplicates.
+    REQUIRE(count_events(events, "CASE_STARTED") == 1);
+    REQUIRE(count_events(events, "CASE_RESULTS") == 1);
+    REQUIRE(case_results_names(events) == std::set<std::string>{"algo_a"});
+
+    // The single CASE_RESULTS carries only SMALL's samples (BIG never ran);
+    // SMALL had 2 iterations.
+    for (const auto& e : events) {
+        if (e.value("event", std::string{}) != "CASE_RESULTS") continue;
+        const auto& tuples = e["results"]["execution_tuples"];
+        REQUIRE(tuples.size() == 1);
+        REQUIRE(tuples[0]["test_cases"].contains("SMALL"));
+        REQUIRE_FALSE(tuples[0]["test_cases"].contains("BIG"));
     }
 }

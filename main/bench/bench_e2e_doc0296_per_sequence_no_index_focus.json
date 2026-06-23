@@ -72,6 +72,7 @@
     }
   },
   "bench_e2e": {
+    "tags": ["e2e", "per_sequence", "no_index", "gpu"],
     "description": "DOC0296 focused per-sequence no-index task_parallel 2Gbp dna4 measurement",
     "fast": false,
     "concurrency": {"bench_lock": true, "concurrency": false},

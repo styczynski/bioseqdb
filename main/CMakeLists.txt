@@ -35,7 +35,7 @@ elseif(NOT DEFINED CMAKE_NAMED_ENV_TYPE)
 endif()
 
 # Override environment, don't change it
-set(CMAKE_NAMED_ENV_TYPE "W")
+set(CMAKE_NAMED_ENV_TYPE "H")
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@22/bin/clang)

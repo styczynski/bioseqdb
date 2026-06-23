@@ -44,6 +44,7 @@
   },
 
   "bench_e2e": {
+    "tags": ["e2e", "smoke"],
     "description": "Smoke validation of the e2e path set (all 6 configs, both minimizer indexes, task_parallel, cold-restart just_index).",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },

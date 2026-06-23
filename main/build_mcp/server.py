@@ -726,7 +726,7 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
 
 
 def _run_build_worker(mode: str, build_only: bool = False,
-                      debug: bool = False) -> int:
+                      debug: bool = False, bench_flags=None) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
@@ -737,7 +737,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
     `bench-opt-debug` preset — the per-TU `.s`/`.bc` + DWARF artefacts the
     `inspect` tool consumes. `debug=False` (default) uses the lean
     `bench-opt` preset that DOC0270 split out for everyday builds.
+
+    `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
+    '--debug']) appended only to bench-mode commands (§5.4).
     """
+    bench_flags = bench_flags or []
     state = _load_state()
     entry = state.get(mode)
     if not entry:
@@ -865,6 +869,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 # active build's bin dir (DOC0270). Args after the first slot
                 # are passed through verbatim.
                 full_cmd = [str(active_bin_dir / cmd[0]), *cmd[1:]]
+                if mode_details.is_bench_mode and bench_flags:
+                    full_cmd += bench_flags          # e.g. --filter tags=gpu --debug
                 rc = _stream_subprocess(
                     full_cmd, log_handle, deadline,
                     cwd=active_build_dir, env=env,
@@ -966,13 +972,65 @@ def _running_in_same_group(state: dict, mode: str) -> tuple[str | None, dict | N
     return None, None
 
 
+# (object key in the MCP `filter`, bench CLI key). Note plural->singular for
+# benchmarks: the MCP surface is `benchmarks` (matching the prompt's
+# FilterConditions.benchmarks) but the bench CLI key is the singular `benchmark`.
+_FILTER_AXES = (("tags", "tags"), ("benchmarks", "benchmark"), ("cases", "cases"))
+
+
+def _filter_to_cli_args(bench_filter):
+    """Translate the structured `filter` object into bench CLI tokens.
+
+    Returns (extra_argv, error). extra_argv is a flat list like
+    ['--filter','tags=a,b','--filter','benchmark=k']. error is a human string or
+    None. Validates value shape (non-empty arrays / strings, no ',' or '=').
+    """
+    if not bench_filter:
+        return [], None
+    if not isinstance(bench_filter, dict):
+        return [], "filter must be an object"
+    extra: list = []
+    for obj_key, cli_key in _FILTER_AXES:
+        if obj_key not in bench_filter:
+            continue
+        values = bench_filter[obj_key]
+        if not isinstance(values, list) or not values:
+            return [], f"filter.{obj_key} must be a non-empty array"
+        for v in values:
+            if not isinstance(v, str) or not v:
+                return [], f"filter.{obj_key} entries must be non-empty strings"
+            if "," in v or "=" in v:
+                return [], f"filter.{obj_key} value '{v}' may not contain ',' or '='"
+        extra += ["--filter", f"{cli_key}=" + ",".join(values)]
+    return extra, None
+
+
 def tool_start_build(mode: str, build_only: bool = False,
-                     debug: bool = False) -> str:
+                     debug: bool = False, bench_filter=None,
+                     debug_report: bool = False) -> str:
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
     mode_details = MODES[mode]
+
+    # Bench-only knobs: reject on non-bench modes, validate + translate the
+    # filter, and enforce debug-requires-filter — all BEFORE spawning the
+    # long-running detached worker (fast feedback).
+    if (bench_filter or debug_report) and not mode_details.is_bench_mode:
+        return (f"`filter`/`debug_report` are only valid for bench modes "
+                f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
+    filter_args, ferr = _filter_to_cli_args(bench_filter)
+    if ferr is not None:
+        return f"Invalid filter: {ferr}"
+    if debug_report and not filter_args:
+        return ("`debug_report` requires a non-empty `filter` — debug is for targeted "
+                "runs, not for instrumenting an entire benchmark sweep.")
+
+    # Encode the bench flags appended to the bench binary by the worker.
+    bench_flags = list(filter_args)
+    if debug_report:
+        bench_flags.append("--debug")
 
     with _global_lock():
         state = _load_state()
@@ -1003,7 +1061,8 @@ def tool_start_build(mode: str, build_only: bool = False,
             [sys.executable, str(server_path),
              "--run-build", mode,
              "--build-only", ("true" if build_only else "false"),
-             "--debug", ("true" if debug else "false")],
+             "--debug", ("true" if debug else "false"),
+             "--bench-flags", json.dumps(bench_flags)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1025,18 +1084,20 @@ def tool_start_build(mode: str, build_only: bool = False,
             "debug": debug,
             "preset": preset_for(debug),
             "build_dir": str(build_dir_for(debug)),
+            "bench_flags": bench_flags,
         }
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
-             f"log={log_path}")
+             f"bench_flags={bench_flags} log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
-            f"(preset={preset_for(debug)}). "
-            f"Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
+            f"(preset={preset_for(debug)})"
+            + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
+            + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
 def _run_build_inline(mode: str, build_only: bool = False,
-                      debug: bool = False) -> int:
+                      debug: bool = False, bench_flags=None) -> int:
     """Reserve the per-mode state slot and run the build worker INLINE
     (synchronously, in this very process) instead of detaching it.
 
@@ -1090,12 +1151,15 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "debug": debug,
             "preset": preset_for(debug),
             "build_dir": str(build_dir_for(debug)),
+            "bench_flags": list(bench_flags or []),
         }
         _save_state(state)
         _log(f"--run-build-sync: running {mode} inline (pid={os.getpid()}, "
-             f"preset={preset_for(debug)}, build_only={build_only}, log={log_path})")
+             f"preset={preset_for(debug)}, build_only={build_only}, "
+             f"bench_flags={bench_flags or []}, log={log_path})")
 
-    return _run_build_worker(mode, build_only=build_only, debug=debug)
+    return _run_build_worker(mode, build_only=build_only, debug=debug,
+                             bench_flags=bench_flags)
 
 
 def tool_inspect(arguments: dict) -> str:
@@ -1760,11 +1824,13 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
         mode = payload["mode"]
         build_only = bool(payload.get("build_only", False))
         debug = bool(payload.get("debug", False))
+        bench_flags = payload.get("bench_flags") or []   # parity with local path
         remote_cmd = (
             f"cd {server_dir} && {env_prefix}python3 server.py "
             f"--run-build-sync {shlex.quote(mode)} "
             f"--build-only {'true' if build_only else 'false'} "
-            f"--debug {'true' if debug else 'false'}"
+            f"--debug {'true' if debug else 'false'} "
+            f"--bench-flags {shlex.quote(json.dumps(bench_flags))}"
         )
     elif operation == "inspect":
         inspect_args = payload.get("inspect_args") or {}
@@ -2257,6 +2323,34 @@ TOOL_DEFINITIONS = [
                        "everyday `bench-opt` preset)."
                    ),
                    "default": False,
+                },
+                "filter": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "description": (
+                        "Bench-only. Subset selection for bench/bench-fast/bench-io/bench-e2e, "
+                        "translated to the bench binary's repeatable --filter flag. Each present "
+                        "array is an OR-set; the three arrays AND together. Omit an array to leave "
+                        "that axis unconstrained. Values may not contain ',' or '='."
+                    ),
+                    "properties": {
+                        "tags":       {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
+                                       "description": "Run only benchmarks whose `tags` intersect this set."},
+                        "cases":      {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
+                                       "description": "Within selected benchmarks, run only these matrix.over cases (algorithm names)."},
+                        "benchmarks": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
+                                       "description": "Run only these benchmark keys. (Maps to the bench CLI's singular `benchmark=`.)"}
+                    }
+                },
+                "debug_report": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Bench-only. Pass --debug to the bench binary: stream a crash-resilient "
+                        "report_debug_<N>.jsonl (one JSON event per case) next to report_<N>.json. "
+                        "Requires a non-empty `filter` (debug is for targeted runs). NOTE: this is "
+                        "NOT the build-tree `debug` flag above."
+                    )
                 }
             },
             "required": ["mode"],
@@ -2969,7 +3063,10 @@ def _handle_tools_call(params: dict) -> dict:
         mode = args.get("mode", "")
         build_only: bool = parse_bool("build_only", args.get("build_only", False))
         debug: bool = parse_bool("debug", args.get("debug", False))
-        text = tool_start_build(mode, build_only=build_only, debug=debug)
+        bench_filter = args.get("filter")                       # dict | None
+        debug_report: bool = parse_bool("debug_report", args.get("debug_report", False))
+        text = tool_start_build(mode, build_only=build_only, debug=debug,
+                                bench_filter=bench_filter, debug_report=debug_report)
     elif name == "status":
         mode = args.get("mode", "")
         text = tool_status(mode)
@@ -3110,6 +3207,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--bench-flags",
+        default="[]",
+        metavar="JSON",
+        help=(
+            "(internal) JSON array of extra argv flags appended to the bench "
+            "binary (e.g. [\"--filter\",\"tags=gpu\",\"--debug\"]). Bench modes only."
+        ),
+    )
+    parser.add_argument(
         "--run-subagent",
         action="store_true",
         default=False,
@@ -3126,13 +3232,27 @@ def main() -> int:
     if args.run_build is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)
+        try:
+            bench_flags = json.loads(args.bench_flags)
+            if not isinstance(bench_flags, list) or not all(isinstance(x, str) for x in bench_flags):
+                raise ValueError("must be a JSON array of strings")
+        except (ValueError, json.JSONDecodeError) as e:
+            _log(f"--bench-flags invalid: {e}")
+            return 2
         return _run_build_worker(args.run_build, build_only=build_only,
-                                 debug=debug)
+                                 debug=debug, bench_flags=bench_flags)
     if args.run_build_sync is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)
+        try:
+            bench_flags = json.loads(args.bench_flags)
+            if not isinstance(bench_flags, list) or not all(isinstance(x, str) for x in bench_flags):
+                raise ValueError("must be a JSON array of strings")
+        except (ValueError, json.JSONDecodeError) as e:
+            _log(f"--bench-flags invalid: {e}")
+            return 2
         return _run_build_inline(args.run_build_sync, build_only=build_only,
-                                 debug=debug)
+                                 debug=debug, bench_flags=bench_flags)
     if args.run_inspect is not None:
         try:
             inspect_args = json.loads(args.run_inspect)

@@ -40,6 +40,7 @@
     }
   },
   "bench_e2e": {
+    "tags": ["e2e", "per_sequence", "just_index"],
     "description": "DOC0296 focused per-sequence just-index task_parallel 2Gbp dna4 measurement",
     "fast": false,
     "concurrency": {"bench_lock": true, "concurrency": false},

@@ -60,6 +60,7 @@
     "CURATED_SEAL_BATCH":      { "data": { "fragment_count": 8, "fragment_length_mean": 200, "fragment_length_stddev": 10, "reference_length": 4000, "substitution_rate": 0.01, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 1234 }, "description": "SEAL-style 8-fragment batch with mild error and reverse-complement" }
   },
   "bench_aligners_grid": {
+    "tags": ["aligner", "grid"],
     "description": "Length × error × algorithm matrix. Iteration counts are bucket-tuned (60 SHORT, 35 MEDIUM, 12 LONG, 3 VERY_LONG, 2 XL) so SHORT cells drive the tight noise floor while XL cells stay inside the per-call budget. Skip noisy×long cells (LONG / VERY_LONG / XL × ONT_LEGACY, HIGH_INDEL_LOW_SUB) — minimap2 itself fails to produce a primary at 8-10% indel rate on >50 kbp pairs.",
     "fast": false,
     "concurrency": { "bench_lock": false, "concurrency": true },
@@ -92,6 +93,7 @@
     }
   },
   "bench_aligners_curated": {
+    "tags": ["aligner", "curated"],
     "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Asserts both unique-fragment primary correctness and SEAL-style batch behaviour. On purpose evaluates one sample for very long sequence (XXL_HIFI)",
     "fast": true,
     "concurrency": { "bench_lock": false, "concurrency": true },
@@ -147,6 +149,7 @@
   },
 
   "bench_aligners_repr_storage": {
+    "tags": ["aligner", "storage", "repr"],
     "description": "Force the 32-bit (K=7 / MEDIUM) and 128-bit (K=27 / XL) MinimizerRepr storage variants. Smaller grid (3 algorithm rows) so the bucket finishes in minutes.",
     "fast": true,
     "concurrency": { "bench_lock": false, "concurrency": true },
@@ -194,6 +197,7 @@
   },
 
   "bench_aligners_rmq_repro": {
+    "tags": ["aligner", "rmq"],
     "description": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining (AVL rebalance bug, fixed in chaining_rmq.cppm). One row, asserts non-zero match count.",
     "fast": true,
     "concurrency": { "bench_lock": false, "concurrency": true },

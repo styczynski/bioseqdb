@@ -42,6 +42,7 @@
   },
 
   "bench_e2e": {
+    "tags": ["e2e", "gpu", "4gbp"],
     "description": "GPU benchmark 4 Gbp pass: Vulkan GPU seeding+chaining (DOC0344/DOC0345 production, no XPC fallback) vs minimap2 baseline at 4 Gbp dna4/dna5. Split from 2 Gbp pass due to 16 GiB local RAM constraint. SIMD + minimap2 numbers carried from SUMMARY.md report 7.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
