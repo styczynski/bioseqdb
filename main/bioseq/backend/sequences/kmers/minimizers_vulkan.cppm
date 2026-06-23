@@ -177,6 +177,33 @@ template <class Traits>
     return AlphabetKernelKind::generic;
 }
 
+template <class Traits>
+[[nodiscard]] constexpr bool vulkan_minimizer_alphabet_shape_supported() noexcept {
+    return Traits::alphabet_size <= 256 && Traits::bits_per_char != 0
+        && Traits::bits_per_char <= 32;
+}
+
+template <class Traits>
+[[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
+    std::size_t kmer_size) noexcept
+{
+    if constexpr (!vulkan_minimizer_alphabet_shape_supported<Traits>()) {
+        return false;
+    } else {
+        constexpr std::size_t step_bits =
+            alphabet_kernel_kind_of_traits<Traits>() == AlphabetKernelKind::generic
+                ? Traits::bits_per_char
+                : std::size_t{2};
+        return kmer_size != 0 && kmer_size <= 64 / step_bits && kmer_size <= 32;
+    }
+}
+
+[[nodiscard]] constexpr bool vulkan_minimizer_window_size_supported(
+    std::size_t window_size) noexcept
+{
+    return window_size != 0 && window_size <= 256;
+}
+
 /// Build the rank → forward/rc nt4-code LUT from the existing CPU helpers. For
 /// SeqAn dna5 this yields `{A,C,G,N,T} -> {0,1,2,4,3}` and resets on `N` (not
 /// `T`) — mandatory DOC0286 parity.
@@ -459,6 +486,20 @@ template <class MinimizerT>
     return std::max<std::uint64_t>(64u, bp_size);
 }
 
+[[nodiscard]] inline std::uint64_t grow_vulkan_minimizer_capacity(
+    std::uint64_t current,
+    std::uint64_t maximum) noexcept
+{
+    if (current >= maximum) {
+        return maximum;
+    }
+    const std::uint64_t doubled =
+        current > (std::numeric_limits<std::uint64_t>::max)() / 2u
+            ? (std::numeric_limits<std::uint64_t>::max)()
+            : current * 2u;
+    return std::min(maximum, std::max(current + 1u, doubled));
+}
+
 template <class MinimizerT>
 [[nodiscard]] std::uint64_t vulkan_sketch_resident_bytes(
     std::uint64_t max_minimizers) noexcept
@@ -538,11 +579,15 @@ sketch_uploaded_window_result(
     std::size_t window_size,
     std::size_t kmer_size,
     bool fused_frontend,
-    std::uint64_t capacity_bound = 0u)
+    std::uint64_t capacity_bound = 0u,
+    bool* capacity_overflowed = nullptr)
 {
     using bioseq::parallelism::MemoryAdmissionController;
     using bioseq::parallelism::saturating_mul;
 
+    if (capacity_overflowed != nullptr) {
+        *capacity_overflowed = false;
+    }
     if (upload.bp_size > std::numeric_limits<std::uint32_t>::max()
         || upload.padded_byte_size == std::numeric_limits<std::uint64_t>::max()) {
         return std::nullopt;
@@ -639,7 +684,10 @@ sketch_uploaded_window_result(
                     sketch_params,
                     max_minimizers);
         if (raw.overflow) {
-            if (capacity_bound != 0u) {
+            if (capacity_overflowed != nullptr) {
+                *capacity_overflowed = true;
+            }
+            if (capacity_bound != 0u && capacity_overflowed == nullptr) {
                 throw VulkanRuntimeError(fmt::format(
                     "Vulkan minimizer sketch overflowed explicit capacity bound "
                     "(bp={}, cap={})",
@@ -674,6 +722,52 @@ sketch_uploaded_window_result(
         };
     } catch (const VulkanRuntimeError&) {
         throw;
+    }
+}
+
+template <class MinimizerT>
+[[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>
+sketch_uploaded_window_result_adaptive_capacity(
+    const SequenceUploadView& upload,
+    const VulkanRankLut& rank_lut,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    bool fused_frontend,
+    std::uint64_t* attempted_capacity = nullptr)
+{
+    const std::uint64_t maximum =
+        worst_case_vulkan_minimizer_capacity(upload.bp_size);
+    std::uint64_t capacity = std::min(
+        maximum,
+        std::max<std::uint64_t>(
+            64u,
+            estimate_vulkan_minimizer_capacity(upload.bp_size, window_size)));
+
+    for (;;) {
+        if (attempted_capacity != nullptr) {
+            *attempted_capacity = capacity;
+        }
+        bool overflowed = false;
+        auto result = sketch_uploaded_window_result<MinimizerT>(
+            upload,
+            rank_lut,
+            window_size,
+            kmer_size,
+            fused_frontend,
+            capacity,
+            &overflowed);
+        if (result || !overflowed) {
+            return result;
+        }
+        if (capacity >= maximum) {
+            throw VulkanRuntimeError(fmt::format(
+                "Vulkan minimizer sketch overflowed worst-case capacity "
+                "(bp={}, cap={}, fused_frontend={})",
+                upload.bp_size,
+                capacity,
+                fused_frontend ? 1 : 0));
+        }
+        capacity = grow_vulkan_minimizer_capacity(capacity, maximum);
     }
 }
 
@@ -1004,18 +1098,13 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
         using bioseq::parallelism::MemoryAdmissionController;
         using bioseq::parallelism::saturating_mul;
 
-        if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0
-                      || traits::bits_per_char > 32) {
+        if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
             throw VulkanRuntimeError{"Vulkan segment minimizer pair path rejected alphabet shape"};
         } else {
-            constexpr std::size_t step_bits =
-                alphabet_kernel_kind_of_traits<traits>() == AlphabetKernelKind::generic
-                    ? traits::bits_per_char
-                    : std::size_t{2};
-            if (kmer_size == 0 || kmer_size > 64 / step_bits || kmer_size > 32) {
+            if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
                 throw VulkanRuntimeError{"Vulkan segment minimizer pair path rejected kmer size"};
             }
-            if (window_size == 0 || window_size > 256) {
+            if (!vulkan_minimizer_window_size_supported(window_size)) {
                 throw VulkanRuntimeError{"Vulkan segment minimizer pair path rejected window size"};
             }
 
@@ -1064,18 +1153,32 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
             // generic alphabets stay on the exact Phase-B GPU sketch until the
             // tiled reset/init ownership bug is fixed for ambiguous bases.
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
-            const std::uint64_t max_minimizers =
-                worst_case_vulkan_minimizer_capacity(upload.bp_size);
             const bool use_tiled_phase_c =
                 upload.alphabet_kind == AlphabetKernelKind::dna4_nt4;
-            auto result = sketch_uploaded_window_result<MinimizerT>(
-                upload,
-                rank_lut,
-                window_size,
-                kmer_size,
-                use_tiled_phase_c,
-                max_minimizers);
+            std::uint64_t attempted_capacity = 0u;
+            auto result = use_tiled_phase_c
+                ? sketch_uploaded_window_result<MinimizerT>(
+                    upload,
+                    rank_lut,
+                    window_size,
+                    kmer_size,
+                    true,
+                    worst_case_vulkan_minimizer_capacity(upload.bp_size))
+                : sketch_uploaded_window_result_adaptive_capacity<MinimizerT>(
+                    upload,
+                    rank_lut,
+                    window_size,
+                    kmer_size,
+                    false,
+                    &attempted_capacity);
             if (!result) {
+                const std::uint64_t max_minimizers =
+                    use_tiled_phase_c
+                        ? worst_case_vulkan_minimizer_capacity(upload.bp_size)
+                        : (attempted_capacity != 0u
+                            ? attempted_capacity
+                            : estimate_vulkan_minimizer_capacity(
+                                upload.bp_size, window_size));
                 const std::uint64_t resident_bytes =
                     vulkan_sketch_resident_bytes<MinimizerT>(max_minimizers);
                 const std::uint64_t host_minimizer_bytes =
@@ -1151,6 +1254,14 @@ void collect_minimizers_vulkan_segment_or_throw(
         using storage_unit = typename traits::storage_unit;
         using MinimizerLimit = bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 
+        if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
+            throw VulkanRuntimeError{"Vulkan segment minimizer sketch rejected alphabet shape"};
+        } else if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
+            throw VulkanRuntimeError{"Vulkan segment minimizer sketch rejected kmer size"};
+        } else if (!vulkan_minimizer_window_size_supported(window_size)) {
+            throw VulkanRuntimeError{"Vulkan segment minimizer sketch rejected window size"};
+        }
+
         const SegmentUploadDescriptor descriptor =
             compute_segment_descriptor(seq, lo_unit, hi_unit);
         if (descriptor.window_bp == 0u
@@ -1182,13 +1293,12 @@ void collect_minimizers_vulkan_segment_or_throw(
         // is bit-exact against the scalar reference for every alphabet. Segment
         // sketching is not on the GPU-index hot path, so the tiling speedup is
         // not needed here.
-        auto result = sketch_uploaded_window_result<MinimizerT>(
+        auto result = sketch_uploaded_window_result_adaptive_capacity<MinimizerT>(
             upload,
             rank_lut,
             window_size,
             kmer_size,
-            false,
-            worst_case_vulkan_minimizer_capacity(upload.bp_size));
+            false);
         if (!result) {
             throw VulkanRuntimeError{"Vulkan segment minimizer sketch selected but declined"};
         }

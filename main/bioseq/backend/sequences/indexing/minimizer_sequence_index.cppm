@@ -841,8 +841,29 @@ struct MinimizerSequenceMergedIndex {
             S& storage, std::span<const MinimapSketchData> query_minimizers,
             sequence_size_t target_len, std::int32_t max_occ,
             MinimizerAssemblyScratch& scratch) {
+        return assemble_for_query_segment(
+            storage,
+            query_minimizers,
+            target_len,
+            max_occ,
+            0,
+            target_len,
+            scratch);
+    }
+
+    /// query-time: load query-touched buckets but keep only positions in one
+    /// target collection range. Occurrence filtering remains global.
+    static MinimizerHashmapFragmentIndex assemble_for_query_segment(
+            S& storage, std::span<const MinimapSketchData> query_minimizers,
+            sequence_size_t target_len, std::int32_t max_occ,
+            sequence_size_t clip_lo_bp, sequence_size_t clip_hi_bp,
+            MinimizerAssemblyScratch& scratch) {
         using detail::HDR; using detail::REC;
         scratch.clear_query();
+        clip_hi_bp = std::min(clip_hi_bp, target_len);
+        if (clip_lo_bp > clip_hi_bp) {
+            clip_lo_bp = clip_hi_bp;
+        }
         // 1. read the directory into an OWNED buffer (DirView copies it).
         const char* dblob = storage.template read_chunk<char>(DIRECTORY_SUB_KEY, 0);
         const std::size_t dbytes = storage.chunk_byte_size(DIRECTORY_SUB_KEY, 0);
@@ -863,7 +884,14 @@ struct MinimizerSequenceMergedIndex {
         auto emit_kept = [&](std::uint64_t kmer, std::uint32_t pos_count, const std::uint64_t* gpos){
             if (!std::binary_search(qkmers.begin(), qkmers.end(), kmer)) return;   // clip to QUERY kmers
             if (pos_count > (std::uint32_t)max_occ) return;                         // drop over-frequent kmer
-            for (std::uint32_t j = 0; j < pos_count; ++j) pairs.emplace_back(kmer, gpos[j]);
+            for (std::uint32_t j = 0; j < pos_count; ++j) {
+                const sequence_size_t pos_bp =
+                    static_cast<sequence_size_t>(gpos[j] >> 1);
+                if (pos_bp < clip_lo_bp || pos_bp >= clip_hi_bp) {
+                    continue;
+                }
+                pairs.emplace_back(kmer, gpos[j]);
+            }
         };
         for (std::int64_t sk : wanted) {
             const std::size_t nc = storage.number_of_chunks(sk);
