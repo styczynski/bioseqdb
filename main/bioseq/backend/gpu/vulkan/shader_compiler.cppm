@@ -1200,8 +1200,12 @@ void write_minimizer(uint dst, Sketch s) {
     }
 }
 
-void emit_one(Sketch s, bool owned) {
-    if (s.is_max != 0u || !owned) return;
+bool owns_emit_position(TileC t, uint emit_pos) {
+    return emit_pos >= t.tile_lo && emit_pos < t.tile_hi;
+}
+
+void emit_one(TileC t, Sketch s, uint emit_pos) {
+    if (s.is_max != 0u || !owns_emit_position(t, emit_pos)) return;
     uint dst = g_local_count;
     g_local_count = g_local_count + 1u;
     // emit_mode 2 (DOC0311 single-pass): no separate count pass / tile-offset
@@ -1315,7 +1319,6 @@ void main() {
     for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
         uint ci = seq_pos - t.replay_lo;
         bool is_init = init_mode;
-        bool owned = seq_pos >= t.tile_lo;
         uint cf = sh_cand_flags[ci];
         bool base_valid = (cf & 2u) != 0u;
         Sketch cand = ((cf & 1u) != 0u)
@@ -1335,24 +1338,24 @@ void main() {
         if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
             && current_min.is_max == 0u) {
             for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
             }
             for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
             }
         }
 
         if (sketch_leq(pushed, current_min)) {
             if ((valid_since_reset >= pc.window_size + pc.kmer_size || !is_init)
                 && current_min.is_max == 0u) {
-                emit_one(current_min, owned);
+                emit_one(t, current_min, seq_pos);
             }
             current_min_pos = prev_pos;
             current_min = pushed;
         } else if (prev_pos == current_min_pos) {
             if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
                 && current_min.is_max == 0u) {
-                emit_one(current_min, owned);
+                emit_one(t, current_min, seq_pos);
             }
             current_min = max_sketch();
             for (uint j = buf_pos; j < pc.window_size; ++j) {
@@ -1364,10 +1367,10 @@ void main() {
             if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
                 && current_min.is_max == 0u) {
                 for (uint j = buf_pos; j < pc.window_size; ++j) {
-                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
                 }
                 for (uint j = 0u; j < buf_pos; ++j) {
-                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
                 }
             }
         }
@@ -1377,8 +1380,7 @@ void main() {
 
     // Final emit belongs to the sequence end; only the owning final tile does it.
     if (loop_hi >= t.bp_count && current_min.is_max == 0u) {
-        bool owned = (t.bp_count > 0u) && ((t.bp_count - 1u) >= t.tile_lo);
-        emit_one(current_min, owned);
+        emit_one(t, current_min, t.bp_count > 0u ? t.bp_count - 1u : 0u);
     }
 
     if (pc.emit_mode == 0u) {

@@ -11,6 +11,7 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <array>
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -71,10 +72,15 @@ template <class MinimizerT, class Alphabet>
 
 template <class MinimizerT, class Alphabet>
 [[nodiscard]] static std::vector<MinimizerT> gpu_sketch(
-    std::vector<Alphabet>& data, std::size_t w, std::size_t k) {
+    std::vector<Alphabet>& data,
+    std::size_t w,
+    std::size_t k,
+    bool fused_frontend = false) {
     using seq_type = sequence_custom_alphabet<Alphabet, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(data);
-    auto result = vk::collect_minimizers_vulkan_result<MinimizerT>(seq, w, k);
+    auto result =
+        vk::collect_minimizers_vulkan_result<MinimizerT>(
+            seq, w, k, fused_frontend);
     if (!result) return {};
     return std::move(result->host_minimizers);
 }
@@ -146,6 +152,38 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
                    last_pos);
         }
     }
+}
+
+TEST_CASE("vulkan minimizer: fused Phase-C dna5 tile-boundary parity",
+          "[vulkan][seeding][phase-c][dna5]") {
+    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+
+    constexpr std::size_t w = 10;
+    constexpr std::size_t k = 15;
+    constexpr std::size_t letter_count = 21u * 700u;
+    std::vector<seq::dna5> data;
+    data.reserve(letter_count);
+    std::uint64_t lcg = 0x6a09e667f3bcc909ULL;
+    for (std::size_t i = 0; i < letter_count; ++i) {
+        lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
+        seq::dna5 value{};
+        value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % 4u));
+        data.push_back(value);
+    }
+    for (const std::size_t n_pos : std::array<std::size_t, 12>{
+             240u, 251u, 252u, 253u, 503u, 504u,
+             505u, 755u, 756u, 757u, 1007u, 1008u}) {
+        data[n_pos].assign_rank(static_cast<std::uint8_t>(4u));
+    }
+
+    const auto cpu = triples(cpu_sketch<MinimapSketchData>(data, w, k));
+    const auto gpu =
+        triples(gpu_sketch<MinimapSketchData>(data, w, k, true));
+    ASSERT(!gpu.empty(), "fused Phase-C dna5 sketch produced no minimizers", gpu.size());
+    ASSERT(cpu == gpu,
+           fmt::format("fused Phase-C dna5 GPU sketch != scalar (cpu={} gpu={})",
+                       cpu.size(), gpu.size()),
+           cpu.size(), gpu.size());
 }
 
 TEST_CASE("vulkan minimizer: generic alphabet smoke (no throw / pre-dispatch decline)",
@@ -243,10 +281,9 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
         constexpr std::size_t w = 10;
         constexpr std::size_t k = 15;
         // DOC0345 §16.1 — exact GPU-vs-scalar parity of the GPU segment sketch.
-        // `collect_minimizers_vulkan_segment_or_throw` uses the bit-exact NON-tiled
-        // Phase B GPU sketch (the tiled emit over-emits ~8% for dna5 and is
-        // bypassed — BUGFIX DOC0348). Two test-only input conditions keep the
-        // comparison EXACT and meaningful:
+        // `collect_minimizers_vulkan_segment_or_throw` uses the fused tiled
+        // Phase-C sketch for all supported alphabets. Two test-only input
+        // conditions keep the comparison EXACT and meaningful:
         //  (1) draw ranks from the NON-AMBIGUOUS letters only (ACGT, ranks 0..3).
         //      The original periodic `i % alphabet_size` put an N every 5th base
         //      for dna5 (every 15-mer spans an N → vacuous). Phase B IS bit-exact
@@ -395,12 +432,13 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
 
     std::vector<typename config_t::alphabet_type> letters;
-    letters.reserve(4u << 20);
+    constexpr std::size_t dna5_letter_count = range_t::traits::letters_per_unit * 50000u;
+    letters.reserve(dna5_letter_count);
     // DOC0345 §16.2 — varied (LCG) ranks so the dna5 sequence actually has
     // minimizers. `(i*7 + i/31) % 5` is periodic and puts an N (rank 4) every
     // 5th base, so every 15-mer contains an N → zero minimizers → empty pairs.
     std::uint64_t lcg = 0x2545f4914f6cdd1dULL;
-    for (std::size_t i = 0; i < (4u << 20); ++i) {
+    for (std::size_t i = 0; i < dna5_letter_count; ++i) {
         lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
         typename config_t::alphabet_type value{};
         value.assign_rank(static_cast<std::uint8_t>(
@@ -409,6 +447,23 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     }
     range_t range(letters);
     lazy_t fragmented{scanner_t::from_range(range)};
+
+    sketch_collector_t<MinimapSketchData> scalar;
+    collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+        scalar,
+        fragmented,
+        fragmented.cbegin(),
+        fragmented.cend(),
+        10,
+        15);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> expected;
+    for (const MinimapSketchData& minimizer : scalar.extract_sketches_data()) {
+        expected.emplace_back(
+            minimizer.kmer(),
+            (static_cast<std::uint64_t>(minimizer.last_pos()) << 1)
+                | static_cast<std::uint64_t>(minimizer.strand()));
+    }
+    std::sort(expected.begin(), expected.end());
 
     const auto pairs =
         vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
@@ -421,7 +476,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
             10,
             15);
     REQUIRE(!pairs.empty());
-    REQUIRE(std::is_sorted(pairs.begin(), pairs.end()));
+    REQUIRE(pairs == expected);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

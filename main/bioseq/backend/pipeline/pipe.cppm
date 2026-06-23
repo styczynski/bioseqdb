@@ -45,7 +45,7 @@ General rule:
 
 For testing/benchmarking faster iteration you can use level 1, level 3 requires massive hour-long builds
 */
-#define PIPELINE_TEMPLATE_BRANCHING_LEVEL 1
+#define PIPELINE_TEMPLATE_BRANCHING_LEVEL 0
 
 // DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
 // on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
@@ -1009,6 +1009,10 @@ target_index_sketch_backend_from_params(const Minimap2Params& params) noexcept
 inline constexpr sequence_size_t kSegmentCoreMaxBp    = 200'000'000ull;  // core ceiling
 inline constexpr sequence_size_t kSegmentOverlapMaxBp =  30'000'000ull;  // per-side overlap ceiling
 inline constexpr sequence_size_t kSegmentMinBp        =  32'000'000ull;  // floor (keep batches useful)
+inline constexpr sequence_size_t kVulkanSegmentMinBp   =   1'000'000ull;  // floor when GPU sketch is selected
+inline constexpr sequence_size_t kVulkanSegmentTargetBp =  8'000'000ull;  // target core before query-overlap clamping
+inline constexpr sequence_size_t kVulkanSegmentCollectedMaxBp =
+    20'000'000ull; // conservative Phase-C tile-count bound on MoltenVK
 static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
                   static_cast<sequence_size_t>(MinimapSketchData::pos_field_mask),
               "segment collected span (core + 2*overlap) must fit "
@@ -1032,10 +1036,59 @@ static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
     return want < kSegmentMinBp ? kSegmentMinBp : want;
 }
 
-[[nodiscard]] inline sequence_size_t segment_bp_from_budget_divided(unsigned divisor) noexcept {
+[[nodiscard]] inline sequence_size_t segment_bp_from_budget_divided(
+        unsigned divisor,
+        sequence_size_t floor_bp = kSegmentMinBp) noexcept {
     const sequence_size_t base = segment_bp_from_budget();
     const sequence_size_t divided = divisor <= 1 ? base : base / divisor;
-    return divided < kSegmentMinBp ? kSegmentMinBp : divided;
+    return divided < floor_bp ? floor_bp : divided;
+}
+
+[[nodiscard]] inline sequence_size_t segment_overlap_bp(
+        sequence_size_t query_len) noexcept {
+    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
+    if (overlap_bp > kSegmentOverlapMaxBp) {
+        overlap_bp = kSegmentOverlapMaxBp;
+    }
+    return overlap_bp;
+}
+
+[[nodiscard]] inline sequence_size_t vulkan_segment_target_bp(
+        sequence_size_t query_len) noexcept {
+    const sequence_size_t overlap_bp = segment_overlap_bp(query_len);
+    const sequence_size_t expanded_overlap =
+        overlap_bp > kVulkanSegmentCollectedMaxBp / 2
+            ? kVulkanSegmentCollectedMaxBp
+            : overlap_bp * 2;
+    if (expanded_overlap + kVulkanSegmentMinBp
+        >= kVulkanSegmentCollectedMaxBp) {
+        return kVulkanSegmentMinBp;
+    }
+    const sequence_size_t room =
+        kVulkanSegmentCollectedMaxBp - expanded_overlap;
+    const sequence_size_t target = std::min(room, kVulkanSegmentTargetBp);
+    return target < kVulkanSegmentMinBp ? kVulkanSegmentMinBp : target;
+}
+
+[[nodiscard]] inline unsigned
+segment_geometry_divisor_for_backend(
+        MinimizerSketchBackend backend,
+        sequence_size_t query_len = 0) noexcept {
+    if (backend != MinimizerSketchBackend::VulkanSegment) {
+        return 1u;
+    }
+    const sequence_size_t base = segment_bp_from_budget();
+    const sequence_size_t target = vulkan_segment_target_bp(query_len);
+    const sequence_size_t divisor =
+        (base + target - sequence_size_t{1}) / target;
+    return static_cast<unsigned>(std::max<sequence_size_t>(1, divisor));
+}
+
+[[nodiscard]] inline sequence_size_t
+segment_core_floor_for_backend(MinimizerSketchBackend backend) noexcept {
+    return backend == MinimizerSketchBackend::VulkanSegment
+        ? kVulkanSegmentMinBp
+        : kSegmentMinBp;
 }
 
 // DOC0279 §11.3a — the segment geometry of `minimap_port_segmented`, extracted
@@ -1051,14 +1104,18 @@ struct SegmentUnitRange {
     sequence_size_t core_hi_bp;    ///< core claim upper bound (bp, clamped to total_bp)
 };
 [[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
-        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu, unsigned divisor) {
+        sequence_size_t total_bp,
+        sequence_size_t query_len,
+        std::size_t lpu,
+        unsigned divisor,
+        sequence_size_t floor_bp) {
     std::vector<SegmentUnitRange> out;
     if (total_bp == 0 || lpu == 0) return out;
     const sequence_size_t total_units = (total_bp + lpu - 1) / lpu;
-    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
-    if (overlap_bp > kSegmentOverlapMaxBp) overlap_bp = kSegmentOverlapMaxBp;
+    const sequence_size_t overlap_bp = segment_overlap_bp(query_len);
     const sequence_size_t ovl_units = (overlap_bp + lpu - 1) / lpu;
-    sequence_size_t seg_units = segment_bp_from_budget_divided(divisor) / lpu;
+    sequence_size_t seg_units =
+        segment_bp_from_budget_divided(divisor, floor_bp) / lpu;
     if (seg_units == 0) seg_units = 1;
     for (sequence_size_t lo_u = 0; lo_u < total_units; lo_u += seg_units) {
         const sequence_size_t hi_u = std::min(lo_u + seg_units, total_units);
@@ -1072,8 +1129,26 @@ struct SegmentUnitRange {
 }
 
 [[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
+        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu, unsigned divisor) {
+    return segment_unit_ranges(total_bp, query_len, lpu, divisor, kSegmentMinBp);
+}
+
+[[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
         sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu) {
     return segment_unit_ranges(total_bp, query_len, lpu, 1);
+}
+
+[[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges_for_backend(
+        sequence_size_t total_bp,
+        sequence_size_t query_len,
+        std::size_t lpu,
+        MinimizerSketchBackend backend) {
+    return segment_unit_ranges(
+        total_bp,
+        query_len,
+        lpu,
+        segment_geometry_divisor_for_backend(backend, query_len),
+        segment_core_floor_for_backend(backend));
 }
 
 // ---------------------------------------------------------------------------
@@ -1763,24 +1838,23 @@ struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downst
     static constexpr std::string_view stage_name = "IndexStage";
 
     const IndexT* index_;
+    bioseq::indexing::GpuIndexCacheIdentity identity_{};
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& sketches, EmitToken<Sink>&& token) {
-        // DOC0307 §5.2 — for a stable whole in-memory target the cache key uses
-        // pointer identity (the batch/wave keeps it alive); assembled/segmented
-        // indexes pass a nonzero identity through the dedicated emit path. The
-        // pipe's per-batch in-memory index is stable, so `{}` is the intended
-        // identity for both stage shapes here.
-        const bioseq::indexing::GpuIndexCacheIdentity identity{};
+        // DOC0307 §5.2 / DOC0351 — whole in-memory targets keep pointer
+        // identity (`{}`); segmented recompute/assembly passes a nonzero
+        // identity so a reused stack index object cannot alias another segment
+        // in the GPU resident cache.
         if constexpr (is_minimizer_batch_view_v<B>) {
             return std::move(token).emit_minimizer_batch_with_index(
-                std::forward<B>(sketches), *index_, identity);
+                std::forward<B>(sketches), *index_, identity_);
         } else {
             using ElemT = std::remove_const_t<
                 typename std::remove_cvref_t<B>::value_type>;
             return std::move(token).emit_batch_with_index(
-                std::span<const ElemT>{sketches.data(), sketches.size()}, *index_, identity);
+                std::span<const ElemT>{sketches.data(), sketches.size()}, *index_, identity_);
         }
     }
 
@@ -2383,10 +2457,11 @@ template <is_constexpr_aligner_params Cep,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     sequence_size_t                   query_len,
     sequence_size_t                   target_len,
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr)
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {})
 {
     auto tail = make_pipeline<Cep>(
-        IndexStage<IndexT>{ {}, &target_index },
+        IndexStage<IndexT>{ {}, &target_index, gpu_index_identity },
         SeedHitStage{ {}, params, query_len, gpu_index_cache },
         ChainStage<kernel_t<CA>>{ {}, params.to_chaining_params() },
         RegionStage{ {}, query_len },
@@ -2464,7 +2539,10 @@ template <is_constexpr_aligner_params Cep,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>&           target_seq,
     std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
     const IndexT&                               target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    bioseq::indexing::GpuMinimizerIndexCache* external_gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     std::optional<context::context>                 owned_context;
     std::optional<context::installed_context_scope> install;
@@ -2488,18 +2566,21 @@ template <is_constexpr_aligner_params Cep,
     // across queries that look up the same target index. When a Vulkan seed
     // path is selected, runtime/device failure is reported before scalar work
     // can masquerade as a GPU row.
-    std::optional<bioseq::indexing::GpuMinimizerIndexCache> gpu_index_cache;
-    if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache> owned_gpu_index_cache;
+    if (external_gpu_index_cache == nullptr
+        && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
         std::uint64_t limit = gpu_rt.usable()
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
         if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
-        gpu_index_cache.emplace(limit);
+        owned_gpu_index_cache.emplace(limit);
     }
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
-        gpu_index_cache ? &*gpu_index_cache : nullptr;
+        external_gpu_index_cache != nullptr
+            ? external_gpu_index_cache
+            : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
 
     // DOC0310 §12/§16 — build the target minimizer index on the GPU and inject
     // it into the wave cache under the key the SeedHitStage will compute, so the
@@ -2510,7 +2591,8 @@ template <is_constexpr_aligner_params Cep,
     if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                   bioseq::indexing::MinimizerHashmapFragmentIndex>) {
         if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
-            && target_index.table.empty() && target_len > 0) {
+            && allow_gpu_target_index_build && target_index.table.empty()
+            && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
             if (gpu_rt.usable()) {
@@ -2519,7 +2601,7 @@ template <is_constexpr_aligner_params Cep,
                     static_cast<std::size_t>(params.kmer_size));
                 if (built) {
                     auto key = bioseq::indexing::make_gpu_index_cache_key(
-                        target_index, bioseq::indexing::GpuIndexCacheIdentity{});
+                        target_index, gpu_index_identity);
                     auto resident = bioseq::indexing::adopt_gpu_built_index(
                         gpu_rt, std::move(*built), key);
                     if (resident) {
@@ -2547,7 +2629,8 @@ template <is_constexpr_aligner_params Cep,
 
     auto run_one_query =
         [target_len, &query_seqs, &query_minimizers_per_query, &target_seq,
-         &effective_index, &scoring_matrix, &params, gpu_index_cache_ptr](std::size_t qi) {
+         &effective_index, &scoring_matrix, &params, gpu_index_cache_ptr,
+         gpu_index_identity](std::size_t qi) {
         const auto&   query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
@@ -2568,7 +2651,8 @@ template <is_constexpr_aligner_params Cep,
 
         auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
             query_seq, target_seq, mins_for_this_query, effective_index,
-            scoring_matrix, out, params, query_len, target_len, gpu_index_cache_ptr);
+            scoring_matrix, out, params, query_len, target_len,
+            gpu_index_cache_ptr, gpu_index_identity);
 
         if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
             pipeline.on_batch(std::span<const MinimizerT>{
@@ -2610,8 +2694,8 @@ template <is_constexpr_aligner_params Cep,
     }
 
     // DOC0307 §4.4 — release the wave's resident GPU index handles.
-    if (gpu_index_cache) {
-        gpu_index_cache->clear();
+    if (owned_gpu_index_cache) {
+        owned_gpu_index_cache->clear();
     }
     return out_per_query;
 }
@@ -2644,7 +2728,10 @@ template <is_constexpr_aligner_params Cep,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
     const std::vector<MinimizerT>&    query_minimizers,
     const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>* one_query = &query_seq;
     const std::vector<MinimizerT>*    one_mins  = &query_minimizers;
@@ -2652,7 +2739,8 @@ template <is_constexpr_aligner_params Cep,
         std::span<const bioseq::storage::lazy_compact_sequence<QR, Scanner>>{one_query, 1},
         target_seq,
         std::span<const std::vector<MinimizerT>>{one_mins, 1},
-        target_index, params);
+        target_index, params, gpu_index_cache, gpu_index_identity,
+        allow_gpu_target_index_build);
     return std::move(results.front());
 }
 
@@ -3181,7 +3269,10 @@ struct pipeline_run_leaf {
         const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
         const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
         const std::vector<MinimizerT>&    query_minimizers,
-        const IndexT&                     target_index)
+        const IndexT&                     target_index,
+        bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache,
+        bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
+        bool allow_gpu_target_index_build)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
         #if PIPELINE_TEMPLATE_BRANCHING_LEVEL == 0
@@ -3198,11 +3289,13 @@ struct pipeline_run_leaf {
             && params.kmer_size == static_cast<int32_t>(K))
         {
             return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner>(
-                query_seq, target_seq, query_minimizers, target_index, params);
+                query_seq, target_seq, query_minimizers, target_index, params,
+                gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
         }
         #endif
         return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner>(
-            query_seq, target_seq, query_minimizers, target_index, params);
+            query_seq, target_seq, query_minimizers, target_index, params,
+            gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
     }
 };
 
@@ -3340,7 +3433,10 @@ MatchResultCollection dispatch_pipeline(
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
     const std::vector<MinimizerT>&    query_minimizers,
     const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     using Traits = detail::pipeline_run_traits<EP, QR, TR, MinimizerT, IndexT, Scanner>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order so the L step (per-K) can
@@ -3355,7 +3451,8 @@ MatchResultCollection dispatch_pipeline(
         detail::guarded_step<detail::ma_step,
             /*active=*/(EP != EntryPoint::WithPrebuiltMinimizers)>
     >::template run<>(
-        params, query_seq, target_seq, query_minimizers, target_index);
+        params, query_seq, target_seq, query_minimizers, target_index,
+        gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
 // =============================================================================
@@ -3426,15 +3523,19 @@ template <class MinimizerT,
     const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     const std::vector<MinimizerT>& query_minimizers,
     const IndexT& prebuilt_target_index,
-    const Minimap2Params& params = Minimap2Params{})
+    const Minimap2Params& params = Minimap2Params{},
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("minimap2_port_with_index");
     auto _scope = bioseq::instr::region(_desc);
     return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
         ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
-        QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
-            query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+            QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
+            query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
+            gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
 /**
@@ -3471,7 +3572,8 @@ template <class MinimizerT,
         target_index.build(target_minimizers, target_len);
     }
     return minimap2_port_with_index<MinimizerT, QueryRange, TargetRange, MinimizerHashmapFragmentIndex, Scanner>(
-        query_seq, target_seq, query_minimizers, target_index, params);
+        query_seq, target_seq, query_minimizers, target_index, params,
+        nullptr, {}, phase_c_gpu_index);
 }
 
 namespace pipe_entry_detail {
@@ -3911,7 +4013,10 @@ template <class MinimizerT, class QuerySeq>
         }
         if (auto gpu_sketch =
                 bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
-                    query_seq, w, k))
+                    query_seq,
+                    w,
+                    k,
+                    params.vulkan_fused_frontend_enabled))
         {
             return BudgetedSketchVector<MinimizerT>{
                 .minimizers = std::move(gpu_sketch->host_minimizers),
@@ -3973,6 +4078,25 @@ template <supports_compact_sequence_range QueryRange,
     const MinimizerSketchBackend target_sketch_backend =
         pipe::target_index_sketch_backend_from_params(params);
 
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache> segmented_gpu_index_cache;
+    if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        std::uint64_t limit = gpu_rt.usable()
+            ? gpu_rt.features().device_local_bytes / 2u
+            : (std::uint64_t{512} << 20);
+        if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
+        if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
+        segmented_gpu_index_cache.emplace(limit);
+    }
+    bioseq::indexing::GpuMinimizerIndexCache* segmented_gpu_index_cache_ptr =
+        segmented_gpu_index_cache ? &*segmented_gpu_index_cache : nullptr;
+    auto segment_gpu_identity = [](std::size_t segment_index) noexcept {
+        return bioseq::indexing::GpuIndexCacheIdentity{
+            .assembly_identity = 0x9e3779b97f4a7c15ULL
+                ^ (static_cast<std::uint64_t>(segment_index) + 1u),
+        };
+    };
+
     // (1) Sketch the query ONCE as MinimapSketchData (query < 2^28 bp; its
     //     positions fit the 28-bit field). Same kmer hashing as the target, so
     //     `collect_seed_hits` matches identically. DOC0307 §5.3 — the helper
@@ -3986,24 +4110,53 @@ template <supports_compact_sequence_range QueryRange,
     for (const MinimizerT& minimizer : query_minimizers) {
         query_kmer_filter.insert(minimizer.kmer());
     }
+    using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
+    auto build_query_filtered_segment_index =
+        [&query_kmer_filter, target_len](
+                std::span<const MinimizerT> minimizers,
+                MinimizerHashmapFragmentIndex& index,
+                std::vector<FilteredMinimizerPair>& filtered_pairs) -> std::size_t {
+        filtered_pairs.clear();
+        const std::size_t filter_size = query_kmer_filter.size();
+        const std::size_t reserve_base =
+            filter_size > (std::numeric_limits<std::size_t>::max)() - 64u
+                ? filter_size
+                : filter_size + 64u;
+        const std::size_t reserve_hint = std::min(minimizers.size(), reserve_base);
+        if (filtered_pairs.capacity() < reserve_hint) {
+            filtered_pairs.reserve(reserve_hint);
+        }
+        for (const MinimizerT& minimizer : minimizers) {
+            const std::uint64_t kmer = minimizer.kmer();
+            if (query_kmer_filter.find(kmer) != query_kmer_filter.end()) {
+                filtered_pairs.emplace_back(kmer, minimizer.pos_strand_encoded());
+            }
+        }
+        index.build_from_pairs(
+            std::span<FilteredMinimizerPair>{
+                filtered_pairs.data(), filtered_pairs.size()},
+            target_len);
+        return filtered_pairs.size();
+    };
 
     // (2) Segment the target. Overlap >= longest target match span so a match
     //     starting in a segment core is fully indexed within that segment.
     constexpr std::size_t lpu =
         compact_sequence_range<TargetRange>::traits::letters_per_unit;
-    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
-    if (overlap_bp > pipe::kSegmentOverlapMaxBp) {
-        overlap_bp = pipe::kSegmentOverlapMaxBp;
-    }
+    const sequence_size_t overlap_bp = pipe::segment_overlap_bp(query_len);
 
     auto run_serial_segmented =
         [target_len, query_len, lpu, w, k, &target_seq, &query_seq,
          &query_minimizers, &params, fragment_index_out,
-         target_sketch_backend]() -> MatchResultCollection {
+         target_sketch_backend, segmented_gpu_index_cache_ptr,
+         &segment_gpu_identity, &build_query_filtered_segment_index]() -> MatchResultCollection {
         std::vector<MatchResult> merged;
         sketch_collector_t<MinimizerT> seg_collector;
         MinimizerHashmapFragmentIndex seg_index;
-        const auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu);
+        std::vector<FilteredMinimizerPair> filtered_pairs;
+        const auto ranges =
+            pipe::segment_unit_ranges_for_backend(
+                target_len, query_len, lpu, target_sketch_backend);
         constexpr std::size_t frag_units = Scanner::fragment_storage_units;
         const sequence_size_t frag_bp =
             static_cast<sequence_size_t>(frag_units) * lpu;
@@ -4020,7 +4173,10 @@ template <supports_compact_sequence_range QueryRange,
             if (fragment_index_out != nullptr) {
                 FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
                     *fragment_index_out, target_len, frag_bp};
-                for (const pipe::SegmentUnitRange& range : ranges) {
+                for (std::size_t segment_index = 0;
+                     segment_index < ranges.size();
+                     ++segment_index) {
+                    const pipe::SegmentUnitRange& range = ranges[segment_index];
                     seg_collector.clear();
                     seg_collector.reserve(
                         (range.ce_u - range.cs_u) * lpu
@@ -4042,11 +4198,17 @@ template <supports_compact_sequence_range QueryRange,
                         emissions.data(), emissions.size()));
                     acc.flush_ready(range.core_hi_bp);
 
-                    seg_index.build(seg_minimizers, target_len);
+                    build_query_filtered_segment_index(
+                        std::span<const MinimizerT>{
+                            seg_minimizers.data(), seg_minimizers.size()},
+                        seg_index,
+                        filtered_pairs);
                     seg_index.add_position_offset(range.cs_u * lpu);
 
                     MatchResultCollection seg_res = minimap2_port_with_index(
-                        query_seq, target_seq, query_minimizers, seg_index, params);
+                        query_seq, target_seq, query_minimizers, seg_index, params,
+                        segmented_gpu_index_cache_ptr,
+                        segment_gpu_identity(segment_index));
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp
                             && result.target_start < range.core_hi_bp) {
@@ -4059,7 +4221,10 @@ template <supports_compact_sequence_range QueryRange,
             }
         }
 
-        for (const pipe::SegmentUnitRange& range : ranges) {
+        for (std::size_t segment_index = 0;
+             segment_index < ranges.size();
+             ++segment_index) {
+            const pipe::SegmentUnitRange& range = ranges[segment_index];
             seg_collector.clear();
             seg_collector.reserve(
                 (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
@@ -4069,11 +4234,16 @@ template <supports_compact_sequence_range QueryRange,
             const std::vector<MinimizerT>& seg_minimizers =
                 seg_collector.extract_sketches_data();
 
-            seg_index.build(seg_minimizers, target_len);
+            build_query_filtered_segment_index(
+                std::span<const MinimizerT>{seg_minimizers.data(), seg_minimizers.size()},
+                seg_index,
+                filtered_pairs);
             seg_index.add_position_offset(range.cs_u * lpu);
 
             MatchResultCollection seg_res = minimap2_port_with_index(
-                query_seq, target_seq, query_minimizers, seg_index, params);
+                query_seq, target_seq, query_minimizers, seg_index, params,
+                segmented_gpu_index_cache_ptr,
+                segment_gpu_identity(segment_index));
             for (auto& result : seg_res.results) {
                 if (result.target_start >= range.core_lo_bp
                     && result.target_start < range.core_hi_bp) {
@@ -4095,6 +4265,7 @@ template <supports_compact_sequence_range QueryRange,
     auto& pool = bioseq::parallelism::GlobalPool::instance();
     if (!bioseq::parallelism::task_parallel(pool.mode())
         || pool.max_concurrency() <= 1
+        || target_sketch_backend == MinimizerSketchBackend::VulkanSegment
         || !bioseq::storage::lazy_is_worker_shareable(query_seq)
         || !bioseq::storage::lazy_is_worker_shareable(target_seq)) {
         return run_serial_segmented();
@@ -4264,7 +4435,8 @@ template <supports_compact_sequence_range QueryRange,
             auto process_segment_serial =
                 [&ranges, &target_seq, &query_seq, &query_minimizers, &params,
                  &acc, &merged, target_len, frag_bp, w, k, lpu,
-                 target_sketch_backend](
+                 target_sketch_backend, segmented_gpu_index_cache_ptr,
+                 &segment_gpu_identity](
                         std::size_t segment_index) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
@@ -4290,7 +4462,9 @@ template <supports_compact_sequence_range QueryRange,
                 index.build(minimizers, target_len);
                 index.add_position_offset(range.cs_u * lpu);
                 MatchResultCollection seg_res = minimap2_port_with_index(
-                    query_seq, target_seq, query_minimizers, index, params);
+                    query_seq, target_seq, query_minimizers, index, params,
+                    segmented_gpu_index_cache_ptr,
+                    segment_gpu_identity(segment_index));
                 for (auto& result : seg_res.results) {
                     if (result.target_start >= range.core_lo_bp
                         && result.target_start < range.core_hi_bp) {
@@ -4334,7 +4508,8 @@ template <supports_compact_sequence_range QueryRange,
                         [&ranges, &wave_seg_out, &wave_frag_out,
                          &target_seq, &query_seq, &query_minimizers, &params,
                          current_wave_lo, target_len, frag_bp, w, k, lpu,
-                         target_sketch_backend](
+                         target_sketch_backend, segmented_gpu_index_cache_ptr,
+                         &segment_gpu_identity](
                                 std::size_t lo, std::size_t hi) {
                         sketch_collector_t<MinimizerT> collector;
                         MinimizerHashmapFragmentIndex index;
@@ -4368,7 +4543,9 @@ template <supports_compact_sequence_range QueryRange,
                                 target_seq,
                                 query_minimizers,
                                 index,
-                                params);
+                                params,
+                                segmented_gpu_index_cache_ptr,
+                                segment_gpu_identity(segment_index));
                         }
                     }});
 
@@ -4393,43 +4570,15 @@ template <supports_compact_sequence_range QueryRange,
         }
     }
 
-    using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
     std::vector<std::size_t> segment_minimizer_counts(ranges.size());
     std::vector<std::size_t> segment_filtered_counts(ranges.size());
-
-    auto build_query_filtered_segment_index =
-        [&query_kmer_filter, target_len](
-                std::span<const MinimizerT> minimizers,
-                MinimizerHashmapFragmentIndex& index,
-                std::vector<FilteredMinimizerPair>& filtered_pairs) -> std::size_t {
-        filtered_pairs.clear();
-        const std::size_t filter_size = query_kmer_filter.size();
-        const std::size_t reserve_base =
-            filter_size > (std::numeric_limits<std::size_t>::max)() - 64u
-                ? filter_size
-                : filter_size + 64u;
-        const std::size_t reserve_hint = std::min(minimizers.size(), reserve_base);
-        if (filtered_pairs.capacity() < reserve_hint) {
-            filtered_pairs.reserve(reserve_hint);
-        }
-        for (const MinimizerT& minimizer : minimizers) {
-            const std::uint64_t kmer = minimizer.kmer();
-            if (query_kmer_filter.find(kmer) != query_kmer_filter.end()) {
-                filtered_pairs.emplace_back(kmer, minimizer.pos_strand_encoded());
-            }
-        }
-        index.build_from_pairs(
-            std::span<FilteredMinimizerPair>{
-                filtered_pairs.data(), filtered_pairs.size()},
-            target_len);
-        return filtered_pairs.size();
-    };
 
     auto process_segment_serial =
         [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
          &segment_minimizer_counts, &segment_filtered_counts,
          &build_query_filtered_segment_index, &params, target_len,
-         w, k, lpu, target_sketch_backend](std::size_t segment_index) {
+         w, k, lpu, target_sketch_backend, segmented_gpu_index_cache_ptr,
+         &segment_gpu_identity](std::size_t segment_index) {
         sketch_collector_t<MinimizerT> collector;
         MinimizerHashmapFragmentIndex index;
         std::vector<FilteredMinimizerPair> filtered_pairs;
@@ -4449,7 +4598,9 @@ template <supports_compact_sequence_range QueryRange,
                 filtered_pairs);
         index.add_position_offset(range.cs_u * lpu);
         seg_out[segment_index] = minimap2_port_with_index(
-            query_seq, target_seq, query_minimizers, index, params);
+            query_seq, target_seq, query_minimizers, index, params,
+            segmented_gpu_index_cache_ptr,
+            segment_gpu_identity(segment_index));
         bioseq_log_lazy<DBG>([&] {
             bioseq_log_progress<DBG>("[minimap_port_segmented] adaptive serial segment core [{},{}) "
                             "produced {} results | footprint={}MB avail={}MB",
@@ -4514,7 +4665,8 @@ template <supports_compact_sequence_range QueryRange,
                 [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
                  &segment_minimizer_counts, &segment_filtered_counts,
                  &build_query_filtered_segment_index, &params, target_len,
-                 w, k, lpu, target_sketch_backend](std::size_t lo, std::size_t hi) {
+                 w, k, lpu, target_sketch_backend, segmented_gpu_index_cache_ptr,
+                 &segment_gpu_identity](std::size_t lo, std::size_t hi) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
                 std::vector<FilteredMinimizerPair> filtered_pairs;
@@ -4537,7 +4689,9 @@ template <supports_compact_sequence_range QueryRange,
                             filtered_pairs);
                     index.add_position_offset(range.cs_u * lpu);
                     seg_out[segment_index] = minimap2_port_with_index(
-                        query_seq, target_seq, query_minimizers, index, params);
+                        query_seq, target_seq, query_minimizers, index, params,
+                        segmented_gpu_index_cache_ptr,
+                        segment_gpu_identity(segment_index));
                 }
             }});
         wave_lo = wave_hi;

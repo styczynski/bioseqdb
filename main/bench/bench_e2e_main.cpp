@@ -942,10 +942,33 @@ template <sequence_alphabet A>
     using active_traits = typename bench_sequence_range<A>::traits;
     if (split_bp > static_cast<std::size_t>(kMinimap2MaxRecordBp) ||
         split_bp % active_traits::letters_per_unit != 0) {
+        const std::size_t lpu =
+            static_cast<std::size_t>(active_traits::letters_per_unit);
+        // Next value that is >= split_bp and a multiple of letters_per_unit, so the
+        // error can suggest a concrete fix. (lpu is always >= 1.)
+        const std::size_t suggested =
+            (split_bp % lpu == 0) ? split_bp : ((split_bp / lpu) + 1u) * lpu;
         bioseq_log<ERR>("[bench_e2e] minimap2_split_bp={} is invalid for alphabet {} "
              "(letters_per_unit={}, max={})",
              split_bp, in.alphabet, active_traits::letters_per_unit,
              kMinimap2MaxRecordBp);
+        // CRITICAL: bioseq_log is ASYNC (fmtlog) and routes to a file/PG sink that
+        // is easily clobbered, so the ERR above is LOST when std::abort() fires
+        // before the async flush — which makes a bad config look like a silent
+        // SIGABRT (exit 134) with zero output. Mirror the position-tolerance abort
+        // above: write the misconfig to stderr SYNCHRONOUSLY with an actionable fix
+        // so a JSON misconfiguration always fails loudly. GOTCHA for config authors:
+        // minimap2_split_bp MUST be divisible by the alphabet's letters_per_unit
+        // (dna4=32, dna5=21, ...). The "reference_length + 352" idiom only stays
+        // divisible by coincidence (true for 32 always, for 21 only sometimes).
+        const std::string msg = fmt::format(
+            "[bench_e2e] FATAL config error: minimap2_split_bp={} is invalid for "
+            "alphabet '{}': it must be <= {} AND divisible by letters_per_unit={}. "
+            "Set minimap2_split_bp to a multiple of {} (e.g. {}).\n",
+            split_bp, in.alphabet,
+            static_cast<long long>(kMinimap2MaxRecordBp), lpu, lpu, suggested);
+        std::fputs(msg.c_str(), stderr);
+        std::fflush(stderr);
         std::abort();
     }
 

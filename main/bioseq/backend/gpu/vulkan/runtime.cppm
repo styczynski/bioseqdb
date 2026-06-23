@@ -525,12 +525,10 @@ public:
         std::uint64_t max_target_minimizers);
 
     // DOC0345 Patch B — GPU per-segment sorted-pair seam: tiled `emit_mode=2`
-    // emit of (kmer, encoded_pos) + a GPU two-key stable radix sort (by
-    // encoded_pos then kmer → (kmer, encoded_pos) order). RETAINED but currently
-    // BYPASSED: the tiled emit over-emits ~8% for dna5, so the shipped index
-    // builders emit via the non-tiled Phase B sketch and sort the pairs on the
-    // host instead (see DOC0348). This entry point re-enables once the tiled
-    // emit is fixed.
+    // emit of (kmer, encoded_pos) + a GPU two-key stable radix sort (by encoded
+    // pos then kmer -> (kmer, encoded_pos) order). Segment builders still use
+    // the host pair sort seam today, but DOC0348's tiled dna5/generic sketch
+    // ownership issue is fixed.
     GpuSortedPairRun run_phase_c_sketch_sort_pairs_roundtrip(
         std::span<const std::byte> packed_sequence,
         const VulkanRankLut& rank_lut,
@@ -867,6 +865,7 @@ struct MoltenVkCommandLibraryInterpose {
     ObjcRuntimeFns objc{};
     std::vector<std::byte> metallib;
     void* original_new_library_with_source = nullptr;
+    void* original_new_library_with_source_async = nullptr;
     void* sel_utf8_string = nullptr;
     void* sel_new_library_with_data_error = nullptr;
     bool installed = false;
@@ -928,6 +927,80 @@ extern "C" void* bioseq_moltenvk_new_library_with_source(
     using SourceFn = void* (*)(void*, void*, void*, void*, void**);
     return objc_msg_cast<SourceFn>(state.original_new_library_with_source)(
         self, cmd, source, options, error);
+}
+
+struct ObjcBlockLiteral {
+    void* isa = nullptr;
+    int flags = 0;
+    int reserved = 0;
+    void* invoke = nullptr;
+    void* descriptor = nullptr;
+};
+
+void invoke_metal_library_completion(void* completion, void* library, void* error) noexcept {
+    if (completion == nullptr) {
+        return;
+    }
+    auto* block = static_cast<ObjcBlockLiteral*>(completion);
+    if (block->invoke == nullptr) {
+        return;
+    }
+    using InvokeFn = void (*)(void*, void*, void*);
+    objc_msg_cast<InvokeFn>(block->invoke)(completion, library, error);
+}
+
+extern "C" void bioseq_moltenvk_new_library_with_source_async(
+    void* self, void* cmd, void* source, void* options, void* completion)
+{
+    auto& state = moltenvk_command_interpose_state();
+    using Utf8Fn = const char* (*)(void*, void*);
+    const char* text = nullptr;
+    if (source != nullptr && state.sel_utf8_string != nullptr) {
+        text = objc_msg_cast<Utf8Fn>(state.objc.msg_send)(source, state.sel_utf8_string);
+    }
+    const bool is_moltenvk_command_source =
+        text != nullptr
+        && std::strstr(text, "cmdCopyBufferBytes") != nullptr
+        && std::strstr(text, "vtxCmdBlitImage") != nullptr;
+    std::fprintf(stderr,
+                 "[bioseq-gpu-diag] newLibraryWithSource async intercepted: text=%d len=%zu is_cmd_source=%d metallib_empty=%d\n",
+                 text != nullptr ? 1 : 0,
+                 text != nullptr ? std::strlen(text) : 0u,
+                 is_moltenvk_command_source ? 1 : 0,
+                 state.metallib.empty() ? 1 : 0);
+    if (is_moltenvk_command_source && !state.metallib.empty()) {
+        using LibraryDataFn = void* (*)(void*, void*, void*, void**);
+        dispatch_data_t mtl_data = dispatch_data_create(
+            state.metallib.data(),
+            state.metallib.size(),
+            nullptr,
+            DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        if (mtl_data != nullptr) {
+            void* error = nullptr;
+            void* library = objc_msg_cast<LibraryDataFn>(state.objc.msg_send)(
+                self,
+                state.sel_new_library_with_data_error,
+                static_cast<void*>(mtl_data),
+                &error);
+            dispatch_release(mtl_data);
+            if (library != nullptr) {
+                std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: returned cached command library async (newLibraryWithData ok)\n");
+                invoke_metal_library_completion(completion, library, nullptr);
+                return;
+            }
+            std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async newLibraryWithData FAILED, falling through to source compile\n");
+        }
+    }
+
+    std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async FALL-THROUGH to real newLibraryWithSource (XPC compile)\n");
+    if (state.original_new_library_with_source_async == nullptr) {
+        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async original IMP missing; completing with null library\n");
+        invoke_metal_library_completion(completion, nullptr, nullptr);
+        return;
+    }
+    using SourceAsyncFn = void (*)(void*, void*, void*, void*, void*);
+    objc_msg_cast<SourceAsyncFn>(state.original_new_library_with_source_async)(
+        self, cmd, source, options, completion);
 }
 
 [[nodiscard]] bool read_file_bytes(
@@ -1010,28 +1083,48 @@ void install_moltenvk_command_library_interpose() noexcept {
     }
 
     void* sel_source = objc.sel_register_name("newLibraryWithSource:options:error:");
+    void* sel_source_async =
+        objc.sel_register_name("newLibraryWithSource:options:completionHandler:");
     state.sel_utf8_string = objc.sel_register_name("UTF8String");
     state.sel_new_library_with_data_error = objc.sel_register_name("newLibraryWithData:error:");
     void* cls = objc.object_get_class(device);
     void* method = nullptr;
-    while (cls != nullptr && method == nullptr) {
-        method = objc.class_get_instance_method(cls, sel_source);
+    void* method_async = nullptr;
+    while (cls != nullptr && (method == nullptr || method_async == nullptr)) {
+        if (method == nullptr) {
+            method = objc.class_get_instance_method(cls, sel_source);
+        }
+        if (method_async == nullptr) {
+            method_async = objc.class_get_instance_method(cls, sel_source_async);
+        }
         cls = objc.class_get_superclass(cls);
     }
-    if (method == nullptr) {
-        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: newLibraryWithSource:options:error: method NOT FOUND on device class\n");
+    if (method == nullptr && method_async == nullptr) {
+        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: newLibraryWithSource methods NOT FOUND on device class\n");
         return;
     }
 
     state.objc = objc;
     state.metallib = std::move(metallib);
-    state.original_new_library_with_source =
-        objc.method_set_implementation(
-            method,
-            reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source));
-    state.installed = state.original_new_library_with_source != nullptr;
-    std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: swizzle installed=%d original=%p\n",
-                 state.installed ? 1 : 0, state.original_new_library_with_source);
+    if (method != nullptr) {
+        state.original_new_library_with_source =
+            objc.method_set_implementation(
+                method,
+                reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source));
+    }
+    if (method_async != nullptr) {
+        state.original_new_library_with_source_async =
+            objc.method_set_implementation(
+                method_async,
+                reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source_async));
+    }
+    state.installed = state.original_new_library_with_source != nullptr
+        || state.original_new_library_with_source_async != nullptr;
+    std::fprintf(stderr,
+                 "[bioseq-gpu-diag] cmd-interpose: swizzle installed=%d sync_original=%p async_original=%p\n",
+                 state.installed ? 1 : 0,
+                 state.original_new_library_with_source,
+                 state.original_new_library_with_source_async);
     if (state.installed) {
         bioseq_log<DBG>(
             "[vulkan_runtime] installed MoltenVK command shader metallib interpose {}",
@@ -1636,6 +1729,15 @@ void Runtime::init() {
     // --- Instance ---
     ensure_vulkan_loader_loaded_for_runtime();
     ensure_homebrew_moltenvk_icd_visible();
+    prepare_shader_provider_runtime();
+#if defined(__APPLE__)
+    // MoltenVK can compile its internal command shaders while enumerating or
+    // creating the device. In a forked PostgreSQL backend that source compile
+    // path reaches MTLCompilerService over XPC and aborts, so install the
+    // cached command-library interpose before the first Vulkan loader query that
+    // may enter MoltenVK device setup.
+    install_moltenvk_command_library_interpose();
+#endif
     const auto inst_exts = instance_extensions();
     std::vector<const char*> enabled_inst_exts;
     VkInstanceCreateFlags inst_flags = 0;
@@ -1689,7 +1791,6 @@ void Runtime::init() {
 
     check_vk(vkCreateInstance(&inst_info, nullptr, &instance_), "vkCreateInstance");
     resolve_moltenvk_private_api();
-    prepare_shader_provider_runtime();
 
     // --- Physical device selection (compute queue + shaderInt64) ---
     std::uint32_t device_count = 0;
@@ -1763,7 +1864,6 @@ void Runtime::init() {
         enabled_dev_exts.empty() ? nullptr : enabled_dev_exts.data();
     device_info.pEnabledFeatures = &enabled_features;
 
-    install_moltenvk_command_library_interpose();
     install_metal_pipeline_archive_interpose();
     check_vk(vkCreateDevice(physical_, &device_info, nullptr, &device_), "vkCreateDevice");
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
@@ -3037,6 +3137,39 @@ void record_shader_to_host(VkCommandBuffer cmd) {
     return std::max<std::uint32_t>(tile_bp, 1u);
 }
 
+/// Same dispatch-limit adaptation as `adaptive_sketch_tile_bp`, with one extra
+/// constraint for packed alphabets: when possible, place Phase-C tile boundaries
+/// on compact-sequence storage-unit boundaries. dna4 already did this
+/// accidentally (256 bp == 8 x 32-letter units); dna5 needs 252 bp so the
+/// replay/ownership boundary never cuts a 21-letter packed unit.
+[[nodiscard]] std::uint32_t phase_c_storage_aligned_tile_bp(
+    std::uint32_t bp,
+    std::uint32_t max_workgroups,
+    std::uint32_t default_tile_bp,
+    std::uint32_t letters_per_unit,
+    std::uint32_t overlap_bp) noexcept
+{
+    std::uint32_t tile_bp =
+        adaptive_sketch_tile_bp(bp, max_workgroups, default_tile_bp);
+    const std::uint32_t span_cap =
+        kPhaseCSketchTileSpanMax > overlap_bp
+            ? kPhaseCSketchTileSpanMax - overlap_bp
+            : 1u;
+    tile_bp = std::min(tile_bp, span_cap);
+
+    const std::uint32_t lpu = std::max<std::uint32_t>(letters_per_unit, 1u);
+    if (lpu <= 1u || tile_bp < lpu) {
+        return tile_bp;
+    }
+
+    const std::uint32_t aligned = (tile_bp / lpu) * lpu;
+    if (aligned == 0u) {
+        return tile_bp;
+    }
+    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
+    return ceil_div_u32(bp, aligned) <= cap ? aligned : tile_bp;
+}
+
 }  // namespace
 
 Buffer Runtime::run_generate_units_roundtrip(
@@ -3433,8 +3566,12 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     const std::uint32_t k = params.kmer_size;
     if (bp == 0u || w == 0u || k == 0u || bp < k) { result.count = 0; return result; }
 
-    const std::uint32_t tile_bp =
-        adaptive_sketch_tile_bp(bp, features_.max_workgroup_count_x, kPhaseCSketchTileBp);
+    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+        bp,
+        features_.max_workgroup_count_x,
+        kPhaseCSketchTileBp,
+        params.letters_per_unit,
+        w + k);
     const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
     if (num_tiles > features_.max_workgroup_count_x) {
         throw VulkanRuntimeError("phase_c sketch tile count exceeds dispatch limit");
@@ -3602,8 +3739,12 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     }
     if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) return out;
 
-    const std::uint32_t tile_bp =
-        adaptive_sketch_tile_bp(bp, features_.max_workgroup_count_x, kPhaseCSketchTileBp);
+    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+        bp,
+        features_.max_workgroup_count_x,
+        kPhaseCSketchTileBp,
+        params.letters_per_unit,
+        w + k);
     const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
     if (num_tiles > features_.max_workgroup_count_x) return out;
     const std::uint32_t overlap = w + k;
@@ -3884,8 +4025,12 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
         return out;
     }
 
-    const std::uint32_t tile_bp =
-        adaptive_sketch_tile_bp(bp, features_.max_workgroup_count_x, kPhaseCSketchTileBp);
+    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+        bp,
+        features_.max_workgroup_count_x,
+        kPhaseCSketchTileBp,
+        params.letters_per_unit,
+        window_size + kmer_size);
     const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
     if (num_tiles == 0u || num_tiles > features_.max_workgroup_count_x) {
         return out;
