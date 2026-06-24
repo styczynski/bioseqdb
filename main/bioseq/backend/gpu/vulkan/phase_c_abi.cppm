@@ -11,7 +11,7 @@
  * structs the Phase C shaders declare. Every layout that the SPIR-V reflection
  * cares about is pinned with `static_assert` against the field offsets.
  *
- * The records are multi-record forms of the Phase B single-sequence sketch:
+ * The records are multi-record forms of the original single-sequence sketch ABI:
  * `GpuSequenceViewWire` describes one logical record inside one packed sequence
  * buffer (32-bit word offset + byte counts + unit traits), and the per-record
  * query/target wires carry the output minimizer/anchor slices the count submit
@@ -22,6 +22,7 @@
 module;
 
 #include <bit>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -33,6 +34,300 @@ export module bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.phase_b_abi;
 
 export namespace bioseq::gpu::vulkan {
+
+inline constexpr std::uint32_t k_phase_c_sketch_tile_bp = 256u;
+inline constexpr std::uint32_t k_phase_c_sketch_local = 64u;
+inline constexpr std::uint32_t k_phase_c_sketch_tile_span_max = 384u;
+inline constexpr std::uint32_t k_phase_c_scan_block = 256u;
+inline constexpr std::uint32_t k_phase_c_slot_offset_align = 256u;
+
+enum class PhaseCSketchUse : std::uint8_t {
+    minimizer_words,
+    target_index_build,
+    sorted_pairs,
+};
+
+/// Host mirror of the GLSL `TileC` record consumed by `phase_c_sketch_tile`.
+/// This is distinct from the resident-frontend `SketchTileWire` below.
+struct PhaseCSketchTileWire {
+    std::uint32_t seq_word_offset = 0;
+    std::uint32_t bp_count = 0;
+    std::uint32_t replay_lo = 0;
+    std::uint32_t tile_lo = 0;
+    std::uint32_t tile_hi = 0;
+    std::uint32_t out_base = 0;
+};
+static_assert(sizeof(PhaseCSketchTileWire) == 24);
+
+struct PhaseCSketchTilePlan {
+    std::uint32_t tile_bp = 0;
+    std::uint32_t tile_count = 0;
+    std::uint32_t scan_block_count = 0;
+    bool dispatchable = false;
+};
+
+struct PhaseCSketchMemoryPlan {
+    PhaseCSketchTilePlan tiles{};
+    std::uint64_t seq_bytes = 0;
+    std::uint64_t rank_lut_bytes = 0;
+    std::uint64_t output_word_bytes = 0;
+    std::uint64_t pair_key_bytes = 0;
+    std::uint64_t pair_value_bytes = 0;
+    std::uint64_t tile_bytes = 0;
+    std::uint64_t tile_count_bytes = 0;
+    std::uint64_t tile_offset_bytes = 0;
+    std::uint64_t scan_block_bytes = 0;
+    std::uint64_t counter_bytes = 0;
+    std::uint64_t arena_pair_value_bytes = 0;
+    std::uint64_t arena_scaffold_bytes = 0;
+    std::uint64_t standalone_device_bytes = 0;
+    std::uint64_t resident_output_bytes = 0;
+    std::uint64_t host_transient_bytes = 0;
+    std::uint64_t admission_bytes = 0;
+    bool valid = false;
+};
+
+[[nodiscard]] constexpr std::uint64_t phase_c_saturating_add(
+    std::uint64_t left, std::uint64_t right) noexcept
+{
+    const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
+    return left > limit - right ? limit : left + right;
+}
+
+[[nodiscard]] constexpr std::uint64_t phase_c_saturating_mul(
+    std::uint64_t left, std::uint64_t right) noexcept
+{
+    if (left == 0u || right == 0u) {
+        return 0u;
+    }
+    const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
+    return left > limit / right ? limit : left * right;
+}
+
+[[nodiscard]] constexpr std::uint64_t phase_c_align_up(
+    std::uint64_t value, std::uint64_t alignment) noexcept
+{
+    if (alignment <= 1u) {
+        return value;
+    }
+    const std::uint64_t remainder = value % alignment;
+    if (remainder == 0u) {
+        return value;
+    }
+    return phase_c_saturating_add(value, alignment - remainder);
+}
+
+[[nodiscard]] constexpr std::uint32_t phase_c_ceil_div_u32(
+    std::uint64_t value, std::uint32_t divisor) noexcept
+{
+    return divisor == 0u
+        ? 0u
+        : static_cast<std::uint32_t>((value + divisor - 1u) / divisor);
+}
+
+[[nodiscard]] constexpr std::uint32_t phase_c_replay_overlap_bp(
+    std::uint32_t k,
+    std::uint32_t window) noexcept
+{
+    const std::uint64_t trigger_span =
+        phase_c_saturating_add(
+            phase_c_saturating_add(k, window),
+            1u);
+    constexpr std::uint32_t max_replay =
+        k_phase_c_sketch_tile_span_max > 1u
+            ? k_phase_c_sketch_tile_span_max - 1u
+            : 1u;
+    return trigger_span > max_replay
+        ? max_replay
+        : static_cast<std::uint32_t>(std::max<std::uint64_t>(1u, trigger_span));
+}
+
+[[nodiscard]] constexpr std::uint32_t phase_c_ownership_guard_bp(
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint32_t letters_per_unit) noexcept
+{
+    (void)k;
+    (void)window;
+    (void)letters_per_unit;
+    return 0u;
+}
+
+[[nodiscard]] constexpr std::uint32_t phase_c_default_tile_bp(
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint32_t letters_per_unit) noexcept
+{
+    (void)k;
+    (void)window;
+    (void)letters_per_unit;
+    return k_phase_c_sketch_tile_bp;
+}
+
+[[nodiscard]] constexpr std::uint32_t phase_c_adaptive_tile_bp(
+    std::uint32_t bp,
+    std::uint32_t max_workgroups,
+    std::uint32_t default_tile_bp) noexcept
+{
+    std::uint32_t tile_bp = std::max<std::uint32_t>(default_tile_bp, 1u);
+    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
+    if (phase_c_ceil_div_u32(bp, tile_bp) > cap) {
+        tile_bp = phase_c_ceil_div_u32(bp, cap);
+    }
+    constexpr std::uint32_t span_cap =
+        k_phase_c_sketch_tile_span_max > 64u
+            ? k_phase_c_sketch_tile_span_max - 64u
+            : 1u;
+    if (tile_bp > span_cap) {
+        tile_bp = span_cap;
+    }
+    return std::max<std::uint32_t>(tile_bp, 1u);
+}
+
+[[nodiscard]] constexpr std::uint32_t phase_c_storage_aligned_tile_bp(
+    std::uint32_t bp,
+    std::uint32_t max_workgroups,
+    std::uint32_t default_tile_bp,
+    std::uint32_t letters_per_unit,
+    std::uint32_t context_bp) noexcept
+{
+    std::uint32_t tile_bp =
+        phase_c_adaptive_tile_bp(bp, max_workgroups, default_tile_bp);
+    const std::uint32_t span_cap =
+        k_phase_c_sketch_tile_span_max > context_bp
+            ? k_phase_c_sketch_tile_span_max - context_bp
+            : 1u;
+    tile_bp = std::min(tile_bp, span_cap);
+
+    const std::uint32_t lpu = std::max<std::uint32_t>(letters_per_unit, 1u);
+    if (lpu <= 1u || tile_bp < lpu) {
+        return tile_bp;
+    }
+
+    const std::uint32_t aligned = (tile_bp / lpu) * lpu;
+    if (aligned == 0u) {
+        return tile_bp;
+    }
+    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
+    return phase_c_ceil_div_u32(bp, aligned) <= cap ? aligned : tile_bp;
+}
+
+[[nodiscard]] constexpr PhaseCSketchTilePlan phase_c_tile_plan(
+    std::uint64_t bp_count,
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint32_t letters_per_unit,
+    std::uint32_t max_workgroups =
+        (std::numeric_limits<std::uint32_t>::max)()) noexcept
+{
+    if (bp_count == 0u || bp_count > (std::numeric_limits<std::uint32_t>::max)()
+        || k == 0u || window == 0u || max_workgroups == 0u) {
+        return {};
+    }
+    const std::uint32_t bp = static_cast<std::uint32_t>(bp_count);
+    const std::uint32_t overlap = phase_c_replay_overlap_bp(k, window);
+    const std::uint32_t ownership_guard =
+        phase_c_ownership_guard_bp(k, window, letters_per_unit);
+    const std::uint32_t context_span = phase_c_saturating_add(
+        overlap, ownership_guard)
+        > (std::numeric_limits<std::uint32_t>::max)()
+            ? (std::numeric_limits<std::uint32_t>::max)()
+            : overlap + ownership_guard;
+    const std::uint32_t default_tile_bp =
+        phase_c_default_tile_bp(k, window, letters_per_unit);
+    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+        bp,
+        max_workgroups,
+        default_tile_bp,
+        letters_per_unit,
+        context_span);
+    const std::uint32_t tile_count = phase_c_ceil_div_u32(bp, tile_bp);
+    const bool dispatchable =
+        tile_bp != 0u
+        && tile_count != 0u
+        && tile_count <= max_workgroups
+        && phase_c_saturating_add(tile_bp, context_span)
+            <= k_phase_c_sketch_tile_span_max;
+    return PhaseCSketchTilePlan{
+        .tile_bp = tile_bp,
+        .tile_count = tile_count,
+        .scan_block_count = phase_c_ceil_div_u32(tile_count, k_phase_c_scan_block),
+        .dispatchable = dispatchable,
+    };
+}
+
+[[nodiscard]] constexpr PhaseCSketchMemoryPlan phase_c_sketch_memory_plan(
+    std::uint64_t bp_count,
+    std::uint64_t sequence_bytes,
+    std::uint64_t rank_lut_bytes,
+    std::uint64_t output_capacity,
+    std::uint64_t minimizer_output_bytes,
+    PhaseCSketchUse use,
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint32_t letters_per_unit,
+    std::uint32_t max_workgroups =
+        (std::numeric_limits<std::uint32_t>::max)()) noexcept
+{
+    PhaseCSketchMemoryPlan plan{};
+    plan.tiles = phase_c_tile_plan(
+        bp_count, k, window, letters_per_unit, max_workgroups);
+    if (!plan.tiles.dispatchable) {
+        return plan;
+    }
+
+    plan.seq_bytes = std::max<std::uint64_t>(sequence_bytes, 4u);
+    plan.rank_lut_bytes = rank_lut_bytes;
+    plan.tile_bytes = phase_c_saturating_mul(
+        plan.tiles.tile_count, sizeof(PhaseCSketchTileWire));
+    plan.tile_count_bytes = phase_c_saturating_mul(plan.tiles.tile_count, 4u);
+    plan.tile_offset_bytes = phase_c_saturating_mul(plan.tiles.tile_count, 4u);
+    plan.scan_block_bytes = phase_c_saturating_mul(
+        std::max<std::uint32_t>(plan.tiles.scan_block_count, 1u), 4u);
+    plan.counter_bytes =
+        use == PhaseCSketchUse::minimizer_words ? 8u : 16u;
+    plan.arena_pair_value_bytes =
+        use == PhaseCSketchUse::minimizer_words ? 16u : 0u;
+
+    if (use == PhaseCSketchUse::minimizer_words) {
+        plan.output_word_bytes = std::max<std::uint64_t>(minimizer_output_bytes, 4u);
+    } else {
+        plan.pair_key_bytes = phase_c_saturating_mul(output_capacity, 8u);
+        plan.pair_value_bytes = phase_c_saturating_mul(output_capacity, 8u);
+    }
+
+    const auto add_aligned = [](std::uint64_t total, std::uint64_t bytes) {
+        return phase_c_saturating_add(
+            total,
+            phase_c_align_up(bytes, k_phase_c_slot_offset_align));
+    };
+    std::uint64_t arena = 0;
+    arena = add_aligned(arena, plan.seq_bytes);
+    arena = add_aligned(arena, plan.rank_lut_bytes);
+    arena = add_aligned(arena, plan.tile_bytes);
+    arena = add_aligned(arena, plan.tile_count_bytes);
+    arena = add_aligned(arena, plan.tile_offset_bytes);
+    arena = add_aligned(arena, plan.scan_block_bytes);
+    arena = add_aligned(arena, plan.counter_bytes);
+    arena = add_aligned(arena, plan.arena_pair_value_bytes);
+    plan.arena_scaffold_bytes = arena;
+
+    plan.standalone_device_bytes = phase_c_saturating_add(
+        plan.output_word_bytes,
+        phase_c_saturating_add(plan.pair_key_bytes, plan.pair_value_bytes));
+    plan.resident_output_bytes = plan.standalone_device_bytes;
+    plan.host_transient_bytes = plan.seq_bytes;
+    plan.admission_bytes = phase_c_saturating_add(
+        plan.arena_scaffold_bytes,
+        phase_c_saturating_add(
+            plan.standalone_device_bytes, plan.host_transient_bytes));
+
+    const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
+    plan.valid = plan.arena_scaffold_bytes != limit
+        && plan.standalone_device_bytes != limit
+        && plan.admission_bytes != limit;
+    return plan;
+}
 
 /// Per-record routing flags. `reverse_complement` is reserved for a future
 /// strand-split; `target_record`/`query_record` tag which wire array a record
@@ -53,7 +348,7 @@ enum class PhaseCRecordFlags : std::uint32_t {
 /// Multi-record sequence view: a window onto one logical record inside the
 /// shared packed-sequence arena buffer. `seq_word_offset` is the 32-bit-word
 /// offset of this record's first storage unit; the shader reads ranks through
-/// the existing Phase B `read_rank_at_bp(... seq_word_offset ...)` helper using
+/// the shared `read_rank_at_bp(... seq_word_offset ...)` helper using
 /// `bits_per_char`/`letters_per_unit`/`unit_bits` — it never assumes dna4.
 struct GpuSequenceViewWire {
     std::uint64_t seq_word_offset;   ///< uint32 word offset in the packed buffer.
@@ -177,8 +472,8 @@ struct GpuPhaseCCounters {
     std::uint64_t reserved;
 };
 
-/// Push-constant/param block for the Phase C kernels. Carries the Phase B
-/// sketch params plus the Phase C-specific limits and the runtime mode toggles
+/// Push-constant/param block for the Phase C kernels. Carries the shared
+/// `VulkanSketchParams` plus the Phase C-specific limits and runtime mode toggles
 /// (DOC0310 §6, §23 — tile/radix/build-mode are runtime fields, never template
 /// axes).
 struct VulkanPhaseCParams {

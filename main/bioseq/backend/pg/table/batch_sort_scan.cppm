@@ -412,9 +412,7 @@ const CustomPathMethods BioseqBatchSortPathMethods = {
 
 create_upper_paths_hook_type PreviousCreateUpperPathsHook = nullptr;
 
-/* The first ORDER BY pathkey whose key is of type bioseq.seq, or nullptr.
- * (DOC0346 — also the carrier of the sort DIRECTION: pk_cmptype is
- * COMPARE_GT for DESC, COMPARE_LT for ASC in PG18.) */
+/* The first ORDER BY pathkey whose key is of type bioseq.seq, or nullptr. */
 [[nodiscard]] PathKey* sort_sequence_pathkey(PlannerInfo* root, Oid seq_oid)
 {
     ListCell* pk_cell;
@@ -433,6 +431,15 @@ create_upper_paths_hook_type PreviousCreateUpperPathsHook = nullptr;
         }
     }
     return nullptr;
+}
+
+[[nodiscard]] bool pathkey_descending(PathKey* pathkey)
+{
+#if POSTGRESQL_VERSION_MAJOR >= 18
+    return pathkey->pk_cmptype == COMPARE_GT;
+#else
+    return pathkey->pk_strategy == BTGreaterStrategyNumber;
+#endif
 }
 
 void
@@ -463,11 +470,9 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
         return;   /* not sorting sequences — leave PostgreSQL's plan untouched */
     }
 
-    /* DOC0346 — carry the sort direction to the executor. The sequence pathkey's
-     * pk_cmptype is COMPARE_GT for DESC (PG18 renamed the old pk_strategy /
-     * BTGreaterStrategyNumber); pk_nulls_first is the NULLS FIRST flag. Stored as
-     * a 2-int List in custom_private and read back in BeginCustomScan. */
-    const bool descending  = (seq_pk->pk_cmptype == COMPARE_GT);
+    /* DOC0346 — carry the sort direction to the executor. Stored as a 2-int List
+     * in custom_private and read back in BeginCustomScan. */
+    const bool descending  = pathkey_descending(seq_pk);
     const bool nulls_first = seq_pk->pk_nulls_first;
 
     bioseq_log<DBG>("[bioseq] pg: BioseqBatchSort engaging for sequence ORDER BY "

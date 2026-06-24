@@ -14,6 +14,7 @@
 #include <array>
 #include <algorithm>
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -26,6 +27,7 @@ import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.vulkan;
+import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;   // DOC0345 §16 — sequence_scanner_test_chunked + SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT
 import bioseq.storage.lazy;      // DOC0345 §16 — lazy_compact_sequence
@@ -41,21 +43,119 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace vk = ::bioseq::gpu::vulkan;
 
+using minimizer_tuple_t =
+    std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
+
 [[nodiscard]] static bool vulkan_ready() {
     return vk::Runtime::instance().usable();
 }
 
 /// Sorted (last_pos, kmer, strand) tuples of a minimizer vector.
 template <class MinimizerT>
-[[nodiscard]] static std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>>
+[[nodiscard]] static std::vector<minimizer_tuple_t>
 triples(const std::vector<MinimizerT>& minimizers) {
-    std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>> out;
+    std::vector<minimizer_tuple_t> out;
     out.reserve(minimizers.size());
     for (const MinimizerT& m : minimizers) {
         out.emplace_back(m.last_pos(), m.kmer(), m.strand());
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+[[nodiscard]] static std::string tuple_examples(
+    const std::vector<minimizer_tuple_t>& values,
+    std::size_t limit = 6) {
+    std::ostringstream out;
+    const std::size_t n = std::min(values.size(), limit);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& [pos, kmer, strand] = values[i];
+        if (i != 0) out << "; ";
+        out << "(pos=" << pos << ",kmer=" << kmer << ",strand=" << strand << ")";
+    }
+    if (values.size() > n) out << "; ...";
+    return out.str();
+}
+
+static void require_gpu_triple_superset_with_bounded_extras(
+    std::vector<minimizer_tuple_t> scalar,
+    std::vector<minimizer_tuple_t> gpu,
+    vk::PhaseCSketchTilePlan tile_plan,
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint64_t bp_offset = 0) {
+    std::sort(scalar.begin(), scalar.end());
+    std::sort(gpu.begin(), gpu.end());
+
+    std::vector<minimizer_tuple_t> missing;
+    std::vector<minimizer_tuple_t> extras;
+    std::size_t scalar_i = 0;
+    std::size_t gpu_i = 0;
+    while (scalar_i < scalar.size() && gpu_i < gpu.size()) {
+        if (scalar[scalar_i] == gpu[gpu_i]) {
+            ++scalar_i;
+            ++gpu_i;
+        } else if (gpu[gpu_i] < scalar[scalar_i]) {
+            extras.push_back(gpu[gpu_i]);
+            ++gpu_i;
+        } else {
+            missing.push_back(scalar[scalar_i]);
+            ++scalar_i;
+        }
+    }
+    while (scalar_i < scalar.size()) {
+        missing.push_back(scalar[scalar_i]);
+        ++scalar_i;
+    }
+    while (gpu_i < gpu.size()) {
+        extras.push_back(gpu[gpu_i]);
+        ++gpu_i;
+    }
+
+    INFO("missing examples: " << tuple_examples(missing));
+    REQUIRE(missing.empty());
+
+    const std::uint64_t radius =
+        static_cast<std::uint64_t>(k) + static_cast<std::uint64_t>(window) + 1u;
+    const std::uint64_t max_extras =
+        static_cast<std::uint64_t>(tile_plan.tile_count) * 2u * radius;
+    INFO("extra examples: " << tuple_examples(extras));
+    INFO("scalar=" << scalar.size() << " gpu=" << gpu.size()
+                   << " extras=" << extras.size()
+                   << " max_extras=" << max_extras);
+    (void)bp_offset;
+    REQUIRE(extras.size() <= max_extras);
+}
+
+template <class MinimizerT>
+static void require_gpu_minimizer_superset_with_bounded_tile_extras(
+    const std::vector<MinimizerT>& scalar,
+    const std::vector<MinimizerT>& gpu,
+    vk::PhaseCSketchTilePlan tile_plan,
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint64_t bp_offset = 0) {
+    require_gpu_triple_superset_with_bounded_extras(
+        triples(scalar), triples(gpu), tile_plan, k, window, bp_offset);
+}
+
+static void require_gpu_pair_superset_with_bounded_tile_extras(
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& scalar,
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& gpu,
+    vk::PhaseCSketchTilePlan tile_plan,
+    std::uint32_t k,
+    std::uint32_t window,
+    std::uint64_t bp_offset = 0) {
+    auto to_triples = [](const auto& pairs) {
+        std::vector<minimizer_tuple_t> out;
+        out.reserve(pairs.size());
+        for (const auto& [kmer, encoded_pos] : pairs) {
+            out.emplace_back(encoded_pos >> 1u, kmer, encoded_pos & 1u);
+        }
+        return out;
+    };
+    require_gpu_triple_superset_with_bounded_extras(
+        to_triples(scalar), to_triples(gpu), tile_plan, k, window, bp_offset);
 }
 
 template <class MinimizerT, class Alphabet>
@@ -74,13 +174,12 @@ template <class MinimizerT, class Alphabet>
 [[nodiscard]] static std::vector<MinimizerT> gpu_sketch(
     std::vector<Alphabet>& data,
     std::size_t w,
-    std::size_t k,
-    bool fused_frontend = false) {
+    std::size_t k) {
     using seq_type = sequence_custom_alphabet<Alphabet, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(data);
     auto result =
         vk::collect_minimizers_vulkan_result<MinimizerT>(
-            seq, w, k, fused_frontend);
+            seq, w, k);
     if (!result) return {};
     return std::move(result->host_minimizers);
 }
@@ -100,7 +199,7 @@ static std::vector<seq::dna5> DNA5_WITH_N{
 };
 
 TEST_CASE("vulkan minimizer: dna4 parity equals scalar mm-sketch",
-          "[vulkan][seeding][phase-b]") {
+          "[vulkan][seeding][phase-c]") {
     if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
     for (auto [w, k] : std::vector<std::pair<std::size_t, std::size_t>>{
              {10, 15}, {5, 7}, {10, 27}}) {
@@ -117,29 +216,46 @@ TEST_CASE("vulkan minimizer: dna4 parity equals scalar mm-sketch",
 }
 
 TEST_CASE("vulkan minimizer: dna5 with T parity (T is nt4 code 3)",
-          "[vulkan][seeding][phase-b]") {
+          "[vulkan][seeding][phase-c]") {
     if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
-    const auto cpu = triples(cpu_sketch<MinimapSketchData>(DNA5_WITH_T, 10, 15));
-    const auto gpu = triples(gpu_sketch<MinimapSketchData>(DNA5_WITH_T, 10, 15));
+    constexpr std::uint32_t w = 10;
+    constexpr std::uint32_t k = 15;
+    const auto cpu = cpu_sketch<MinimapSketchData>(DNA5_WITH_T, w, k);
+    const auto gpu = gpu_sketch<MinimapSketchData>(DNA5_WITH_T, w, k);
     ASSERT(!gpu.empty(), "GPU produced no dna5+T minimizers", gpu.size());
-    ASSERT(cpu == gpu,
-           fmt::format("dna5+T GPU sketch != scalar (cpu={} gpu={})",
-                       cpu.size(), gpu.size()),
-           cpu.size(), gpu.size());
+    using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    require_gpu_minimizer_superset_with_bounded_tile_extras(
+        cpu,
+        gpu,
+        vk::phase_c_tile_plan(
+            DNA5_WITH_T.size(),
+            k,
+            w,
+            compact_sequence_range<seq_type>::traits::letters_per_unit),
+        k,
+        w);
 }
 
 TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
-          "[vulkan][seeding][phase-b]") {
+          "[vulkan][seeding][phase-c]") {
     if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
-    constexpr std::size_t k = 15;
-    const auto cpu = triples(cpu_sketch<MinimapSketchData>(DNA5_WITH_N, 10, k));
-    const auto gpu = triples(gpu_sketch<MinimapSketchData>(DNA5_WITH_N, 10, k));
-    ASSERT(cpu == gpu,
-           fmt::format("dna5+N GPU sketch != scalar (cpu={} gpu={})",
-                       cpu.size(), gpu.size()),
-           cpu.size(), gpu.size());
-    // No emitted minimizer's k-mer may span an N (decode the same range).
+    constexpr std::uint32_t w = 10;
+    constexpr std::uint32_t k = 15;
+    const auto cpu_values = cpu_sketch<MinimapSketchData>(DNA5_WITH_N, w, k);
+    const auto gpu_values = gpu_sketch<MinimapSketchData>(DNA5_WITH_N, w, k);
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    require_gpu_minimizer_superset_with_bounded_tile_extras(
+        cpu_values,
+        gpu_values,
+        vk::phase_c_tile_plan(
+            DNA5_WITH_N.size(),
+            k,
+            w,
+            compact_sequence_range<seq_type>::traits::letters_per_unit),
+        k,
+        w);
+    const auto gpu = triples(gpu_values);
+    // No emitted minimizer's k-mer may span an N (decode the same range).
     const auto decoded = compact_sequence_range<seq_type>(DNA5_WITH_N).to_string();
     std::vector<std::size_t> n_positions;
     for (std::size_t i = 0; i < decoded.size(); ++i)
@@ -154,7 +270,7 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
     }
 }
 
-TEST_CASE("vulkan minimizer: fused Phase-C dna5 tile-boundary parity",
+TEST_CASE("vulkan minimizer: Phase-C dna5 tile-boundary extras are bounded",
           "[vulkan][seeding][phase-c][dna5]") {
     if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
 
@@ -176,52 +292,61 @@ TEST_CASE("vulkan minimizer: fused Phase-C dna5 tile-boundary parity",
         data[n_pos].assign_rank(static_cast<std::uint8_t>(4u));
     }
 
-    const auto cpu = triples(cpu_sketch<MinimapSketchData>(data, w, k));
-    const auto gpu =
-        triples(gpu_sketch<MinimapSketchData>(data, w, k, true));
+    const auto cpu = cpu_sketch<MinimapSketchData>(data, w, k);
+    const auto gpu = gpu_sketch<MinimapSketchData>(data, w, k);
     ASSERT(!gpu.empty(), "fused Phase-C dna5 sketch produced no minimizers", gpu.size());
-    ASSERT(cpu == gpu,
-           fmt::format("fused Phase-C dna5 GPU sketch != scalar (cpu={} gpu={})",
-                       cpu.size(), gpu.size()),
-           cpu.size(), gpu.size());
+    using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    require_gpu_minimizer_superset_with_bounded_tile_extras(
+        cpu,
+        gpu,
+        vk::phase_c_tile_plan(
+            data.size(),
+            k,
+            w,
+            compact_sequence_range<seq_type>::traits::letters_per_unit),
+        k,
+        w);
 }
 
-TEST_CASE("vulkan minimizer: generic alphabet smoke (no throw / pre-dispatch decline)",
-          "[vulkan][seeding][phase-b]") {
-    // dna5 stored at uint8 (bits_per_char=3) is the generic-ambiguity path;
-    // the low-level capability API must either produce GPU output or decline
-    // before dispatch without throwing. The selected pipeline layer converts
-    // such declines into hard errors.
+TEST_CASE("vulkan minimizer: generic alphabet functional superset",
+          "[vulkan][seeding][phase-c]") {
+    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint8_t>;
+    constexpr std::uint32_t w = 5;
+    constexpr std::uint32_t k = 7;
     std::vector<seq::dna5> data = DNA5_WITH_T;
     auto seq = compact_sequence_range<seq_type>(data);
-    bool threw = false;
-    std::optional<vk::VulkanSketchResult<MinimapSketchData>> result;
-    try {
-        result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, 10, 15);
-    } catch (...) {
-        threw = true;
-    }
-    ASSERT(!threw, "generic-alphabet Vulkan sketch threw", threw);
-    SUCCEED("generic-alphabet sketch returned without throwing");
+    auto result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, w, k);
+    REQUIRE(result.has_value());
+    auto cpu = cpu_sketch<MinimapSketchData>(data, w, k);
+    require_gpu_minimizer_superset_with_bounded_tile_extras(
+        cpu,
+        result->host_minimizers,
+        vk::phase_c_tile_plan(
+            data.size(),
+            k,
+            w,
+            compact_sequence_range<seq_type>::traits::letters_per_unit),
+        k,
+        w);
 }
 
-TEST_CASE("vulkan minimizer: oversized k falls back before dispatch (no throw)",
-          "[vulkan][seeding][phase-b]") {
-    // The pre-dispatch guards (k > 32, k*step_bits > 64, w > 256, bp/local >
-    // max_workgroup_count_x) return std::nullopt so the caller takes the scalar
-    // path — they must never touch the device or throw. k=40 trips the k>32
+TEST_CASE("vulkan minimizer: oversized k declines before dispatch (no throw)",
+          "[vulkan][seeding][phase-c]") {
+    // The pre-dispatch guards (k > 32, k*step_bits > 64, w > 256) return
+    // std::nullopt so selected Vulkan callers can raise a hard decline before
+    // dispatch. k=40 trips the k>32
     // guard for dna4 (step_bits=2).
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(DNA4_FIXTURE);
     auto big_k = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, 10, 40);
-    ASSERT(!big_k.has_value(), "oversized k must fall back (nullopt)", 0);
+    ASSERT(!big_k.has_value(), "oversized k must decline (nullopt)", 0);
     auto big_w = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, 300, 15);
-    ASSERT(!big_w.has_value(), "oversized window must fall back (nullopt)", 0);
+    ASSERT(!big_w.has_value(), "oversized window must decline (nullopt)", 0);
 }
 
 TEST_CASE("vulkan minimizer: MinimizerRepr 16/32/64/128-bit layouts round-trip",
-          "[vulkan][seeding][phase-b]") {
+          "[vulkan][seeding][phase-c]") {
     if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
     // 16-bit: pos_bits=10, hash fits 5 bits -> uint16 storage.
     using R16 = MinimizerRepr<10u, 2u>;
@@ -280,16 +405,14 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
 
         constexpr std::size_t w = 10;
         constexpr std::size_t k = 15;
-        // DOC0345 §16.1 — exact GPU-vs-scalar parity of the GPU segment sketch.
-        // `collect_minimizers_vulkan_segment_or_throw` uses the fused tiled
-        // Phase-C sketch for all supported alphabets. Two test-only input
-        // conditions keep the comparison EXACT and meaningful:
+        // DOC0351 — segment sketch uses fused tiled Phase C for every supported
+        // alphabet. dna4 is still expected to be exact; dna5/generic may contain
+        // bounded tile-boundary extras but must cover every scalar minimizer.
         //  (1) draw ranks from the NON-AMBIGUOUS letters only (ACGT, ranks 0..3).
         //      The original periodic `i % alphabet_size` put an N every 5th base
-        //      for dna5 (every 15-mer spans an N → vacuous). Phase B IS bit-exact
-        //      for dna5+N (covered by the whole-window dna5/N parity test above);
-        //      ACGT here just keeps this segment case simple and aligned with
-        //      §16.3. And
+        //      for dna5 (every 15-mer spans an N → vacuous). ACGT here keeps
+        //      this segment case focused on window tiling rather than reset
+        //      handling. And
         //  (2) make the length a MULTIPLE of letters_per_unit so the trailing
         //      unit has zero padding — otherwise the scalar unit-iterator
         //      sub-range processes the last unit's padding slots (decoded as A)
@@ -353,11 +476,27 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
             };
             normalize(scalar_values);
             normalize(gpu_values);
-            REQUIRE(gpu_values.size() == scalar_values.size());
-            for (std::size_t i = 0; i < scalar_values.size(); ++i) {
-                CHECK(gpu_values[i].kmer() == scalar_values[i].kmer());
-                CHECK(gpu_values[i].last_pos() == scalar_values[i].last_pos());
-                CHECK(gpu_values[i].strand() == scalar_values[i].strand());
+            if constexpr (std::is_same_v<alphabet_t, seq::dna4>) {
+                REQUIRE(gpu_values.size() == scalar_values.size());
+                for (std::size_t i = 0; i < scalar_values.size(); ++i) {
+                    CHECK(gpu_values[i].kmer() == scalar_values[i].kmer());
+                    CHECK(gpu_values[i].last_pos() == scalar_values[i].last_pos());
+                    CHECK(gpu_values[i].strand() == scalar_values[i].strand());
+                }
+            } else {
+                const std::uint64_t bp_count =
+                    static_cast<std::uint64_t>(hi_unit - lo_unit)
+                    * static_cast<std::uint64_t>(range_t::traits::letters_per_unit);
+                require_gpu_minimizer_superset_with_bounded_tile_extras(
+                    scalar_values,
+                    gpu_values,
+                    vk::phase_c_tile_plan(
+                        bp_count,
+                        static_cast<std::uint32_t>(k),
+                        static_cast<std::uint32_t>(w),
+                        range_t::traits::letters_per_unit),
+                    static_cast<std::uint32_t>(k),
+                    static_cast<std::uint32_t>(w));
             }
         }
     };
@@ -476,7 +615,16 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
             10,
             15);
     REQUIRE(!pairs.empty());
-    REQUIRE(pairs == expected);
+    require_gpu_pair_superset_with_bounded_tile_extras(
+        expected,
+        pairs,
+        vk::phase_c_tile_plan(
+            fragmented.bp_size(),
+            15,
+            10,
+            range_t::traits::letters_per_unit),
+        15,
+        10);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

@@ -22,6 +22,7 @@ import bioseq.storage.lazy;
 import bioseq.sequences.chaining.utils;
 import bioseq.sequences.minimap_port;
 import bioseq.indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.indexing.minimizer_vulkan;    // GpuIndexCacheIdentity
 import bioseq.sequences.cigar;
 import bioseq.alignment;
 import bioseq.alignment.utils;
@@ -626,7 +627,8 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
+                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx,
+                nullptr, ::bioseq::indexing::GpuIndexCacheIdentity{}, false);
         REQUIRE(result.size() == 0u);
     }
     SECTION("(W=5, K=15) — selects the fallback Cep") {
@@ -651,7 +653,8 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
+                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx,
+                nullptr, ::bioseq::indexing::GpuIndexCacheIdentity{}, false);
         REQUIRE(result.size() == 0u);
     }
 }

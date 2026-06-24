@@ -569,7 +569,7 @@ struct OpportunisticFragmentIndexStorage {
     std::vector<OpportunisticIndexChunk> chunks{};
 
     [[noreturn]] void index_error(std::string_view msg) const {
-        bioseq_log<ERR, PG>( "bioseq opportunistic index: {}", msg);
+        bioseq_log_progress<ERR, PG>( "bioseq opportunistic index: {}", msg);
         abort();
     }
 
@@ -943,7 +943,12 @@ struct OpportunisticSequenceIndexStorage {
     [[nodiscard]] std::size_t spill_sorted_run_owned(
         std::vector<sorted_pair_t> sorted)
     {
-        return sorted_runs.spill_sorted_run_owned(std::move(sorted));
+        // The transient no-index MPS path immediately re-enters Phase C for the
+        // next target range. Keep these runs file-backed so resident pair
+        // vectors do not consume the admission budget needed by the nested GPU
+        // sketch dispatch.
+        return sorted_runs.spill_sorted_run(
+            std::span<const sorted_pair_t>(sorted.data(), sorted.size()));
     }
 
     [[nodiscard]] std::size_t spill_sorted_run_owned_admitted(
@@ -951,10 +956,11 @@ struct OpportunisticSequenceIndexStorage {
         std::uint64_t admitted_bytes,
         bioseq::parallelism::MemoryPermit permit)
     {
-        return sorted_runs.spill_sorted_run_owned_admitted(
-            std::move(sorted),
-            admitted_bytes,
-            std::move(permit));
+        (void)admitted_bytes;
+        const std::size_t run_index = sorted_runs.spill_sorted_run(
+            std::span<const sorted_pair_t>(sorted.data(), sorted.size()));
+        permit.release();
+        return run_index;
     }
 
     template <class F>
@@ -1024,7 +1030,7 @@ struct OpportunisticSequenceIndexStorage {
     }
 
     [[noreturn]] void index_error(std::string_view message) const {
-        bioseq_log<ERR, PG>("bioseq opportunistic mps index: {}", message);
+        bioseq_log_progress<ERR, PG>("bioseq opportunistic mps index: {}", message);
         abort();
     }
 
@@ -1094,7 +1100,7 @@ struct AsyncPersistFileFragmentStorage {
     }
 
     [[noreturn]] void index_error(std::string_view msg) const {
-        bioseq_log<ERR, PG>( "bioseq async persist file storage: {}", msg);
+        bioseq_log_progress<ERR, PG>( "bioseq async persist file storage: {}", msg);
         abort();
     }
 

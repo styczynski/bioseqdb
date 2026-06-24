@@ -57,7 +57,6 @@ export module bioseq.gpu.vulkan.shader_cache;
 
 import bioseq.common.hashing;
 import bioseq.common.mlogging;
-import bioseq.gpu.vulkan.phase_b_abi;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.shader_layout;
 import bioseq.gpu.vulkan.shader_variants;
@@ -413,10 +412,6 @@ kernel void bioseq_moltenvk_command_placeholder() {}
         if (!scan.has_array_stride(24) || !scan.has_struct_offsets({0u, 8u, 16u, 20u})) {
             return std::unexpected("SPIR-V chain_tiled_dp_u64 ABI mismatch");
         }
-    }
-    if (kind == ShaderKind::minimizer_candidates
-        && !scan.has_array_stride(candidate_wire_stride)) {
-        return std::unexpected("SPIR-V minimizer_candidates Candidate stride mismatch");
     }
     if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
         return std::unexpected("SPIR-V sort_anchors_bitonic range stride mismatch");

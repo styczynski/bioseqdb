@@ -14,6 +14,7 @@ module;
 #include <cstring>
 #include <exception>
 #include <iterator>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -26,6 +27,8 @@ import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;            // MinimizerHashmapFragmentIndex, build_from_pairs, wire_for_each_*
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch E — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
+import bioseq.gpu.vulkan.phase_b_abi;                // VulkanRankLut
+import bioseq.gpu.vulkan.phase_c_abi;                // Phase C sketch memory planner
 import bioseq.gpu.vulkan.runtime;                    // VulkanRuntimeError
 import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq.storage.lazy;                          // lazy_compact_sequence
@@ -61,20 +64,25 @@ static_assert(sizeof(MinimizerBucketDirEntry) == 24 && alignof(MinimizerBucketDi
 
 struct MinimizerBucketDirectory {
     static constexpr std::uint32_t kDirMagic   = 0xB1000002u;
-    static constexpr std::uint32_t kDirVersion = 1u;
+    static constexpr std::uint32_t kDirVersion = 2u;
+    static constexpr std::uint32_t kBuiltFromPhaseC = 1u << 0u;
     std::uint32_t magic   = kDirMagic;
     std::uint32_t version = kDirVersion;
+    std::uint32_t flags = 0;
+    std::uint32_t reserved = 0;
     std::uint64_t num_buckets = 0;
     bioseq::storage::sequence_size_t total_distinct_kmers = 0;
     bioseq::storage::sequence_size_t total_positions      = 0;
     // followed by MinimizerBucketDirEntry[num_buckets]
 };
-static_assert(sizeof(MinimizerBucketDirectory) == 32 && alignof(MinimizerBucketDirectory) == 8,
+static_assert(sizeof(MinimizerBucketDirectory) == 40 && alignof(MinimizerBucketDirectory) == 8,
               "directory wire header layout pinned");
 static_assert(sizeof(bioseq::storage::sequence_size_t) == 8, "directory wire fields assume 8-byte sequence_size_t");
-static_assert(offsetof(MinimizerBucketDirectory, num_buckets) == 8
-           && offsetof(MinimizerBucketDirectory, total_distinct_kmers) == 16
-           && offsetof(MinimizerBucketDirectory, total_positions) == 24,
+static_assert(offsetof(MinimizerBucketDirectory, flags) == 8
+           && offsetof(MinimizerBucketDirectory, reserved) == 12
+           && offsetof(MinimizerBucketDirectory, num_buckets) == 16
+           && offsetof(MinimizerBucketDirectory, total_distinct_kmers) == 24
+           && offsetof(MinimizerBucketDirectory, total_positions) == 32,
               "directory header field offsets pinned");
 static_assert(offsetof(MinimizerBucketDirEntry, sub_key) == 16, "dir entry field offsets pinned");
 
@@ -106,6 +114,10 @@ struct DirView {
         while (lo < hi) { std::size_t mid = (lo + hi) / 2; if (entries[mid].hi_kmer < kmer) lo = mid + 1; else hi = mid; }
         if (lo < n && entries[lo].lo_kmer <= kmer && kmer <= entries[lo].hi_kmer) return &entries[lo];
         return nullptr;
+    }
+    [[nodiscard]] bool built_from_phase_c() const noexcept {
+        return hdr != nullptr
+            && (hdr->flags & MinimizerBucketDirectory::kBuiltFromPhaseC) != 0u;
     }
 };
 
@@ -172,6 +184,22 @@ inline void set_pair_run_sort_impl(PairRunSortImpl impl) noexcept {
     default:
         return "std_sort";
     }
+}
+
+[[nodiscard]] constexpr std::uint32_t effective_max_occ_threshold(
+    std::int32_t max_occ,
+    bool built_from_phase_c) noexcept
+{
+    if (max_occ < 0) {
+        return (std::numeric_limits<std::uint32_t>::max)();
+    }
+    const std::uint32_t threshold = static_cast<std::uint32_t>(max_occ);
+    if (!built_from_phase_c || threshold == 0u) {
+        return threshold;
+    }
+    const std::uint32_t limit =
+        (std::numeric_limits<std::uint32_t>::max)();
+    return threshold == limit ? limit : threshold + 1u;
 }
 
 [[nodiscard]] inline hwy::uint128_t pack_pair(sorted_pair_t p) noexcept {
@@ -269,14 +297,35 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
         std::min({scalar_fragments_per_block, by_pos_field, by_dispatch}));
 }
 
+template <class Traits, std::size_t WindowSize, std::size_t KmerSize>
 [[nodiscard]] inline std::uint64_t vulkan_segment_pair_collect_peak_bytes(
     std::uint64_t upload_bp) noexcept
 {
-    constexpr std::uint64_t kBytesPerBp = 128u;
-    constexpr std::uint64_t kFixedSlack = std::uint64_t{1} << 20;
-    return bioseq::parallelism::saturating_add(
-        bioseq::parallelism::saturating_mul(upload_bp, kBytesPerBp),
-        kFixedSlack);
+    using storage_unit = typename Traits::storage_unit;
+    constexpr std::uint64_t lpu =
+        Traits::letters_per_unit == 0u ? 1u : Traits::letters_per_unit;
+    const std::uint64_t unit_count = upload_bp / lpu + (upload_bp % lpu != 0u ? 1u : 0u);
+    const std::uint64_t sequence_bytes_unaligned =
+        bioseq::parallelism::saturating_mul(
+            unit_count,
+            static_cast<std::uint64_t>(sizeof(storage_unit)));
+    const std::uint64_t sequence_bytes =
+        bioseq::gpu::vulkan::phase_c_align_up(sequence_bytes_unaligned, 4u);
+    const std::uint64_t max_minimizers = std::max<std::uint64_t>(64u, upload_bp);
+    const bioseq::gpu::vulkan::PhaseCSketchMemoryPlan plan =
+        bioseq::gpu::vulkan::phase_c_sketch_memory_plan(
+            upload_bp,
+            sequence_bytes,
+            sizeof(bioseq::gpu::vulkan::VulkanRankLut),
+            max_minimizers,
+            0u,
+            bioseq::gpu::vulkan::PhaseCSketchUse::sorted_pairs,
+            static_cast<std::uint32_t>(KmerSize),
+            static_cast<std::uint32_t>(WindowSize),
+            static_cast<std::uint32_t>(lpu));
+    return plan.valid
+        ? plan.admission_bytes
+        : (std::numeric_limits<std::uint64_t>::max)();
 }
 }  // namespace detail
 
@@ -464,7 +513,7 @@ struct MinimizerSequenceMergedIndex {
                     backend == MinimizerSketchBackend::VulkanSegment
                         ? bioseq::parallelism::saturating_add(
                             reserve_bytes,
-                            detail::vulkan_segment_pair_collect_peak_bytes(
+                            detail::vulkan_segment_pair_collect_peak_bytes<traits, w, k>(
                                 bioseq::parallelism::saturating_add(
                                     bp,
                                     static_cast<std::uint64_t>(2u * W + 2u * lpu))))
@@ -476,21 +525,30 @@ struct MinimizerSequenceMergedIndex {
                         storage.demote_resident_runs_until_available(admission_bytes);
                     }
                 }
+                const std::uint64_t permit_bytes =
+                    backend == MinimizerSketchBackend::VulkanSegment
+                        ? admission_bytes
+                        : reserve_bytes;
                 auto permit =
                     bioseq::parallelism::MemoryAdmissionController::instance()
-                        .try_reserve(reserve_bytes);
+                        .try_reserve(permit_bytes);
                 if (!permit) {
                     if constexpr (requires (S& s, std::uint64_t bytes) {
                                       s.demote_resident_runs_until_available(bytes);
                                   }) {
                         storage.demote_resident_runs_until_available(admission_bytes);
                         permit = bioseq::parallelism::MemoryAdmissionController::instance()
-                            .try_reserve(reserve_bytes);
+                            .try_reserve(permit_bytes);
                     }
                 }
                 if (!permit) {
-                    constexpr sequence_size_t kEmergencyUnadmittedCoreBp = 4096;
-                    if (range.core_hi - range.core_lo > kEmergencyUnadmittedCoreBp) {
+                    constexpr sequence_size_t kScalarEmergencyUnadmittedCoreBp = 4096;
+                    constexpr sequence_size_t kVulkanEmergencyUnadmittedCoreBp = 256;
+                    const sequence_size_t min_core_bp =
+                        backend == MinimizerSketchBackend::VulkanSegment
+                            ? kVulkanEmergencyUnadmittedCoreBp
+                            : kScalarEmergencyUnadmittedCoreBp;
+                    if (range.core_hi - range.core_lo > min_core_bp) {
                         const sequence_size_t mid =
                             range.core_lo + (range.core_hi - range.core_lo) / 2;
                         self(self, CoreRange{range.core_lo, mid});
@@ -510,6 +568,10 @@ struct MinimizerSequenceMergedIndex {
                     return;
                 }
                 std::vector<pair_t> scratch;
+                if (backend == MinimizerSketchBackend::VulkanSegment
+                    && permit_bytes > reserve_bytes) {
+                    permit->shrink_to(reserve_bytes);
+                }
                 reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
                 sketch_collector collector;
                 collect_core_range_pairs(
@@ -578,7 +640,7 @@ struct MinimizerSequenceMergedIndex {
                         backend == MinimizerSketchBackend::VulkanSegment
                             ? bioseq::parallelism::saturating_add(
                                 reserve_bytes,
-                                detail::vulkan_segment_pair_collect_peak_bytes(
+                                detail::vulkan_segment_pair_collect_peak_bytes<traits, w, k>(
                                     bioseq::parallelism::saturating_add(
                                         bp,
                                         static_cast<std::uint64_t>(2u * W + 2u * lpu))))
@@ -590,12 +652,21 @@ struct MinimizerSequenceMergedIndex {
                             storage.demote_resident_runs_until_available(admission_bytes);
                         }
                     }
+                    const std::uint64_t permit_bytes =
+                        backend == MinimizerSketchBackend::VulkanSegment
+                            ? admission_bytes
+                            : reserve_bytes;
                     auto permit =
                         bioseq::parallelism::MemoryAdmissionController::instance()
-                            .try_reserve(reserve_bytes);
+                            .try_reserve(permit_bytes);
                     if (!permit) {
-                        constexpr sequence_size_t kMinCoreBp = 4096;
-                        if (range.core_hi - range.core_lo <= kMinCoreBp) {
+                        constexpr sequence_size_t kScalarMinCoreBp = 4096;
+                        constexpr sequence_size_t kVulkanMinCoreBp = 256;
+                        const sequence_size_t min_core_bp =
+                            backend == MinimizerSketchBackend::VulkanSegment
+                                ? kVulkanMinCoreBp
+                                : kScalarMinCoreBp;
+                        if (range.core_hi - range.core_lo <= min_core_bp) {
                             result.deferred_for_backend_spill.push_back(range);
                             return;
                         }
@@ -607,6 +678,10 @@ struct MinimizerSequenceMergedIndex {
                     }
 
                     AdmittedPairRun run{};
+                    if (backend == MinimizerSketchBackend::VulkanSegment
+                        && permit_bytes > reserve_bytes) {
+                        permit->shrink_to(reserve_bytes);
+                    }
                     run.admitted_bytes = reserve_bytes;
                     run.permit = std::move(*permit);
                     reserve_pairs_or_panic(run.pairs, reserve_bytes / sizeof(pair_t));
@@ -625,7 +700,7 @@ struct MinimizerSequenceMergedIndex {
                             "Vulkan segment minimizer pair build returned invalid ");
                     if (backend == MinimizerSketchBackend::VulkanSegment
                         && split_admission_decline) {
-                        constexpr sequence_size_t kMinGpuCoreBp = 4096;
+                        constexpr sequence_size_t kMinGpuCoreBp = 256;
                         if (range.core_hi - range.core_lo > kMinGpuCoreBp) {
                             const sequence_size_t mid =
                                 range.core_lo + (range.core_hi - range.core_lo) / 2;
@@ -638,7 +713,7 @@ struct MinimizerSequenceMergedIndex {
                     result.error_range = range;
                 } catch (const std::bad_alloc&) {
                     if (backend == MinimizerSketchBackend::VulkanSegment) {
-                        constexpr sequence_size_t kMinGpuCoreBp = 4096;
+                        constexpr sequence_size_t kMinGpuCoreBp = 256;
                         if (range.core_hi - range.core_lo > kMinGpuCoreBp) {
                             const sequence_size_t mid =
                                 range.core_lo + (range.core_hi - range.core_lo) / 2;
@@ -800,6 +875,11 @@ struct MinimizerSequenceMergedIndex {
             storage.template write_to_each<char>(DIRECTORY_SUB_KEY, [&](std::size_t c, char* outbuf, std::size_t){
                 MinimizerBucketDirectory h;
                 h.magic = MinimizerBucketDirectory::kDirMagic; h.version = MinimizerBucketDirectory::kDirVersion;
+                h.flags = backend == MinimizerSketchBackend::VulkanSegment
+                    && bioseq::gpu::vulkan::alphabet_kernel_kind_of_traits<traits>()
+                        != bioseq::gpu::vulkan::AlphabetKernelKind::dna4_nt4
+                    ? MinimizerBucketDirectory::kBuiltFromPhaseC
+                    : 0u;
                 h.num_buckets = dir.size(); h.total_distinct_kmers = total_distinct; h.total_positions = total_positions;
                 std::memcpy(outbuf, &h, sizeof(h));
                 if (!dir.empty()) std::memcpy(outbuf + sizeof(h), dir.data(), sizeof(MinimizerBucketDirEntry) * dir.size());
@@ -868,6 +948,8 @@ struct MinimizerSequenceMergedIndex {
         const std::size_t dbytes = storage.chunk_byte_size(DIRECTORY_SUB_KEY, 0);
         storage.validate_minimizer_directory_or_error(dblob, dbytes);
         DirView dir{ dblob, dbytes };
+        const std::uint32_t max_occ_threshold =
+            detail::effective_max_occ_threshold(max_occ, dir.built_from_phase_c());
         // 2. collect distinct query kmers + the distinct bucket sub_keys they touch.
         auto& qkmers = scratch.query_kmers;
         auto& wanted = scratch.wanted_sub_keys;
@@ -882,7 +964,7 @@ struct MinimizerSequenceMergedIndex {
         auto& pairs = scratch.pairs;
         auto emit_kept = [&](std::uint64_t kmer, std::uint32_t pos_count, const std::uint64_t* gpos){
             if (!std::binary_search(qkmers.begin(), qkmers.end(), kmer)) return;   // clip to QUERY kmers
-            if (pos_count > (std::uint32_t)max_occ) return;                         // drop over-frequent kmer
+            if (pos_count > max_occ_threshold) return;                              // drop over-frequent kmer
             for (std::uint32_t j = 0; j < pos_count; ++j) {
                 const sequence_size_t pos_bp =
                     static_cast<sequence_size_t>(gpos[j] >> 1);
@@ -903,7 +985,7 @@ struct MinimizerSequenceMergedIndex {
                     const std::size_t cb = storage.chunk_byte_size(sk, c);
                     exact += (cb - HDR - REC) / sizeof(std::uint64_t);
                 }
-                if (exact > (std::size_t)max_occ) continue;        // drop over-frequent kmer
+                if (exact > static_cast<std::size_t>(max_occ_threshold)) continue;  // drop over-frequent kmer
                 for (std::size_t c = 0; c < nc; ++c) {             // materialise EVERY chunk
                     const std::size_t cb = storage.chunk_byte_size(sk, c);
                     const char*       p  = storage.template read_chunk<char>(sk, c);

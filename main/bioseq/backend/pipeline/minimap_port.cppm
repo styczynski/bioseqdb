@@ -163,9 +163,9 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// RESEARCH/ENGINEERING_REPORT_V2.md for the full evolution
     /// history (was TWO_STACK_NTHASH_V3 in the iteration log).
     TWO_STACK_NTHASH = 2,
-    /// DOC0307 Phase B — Vulkan minimizer sketch compatible with the scalar
-    /// `minimap_int` minimizers (reads packed `compact_sequence_range` storage
-    /// directly). Requires a usable Vulkan runtime when selected by the pipeline.
+    /// Vulkan minimap-int minimizer path. DOC0351 routes the active GPU sketch
+    /// through fused tiled Phase C for every supported alphabet. Requires a
+    /// usable Vulkan runtime when selected by the pipeline.
     VULKAN_MINIMAP_INT = 3,
 };
 

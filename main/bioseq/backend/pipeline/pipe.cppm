@@ -106,8 +106,8 @@ import bioseq.storage.size;   // DOC0263 §10 — sequence_size_t for the C1 tru
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq.indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
-import bioseq.gpu.vulkan.runtime;           // DOC0307 Phase B — Runtime::instance() for the GPU seed path
-import bioseq.sequences.kmers.vulkan;       // DOC0307 Phase B — Vulkan minimizer sketch + device span
+import bioseq.gpu.vulkan.runtime;           // Runtime::instance() for GPU sketch/seed paths
+import bioseq.sequences.kmers.vulkan;       // DOC0351 Phase C — Vulkan minimizer sketch + device span
 import bioseq.indexing.minimizer_vulkan;    // DOC0307 Phase B — GPU-resident index view + cache
 import bioseq.sequences.seeding.vulkan;     // DOC0307 Phase B — Vulkan seed-hit lookup
 import bioseq.parallelism.mode;
@@ -1285,7 +1285,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
     };
 };
 
-/// DOC0307 Phase B — Vulkan minimap-int minimizer extraction. Reads packed
+/// DOC0351 Phase C — Vulkan minimap-int minimizer extraction. Reads packed
 /// `compact_sequence_range` storage directly on the GPU. When this algorithm
 /// is selected, Vulkan execution is mandatory and failures throw.
 /// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
@@ -1305,8 +1305,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
                 throw_vulkan_declined("Vulkan minimizer sketch");
             }
             if (!bioseq::gpu::vulkan::collect_minimizers_vulkan<MinimizerT>(
-                    collector, range, window_size, kmer_size,
-                    params.vulkan_fused_frontend_enabled))
+                    collector, range, window_size, kmer_size))
             {
                 throw_vulkan_declined("Vulkan minimizer sketch");
             }
@@ -1332,7 +1331,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
                 throw_vulkan_declined("Vulkan minimizer sketch");
             }
             auto result = bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
-                range, window_size, kmer_size, params.vulkan_fused_frontend_enabled);
+                range, window_size, kmer_size);
             if (!result) {
                 throw_vulkan_declined("Vulkan minimizer sketch");
             }
@@ -4015,8 +4014,7 @@ template <class MinimizerT, class QuerySeq>
                 bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
                     query_seq,
                     w,
-                    k,
-                    params.vulkan_fused_frontend_enabled))
+                    k))
         {
             return BudgetedSketchVector<MinimizerT>{
                 .minimizers = std::move(gpu_sketch->host_minimizers),

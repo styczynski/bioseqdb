@@ -34,13 +34,9 @@ import bioseq.common.mlogging;
 
 export namespace bioseq::gpu::vulkan {
 
-/// The kinds of compute shader the runtime knows how to compile. Phase A added
-/// `chain_tiled_dp_u64`; DOC0307 Phase B adds the four seeding kernels (two
-/// sketch dispatches, one seed-hit lookup, one anchor sort).
+/// The kinds of compute shader the runtime knows how to compile.
 enum class ShaderKind : std::uint8_t {
     chain_tiled_dp_u64,
-    minimizer_candidates,
-    minimizer_emit_exact,
     seed_lookup_anchors,
     sort_anchors_bitonic,
     // DOC0310 Phase C — resident two-submit frontend kernels. The sketch family
@@ -73,13 +69,10 @@ enum class ShaderKind : std::uint8_t {
     seq_sort_tiebreak_generic,
 };
 
-/// The descriptor-set layout each shader needs. Phase A's fixed four-storage-
-/// buffer layout does not fit the Phase B pipelines (3/3/5/2 storage buffers),
-/// so the runtime keeps one cached layout per kind (DOC0307 §4.5).
+/// The descriptor-set layout each shader needs. The runtime keeps one cached
+/// layout per kind (DOC0307 §4.5).
 enum class DescriptorLayoutKind : std::uint8_t {
     chain_tiled_dp,
-    minimizer_candidates,
-    minimizer_emit_exact,
     seed_lookup,
     anchor_sort,
     // DOC0310 §8 — reusable Phase C layouts. One layout per kernel family;
@@ -100,8 +93,6 @@ enum class DescriptorLayoutKind : std::uint8_t {
 {
     switch (kind) {
         case DescriptorLayoutKind::chain_tiled_dp:        return 4;
-        case DescriptorLayoutKind::minimizer_candidates:  return 3;
-        case DescriptorLayoutKind::minimizer_emit_exact:  return 3;
         case DescriptorLayoutKind::seed_lookup:           return 5;
         case DescriptorLayoutKind::anchor_sort:           return 2;
         // DOC0310 Phase C layouts.
@@ -123,8 +114,6 @@ enum class DescriptorLayoutKind : std::uint8_t {
 {
     switch (kind) {
         case ShaderKind::chain_tiled_dp_u64:    return DescriptorLayoutKind::chain_tiled_dp;
-        case ShaderKind::minimizer_candidates:  return DescriptorLayoutKind::minimizer_candidates;
-        case ShaderKind::minimizer_emit_exact:  return DescriptorLayoutKind::minimizer_emit_exact;
         case ShaderKind::seed_lookup_anchors:   return DescriptorLayoutKind::seed_lookup;
         case ShaderKind::sort_anchors_bitonic:  return DescriptorLayoutKind::anchor_sort;
         case ShaderKind::phase_c_sketch_tile:
@@ -157,8 +146,6 @@ enum class DescriptorLayoutKind : std::uint8_t {
 [[nodiscard]] constexpr std::uint32_t push_constant_size(ShaderKind kind) noexcept {
     switch (kind) {
         case ShaderKind::chain_tiled_dp_u64:    return 36;  // ChainingPushConstants
-        case ShaderKind::minimizer_candidates:  return 40;  // 10 × uint32
-        case ShaderKind::minimizer_emit_exact:  return 40;  // 10 × uint32
         case ShaderKind::seed_lookup_anchors:   return 36;  //  9 × uint32
         case ShaderKind::sort_anchors_bitonic:  return 0;
         // DOC0310 Phase C — per-family push blocks (see runtime.cppm structs).
@@ -196,7 +183,7 @@ struct ShaderCompileRequest {
     ShaderKind kind;
     std::uint32_t tile_size = 384;       // chain only
     std::uint32_t local_size = 128;
-    std::uint32_t max_span = 256;        // minimizer_emit_exact ring length
+    std::uint32_t max_span = 256;        // shader-specific compile-time span
     std::uint32_t word_kind = 0;
     std::uint32_t alphabet_kind = 0;
     std::uint32_t unit_bits = 0;
@@ -459,390 +446,6 @@ void main() {
 }
 )GLSL";
 
-/// DOC0307 §6.2 — the candidate-k-mer sketch shader. One invocation per base
-/// reads the packed bioseq sequence units directly (no G3SA ASCII transcode),
-/// rolls the canonical k-mer with `step_bits` per char, and scrambles it with
-/// the byte-for-byte port of `minimap_int_hasher::scramble` (§6.1 header). The
-/// shader is alphabet-generic: `pc.alphabet_kind == 0` is the dna4 fast path
-/// (XOR complement), otherwise the rank LUTs drive code/rc-code/reset.
-constexpr std::string_view kMinimizerCandidatesBody = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-
-struct Candidate {
-    uint64_t hash;
-    uint pos;
-    uint strand;
-    uint valid;
-    uint base_valid;
-    uint reserved0;
-    uint reserved1;
-};
-
-layout(std430, set = 0, binding = 0) readonly buffer SeqWords { uint seq_words[]; };
-layout(std430, set = 0, binding = 1) buffer Candidates { Candidate candidates[]; };
-layout(std430, set = 0, binding = 2) readonly buffer RankLut {
-    uint rank_to_code[256];
-    uint rank_to_rc_code[256];
-};
-
-layout(push_constant) uniform Params {
-    uint bp_size;
-    uint window_size;
-    uint kmer_size;
-    uint unit_bits;
-    uint bits_per_char;
-    uint letters_per_unit;
-    uint alphabet_size;
-    uint alphabet_kind;
-    uint seq_word_offset;
-    uint char_mask;
-} pc;
-
-uint read_u32_word(uint word_index) {
-    return seq_words[word_index];
-}
-
-uint read_storage_unit(uint unit_index, uint unit_bits, uint byte_offset_words) {
-    if (unit_bits == 64u) {
-        uint lo = read_u32_word(byte_offset_words + unit_index * 2u);
-        uint hi = read_u32_word(byte_offset_words + unit_index * 2u + 1u);
-        return lo ^ hi; // only used by generic fallback guards
-    }
-    if (unit_bits == 32u) {
-        return read_u32_word(byte_offset_words + unit_index);
-    }
-    if (unit_bits == 16u) {
-        uint w = read_u32_word(byte_offset_words + (unit_index >> 1u));
-        return (w >> ((unit_index & 1u) * 16u)) & 0xffffu;
-    }
-    uint w = read_u32_word(byte_offset_words + (unit_index >> 2u));
-    return (w >> ((unit_index & 3u) * 8u)) & 0xffu;
-}
-
-uint64_t read_storage_unit64(uint unit_index, uint unit_bits, uint byte_offset_words) {
-    if (unit_bits == 64u) {
-        uint lo = read_u32_word(byte_offset_words + unit_index * 2u);
-        uint hi = read_u32_word(byte_offset_words + unit_index * 2u + 1u);
-        return (uint64_t(hi) << 32) | uint64_t(lo);
-    }
-    return uint64_t(read_storage_unit(unit_index, unit_bits, byte_offset_words));
-}
-
-uint read_rank_at_bp(uint bp, uint bits_per_char, uint letters_per_unit,
-                     uint unit_bits, uint byte_offset_words, uint char_mask)
-{
-    uint unit_index = bp / letters_per_unit;
-    uint in_unit = bp - unit_index * letters_per_unit;
-    uint shift = in_unit * bits_per_char;
-    uint64_t unit = read_storage_unit64(unit_index, unit_bits, byte_offset_words);
-    return uint((unit >> shift) & uint64_t(char_mask));
-}
-
-uint64_t minimap_scramble(uint64_t key, uint64_t mask) {
-    key = (~key + (key << 21)) & mask;
-    key = key ^ (key >> 24);
-    key = ((key + (key << 3)) + (key << 8)) & mask;
-    key = key ^ (key >> 14);
-    key = ((key + (key << 2)) + (key << 4)) & mask;
-    key = key ^ (key >> 28);
-    key = (key + (key << 31)) & mask;
-    return key;
-}
-
-uint code_for_rank(uint rank) {
-    if (pc.alphabet_kind == 0u) return rank;      // dna4 fast path
-    return rank_to_code[rank];                   // dna5 and generic
-}
-
-uint rc_code_for_rank(uint rank) {
-    if (pc.alphabet_kind == 0u) return rank ^ 3u; // dna4 fast path
-    return rank_to_rc_code[rank];                // dna5 and generic
-}
-
-void main() {
-    uint pos = gl_GlobalInvocationID.x;
-    if (pos >= pc.bp_size) return;
-
-    Candidate outc;
-    outc.hash = uint64_t(0);
-    outc.pos = pos;
-    outc.strand = 0u;
-    outc.valid = 0u;
-    outc.base_valid = 0u;
-    outc.reserved0 = 0u;
-    outc.reserved1 = 0u;
-
-    uint rank_here = read_rank_at_bp(
-        pos, pc.bits_per_char, pc.letters_per_unit, pc.unit_bits,
-        pc.seq_word_offset, pc.char_mask);
-    outc.base_valid = code_for_rank(rank_here) < 4u ? 1u : 0u;
-
-    if (pc.kmer_size == 0u || pos + 1u < pc.kmer_size) {
-        candidates[pos] = outc;
-        return;
-    }
-
-    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
-    uint roll_bits = pc.kmer_size * step_bits;
-    uint scramble_bits = pc.kmer_size * 2u;
-    if (roll_bits > 64u || scramble_bits > 64u) {
-        candidates[pos] = outc;
-        return;
-    }
-
-    uint64_t roll_mask = (roll_bits == 64u)
-        ? ~uint64_t(0)
-        : ((uint64_t(1) << roll_bits) - uint64_t(1));
-    uint64_t scramble_mask = (scramble_bits == 64u)
-        ? ~uint64_t(0)
-        : ((uint64_t(1) << scramble_bits) - uint64_t(1));
-    uint shift_rc = step_bits * (pc.kmer_size - 1u);
-    uint64_t forward = uint64_t(0);
-    uint64_t reverse = uint64_t(0);
-    bool ok = true;
-
-    uint start = pos + 1u - pc.kmer_size;
-    for (uint i = 0u; i < pc.kmer_size; ++i) {
-        uint rank = read_rank_at_bp(
-            start + i, pc.bits_per_char, pc.letters_per_unit, pc.unit_bits,
-            pc.seq_word_offset, pc.char_mask);
-        uint code = code_for_rank(rank);
-        uint rc_code = rc_code_for_rank(rank);
-        if (code >= 4u || rc_code >= 4u) { ok = false; break; }
-        forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
-        reverse = (reverse >> step_bits) | (uint64_t(rc_code) << shift_rc);
-    }
-
-    if (!ok || forward == reverse) {
-        candidates[pos] = outc;
-        return;
-    }
-
-    bool forward_wins = forward < reverse;
-    uint64_t canonical = forward_wins ? forward : reverse;
-    outc.hash = minimap_scramble(canonical, scramble_mask);
-    outc.strand = forward_wins ? 0u : 1u;
-    outc.valid = 1u;
-    candidates[pos] = outc;
-}
-)GLSL";
-
-/// DOC0307 §6.3 — exact emit-minimizers shader. A single-invocation state
-/// machine over the `candidates[]` stream that mirrors `collect_minimizers_view`
-/// byte-for-byte (duplicate emission, rescan order, palindrome suppression,
-/// dna5 N-reset). Writes the chosen `MinimizerRepr<L,K>` word layout directly.
-constexpr std::string_view kMinimizerEmitExactBody = R"GLSL(
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
-
-struct Candidate {
-    uint64_t hash;
-    uint pos;
-    uint strand;
-    uint valid;
-    uint base_valid;
-    uint reserved0;
-    uint reserved1;
-};
-
-layout(std430, set = 0, binding = 0) readonly buffer Candidates { Candidate candidates[]; };
-layout(std430, set = 0, binding = 1) buffer OutWords { uint out_words[]; };
-layout(std430, set = 0, binding = 2) buffer Counter { uint out_count; uint overflow; };
-
-layout(push_constant) uniform Params {
-    uint bp_size;
-    uint window_size;
-    uint kmer_size;
-    uint pos_bits;
-    uint hash_bits;
-    uint hash_shift;
-    uint word_kind;
-    uint words32_per_minimizer;
-    uint span_value;
-    uint max_minimizers;
-} pc;
-
-struct Sketch {
-    uint64_t hash;
-    uint pos;
-    uint strand;
-    uint is_max;
-};
-
-shared Sketch ring[MAX_SPAN];
-
-uint64_t hash_field_mask() {
-    return pc.hash_bits >= 64u
-        ? ~uint64_t(0)
-        : ((uint64_t(1) << pc.hash_bits) - uint64_t(1));
-}
-
-Sketch max_sketch() {
-    return Sketch(hash_field_mask(), 0u, 0u, 1u);
-}
-
-Sketch from_candidate(Candidate c) {
-    if (c.valid == 0u) return max_sketch();
-    uint64_t h = c.hash & hash_field_mask();
-    if (h == hash_field_mask()) return max_sketch();
-    return Sketch(h, c.pos, c.strand, 0u);
-}
-
-bool sketch_leq(Sketch a, Sketch b) {
-    return a.hash <= b.hash;
-}
-
-bool sketch_geq(Sketch a, Sketch b) {
-    return a.hash >= b.hash;
-}
-
-bool sketch_match_but_different_identity(Sketch a, Sketch b) {
-    return a.is_max == 0u && b.is_max == 0u
-        && a.hash == b.hash
-        && (a.pos != b.pos || a.strand != b.strand);
-}
-
-void write_minimizer(uint dst, Sketch s) {
-    if (pc.word_kind == 0u) {
-        uint raw = uint((s.hash << pc.hash_shift)
-              | (uint64_t(s.pos) << 1) | uint64_t(s.strand));
-        uint word = dst >> 1u;
-        uint shift = (dst & 1u) * 16u;
-        uint old_word = out_words[word];
-        uint clear_mask = ~(0xffffu << shift);
-        out_words[word] = (old_word & clear_mask) | ((raw & 0xffffu) << shift);
-    } else if (pc.word_kind == 1u) {
-        uint base = dst * pc.words32_per_minimizer;
-        out_words[base] = uint((s.hash << pc.hash_shift)
-              | (uint64_t(s.pos) << 1) | uint64_t(s.strand));
-    } else if (pc.word_kind == 2u) {
-        uint base = dst * pc.words32_per_minimizer;
-        uint64_t raw = (s.hash << pc.hash_shift)
-             | (uint64_t(s.pos) << 1) | uint64_t(s.strand);
-        out_words[base + 0u] = uint(raw);
-        out_words[base + 1u] = uint(raw >> 32);
-    } else {
-        uint base = dst * pc.words32_per_minimizer;
-        uint64_t low = (uint64_t(s.pos) << 1) | uint64_t(s.strand);
-        uint64_t high = (s.hash << 8) | uint64_t(pc.span_value & 0xffu);
-        out_words[base + 0u] = uint(low);
-        out_words[base + 1u] = uint(low >> 32);
-        out_words[base + 2u] = uint(high);
-        out_words[base + 3u] = uint(high >> 32);
-    }
-}
-
-void emit_one(Sketch s) {
-    if (s.is_max != 0u) return;
-    uint dst = out_count;
-    out_count = out_count + 1u;
-    if (dst >= pc.max_minimizers) {
-        overflow = 1u;
-        return;
-    }
-    write_minimizer(dst, s);
-}
-
-void for_each_filled(uint buf_pos, uint capacity, inout Sketch current_min,
-                     inout uint current_min_pos, bool update_min, bool emit_matches)
-{
-    for (uint j = buf_pos; j < capacity; ++j) {
-        Sketch el = ring[j];
-        if (update_min && sketch_geq(current_min, el)) {
-            current_min = el;
-            current_min_pos = j;
-        }
-        if (emit_matches && sketch_match_but_different_identity(current_min, el)) {
-            emit_one(el);
-        }
-    }
-    for (uint j = 0u; j < buf_pos; ++j) {
-        Sketch el = ring[j];
-        if (update_min && sketch_geq(current_min, el)) {
-            current_min = el;
-            current_min_pos = j;
-        }
-        if (emit_matches && sketch_match_but_different_identity(current_min, el)) {
-            emit_one(el);
-        }
-    }
-}
-
-void main() {
-    if (pc.window_size == 0u || pc.window_size > MAX_SPAN
-        || pc.kmer_size == 0u || pc.bp_size == 0u) {
-        return;
-    }
-
-    out_count = 0u;
-    overflow = 0u;
-
-    uint buf_pos = 0u;
-    uint prev_pos = 0u;
-    uint valid_since_reset = 0u;
-    bool init_mode = true;
-    Sketch current_min = max_sketch();
-    uint current_min_pos = 0u;
-
-    for (uint seq_pos = 0u; seq_pos < pc.bp_size; ++seq_pos) {
-        bool is_init = init_mode;
-        Candidate c = candidates[seq_pos];
-        Sketch pushed = max_sketch();
-
-        if (c.base_valid == 0u) {
-            valid_since_reset = 0u;
-        } else {
-            valid_since_reset = valid_since_reset + 1u;
-            if (valid_since_reset >= pc.kmer_size) {
-                pushed = from_candidate(c);
-            }
-        }
-
-        prev_pos = buf_pos;
-        ring[buf_pos] = pushed;
-        buf_pos = (buf_pos + 1u) % pc.window_size;
-
-        if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
-            && current_min.is_max == 0u) {
-            Sketch ignored_min = current_min;
-            uint ignored_pos = current_min_pos;
-            for_each_filled(buf_pos, pc.window_size, ignored_min, ignored_pos, false, true);
-        }
-
-        if (sketch_leq(pushed, current_min)) {
-            if ((valid_since_reset >= pc.window_size + pc.kmer_size || !is_init)
-                && current_min.is_max == 0u) {
-                emit_one(current_min);
-            }
-            current_min_pos = prev_pos;
-            current_min = pushed;
-        } else if (prev_pos == current_min_pos) {
-            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
-                && current_min.is_max == 0u) {
-                emit_one(current_min);
-            }
-            current_min = max_sketch();
-            for_each_filled(buf_pos, pc.window_size, current_min, current_min_pos, true, false);
-            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
-                && current_min.is_max == 0u) {
-                for_each_filled(buf_pos, pc.window_size, current_min, current_min_pos, false, true);
-            }
-        }
-
-        if (init_mode && valid_since_reset >= pc.window_size + pc.kmer_size) {
-            init_mode = false;
-        }
-    }
-
-    if (current_min.is_max == 0u) {
-        emit_one(current_min);
-    }
-}
-)GLSL";
-
-/// DOC0307 §7.1 — seed-hit lookup. One invocation per query minimizer probes
-/// the GPU-resident open-addressed slot table, then emits one `Anchor` per
-/// target position into the exclusive-prefix window `[prefix[i], prefix[i+1])`.
-/// Writes `bioseq::chaining::Anchor` directly (full 64-bit ref position).
 constexpr std::string_view kSeedLookupAnchorsBody = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
@@ -1172,7 +775,7 @@ uint64_t hash_field_mask() {
                                : ((uint64_t(1) << pc.hash_bits) - uint64_t(1));
 }
 
-// Sketch element mirrors kMinimizerEmitExactBody's Sketch.
+// Sketch element mirrors the scalar minimizer state machine element.
 struct Sketch { uint64_t hash; uint pos; uint strand; uint is_max; };
 Sketch max_sketch() { return Sketch(hash_field_mask(), 0u, 0u, 1u); }
 bool sketch_leq(Sketch a, Sketch b) { return a.hash <= b.hash; }
@@ -1182,9 +785,12 @@ bool sketch_match_diff(Sketch a, Sketch b) {
         && (a.pos != b.pos || a.strand != b.strand);
 }
 
-uint g_seq_word_offset;
-uint g_local_count;
-uint g_out_base;
+	const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
+	uint g_seq_word_offset;
+	uint g_local_count;
+	uint g_out_base;
+	uint g_owned_lo;
+	uint g_owned_hi;
 
 void write_minimizer(uint dst, Sketch s) {
     // dst is tile-local; the global minimizer index is g_out_base + dst.
@@ -1217,9 +823,18 @@ void write_minimizer(uint dst, Sketch s) {
     }
 }
 
-bool owns_emit_position(TileC t, uint emit_pos) {
-    return emit_pos >= t.tile_lo && emit_pos < t.tile_hi;
-}
+	bool owns_emit_position(TileC t, uint emit_pos) {
+	    return emit_pos >= g_owned_lo && emit_pos < g_owned_hi;
+	}
+
+	uint replay_overlap_bp() {
+	    uint trigger_span = pc.kmer_size + pc.window_size + 1u;
+	    return min(trigger_span, SKETCH_CAND_MAX - 1u);
+	}
+
+	uint ownership_guard_bp() {
+	    return 0u;
+	}
 
 void emit_one(TileC t, Sketch s, uint emit_pos) {
     if (s.is_max != 0u || !owns_emit_position(t, emit_pos)) return;
@@ -1296,8 +911,7 @@ Sketch candidate_at(uint pos) {
 // reading the shared candidates — keeping bit-exact `collect_minimizers_view`
 // order without paying the hash cost on a single lane. SKETCH_CAND_MAX bounds
 // the tile span (tile_bp + overlap); the runtime keeps tiles within it.
-const uint SKETCH_CAND_MAX = 384u;            // small shared footprint → high core occupancy
-shared uint64_t sh_cand_hash[SKETCH_CAND_MAX];
+	shared uint64_t sh_cand_hash[SKETCH_CAND_MAX];
 shared uint sh_cand_flags[SKETCH_CAND_MAX];   // bit0 real-minimizer, bit1 base_valid, bit2 strand
 shared Sketch sh_ring[MAX_SPAN];
 
@@ -1308,8 +922,13 @@ void main() {
 
     TileC t = tiles[tile_id];
     g_seq_word_offset = t.seq_word_offset;
-    uint loop_hi = (t.tile_hi >= t.bp_count) ? t.bp_count : t.tile_hi;
-    uint span = loop_hi - t.replay_lo;
+	    uint guard = ownership_guard_bp();
+	    g_owned_lo = t.tile_lo;
+	    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
+	    uint loop_hi = tile_id + 1u >= pc.tile_count
+	        ? t.bp_count
+	        : min(t.bp_count, t.tile_hi + guard);
+	    uint span = loop_hi - t.replay_lo;
     if (span > SKETCH_CAND_MAX) span = SKETCH_CAND_MAX;
 
     // Phase 1 — parallel candidate hashing into shared memory.
@@ -2257,10 +1876,6 @@ void main() {
     switch (kind) {
         case ShaderKind::chain_tiled_dp_u64:
             return std::string{kChainTiledDpBody};
-        case ShaderKind::minimizer_candidates:
-            return std::string{kMinimizerCandidatesBody};
-        case ShaderKind::minimizer_emit_exact:
-            return std::string{kMinimizerEmitExactBody};
         case ShaderKind::seed_lookup_anchors:
             return std::string{kSeedLookupAnchorsBody};
         case ShaderKind::sort_anchors_bitonic:

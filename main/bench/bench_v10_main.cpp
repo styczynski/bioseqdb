@@ -297,8 +297,10 @@ struct AlgorithmDispatch {
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
     } else if (algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
-        // DOC0307 Phase B: the full G3SA front-end — Vulkan minimap-int
-        // minimizers + Vulkan tiled-DP chaining + block aligner. The only varied
+        // Vulkan minimap-int minimizers + Vulkan tiled-DP chaining + block
+        // aligner. The minimizer sketch is always the fused tiled Phase-C path
+        // after DOC0351; this row keeps the older seed/index frontend settings
+        // for comparison. The only varied
         // dimensions versus bioseq_block_simd_dp_two_stack_nthash (SIMD
         // minimizers + SIMD chaining + block aligner) are the seeding (GPU
         // sketch + GPU seed-hit lookup) and the chaining backend; the base
@@ -311,8 +313,8 @@ struct AlgorithmDispatch {
         dispatch.params.vulkan_enabled            = true;
         dispatch.params.vulkan_seed_hits_enabled  = true;
         dispatch.params.vulkan_index_cache_enabled = true;
-        // Phase B parity row: keep the resident two-submit frontend OFF so it
-        // measures the Phase B serial-emit sketch + CPU index build path.
+        // Keep the resident two-submit seed/index frontend OFF for the legacy
+        // comparison row. This no longer selects a Phase-B minimizer sketch.
         dispatch.params.vulkan_fused_frontend_enabled  = false;
         dispatch.params.vulkan_gpu_index_build_enabled = false;
     } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {

@@ -509,16 +509,9 @@ public:
         float skip_penalty,
         std::int32_t max_chain_skip = 0);
 
-    // DOC0307 Phase B — two-dispatch minimizer sketch (candidate + exact emit)
-    // and seed-hit lookup (lookup + bitonic sort). Both record every H2D copy,
-    // dispatch, barrier, and D2H copy under one queue lock, mirroring the Phase A
-    // roundtrip discipline. Transient buffers are owned internally; resident
-    // index buffers and memory-budget permits are owned by the caller.
-    RuntimeSketchResult run_minimizer_sketch_roundtrip(
-        std::span<const std::byte> packed_sequence,
-        const VulkanRankLut& rank_lut,
-        const VulkanSketchParams& params,
-        std::uint64_t max_minimizers);
+    // DOC0307 Phase B — seed-hit lookup (lookup + bitonic sort). It records
+    // every H2D copy, dispatch, barrier, and D2H copy under one queue lock,
+    // mirroring the Phase A roundtrip discipline.
     Buffer run_generate_units_roundtrip(
         std::uint32_t word_bits,
         std::span<const std::uint32_t> cdf,
@@ -539,9 +532,8 @@ public:
     // DOC0310 Phase C — accessor for the per-runtime reusable arena (§7).
     [[nodiscard]] GpuArena& phase_c_arena();
 
-    // DOC0310 Phase C — parallel ordered tile sketch (§9). Drop-in replacement
-    // for `run_minimizer_sketch_roundtrip`: same inputs/result, but the emit is
-    // tile-parallel (no one-workgroup-per-sequence serial pass).
+    // DOC0310/DOC0351 Phase C — parallel ordered tile sketch (§9). The emit is
+    // tile-parallel for every supported alphabet.
     RuntimeSketchResult run_phase_c_sketch_roundtrip(
         std::span<const std::byte> packed_sequence,
         const VulkanRankLut& rank_lut,
@@ -2506,36 +2498,6 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
 
 namespace {
 
-/// Push-constant blocks for the Phase B shaders. Each mirrors its GLSL `Params`
-/// uniform byte-for-byte (see `push_constant_size` in shader_compiler.cppm).
-struct SketchCandidatePush {
-    std::uint32_t bp_size;
-    std::uint32_t window_size;
-    std::uint32_t kmer_size;
-    std::uint32_t unit_bits;
-    std::uint32_t bits_per_char;
-    std::uint32_t letters_per_unit;
-    std::uint32_t alphabet_size;
-    std::uint32_t alphabet_kind;
-    std::uint32_t seq_word_offset;
-    std::uint32_t char_mask;
-};
-static_assert(sizeof(SketchCandidatePush) == 40);
-
-struct SketchEmitPush {
-    std::uint32_t bp_size;
-    std::uint32_t window_size;
-    std::uint32_t kmer_size;
-    std::uint32_t pos_bits;
-    std::uint32_t hash_bits;
-    std::uint32_t hash_shift;
-    std::uint32_t word_kind;
-    std::uint32_t words32_per_minimizer;
-    std::uint32_t span_value;
-    std::uint32_t max_minimizers;
-};
-static_assert(sizeof(SketchEmitPush) == 40);
-
 struct SeedLookupPush {
     std::uint32_t minimizer_count;
     std::uint32_t words32_per_minimizer;
@@ -2695,16 +2657,9 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
                                                  compile_error.what()));
         }
 
-        // Pin the SSBO wire ABI: a candidate-stride / sort-range-stride mismatch
-        // would silently corrupt the direct CandidateWire / SortRangeWire reads.
+        // Pin the SSBO wire ABI: a sort-range-stride mismatch would silently
+        // corrupt direct SortRangeWire reads.
         const SpirvLayoutScan scan = scan_spirv_layout(spirv);
-        if (kind == ShaderKind::minimizer_candidates
-            && !scan.has_array_stride(candidate_wire_stride)) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-            throw VulkanRuntimeError("SPIR-V Candidate array stride != candidate_wire_stride (32)");
-        }
         if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
             vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
             vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
@@ -2745,10 +2700,10 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
         vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
         vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
         throw VulkanRuntimeError(fmt::format(
-            "vkCreateComputePipelines(phase_b): VkResult {}", static_cast<int>(pr)));
+            "vkCreateComputePipelines(compute): VkResult {}", static_cast<int>(pr)));
     }
 
-    bioseq_log<DBG>("[vulkan_runtime] built phase B pipeline kind={} local={} max_span={}",
+    bioseq_log<DBG>("[vulkan_runtime] built compute pipeline kind={} local={} max_span={}",
                     static_cast<int>(kind), local_size, max_span);
     phase_b_pipelines_.push_back(entry);
     return phase_b_pipelines_.back();
@@ -2773,145 +2728,6 @@ void Runtime::bind_phase_b_descriptors_locked(
     }
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
                            writes.data(), 0, nullptr);
-}
-
-RuntimeSketchResult Runtime::run_minimizer_sketch_roundtrip(
-    std::span<const std::byte> packed_sequence,
-    const VulkanRankLut& rank_lut,
-    const VulkanSketchParams& params,
-    std::uint64_t max_minimizers)
-{
-    std::lock_guard<std::mutex> guard(mu_);
-    if (!features_.available) {
-        throw VulkanRuntimeError("run_minimizer_sketch_roundtrip on unavailable device");
-    }
-
-    const std::uint32_t bp_size = params.bp_size;
-    constexpr std::uint32_t candidate_local = 128u;
-    const std::uint64_t candidate_groups =
-        (static_cast<std::uint64_t>(bp_size) + candidate_local - 1u) / candidate_local;
-    if (candidate_groups > features_.max_workgroup_count_x) {
-        throw VulkanRuntimeError("minimizer sketch dispatch exceeds maxComputeWorkGroupCount[0]");
-    }
-
-    const PhaseBPipeline cand_pipe =
-        get_phase_b_pipeline_locked(ShaderKind::minimizer_candidates, candidate_local, 256u);
-    const PhaseBPipeline emit_pipe =
-        get_phase_b_pipeline_locked(ShaderKind::minimizer_emit_exact, 1u, 256u);
-
-    const std::uint64_t out_bytes = std::max<std::uint64_t>(
-        minimizer_device_bytes(params.minimizer_word_kind, params.minimizer_words32, max_minimizers), 4u);
-    const std::uint64_t cand_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(bp_size) * sizeof(CandidateWire), 32u);
-    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_sequence.size(), 4u);
-
-    Buffer scratch = create_host_buffer(4u, kPhaseBBufferUsage);
-    Buffer seq_buf = create_device_buffer(seq_bytes, kPhaseBBufferUsage);
-    Buffer cand_buf = create_device_buffer(cand_bytes, kPhaseBBufferUsage);
-    Buffer lut_buf = create_device_buffer(sizeof(VulkanRankLut), kPhaseBBufferUsage);
-    Buffer out_buf = create_device_buffer(out_bytes, kPhaseBBufferUsage);
-    Buffer counter_buf = create_device_buffer(8u, kPhaseBBufferUsage);
-
-    upload_locked(scratch, seq_buf, packed_sequence, VK_ACCESS_SHADER_READ_BIT);
-    upload_locked(scratch, lut_buf,
-        std::span<const std::byte>{reinterpret_cast<const std::byte*>(&rank_lut), sizeof(rank_lut)},
-        VK_ACCESS_SHADER_READ_BIT);
-    {
-        const std::array<std::uint32_t, 2> zero{0u, 0u};
-        upload_locked(scratch, counter_buf,
-            std::as_bytes(std::span<const std::uint32_t>{zero.data(), zero.size()}),
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    }
-
-    {
-        const std::array<VkBuffer, 3> cand_bufs{seq_buf.buffer, cand_buf.buffer, lut_buf.buffer};
-        bind_phase_b_descriptors_locked(cand_pipe, cand_bufs);
-        const std::array<VkBuffer, 3> emit_bufs{cand_buf.buffer, out_buf.buffer, counter_buf.buffer};
-        bind_phase_b_descriptors_locked(emit_pipe, emit_bufs);
-    }
-
-    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(sketch)");
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(sketch)");
-
-    VkMemoryBarrier host_to_shader{};
-    host_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    host_to_shader.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    host_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &host_to_shader,
-                         0, nullptr, 0, nullptr);
-
-    const SketchCandidatePush cand_push{
-        bp_size, params.window_size, params.kmer_size, params.unit_bits,
-        params.bits_per_char, params.letters_per_unit, params.alphabet_size,
-        params.alphabet_kind, params.seq_word_offset, params.char_mask};
-    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, cand_pipe.pipeline);
-    vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            cand_pipe.pipeline_layout, 0, 1, &cand_pipe.descriptor_set, 0, nullptr);
-    vkCmdPushConstants(command_buffer_, cand_pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(cand_push), &cand_push);
-    vkCmdDispatch(command_buffer_, static_cast<std::uint32_t>(candidate_groups), 1, 1);
-
-    VkMemoryBarrier shader_to_shader{};
-    shader_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    shader_to_shader.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    shader_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &shader_to_shader,
-                         0, nullptr, 0, nullptr);
-
-    const SketchEmitPush emit_push{
-        bp_size, params.window_size, params.kmer_size, params.pos_bits, params.hash_bits,
-        params.hash_shift, params.minimizer_word_kind, params.minimizer_words32,
-        params.kmer_size, static_cast<std::uint32_t>(max_minimizers)};
-    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, emit_pipe.pipeline);
-    vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            emit_pipe.pipeline_layout, 0, 1, &emit_pipe.descriptor_set, 0, nullptr);
-    vkCmdPushConstants(command_buffer_, emit_pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(emit_push), &emit_push);
-    vkCmdDispatch(command_buffer_, 1, 1, 1);
-
-    VkMemoryBarrier shader_to_host{};
-    shader_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    shader_to_host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    shader_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &shader_to_host,
-                         0, nullptr, 0, nullptr);
-
-    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(sketch)");
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &command_buffer_;
-    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(sketch)");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(sketch)");
-    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(sketch)");
-
-    std::array<std::uint32_t, 2> counter{0u, 0u};
-    download_locked(scratch, counter_buf,
-        std::as_writable_bytes(std::span<std::uint32_t>{counter.data(), counter.size()}));
-
-    RuntimeSketchResult result;
-    result.overflow = counter[1] != 0u;
-    if (!result.overflow) {
-        result.count = std::min<std::uint64_t>(counter[0], max_minimizers);
-        const std::uint64_t host_bytes =
-            minimizer_host_bytes(params.minimizer_word_kind, result.count);
-        result.host_minimizer_bytes.resize(static_cast<std::size_t>(host_bytes));
-        if (host_bytes > 0) {
-            download_locked(scratch, out_buf, std::span<std::byte>{
-                result.host_minimizer_bytes.data(), result.host_minimizer_bytes.size()});
-        }
-        result.minimizer_words = std::move(out_buf);
-    }
-
-    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(sketch-post)");
-    chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
-    return result;
 }
 
 SeedLookupResult Runtime::run_seed_lookup_roundtrip(
@@ -3089,16 +2905,7 @@ constexpr std::uint32_t kPhaseCSketchTileSpanMax = 384u;
 constexpr std::uint32_t kPhaseCScanBlock = 256u;
 constexpr std::uint32_t kPhaseCSlotOffsetAlign = 256u;
 
-/// One tile descriptor (host mirror of the GLSL `TileC`): owned base range
-/// `[tile_lo, tile_hi)` plus the left-context replay start and output base.
-struct TileC {
-    std::uint32_t seq_word_offset;
-    std::uint32_t bp_count;
-    std::uint32_t replay_lo;
-    std::uint32_t tile_lo;
-    std::uint32_t tile_hi;
-    std::uint32_t out_base;
-};
+using TileC = PhaseCSketchTileWire;
 static_assert(sizeof(TileC) == 24);
 
 struct SketchPushC {
@@ -3165,60 +2972,6 @@ void record_shader_to_host(VkCommandBuffer cmd) {
 
 [[nodiscard]] std::uint32_t ceil_div_u32(std::uint64_t n, std::uint32_t d) noexcept {
     return static_cast<std::uint32_t>((n + d - 1u) / d);
-}
-
-/// Pick a sketch tile size so the per-sequence tile count (one workgroup per
-/// tile) never exceeds the device dispatch limit. Grows past the default tile
-/// for very long sequences (e.g. the XXL_HIFI 500 Mbp target would otherwise
-/// need ~244k workgroups against MoltenVK's ~65535 cap). Each enlarged tile just
-/// runs a longer serial replay; parallelism across tiles is preserved.
-[[nodiscard]] std::uint32_t adaptive_sketch_tile_bp(
-    std::uint32_t bp, std::uint32_t max_workgroups, std::uint32_t default_tile_bp) noexcept {
-    std::uint32_t tile_bp = default_tile_bp;
-    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
-    if (ceil_div_u32(bp, tile_bp) > cap) {
-        tile_bp = ceil_div_u32(bp, cap);
-    }
-    // The cooperative sketch keeps the whole tile span (tile_bp + overlap) in
-    // shared memory, so the tile cannot grow past the shared-array bound. If a
-    // (tiny-dispatch-limit) device would need a larger tile, the caller's
-    // `num_tiles > max_workgroup_count_x` guard declines Phase C.
-    const std::uint32_t span_cap = kPhaseCSketchTileSpanMax - 64u;
-    if (tile_bp > span_cap) tile_bp = span_cap;
-    return std::max<std::uint32_t>(tile_bp, 1u);
-}
-
-/// Same dispatch-limit adaptation as `adaptive_sketch_tile_bp`, with one extra
-/// constraint for packed alphabets: when possible, place Phase-C tile boundaries
-/// on compact-sequence storage-unit boundaries. dna4 already did this
-/// accidentally (256 bp == 8 x 32-letter units); dna5 needs 252 bp so the
-/// replay/ownership boundary never cuts a 21-letter packed unit.
-[[nodiscard]] std::uint32_t phase_c_storage_aligned_tile_bp(
-    std::uint32_t bp,
-    std::uint32_t max_workgroups,
-    std::uint32_t default_tile_bp,
-    std::uint32_t letters_per_unit,
-    std::uint32_t overlap_bp) noexcept
-{
-    std::uint32_t tile_bp =
-        adaptive_sketch_tile_bp(bp, max_workgroups, default_tile_bp);
-    const std::uint32_t span_cap =
-        kPhaseCSketchTileSpanMax > overlap_bp
-            ? kPhaseCSketchTileSpanMax - overlap_bp
-            : 1u;
-    tile_bp = std::min(tile_bp, span_cap);
-
-    const std::uint32_t lpu = std::max<std::uint32_t>(letters_per_unit, 1u);
-    if (lpu <= 1u || tile_bp < lpu) {
-        return tile_bp;
-    }
-
-    const std::uint32_t aligned = (tile_bp / lpu) * lpu;
-    if (aligned == 0u) {
-        return tile_bp;
-    }
-    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
-    return ceil_div_u32(bp, aligned) <= cap ? aligned : tile_bp;
 }
 
 }  // namespace
@@ -3617,17 +3370,36 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     const std::uint32_t k = params.kmer_size;
     if (bp == 0u || w == 0u || k == 0u || bp < k) { result.count = 0; return result; }
 
-    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+    const std::uint64_t out_bytes = std::max<std::uint64_t>(
+        minimizer_device_bytes(
+            params.minimizer_word_kind,
+            params.minimizer_words32,
+            max_minimizers),
+        4u);
+    const PhaseCSketchMemoryPlan memory_plan = phase_c_sketch_memory_plan(
         bp,
-        features_.max_workgroup_count_x,
-        kPhaseCSketchTileBp,
+        packed_sequence.size(),
+        sizeof(VulkanRankLut),
+        max_minimizers,
+        out_bytes,
+        PhaseCSketchUse::minimizer_words,
+        k,
+        w,
         params.letters_per_unit,
-        w + k);
-    const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
+        features_.max_workgroup_count_x);
+    if (!memory_plan.valid) {
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c sketch memory plan invalid (bp={}, max_min={}, lpu={})",
+            bp,
+            max_minimizers,
+            params.letters_per_unit));
+    }
+    const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
+    const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
     if (num_tiles > features_.max_workgroup_count_x) {
         throw VulkanRuntimeError("phase_c sketch tile count exceeds dispatch limit");
     }
-    const std::uint32_t overlap = w + k;
+    const std::uint32_t overlap = phase_c_replay_overlap_bp(k, w);
     std::vector<TileC> tiles(num_tiles);
     for (std::uint32_t t = 0; t < num_tiles; ++t) {
         const std::uint32_t lo = t * tile_bp;
@@ -3635,36 +3407,41 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         const std::uint32_t rlo = lo > overlap ? lo - overlap : 0u;
         tiles[t] = TileC{params.seq_word_offset, bp, rlo, lo, hi, 0u};
     }
-    const std::uint32_t num_blocks = ceil_div_u32(num_tiles, kPhaseCScanBlock);
-
-    const std::uint64_t out_bytes = std::max<std::uint64_t>(
-        minimizer_device_bytes(params.minimizer_word_kind, params.minimizer_words32, max_minimizers), 4u);
+    const std::uint32_t num_blocks = memory_plan.tiles.scan_block_count;
     Buffer out_words = create_device_buffer(out_bytes, kPhaseBBufferUsage);
     if (out_words.mapped == nullptr) throw VulkanRuntimeError("phase_c sketch non-unified memory");
 
     GpuArena& arena = phase_c_arena();
-    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_sequence.size(), 4u);
-    const std::uint64_t device_total =
-        seq_bytes + sizeof(VulkanRankLut) + std::uint64_t{num_tiles} * 24u
-        + std::uint64_t{num_tiles} * 4u + std::uint64_t{num_tiles} * 4u
-        + std::max<std::uint64_t>(num_blocks, 1u) * 4u + 8u + 16u
-        + 8u * std::uint64_t{kPhaseCSlotOffsetAlign};
-    if (!arena.ensure_capacity(device_total, 0, 0)) throw VulkanRuntimeError("phase_c arena grow failed");
+    if (!arena.ensure_capacity(memory_plan.arena_scaffold_bytes, 0, 0)) {
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c arena grow failed (bp={}, arena_bytes={})",
+            bp,
+            memory_plan.arena_scaffold_bytes));
+    }
     const GpuArenaMark mark = arena.mark();
 
-    const GpuArenaSlice seq_s = arena.allocate_device(seq_bytes, 16u);
-    const GpuArenaSlice lut_s = arena.allocate_device(sizeof(VulkanRankLut), 16u);
-    const GpuArenaSlice tiles_s = arena.allocate_device(std::uint64_t{num_tiles} * 24u, 16u);
-    const GpuArenaSlice counts_s = arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
-    const GpuArenaSlice offsets_s = arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
-    const GpuArenaSlice blocks_s = arena.allocate_device(std::max<std::uint64_t>(num_blocks, 1u) * 4u, 16u);
-    const GpuArenaSlice counters_s = arena.allocate_device(8u, 16u);
-    const GpuArenaSlice pairvals_s = arena.allocate_device(16u, 16u);
+    const GpuArenaSlice seq_s = arena.allocate_device(memory_plan.seq_bytes, 16u);
+    const GpuArenaSlice lut_s = arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
+    const GpuArenaSlice tiles_s = arena.allocate_device(memory_plan.tile_bytes, 16u);
+    const GpuArenaSlice counts_s =
+        arena.allocate_device(memory_plan.tile_count_bytes, 16u);
+    const GpuArenaSlice offsets_s =
+        arena.allocate_device(memory_plan.tile_offset_bytes, 16u);
+    const GpuArenaSlice blocks_s =
+        arena.allocate_device(memory_plan.scan_block_bytes, 16u);
+    const GpuArenaSlice counters_s =
+        arena.allocate_device(memory_plan.counter_bytes, 16u);
+    const GpuArenaSlice pairvals_s =
+        arena.allocate_device(memory_plan.arena_pair_value_bytes, 16u);
     if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid() || !counts_s.valid()
         || !offsets_s.valid() || !blocks_s.valid() || !counters_s.valid()
         || !pairvals_s.valid()) {
         arena.rewind(mark);
-        throw VulkanRuntimeError("phase_c sketch arena oversub");
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c sketch arena oversub (bp={} arena_bytes={} num_tiles={})",
+            bp,
+            memory_plan.arena_scaffold_bytes,
+            num_tiles));
     }
 
     auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
@@ -3790,47 +3567,61 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     }
     if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) return out;
 
-    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+    const PhaseCSketchMemoryPlan memory_plan = phase_c_sketch_memory_plan(
         bp,
-        features_.max_workgroup_count_x,
-        kPhaseCSketchTileBp,
+        packed_sequence.size(),
+        sizeof(VulkanRankLut),
+        max_target_minimizers,
+        0u,
+        PhaseCSketchUse::target_index_build,
+        k,
+        w,
         params.letters_per_unit,
-        w + k);
-    const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
+        features_.max_workgroup_count_x);
+    if (!memory_plan.valid) {
+        return out;
+    }
+    const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
+    const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
     if (num_tiles > features_.max_workgroup_count_x) return out;
-    const std::uint32_t overlap = w + k;
+    const std::uint32_t overlap = phase_c_replay_overlap_bp(k, w);
     std::vector<TileC> tiles(num_tiles);
     for (std::uint32_t t = 0; t < num_tiles; ++t) {
         const std::uint32_t lo = t * tile_bp;
         const std::uint32_t hi = std::min(bp, (t + 1u) * tile_bp);
         tiles[t] = TileC{params.seq_word_offset, bp, lo > overlap ? lo - overlap : 0u, lo, hi, 0u};
     }
-    const std::uint32_t num_blocks = ceil_div_u32(num_tiles, kPhaseCScanBlock);
-
     // Small per-call scaffolding lives in the shared arena (seq + lut + tiles +
     // tile counts/offsets). The large minimizer/sort/index arrays are sized from
     // the EXACT minimizer count (downloaded after the count pass) as standalone
     // device buffers — never a single 14 GB arena buffer that Metal cannot
     // allocate for the XXL_HIFI 500 Mbp target.
     GpuArena& arena = phase_c_arena();
-    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_sequence.size(), 4u);
-    std::uint64_t scaffold = seq_bytes + sizeof(VulkanRankLut)
-        + std::uint64_t{num_tiles} * 24u + std::uint64_t{num_tiles} * 4u * 2u
-        + std::max<std::uint64_t>(num_blocks, 1u) * 4u + 16u + 4096u;
-    if (!arena.ensure_capacity(scaffold, 0, 0)) throw VulkanRuntimeError("phase_c index arena grow failed");
+    if (!arena.ensure_capacity(memory_plan.arena_scaffold_bytes, 0, 0)) {
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c index arena grow failed (bp={}, arena_bytes={})",
+            bp,
+            memory_plan.arena_scaffold_bytes));
+    }
     const GpuArenaMark mark = arena.mark();
-    const GpuArenaSlice seq_s = arena.allocate_device(seq_bytes, 16u);
-    const GpuArenaSlice lut_s = arena.allocate_device(sizeof(VulkanRankLut), 16u);
-    const GpuArenaSlice tiles_s = arena.allocate_device(std::uint64_t{num_tiles} * 24u, 16u);
-    const GpuArenaSlice tcounts_s = arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
-    const GpuArenaSlice toffsets_s = arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
-    const GpuArenaSlice tblocks_s = arena.allocate_device(std::max<std::uint64_t>(num_blocks, 1u) * 4u, 16u);
-    const GpuArenaSlice counters_s = arena.allocate_device(16u, 16u);
+    const GpuArenaSlice seq_s = arena.allocate_device(memory_plan.seq_bytes, 16u);
+    const GpuArenaSlice lut_s =
+        arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
+    const GpuArenaSlice tiles_s =
+        arena.allocate_device(memory_plan.tile_bytes, 16u);
+    const GpuArenaSlice tcounts_s =
+        arena.allocate_device(memory_plan.tile_count_bytes, 16u);
+    const GpuArenaSlice toffsets_s =
+        arena.allocate_device(memory_plan.tile_offset_bytes, 16u);
+    const GpuArenaSlice tblocks_s =
+        arena.allocate_device(memory_plan.scan_block_bytes, 16u);
+    const GpuArenaSlice counters_s =
+        arena.allocate_device(memory_plan.counter_bytes, 16u);
     if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid() || !tcounts_s.valid()
         || !toffsets_s.valid() || !tblocks_s.valid() || !counters_s.valid()) {
         bioseq_log<ERR>("[phase_c index] scaffold arena oversubscribed (bp={}, num_tiles={}, "
-                        "seq_bytes={}); returning invalid GPU index",
-                        bp, num_tiles, seq_bytes);
+                        "arena_bytes={}); returning invalid GPU index",
+                        bp, num_tiles, memory_plan.arena_scaffold_bytes);
         arena.rewind(mark);
         return out;
     }
@@ -4076,18 +3867,28 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
         return out;
     }
 
-    const std::uint32_t tile_bp = phase_c_storage_aligned_tile_bp(
+    const PhaseCSketchMemoryPlan memory_plan = phase_c_sketch_memory_plan(
         bp,
-        features_.max_workgroup_count_x,
-        kPhaseCSketchTileBp,
+        packed_sequence.size(),
+        sizeof(VulkanRankLut),
+        max_target_minimizers,
+        0u,
+        PhaseCSketchUse::sorted_pairs,
+        kmer_size,
+        window_size,
         params.letters_per_unit,
-        window_size + kmer_size);
-    const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
+        features_.max_workgroup_count_x);
+    if (!memory_plan.valid) {
+        return out;
+    }
+    const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
+    const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
     if (num_tiles == 0u || num_tiles > features_.max_workgroup_count_x) {
         return out;
     }
 
-    const std::uint32_t overlap = window_size + kmer_size;
+    const std::uint32_t overlap =
+        phase_c_replay_overlap_bp(kmer_size, window_size);
     std::vector<TileC> tiles(num_tiles);
     for (std::uint32_t tile = 0; tile < num_tiles; ++tile) {
         const std::uint32_t lo = tile * tile_bp;
@@ -4101,34 +3902,28 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
             0u};
     }
 
-    const std::uint32_t num_blocks = ceil_div_u32(num_tiles, kPhaseCScanBlock);
     GpuArena& arena = phase_c_arena();
-    const std::uint64_t seq_bytes =
-        std::max<std::uint64_t>(packed_sequence.size(), 4u);
-    const std::uint64_t scaffold =
-        seq_bytes
-        + sizeof(VulkanRankLut)
-        + std::uint64_t{num_tiles} * 24u
-        + std::uint64_t{num_tiles} * 4u * 2u
-        + std::max<std::uint64_t>(num_blocks, 1u) * 4u
-        + 16u
-        + 4096u;
-    if (!arena.ensure_capacity(scaffold, 0u, 0u)) {
-        throw VulkanRuntimeError("phase_c sorted-pair arena grow failed");
+    if (!arena.ensure_capacity(memory_plan.arena_scaffold_bytes, 0u, 0u)) {
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c sorted-pair arena grow failed (bp={}, arena_bytes={})",
+            bp,
+            memory_plan.arena_scaffold_bytes));
     }
 
     const GpuArenaMark mark = arena.mark();
-    const GpuArenaSlice seq_s = arena.allocate_device(seq_bytes, 16u);
-    const GpuArenaSlice lut_s = arena.allocate_device(sizeof(VulkanRankLut), 16u);
+    const GpuArenaSlice seq_s = arena.allocate_device(memory_plan.seq_bytes, 16u);
+    const GpuArenaSlice lut_s =
+        arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
     const GpuArenaSlice tiles_s =
-        arena.allocate_device(std::uint64_t{num_tiles} * 24u, 16u);
+        arena.allocate_device(memory_plan.tile_bytes, 16u);
     const GpuArenaSlice tcounts_s =
-        arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
+        arena.allocate_device(memory_plan.tile_count_bytes, 16u);
     const GpuArenaSlice toffsets_s =
-        arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
+        arena.allocate_device(memory_plan.tile_offset_bytes, 16u);
     const GpuArenaSlice tblocks_s =
-        arena.allocate_device(std::max<std::uint64_t>(num_blocks, 1u) * 4u, 16u);
-    const GpuArenaSlice counters_s = arena.allocate_device(16u, 16u);
+        arena.allocate_device(memory_plan.scan_block_bytes, 16u);
+    const GpuArenaSlice counters_s =
+        arena.allocate_device(memory_plan.counter_bytes, 16u);
     if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid()
         || !tcounts_s.valid() || !toffsets_s.valid() || !tblocks_s.valid()
         || !counters_s.valid()) {

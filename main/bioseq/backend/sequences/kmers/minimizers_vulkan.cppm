@@ -1,6 +1,6 @@
 /**
  * @file minimizers_vulkan.cppm
- * @brief DOC0307 Phase B — Vulkan minimizer-sketch backend for
+ * @brief DOC0351 Phase C — Vulkan minimizer-sketch backend for
  *        `compact_sequence_range` / `lazy_compact_sequence`.
  *
  * Owns the `MinimizerRepr<L,K>` wire traits, the sequence upload view (a direct
@@ -44,6 +44,7 @@ import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.gpu.vulkan.phase_b_abi;
+import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.size;  // DOC0345 Patch C — bioseq::storage::sequence_size_t
@@ -316,7 +317,7 @@ struct SequenceUploadView {
     return (n + 3u) & ~std::uint64_t{3u};
 }
 
-[[nodiscard]] inline std::uint64_t ceil_div_u64(
+[[nodiscard]] constexpr std::uint64_t ceil_div_u64(
     std::uint64_t n, std::uint64_t d) noexcept
 {
     return d == 0u ? (std::numeric_limits<std::uint64_t>::max)()
@@ -333,6 +334,39 @@ struct SegmentUploadDescriptor {
     std::uint64_t window_bp = 0;
     std::uint32_t tail_padding = 0;
 };
+
+struct PhaseCSegmentWindow {
+    std::size_t sub_lo_unit = 0;
+    std::size_t sub_hi_unit = 0;
+    std::size_t core_lo_unit = 0;
+    std::size_t core_hi_unit = 0;
+    std::uint64_t emit_base_bp = 0;
+    std::uint64_t collected_bp = 0;
+};
+
+template <class Traits>
+[[nodiscard]] constexpr std::uint64_t phase_c_segment_context_bp(
+    std::size_t window_size,
+    std::size_t kmer_size) noexcept
+{
+    return static_cast<std::uint64_t>(window_size)
+        + static_cast<std::uint64_t>(kmer_size)
+        + 1u;
+}
+
+template <class Traits>
+[[nodiscard]] constexpr std::size_t phase_c_segment_context_units(
+    std::size_t window_size,
+    std::size_t kmer_size) noexcept
+{
+    const std::uint64_t context_bp =
+        phase_c_segment_context_bp<Traits>(window_size, kmer_size);
+    const std::uint64_t lpu =
+        std::max<std::uint64_t>(1u, Traits::letters_per_unit);
+    return std::max<std::size_t>(
+        1u,
+        static_cast<std::size_t>(ceil_div_u64(context_bp, lpu)));
+}
 
 template <class Seq>
 [[nodiscard]] SegmentUploadDescriptor compute_segment_descriptor(
@@ -360,6 +394,175 @@ template <class Seq>
         .window_bp = window_bp,
         .tail_padding = tail_padding,
     };
+}
+
+template <class Seq>
+[[nodiscard]] PhaseCSegmentWindow make_phase_c_segment_window(
+    const Seq& seq,
+    const SegmentUploadDescriptor& descriptor,
+    std::size_t core_lo_unit,
+    std::size_t core_hi_unit,
+    std::size_t context_units)
+{
+    using traits = typename std::remove_cvref_t<Seq>::traits;
+    const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);
+    const std::size_t core_lo =
+        std::min(std::max(core_lo_unit, descriptor.lo_unit), descriptor.hi_unit);
+    const std::size_t core_hi =
+        std::min(std::max(core_hi_unit, core_lo), descriptor.hi_unit);
+    const std::size_t sub_lo =
+        core_lo > descriptor.lo_unit + context_units
+            ? core_lo - context_units
+            : descriptor.lo_unit;
+    const std::size_t sub_hi =
+        std::min(core_hi + context_units, descriptor.hi_unit);
+    const SegmentUploadDescriptor sub_descriptor =
+        compute_segment_descriptor(seq, sub_lo, sub_hi);
+    return PhaseCSegmentWindow{
+        .sub_lo_unit = sub_lo,
+        .sub_hi_unit = sub_hi,
+        .core_lo_unit = core_lo,
+        .core_hi_unit = core_hi,
+        .emit_base_bp = static_cast<std::uint64_t>(sub_lo) * lpu,
+        .collected_bp = sub_descriptor.window_bp,
+    };
+}
+
+template <class Seq>
+[[nodiscard]] bool split_phase_c_segment_window(
+    const Seq& seq,
+    const SegmentUploadDescriptor& descriptor,
+    const PhaseCSegmentWindow& window,
+    std::size_t context_units,
+    PhaseCSegmentWindow& left,
+    PhaseCSegmentWindow& right)
+{
+    if (window.core_hi_unit <= window.core_lo_unit + 1u) {
+        return false;
+    }
+    const std::size_t core_mid =
+        window.core_lo_unit + (window.core_hi_unit - window.core_lo_unit) / 2u;
+    if (core_mid == window.core_lo_unit || core_mid == window.core_hi_unit) {
+        return false;
+    }
+    left = make_phase_c_segment_window(
+        seq,
+        descriptor,
+        window.core_lo_unit,
+        core_mid,
+        context_units);
+    right = make_phase_c_segment_window(
+        seq,
+        descriptor,
+        core_mid,
+        window.core_hi_unit,
+        context_units);
+    return left.core_lo_unit < left.core_hi_unit
+        && right.core_lo_unit < right.core_hi_unit;
+}
+
+template <class MinimizerT, class Traits>
+[[nodiscard]] std::uint64_t phase_c_admitted_collected_limit_bp(
+    std::size_t window_size,
+    std::size_t kmer_size,
+    PhaseCSketchUse use) noexcept
+{
+    using storage_unit = typename Traits::storage_unit;
+    constexpr std::uint64_t collected_floor_bp = 1'000'000u;
+    constexpr std::uint64_t collected_ceil_bp = 20'000'000u;
+    const std::uint64_t available =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .allocatable_after_reservations();
+    if (available == (std::numeric_limits<std::uint64_t>::max)()) {
+        return collected_ceil_bp;
+    }
+
+    const std::uint64_t lpu =
+        std::max<std::uint64_t>(1u, Traits::letters_per_unit);
+    std::uint64_t candidate = collected_ceil_bp;
+    while (candidate > collected_floor_bp) {
+        const std::uint64_t capacity = std::max<std::uint64_t>(64u, candidate);
+        const std::uint64_t unit_count = ceil_div_u64(candidate, lpu);
+        const std::uint64_t sequence_bytes = round_up4(
+            bioseq::parallelism::saturating_mul(
+                unit_count,
+                static_cast<std::uint64_t>(sizeof(storage_unit))));
+        const std::uint64_t output_bytes =
+            use == PhaseCSketchUse::minimizer_words
+                ? minimizer_wire_traits<MinimizerT>::device_bytes_for_count(capacity)
+                : 0u;
+        const PhaseCSketchMemoryPlan plan = phase_c_sketch_memory_plan(
+            candidate,
+            sequence_bytes,
+            sizeof(VulkanRankLut),
+            capacity,
+            output_bytes,
+            use,
+            static_cast<std::uint32_t>(kmer_size),
+            static_cast<std::uint32_t>(window_size),
+            static_cast<std::uint32_t>(lpu));
+        if (plan.valid && plan.admission_bytes <= available / 2u) {
+            return candidate;
+        }
+        candidate /= 2u;
+    }
+    return collected_floor_bp;
+}
+
+template <class MinimizerT, class Seq>
+[[nodiscard]] std::vector<PhaseCSegmentWindow> phase_c_segment_windows(
+    const Seq& seq,
+    const SegmentUploadDescriptor& descriptor,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    PhaseCSketchUse use)
+{
+    using traits = typename std::remove_cvref_t<Seq>::traits;
+    const std::uint64_t collected_limit =
+        phase_c_admitted_collected_limit_bp<MinimizerT, traits>(
+            window_size, kmer_size, use);
+    const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);
+    const std::uint64_t context_bp =
+        phase_c_segment_context_bp<traits>(window_size, kmer_size);
+    constexpr std::uint64_t tile_safety_bp = 4096u;
+    const std::uint64_t core_bp =
+        collected_limit > context_bp * 2u + tile_safety_bp + 1u
+            ? collected_limit - context_bp * 2u - tile_safety_bp
+            : std::max<std::uint64_t>(1u, collected_limit / 2u);
+    const std::size_t core_units =
+        std::max<std::size_t>(1u, static_cast<std::size_t>(core_bp / lpu));
+    const std::size_t context_units =
+        phase_c_segment_context_units<traits>(window_size, kmer_size);
+
+    std::vector<PhaseCSegmentWindow> windows;
+    if (descriptor.window_bp <= collected_limit) {
+        windows.push_back(PhaseCSegmentWindow{
+            .sub_lo_unit = descriptor.lo_unit,
+            .sub_hi_unit = descriptor.hi_unit,
+            .core_lo_unit = descriptor.lo_unit,
+            .core_hi_unit = descriptor.hi_unit,
+            .emit_base_bp = static_cast<std::uint64_t>(descriptor.lo_unit) * lpu,
+            .collected_bp = descriptor.window_bp,
+        });
+        return windows;
+    }
+
+    for (std::size_t core_lo = descriptor.lo_unit;
+         core_lo < descriptor.hi_unit;
+         core_lo += core_units) {
+        const std::size_t core_hi =
+            std::min(core_lo + core_units, descriptor.hi_unit);
+        windows.push_back(make_phase_c_segment_window(
+            seq,
+            descriptor,
+            core_lo,
+            core_hi,
+            context_units));
+        if (core_hi == descriptor.hi_unit) {
+            break;
+        }
+    }
+    return windows;
 }
 
 template <class Seq, class StorageUnit>
@@ -482,28 +685,11 @@ template <class MinimizerT>
     // admission reservation small enough to avoid spurious memory pressure at
     // XXL_HIFI. An under-estimate is caught by the emit's capacity guard
     // (counters[1]) and reported as a GPU decline, never an out-of-bounds write.
+    if (bp_size <= k_phase_c_sketch_tile_bp) {
+        return std::max<std::uint64_t>(64u, bp_size);
+    }
     const std::uint64_t base = window_size == 0 ? bp_size : (bp_size / window_size + 64u);
     return std::max<std::uint64_t>(64u, saturating_mul(base, 3u));
-}
-
-[[nodiscard]] inline std::uint64_t worst_case_vulkan_minimizer_capacity(
-    std::uint64_t bp_size) noexcept
-{
-    return std::max<std::uint64_t>(64u, bp_size);
-}
-
-[[nodiscard]] inline std::uint64_t grow_vulkan_minimizer_capacity(
-    std::uint64_t current,
-    std::uint64_t maximum) noexcept
-{
-    if (current >= maximum) {
-        return maximum;
-    }
-    const std::uint64_t doubled =
-        current > (std::numeric_limits<std::uint64_t>::max)() / 2u
-            ? (std::numeric_limits<std::uint64_t>::max)()
-            : current * 2u;
-    return std::min(maximum, std::max(current + 1u, doubled));
 }
 
 template <class MinimizerT>
@@ -517,43 +703,25 @@ template <class MinimizerT>
     std::uint64_t bp,
     std::uint64_t sequence_bytes,
     std::uint32_t letters_per_unit,
-    std::uint64_t overlap_bp)
+    std::size_t window_size,
+    std::size_t kmer_size,
+    std::uint64_t max_minimizers,
+    std::uint64_t minimizer_device_output_bytes)
 {
-    // Mirrors Runtime::run_phase_c_sketch_roundtrip() arena allocations. The
-    // output minimizer buffer is admitted as resident memory by the caller.
-    constexpr std::uint64_t kEstimatorDefaultTileBp = 256u;
-    constexpr std::uint64_t kEstimatorScanBlock = 256u;
-    constexpr std::uint64_t kEstimatorSlotOffsetAlign = 256u;
-
-    const std::uint64_t padded_seq = round_up4(sequence_bytes);
-    const std::uint64_t seq_bytes = std::max<std::uint64_t>(padded_seq, 4u);
-    const std::uint64_t lpu = std::max<std::uint64_t>(letters_per_unit, 1u);
-    const std::uint64_t span_cap = 384u > overlap_bp ? 384u - overlap_bp : 1u;
-    const std::uint64_t default_tile_bp =
-        std::min(kEstimatorDefaultTileBp, span_cap);
-    const std::uint64_t tile_bp =
-        lpu > 1u && default_tile_bp >= lpu
-            ? std::max<std::uint64_t>(
-                lpu,
-                (default_tile_bp / lpu) * lpu)
-            : default_tile_bp;
-    const std::uint64_t num_tiles = std::max<std::uint64_t>(
-        1u, ceil_div_u64(bp, tile_bp));
-    const std::uint64_t num_blocks = std::max<std::uint64_t>(
-        1u, ceil_div_u64(num_tiles, kEstimatorScanBlock));
-
-    std::uint64_t total = 0;
-    total = sat_add(total, padded_seq); // caller-side padded_sequence vector
-    total = sat_add(total, seq_bytes);
-    total = sat_add(total, sizeof(VulkanRankLut));
-    total = sat_add(total, bioseq::parallelism::saturating_mul(num_tiles, 24u));
-    total = sat_add(total, bioseq::parallelism::saturating_mul(num_tiles, 4u));
-    total = sat_add(total, bioseq::parallelism::saturating_mul(num_tiles, 4u));
-    total = sat_add(total, bioseq::parallelism::saturating_mul(num_blocks, 4u));
-    total = sat_add(total, 8u);
-    total = sat_add(total, 16u);
-    total = sat_add(total, 8u * kEstimatorSlotOffsetAlign);
-    return total;
+    const PhaseCSketchMemoryPlan plan = phase_c_sketch_memory_plan(
+        bp,
+        round_up4(sequence_bytes),
+        sizeof(VulkanRankLut),
+        max_minimizers,
+        minimizer_device_output_bytes,
+        PhaseCSketchUse::minimizer_words,
+        static_cast<std::uint32_t>(kmer_size),
+        static_cast<std::uint32_t>(window_size),
+        letters_per_unit);
+    if (!plan.valid) {
+        return (std::numeric_limits<std::uint64_t>::max)();
+    }
+    return sat_add(plan.arena_scaffold_bytes, plan.host_transient_bytes);
 }
 
 [[nodiscard]] inline std::uint64_t vulkan_sketch_transient_reserved_bytes(
@@ -563,32 +731,16 @@ template <class MinimizerT>
     std::size_t window_size,
     std::size_t kmer_size,
     std::uint64_t max_minimizers,
-    std::uint64_t minimizer_device_output_bytes, bool fused_frontend)
+    std::uint64_t minimizer_device_output_bytes)
 {
-    using bioseq::parallelism::saturating_mul;
-    (void)max_minimizers;
-    if (fused_frontend) {
-        return vulkan_phase_c_sketch_transient_reserved_bytes(
-            bp,
-            sequence_bytes,
-            letters_per_unit,
-            static_cast<std::uint64_t>(window_size)
-                + static_cast<std::uint64_t>(kmer_size));
-    }
-    const std::uint64_t padded_seq = round_up4(sequence_bytes);
-    const std::uint64_t candidates = saturating_mul(bp, sizeof(CandidateWire));
-    const std::uint64_t counter_block = 8u;
-    const std::uint64_t rank_lut_bytes = sizeof(VulkanRankLut);
-    const std::uint64_t host_download = minimizer_device_output_bytes;
-    const std::uint64_t staging = std::max({padded_seq, candidates, host_download});
-    std::uint64_t total = 0;
-    total = sat_add(total, padded_seq);
-    total = sat_add(total, candidates);
-    total = sat_add(total, counter_block);
-    total = sat_add(total, rank_lut_bytes);
-    total = sat_add(total, host_download);
-    total = sat_add(total, staging);
-    return total;
+    return vulkan_phase_c_sketch_transient_reserved_bytes(
+        bp,
+        sequence_bytes,
+        letters_per_unit,
+        window_size,
+        kmer_size,
+        max_minimizers,
+        minimizer_device_output_bytes);
 }
 
 // ===========================================================================
@@ -640,7 +792,6 @@ sketch_uploaded_window_result(
     const VulkanRankLut& rank_lut,
     std::size_t window_size,
     std::size_t kmer_size,
-    bool fused_frontend,
     std::uint64_t capacity_bound = 0u,
     bool* capacity_overflowed = nullptr)
 {
@@ -658,13 +809,6 @@ sketch_uploaded_window_result(
     if (!runtime.usable()) {
         return std::nullopt;
     }
-    constexpr std::uint32_t candidate_local_size = 128u;
-    if (!fused_frontend
-        && ceil_div_u64(upload.bp_size, candidate_local_size)
-        > runtime.features().max_workgroup_count_x) {
-        return std::nullopt;
-    }
-
     const std::uint64_t max_minimizers =
         capacity_bound == 0u
             ? estimate_vulkan_minimizer_capacity(upload.bp_size, window_size)
@@ -684,22 +828,13 @@ sketch_uploaded_window_result(
             window_size,
             kmer_size,
             max_minimizers,
-            resident_bytes,
-            fused_frontend);
+            resident_bytes);
 
-    auto resident_permit =
-        MemoryAdmissionController::instance().try_reserve(resident_bytes);
-    if (!resident_permit) {
-        return std::nullopt;
-    }
-    auto transient_permit =
-        MemoryAdmissionController::instance().try_reserve(transient_bytes);
-    if (!transient_permit) {
-        return std::nullopt;
-    }
-    auto host_permit =
-        MemoryAdmissionController::instance().try_reserve(host_minimizer_bytes);
-    if (!host_permit) {
+    const std::uint64_t dispatch_admission_bytes =
+        sat_add(sat_add(resident_bytes, transient_bytes), host_minimizer_bytes);
+    auto dispatch_permit =
+        MemoryAdmissionController::instance().try_reserve(dispatch_admission_bytes);
+    if (!dispatch_permit) {
         return std::nullopt;
     }
 
@@ -734,22 +869,13 @@ sketch_uploaded_window_result(
             .padding_letters = upload.padding_letters,
         };
 
-        RuntimeSketchResult raw =
-            fused_frontend
-                ? runtime.run_phase_c_sketch_roundtrip(
-                    std::span<const std::byte>{
-                        padded_sequence.data(),
-                        padded_sequence.size()},
-                    rank_lut,
-                    sketch_params,
-                    max_minimizers)
-                : runtime.run_minimizer_sketch_roundtrip(
-                    std::span<const std::byte>{
-                        padded_sequence.data(),
-                        padded_sequence.size()},
-                    rank_lut,
-                    sketch_params,
-                    max_minimizers);
+        RuntimeSketchResult raw = runtime.run_phase_c_sketch_roundtrip(
+            std::span<const std::byte>{
+                padded_sequence.data(),
+                padded_sequence.size()},
+            rank_lut,
+            sketch_params,
+            max_minimizers);
         if (raw.overflow) {
             if (capacity_overflowed != nullptr) {
                 *capacity_overflowed = true;
@@ -769,83 +895,25 @@ sketch_uploaded_window_result(
                 raw.host_minimizer_bytes.data(),
                 raw.host_minimizer_bytes.size()},
             raw.count);
-        host_permit->shrink_to(saturating_mul(raw.count, sizeof(MinimizerT)));
+        dispatch_permit->shrink_to(
+            sat_add(resident_bytes, saturating_mul(raw.count, sizeof(MinimizerT))));
         raw.host_minimizer_bytes.clear();
         raw.host_minimizer_bytes.shrink_to_fit();
 
         auto storage = std::make_shared<VulkanDeviceMinimizerStorage<MinimizerT>>();
         storage->words = std::move(raw.minimizer_words);
-        storage->permit = std::move(*resident_permit);
+        storage->permit = std::move(*dispatch_permit);
         storage->count = raw.count;
         storage->capacity = max_minimizers;
 
         return VulkanSketchResult<MinimizerT>{
             .host_minimizers = std::move(host_minimizers),
-            .host_permit =
-                std::optional<bioseq::parallelism::MemoryPermit>{
-                    std::move(*host_permit)},
+            .host_permit = std::nullopt,
             .device = std::move(storage),
             .overflow = false,
         };
     } catch (const VulkanRuntimeError&) {
         throw;
-    }
-}
-
-template <class MinimizerT>
-[[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>
-sketch_uploaded_window_result_adaptive_capacity(
-    const SequenceUploadView& upload,
-    const VulkanRankLut& rank_lut,
-    std::size_t window_size,
-    std::size_t kmer_size,
-    bool fused_frontend,
-    std::uint64_t* attempted_capacity = nullptr)
-{
-    const std::uint64_t maximum =
-        worst_case_vulkan_minimizer_capacity(upload.bp_size);
-    std::uint64_t capacity = std::min(
-        maximum,
-        std::max<std::uint64_t>(
-            64u,
-            estimate_vulkan_minimizer_capacity(upload.bp_size, window_size)));
-
-    std::uint32_t adaptive_attempt = 0u;
-    for (;;) {
-        if (attempted_capacity != nullptr) {
-            *attempted_capacity = capacity;
-        }
-        bool overflowed = false;
-        auto result = sketch_uploaded_window_result<MinimizerT>(
-            upload,
-            rank_lut,
-            window_size,
-            kmer_size,
-            fused_frontend,
-            capacity,
-            &overflowed);
-        // OBSERVABILITY (DBG -> /tmp/bioseq_loglog.log): one line per GPU sketch
-        // dispatch. Consecutive timestamps give per-dispatch wall time; multiple
-        // lines for the same bp = adaptive-capacity retries (overflow growth).
-        bioseq_log<DBG>(
-            "[vulkan_sketch_adaptive] attempt={} bp={} capacity={} fused={} "
-            "overflowed={} produced={}",
-            adaptive_attempt++, upload.bp_size, capacity,
-            fused_frontend ? 1 : 0, overflowed ? 1 : 0,
-            result ? static_cast<std::uint64_t>(result->host_minimizers.size())
-                   : std::uint64_t{0});
-        if (result || !overflowed) {
-            return result;
-        }
-        if (capacity >= maximum) {
-            throw VulkanRuntimeError(fmt::format(
-                "Vulkan minimizer sketch overflowed worst-case capacity "
-                "(bp={}, cap={}, fused_frontend={})",
-                upload.bp_size,
-                capacity,
-                fused_frontend ? 1 : 0));
-        }
-        capacity = grow_vulkan_minimizer_capacity(capacity, maximum);
     }
 }
 
@@ -876,10 +944,21 @@ build_gpu_index_from_upload_on_device(
         return std::nullopt;
     }
 
-    // Resident index footprint (~ slots + positions); admitted via the
-    // existing controller. Transient sort scratch is bounded by the arena.
-    const std::uint64_t resident_bytes = saturating_mul(max_minimizers, 24u);
-    auto permit = MemoryAdmissionController::instance().try_reserve(resident_bytes);
+    const PhaseCSketchMemoryPlan memory_plan = phase_c_sketch_memory_plan(
+        upload.bp_size,
+        upload.padded_byte_size,
+        sizeof(VulkanRankLut),
+        max_minimizers,
+        0u,
+        PhaseCSketchUse::target_index_build,
+        static_cast<std::uint32_t>(kmer_size),
+        static_cast<std::uint32_t>(window_size),
+        upload.letters_per_unit);
+    if (!memory_plan.valid) {
+        return std::nullopt;
+    }
+    auto permit =
+        MemoryAdmissionController::instance().try_reserve(memory_plan.admission_bytes);
     if (!permit) {
         return std::nullopt;
     }
@@ -941,8 +1020,7 @@ template <class MinimizerT, class Seq>
 collect_minimizers_vulkan_result(
     const Seq& seq,
     std::size_t window_size,
-    std::size_t kmer_size,
-    bool fused_frontend = false)
+    std::size_t kmer_size)
 {
     using bare = std::remove_cvref_t<Seq>;
     if constexpr (is_fragmented_sequence<bare>()) {
@@ -980,8 +1058,7 @@ collect_minimizers_vulkan_result(
                     upload,
                     rank_lut,
                     window_size,
-                    kmer_size,
-                    fused_frontend);
+                    kmer_size);
             }
         }
     } else if constexpr (!vulkan_sketchable_sequence<bare>) {
@@ -1008,8 +1085,7 @@ collect_minimizers_vulkan_result(
                 upload,
                 rank_lut,
                 window_size,
-                kmer_size,
-                fused_frontend);
+                kmer_size);
         }
     }
 }
@@ -1097,11 +1173,10 @@ template <class MinimizerT, class Seq>
 template <class MinimizerT, class Collector, class Seq>
 [[nodiscard]] bool collect_minimizers_vulkan(
     Collector& collector, const Seq& seq,
-    std::size_t window_size, std::size_t kmer_size,
-    bool fused_frontend = false)
+    std::size_t window_size, std::size_t kmer_size)
 {
     auto result = collect_minimizers_vulkan_result<MinimizerT>(
-        seq, window_size, kmer_size, fused_frontend);
+        seq, window_size, kmer_size);
     if (!result) {
         return false;
     }
@@ -1148,9 +1223,9 @@ decode_sorted_pair_bytes(
 }
 
 /// Checked Vulkan segment pair path: stitches one window from lazy fragmented
-/// storage, runs the selected minimizer sketch on the GPU (dna4 uses the tiled
-/// Phase-C path (DOC0348 fixed the dna5/generic tile-boundary ownership issue),
-/// globalises/filters to the core range, then returns pairs sorted by
+/// storage, runs the fused tiled Phase-C minimizer sketch on the GPU for every
+/// supported alphabet, globalises/filters to the core range, then returns pairs
+/// sorted by
 /// (kmer, encoded_pos).
 /// Throws `VulkanRuntimeError` on every selected-GPU decline — no scalar fallback.
 template <class Seq>
@@ -1198,121 +1273,154 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
                 return {};
             }
 
-            const std::size_t unit_count = descriptor.hi_unit - descriptor.lo_unit;
-            std::vector<storage_unit> scratch;
-            scratch.resize(unit_count);
-            auto begin_iter = seq.cbegin();
-            begin_iter += static_cast<bioseq::storage::sequence_size_t>(descriptor.lo_unit);
-            const storage_unit* base = seq.read_cptr(
-                begin_iter,
-                std::span<storage_unit>{scratch.data(), scratch.size()},
-                unit_count);
-            const SequenceUploadView upload =
-                make_upload_view_from_window<bare>(seq, base, descriptor);
-            if (upload.bp_size > std::numeric_limits<std::uint32_t>::max()
-                || upload.padded_byte_size
-                    == std::numeric_limits<std::uint64_t>::max()) {
-                throw VulkanRuntimeError{"Vulkan segment minimizer pair upload is too large"};
-            }
-
             auto& runtime = Runtime::instance();
             if (!runtime.usable()) {
                 throw VulkanRuntimeError{fmt::format(
                     "Vulkan segment minimizer pair path selected but runtime is unusable: {}",
                     runtime.initialization_error())};
             }
-            // BUGFIX DOC0348 — Phase C now owns tile output by the scalar
-            // emission event and aligns packed-sequence tile boundaries to the
-            // storage-unit width where possible, so dna5/generic no longer need
-            // the exact but serial Phase-B sketch.
-            const bool use_tiled_phase_c =
-                vulkan_phase_c_minimizer_sketch_supported<traits>();
-            constexpr std::uint32_t candidate_local_size = 128u;
-            if (!use_tiled_phase_c
-                && ceil_div_u64(upload.bp_size, candidate_local_size)
-                > runtime.features().max_workgroup_count_x) {
-                throw VulkanRuntimeError{"Vulkan segment minimizer pair path exceeds workgroup limit"};
-            }
 
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
-            std::uint64_t attempted_capacity = 0u;
-            auto result = use_tiled_phase_c
-                ? sketch_uploaded_window_result<MinimizerT>(
-                    upload,
-                    rank_lut,
-                    window_size,
-                    kmer_size,
-                    true,
-                    worst_case_vulkan_minimizer_capacity(upload.bp_size))
-                : sketch_uploaded_window_result_adaptive_capacity<MinimizerT>(
-                    upload,
-                    rank_lut,
-                    window_size,
-                    kmer_size,
-                    false,
-                    &attempted_capacity);
-            if (!result) {
-                const std::uint64_t max_minimizers =
-                    use_tiled_phase_c
-                        ? worst_case_vulkan_minimizer_capacity(upload.bp_size)
-                        : (attempted_capacity != 0u
-                            ? attempted_capacity
-                            : estimate_vulkan_minimizer_capacity(
-                                upload.bp_size, window_size));
-                const std::uint64_t resident_bytes =
-                    vulkan_sketch_resident_bytes<MinimizerT>(max_minimizers);
-                const std::uint64_t host_minimizer_bytes =
-                    bioseq::parallelism::saturating_mul(max_minimizers, sizeof(MinimizerT));
-                const std::uint64_t transient_bytes =
-                    vulkan_sketch_transient_reserved_bytes(
-                        upload.bp_size,
-                        upload.padded_byte_size,
-                        upload.letters_per_unit,
-                        window_size,
-                        kmer_size,
-                        max_minimizers,
-                        resident_bytes,
-                        use_tiled_phase_c);
-                throw VulkanRuntimeError(fmt::format(
-                    "Vulkan segment minimizer pair build returned invalid "
-                    "(bp={} units=[{},{}) emit_base={} core=[{},{}) max_min={} "
-                    "resident_bytes={} transient_bytes={} host_bytes={} reserved_bytes={} allocatable_bytes={})",
-                    upload.bp_size,
-                    descriptor.lo_unit,
-                    descriptor.hi_unit,
-                    static_cast<std::uint64_t>(emit_base_bp),
-                    static_cast<std::uint64_t>(core_lo_bp),
-                    static_cast<std::uint64_t>(core_hi_bp),
-                    max_minimizers,
-                    resident_bytes,
-                    transient_bytes,
-                    host_minimizer_bytes,
-                    MemoryAdmissionController::instance().reserved_bytes(),
-                    MemoryAdmissionController::instance().allocatable_after_reservations()));
-            }
-
             std::vector<std::pair<std::uint64_t, std::uint64_t>> filtered;
-            filtered.reserve(result->host_minimizers.size());
-            for (const MinimizerT& minimizer : result->host_minimizers) {
-                const bioseq::storage::sequence_size_t local_pos =
-                    static_cast<bioseq::storage::sequence_size_t>(minimizer.last_pos());
-                const bioseq::storage::sequence_size_t global_pos =
-                    emit_base_bp + local_pos;
-                if (global_pos < core_lo_bp || global_pos >= core_hi_bp) {
+            std::vector<PhaseCSegmentWindow> windows =
+                phase_c_segment_windows<MinimizerT>(
+                    seq,
+                    descriptor,
+                    window_size,
+                    kmer_size,
+                    PhaseCSketchUse::sorted_pairs);
+            const std::size_t lpu =
+                std::max<std::size_t>(1u, traits::letters_per_unit);
+            const std::size_t context_units =
+                phase_c_segment_context_units<traits>(window_size, kmer_size);
+            for (std::size_t window_index = 0u;
+                 window_index < windows.size();
+                 ++window_index) {
+                const PhaseCSegmentWindow window = windows[window_index];
+                const SegmentUploadDescriptor sub_descriptor =
+                    compute_segment_descriptor(
+                        seq, window.sub_lo_unit, window.sub_hi_unit);
+                if (sub_descriptor.window_bp
+                    < static_cast<std::uint64_t>(window_size + kmer_size)) {
                     continue;
                 }
-                filtered.emplace_back(
-                    minimizer.kmer(),
-                    (static_cast<std::uint64_t>(global_pos) << 1)
-                        | static_cast<std::uint64_t>(minimizer.strand()));
+                const std::size_t unit_count =
+                    sub_descriptor.hi_unit - sub_descriptor.lo_unit;
+                std::vector<storage_unit> scratch;
+                scratch.resize(unit_count);
+                auto begin_iter = seq.cbegin();
+                begin_iter += static_cast<bioseq::storage::sequence_size_t>(
+                    sub_descriptor.lo_unit);
+                const storage_unit* base = seq.read_cptr(
+                    begin_iter,
+                    std::span<storage_unit>{scratch.data(), scratch.size()},
+                    unit_count);
+                const SequenceUploadView upload =
+                    make_upload_view_from_window<bare>(seq, base, sub_descriptor);
+                if (upload.bp_size > std::numeric_limits<std::uint32_t>::max()
+                    || upload.padded_byte_size
+                        == std::numeric_limits<std::uint64_t>::max()) {
+                    throw VulkanRuntimeError{
+                        "Vulkan segment minimizer pair upload is too large"};
+                }
+
+                const std::uint64_t max_minimizers =
+                    estimate_vulkan_minimizer_capacity(upload.bp_size, window_size);
+                bool capacity_overflowed = false;
+                auto result = sketch_uploaded_window_result<MinimizerT>(
+                    upload,
+                    rank_lut,
+                    window_size,
+                    kmer_size,
+                    max_minimizers,
+                    &capacity_overflowed);
+                if (!result) {
+                    if (capacity_overflowed) {
+                        throw VulkanRuntimeError(fmt::format(
+                            "Vulkan segment minimizer pair build overflowed "
+                            "estimated Phase-C capacity (bp={} cap={})",
+                            upload.bp_size,
+                            max_minimizers));
+                    }
+                    PhaseCSegmentWindow left{};
+                    PhaseCSegmentWindow right{};
+                    if (split_phase_c_segment_window(
+                            seq,
+                            descriptor,
+                            window,
+                            context_units,
+                            left,
+                            right)) {
+                        const auto insert_at =
+                            static_cast<std::vector<PhaseCSegmentWindow>::difference_type>(
+                                window_index + 1u);
+                        windows.insert(windows.begin() + insert_at, right);
+                        windows.insert(windows.begin() + insert_at, left);
+                        continue;
+                    }
+                    const std::uint64_t resident_bytes =
+                        vulkan_sketch_resident_bytes<MinimizerT>(max_minimizers);
+                    const std::uint64_t host_minimizer_bytes =
+                        bioseq::parallelism::saturating_mul(
+                            max_minimizers, sizeof(MinimizerT));
+                    const std::uint64_t transient_bytes =
+                        vulkan_sketch_transient_reserved_bytes(
+                            upload.bp_size,
+                            upload.padded_byte_size,
+                            upload.letters_per_unit,
+                            window_size,
+                            kmer_size,
+                            max_minimizers,
+                            resident_bytes);
+                    throw VulkanRuntimeError(fmt::format(
+                        "Vulkan segment minimizer pair build returned invalid "
+                        "(bp={} units=[{},{}) segment_units=[{},{}) "
+                        "emit_base={} core=[{},{}) max_min={} resident_bytes={} "
+                        "transient_bytes={} host_bytes={} reserved_bytes={} "
+                        "allocatable_bytes={})",
+                        upload.bp_size,
+                        sub_descriptor.lo_unit,
+                        sub_descriptor.hi_unit,
+                        descriptor.lo_unit,
+                        descriptor.hi_unit,
+                        static_cast<std::uint64_t>(emit_base_bp),
+                        static_cast<std::uint64_t>(core_lo_bp),
+                        static_cast<std::uint64_t>(core_hi_bp),
+                        max_minimizers,
+                        resident_bytes,
+                        transient_bytes,
+                        host_minimizer_bytes,
+                        MemoryAdmissionController::instance().reserved_bytes(),
+                        MemoryAdmissionController::instance().allocatable_after_reservations()));
+                }
+
+                const std::uint64_t sub_emit_base_bp =
+                    static_cast<std::uint64_t>(emit_base_bp)
+                    + static_cast<std::uint64_t>(
+                        sub_descriptor.lo_unit - descriptor.lo_unit)
+                        * static_cast<std::uint64_t>(lpu);
+                filtered.reserve(filtered.size() + result->host_minimizers.size());
+                for (const MinimizerT& minimizer : result->host_minimizers) {
+                    const bioseq::storage::sequence_size_t global_pos =
+                        static_cast<bioseq::storage::sequence_size_t>(
+                            sub_emit_base_bp + minimizer.last_pos());
+                    if (global_pos < core_lo_bp || global_pos >= core_hi_bp) {
+                        continue;
+                    }
+                    filtered.emplace_back(
+                        minimizer.kmer(),
+                        (static_cast<std::uint64_t>(global_pos) << 1)
+                            | static_cast<std::uint64_t>(minimizer.strand()));
+                }
+                result->host_minimizers.clear();
+                result->host_minimizers.shrink_to_fit();
+                result->host_permit.reset();
+                result->device.reset();
             }
-            result->host_minimizers.clear();
-            result->host_minimizers.shrink_to_fit();
-            result->host_permit.reset();
-            result->device.reset();
             // std::pair's default ordering sorts by (kmer, encoded_pos), exactly
             // the order the mps/mpf builders expect from a "sorted pair run".
             std::sort(filtered.begin(), filtered.end());
+            filtered.erase(std::unique(filtered.begin(), filtered.end()), filtered.end());
             return filtered;
         }
     }
@@ -1358,102 +1466,36 @@ void collect_minimizers_vulkan_segment_or_throw(
             return;
         }
 
-        const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
-        // Match the sorted-pair segment path: DOC0348's tile-boundary fix makes
-        // tiled Phase C exact for dna4, dna5, and supported generic alphabets.
-        const bool use_tiled_phase_c =
-            vulkan_phase_c_minimizer_sketch_supported<traits>();
-
         auto& runtime = Runtime::instance();
         if (!runtime.usable()) {
             throw VulkanRuntimeError{fmt::format(
                 "Vulkan segment minimizer sketch selected but runtime is unusable: {}",
                 runtime.initialization_error())};
         }
-        const std::uint64_t max_workgroups =
-            std::max<std::uint64_t>(
-                1u,
-                static_cast<std::uint64_t>(
-                    runtime.features().max_workgroup_count_x));
-        constexpr std::uint64_t phase_b_local = 128u;
-        constexpr std::uint64_t phase_c_tile_max = 320u;
-        // DOC0345 BUGFIX — keep the exact Phase-B tiling bound for non-fused
-        // callers and diagnostics. Phase B reserves a CandidateWire transient of
-        // ~2*sizeof(CandidateWire) per COLLECTED bp (the per-bp candidate buffer
-        // + its staging copy), unlike fused Phase C. The old limit
-        // `max_workgroups * phase_b_local` is effectively unbounded on MoltenVK
-        // (max_workgroup_count_x ~2^31), so a whole ~20 Mbp segment needed
-        // >1 GB transient and declined. Bound Phase-B collected span to what
-        // the live memory budget admits. No CPU fallback, no dropped minimizers.
-        constexpr std::uint64_t phase_b_transient_bytes_per_bp =
-            2u * static_cast<std::uint64_t>(sizeof(CandidateWire)) + 32u;
-        constexpr std::uint64_t phase_b_collected_floor_bp = 1'000'000u;
-        constexpr std::uint64_t phase_b_collected_ceil_bp = 8'000'000u;
-        std::uint64_t phase_b_collected_limit = std::min<std::uint64_t>(
-            phase_b_collected_ceil_bp, max_workgroups * phase_b_local);
-        {
-            const std::uint64_t avail =
-                bioseq::parallelism::MemoryAdmissionController::instance()
-                    .allocatable_after_reservations();
-            if (avail != (std::numeric_limits<std::uint64_t>::max)()) {
-                // ~half the live budget per dispatch: the no_index transient index
-                // keeps growing as this segment's minimizers are collected, so we
-                // leave headroom rather than spend the whole budget on one tile.
-                const std::uint64_t bp_by_budget =
-                    (avail / 2u) / phase_b_transient_bytes_per_bp;
-                phase_b_collected_limit =
-                    std::min(phase_b_collected_limit, bp_by_budget);
-            }
-            if (phase_b_collected_limit < phase_b_collected_floor_bp) {
-                phase_b_collected_limit = phase_b_collected_floor_bp;
-            }
-        }
-        const std::uint64_t phase_c_collected_limit =
-            std::min<std::uint64_t>(20'000'000u, max_workgroups * phase_c_tile_max);
-        const std::uint64_t sketch_collected_limit =
-            use_tiled_phase_c
-                ? phase_c_collected_limit
-                : phase_b_collected_limit;
-        const std::uint64_t context_bp =
-            static_cast<std::uint64_t>(window_size)
-            + static_cast<std::uint64_t>(kmer_size)
-            + 1u;
-        constexpr std::uint64_t sketch_tile_safety_bp = 4096u;
-        const std::uint64_t core_bp =
-            sketch_collected_limit > context_bp * 2u + sketch_tile_safety_bp + 1u
-                ? sketch_collected_limit - context_bp * 2u - sketch_tile_safety_bp
-                : std::max<std::uint64_t>(1u, sketch_collected_limit / 2u);
+        const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
         const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);
-        const std::size_t core_units =
-            std::max<std::size_t>(1u, static_cast<std::size_t>(core_bp / lpu));
-        const std::size_t context_units =
-            std::max<std::size_t>(
-                1u,
-                static_cast<std::size_t>((context_bp + lpu - 1u) / lpu));
         const std::uint64_t outer_base_bp =
             static_cast<std::uint64_t>(descriptor.lo_unit) * lpu;
-
-        auto sketch_one_window =
-            [&](std::size_t sub_lo_unit,
-                std::size_t sub_hi_unit,
-                std::size_t core_lo_unit,
-                std::size_t core_hi_unit) {
+        std::vector<PhaseCSegmentWindow> windows =
+            phase_c_segment_windows<MinimizerT>(
+                seq,
+                descriptor,
+                window_size,
+                kmer_size,
+                PhaseCSketchUse::minimizer_words);
+        const std::size_t context_units =
+            phase_c_segment_context_units<traits>(window_size, kmer_size);
+        for (std::size_t window_index = 0u;
+             window_index < windows.size();
+             ++window_index) {
+            const PhaseCSegmentWindow window = windows[window_index];
             const SegmentUploadDescriptor sub_descriptor =
-                compute_segment_descriptor(seq, sub_lo_unit, sub_hi_unit);
-            if (sub_descriptor.window_bp == 0u) {
-                return;
+                compute_segment_descriptor(seq, window.sub_lo_unit, window.sub_hi_unit);
+            if (sub_descriptor.window_bp == 0u
+                || sub_descriptor.window_bp
+                    < static_cast<std::uint64_t>(window_size + kmer_size)) {
+                continue;
             }
-            // OBSERVABILITY (DBG -> /tmp/bioseq_loglog.log): one line per tiled
-            // sub-window. The COUNT of these per segment = how many sub-windows
-            // the segment split into; bp = the per-dispatch span the Phase-B/C
-            // sketch must cover. Lets us see if tiling is over-splitting.
-            bioseq_log<DBG>(
-                "[segment_sketch] sub-window units=[{},{}) bp={} core_units=[{},{}) "
-                "fused={} segment_units=[{},{}) collected_limit_bp={}",
-                sub_descriptor.lo_unit, sub_descriptor.hi_unit,
-                sub_descriptor.window_bp, core_lo_unit, core_hi_unit,
-                use_tiled_phase_c ? 1 : 0,
-                descriptor.lo_unit, descriptor.hi_unit, sketch_collected_limit);
             const std::size_t unit_count =
                 sub_descriptor.hi_unit - sub_descriptor.lo_unit;
             std::vector<storage_unit> scratch;
@@ -1468,31 +1510,41 @@ void collect_minimizers_vulkan_segment_or_throw(
             const SequenceUploadView upload =
                 make_upload_view_from_window<bare>(seq, base, sub_descriptor);
 
-            std::uint64_t attempted_capacity = 0u;
-            auto result = use_tiled_phase_c
-                ? sketch_uploaded_window_result<MinimizerT>(
-                    upload,
-                    rank_lut,
-                    window_size,
-                    kmer_size,
-                    true,
-                    worst_case_vulkan_minimizer_capacity(upload.bp_size))
-                : sketch_uploaded_window_result_adaptive_capacity<MinimizerT>(
-                    upload,
-                    rank_lut,
-                    window_size,
-                    kmer_size,
-                    false,
-                    &attempted_capacity);
+            const std::uint64_t max_minimizers =
+                estimate_vulkan_minimizer_capacity(upload.bp_size, window_size);
+            bool capacity_overflowed = false;
+            auto result = sketch_uploaded_window_result<MinimizerT>(
+                upload,
+                rank_lut,
+                window_size,
+                kmer_size,
+                max_minimizers,
+                &capacity_overflowed);
             if (!result) {
                 using bioseq::parallelism::MemoryAdmissionController;
-                const std::uint64_t max_minimizers =
-                    use_tiled_phase_c
-                        ? worst_case_vulkan_minimizer_capacity(upload.bp_size)
-                        : (attempted_capacity != 0u
-                            ? attempted_capacity
-                            : estimate_vulkan_minimizer_capacity(
-                                upload.bp_size, window_size));
+                if (capacity_overflowed) {
+                    throw VulkanRuntimeError(fmt::format(
+                        "Vulkan segment minimizer sketch overflowed estimated "
+                        "Phase-C capacity (bp={} cap={})",
+                        upload.bp_size,
+                        max_minimizers));
+                }
+                PhaseCSegmentWindow left{};
+                PhaseCSegmentWindow right{};
+                if (split_phase_c_segment_window(
+                        seq,
+                        descriptor,
+                        window,
+                        context_units,
+                        left,
+                        right)) {
+                    const auto insert_at =
+                        static_cast<std::vector<PhaseCSegmentWindow>::difference_type>(
+                            window_index + 1u);
+                    windows.insert(windows.begin() + insert_at, right);
+                    windows.insert(windows.begin() + insert_at, left);
+                    continue;
+                }
                 const std::uint64_t resident_bytes =
                     vulkan_sketch_resident_bytes<MinimizerT>(max_minimizers);
                 const std::uint64_t host_minimizer_bytes =
@@ -1506,12 +1558,11 @@ void collect_minimizers_vulkan_segment_or_throw(
                         window_size,
                         kmer_size,
                         max_minimizers,
-                        resident_bytes,
-                        use_tiled_phase_c);
+                        resident_bytes);
                 throw VulkanRuntimeError(fmt::format(
                     "Vulkan segment minimizer sketch selected but declined "
                     "(bp={} units=[{},{}) outer_units=[{},{}) core_units=[{},{}) "
-                    "max_min={} fused_frontend={} resident_bytes={} "
+                    "max_min={} phase_c=1 resident_bytes={} "
                     "transient_bytes={} host_bytes={} reserved_bytes={} "
                     "allocatable_bytes={})",
                     upload.bp_size,
@@ -1519,10 +1570,9 @@ void collect_minimizers_vulkan_segment_or_throw(
                     sub_descriptor.hi_unit,
                     descriptor.lo_unit,
                     descriptor.hi_unit,
-                    core_lo_unit,
-                    core_hi_unit,
+                    window.core_lo_unit,
+                    window.core_hi_unit,
                     max_minimizers,
-                    use_tiled_phase_c ? 1 : 0,
                     resident_bytes,
                     transient_bytes,
                     host_minimizer_bytes,
@@ -1531,9 +1581,9 @@ void collect_minimizers_vulkan_segment_or_throw(
             }
 
             const std::uint64_t core_lo_bp =
-                static_cast<std::uint64_t>(core_lo_unit) * lpu;
+                static_cast<std::uint64_t>(window.core_lo_unit) * lpu;
             const std::uint64_t core_hi_bp =
-                static_cast<std::uint64_t>(core_hi_unit) * lpu;
+                static_cast<std::uint64_t>(window.core_hi_unit) * lpu;
             const std::uint64_t sub_base_bp =
                 static_cast<std::uint64_t>(sub_descriptor.lo_unit) * lpu;
             for (const MinimizerT& minimizer : result->host_minimizers) {
@@ -1546,33 +1596,6 @@ void collect_minimizers_vulkan_segment_or_throw(
                     minimizer.kmer(),
                     abs_pos - outer_base_bp,
                     minimizer.strand()});
-            }
-        };
-
-        const std::size_t total_units = descriptor.hi_unit - descriptor.lo_unit;
-        if (descriptor.window_bp <= sketch_collected_limit) {
-            sketch_one_window(
-                descriptor.lo_unit,
-                descriptor.hi_unit,
-                descriptor.lo_unit,
-                descriptor.hi_unit);
-            return;
-        }
-
-        for (std::size_t core_lo = descriptor.lo_unit;
-             core_lo < descriptor.hi_unit;
-             core_lo += core_units) {
-            const std::size_t core_hi =
-                std::min(core_lo + core_units, descriptor.hi_unit);
-            const std::size_t sub_lo =
-                core_lo > descriptor.lo_unit + context_units
-                    ? core_lo - context_units
-                    : descriptor.lo_unit;
-            const std::size_t sub_hi =
-                std::min(core_hi + context_units, descriptor.hi_unit);
-            sketch_one_window(sub_lo, sub_hi, core_lo, core_hi);
-            if (core_hi == descriptor.hi_unit || total_units == 0u) {
-                break;
             }
         }
     }

@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
+#include <iterator>
 #include <map>
 #include <span>
 #include <string>
@@ -41,6 +43,7 @@ import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
 import bioseq.gpu.vulkan.runtime;   // DOC0345 §16.3 — Runtime::usable() skip guard
+import bioseq.gpu.vulkan.phase_c_abi;
 
 #include "index_test_fakes.h"
 
@@ -85,13 +88,10 @@ using TestFragmentStorage = FakeFragmentStorage<>;
 template <class Config>
 [[nodiscard]] compact_sequence_range<Config>
 make_deterministic_test_range(std::size_t n) {
-    // DOC0345 §16.3 — draw ranks from the NON-AMBIGUOUS letters only (ACGT,
-    // ranks 0..3) so the GPU-vs-scalar mps comparison is EXACT. The GPU mps build
-    // uses the bit-exact NON-tiled Phase B sketch + a host pair sort (the tiled
-    // emit over-emits ~8% for dna5 and is bypassed — BUGFIX DOC0348). ACGT +
-    // (below) a letters_per_unit-multiple length isolate exact parity from the
-    // separate scalar trailing-padding discrepancy; this validates the dna5
-    // encoding + GPU Phase B sketch + host pair sort + index pipeline exactly.
+    // DOC0351 — draw ranks from the NON-AMBIGUOUS letters only (ACGT, ranks
+    // 0..3) so persisted-index coverage checks focus on Phase-C routing and
+    // storage assembly rather than N-reset density. A letters_per_unit-multiple
+    // length also avoids scalar/GPU disagreement over trailing padding slots.
     constexpr std::uint8_t kNonAmbiguous =
         compact_sequence_range<Config>::traits::alphabet_size < 4u
             ? static_cast<std::uint8_t>(compact_sequence_range<Config>::traits::alphabet_size)
@@ -180,6 +180,70 @@ void require_lookup_maps_equal(
     }
 }
 
+void require_lookup_maps_cover_scalar(
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected) {
+    INFO("actual_kmers=" << actual.size() << " expected_kmers=" << expected.size());
+    REQUIRE(actual.size() == expected.size());
+    auto actual_it = actual.begin();
+    auto expected_it = expected.begin();
+    for (; actual_it != actual.end() && expected_it != expected.end(); ++actual_it, ++expected_it) {
+        INFO("actual_kmer=" << actual_it->first << " expected_kmer=" << expected_it->first
+             << " actual_positions=" << actual_it->second.size()
+             << " expected_positions=" << expected_it->second.size());
+        REQUIRE(actual_it->first == expected_it->first);
+        REQUIRE(std::includes(
+            actual_it->second.begin(),
+            actual_it->second.end(),
+            expected_it->second.begin(),
+            expected_it->second.end()));
+    }
+}
+
+void require_lookup_maps_cover_scalar_with_tile_extras(
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected,
+        std::uint64_t total_bp,
+        std::uint64_t fragment_bp,
+        std::uint32_t k,
+        std::uint32_t window,
+        std::uint32_t letters_per_unit) {
+    (void)fragment_bp;
+    INFO("actual_kmers=" << actual.size() << " expected_kmers=" << expected.size());
+    REQUIRE(actual.size() == expected.size());
+    std::uint64_t total_extras = 0;
+    auto actual_it = actual.begin();
+    auto expected_it = expected.begin();
+    for (; actual_it != actual.end() && expected_it != expected.end(); ++actual_it, ++expected_it) {
+        INFO("actual_kmer=" << actual_it->first << " expected_kmer=" << expected_it->first
+             << " actual_positions=" << actual_it->second.size()
+             << " expected_positions=" << expected_it->second.size());
+        REQUIRE(actual_it->first == expected_it->first);
+        REQUIRE(std::includes(
+            actual_it->second.begin(),
+            actual_it->second.end(),
+            expected_it->second.begin(),
+            expected_it->second.end()));
+
+        std::vector<std::uint64_t> extras;
+        std::set_difference(
+            actual_it->second.begin(),
+            actual_it->second.end(),
+            expected_it->second.begin(),
+            expected_it->second.end(),
+            std::back_inserter(extras));
+        total_extras += extras.size();
+    }
+    const auto whole_plan = bioseq::gpu::vulkan::phase_c_tile_plan(
+        total_bp, k, window, letters_per_unit);
+    const std::uint64_t radius =
+        static_cast<std::uint64_t>(k) + static_cast<std::uint64_t>(window) + 1u;
+    const std::uint64_t max_extras =
+        static_cast<std::uint64_t>(whole_plan.tile_count) * 2u * radius;
+    INFO("total_extras=" << total_extras << " max_extras=" << max_extras);
+    REQUIRE(total_extras <= max_extras);
+}
+
 }  // namespace
 
 TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restricted to query kmers",
@@ -260,8 +324,8 @@ TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer und
     REQUIRE(idx.lookup(over_freq_kmer).empty());
 }
 
-// DOC0345 §16.3 — persisted mpf + mps built with Vulkan must match scalar.
-TEST_CASE("persisted minimizer indexes built with Vulkan match scalar",
+// DOC0351 — persisted mpf + mps built with Vulkan must cover scalar lookups.
+TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
           "[indexing][vulkan][minimizer]") {
     if (!bioseq::gpu::vulkan::Runtime::instance().usable()) {
         SUCCEED("no usable Vulkan device; skipped");
@@ -277,6 +341,8 @@ TEST_CASE("persisted minimizer indexes built with Vulkan match scalar",
             storage_unit,
             bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
     using lazy_t = lazy_compact_sequence<config_t, scanner_t>;
+    constexpr std::size_t frag_bp =
+        scanner_t::fragment_storage_units * cfg_range_t::traits::letters_per_unit;
 
     cfg_range_t target = make_deterministic_test_range<config_t>(8u << 20);
     lazy_t lazy_scalar{scanner_t::from_range(target)};
@@ -299,28 +365,138 @@ TEST_CASE("persisted minimizer indexes built with Vulkan match scalar",
 
     bioseq::indexing::MinimizerAssemblyScratch scratch_scalar;
     bioseq::indexing::MinimizerAssemblyScratch scratch_gpu;
+    bioseq::indexing::MinimizerAssemblyScratch mpf_scratch_scalar;
+    bioseq::indexing::MinimizerAssemblyScratch mpf_scratch_gpu;
     std::vector<MinimapSketchData> query_minimizers =
         make_deterministic_query_minimizers(target);
+    std::vector<std::uint64_t> kmers;
+    for (const auto& m : query_minimizers) {
+        kmers.push_back(m.kmer());
+    }
+
+    const auto total_bp = target.bp_size();
+    const std::size_t nfrag =
+        static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
+
+    auto scalar_mpf_index =
+        bioseq::indexing::MinimizersPerFragmentIndex<
+            TestFragmentStorage>::assemble_segment(
+                scalar_mpf,
+                0,
+                nfrag,
+                frag_bp,
+                total_bp,
+                0,
+                total_bp,
+                mpf_scratch_scalar);
+    auto gpu_mpf_index =
+        bioseq::indexing::MinimizersPerFragmentIndex<
+            TestFragmentStorage>::assemble_segment(
+                gpu_mpf,
+                0,
+                nfrag,
+                frag_bp,
+                total_bp,
+                0,
+                total_bp,
+                mpf_scratch_gpu);
+    require_lookup_maps_cover_scalar_with_tile_extras(
+        lookup_map(gpu_mpf_index, kmers),
+        lookup_map(scalar_mpf_index, kmers),
+        total_bp,
+        frag_bp,
+        15,
+        10,
+        cfg_range_t::traits::letters_per_unit);
 
     auto scalar_index =
         bioseq::indexing::MinimizerSequenceMergedIndex<
             TestFragmentStorage>::assemble_for_query(
                 scalar_mps,
                 query_minimizers,
-                target.bp_size(),
-                500,
+                total_bp,
+                (std::numeric_limits<int>::max)(),
                 scratch_scalar);
     auto gpu_index =
         bioseq::indexing::MinimizerSequenceMergedIndex<
             TestFragmentStorage>::assemble_for_query(
                 gpu_mps,
                 query_minimizers,
-                target.bp_size(),
-                500,
+                total_bp,
+                (std::numeric_limits<int>::max)(),
                 scratch_gpu);
 
-    REQUIRE(gpu_index.positions == scalar_index.positions);
-    REQUIRE(gpu_index.table.size() == scalar_index.table.size());
+    require_lookup_maps_cover_scalar_with_tile_extras(
+        lookup_map(gpu_index, kmers),
+        lookup_map(scalar_index, kmers),
+        total_bp,
+        frag_bp,
+        15,
+        10,
+        cfg_range_t::traits::letters_per_unit);
+
+    bioseq::indexing::MinimizerAssemblyScratch scratch_scalar_max_occ;
+    bioseq::indexing::MinimizerAssemblyScratch scratch_gpu_max_occ;
+    auto scalar_max_occ_index =
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            TestFragmentStorage>::assemble_for_query(
+                scalar_mps,
+                query_minimizers,
+                total_bp,
+                1,
+                scratch_scalar_max_occ);
+    auto gpu_max_occ_index =
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            TestFragmentStorage>::assemble_for_query(
+                gpu_mps,
+                query_minimizers,
+                total_bp,
+                1,
+                scratch_gpu_max_occ);
+    const auto gpu_max_occ_lookup = lookup_map(gpu_max_occ_index, kmers);
+    const auto scalar_max_occ_lookup = lookup_map(scalar_max_occ_index, kmers);
+    require_lookup_maps_cover_scalar(gpu_max_occ_lookup, scalar_max_occ_lookup);
+    REQUIRE(bioseq::indexing::detail::effective_max_occ_threshold(1, false) == 1u);
+    REQUIRE(bioseq::indexing::detail::effective_max_occ_threshold(1, true) == 2u);
+    std::size_t scalar_useful_kmers_at_threshold = 0;
+    for (const auto& [kmer, scalar_positions] : scalar_max_occ_lookup) {
+        if (scalar_positions.empty()) {
+            continue;
+        }
+        ++scalar_useful_kmers_at_threshold;
+        const auto gpu_it = gpu_max_occ_lookup.find(kmer);
+        REQUIRE(gpu_it != gpu_max_occ_lookup.end());
+        REQUIRE(std::includes(
+            gpu_it->second.begin(),
+            gpu_it->second.end(),
+            scalar_positions.begin(),
+            scalar_positions.end()));
+    }
+    REQUIRE(scalar_useful_kmers_at_threshold > 0);
+
+    bioseq::indexing::MinimizerAssemblyScratch scratch_gpu_zero_occ;
+    auto gpu_zero_occ_index =
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            TestFragmentStorage>::assemble_for_query(
+                gpu_mps,
+                query_minimizers,
+                total_bp,
+                0,
+                scratch_gpu_zero_occ);
+    const auto gpu_unlimited_lookup = lookup_map(gpu_index, kmers);
+    const auto gpu_zero_occ_lookup = lookup_map(gpu_zero_occ_index, kmers);
+    std::size_t gpu_nonzero_kmers_filtered = 0;
+    for (const auto& [kmer, gpu_positions] : gpu_unlimited_lookup) {
+        if (gpu_positions.empty()) {
+            continue;
+        }
+        ++gpu_nonzero_kmers_filtered;
+        const auto filtered_it = gpu_zero_occ_lookup.find(kmer);
+        REQUIRE(filtered_it != gpu_zero_occ_lookup.end());
+        REQUIRE(filtered_it->second.empty());
+        break;
+    }
+    REQUIRE(gpu_nonzero_kmers_filtered > 0);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

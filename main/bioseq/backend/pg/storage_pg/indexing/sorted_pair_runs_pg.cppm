@@ -98,6 +98,9 @@ static_assert(alignof(SortedPairWire) == alignof(std::uint64_t));
 static_assert(offsetof(SortedPairWire, kmer) == 0);
 static_assert(offsetof(SortedPairWire, encoded) == 8);
 
+inline constexpr std::uint64_t kTargetPositionBatchBytes = std::uint64_t{8} << 20;
+inline constexpr std::uint64_t kMinPositionBatchBytes = std::uint64_t{32} << 10;
+
 template <class T>
 void release_vector_storage_noexcept(std::vector<T>& values) noexcept {
     try {
@@ -172,6 +175,7 @@ struct PositionAccumulator {
     BufFile* spill = nullptr;
     std::uint64_t total = 0;
     std::uint64_t spilled_bytes = 0;
+    bool resident_batch_ready = false;
 
     void reset_for_kmer() {
         resident.clear();
@@ -184,18 +188,35 @@ struct PositionAccumulator {
     }
 
     void ensure_resident_batch() {
-        if (resident_permit) {
+        if (resident_batch_ready) {
             return;
         }
-        constexpr std::uint64_t kPositionBatchBytes = std::uint64_t{8} << 20;
-        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-            .try_reserve(kPositionBatchBytes);
-        if (!permit) {
-            bioseq_log<ERR, PG>( "bioseq sorted runs: could not admit position batch");
+        auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+        std::uint64_t batch_bytes = kTargetPositionBatchBytes;
+        const std::uint64_t available = admission.allocatable_after_reservations();
+        if (available != (std::numeric_limits<std::uint64_t>::max)()) {
+            batch_bytes = std::min(batch_bytes, available);
         }
-        resident.reserve(kPositionBatchBytes / sizeof(std::uint64_t));
-        read_buffer.reserve(kPositionBatchBytes / sizeof(std::uint64_t));
-        resident_permit = std::move(*permit);
+        batch_bytes = std::max(batch_bytes, kMinPositionBatchBytes);
+        for (;;) {
+            if (auto permit = admission.try_reserve(batch_bytes)) {
+                resident.reserve(batch_bytes / sizeof(std::uint64_t));
+                read_buffer.reserve(batch_bytes / sizeof(std::uint64_t));
+                resident_permit = std::move(*permit);
+                resident_batch_ready = true;
+                return;
+            }
+            if (batch_bytes == kMinPositionBatchBytes) {
+                break;
+            }
+            batch_bytes = std::max(batch_bytes / 2, kMinPositionBatchBytes);
+        }
+        // Keep the cursor usable when resident sorted runs have consumed the
+        // formal admission budget. This is a fixed 32 KiB scratch batch; larger
+        // k-mer hit lists still spill through BufFile in the usual way.
+        resident.reserve(kMinPositionBatchBytes / sizeof(std::uint64_t));
+        read_buffer.reserve(kMinPositionBatchBytes / sizeof(std::uint64_t));
+        resident_batch_ready = true;
     }
 
     void push_unique_encoded(std::uint64_t encoded) {
@@ -266,6 +287,7 @@ struct PositionAccumulator {
         }
         total = 0;
         spilled_bytes = 0;
+        resident_batch_ready = false;
     }
 };
 
@@ -636,7 +658,7 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
         return true;
     }
     const std::uint64_t reader_budget = merge_reader_budget_bytes_();
-    const std::uint64_t per_reader = std::clamp<std::uint64_t>(
+    std::uint64_t per_reader = std::clamp<std::uint64_t>(
         reader_budget / std::max<std::size_t>(1, file_runs_.size()),
         std::uint64_t{32} << 10,
         std::uint64_t{4} << 20);
@@ -647,9 +669,16 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
     auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
         .try_reserve(total_reader_bytes);
     if (!permit) {
-        return false;
+        if (file_runs_.size() > 1) {
+            return false;
+        }
+        // The store has already compacted to one file run. Keep the merge
+        // streaming with a fixed 32 KiB reader instead of failing a query after
+        // the large sorted runs consumed the formal admission budget.
+        per_reader = std::uint64_t{32} << 10;
+    } else {
+        resources.reader_budget_permit = std::move(*permit);
     }
-    resources.reader_budget_permit = std::move(*permit);
 
     for (BufFileRun& run : file_runs_) {
         if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {

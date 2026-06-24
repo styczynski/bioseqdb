@@ -75,10 +75,10 @@ struct FakeFragmentStorage {
         return h;
     }
     void validate_minimizer_directory_or_error(const char* p, std::size_t bytes) const {
-        if (bytes < 32) index_error("directory truncated");
+        if (bytes < 40) index_error("directory truncated");
         std::uint32_t magic{}, version{};
         std::memcpy(&magic, p, 4); std::memcpy(&version, p + 4, 4);
-        if (magic != 0xB1000002u || version != 1u) index_error("directory magic/version");
+        if (magic != 0xB1000002u || version != 2u) index_error("directory magic/version");
     }
     void validate_minimizer_chunk_metadata_or_error(index_sub_key_t sk, std::size_t chunk_no,
             std::size_t min_bytes, std::size_t /*alignment*/) const {
