@@ -2367,6 +2367,24 @@ void Runtime::download_locked(
     std::memcpy(bytes.data(), src.mapped, bytes.size());
 }
 
+// DIAG: RAII wall-clock for the GPU roundtrips. fprintf goes to backend stderr
+// (-> /tmp/pgr.log after a restart with `>/tmp/pgr.log 2>&1`). One line per call;
+// sum per-stage with awk to localize the e2e bottleneck.
+namespace {
+struct StageTimer {
+    const char* name;
+    std::uint64_t n;
+    std::uint64_t t0;
+    StageTimer(const char* nm, std::uint64_t nn)
+        : name(nm), n(nn), t0(bioseq::instr::clock::now_ns()) {}
+    ~StageTimer() {
+        const double ms = static_cast<double>(bioseq::instr::clock::now_ns() - t0) / 1.0e6;
+        std::fprintf(stderr, "[stagetime] %s n=%llu ms=%.1f\n",
+                     name, static_cast<unsigned long long>(n), ms);
+    }
+};
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // The one hot entry point
 // ---------------------------------------------------------------------------
@@ -2392,6 +2410,7 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
     float skip_penalty,
     std::int32_t max_chain_skip) {
     std::lock_guard<std::mutex> guard(mu_);
+    StageTimer _st_chain("chain", anchor_count);
 
     if (!features_.available) {
         throw VulkanRuntimeError("run_chaining_tiled_dp_roundtrip on unavailable device");
@@ -2402,6 +2421,25 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
             range_count, features_.max_workgroup_count_x));
     }
     DEBUG_ASSERT(transfer_scratch.valid(), "transfer scratch buffer must be allocated");
+
+    // DIAG: characterise the chaining workload — how many independent ranges
+    // (= dispatched workgroups) and the size of the biggest one (the single
+    // workgroup that owns the longest chain is the critical path).
+    {
+        std::uint32_t max_len = 0, big_ranges = 0;
+        const auto* rg = reinterpret_cast<const std::uint32_t*>(ranges_bytes.data());
+        const std::size_t rcount = ranges_bytes.size() / 8u;  // {begin,len} = 8 bytes
+        for (std::size_t i = 0; i < rcount; ++i) {
+            const std::uint32_t len = rg[i * 2u + 1u];
+            if (len > max_len) max_len = len;
+            if (len >= 4096u) ++big_ranges;
+        }
+        std::fprintf(stderr,
+                     "[chain_diag] anchors=%u ranges=%u max_range_len=%u ranges_ge_4096=%u "
+                     "tile=%u local=%u max_iter=%d max_skip=%d\n",
+                     anchor_count, range_count, max_len, big_ranges,
+                     key.tile_size, key.local_size, max_iter, max_chain_skip);
+    }
 
     const VkPipeline pipeline = create_pipeline_locked(key);
 
@@ -2738,6 +2776,7 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     std::uint64_t exact_anchor_count)
 {
     std::lock_guard<std::mutex> guard(mu_);
+    StageTimer _st_seedlookup("seed_lookup", 0);
     if (!features_.available) {
         throw VulkanRuntimeError("run_seed_lookup_roundtrip on unavailable device");
     }
@@ -3361,6 +3400,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     std::uint64_t max_minimizers)
 {
     std::lock_guard<std::mutex> guard(mu_);
+    StageTimer _st_sketch("sketch", params.bp_size);
     RuntimeSketchResult result;
     if (!features_.available) {
         throw VulkanRuntimeError("run_phase_c_sketch_roundtrip on unavailable device");
@@ -3556,6 +3596,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     std::lock_guard<std::mutex> guard(mu_);
     static const auto* _run_d = bioseq::instr::register_region_static("phase_c_index_run");
     auto _run_s = bioseq::instr::region(_run_d);
+    StageTimer _st_tgtbuild("tgt_build", params.bp_size);
     GpuBuiltIndex out;
     if (!features_.available) throw VulkanRuntimeError("run_phase_c_build_target_index on unavailable device");
     const std::uint32_t bp = params.bp_size;
@@ -4283,6 +4324,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     std::int32_t max_occ)
 {
     std::lock_guard<std::mutex> guard(mu_);
+    StageTimer _st_seed("seed", inputs.minimizer_count);
     SeedLookupResult result;
     if (!features_.available) throw VulkanRuntimeError("run_phase_c_seed_roundtrip on unavailable device");
     if (inputs.slots == nullptr || inputs.positions == nullptr) {

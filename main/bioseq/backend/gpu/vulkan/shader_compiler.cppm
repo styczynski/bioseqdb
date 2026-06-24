@@ -352,74 +352,36 @@ void main() {
     for (uint tile_begin = begin; tile_begin < end; tile_begin += TILE_SIZE_U) {
         uint tile_count = min(TILE_SIZE_U, end - tile_begin);
 
+        // Cross-tile lookback (the heavy stage). Each anchor independently scans its
+        // predecessors in EARLIER tiles of this range, [global_i-max_iter, tile_begin),
+        // which are already FINAL in global memory (tiles run in order within the one
+        // workgroup that owns the range). A single nearest-first scan with ONE
+        // max_chain_skip budget + an exact ref-distance break does O(n*max_skip) total
+        // work — matching minimap2 mg_lchain_dp / the SIMD path. This replaces the old
+        // "tail" that re-scanned every target from each of the ~max_iter/TILE_SIZE
+        // preceding tiles with the skip budget reset per tile (O(n*max_iter)).
         for (uint i = tid; i < tile_count; i += gl_WorkGroupSize.x) {
             uint global_i = tile_begin + i;
             AnchorWire a = anchors[global_i];
-            int64_t parent64 = predecessors[global_i];
-            int score = max(best_scores[global_i], int(anchor_span(a)));
-            sh_ref_position[i] = a.ref_position;
-            sh_query_position[i] = a.query_position;
-            sh_is_reverse[i] = a.is_reverse;
-            sh_span_flags_segment[i] = a.span_flags_segment;
-            sh_score[i] = score;
-            sh_parent[i] = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
-        }
-        barrier();
-
-        // G3SA-style prologue: all-to-all inside the tile. Predecessor rows
-        // advance in j order so sh_score[j] is already final when later anchors
-        // compare against j.
-        for (uint j = 0u; j < tile_count; ++j) {
-            for (uint k = j + 1u + tid; k < tile_count; k += gl_WorkGroupSize.x) {
-                if (k - j > uint(pc.max_iter)) continue;
-                int pair = chain_score(shared_anchor(k), shared_anchor(j));
-                if (pair == INVALID_SCORE) continue;
-                int total = pair + sh_score[j];
-                if (total >= sh_score[k]) {
-                    sh_score[k] = total;
-                    sh_parent[k] = tile_begin + j;
-                }
-            }
-            barrier();
-        }
-
-        // Tail update: targets after the tile compare against the tile's cached
-        // predecessors. We scan NEAREST-FIRST (highest index first; anchors are
-        // ref-sorted, so the highest index is the closest predecessor in ref).
-        // Nearest-first ordering enables two early exits that match the SIMD /
-        // minimap2 chaining (DOC0311): (1) an EXACT ref-distance break — once a
-        // predecessor's ref gap exceeds max_dist_x, chain_score would reject it
-        // and every farther predecessor too, so we stop; (2) minimap2's
-        // max_chain_skip — stop after K consecutive non-improving predecessors.
-        // Without these the tail is O(n*max_iter)=12s on XXL_HIFI; with them it is
-        // the same bounded O(n*max_skip) work the SIMD path does. Each range is
-        // owned by exactly one workgroup, so no atomics are needed.
-        uint tail_limit = min(end, tile_begin + TILE_SIZE_U + uint(pc.max_iter));
-        for (uint target_base = tile_begin + TILE_SIZE_U; target_base < tail_limit;
-             target_base += gl_WorkGroupSize.x) {
-            uint target = target_base + tid;
-            if (target >= tail_limit) continue;
-            AnchorWire cur = anchors[target];
-            int best = max(best_scores[target], int(anchor_span(cur)));
-            int64_t parent64 = predecessors[target];
-            uint best_parent = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
+            int best = max(best_scores[global_i], int(anchor_span(a)));
+            uint best_parent = NO_PARENT;
             int n_skip = 0;
-            for (uint jj = 0u; jj < tile_count; ++jj) {
-                uint j = tile_count - 1u - jj;            // nearest predecessor first
-                uint pred = tile_begin + j;
-                if (target - pred > uint(pc.max_iter)) break;
-                AnchorWire pa = shared_anchor(j);
-                if (anchor_reverse(cur) == anchor_reverse(pa)
-                    && cur.ref_position > pa.ref_position
-                    && cur.ref_position - pa.ref_position > uint64_t(pc.max_dist_x)) {
-                    break;  // exact: farther predecessors are all out of ref range
+            uint pred = tile_begin;            // exclusive upper bound; decremented first
+            while (pred > begin) {
+                pred -= 1u;
+                if (global_i - pred > uint(pc.max_iter)) break;   // anchor-count window
+                AnchorWire pa = anchors[pred];
+                if (anchor_reverse(a) == anchor_reverse(pa)
+                    && a.ref_position > pa.ref_position
+                    && a.ref_position - pa.ref_position > uint64_t(pc.max_dist_x)) {
+                    break;  // exact: every farther predecessor is also out of ref range
                 }
-                int pair = chain_score(cur, pa);
+                int pair = chain_score(a, pa);
                 if (pair == INVALID_SCORE) {
                     if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) break;
                     continue;
                 }
-                int total = pair + sh_score[j];
+                int total = pair + best_scores[pred];   // FINAL chain score of pred
                 if (total > best) {
                     best = total;
                     best_parent = pred;
@@ -428,10 +390,44 @@ void main() {
                     break;
                 }
             }
-            write_best(target, best, best_parent);
+            sh_ref_position[i] = a.ref_position;
+            sh_query_position[i] = a.query_position;
+            sh_is_reverse[i] = a.is_reverse;
+            sh_span_flags_segment[i] = a.span_flags_segment;
+            sh_score[i] = best;
+            sh_parent[i] = best_parent;
         }
-        memoryBarrierBuffer();
         barrier();
+
+        // Intra-tile prologue: fold in within-tile predecessors [tile_begin, global_i).
+        // Sources j advance in order so sh_score[j] (which already includes j's own
+        // cross-tile contribution from the stage above) is final before later anchors
+        // chain through it. The inner loop is bounded by the same exact ref-distance
+        // break: anchors are ref-sorted, so once this thread's target k leaves source
+        // j's max_dist_x ref window, every farther target of this thread leaves it too.
+        for (uint j = 0u; j < tile_count; ++j) {
+            uint64_t rj = sh_ref_position[j];
+            int sj = sh_score[j];
+            // Bound the within-tile reach: a source only chains to targets within
+            // max_iter anchors (DIAG knob — set via bioseq.aligner.max_chain_iter).
+            uint k_hi = min(tile_count, j + 1u + uint(pc.max_iter));
+            for (uint k = j + 1u + tid; k < k_hi; k += gl_WorkGroupSize.x) {
+                if (sh_ref_position[k] > rj
+                    && sh_ref_position[k] - rj > uint64_t(pc.max_dist_x)) break;
+                int pair = chain_score(shared_anchor(k), shared_anchor(j));
+                if (pair == INVALID_SCORE) continue;
+                int total = pair + sj;
+                if (total >= sh_score[k]) {
+                    sh_score[k] = total;
+                    sh_parent[k] = tile_begin + j;
+                }
+            }
+            barrier();
+        }
+
+        // (The old forward "tail" that pushed each tile's contribution to the next
+        // max_iter targets is gone: that cross-tile lookback is now pulled once per
+        // anchor in the stage above, so no target is re-scanned per preceding tile.)
 
         for (uint i = tid; i < tile_count; i += gl_WorkGroupSize.x) {
             uint global_i = tile_begin + i;
