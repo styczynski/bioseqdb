@@ -4,7 +4,7 @@
       "type": "stdio",
       "command": "/usr/local/bin/python3",
       "args": [
-        "/Users/piotr.styczynski/Code/bioseqdb/main/build_mcp/server.py"
+        "/Users/styczynski/Code/bioseqdb/main/build_mcp/server.py"
       ]
     }
   }

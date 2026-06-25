@@ -33,6 +33,7 @@ export module bioseq.indexing.minimizer_vulkan;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
+import bioseq.common.radix_sort;
 
 export namespace bioseq::indexing {
 
@@ -46,6 +47,7 @@ struct GpuMinimizerIndexUpload {
     std::vector<GpuMinimizerSlot> slots;
     std::vector<std::uint64_t> positions;
     std::uint64_t target_len = 0;
+    std::uint64_t table_size = 0;
     std::uint32_t slot_mask = 0;
 };
 
@@ -113,15 +115,29 @@ struct GpuIndexCacheIdentity {
     // Zero means a stable, non-mutated in-memory index in the current wave.
     // Nonzero means persisted assembly or segmented recompute identity.
     std::uint64_t assembly_identity = 0;
+    // Optional explicit shape for paths that preinsert a GPU-resident index
+    // without materialising the CPU table/positions vectors.
+    std::uint64_t table_size = 0;
+    std::uint64_t position_count = 0;
 };
 
 [[nodiscard]] inline GpuMinimizerIndexCacheKey make_gpu_index_cache_key(
     const MinimizerHashmapFragmentIndex& idx,
     GpuIndexCacheIdentity identity) noexcept
 {
-    return identity.assembly_identity == 0
-        ? make_gpu_index_cache_key_for_in_memory(idx)
-        : make_gpu_index_cache_key_for_assembly(idx, identity.assembly_identity);
+    if (identity.assembly_identity == 0) {
+        return make_gpu_index_cache_key_for_in_memory(idx);
+    }
+    if (identity.table_size != 0 || identity.position_count != 0) {
+        return GpuMinimizerIndexCacheKey{
+            .source_id = 0u,
+            .caller_identity = identity.assembly_identity,
+            .target_len = static_cast<std::uint64_t>(idx.target_len),
+            .table_size = identity.table_size,
+            .position_count = identity.position_count,
+        };
+    }
+    return make_gpu_index_cache_key_for_assembly(idx, identity.assembly_identity);
 }
 
 struct GpuResidentMinimizerIndex {
@@ -137,6 +153,7 @@ struct GpuResidentMinimizerIndex {
     // When zero, `slots` is the open-addressed table (CPU upload) and `slot_mask`
     // is the power-of-two mask.
     std::uint32_t bucket_count = 0;
+    std::uint64_t target_position_offset = 0;
 };
 
 [[nodiscard]] inline std::uint32_t gpu_slot_capacity(std::uint64_t distinct) {
@@ -186,6 +203,7 @@ build_gpu_minimizer_upload(const MinimizerHashmapFragmentIndex& idx) {
     upload.slots.resize(capacity);
     upload.positions = idx.positions;
     upload.target_len = idx.target_len;
+    upload.table_size = idx.table.size();
     upload.slot_mask = capacity - 1u;
 
     for (const auto& kv : idx.table) {
@@ -206,6 +224,64 @@ build_gpu_minimizer_upload(const MinimizerHashmapFragmentIndex& idx) {
                 slot.hash = hash;
                 slot.pos_offset = off;
                 slot.pos_count = cnt;
+                break;
+            }
+            p = (p + 1u) & upload.slot_mask;
+        }
+    }
+    return upload;
+}
+
+[[nodiscard]] inline GpuMinimizerIndexUpload
+build_gpu_minimizer_upload_from_pairs(
+    std::span<std::pair<std::uint64_t, std::uint64_t>> pairs,
+    sequence_size_t target_length)
+{
+    const std::size_t n = pairs.size();
+    if (n > std::numeric_limits<std::uint32_t>::max()) {
+        throw GpuIndexTooLarge{};
+    }
+    bioseq::sorting::radix_sort(
+        pairs.data(), pairs.data() + n,
+        [](const auto& p) noexcept { return p.first; });
+
+    std::uint64_t distinct = 0;
+    std::size_t i = 0;
+    while (i < n) {
+        const std::uint64_t kmer = pairs[i].first;
+        do { ++i; } while (i < n && pairs[i].first == kmer);
+        ++distinct;
+    }
+
+    const std::uint32_t capacity = gpu_slot_capacity(distinct);
+    GpuMinimizerIndexUpload upload;
+    upload.slots.resize(capacity);
+    upload.positions.resize(n);
+    upload.target_len = target_length;
+    upload.table_size = distinct;
+    upload.slot_mask = capacity - 1u;
+
+    i = 0;
+    while (i < n) {
+        const std::uint64_t hash = pairs[i].first;
+        const std::size_t begin = i;
+        do {
+            upload.positions[i] = pairs[i].second;
+            ++i;
+        } while (i < n && pairs[i].first == hash);
+        const std::size_t count = i - begin;
+        if (begin > std::numeric_limits<std::uint32_t>::max()
+            || count > std::numeric_limits<std::uint32_t>::max()) {
+            throw GpuIndexTooLarge{};
+        }
+        std::uint32_t p =
+            static_cast<std::uint32_t>(splitmix64(hash)) & upload.slot_mask;
+        for (;;) {
+            GpuMinimizerSlot& slot = upload.slots[p];
+            if (slot.pos_count == 0) {
+                slot.hash = hash;
+                slot.pos_offset = static_cast<std::uint32_t>(begin);
+                slot.pos_count = static_cast<std::uint32_t>(count);
                 break;
             }
             p = (p + 1u) & upload.slot_mask;
@@ -290,6 +366,29 @@ public:
         if (!handle) return;
         std::lock_guard<std::mutex> guard(mu_);
         insert_with_eviction_locked(key, handle);
+    }
+
+    [[nodiscard]] std::shared_ptr<const GpuResidentMinimizerIndex> insert_upload(
+        bioseq::gpu::vulkan::Runtime& runtime,
+        GpuMinimizerIndexUpload&& upload,
+        const GpuMinimizerIndexCacheKey& key,
+        bool cache_enabled)
+    {
+        std::lock_guard<std::mutex> guard(mu_);
+        if (cache_enabled) {
+            auto found = entries_.find(key);
+            if (found != entries_.end()) {
+                touch_lru_locked(key);
+                return found->second;
+            }
+        }
+
+        auto handle = upload_prepared_locked(runtime, upload, key);
+        if (!handle) return nullptr;
+        if (cache_enabled) {
+            insert_with_eviction_locked(key, handle);
+        }
+        return handle;
     }
 
     void erase(const GpuMinimizerIndexCacheKey& key) noexcept {
@@ -395,6 +494,49 @@ private:
         resident->slot_mask = upload.slot_mask;
         resident->position_count = static_cast<std::uint32_t>(upload.positions.size());
         // upload_permit released here (host vectors copied to device).
+        return resident;
+    }
+
+    [[nodiscard]] std::shared_ptr<const GpuResidentMinimizerIndex> upload_prepared_locked(
+        bioseq::gpu::vulkan::Runtime& runtime,
+        const GpuMinimizerIndexUpload& upload,
+        const GpuMinimizerIndexCacheKey& key)
+    {
+        using bioseq::parallelism::MemoryAdmissionController;
+        const std::uint64_t slot_bytes =
+            static_cast<std::uint64_t>(upload.slots.size()) * sizeof(GpuMinimizerSlot);
+        const std::uint64_t pos_bytes =
+            static_cast<std::uint64_t>(upload.positions.size()) * sizeof(std::uint64_t);
+        const std::uint64_t resident_bytes =
+            bioseq::gpu::vulkan::sat_add(slot_bytes, pos_bytes);
+        auto resident_permit =
+            MemoryAdmissionController::instance().try_reserve(resident_bytes);
+        if (!resident_permit) return nullptr;
+
+        constexpr VkBufferUsageFlags usage =
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        auto resident = std::make_shared<GpuResidentMinimizerIndex>();
+        resident->slots = runtime.create_device_buffer(std::max<std::uint64_t>(slot_bytes, 16u), usage);
+        resident->positions = runtime.create_device_buffer(std::max<std::uint64_t>(pos_bytes, 8u), usage);
+        if (resident->slots.mapped == nullptr || resident->positions.mapped == nullptr) {
+            return nullptr;
+        }
+        if (slot_bytes > 0) {
+            std::memcpy(resident->slots.mapped, upload.slots.data(),
+                        static_cast<std::size_t>(slot_bytes));
+        }
+        if (pos_bytes > 0) {
+            std::memcpy(resident->positions.mapped, upload.positions.data(),
+                        static_cast<std::size_t>(pos_bytes));
+        }
+        resident->permit = std::move(*resident_permit);
+        resident->key = key;
+        resident->target_len = upload.target_len;
+        resident->slot_mask = upload.slot_mask;
+        resident->position_count = static_cast<std::uint32_t>(upload.positions.size());
+        resident->bucket_count = 0u;
         return resident;
     }
 

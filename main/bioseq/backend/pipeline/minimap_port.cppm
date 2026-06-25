@@ -374,6 +374,7 @@ struct Minimap2Params {
             default:                                cp.chaining_mode = ChainingMode::SCALAR_DP; break;
         }
         cp.vulkan_enabled = vulkan_enabled;
+        cp.coordinate_only = !do_cigar && !compute_divergence && !compute_mapq;
         cp.prepare();
         return cp;
     }
