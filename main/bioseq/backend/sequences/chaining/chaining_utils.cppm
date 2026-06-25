@@ -323,6 +323,14 @@ struct ChainingParams {
     /// Algorithm fallback must be selected before entering the pipeline.
     bool    vulkan_enabled    = true;
 
+    /// True when downstream stages only need a mapped coordinate/strand result,
+    /// not the full secondary list or base-alignment metadata. The scalar/SIMD
+    /// chaining backends ignore this hint; the Vulkan backend uses it to keep the
+    /// selected GPU coordinate path from spending CPU time backtracking every
+    /// chain when SQL did not request CIGAR, divergence, or MAPQ.
+    bool    coordinate_only    = false;
+    std::uint64_t query_len    = 0;
+
     /// Derived penalty values. Call prepare() after setting scale values.
     float   gap_penalty       = 0.0f;   ///< chain_gap_scale * 0.01 * kmer_size
     float   skip_penalty      = 0.0f;   ///< chain_skip_scale * 0.01 * kmer_size

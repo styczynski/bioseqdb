@@ -59,6 +59,7 @@ enum class ShaderKind : std::uint8_t {
     phase_c_index_claim_slots,
     phase_c_index_emit_slots,
     phase_c_chain_range_build,
+    phase_c_coordinate_reduce,
     generate_units,
     // DOC0346 — GPU sequence sort. Two stages × two alphabets. The cache keys on
     // ShaderKind, so the dna4 and generic variants are distinct SPIR-V modules
@@ -67,6 +68,7 @@ enum class ShaderKind : std::uint8_t {
     seq_sort_extract_key_generic,
     seq_sort_tiebreak_dna4,
     seq_sort_tiebreak_generic,
+    align_extend_banded_affine,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -83,8 +85,10 @@ enum class DescriptorLayoutKind : std::uint8_t {
     phase_c_sort,
     phase_c_index,
     phase_c_chain_range,
+    phase_c_coordinate_reduce,
     generate_units,
     seq_sort,   // DOC0346 — { SeqWords, Descs, KeysOrIndex, ValsOrRanges }
+    align_extension,  // { QuerySymbols, TargetSymbols, Jobs, Results }
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -96,14 +100,16 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::seed_lookup:           return 5;
         case DescriptorLayoutKind::anchor_sort:           return 2;
         // DOC0310 Phase C layouts.
-        case DescriptorLayoutKind::phase_c_sketch:        return 8;
+        case DescriptorLayoutKind::phase_c_sketch:        return 9;
         case DescriptorLayoutKind::phase_c_scan:          return 3;
         case DescriptorLayoutKind::phase_c_seed:          return 8;
         case DescriptorLayoutKind::phase_c_sort:          return 5;
         case DescriptorLayoutKind::phase_c_index:         return 7;
         case DescriptorLayoutKind::phase_c_chain_range:   return 6;
+        case DescriptorLayoutKind::phase_c_coordinate_reduce: return 6;
         case DescriptorLayoutKind::generate_units:         return 2;
         case DescriptorLayoutKind::seq_sort:               return 4;
+        case DescriptorLayoutKind::align_extension:        return 4;
     }
     return 0;
 }
@@ -132,11 +138,13 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_index_claim_slots:
         case ShaderKind::phase_c_index_emit_slots:    return DescriptorLayoutKind::phase_c_index;
         case ShaderKind::phase_c_chain_range_build:   return DescriptorLayoutKind::phase_c_chain_range;
+        case ShaderKind::phase_c_coordinate_reduce:   return DescriptorLayoutKind::phase_c_coordinate_reduce;
         case ShaderKind::generate_units:              return DescriptorLayoutKind::generate_units;
         case ShaderKind::seq_sort_extract_key_dna4:
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
         case ShaderKind::seq_sort_tiebreak_generic:   return DescriptorLayoutKind::seq_sort;
+        case ShaderKind::align_extend_banded_affine:  return DescriptorLayoutKind::align_extension;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -152,11 +160,11 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_sketch_tile:
         case ShaderKind::phase_c_sketch_emit_flags:
         case ShaderKind::phase_c_sketch_emit_carry:
-        case ShaderKind::phase_c_sketch_emit_words:   return 64;  // SketchPushC (16 × u32)
+        case ShaderKind::phase_c_sketch_emit_words:   return 72;  // SketchPushC (18 × u32)
         case ShaderKind::phase_c_prefix_scan_block:
         case ShaderKind::phase_c_prefix_scan_add:     return 16;  // ScanPushC (4 × u32)
         case ShaderKind::phase_c_seed_count:
-        case ShaderKind::phase_c_seed_emit:           return 40;  // SeedPushC (10 × u32)
+        case ShaderKind::phase_c_seed_emit:           return 52;  // SeedPushC (13 × u32)
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return 20;  // SortPushC (5 × u32)
@@ -165,11 +173,13 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_index_claim_slots:
         case ShaderKind::phase_c_index_emit_slots:    return 24;  // IndexPushC (6 × u32)
         case ShaderKind::phase_c_chain_range_build:   return 8;   // ChainRangePushC (2 × u32)
+        case ShaderKind::phase_c_coordinate_reduce:   return 28;  // GpuCoordinateReducePush
         case ShaderKind::generate_units:              return 48;  // GenerateUnitsPush (12 × u32)
         case ShaderKind::seq_sort_extract_key_dna4:
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
         case ShaderKind::seq_sort_tiebreak_generic:   return 32;  // SeqSortPush (8 × u32)
+        case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
     }
     return 0;
 }
@@ -236,8 +246,13 @@ namespace {
 /// directly). One workgroup owns one independent hard range, so no atomics are
 /// needed for the tail sweep.
 constexpr std::string_view kChainTiledDpBody = R"GLSL(
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-const uint TILE_SIZE_U = uint(TILE_SIZE);
+
+const uint SUBGROUP_LANES_U = 32u;
 const uint NO_PARENT = 0xffffffffu;
 const int INVALID_SCORE = -2147483647 - 1;
 
@@ -250,7 +265,7 @@ struct AnchorWire {
 
 struct ChainRangeWire {
     uint begin;
-    uint range_len;  // NB: not 'length' — that clashes with GLSL's .length() builtin
+    uint range_len;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Anchors {
@@ -260,7 +275,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Ranges {
     ChainRangeWire ranges[];
 };
 layout(std430, set = 0, binding = 2) buffer BestScores {
-    int best_scores[];
+    coherent int best_scores[];
 };
 layout(std430, set = 0, binding = 3) buffer Predecessors {
     int64_t predecessors[];
@@ -275,26 +290,11 @@ layout(push_constant) uniform Params {
     int max_iter;
     float gap_penalty;
     float skip_penalty;
-    int max_chain_skip;   // DOC0311: nearest-first early-exit (minimap2 max_skip); <=0 disables
+    int max_chain_skip;
 } pc;
-
-shared uint64_t sh_ref_position[TILE_SIZE];
-shared uint64_t sh_query_position[TILE_SIZE];
-shared uint sh_is_reverse[TILE_SIZE];
-shared uint sh_span_flags_segment[TILE_SIZE];
-shared int sh_score[TILE_SIZE];
-shared uint sh_parent[TILE_SIZE];
 
 bool anchor_reverse(AnchorWire a) { return a.is_reverse != 0u; }
 uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
-
-AnchorWire shared_anchor(uint idx) {
-    return AnchorWire(
-        sh_ref_position[idx],
-        sh_query_position[idx],
-        sh_is_reverse[idx],
-        sh_span_flags_segment[idx]);
-}
 
 float fast_log2(float x) {
     uint z = floatBitsToUint(x);
@@ -332,116 +332,93 @@ int chain_score(AnchorWire current, AnchorWire pred) {
     return score;
 }
 
-void write_best(uint target, int best, uint parent) {
-    if (parent != NO_PARENT && best >= best_scores[target]) {
-        best_scores[target] = best;
-        predecessors[target] = int64_t(parent);
-    }
+uint signed_score_key(int score) {
+    return uint(score) ^ 0x80000000u;
 }
 
 void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint range_id = gl_WorkGroupID.x;
-    if (range_id >= pc.range_count) return;
+    uint lane = gl_SubgroupInvocationID;
 
-    ChainRangeWire r = ranges[range_id];
-    uint begin = r.begin;
-    uint end = min(pc.anchor_count, r.begin + r.range_len);
-    if (begin >= end) return;
+    for (uint range_id = gl_WorkGroupID.x; range_id < pc.range_count;
+         range_id += gl_NumWorkGroups.x) {
+        ChainRangeWire r = ranges[range_id];
+        uint begin = r.begin;
+        uint end = min(pc.anchor_count, r.begin + r.range_len);
+        if (begin >= end) continue;
 
-    for (uint tile_begin = begin; tile_begin < end; tile_begin += TILE_SIZE_U) {
-        uint tile_count = min(TILE_SIZE_U, end - tile_begin);
-
-        for (uint i = tid; i < tile_count; i += gl_WorkGroupSize.x) {
-            uint global_i = tile_begin + i;
+        for (uint global_i = begin; global_i < end; ++global_i) {
             AnchorWire a = anchors[global_i];
-            int64_t parent64 = predecessors[global_i];
-            int score = max(best_scores[global_i], int(anchor_span(a)));
-            sh_ref_position[i] = a.ref_position;
-            sh_query_position[i] = a.query_position;
-            sh_is_reverse[i] = a.is_reverse;
-            sh_span_flags_segment[i] = a.span_flags_segment;
-            sh_score[i] = score;
-            sh_parent[i] = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
-        }
-        barrier();
+            int best = max(best_scores[global_i], int(anchor_span(a)));
+            uint best_parent = NO_PARENT;
+            uint64_t scanned = uint64_t(0);
+            uint no_improve_batches = 0u;
+            uint max_no_improve_batches = pc.max_chain_skip > 0
+                ? (uint(pc.max_chain_skip) / SUBGROUP_LANES_U + 1u)
+                : 0xffffffffu;
 
-        // G3SA-style prologue: all-to-all inside the tile. Predecessor rows
-        // advance in j order so sh_score[j] is already final when later anchors
-        // compare against j.
-        for (uint j = 0u; j < tile_count; ++j) {
-            for (uint k = j + 1u + tid; k < tile_count; k += gl_WorkGroupSize.x) {
-                if (k - j > uint(pc.max_iter)) continue;
-                int pair = chain_score(shared_anchor(k), shared_anchor(j));
-                if (pair == INVALID_SCORE) continue;
-                int total = pair + sh_score[j];
-                if (total >= sh_score[k]) {
-                    sh_score[k] = total;
-                    sh_parent[k] = tile_begin + j;
+            while (true) {
+                uint64_t remaining = uint64_t(global_i) - uint64_t(begin);
+                uint64_t offset = scanned + uint64_t(lane) + uint64_t(1);
+                bool in_range = offset <= remaining;
+
+                uint pred = begin;
+                AnchorWire pa = a;
+                if (in_range) {
+                    pred = global_i - uint(offset);
+                    pa = anchors[pred];
                 }
+
+                uint first_out = subgroupMin(!in_range ? lane : SUBGROUP_LANES_U);
+                uint first_iter = subgroupMin(
+                    (in_range && offset > uint64_t(uint(pc.max_iter))) ? lane : SUBGROUP_LANES_U);
+                uint first_ref = subgroupMin(
+                    (in_range
+                     && anchor_reverse(a) == anchor_reverse(pa)
+                     && a.ref_position > pa.ref_position
+                     && a.ref_position - pa.ref_position > uint64_t(pc.max_dist_x))
+                        ? lane : SUBGROUP_LANES_U);
+                uint first_stop = min(first_out, min(first_iter, first_ref));
+                bool lane_active = in_range && lane < first_stop;
+
+                int candidate_total = INVALID_SCORE;
+                if (lane_active) {
+                    int pair = chain_score(a, pa);
+                    if (pair != INVALID_SCORE) {
+                        candidate_total = pair + best_scores[pred];
+                    }
+                }
+
+                uint candidate_score_key = signed_score_key(candidate_total);
+                uint max_score_key = subgroupMax(candidate_score_key);
+                bool is_max_score_lane = candidate_score_key == max_score_key;
+                int batch_score = subgroupMax(is_max_score_lane ? candidate_total : INVALID_SCORE);
+                uint batch_parent = subgroupMax(
+                    (is_max_score_lane && lane_active && candidate_total != INVALID_SCORE) ? pred : 0u);
+
+                bool stop_after_batch = first_stop < SUBGROUP_LANES_U;
+                if (batch_score > best) {
+                    best = batch_score;
+                    best_parent = batch_parent;
+                    no_improve_batches = 0u;
+                } else if (pc.max_chain_skip > 0) {
+                    ++no_improve_batches;
+                    if (no_improve_batches >= max_no_improve_batches) {
+                        stop_after_batch = true;
+                    }
+                }
+
+                if (stop_after_batch) break;
+                scanned += uint64_t(SUBGROUP_LANES_U);
             }
+
+            if (subgroupElect()) {
+                best_scores[global_i] = best;
+                predecessors[global_i] = best_parent == NO_PARENT
+                    ? int64_t(-1) : int64_t(best_parent);
+            }
+            memoryBarrierBuffer();
             barrier();
         }
-
-        // Tail update: targets after the tile compare against the tile's cached
-        // predecessors. We scan NEAREST-FIRST (highest index first; anchors are
-        // ref-sorted, so the highest index is the closest predecessor in ref).
-        // Nearest-first ordering enables two early exits that match the SIMD /
-        // minimap2 chaining (DOC0311): (1) an EXACT ref-distance break — once a
-        // predecessor's ref gap exceeds max_dist_x, chain_score would reject it
-        // and every farther predecessor too, so we stop; (2) minimap2's
-        // max_chain_skip — stop after K consecutive non-improving predecessors.
-        // Without these the tail is O(n*max_iter)=12s on XXL_HIFI; with them it is
-        // the same bounded O(n*max_skip) work the SIMD path does. Each range is
-        // owned by exactly one workgroup, so no atomics are needed.
-        uint tail_limit = min(end, tile_begin + TILE_SIZE_U + uint(pc.max_iter));
-        for (uint target_base = tile_begin + TILE_SIZE_U; target_base < tail_limit;
-             target_base += gl_WorkGroupSize.x) {
-            uint target = target_base + tid;
-            if (target >= tail_limit) continue;
-            AnchorWire cur = anchors[target];
-            int best = max(best_scores[target], int(anchor_span(cur)));
-            int64_t parent64 = predecessors[target];
-            uint best_parent = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
-            int n_skip = 0;
-            for (uint jj = 0u; jj < tile_count; ++jj) {
-                uint j = tile_count - 1u - jj;            // nearest predecessor first
-                uint pred = tile_begin + j;
-                if (target - pred > uint(pc.max_iter)) break;
-                AnchorWire pa = shared_anchor(j);
-                if (anchor_reverse(cur) == anchor_reverse(pa)
-                    && cur.ref_position > pa.ref_position
-                    && cur.ref_position - pa.ref_position > uint64_t(pc.max_dist_x)) {
-                    break;  // exact: farther predecessors are all out of ref range
-                }
-                int pair = chain_score(cur, pa);
-                if (pair == INVALID_SCORE) {
-                    if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) break;
-                    continue;
-                }
-                int total = pair + sh_score[j];
-                if (total > best) {
-                    best = total;
-                    best_parent = pred;
-                    if (n_skip > 0) --n_skip;
-                } else if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) {
-                    break;
-                }
-            }
-            write_best(target, best, best_parent);
-        }
-        memoryBarrierBuffer();
-        barrier();
-
-        for (uint i = tid; i < tile_count; i += gl_WorkGroupSize.x) {
-            uint global_i = tile_begin + i;
-            best_scores[global_i] = sh_score[i];
-            predecessors[global_i] = sh_parent[i] == NO_PARENT
-                ? int64_t(-1)
-                : int64_t(sh_parent[i]);
-        }
-        memoryBarrierBuffer();
-        barrier();
     }
 }
 )GLSL";
@@ -698,6 +675,7 @@ layout(std430, set = 0, binding = 4) buffer OutWords { uint out_words[]; };
 layout(std430, set = 0, binding = 5) buffer Counters { uint counters[]; };
 layout(std430, set = 0, binding = 6) readonly buffer TileOffsets { uint tile_offsets[]; };
 layout(std430, set = 0, binding = 7) buffer OutPairVals { uint64_t out_pair_vals[]; };
+layout(std430, set = 0, binding = 8) readonly buffer QueryGate { uint query_gate_words[]; };
 
 layout(push_constant) uniform Params {
     uint emit_mode;
@@ -716,6 +694,8 @@ layout(push_constant) uniform Params {
     uint char_mask;
     uint tile_count;
     uint emit_pairs;
+    uint query_gate_mask;
+    uint query_gate_word_count;
 } pc;
 
 )GLSL"
@@ -785,7 +765,15 @@ bool sketch_match_diff(Sketch a, Sketch b) {
         && (a.pos != b.pos || a.strand != b.strand);
 }
 
-	const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
+bool query_gate_accepts(uint64_t hash) {
+    if (pc.query_gate_word_count == 0u) return true;
+    uint bit = uint(hash & uint64_t(pc.query_gate_mask));
+    uint word = bit >> 5u;
+    if (word >= pc.query_gate_word_count) return true;
+    return (query_gate_words[word] & (1u << (bit & 31u))) != 0u;
+}
+
+		const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
 	uint g_seq_word_offset;
 	uint g_local_count;
 	uint g_out_base;
@@ -838,13 +826,18 @@ void write_minimizer(uint dst, Sketch s) {
 
 void emit_one(TileC t, Sketch s, uint emit_pos) {
     if (s.is_max != 0u || !owns_emit_position(t, emit_pos)) return;
+    if (!query_gate_accepts(s.hash)) return;
     uint dst = g_local_count;
     g_local_count = g_local_count + 1u;
-    // emit_mode 2 (DOC0311 single-pass): no separate count pass / tile-offset
-    // scan — each minimizer atomically reserves its output slot. The pairs are
-    // radix-sorted by hash afterwards, so the (now arbitrary) emission order is
-    // irrelevant. counters[0] is the running total (= tm); counters[1] is the
-    // output capacity guard so an under-estimate cannot write out of bounds.
+    // emit_mode 3 is a query-gated count-only pass. emit_mode 2 (DOC0311
+    // single-pass) atomically reserves output slots; the pairs are radix-sorted
+    // by hash afterwards, so the arbitrary emission order is irrelevant.
+    // counters[0] is the running total (= tm); counters[1] is the output
+    // capacity guard so an under-estimate cannot write out of bounds.
+    if (pc.emit_mode == 3u) {
+        atomicAdd(counters[0], 1u);
+        return;
+    }
     if (pc.emit_mode == 2u) {
         uint gmin = atomicAdd(counters[0], 1u);
         if (gmin >= counters[1]) return;
@@ -869,83 +862,42 @@ void emit_one(TileC t, Sketch s, uint emit_pos) {
 
 )GLSL"
 R"GLSL(
-// Candidate canonical k-mer ending at base `pos`. Returns a Sketch (max if the
-// window has an ambiguity, a palindrome, or is too short).
-Sketch candidate_at(uint pos) {
-    uint rank_here = read_rank_at_bp(pos, pc.bits_per_char, pc.letters_per_unit,
-                                     pc.unit_bits, g_seq_word_offset, pc.char_mask);
-    bool base_valid = code_for_rank(rank_here) < 4u;
-    if (!base_valid) { Sketch m = max_sketch(); m.pos = 0xffffffffu; return m; } // sentinel: base invalid
-    if (pc.kmer_size == 0u || pos + 1u < pc.kmer_size) return max_sketch();
-
-    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
-    uint roll_bits = pc.kmer_size * step_bits;
-    uint scramble_bits = pc.kmer_size * 2u;
-    if (roll_bits > 64u || scramble_bits > 64u) return max_sketch();
-    uint64_t roll_mask = (roll_bits == 64u) ? ~uint64_t(0) : ((uint64_t(1) << roll_bits) - uint64_t(1));
-    uint64_t scramble_mask = (scramble_bits == 64u) ? ~uint64_t(0) : ((uint64_t(1) << scramble_bits) - uint64_t(1));
-    uint shift_rc = step_bits * (pc.kmer_size - 1u);
-    uint64_t forward = uint64_t(0);
-    uint64_t reverse = uint64_t(0);
-    uint start = pos + 1u - pc.kmer_size;
-    for (uint i = 0u; i < pc.kmer_size; ++i) {
-        uint rank = read_rank_at_bp(start + i, pc.bits_per_char, pc.letters_per_unit,
-                                    pc.unit_bits, g_seq_word_offset, pc.char_mask);
-        uint code = code_for_rank(rank);
-        uint rc = rc_code_for_rank(rank);
-        if (code >= 4u || rc >= 4u) return max_sketch();
-        forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
-        reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
-    }
-    if (forward == reverse) return max_sketch();
-    bool fwd_wins = forward < reverse;
-    uint64_t canonical = fwd_wins ? forward : reverse;
-    uint64_t h = minimap_scramble(canonical, scramble_mask) & hash_field_mask();
-    if (h == hash_field_mask()) return max_sketch();
-    return Sketch(h, pos, fwd_wins ? 0u : 1u, 0u);
-}
-
-// Cooperative tile sketch. All workgroup invocations hash the tile's candidate
-// k-mers into shared memory in parallel (the expensive per-base rolling-hash is
-// fully SIMD-parallel), then invocation 0 runs the ordered emit state machine
-// reading the shared candidates — keeping bit-exact `collect_minimizers_view`
-// order without paying the hash cost on a single lane. SKETCH_CAND_MAX bounds
-// the tile span (tile_bp + overlap); the runtime keeps tiles within it.
-	shared uint64_t sh_cand_hash[SKETCH_CAND_MAX];
-shared uint sh_cand_flags[SKETCH_CAND_MAX];   // bit0 real-minimizer, bit1 base_valid, bit2 strand
-shared Sketch sh_ring[MAX_SPAN];
-
-void main() {
-    uint tile_id = gl_WorkGroupID.x;
-    if (tile_id >= pc.tile_count) return;
-    if (pc.window_size == 0u || pc.window_size > MAX_SPAN || pc.kmer_size == 0u) return;
-
+// Rolling-hash ordered minimizer sketch (DOC0353). Each invocation owns ONE tile
+// and runs minimap2's ordered window-minimum state machine over [replay_lo,
+// loop_hi), emitting only for owned positions [tile_lo, tile_hi). The canonical
+// k-mer hash is maintained INCREMENTALLY (forward/reverse rolled one base per
+// step) instead of recomputed O(k) per position, and EVERY invocation runs the
+// emit (no lane-0 serialization) — together these replace the prior
+// parallel-hash-into-shared + single-lane-emit scheme that left 63/64 lanes idle
+// and re-read each k-mer O(k) times. Output is bit-identical to
+// `collect_minimizers_view`: `valid_since_reset` (forward-code validity) gates
+// the state machine exactly as before, and a separate `valid_rc` counter
+// suppresses the candidate while a reverse-complement-invalid base sits in the
+// window (a no-op for dna4/dna5 where rc-invalid implies fwd-invalid).
+void process_tile(uint tile_id) {
     TileC t = tiles[tile_id];
     g_seq_word_offset = t.seq_word_offset;
-	    uint guard = ownership_guard_bp();
-	    g_owned_lo = t.tile_lo;
-	    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
-	    uint loop_hi = tile_id + 1u >= pc.tile_count
-	        ? t.bp_count
-	        : min(t.bp_count, t.tile_hi + guard);
-	    uint span = loop_hi - t.replay_lo;
-    if (span > SKETCH_CAND_MAX) span = SKETCH_CAND_MAX;
-
-    // Phase 1 — parallel candidate hashing into shared memory.
-    for (uint i = gl_LocalInvocationID.x; i < span; i += gl_WorkGroupSize.x) {
-        Sketch c = candidate_at(t.replay_lo + i);
-        bool base_valid = !(c.is_max != 0u && c.pos == 0xffffffffu);
-        uint flags = (c.is_max == 0u ? 1u : 0u) | (base_valid ? 2u : 0u) | (c.strand << 2u);
-        sh_cand_hash[i] = c.hash;
-        sh_cand_flags[i] = flags;
-    }
-    barrier();
-
-    // Phase 2 — ordered emit on a single lane reading shared candidates.
-    if (gl_LocalInvocationID.x != 0u) return;
+    g_owned_lo = t.tile_lo;
+    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
+    uint loop_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : min(t.bp_count, t.tile_hi);
     g_local_count = 0u;
     g_out_base = (pc.emit_mode == 1u) ? tile_offsets[tile_id] : 0u;
 
+    // Rolling canonical-kmer hash constants (constant per tile).
+    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
+    uint roll_bits = pc.kmer_size * step_bits;
+    uint scramble_bits = pc.kmer_size * 2u;
+    bool hash_ok = (roll_bits <= 64u) && (scramble_bits <= 64u);
+    uint64_t roll_mask = (roll_bits >= 64u) ? ~uint64_t(0) : ((uint64_t(1) << roll_bits) - uint64_t(1));
+    uint64_t scramble_mask = (scramble_bits >= 64u) ? ~uint64_t(0) : ((uint64_t(1) << scramble_bits) - uint64_t(1));
+    uint shift_rc = step_bits * (pc.kmer_size - 1u);
+    uint64_t hmask = hash_field_mask();
+
+    uint64_t forward = uint64_t(0);
+    uint64_t reverse = uint64_t(0);
+    uint valid_rc = 0u;   // consecutive bases whose rc code < 4 (palindrome-safety vs candidate_at)
+
+    Sketch ring[MAX_SPAN];
     uint buf_pos = 0u;
     uint valid_since_reset = 0u;
     bool init_mode = (t.replay_lo == 0u);
@@ -953,31 +905,52 @@ void main() {
     uint current_min_pos = 0u;
 
     for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
-        uint ci = seq_pos - t.replay_lo;
         bool is_init = init_mode;
-        uint cf = sh_cand_flags[ci];
-        bool base_valid = (cf & 2u) != 0u;
-        Sketch cand = ((cf & 1u) != 0u)
-            ? Sketch(sh_cand_hash[ci], seq_pos, (cf >> 2u) & 1u, 0u)
-            : max_sketch();
+
+        // --- rolling candidate ending at seq_pos (bit-exact with candidate_at) ---
+        uint rank_here = read_rank_at_bp(seq_pos, pc.bits_per_char, pc.letters_per_unit,
+                                         pc.unit_bits, g_seq_word_offset, pc.char_mask);
+        uint code = code_for_rank(rank_here);
+        uint rc = rc_code_for_rank(rank_here);
+        bool base_valid = code < 4u;          // matches candidate_at base_valid (forward code only)
+        if (code < 4u) {
+            forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
+        } else {
+            forward = uint64_t(0);
+        }
+        if (rc < 4u) {
+            reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
+            valid_rc = valid_rc + 1u;
+        } else {
+            reverse = uint64_t(0);
+            valid_rc = 0u;
+        }
+        Sketch cand = max_sketch();
+
         Sketch pushed = max_sketch();
         if (!base_valid) {
             valid_since_reset = 0u;
         } else {
             valid_since_reset = valid_since_reset + 1u;
+            if (hash_ok && valid_since_reset >= pc.kmer_size && valid_rc >= pc.kmer_size
+                && forward != reverse) {
+                uint64_t canonical = forward < reverse ? forward : reverse;
+                uint64_t h = minimap_scramble(canonical, scramble_mask) & hmask;
+                if (h != hmask) cand = Sketch(h, seq_pos, forward < reverse ? 0u : 1u, 0u);
+            }
             if (valid_since_reset >= pc.kmer_size && cand.is_max == 0u) pushed = cand;
         }
         uint prev_pos = buf_pos;
-        sh_ring[buf_pos] = pushed;
+        ring[buf_pos] = pushed;
         buf_pos = (buf_pos + 1u) % pc.window_size;
 
         if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
             && current_min.is_max == 0u) {
             for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
             }
             for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
             }
         }
 
@@ -995,18 +968,18 @@ void main() {
             }
             current_min = max_sketch();
             for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_geq(current_min, sh_ring[j])) { current_min = sh_ring[j]; current_min_pos = j; }
+                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
             }
             for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_geq(current_min, sh_ring[j])) { current_min = sh_ring[j]; current_min_pos = j; }
+                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
             }
             if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
                 && current_min.is_max == 0u) {
                 for (uint j = buf_pos; j < pc.window_size; ++j) {
-                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
                 }
                 for (uint j = 0u; j < buf_pos; ++j) {
-                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
                 }
             }
         }
@@ -1021,6 +994,17 @@ void main() {
 
     if (pc.emit_mode == 0u) {
         tile_counts[tile_id] = g_local_count;
+    }
+}
+
+void main() {
+    if (pc.window_size == 0u || pc.window_size > MAX_SPAN || pc.kmer_size == 0u) return;
+    // One invocation per tile, grid-strided so the dispatch workgroup count is
+    // free to be ceil(tile_count / local_size) (every lane active) yet still
+    // correct for any larger dispatch.
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint tile_id = gl_GlobalInvocationID.x; tile_id < pc.tile_count; tile_id += stride) {
+        process_tile(tile_id);
     }
 }
 )GLSL";
@@ -1093,7 +1077,7 @@ void main() {
 /// invocations stride over that record's minimizers. `emit_mode==0` writes the
 /// per-minimizer anchor count (clamped by `max_occ`) to `counts`; `emit_mode==1`
 /// reads the exclusive `prefix` and emits `GpuAnchorWire` records plus their
-/// `ref_bits()` sort key, matching the Phase B seed-lookup formula exactly.
+/// compact `(strand, ref)` sort key.
 constexpr std::string_view kPhaseCSeedBody = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
@@ -1121,7 +1105,21 @@ layout(push_constant) uniform Params {
     uint emit_mode;
     uint record_count;
     uint bucket_count;   // >0 ⇒ Slots[] is a hash-sorted dense bucket array (binary search)
+    uint target_pos_offset_lo;
+    uint target_pos_offset_hi;
+    uint target_ref_bits;
 } pc;
+
+uint64_t target_pos_offset() {
+    return uint64_t(pc.target_pos_offset_lo) | (uint64_t(pc.target_pos_offset_hi) << 32);
+}
+
+uint64_t anchor_sort_key(uint rev, uint64_t ref_position) {
+    if (pc.target_ref_bits >= 63u) {
+        return (uint64_t(rev) << 63) | ref_position;
+    }
+    return (uint64_t(rev) << pc.target_ref_bits) | ref_position;
+}
 
 uint64_t read_min_hash(uint i) {
     if (pc.word_kind == 0u) {
@@ -1188,6 +1186,50 @@ uint find_slot(uint64_t hash) {
 }
 
 void main() {
+    // Fast fused-MPF path: Runtime currently provides one QRec. Flatten the
+    // record so every global invocation owns minimizers by grid stride instead
+    // of making one workgroup loop over the entire query.
+    if (pc.record_count == 1u) {
+        QRec q = qrecs[0];
+        uint64_t reverse_base = uint64_t(q.query_len - 2u + pc.kmer_size);
+        uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+        for (uint local = gl_GlobalInvocationID.x; local < q.min_count; local += stride) {
+            uint gi = q.min_offset + local;
+            uint64_t hash = read_min_hash(gi);
+            uint slot_idx = find_slot(hash);
+            uint cnt = 0u;
+            if (slot_idx != 0xffffffffu) {
+                GpuMinimizerSlot slot = slots[slot_idx];
+                if (slot.pos_count <= pc.max_occ) cnt = slot.pos_count;
+            }
+            if (pc.emit_mode == 0u) {
+                counts[gi] = cnt;
+                continue;
+            }
+            if (cnt == 0u) continue;
+            GpuMinimizerSlot slot = slots[slot_idx];
+            uint dst = prefix[gi];
+            uint64_t q_encoded = read_min_pos_strand(gi);
+            uint64_t q_pos = q_encoded >> 1;
+            uint q_strand = uint(q_encoded & uint64_t(1));
+            uint span_flags_segment = pc.kmer_size & 0xffu;
+            for (uint j = 0u; j < cnt; ++j) {
+                uint64_t target = positions[slot.pos_offset + j];
+                uint t_strand = uint(target & uint64_t(1));
+                uint rev = t_strand ^ q_strand;
+                uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
+                uint64_t ref_position = (target >> 1) + target_pos_offset();
+                anchors[dst + j].ref_position = ref_position;
+                anchors[dst + j].query_position = query_position;
+                anchors[dst + j].is_reverse = rev;
+                anchors[dst + j].span_flags_segment = span_flags_segment;
+                anchor_keys[dst + j] = anchor_sort_key(rev, ref_position);
+            }
+        }
+        return;
+    }
+
+    // General multi-record fallback, kept for ABI completeness.
     uint rec = gl_WorkGroupID.x;
     if (rec >= pc.record_count) return;
     QRec q = qrecs[rec];
@@ -1217,12 +1259,12 @@ void main() {
             uint t_strand = uint(target & uint64_t(1));
             uint rev = t_strand ^ q_strand;
             uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
-            uint64_t ref_position = target >> 1;
+            uint64_t ref_position = (target >> 1) + target_pos_offset();
             anchors[dst + j].ref_position = ref_position;
             anchors[dst + j].query_position = query_position;
             anchors[dst + j].is_reverse = rev;
             anchors[dst + j].span_flags_segment = span_flags_segment;
-            anchor_keys[dst + j] = (uint64_t(rev) << 63) | (ref_position & 0x7fffffffffffffffUL);
+            anchor_keys[dst + j] = anchor_sort_key(rev, ref_position);
         }
     }
 }
@@ -1510,23 +1552,53 @@ void main() {
 /// DOC0310 §15 — chain range build. One workgroup (1 invocation) per query
 /// serially scans that query's sorted anchor span, emitting `GpuChainRange`
 /// records at strand/chromosome changes and hard reference gaps, matching the
-/// CPU `build_gpu_chain_ranges` predicate. Writes the per-query range count.
+/// CPU `build_gpu_chain_ranges` predicate. When any hard range is very long,
+/// the shader also performs the same endpoint-preserving thinning used by the
+/// CPU-side Vulkan chainer so resident seed-to-coordinate does not feed huge
+/// dense ranges into DP.
 constexpr std::string_view kPhaseCChainRangeBuildBody = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 struct AnchorWire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
 struct ChainRangeWire { uint begin; uint range_len; };
 struct QuerySpan { uint anchor_lo; uint anchor_hi; uint range_lo; uint range_out; };
 layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 1) readonly buffer Unused1 { uint unused1[]; };
+layout(std430, set = 0, binding = 1) buffer Counts { uint counts[]; };
 layout(std430, set = 0, binding = 2) buffer RangesOut { ChainRangeWire ranges[]; };
-layout(std430, set = 0, binding = 3) buffer RangeCount { uint range_count[]; };
-layout(std430, set = 0, binding = 4) buffer Unused4 { uint unused4[]; };
+layout(std430, set = 0, binding = 3) buffer Unused3 { uint unused3[]; };
+layout(std430, set = 0, binding = 4) buffer CompactedAnchors { AnchorWire compacted_anchors[]; };
 layout(std430, set = 0, binding = 5) readonly buffer QuerySpans { QuerySpan spans[]; };
 layout(push_constant) uniform Params {
     uint query_count;
     uint max_ref_gap;
 } pc;
+const uint COMPACT_RANGE_THRESHOLD = 131072u;
+const uint COMPACT_RANGE_TARGET = 65536u;
 uint chrom_key(AnchorWire a) { return (a.is_reverse != 0u) ? 1u : 0u; }
+bool range_break(AnchorWire prev, AnchorWire cur) {
+    bool key_changed = chrom_key(cur) != chrom_key(prev);
+    bool hard_gap = (cur.ref_position > prev.ref_position)
+        && ((cur.ref_position - prev.ref_position) > uint64_t(pc.max_ref_gap));
+    return key_changed || hard_gap;
+}
+uint compact_stride(uint range_len) {
+    if (range_len <= COMPACT_RANGE_THRESHOLD) return 1u;
+    uint stride = (range_len + COMPACT_RANGE_TARGET - 1u) / COMPACT_RANGE_TARGET;
+    return max(stride, 1u);
+}
+uint emit_compacted_range(uint src_begin, uint src_end, uint range_index, uint anchor_out) {
+    uint range_len = src_end - src_begin;
+    uint stride = compact_stride(range_len);
+    uint dst_begin = anchor_out;
+    for (uint j = 0u; j < range_len; ++j) {
+        if ((j % stride) == 0u || j + 1u == range_len) {
+            compacted_anchors[anchor_out] = anchors[src_begin + j];
+            anchor_out += 1u;
+        }
+    }
+    ranges[range_index].begin = dst_begin;
+    ranges[range_index].range_len = anchor_out - dst_begin;
+    return anchor_out;
+}
 void main() {
     uint qi = gl_WorkGroupID.x;
     if (qi >= pc.query_count) return;
@@ -1535,25 +1607,413 @@ void main() {
     uint hi = s.anchor_hi;
     uint out_idx = s.range_lo;
     uint produced = 0u;
-    if (lo >= hi) { range_count[qi] = 0u; return; }
+    uint count_idx = qi * 2u;
+    if (lo >= hi) {
+        counts[count_idx] = 0u;
+        counts[count_idx + 1u] = 0u;
+        return;
+    }
     uint begin = lo;
+    bool needs_compaction = false;
     for (uint i = lo + 1u; i < hi; ++i) {
         AnchorWire prev = anchors[i - 1u];
         AnchorWire cur = anchors[i];
-        bool key_changed = chrom_key(cur) != chrom_key(prev);
-        bool hard_gap = (cur.ref_position > prev.ref_position)
-            && ((cur.ref_position - prev.ref_position) > uint64_t(pc.max_ref_gap));
-        if (key_changed || hard_gap) {
+        if (range_break(prev, cur)) {
+            uint range_len = i - begin;
+            needs_compaction = needs_compaction || range_len > COMPACT_RANGE_THRESHOLD;
             ranges[out_idx + produced].begin = begin;
-            ranges[out_idx + produced].range_len = i - begin;
+            ranges[out_idx + produced].range_len = range_len;
             produced += 1u;
             begin = i;
         }
     }
+    uint last_len = hi - begin;
+    needs_compaction = needs_compaction || last_len > COMPACT_RANGE_THRESHOLD;
     ranges[out_idx + produced].begin = begin;
-    ranges[out_idx + produced].range_len = hi - begin;
+    ranges[out_idx + produced].range_len = last_len;
     produced += 1u;
-    range_count[qi] = produced;
+    counts[count_idx] = produced;
+    counts[count_idx + 1u] = 0u;
+
+    if (!needs_compaction) return;
+
+    produced = 0u;
+    uint anchor_out = s.range_out;
+    begin = lo;
+    for (uint i = lo + 1u; i < hi; ++i) {
+        AnchorWire prev = anchors[i - 1u];
+        AnchorWire cur = anchors[i];
+        if (range_break(prev, cur)) {
+            anchor_out = emit_compacted_range(
+                begin, i, out_idx + produced, anchor_out);
+            produced += 1u;
+            begin = i;
+        }
+    }
+    anchor_out = emit_compacted_range(begin, hi, out_idx + produced, anchor_out);
+    counts[count_idx + 1u] = anchor_out - s.range_out;
+}
+)GLSL";
+
+/// Resident coordinate-only finalizer. It mirrors the bounded top-k CPU
+/// coordinate extractor, but downloads only one compact mapping record.
+constexpr std::string_view kPhaseCCoordinateReduceBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct AnchorWire {
+    uint64_t ref_position;
+    uint64_t query_position;
+    uint is_reverse;
+    uint span_flags_segment;
+};
+
+struct CoordinateResult {
+    uint64_t query_start;
+    uint64_t query_end;
+    uint64_t target_start;
+    uint64_t target_end;
+    uint64_t match_length;
+    uint64_t block_length;
+    int chain_score;
+    int seed_count;
+    uint is_reverse;
+    uint valid;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BestScores { int best_scores[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Predecessors { int64_t predecessors[]; };
+layout(std430, set = 0, binding = 3) buffer Visited { uint visited[]; };
+layout(std430, set = 0, binding = 4) buffer Trace { uint trace[]; };
+layout(std430, set = 0, binding = 5) buffer Result { CoordinateResult result; };
+
+layout(push_constant) uniform Params {
+    uint anchor_count;
+    uint query_len_lo;
+    uint query_len_hi;
+    int min_chain_score;
+    int min_seed_count;
+    uint probe_limit;
+    uint reserved;
+} pc;
+
+shared int sh_score[LOCAL_SIZE_X];
+shared uint sh_index[LOCAL_SIZE_X];
+shared int selected_score;
+shared uint selected_anchor;
+shared uint selected_valid;
+shared uint done;
+
+uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+
+uint64_t query_len() {
+    return uint64_t(pc.query_len_lo) | (uint64_t(pc.query_len_hi) << 32);
+}
+
+bool better_candidate(int score, uint idx, int best_score, uint best_idx) {
+    return score > best_score || (score == best_score && idx > best_idx);
+}
+
+void write_result(uint chain_len, int candidate_score) {
+    uint first_idx = trace[chain_len - 1u];
+    uint last_idx = trace[0u];
+    AnchorWire first_anchor = anchors[first_idx];
+    AnchorWire last_anchor = anchors[last_idx];
+    uint first_span_u = anchor_span(first_anchor);
+    int64_t first_span = int64_t(first_span_u);
+
+    int64_t ref_start_i = int64_t(first_anchor.ref_position) + int64_t(1) - first_span;
+    if (ref_start_i < int64_t(0)) ref_start_i = int64_t(0);
+    uint64_t ref_end = last_anchor.ref_position + uint64_t(1);
+
+    int64_t raw_q_start = int64_t(first_anchor.query_position) + int64_t(1) - first_span;
+    if (raw_q_start < int64_t(0)) raw_q_start = int64_t(0);
+    uint64_t raw_q_end = last_anchor.query_position + uint64_t(1);
+
+    uint64_t q_start;
+    uint64_t q_end;
+    if (first_anchor.is_reverse == 0u) {
+        q_start = uint64_t(raw_q_start);
+        q_end = raw_q_end;
+    } else {
+        uint64_t qlen = query_len();
+        q_start = qlen - raw_q_end;
+        q_end = qlen - uint64_t(raw_q_start);
+    }
+
+    int64_t match_len = int64_t(first_span_u);
+    int64_t block_len = int64_t(first_span_u);
+    uint prev_idx = first_idx;
+    int t = int(chain_len) - 2;
+    while (t >= 0) {
+        uint cur_idx = trace[uint(t)];
+        AnchorWire prev = anchors[prev_idx];
+        AnchorWire cur = anchors[cur_idx];
+        int span = int(anchor_span(cur));
+        int target_gap = int(cur.ref_position - prev.ref_position);
+        int query_gap = int(cur.query_position - prev.query_position);
+        int max_gap = target_gap > query_gap ? target_gap : query_gap;
+        int min_gap = target_gap < query_gap ? target_gap : query_gap;
+        block_len += int64_t(max_gap);
+        match_len += int64_t((target_gap > span && query_gap > span) ? span : min_gap);
+        prev_idx = cur_idx;
+        --t;
+    }
+
+    result.query_start = q_start;
+    result.query_end = q_end;
+    result.target_start = uint64_t(ref_start_i);
+    result.target_end = ref_end;
+    result.match_length = uint64_t(match_len);
+    result.block_length = uint64_t(block_len);
+    result.chain_score = candidate_score;
+    result.seed_count = int(chain_len);
+    result.is_reverse = first_anchor.is_reverse != 0u ? 1u : 0u;
+    result.valid = 1u;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    if (lane == 0u) {
+        result.valid = 0u;
+        done = 0u;
+    }
+    barrier();
+
+    for (uint attempt = 0u; attempt < pc.probe_limit; ++attempt) {
+        if (done != 0u) break;
+
+        int local_score = pc.min_chain_score - 1;
+        uint local_idx = 0u;
+        for (uint i = lane; i < pc.anchor_count; i += LOCAL_SIZE_X) {
+            int score = best_scores[i];
+            if (visited[i] == 0u && better_candidate(score, i, local_score, local_idx)) {
+                local_score = score;
+                local_idx = i;
+            }
+        }
+        sh_score[lane] = local_score;
+        sh_index[lane] = local_idx;
+        barrier();
+
+        if (lane == 0u) {
+            int best_score = pc.min_chain_score - 1;
+            uint best_idx = 0u;
+            uint valid = 0u;
+            for (uint i = 0u; i < LOCAL_SIZE_X; ++i) {
+                if (better_candidate(sh_score[i], sh_index[i], best_score, best_idx)) {
+                    best_score = sh_score[i];
+                    best_idx = sh_index[i];
+                    valid = 1u;
+                }
+            }
+            selected_score = best_score;
+            selected_anchor = best_idx;
+            selected_valid = valid;
+        }
+        barrier();
+
+        if (lane == 0u) {
+            if (selected_valid == 0u || selected_score < pc.min_chain_score) {
+                done = 1u;
+            } else {
+                uint chain_len = 0u;
+                uint stop_idx = 0xffffffffu;
+                int64_t trace_idx = int64_t(selected_anchor);
+                while (trace_idx >= int64_t(0)
+                       && uint64_t(trace_idx) < uint64_t(pc.anchor_count)
+                       && chain_len < pc.anchor_count) {
+                    uint idx = uint(trace_idx);
+                    if (visited[idx] != 0u) {
+                        stop_idx = idx;
+                        break;
+                    }
+                    trace[chain_len] = idx;
+                    ++chain_len;
+                    int64_t next_idx = predecessors[idx];
+                    if (next_idx >= trace_idx) {
+                        chain_len = 0u;
+                        break;
+                    }
+                    trace_idx = next_idx;
+                }
+
+                int candidate_score = selected_score;
+                if (stop_idx != 0xffffffffu) {
+                    candidate_score -= best_scores[stop_idx];
+                }
+
+                if (candidate_score >= pc.min_chain_score
+                    && chain_len >= uint(pc.min_seed_count)) {
+                    write_result(chain_len, candidate_score);
+                    done = 1u;
+                } else {
+                    for (uint i = 0u; i < chain_len; ++i) {
+                        visited[trace[i]] = 1u;
+                    }
+                }
+            }
+        }
+        barrier();
+    }
+}
+)GLSL";
+
+/// Score/end-point-only banded affine extension. This prototype runs one
+/// scalar DP per job and dispatches the batch as grid-strided workgroups. The
+/// ABI is intentionally symbol-rank based (`uint` per symbol) so parent
+/// integration can feed any alphabet without dna4-specific decoding here.
+constexpr std::string_view kAlignmentExtensionBandedAffineBody = R"GLSL(
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+const int NEG_INF = -1073741824;
+const uint STATUS_OK = 0u;
+const uint STATUS_UNSUPPORTED_GEOMETRY = 1u;
+
+struct AlignmentExtensionJob {
+    uint query_offset;
+    uint target_offset;
+    uint query_len;
+    uint target_len;
+    uint band_width;
+    uint flags;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct AlignmentExtensionResult {
+    int score;
+    uint query_end;
+    uint target_end;
+    uint status;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer QuerySymbols { uint query_symbols[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TargetSymbols { uint target_symbols[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Jobs { AlignmentExtensionJob jobs[]; };
+layout(std430, set = 0, binding = 3) buffer Results { AlignmentExtensionResult results[]; };
+
+layout(push_constant) uniform Params {
+    uint job_count;
+    uint max_query_len;
+    uint max_target_len;
+    uint max_band_width;
+    uint alphabet_size;
+    int match_score;
+    int mismatch_penalty;
+    int gap_open_penalty;
+    int gap_extend_penalty;
+    uint flags;
+    uint reserved0;
+} pc;
+
+int max3(int a, int b, int c) {
+    return max(max(a, b), c);
+}
+
+int substitution_score(uint query_symbol, uint target_symbol) {
+    return query_symbol == target_symbol ? pc.match_score : -pc.mismatch_penalty;
+}
+
+void reject_job(uint job_index) {
+    results[job_index].score = 0;
+    results[job_index].query_end = 0u;
+    results[job_index].target_end = 0u;
+    results[job_index].status = STATUS_UNSUPPORTED_GEOMETRY;
+}
+
+void solve_job(uint job_index) {
+    AlignmentExtensionJob job = jobs[job_index];
+    if (job.query_len > pc.max_query_len || job.target_len > pc.max_target_len
+        || job.band_width > pc.max_band_width || job.flags != 0u
+        || job.reserved0 != 0u || job.reserved1 != 0u
+        || pc.flags != 0u || pc.reserved0 != 0u || pc.alphabet_size == 0u) {
+        reject_job(job_index);
+        return;
+    }
+
+    int prev_m[MAX_SPAN + 1];
+    int prev_i[MAX_SPAN + 1];
+    int prev_d[MAX_SPAN + 1];
+    int curr_m[MAX_SPAN + 1];
+    int curr_i[MAX_SPAN + 1];
+    int curr_d[MAX_SPAN + 1];
+
+    for (uint j = 0u; j <= job.target_len; ++j) {
+        prev_m[j] = 0;
+        prev_i[j] = NEG_INF;
+        prev_d[j] = NEG_INF;
+        curr_m[j] = 0;
+        curr_i[j] = NEG_INF;
+        curr_d[j] = NEG_INF;
+    }
+
+    int best_score = 0;
+    uint best_query_end = 0u;
+    uint best_target_end = 0u;
+    int gap_open_total = pc.gap_open_penalty + pc.gap_extend_penalty;
+
+    for (uint i = 1u; i <= job.query_len; ++i) {
+        curr_m[0] = 0;
+        curr_i[0] = NEG_INF;
+        curr_d[0] = NEG_INF;
+        uint query_symbol = query_symbols[job.query_offset + i - 1u];
+        if (query_symbol >= pc.alphabet_size) {
+            reject_job(job_index);
+            return;
+        }
+        for (uint j = 1u; j <= job.target_len; ++j) {
+            uint delta = i > j ? (i - j) : (j - i);
+            if (delta > job.band_width) {
+                curr_m[j] = 0;
+                curr_i[j] = NEG_INF;
+                curr_d[j] = NEG_INF;
+                continue;
+            }
+
+            uint target_symbol = target_symbols[job.target_offset + j - 1u];
+            if (target_symbol >= pc.alphabet_size) {
+                reject_job(job_index);
+                return;
+            }
+            int diag = max3(prev_m[j - 1u], prev_i[j - 1u], prev_d[j - 1u])
+                + substitution_score(query_symbol, target_symbol);
+            int match_state = max(0, diag);
+            int insert_state = max(
+                max(prev_m[j] - gap_open_total, prev_i[j] - pc.gap_extend_penalty), 0);
+            int delete_state = max(
+                max(curr_m[j - 1u] - gap_open_total, curr_d[j - 1u] - pc.gap_extend_penalty), 0);
+
+            curr_m[j] = match_state;
+            curr_i[j] = insert_state;
+            curr_d[j] = delete_state;
+
+            int cell_best = max3(match_state, insert_state, delete_state);
+            if (cell_best > best_score) {
+                best_score = cell_best;
+                best_query_end = i;
+                best_target_end = j;
+            }
+        }
+        for (uint j = 0u; j <= job.target_len; ++j) {
+            prev_m[j] = curr_m[j];
+            prev_i[j] = curr_i[j];
+            prev_d[j] = curr_d[j];
+        }
+    }
+
+    results[job_index].score = best_score;
+    results[job_index].query_end = best_query_end;
+    results[job_index].target_end = best_target_end;
+    results[job_index].status = STATUS_OK;
+}
+
+void main() {
+    uint stride = gl_NumWorkGroups.x;
+    if (stride == 0u) return;
+    for (uint job_index = gl_WorkGroupID.x; job_index < pc.job_count; job_index += stride) {
+        solve_job(job_index);
+    }
 }
 )GLSL";
 
@@ -1910,6 +2370,8 @@ void main() {
             return std::string{kPhaseCIndexEmitSlotsBody};
         case ShaderKind::phase_c_chain_range_build:
             return std::string{kPhaseCChainRangeBuildBody};
+        case ShaderKind::phase_c_coordinate_reduce:
+            return std::string{kPhaseCCoordinateReduceBody};
         case ShaderKind::generate_units:
             return std::string{kGenerateUnitsBody};
         case ShaderKind::seq_sort_extract_key_dna4:
@@ -1920,6 +2382,8 @@ void main() {
             return seq_sort_body(/*dna4=*/true,  /*key_stage=*/false);
         case ShaderKind::seq_sort_tiebreak_generic:
             return seq_sort_body(/*dna4=*/false, /*key_stage=*/false);
+        case ShaderKind::align_extend_banded_affine:
+            return std::string{kAlignmentExtensionBandedAffineBody};
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }
@@ -2060,6 +2524,12 @@ std::vector<std::uint32_t> compile_shader_spirv(const ShaderCompileRequest& requ
     }
     if (request.local_size == 0) {
         throw ShaderCompileError("compile_shader_spirv: local_size must be non-zero");
+    }
+    if (request.kind == ShaderKind::align_extend_banded_affine
+        && (request.max_span == 0 || request.max_span > 512)) {
+        throw ShaderCompileError(fmt::format(
+            "compile_shader_spirv: alignment max_span {} out of range (1..512)",
+            request.max_span));
     }
 
     ensure_glslang_initialized();

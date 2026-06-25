@@ -40,6 +40,10 @@ inline constexpr std::uint32_t k_phase_c_sketch_local = 64u;
 inline constexpr std::uint32_t k_phase_c_sketch_tile_span_max = 384u;
 inline constexpr std::uint32_t k_phase_c_scan_block = 256u;
 inline constexpr std::uint32_t k_phase_c_slot_offset_align = 256u;
+inline constexpr std::uint32_t k_gpu_alignment_extension_max_len = 512u;
+inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
+inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
+inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
 
 enum class PhaseCSketchUse : std::uint8_t {
     minimizer_words,
@@ -242,10 +246,13 @@ struct PhaseCSketchMemoryPlan {
         letters_per_unit,
         context_span);
     const std::uint32_t tile_count = phase_c_ceil_div_u32(bp, tile_bp);
+    // DOC0353: the sketch kernel grid-strides one invocation per tile and the
+    // runtime clamps the dispatch to maxComputeWorkGroupCount[0], so a window with
+    // tile_count > max_workgroups is processed over multiple grid-stride steps —
+    // it is no longer a dispatchability failure (was `&& tile_count <= max_workgroups`).
     const bool dispatchable =
         tile_bp != 0u
         && tile_count != 0u
-        && tile_count <= max_workgroups
         && phase_c_saturating_add(tile_bp, context_span)
             <= k_phase_c_sketch_tile_span_max;
     return PhaseCSketchTilePlan{
@@ -460,6 +467,77 @@ struct GpuChainRangeWire {
     std::uint32_t length;
 };
 
+/// One query span consumed by the GPU hard-range builder.
+struct GpuChainRangeBuildSpanWire {
+    std::uint32_t anchor_lo;
+    std::uint32_t anchor_hi;
+    std::uint32_t range_lo;
+    std::uint32_t range_out;
+};
+
+/// Compact coordinate-only result emitted after resident seed+chain execution.
+struct GpuCoordinateOnlyResultWire {
+    std::uint64_t query_start;
+    std::uint64_t query_end;
+    std::uint64_t target_start;
+    std::uint64_t target_end;
+    std::uint64_t match_length;
+    std::uint64_t block_length;
+    std::int32_t chain_score;
+    std::int32_t seed_count;
+    std::uint32_t is_reverse;
+    std::uint32_t valid;
+};
+
+/// Push constants for the resident coordinate-only chain reducer.
+struct GpuCoordinateReducePush {
+    std::uint32_t anchor_count;
+    std::uint32_t query_len_lo;
+    std::uint32_t query_len_hi;
+    std::int32_t min_chain_score;
+    std::int32_t min_seed_count;
+    std::uint32_t probe_limit;
+    std::uint32_t reserved;
+};
+
+/// One score/end-point-only affine extension job. `query_offset` and
+/// `target_offset` are offsets into the runtime-provided uint32 symbol streams;
+/// symbols are caller-normalised alphabet ranks, not dna4-specific encodings.
+struct GpuAlignmentExtensionJobWire {
+    std::uint32_t query_offset;
+    std::uint32_t target_offset;
+    std::uint32_t query_len;
+    std::uint32_t target_len;
+    std::uint32_t band_width;
+    std::uint32_t flags;
+    std::uint32_t reserved0;
+    std::uint32_t reserved1;
+};
+
+/// Score and best extension end point for one job. No CIGAR or traceback state
+/// is materialised by this kernel surface.
+struct GpuAlignmentExtensionResultWire {
+    std::int32_t score;
+    std::uint32_t query_end;
+    std::uint32_t target_end;
+    std::uint32_t status;
+};
+
+/// Geometry and scoring contract for one alignment-extension batch. The runtime
+/// validates every job against these limits before dispatching the Vulkan kernel.
+struct GpuAlignmentExtensionParams {
+    std::uint32_t max_query_len = 0;
+    std::uint32_t max_target_len = 0;
+    std::uint32_t max_band_width = 0;
+    std::uint32_t alphabet_size = 0;
+    std::int32_t match_score = 0;
+    std::int32_t mismatch_penalty = 0;
+    std::int32_t gap_open_penalty = 0;
+    std::int32_t gap_extend_penalty = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t reserved0 = 0;
+};
+
 /// Aggregate counters downloaded after the count submit.
 struct GpuPhaseCCounters {
     std::uint64_t query_minimizers;
@@ -506,5 +584,33 @@ static_assert(offsetof(GpuAnchorWire, query_span) == 20);
 static_assert(offsetof(GpuAnchorWire, flags) == 21);
 static_assert(offsetof(GpuAnchorWire, segment_id) == 22);
 static_assert(sizeof(GpuChainRangeWire) == 8);
+static_assert(std::is_standard_layout_v<GpuChainRangeBuildSpanWire>);
+static_assert(sizeof(GpuChainRangeBuildSpanWire) == 16);
+static_assert(std::is_standard_layout_v<GpuCoordinateOnlyResultWire>);
+static_assert(sizeof(GpuCoordinateOnlyResultWire) == 64);
+static_assert(offsetof(GpuCoordinateOnlyResultWire, query_start) == 0);
+static_assert(offsetof(GpuCoordinateOnlyResultWire, target_start) == 16);
+static_assert(offsetof(GpuCoordinateOnlyResultWire, chain_score) == 48);
+static_assert(offsetof(GpuCoordinateOnlyResultWire, valid) == 60);
+static_assert(std::is_standard_layout_v<GpuCoordinateReducePush>);
+static_assert(sizeof(GpuCoordinateReducePush) == 28);
+static_assert(std::is_standard_layout_v<GpuAlignmentExtensionJobWire>);
+static_assert(sizeof(GpuAlignmentExtensionJobWire) == 32);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, query_offset) == 0);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, target_offset) == 4);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, query_len) == 8);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, target_len) == 12);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, band_width) == 16);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, flags) == 20);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, reserved0) == 24);
+static_assert(offsetof(GpuAlignmentExtensionJobWire, reserved1) == 28);
+static_assert(std::is_standard_layout_v<GpuAlignmentExtensionResultWire>);
+static_assert(sizeof(GpuAlignmentExtensionResultWire) == 16);
+static_assert(offsetof(GpuAlignmentExtensionResultWire, score) == 0);
+static_assert(offsetof(GpuAlignmentExtensionResultWire, query_end) == 4);
+static_assert(offsetof(GpuAlignmentExtensionResultWire, target_end) == 8);
+static_assert(offsetof(GpuAlignmentExtensionResultWire, status) == 12);
+static_assert(std::is_standard_layout_v<GpuAlignmentExtensionParams>);
+static_assert(sizeof(GpuAlignmentExtensionParams) == 40);
 
 } // namespace bioseq::gpu::vulkan

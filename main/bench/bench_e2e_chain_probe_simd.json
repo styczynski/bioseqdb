@@ -1,0 +1,42 @@
+{
+  "params": {
+    "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "SIMD frontend baseline; block aligner + SIMD-mm2 chaining + two-stack nthash minimizer; load(no index)+recompute align"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"]},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"]},
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"]}
+    }
+  },
+  "test_cases": {
+    "E2E_PROBE_DNA4": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "probe_300mbp_dna4", "reference_length": 300000000,
+        "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 300000352, "seed": 3219876 },
+      "description": "REAL e2e shape: 300 Mbp dna4 target, one 5 Mbp query (query<<target). SIMD baseline." }
+  },
+  "bench_e2e": {
+    "tags": ["e2e", "simd", "probe"],
+    "description": "SIMD baseline on the REAL e2e anchor/chain profile (small query vs large target) — MPF no_index CPU SIMD.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "E2E_PROBE_DNA4": 1 },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":   { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "match_count":            { "type": "evaluation" },
+        "found_fraction":         { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+  "regression_rules": []
+}

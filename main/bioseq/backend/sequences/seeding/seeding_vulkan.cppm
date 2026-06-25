@@ -205,6 +205,7 @@ template <class MinimizerT>
             .device_minimizer_words = fused_device_words,
             .slots = &resident_index->slots,
             .positions = &resident_index->positions,
+            .target_len = resident_index->target_len,
             .slot_mask = resident_index->slot_mask,
             .position_count = resident_index->position_count,
             .minimizer_count = static_cast<std::uint32_t>(query_minimizers.size()),
@@ -215,6 +216,7 @@ template <class MinimizerT>
             .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
             .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
             .bucket_count = resident_index->bucket_count,
+            .target_position_offset = resident_index->target_position_offset,
         };
         auto anchors = runtime.run_phase_c_seed_roundtrip(
             inputs, query_len, static_cast<std::uint32_t>(kmer_size), max_occ);
