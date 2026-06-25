@@ -242,10 +242,13 @@ struct PhaseCSketchMemoryPlan {
         letters_per_unit,
         context_span);
     const std::uint32_t tile_count = phase_c_ceil_div_u32(bp, tile_bp);
+    // DOC0353: the sketch kernel grid-strides one invocation per tile and the
+    // runtime clamps the dispatch to maxComputeWorkGroupCount[0], so a window with
+    // tile_count > max_workgroups is processed over multiple grid-stride steps —
+    // it is no longer a dispatchability failure (was `&& tile_count <= max_workgroups`).
     const bool dispatchable =
         tile_bp != 0u
         && tile_count != 0u
-        && tile_count <= max_workgroups
         && phase_c_saturating_add(tile_bp, context_span)
             <= k_phase_c_sketch_tile_span_max;
     return PhaseCSketchTilePlan{

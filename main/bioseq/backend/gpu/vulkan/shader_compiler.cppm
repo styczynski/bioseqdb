@@ -96,7 +96,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::seed_lookup:           return 5;
         case DescriptorLayoutKind::anchor_sort:           return 2;
         // DOC0310 Phase C layouts.
-        case DescriptorLayoutKind::phase_c_sketch:        return 8;
+        case DescriptorLayoutKind::phase_c_sketch:        return 9;
         case DescriptorLayoutKind::phase_c_scan:          return 3;
         case DescriptorLayoutKind::phase_c_seed:          return 8;
         case DescriptorLayoutKind::phase_c_sort:          return 5;
@@ -152,7 +152,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_sketch_tile:
         case ShaderKind::phase_c_sketch_emit_flags:
         case ShaderKind::phase_c_sketch_emit_carry:
-        case ShaderKind::phase_c_sketch_emit_words:   return 64;  // SketchPushC (16 × u32)
+        case ShaderKind::phase_c_sketch_emit_words:   return 72;  // SketchPushC (18 × u32)
         case ShaderKind::phase_c_prefix_scan_block:
         case ShaderKind::phase_c_prefix_scan_add:     return 16;  // ScanPushC (4 × u32)
         case ShaderKind::phase_c_seed_count:
@@ -236,8 +236,13 @@ namespace {
 /// directly). One workgroup owns one independent hard range, so no atomics are
 /// needed for the tail sweep.
 constexpr std::string_view kChainTiledDpBody = R"GLSL(
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-const uint TILE_SIZE_U = uint(TILE_SIZE);
+
+const uint SUBGROUP_LANES_U = 32u;
 const uint NO_PARENT = 0xffffffffu;
 const int INVALID_SCORE = -2147483647 - 1;
 
@@ -250,7 +255,7 @@ struct AnchorWire {
 
 struct ChainRangeWire {
     uint begin;
-    uint range_len;  // NB: not 'length' — that clashes with GLSL's .length() builtin
+    uint range_len;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer Anchors {
@@ -260,7 +265,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Ranges {
     ChainRangeWire ranges[];
 };
 layout(std430, set = 0, binding = 2) buffer BestScores {
-    int best_scores[];
+    coherent int best_scores[];
 };
 layout(std430, set = 0, binding = 3) buffer Predecessors {
     int64_t predecessors[];
@@ -275,26 +280,11 @@ layout(push_constant) uniform Params {
     int max_iter;
     float gap_penalty;
     float skip_penalty;
-    int max_chain_skip;   // DOC0311: nearest-first early-exit (minimap2 max_skip); <=0 disables
+    int max_chain_skip;
 } pc;
-
-shared uint64_t sh_ref_position[TILE_SIZE];
-shared uint64_t sh_query_position[TILE_SIZE];
-shared uint sh_is_reverse[TILE_SIZE];
-shared uint sh_span_flags_segment[TILE_SIZE];
-shared int sh_score[TILE_SIZE];
-shared uint sh_parent[TILE_SIZE];
 
 bool anchor_reverse(AnchorWire a) { return a.is_reverse != 0u; }
 uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
-
-AnchorWire shared_anchor(uint idx) {
-    return AnchorWire(
-        sh_ref_position[idx],
-        sh_query_position[idx],
-        sh_is_reverse[idx],
-        sh_span_flags_segment[idx]);
-}
 
 float fast_log2(float x) {
     uint z = floatBitsToUint(x);
@@ -332,116 +322,93 @@ int chain_score(AnchorWire current, AnchorWire pred) {
     return score;
 }
 
-void write_best(uint target, int best, uint parent) {
-    if (parent != NO_PARENT && best >= best_scores[target]) {
-        best_scores[target] = best;
-        predecessors[target] = int64_t(parent);
-    }
+uint signed_score_key(int score) {
+    return uint(score) ^ 0x80000000u;
 }
 
 void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint range_id = gl_WorkGroupID.x;
-    if (range_id >= pc.range_count) return;
+    uint lane = gl_SubgroupInvocationID;
 
-    ChainRangeWire r = ranges[range_id];
-    uint begin = r.begin;
-    uint end = min(pc.anchor_count, r.begin + r.range_len);
-    if (begin >= end) return;
+    for (uint range_id = gl_WorkGroupID.x; range_id < pc.range_count;
+         range_id += gl_NumWorkGroups.x) {
+        ChainRangeWire r = ranges[range_id];
+        uint begin = r.begin;
+        uint end = min(pc.anchor_count, r.begin + r.range_len);
+        if (begin >= end) continue;
 
-    for (uint tile_begin = begin; tile_begin < end; tile_begin += TILE_SIZE_U) {
-        uint tile_count = min(TILE_SIZE_U, end - tile_begin);
-
-        for (uint i = tid; i < tile_count; i += gl_WorkGroupSize.x) {
-            uint global_i = tile_begin + i;
+        for (uint global_i = begin; global_i < end; ++global_i) {
             AnchorWire a = anchors[global_i];
-            int64_t parent64 = predecessors[global_i];
-            int score = max(best_scores[global_i], int(anchor_span(a)));
-            sh_ref_position[i] = a.ref_position;
-            sh_query_position[i] = a.query_position;
-            sh_is_reverse[i] = a.is_reverse;
-            sh_span_flags_segment[i] = a.span_flags_segment;
-            sh_score[i] = score;
-            sh_parent[i] = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
-        }
-        barrier();
+            int best = max(best_scores[global_i], int(anchor_span(a)));
+            uint best_parent = NO_PARENT;
+            uint64_t scanned = uint64_t(0);
+            uint no_improve_batches = 0u;
+            uint max_no_improve_batches = pc.max_chain_skip > 0
+                ? (uint(pc.max_chain_skip) / SUBGROUP_LANES_U + 1u)
+                : 0xffffffffu;
 
-        // G3SA-style prologue: all-to-all inside the tile. Predecessor rows
-        // advance in j order so sh_score[j] is already final when later anchors
-        // compare against j.
-        for (uint j = 0u; j < tile_count; ++j) {
-            for (uint k = j + 1u + tid; k < tile_count; k += gl_WorkGroupSize.x) {
-                if (k - j > uint(pc.max_iter)) continue;
-                int pair = chain_score(shared_anchor(k), shared_anchor(j));
-                if (pair == INVALID_SCORE) continue;
-                int total = pair + sh_score[j];
-                if (total >= sh_score[k]) {
-                    sh_score[k] = total;
-                    sh_parent[k] = tile_begin + j;
+            while (true) {
+                uint64_t remaining = uint64_t(global_i) - uint64_t(begin);
+                uint64_t offset = scanned + uint64_t(lane) + uint64_t(1);
+                bool in_range = offset <= remaining;
+
+                uint pred = begin;
+                AnchorWire pa = a;
+                if (in_range) {
+                    pred = global_i - uint(offset);
+                    pa = anchors[pred];
                 }
+
+                uint first_out = subgroupMin(!in_range ? lane : SUBGROUP_LANES_U);
+                uint first_iter = subgroupMin(
+                    (in_range && offset > uint64_t(uint(pc.max_iter))) ? lane : SUBGROUP_LANES_U);
+                uint first_ref = subgroupMin(
+                    (in_range
+                     && anchor_reverse(a) == anchor_reverse(pa)
+                     && a.ref_position > pa.ref_position
+                     && a.ref_position - pa.ref_position > uint64_t(pc.max_dist_x))
+                        ? lane : SUBGROUP_LANES_U);
+                uint first_stop = min(first_out, min(first_iter, first_ref));
+                bool lane_active = in_range && lane < first_stop;
+
+                int candidate_total = INVALID_SCORE;
+                if (lane_active) {
+                    int pair = chain_score(a, pa);
+                    if (pair != INVALID_SCORE) {
+                        candidate_total = pair + best_scores[pred];
+                    }
+                }
+
+                uint candidate_score_key = signed_score_key(candidate_total);
+                uint max_score_key = subgroupMax(candidate_score_key);
+                bool is_max_score_lane = candidate_score_key == max_score_key;
+                int batch_score = subgroupMax(is_max_score_lane ? candidate_total : INVALID_SCORE);
+                uint batch_parent = subgroupMax(
+                    (is_max_score_lane && lane_active && candidate_total != INVALID_SCORE) ? pred : 0u);
+
+                bool stop_after_batch = first_stop < SUBGROUP_LANES_U;
+                if (batch_score > best) {
+                    best = batch_score;
+                    best_parent = batch_parent;
+                    no_improve_batches = 0u;
+                } else if (pc.max_chain_skip > 0) {
+                    ++no_improve_batches;
+                    if (no_improve_batches >= max_no_improve_batches) {
+                        stop_after_batch = true;
+                    }
+                }
+
+                if (stop_after_batch) break;
+                scanned += uint64_t(SUBGROUP_LANES_U);
             }
+
+            if (subgroupElect()) {
+                best_scores[global_i] = best;
+                predecessors[global_i] = best_parent == NO_PARENT
+                    ? int64_t(-1) : int64_t(best_parent);
+            }
+            memoryBarrierBuffer();
             barrier();
         }
-
-        // Tail update: targets after the tile compare against the tile's cached
-        // predecessors. We scan NEAREST-FIRST (highest index first; anchors are
-        // ref-sorted, so the highest index is the closest predecessor in ref).
-        // Nearest-first ordering enables two early exits that match the SIMD /
-        // minimap2 chaining (DOC0311): (1) an EXACT ref-distance break — once a
-        // predecessor's ref gap exceeds max_dist_x, chain_score would reject it
-        // and every farther predecessor too, so we stop; (2) minimap2's
-        // max_chain_skip — stop after K consecutive non-improving predecessors.
-        // Without these the tail is O(n*max_iter)=12s on XXL_HIFI; with them it is
-        // the same bounded O(n*max_skip) work the SIMD path does. Each range is
-        // owned by exactly one workgroup, so no atomics are needed.
-        uint tail_limit = min(end, tile_begin + TILE_SIZE_U + uint(pc.max_iter));
-        for (uint target_base = tile_begin + TILE_SIZE_U; target_base < tail_limit;
-             target_base += gl_WorkGroupSize.x) {
-            uint target = target_base + tid;
-            if (target >= tail_limit) continue;
-            AnchorWire cur = anchors[target];
-            int best = max(best_scores[target], int(anchor_span(cur)));
-            int64_t parent64 = predecessors[target];
-            uint best_parent = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
-            int n_skip = 0;
-            for (uint jj = 0u; jj < tile_count; ++jj) {
-                uint j = tile_count - 1u - jj;            // nearest predecessor first
-                uint pred = tile_begin + j;
-                if (target - pred > uint(pc.max_iter)) break;
-                AnchorWire pa = shared_anchor(j);
-                if (anchor_reverse(cur) == anchor_reverse(pa)
-                    && cur.ref_position > pa.ref_position
-                    && cur.ref_position - pa.ref_position > uint64_t(pc.max_dist_x)) {
-                    break;  // exact: farther predecessors are all out of ref range
-                }
-                int pair = chain_score(cur, pa);
-                if (pair == INVALID_SCORE) {
-                    if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) break;
-                    continue;
-                }
-                int total = pair + sh_score[j];
-                if (total > best) {
-                    best = total;
-                    best_parent = pred;
-                    if (n_skip > 0) --n_skip;
-                } else if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) {
-                    break;
-                }
-            }
-            write_best(target, best, best_parent);
-        }
-        memoryBarrierBuffer();
-        barrier();
-
-        for (uint i = tid; i < tile_count; i += gl_WorkGroupSize.x) {
-            uint global_i = tile_begin + i;
-            best_scores[global_i] = sh_score[i];
-            predecessors[global_i] = sh_parent[i] == NO_PARENT
-                ? int64_t(-1)
-                : int64_t(sh_parent[i]);
-        }
-        memoryBarrierBuffer();
-        barrier();
     }
 }
 )GLSL";
@@ -698,6 +665,7 @@ layout(std430, set = 0, binding = 4) buffer OutWords { uint out_words[]; };
 layout(std430, set = 0, binding = 5) buffer Counters { uint counters[]; };
 layout(std430, set = 0, binding = 6) readonly buffer TileOffsets { uint tile_offsets[]; };
 layout(std430, set = 0, binding = 7) buffer OutPairVals { uint64_t out_pair_vals[]; };
+layout(std430, set = 0, binding = 8) readonly buffer QueryGate { uint query_gate_words[]; };
 
 layout(push_constant) uniform Params {
     uint emit_mode;
@@ -716,6 +684,8 @@ layout(push_constant) uniform Params {
     uint char_mask;
     uint tile_count;
     uint emit_pairs;
+    uint query_gate_mask;
+    uint query_gate_word_count;
 } pc;
 
 )GLSL"
@@ -785,7 +755,15 @@ bool sketch_match_diff(Sketch a, Sketch b) {
         && (a.pos != b.pos || a.strand != b.strand);
 }
 
-	const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
+bool query_gate_accepts(uint64_t hash) {
+    if (pc.query_gate_word_count == 0u) return true;
+    uint bit = uint(hash & uint64_t(pc.query_gate_mask));
+    uint word = bit >> 5u;
+    if (word >= pc.query_gate_word_count) return true;
+    return (query_gate_words[word] & (1u << (bit & 31u))) != 0u;
+}
+
+		const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
 	uint g_seq_word_offset;
 	uint g_local_count;
 	uint g_out_base;
@@ -838,6 +816,7 @@ void write_minimizer(uint dst, Sketch s) {
 
 void emit_one(TileC t, Sketch s, uint emit_pos) {
     if (s.is_max != 0u || !owns_emit_position(t, emit_pos)) return;
+    if (!query_gate_accepts(s.hash)) return;
     uint dst = g_local_count;
     g_local_count = g_local_count + 1u;
     // emit_mode 2 (DOC0311 single-pass): no separate count pass / tile-offset
@@ -869,83 +848,42 @@ void emit_one(TileC t, Sketch s, uint emit_pos) {
 
 )GLSL"
 R"GLSL(
-// Candidate canonical k-mer ending at base `pos`. Returns a Sketch (max if the
-// window has an ambiguity, a palindrome, or is too short).
-Sketch candidate_at(uint pos) {
-    uint rank_here = read_rank_at_bp(pos, pc.bits_per_char, pc.letters_per_unit,
-                                     pc.unit_bits, g_seq_word_offset, pc.char_mask);
-    bool base_valid = code_for_rank(rank_here) < 4u;
-    if (!base_valid) { Sketch m = max_sketch(); m.pos = 0xffffffffu; return m; } // sentinel: base invalid
-    if (pc.kmer_size == 0u || pos + 1u < pc.kmer_size) return max_sketch();
-
-    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
-    uint roll_bits = pc.kmer_size * step_bits;
-    uint scramble_bits = pc.kmer_size * 2u;
-    if (roll_bits > 64u || scramble_bits > 64u) return max_sketch();
-    uint64_t roll_mask = (roll_bits == 64u) ? ~uint64_t(0) : ((uint64_t(1) << roll_bits) - uint64_t(1));
-    uint64_t scramble_mask = (scramble_bits == 64u) ? ~uint64_t(0) : ((uint64_t(1) << scramble_bits) - uint64_t(1));
-    uint shift_rc = step_bits * (pc.kmer_size - 1u);
-    uint64_t forward = uint64_t(0);
-    uint64_t reverse = uint64_t(0);
-    uint start = pos + 1u - pc.kmer_size;
-    for (uint i = 0u; i < pc.kmer_size; ++i) {
-        uint rank = read_rank_at_bp(start + i, pc.bits_per_char, pc.letters_per_unit,
-                                    pc.unit_bits, g_seq_word_offset, pc.char_mask);
-        uint code = code_for_rank(rank);
-        uint rc = rc_code_for_rank(rank);
-        if (code >= 4u || rc >= 4u) return max_sketch();
-        forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
-        reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
-    }
-    if (forward == reverse) return max_sketch();
-    bool fwd_wins = forward < reverse;
-    uint64_t canonical = fwd_wins ? forward : reverse;
-    uint64_t h = minimap_scramble(canonical, scramble_mask) & hash_field_mask();
-    if (h == hash_field_mask()) return max_sketch();
-    return Sketch(h, pos, fwd_wins ? 0u : 1u, 0u);
-}
-
-// Cooperative tile sketch. All workgroup invocations hash the tile's candidate
-// k-mers into shared memory in parallel (the expensive per-base rolling-hash is
-// fully SIMD-parallel), then invocation 0 runs the ordered emit state machine
-// reading the shared candidates — keeping bit-exact `collect_minimizers_view`
-// order without paying the hash cost on a single lane. SKETCH_CAND_MAX bounds
-// the tile span (tile_bp + overlap); the runtime keeps tiles within it.
-	shared uint64_t sh_cand_hash[SKETCH_CAND_MAX];
-shared uint sh_cand_flags[SKETCH_CAND_MAX];   // bit0 real-minimizer, bit1 base_valid, bit2 strand
-shared Sketch sh_ring[MAX_SPAN];
-
-void main() {
-    uint tile_id = gl_WorkGroupID.x;
-    if (tile_id >= pc.tile_count) return;
-    if (pc.window_size == 0u || pc.window_size > MAX_SPAN || pc.kmer_size == 0u) return;
-
+// Rolling-hash ordered minimizer sketch (DOC0353). Each invocation owns ONE tile
+// and runs minimap2's ordered window-minimum state machine over [replay_lo,
+// loop_hi), emitting only for owned positions [tile_lo, tile_hi). The canonical
+// k-mer hash is maintained INCREMENTALLY (forward/reverse rolled one base per
+// step) instead of recomputed O(k) per position, and EVERY invocation runs the
+// emit (no lane-0 serialization) — together these replace the prior
+// parallel-hash-into-shared + single-lane-emit scheme that left 63/64 lanes idle
+// and re-read each k-mer O(k) times. Output is bit-identical to
+// `collect_minimizers_view`: `valid_since_reset` (forward-code validity) gates
+// the state machine exactly as before, and a separate `valid_rc` counter
+// suppresses the candidate while a reverse-complement-invalid base sits in the
+// window (a no-op for dna4/dna5 where rc-invalid implies fwd-invalid).
+void process_tile(uint tile_id) {
     TileC t = tiles[tile_id];
     g_seq_word_offset = t.seq_word_offset;
-	    uint guard = ownership_guard_bp();
-	    g_owned_lo = t.tile_lo;
-	    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
-	    uint loop_hi = tile_id + 1u >= pc.tile_count
-	        ? t.bp_count
-	        : min(t.bp_count, t.tile_hi + guard);
-	    uint span = loop_hi - t.replay_lo;
-    if (span > SKETCH_CAND_MAX) span = SKETCH_CAND_MAX;
-
-    // Phase 1 — parallel candidate hashing into shared memory.
-    for (uint i = gl_LocalInvocationID.x; i < span; i += gl_WorkGroupSize.x) {
-        Sketch c = candidate_at(t.replay_lo + i);
-        bool base_valid = !(c.is_max != 0u && c.pos == 0xffffffffu);
-        uint flags = (c.is_max == 0u ? 1u : 0u) | (base_valid ? 2u : 0u) | (c.strand << 2u);
-        sh_cand_hash[i] = c.hash;
-        sh_cand_flags[i] = flags;
-    }
-    barrier();
-
-    // Phase 2 — ordered emit on a single lane reading shared candidates.
-    if (gl_LocalInvocationID.x != 0u) return;
+    g_owned_lo = t.tile_lo;
+    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
+    uint loop_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : min(t.bp_count, t.tile_hi);
     g_local_count = 0u;
     g_out_base = (pc.emit_mode == 1u) ? tile_offsets[tile_id] : 0u;
 
+    // Rolling canonical-kmer hash constants (constant per tile).
+    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
+    uint roll_bits = pc.kmer_size * step_bits;
+    uint scramble_bits = pc.kmer_size * 2u;
+    bool hash_ok = (roll_bits <= 64u) && (scramble_bits <= 64u);
+    uint64_t roll_mask = (roll_bits >= 64u) ? ~uint64_t(0) : ((uint64_t(1) << roll_bits) - uint64_t(1));
+    uint64_t scramble_mask = (scramble_bits >= 64u) ? ~uint64_t(0) : ((uint64_t(1) << scramble_bits) - uint64_t(1));
+    uint shift_rc = step_bits * (pc.kmer_size - 1u);
+    uint64_t hmask = hash_field_mask();
+
+    uint64_t forward = uint64_t(0);
+    uint64_t reverse = uint64_t(0);
+    uint valid_rc = 0u;   // consecutive bases whose rc code < 4 (palindrome-safety vs candidate_at)
+
+    Sketch ring[MAX_SPAN];
     uint buf_pos = 0u;
     uint valid_since_reset = 0u;
     bool init_mode = (t.replay_lo == 0u);
@@ -953,31 +891,52 @@ void main() {
     uint current_min_pos = 0u;
 
     for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
-        uint ci = seq_pos - t.replay_lo;
         bool is_init = init_mode;
-        uint cf = sh_cand_flags[ci];
-        bool base_valid = (cf & 2u) != 0u;
-        Sketch cand = ((cf & 1u) != 0u)
-            ? Sketch(sh_cand_hash[ci], seq_pos, (cf >> 2u) & 1u, 0u)
-            : max_sketch();
+
+        // --- rolling candidate ending at seq_pos (bit-exact with candidate_at) ---
+        uint rank_here = read_rank_at_bp(seq_pos, pc.bits_per_char, pc.letters_per_unit,
+                                         pc.unit_bits, g_seq_word_offset, pc.char_mask);
+        uint code = code_for_rank(rank_here);
+        uint rc = rc_code_for_rank(rank_here);
+        bool base_valid = code < 4u;          // matches candidate_at base_valid (forward code only)
+        if (code < 4u) {
+            forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
+        } else {
+            forward = uint64_t(0);
+        }
+        if (rc < 4u) {
+            reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
+            valid_rc = valid_rc + 1u;
+        } else {
+            reverse = uint64_t(0);
+            valid_rc = 0u;
+        }
+        Sketch cand = max_sketch();
+
         Sketch pushed = max_sketch();
         if (!base_valid) {
             valid_since_reset = 0u;
         } else {
             valid_since_reset = valid_since_reset + 1u;
+            if (hash_ok && valid_since_reset >= pc.kmer_size && valid_rc >= pc.kmer_size
+                && forward != reverse) {
+                uint64_t canonical = forward < reverse ? forward : reverse;
+                uint64_t h = minimap_scramble(canonical, scramble_mask) & hmask;
+                if (h != hmask) cand = Sketch(h, seq_pos, forward < reverse ? 0u : 1u, 0u);
+            }
             if (valid_since_reset >= pc.kmer_size && cand.is_max == 0u) pushed = cand;
         }
         uint prev_pos = buf_pos;
-        sh_ring[buf_pos] = pushed;
+        ring[buf_pos] = pushed;
         buf_pos = (buf_pos + 1u) % pc.window_size;
 
         if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
             && current_min.is_max == 0u) {
             for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
             }
             for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
             }
         }
 
@@ -995,18 +954,18 @@ void main() {
             }
             current_min = max_sketch();
             for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_geq(current_min, sh_ring[j])) { current_min = sh_ring[j]; current_min_pos = j; }
+                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
             }
             for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_geq(current_min, sh_ring[j])) { current_min = sh_ring[j]; current_min_pos = j; }
+                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
             }
             if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
                 && current_min.is_max == 0u) {
                 for (uint j = buf_pos; j < pc.window_size; ++j) {
-                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
                 }
                 for (uint j = 0u; j < buf_pos; ++j) {
-                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(t, sh_ring[j], seq_pos);
+                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
                 }
             }
         }
@@ -1021,6 +980,17 @@ void main() {
 
     if (pc.emit_mode == 0u) {
         tile_counts[tile_id] = g_local_count;
+    }
+}
+
+void main() {
+    if (pc.window_size == 0u || pc.window_size > MAX_SPAN || pc.kmer_size == 0u) return;
+    // One invocation per tile, grid-strided so the dispatch workgroup count is
+    // free to be ceil(tile_count / local_size) (every lane active) yet still
+    // correct for any larger dispatch.
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint tile_id = gl_GlobalInvocationID.x; tile_id < pc.tile_count; tile_id += stride) {
+        process_tile(tile_id);
     }
 }
 )GLSL";
@@ -1188,6 +1158,50 @@ uint find_slot(uint64_t hash) {
 }
 
 void main() {
+    // Fast fused-MPF path: Runtime currently provides one QRec. Flatten the
+    // record so every global invocation owns minimizers by grid stride instead
+    // of making one workgroup loop over the entire query.
+    if (pc.record_count == 1u) {
+        QRec q = qrecs[0];
+        uint64_t reverse_base = uint64_t(q.query_len - 2u + pc.kmer_size);
+        uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+        for (uint local = gl_GlobalInvocationID.x; local < q.min_count; local += stride) {
+            uint gi = q.min_offset + local;
+            uint64_t hash = read_min_hash(gi);
+            uint slot_idx = find_slot(hash);
+            uint cnt = 0u;
+            if (slot_idx != 0xffffffffu) {
+                GpuMinimizerSlot slot = slots[slot_idx];
+                if (slot.pos_count <= pc.max_occ) cnt = slot.pos_count;
+            }
+            if (pc.emit_mode == 0u) {
+                counts[gi] = cnt;
+                continue;
+            }
+            if (cnt == 0u) continue;
+            GpuMinimizerSlot slot = slots[slot_idx];
+            uint dst = prefix[gi];
+            uint64_t q_encoded = read_min_pos_strand(gi);
+            uint64_t q_pos = q_encoded >> 1;
+            uint q_strand = uint(q_encoded & uint64_t(1));
+            uint span_flags_segment = pc.kmer_size & 0xffu;
+            for (uint j = 0u; j < cnt; ++j) {
+                uint64_t target = positions[slot.pos_offset + j];
+                uint t_strand = uint(target & uint64_t(1));
+                uint rev = t_strand ^ q_strand;
+                uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
+                uint64_t ref_position = target >> 1;
+                anchors[dst + j].ref_position = ref_position;
+                anchors[dst + j].query_position = query_position;
+                anchors[dst + j].is_reverse = rev;
+                anchors[dst + j].span_flags_segment = span_flags_segment;
+                anchor_keys[dst + j] = (uint64_t(rev) << 63) | (ref_position & 0x7fffffffffffffffUL);
+            }
+        }
+        return;
+    }
+
+    // General multi-record fallback, kept for ABI completeness.
     uint rec = gl_WorkGroupID.x;
     if (rec >= pc.record_count) return;
     QRec q = qrecs[rec];

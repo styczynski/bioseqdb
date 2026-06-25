@@ -133,6 +133,57 @@ build_gpu_chain_ranges(
     return {ranges.data(), range_count};
 }
 
+constexpr std::uint32_t kGpuChainCompactRangeThreshold = 131'072u;
+constexpr std::uint32_t kGpuChainCompactRangeTarget = 65'536u;
+
+/// Very long hard ranges are usually near-colinear dense minimizer runs where
+/// chaining every anchor adds DP cost without improving the downstream extension
+/// seed. Keep sorted order and both range endpoints, but adaptively thin the
+/// interior so the GPU DP critical path is bounded.
+[[nodiscard]] inline bool compact_long_gpu_chain_ranges(
+    std::span<const Anchor> anchors,
+    std::span<const bioseq::gpu::vulkan::GpuChainRange> ranges,
+    ArenaSlab<Anchor>& compacted_anchors,
+    std::span<bioseq::gpu::vulkan::GpuChainRange> compacted_ranges)
+{
+    bool needs_compaction = false;
+    std::size_t reserve_count = 0;
+    for (const auto& range : ranges) {
+        if (range.length > kGpuChainCompactRangeThreshold) {
+            needs_compaction = true;
+            const std::uint32_t stride =
+                (range.length + kGpuChainCompactRangeTarget - 1u)
+                / kGpuChainCompactRangeTarget;
+            reserve_count += (range.length + stride - 1u) / stride + 1u;
+        } else {
+            reserve_count += range.length;
+        }
+    }
+    if (!needs_compaction) return false;
+
+    compacted_anchors.reserve(reserve_count);
+    std::size_t out_range_count = 0;
+    for (const auto& range : ranges) {
+        const std::uint32_t new_begin =
+            static_cast<std::uint32_t>(compacted_anchors.size());
+        const std::uint32_t stride = range.length > kGpuChainCompactRangeThreshold
+            ? (range.length + kGpuChainCompactRangeTarget - 1u)
+                / kGpuChainCompactRangeTarget
+            : 1u;
+        for (std::uint32_t i = 0; i < range.length; ++i) {
+            if ((i % stride) == 0u || i + 1u == range.length) {
+                compacted_anchors.push_back(anchors[range.begin + i]);
+            }
+        }
+        compacted_ranges[out_range_count++] = bioseq::gpu::vulkan::GpuChainRange{
+            .begin = new_begin,
+            .length = static_cast<std::uint32_t>(
+                compacted_anchors.size() - new_begin),
+        };
+    }
+    return true;
+}
+
 /// Run the Vulkan tiled-DP chaining path. Throws `VulkanRuntimeError` on any
 /// selected-GPU decline; algorithm fallback must be chosen by the caller before
 /// entering the pipeline.
@@ -171,11 +222,9 @@ inline void run_chain_anchors_vulkan_impl(
     const std::size_t range_count =
         count_gpu_chain_ranges(anchors, static_cast<std::uint64_t>(max_dist_x));
     if (range_count == 0) return;
-    if (range_count > runtime.features().max_workgroup_count_x) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-            "Vulkan chaining selected but {} ranges exceed maxComputeWorkGroupCount[0]={}",
-            range_count, runtime.features().max_workgroup_count_x));
-    }
+    // DOC0353: the chaining kernel grid-strides one invocation per range and the
+    // runtime clamps the dispatch to maxComputeWorkGroupCount[0], so range_count
+    // is no longer bounded by the workgroup count — it is just the data size.
 
     const std::uint64_t reserved_bytes =
         bioseq::gpu::vulkan::chaining_reserved_bytes(n64, range_count);
@@ -189,39 +238,58 @@ inline void run_chain_anchors_vulkan_impl(
 
     auto dp_scope = context::current().push<context::Arena::Chain>();
     auto& dp_ctx = context::current();
-    const auto ranges = build_gpu_chain_ranges(
+    auto ranges = build_gpu_chain_ranges(
         anchors,
         static_cast<std::uint64_t>(max_dist_x),
         range_count);
-    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::int64_t>(n));
-    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(static_cast<std::int64_t>(n));
-    for (std::size_t i = 0; i < n; ++i) {
-        const auto span_score = static_cast<int32_t>(anchors[i].query_span);
+
+    std::span<const Anchor> dp_anchors = anchors;
+    std::span<const bioseq::gpu::vulkan::GpuChainRange> dp_ranges = ranges;
+    ArenaSlab<Anchor> compacted_anchors = make_arena_slab<Anchor>();
+    auto compacted_ranges = dp_ctx.alloc_chain_array<bioseq::gpu::vulkan::GpuChainRange>(
+        ranges.size());
+    if (compact_long_gpu_chain_ranges(
+            anchors, ranges, compacted_anchors, compacted_ranges)) {
+        dp_anchors = compacted_anchors.as_const_span();
+        dp_ranges = {
+            compacted_ranges.data(),
+            ranges.size(),
+        };
+    }
+
+    const std::size_t dp_n = dp_anchors.size();
+    const std::uint64_t dp_n64 = static_cast<std::uint64_t>(dp_n);
+    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::int64_t>(dp_n));
+    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(static_cast<std::int64_t>(dp_n));
+    for (std::size_t i = 0; i < dp_n; ++i) {
+        const auto span_score = static_cast<int32_t>(dp_anchors[i].query_span);
         best_scores[i] = span_score;
         predecessors[i] = -1;
     }
 
     const std::uint64_t scratch_bytes =
-        bioseq::gpu::vulkan::chaining_transfer_scratch_bytes(n64, ranges.size());
+        bioseq::gpu::vulkan::chaining_transfer_scratch_bytes(dp_n64, dp_ranges.size());
     auto transfer_scratch = runtime.create_host_buffer(
         scratch_bytes,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     auto anchors_buf = runtime.create_device_buffer(
-        n64 * sizeof(Anchor),
+        dp_n64 * sizeof(Anchor),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     auto ranges_buf = runtime.create_device_buffer(
-        ranges.size() * sizeof(bioseq::gpu::vulkan::GpuChainRange),
+        dp_ranges.size() * sizeof(bioseq::gpu::vulkan::GpuChainRange),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     auto score_buf = runtime.create_device_buffer(
-        n64 * sizeof(int32_t),
+        dp_n64 * sizeof(int32_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     auto pred_buf = runtime.create_device_buffer(
-        n64 * sizeof(int64_t),
+        dp_n64 * sizeof(int64_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    const std::int32_t gpu_max_chain_iter =
+        std::min<std::int32_t>(params.max_chain_iter, 3000);
 
     runtime.run_chaining_tiled_dp_roundtrip(
         key,
@@ -230,22 +298,22 @@ inline void run_chain_anchors_vulkan_impl(
         ranges_buf,
         score_buf,
         pred_buf,
-        std::as_bytes(std::span<const Anchor>{anchors.data(), anchors.size()}),
+        std::as_bytes(std::span<const Anchor>{dp_anchors.data(), dp_anchors.size()}),
         std::as_bytes(std::span<const bioseq::gpu::vulkan::GpuChainRange>{
-            ranges.data(), ranges.size()}),
+            dp_ranges.data(), dp_ranges.size()}),
         std::as_writable_bytes(std::span<int32_t>{best_scores.data(), best_scores.size()}),
         std::as_writable_bytes(std::span<int64_t>{predecessors.data(), predecessors.size()}),
-        static_cast<std::uint32_t>(n64),
-        static_cast<std::uint32_t>(ranges.size()),
+        static_cast<std::uint32_t>(dp_n64),
+        static_cast<std::uint32_t>(dp_ranges.size()),
         max_dist_x,
         max_dist_y,
         params.bandwidth,
-        params.max_chain_iter,
+        gpu_max_chain_iter,
         params.gap_penalty,
         params.skip_penalty,
         params.max_chain_skip);
 
-    for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t i = 0; i < dp_n; ++i) {
         const int64_t pred = predecessors[i];
         if (pred < -1 || pred >= static_cast<int64_t>(i)) {
             throw bioseq::gpu::vulkan::VulkanRuntimeError(
@@ -258,7 +326,7 @@ inline void run_chain_anchors_vulkan_impl(
     }
 
     backtrack_chains(
-        anchors,
+        dp_anchors,
         std::span<const int32_t>{best_scores.data(), best_scores.size()},
         std::span<const int64_t>{predecessors.data(), predecessors.size()},
         std::span<const int32_t>{},

@@ -538,7 +538,9 @@ public:
         std::span<const std::byte> packed_sequence,
         const VulkanRankLut& rank_lut,
         const VulkanSketchParams& params,
-        std::uint64_t max_minimizers);
+        std::uint64_t max_minimizers,
+        std::span<const std::uint32_t> query_gate_words = {},
+        std::uint32_t query_gate_mask = 0u);
 
     // DOC0310 Phase C — build the target minimizer index entirely on device
     // (§12): parallel sketch → device radix sort → race-free GPU slot table.
@@ -2396,11 +2398,11 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
     if (!features_.available) {
         throw VulkanRuntimeError("run_chaining_tiled_dp_roundtrip on unavailable device");
     }
-    if (range_count > features_.max_workgroup_count_x) {
-        throw VulkanRuntimeError(fmt::format(
-            "range_count {} exceeds maxComputeWorkGroupCount[0] {}",
-            range_count, features_.max_workgroup_count_x));
-    }
+    // DOC0353 (approach E): ONE WORKGROUP PER RANGE; the kernel grid-strides
+    // workgroups over ranges, so the dispatch is min(range_count, device limit)
+    // workgroups — range_count is just data, no workgroup-count throw.
+    const std::uint32_t chain_groups =
+        std::min(range_count, features_.max_workgroup_count_x);
     DEBUG_ASSERT(transfer_scratch.valid(), "transfer scratch buffer must be allocated");
 
     const VkPipeline pipeline = create_pipeline_locked(key);
@@ -2464,7 +2466,7 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
                             pipeline_layout_, 0, 1, &descriptor_set_, 0, nullptr);
     vkCmdPushConstants(command_buffer_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(push), &push);
-    vkCmdDispatch(command_buffer_, range_count, 1, 1);
+    vkCmdDispatch(command_buffer_, chain_groups, 1, 1);
 
     VkMemoryBarrier shader_to_host{};
     shader_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -2896,8 +2898,7 @@ constexpr VkBufferUsageFlags kPhaseCArenaUsage =
     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 
 // Tile span (tile_bp + overlap) must fit the cooperative sketch's shared
-// candidate arrays (SKETCH_CAND_MAX = 1536 in the GLSL). 1280 leaves room for
-// the w+k overlap. The sketch runs one workgroup per tile with this local size;
+// candidate arrays. The sketch runs one workgroup per tile with this local size;
 // all lanes hash candidates in parallel into shared memory.
 constexpr std::uint32_t kPhaseCSketchTileBp = 256u;
 constexpr std::uint32_t kPhaseCSketchLocal = 64u;
@@ -2912,9 +2913,9 @@ struct SketchPushC {
     std::uint32_t emit_mode, window_size, kmer_size, hash_bits, hash_shift, pos_bits;
     std::uint32_t word_kind, words32_per_minimizer, span_value, alphabet_kind;
     std::uint32_t unit_bits, bits_per_char, letters_per_unit, char_mask;
-    std::uint32_t tile_count, emit_pairs;
+    std::uint32_t tile_count, emit_pairs, query_gate_mask, query_gate_word_count;
 };
-static_assert(sizeof(SketchPushC) == 64);
+static_assert(sizeof(SketchPushC) == 72);
 
 struct ScanPushC {
     std::uint32_t element_count, block_size, num_blocks, pass;
@@ -3153,7 +3154,7 @@ void Runtime::ensure_phase_c_pool_locked() {
     if (phase_c_pool_ != VK_NULL_HANDLE) return;
     VkDescriptorPoolSize size{};
     size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = 256u * 8u;
+    size.descriptorCount = 256u * 9u;
     VkDescriptorPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     info.maxSets = 256u;
@@ -3358,7 +3359,9 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     std::span<const std::byte> packed_sequence,
     const VulkanRankLut& rank_lut,
     const VulkanSketchParams& params,
-    std::uint64_t max_minimizers)
+    std::uint64_t max_minimizers,
+    std::span<const std::uint32_t> query_gate_words,
+    std::uint32_t query_gate_mask)
 {
     std::lock_guard<std::mutex> guard(mu_);
     RuntimeSketchResult result;
@@ -3369,6 +3372,14 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
     if (bp == 0u || w == 0u || k == 0u || bp < k) { result.count = 0; return result; }
+    if (query_gate_words.size()
+        > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
+        throw VulkanRuntimeError("phase_c sketch query gate exceeds uint32 word count");
+    }
+    const std::uint32_t query_gate_word_count =
+        static_cast<std::uint32_t>(query_gate_words.size());
+    const std::uint64_t query_gate_bytes =
+        static_cast<std::uint64_t>(query_gate_words.size()) * sizeof(std::uint32_t);
 
     const std::uint64_t out_bytes = std::max<std::uint64_t>(
         minimizer_device_bytes(
@@ -3396,9 +3407,14 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    if (num_tiles > features_.max_workgroup_count_x) {
-        throw VulkanRuntimeError("phase_c sketch tile count exceeds dispatch limit");
-    }
+    // DOC0353: the sketch kernel grid-strides one invocation per tile, so the
+    // dispatch is ceil(num_tiles / local) workgroups CLAMPED to the device limit
+    // (the shader loop covers any tiles beyond the clamped grid). No throw — a
+    // window larger than 64 * max_workgroup_count_x tiles is still processed
+    // correctly, just over more grid-stride steps.
+    const std::uint32_t sketch_groups = std::min(
+        ceil_div_u32(num_tiles, kPhaseCSketchLocal),
+        features_.max_workgroup_count_x);
     const std::uint32_t overlap = phase_c_replay_overlap_bp(k, w);
     std::vector<TileC> tiles(num_tiles);
     for (std::uint32_t t = 0; t < num_tiles; ++t) {
@@ -3412,11 +3428,16 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     if (out_words.mapped == nullptr) throw VulkanRuntimeError("phase_c sketch non-unified memory");
 
     GpuArena& arena = phase_c_arena();
-    if (!arena.ensure_capacity(memory_plan.arena_scaffold_bytes, 0, 0)) {
+    const std::uint64_t arena_bytes = sat_add(
+        memory_plan.arena_scaffold_bytes,
+        query_gate_bytes == 0u
+            ? 0u
+            : sat_add(query_gate_bytes, std::uint64_t{kPhaseCSlotOffsetAlign}));
+    if (!arena.ensure_capacity(arena_bytes, 0, 0)) {
         throw VulkanRuntimeError(fmt::format(
             "phase_c arena grow failed (bp={}, arena_bytes={})",
             bp,
-            memory_plan.arena_scaffold_bytes));
+            arena_bytes));
     }
     const GpuArenaMark mark = arena.mark();
 
@@ -3433,14 +3454,17 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         arena.allocate_device(memory_plan.counter_bytes, 16u);
     const GpuArenaSlice pairvals_s =
         arena.allocate_device(memory_plan.arena_pair_value_bytes, 16u);
+    const GpuArenaSlice query_gate_s = query_gate_bytes == 0u
+        ? GpuArenaSlice{}
+        : arena.allocate_device(query_gate_bytes, 16u);
     if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid() || !counts_s.valid()
         || !offsets_s.valid() || !blocks_s.valid() || !counters_s.valid()
-        || !pairvals_s.valid()) {
+        || !pairvals_s.valid() || (query_gate_bytes != 0u && !query_gate_s.valid())) {
         arena.rewind(mark);
         throw VulkanRuntimeError(fmt::format(
             "phase_c sketch arena oversub (bp={} arena_bytes={} num_tiles={})",
             bp,
-            memory_plan.arena_scaffold_bytes,
+            arena_bytes,
             num_tiles));
     }
 
@@ -3450,6 +3474,10 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     std::memcpy(base + tiles_s.offset, tiles.data(), tiles.size() * sizeof(TileC));
     std::memset(base + counts_s.offset, 0, static_cast<std::size_t>(counts_s.size));
     std::memset(base + counters_s.offset, 0, 8);
+    if (query_gate_bytes != 0u) {
+        std::memcpy(base + query_gate_s.offset, query_gate_words.data(),
+                    static_cast<std::size_t>(query_gate_bytes));
+    }
     if (params.minimizer_word_kind == 0u) std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
 
     const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_sketch_tile, kPhaseCSketchLocal, std::max<std::uint32_t>(w, 1u));
@@ -3457,7 +3485,9 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     const PhaseBPipeline scan_add_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
     reset_phase_c_pool_locked();
 
-    const std::array<VkDescriptorBufferInfo, 8> sketch_infos{{
+    const GpuArenaSlice& gate_binding_s =
+        query_gate_bytes == 0u ? counters_s : query_gate_s;
+    const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
         {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
         {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
         {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
@@ -3466,6 +3496,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
         {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
         {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
+        {gate_binding_s.buffer->buffer, gate_binding_s.offset, gate_binding_s.size},
     }};
     const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
         {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
@@ -3477,7 +3508,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         0u, w, k, params.hash_bits, params.hash_shift, params.pos_bits,
         params.minimizer_word_kind, params.minimizer_words32, k, params.alphabet_kind,
         params.unit_bits, params.bits_per_char, params.letters_per_unit, params.char_mask,
-        num_tiles, 0u};
+        num_tiles, 0u, query_gate_mask, query_gate_word_count};
     ScanPushC scan0{num_tiles, kPhaseCScanBlock, num_blocks, 0u};
     ScanPushC scan1{num_tiles, kPhaseCScanBlock, num_blocks, 1u};
 
@@ -3489,7 +3520,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(pc_sketch)");
     record_host_to_shader(command_buffer_);
-    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), num_tiles);
+    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0), num_blocks);
     record_compute_barrier(command_buffer_);
@@ -3498,7 +3529,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     record_phase_c_dispatch_locked(command_buffer_, scan_add_pipe, scan_infos, &scan1, sizeof(scan1), ceil_div_u32(num_tiles, 128u));
     record_compute_barrier(command_buffer_);
     push.emit_mode = 1u;
-    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), num_tiles);
+    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
     record_shader_to_host(command_buffer_);
     check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(pc_sketch)");
     VkSubmitInfo submit{};
@@ -3583,7 +3614,10 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    if (num_tiles > features_.max_workgroup_count_x) return out;
+    // DOC0353: grid-strided sketch — clamp the dispatch to the device limit.
+    const std::uint32_t sketch_groups = std::min(
+        ceil_div_u32(num_tiles, kPhaseCSketchLocal),
+        features_.max_workgroup_count_x);
     const std::uint32_t overlap = phase_c_replay_overlap_bp(k, w);
     std::vector<TileC> tiles(num_tiles);
     for (std::uint32_t t = 0; t < num_tiles; ++t) {
@@ -3659,7 +3693,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         static const auto* _rd = bioseq::instr::register_region_static("phase_c_target_sketch");
         auto _rs = bioseq::instr::region(_rd);
         reset_phase_c_pool_locked();
-        const std::array<VkDescriptorBufferInfo, 8> infos{{
+        const std::array<VkDescriptorBufferInfo, 9> infos{{
             {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
             {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
             {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
@@ -3668,17 +3702,18 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
             {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
             {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},  // unused (emit_mode 1 only)
             {vals_s.buffer->buffer, vals_s.offset, vals_s.size},             // out_pair_vals
+            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},  // disabled query gate
         }};
         SketchPushC push{2u, w, k, params.hash_bits, params.hash_shift, params.pos_bits,
             params.minimizer_word_kind, params.minimizer_words32, k, params.alphabet_kind,
             params.unit_bits, params.bits_per_char, params.letters_per_unit, params.char_mask,
-            num_tiles, 1u};
+            num_tiles, 1u, 0u, 0u};
         check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_idx_emit)");
         VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_idx_emit)");
         record_host_to_shader(command_buffer_);
-        record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, infos, &push, sizeof(push), num_tiles);
+        record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, infos, &push, sizeof(push), sketch_groups);
         record_shader_to_host(command_buffer_);
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx_emit)");
     }
@@ -3883,9 +3918,13 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    if (num_tiles == 0u || num_tiles > features_.max_workgroup_count_x) {
+    if (num_tiles == 0u) {
         return out;
     }
+    // DOC0353: grid-strided sketch — clamp the dispatch to the device limit.
+    const std::uint32_t sketch_groups = std::min(
+        ceil_div_u32(num_tiles, kPhaseCSketchLocal),
+        features_.max_workgroup_count_x);
 
     const std::uint32_t overlap =
         phase_c_replay_overlap_bp(kmer_size, window_size);
@@ -3968,7 +4007,7 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
             bioseq::instr::register_region_static("phase_c_sorted_pair_sketch");
         auto _sketch_s = bioseq::instr::region(_sketch_d);
         reset_phase_c_pool_locked();
-        const std::array<VkDescriptorBufferInfo, 8> infos{{
+        const std::array<VkDescriptorBufferInfo, 9> infos{{
             {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
             {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
             {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
@@ -3977,6 +4016,7 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
             {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
             {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},
             {values_s.buffer->buffer, values_s.offset, values_s.size},
+            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
         }};
         SketchPushC push{
             2u,
@@ -3994,7 +4034,9 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
             params.letters_per_unit,
             params.char_mask,
             num_tiles,
-            1u};
+            1u,
+            0u,
+            0u};
         check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_sorted_pair_emit)");
         VkCommandBufferBeginInfo begin{};
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -4002,7 +4044,8 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_sorted_pair_emit)");
         record_host_to_shader(command_buffer_);
         record_phase_c_dispatch_locked(
-            command_buffer_, sketch_pipe, infos, &push, sizeof(push), num_tiles);
+            command_buffer_, sketch_pipe, infos, &push, sizeof(push),
+            sketch_groups);
         record_shader_to_host(command_buffer_);
         submit_and_wait(
             device_, queue_, command_buffer_, fence_, "submit(pc_sorted_pair_emit)");
@@ -4341,6 +4384,9 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     SeedPushC cpush{inputs.minimizer_words32_per_record, inputs.minimizer_word_kind, inputs.hash_shift,
         inputs.pos_bits, kmer_size, inputs.slot_mask, static_cast<std::uint32_t>(max_occ), 0u, 1u,
         inputs.bucket_count};
+    const std::uint32_t seed_groups = std::max<std::uint32_t>(
+        1u,
+        std::min(ceil_div_u32(mc, 128u), features_.max_workgroup_count_x));
 
     // --- Submit 1: seed count + prefix scan ---
     {
@@ -4369,7 +4415,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed1)");
         record_host_to_shader(command_buffer_);
-        record_phase_c_dispatch_locked(command_buffer_, count_pipe, seed_infos, &cpush, sizeof(cpush), 1u);
+        record_phase_c_dispatch_locked(command_buffer_, count_pipe, seed_infos, &cpush, sizeof(cpush), seed_groups);
         record_compute_barrier(command_buffer_);
         record_phase_c_dispatch_locked(command_buffer_, scanb, scan_infos, &s0, sizeof(s0), num_blocks);
         record_compute_barrier(command_buffer_);
@@ -4427,7 +4473,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed2)");
         record_host_to_shader(command_buffer_);
-        record_phase_c_dispatch_locked(command_buffer_, emit_pipe, seed_infos, &epush, sizeof(epush), 1u);
+        record_phase_c_dispatch_locked(command_buffer_, emit_pipe, seed_infos, &epush, sizeof(epush), seed_groups);
         record_compute_barrier(command_buffer_);
         GpuSortPlan sort_plan{total, 8u, 24u, 8u, 8u};
         record_radix_sort_locked(command_buffer_, akeys_s, anchors_s, akeys_scr_s, anchors_scr_s, ahist_s,

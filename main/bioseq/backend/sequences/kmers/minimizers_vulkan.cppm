@@ -52,6 +52,13 @@ import bioseq.instr;  // DOC0310 §21 — phase_c_* timing labels
 
 export namespace bioseq::gpu::vulkan {
 
+struct VulkanSketchQueryGate {
+    std::span<const std::uint32_t> words{};
+    std::uint32_t mask = 0u;
+
+    [[nodiscard]] bool enabled() const noexcept { return !words.empty(); }
+};
+
 // ===========================================================================
 // MinimizerRepr wire traits (DOC0307 §4.3)
 // ===========================================================================
@@ -469,7 +476,11 @@ template <class MinimizerT, class Traits>
 {
     using storage_unit = typename Traits::storage_unit;
     constexpr std::uint64_t collected_floor_bp = 1'000'000u;
-    constexpr std::uint64_t collected_ceil_bp = 20'000'000u;
+    // DOC0353 continuation: match the moderate Vulkan segment collected cap.
+    // 64M stays below the previously failed 100M/128M shape while giving the
+    // grid-stride sketch enough room to avoid splitting the new 51M-core target
+    // segments under normal memory admission.
+    constexpr std::uint64_t collected_ceil_bp = 96'000'000u;
     const std::uint64_t available =
         bioseq::parallelism::MemoryAdmissionController::instance()
             .allocatable_after_reservations();
@@ -793,7 +804,8 @@ sketch_uploaded_window_result(
     std::size_t window_size,
     std::size_t kmer_size,
     std::uint64_t capacity_bound = 0u,
-    bool* capacity_overflowed = nullptr)
+    bool* capacity_overflowed = nullptr,
+    VulkanSketchQueryGate query_gate = {})
 {
     using bioseq::parallelism::MemoryAdmissionController;
     using bioseq::parallelism::saturating_mul;
@@ -816,6 +828,14 @@ sketch_uploaded_window_result(
     if (max_minimizers > std::numeric_limits<std::uint32_t>::max()) {
         return std::nullopt;
     }
+    if (query_gate.words.size()
+        > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
+        return std::nullopt;
+    }
+    const std::uint64_t query_gate_bytes =
+        saturating_mul(
+            static_cast<std::uint64_t>(query_gate.words.size()),
+            static_cast<std::uint64_t>(sizeof(std::uint32_t)));
     const std::uint64_t resident_bytes =
         vulkan_sketch_resident_bytes<MinimizerT>(max_minimizers);
     const std::uint64_t host_minimizer_bytes =
@@ -831,7 +851,9 @@ sketch_uploaded_window_result(
             resident_bytes);
 
     const std::uint64_t dispatch_admission_bytes =
-        sat_add(sat_add(resident_bytes, transient_bytes), host_minimizer_bytes);
+        sat_add(
+            sat_add(sat_add(resident_bytes, transient_bytes), host_minimizer_bytes),
+            query_gate_bytes);
     auto dispatch_permit =
         MemoryAdmissionController::instance().try_reserve(dispatch_admission_bytes);
     if (!dispatch_permit) {
@@ -875,7 +897,9 @@ sketch_uploaded_window_result(
                 padded_sequence.size()},
             rank_lut,
             sketch_params,
-            max_minimizers);
+            max_minimizers,
+            query_gate.words,
+            query_gate.mask);
         if (raw.overflow) {
             if (capacity_overflowed != nullptr) {
                 *capacity_overflowed = true;
@@ -1435,7 +1459,8 @@ void collect_minimizers_vulkan_segment_or_throw(
     std::size_t lo_unit,
     std::size_t hi_unit,
     std::size_t window_size,
-    std::size_t kmer_size)
+    std::size_t kmer_size,
+    VulkanSketchQueryGate query_gate = {})
 {
     using bare = std::remove_cvref_t<Seq>;
     if constexpr (!vulkan_sketchable_segment_sequence<bare>) {
@@ -1483,6 +1508,10 @@ void collect_minimizers_vulkan_segment_or_throw(
                 window_size,
                 kmer_size,
                 PhaseCSketchUse::minimizer_words);
+        if (query_gate.enabled() && windows.size() != 1u) {
+            throw VulkanRuntimeError{
+                "query-gated Vulkan segment sketch requires one admitted Phase-C window"};
+        }
         const std::size_t context_units =
             phase_c_segment_context_units<traits>(window_size, kmer_size);
         for (std::size_t window_index = 0u;
@@ -1519,7 +1548,8 @@ void collect_minimizers_vulkan_segment_or_throw(
                 window_size,
                 kmer_size,
                 max_minimizers,
-                &capacity_overflowed);
+                &capacity_overflowed,
+                query_gate);
             if (!result) {
                 using bioseq::parallelism::MemoryAdmissionController;
                 if (capacity_overflowed) {
@@ -1528,6 +1558,10 @@ void collect_minimizers_vulkan_segment_or_throw(
                         "Phase-C capacity (bp={} cap={})",
                         upload.bp_size,
                         max_minimizers));
+                }
+                if (query_gate.enabled()) {
+                    throw VulkanRuntimeError{
+                        "query-gated Vulkan segment sketch declined one-window Phase-C dispatch"};
                 }
                 PhaseCSegmentWindow left{};
                 PhaseCSegmentWindow right{};

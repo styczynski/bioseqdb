@@ -1010,9 +1010,14 @@ inline constexpr sequence_size_t kSegmentCoreMaxBp    = 200'000'000ull;  // core
 inline constexpr sequence_size_t kSegmentOverlapMaxBp =  30'000'000ull;  // per-side overlap ceiling
 inline constexpr sequence_size_t kSegmentMinBp        =  32'000'000ull;  // floor (keep batches useful)
 inline constexpr sequence_size_t kVulkanSegmentMinBp   =   1'000'000ull;  // floor when GPU sketch is selected
-inline constexpr sequence_size_t kVulkanSegmentTargetBp =  8'000'000ull;  // target core before query-overlap clamping
+// DOC0353 continuation: 76M/96M is the best measured consolidation point. The
+// earlier 100M/128M experiment made the inner sketch admission shrink and exposed
+// a multi-window correctness bug; 96M keeps the collected span below that failed
+// shape while cutting the 300M probe from ~44 GPU windows to ~6 when
+// memory admission accepts a one-window sketch.
+inline constexpr sequence_size_t kVulkanSegmentTargetBp = 76'000'000ull;  // target core before query-overlap clamping
 inline constexpr sequence_size_t kVulkanSegmentCollectedMaxBp =
-    20'000'000ull; // conservative Phase-C tile-count bound on MoltenVK
+    96'000'000ull;
 static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
                   static_cast<sequence_size_t>(MinimapSketchData::pos_field_mask),
               "segment collected span (core + 2*overlap) must fit "
@@ -4108,12 +4113,65 @@ template <supports_compact_sequence_range QueryRange,
     for (const MinimizerT& minimizer : query_minimizers) {
         query_kmer_filter.insert(minimizer.kmer());
     }
+    struct QueryKmerGate {
+        std::vector<std::uint32_t> words;
+        std::uint64_t mask = 0u;
+        bool exact = false;
+
+        void build(
+            const boost::unordered_flat_set<std::uint64_t>& filter,
+            std::size_t /*kmer_size*/) {
+            const unsigned gate_bits = 26u;
+            exact = false;
+            if (filter.empty()) {
+                words.clear();
+                mask = 0u;
+                return;
+            }
+            const std::uint64_t bit_count = std::uint64_t{1} << gate_bits;
+            mask = bit_count - 1u;
+            words.assign(static_cast<std::size_t>(bit_count / 32u), 0u);
+            for (const std::uint64_t kmer : filter) {
+                const std::uint64_t bit = kmer & mask;
+                words[static_cast<std::size_t>(bit >> 5u)] |=
+                    std::uint32_t{1} << (bit & 31u);
+            }
+        }
+
+        [[nodiscard, gnu::always_inline]] bool maybe_contains(
+            std::uint64_t kmer) const noexcept
+        {
+            if (words.empty()) return true;
+            const std::uint64_t bit = kmer & mask;
+            return (words[static_cast<std::size_t>(bit >> 5u)]
+                    & (std::uint32_t{1} << (bit & 31u))) != 0u;
+        }
+
+        [[nodiscard, gnu::always_inline]] bool accepts_exactly(
+            std::uint64_t /*kmer*/) const noexcept
+        {
+            return false;
+        }
+
+        [[nodiscard]] bioseq::gpu::vulkan::VulkanSketchQueryGate
+        vulkan_gate() const noexcept
+        {
+            return bioseq::gpu::vulkan::VulkanSketchQueryGate{
+                std::span<const std::uint32_t>{words.data(), words.size()},
+                static_cast<std::uint32_t>(mask)};
+        }
+    };
+    QueryKmerGate query_kmer_gate;
+    if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
+        query_kmer_gate.build(query_kmer_filter, k);
+    }
     using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
     auto build_query_filtered_segment_index =
-        [&query_kmer_filter, target_len](
+        [&query_kmer_filter, &query_kmer_gate, target_len](
                 std::span<const MinimizerT> minimizers,
                 MinimizerHashmapFragmentIndex& index,
-                std::vector<FilteredMinimizerPair>& filtered_pairs) -> std::size_t {
+                std::vector<FilteredMinimizerPair>& filtered_pairs,
+                bool already_query_filtered = false) -> std::size_t {
         filtered_pairs.clear();
         const std::size_t filter_size = query_kmer_filter.size();
         const std::size_t reserve_base =
@@ -4126,7 +4184,10 @@ template <supports_compact_sequence_range QueryRange,
         }
         for (const MinimizerT& minimizer : minimizers) {
             const std::uint64_t kmer = minimizer.kmer();
-            if (query_kmer_filter.find(kmer) != query_kmer_filter.end()) {
+            if (already_query_filtered
+                || query_kmer_gate.accepts_exactly(kmer)
+                || (query_kmer_gate.maybe_contains(kmer)
+                    && query_kmer_filter.find(kmer) != query_kmer_filter.end())) {
                 filtered_pairs.emplace_back(kmer, minimizer.pos_strand_encoded());
             }
         }
@@ -4135,6 +4196,73 @@ template <supports_compact_sequence_range QueryRange,
                 filtered_pairs.data(), filtered_pairs.size()},
             target_len);
         return filtered_pairs.size();
+    };
+    using QueryKmerFilter = decltype(query_kmer_filter);
+    struct QueryFilteredSketchCollector {
+        const QueryKmerFilter* filter = nullptr;
+        const QueryKmerGate* gate = nullptr;
+        std::vector<MinimizerT> sketches;
+
+        void reserve(std::size_t expected_count) {
+            const std::size_t filtered_hint = filter == nullptr
+                ? expected_count
+                : std::min<std::size_t>(expected_count, filter->size() + 64u);
+            sketches.reserve(filtered_hint);
+        }
+        void clear() { sketches.clear(); }
+        [[gnu::always_inline]] void collect(MinimizerT&& sketch) {
+            if (filter == nullptr) {
+                sketches.push_back(std::move(sketch));
+                return;
+            }
+            const std::uint64_t kmer = sketch.kmer();
+            if ((gate == nullptr || gate->maybe_contains(kmer))
+                && filter->find(kmer) != filter->end()) {
+                sketches.push_back(std::move(sketch));
+            }
+        }
+        [[gnu::always_inline]] void collect(const MinimizerT& sketch) {
+            if (filter == nullptr) {
+                sketches.push_back(sketch);
+                return;
+            }
+            const std::uint64_t kmer = sketch.kmer();
+            if ((gate == nullptr || gate->maybe_contains(kmer))
+                && filter->find(kmer) != filter->end()) {
+                sketches.push_back(sketch);
+            }
+        }
+        [[nodiscard]] const std::vector<MinimizerT>& extract_sketches_data() const & {
+            return sketches;
+        }
+    };
+    struct QueryFilteredPairCollector {
+        const QueryKmerFilter* filter = nullptr;
+        const QueryKmerGate* gate = nullptr;
+        std::uint64_t position_offset = 0u;
+        std::vector<FilteredMinimizerPair> pairs;
+
+        void reserve(std::size_t expected_count) {
+            const std::size_t filtered_hint = filter == nullptr
+                ? expected_count
+                : std::min<std::size_t>(expected_count, filter->size() + 64u);
+            pairs.reserve(filtered_hint);
+        }
+        void clear() { pairs.clear(); }
+        [[gnu::always_inline]] void collect(MinimizerT&& sketch) {
+            collect(static_cast<const MinimizerT&>(sketch));
+        }
+        [[gnu::always_inline]] void collect(const MinimizerT& sketch) {
+            const std::uint64_t kmer = sketch.kmer();
+            if (filter == nullptr
+                || ((gate == nullptr || gate->maybe_contains(kmer))
+                    && filter->find(kmer) != filter->end())) {
+                const std::uint64_t encoded =
+                    ((position_offset + sketch.last_pos()) << 1u)
+                    | static_cast<std::uint64_t>(sketch.strand());
+                pairs.emplace_back(kmer, encoded);
+            }
+        }
     };
 
     // (2) Segment the target. Overlap >= longest target match span so a match
@@ -4145,7 +4273,7 @@ template <supports_compact_sequence_range QueryRange,
 
     auto run_serial_segmented =
         [target_len, query_len, lpu, w, k, &target_seq, &query_seq,
-         &query_minimizers, &params, fragment_index_out,
+         &query_minimizers, &query_kmer_filter, &query_kmer_gate, &params, fragment_index_out,
          target_sketch_backend, segmented_gpu_index_cache_ptr,
          &segment_gpu_identity, &build_query_filtered_segment_index]() -> MatchResultCollection {
         std::vector<MatchResult> merged;
@@ -4219,40 +4347,110 @@ template <supports_compact_sequence_range QueryRange,
             }
         }
 
+        QueryFilteredPairCollector filtered_pair_collector{
+            &query_kmer_filter, &query_kmer_gate};
         for (std::size_t segment_index = 0;
              segment_index < ranges.size();
              ++segment_index) {
             const pipe::SegmentUnitRange& range = ranges[segment_index];
-            seg_collector.clear();
-            seg_collector.reserve(
-                (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-            pipe::minimizer_dispatch_range<MinimizerT>(
-                seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
-                target_sketch_backend);
-            const std::vector<MinimizerT>& seg_minimizers =
-                seg_collector.extract_sketches_data();
+            bioseq::indexing::GpuIndexCacheIdentity gpu_identity =
+                segment_gpu_identity(segment_index);
+            std::size_t seg_result_count = 0;
+            if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
+                filtered_pair_collector.position_offset = range.cs_u * lpu;
+                filtered_pair_collector.clear();
+                filtered_pair_collector.reserve(
+                    (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+                bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
+                    filtered_pair_collector,
+                    target_seq,
+                    static_cast<std::size_t>(range.cs_u),
+                    static_cast<std::size_t>(range.ce_u),
+                    w,
+                    k,
+                    query_kmer_gate.vulkan_gate());
+                // Safe with the approximate device gate because the collector
+                // still exact-confirms each emitted kmer against query_kmer_filter.
+                std::optional<bioseq::indexing::GpuMinimizerIndexCacheKey>
+                    direct_gpu_key;
+                if (segmented_gpu_index_cache_ptr != nullptr
+                    && params.vulkan_seed_hits_enabled
+                    && params.vulkan_fused_frontend_enabled) {
+                    seg_index.table.clear();
+                    seg_index.positions.clear();
+                    seg_index.target_len = target_len;
+                    auto upload =
+                        bioseq::indexing::build_gpu_minimizer_upload_from_pairs(
+                            std::span<FilteredMinimizerPair>{
+                                filtered_pair_collector.pairs.data(),
+                                filtered_pair_collector.pairs.size()},
+                            target_len);
+                    gpu_identity.table_size = upload.table_size;
+                    gpu_identity.position_count = upload.positions.size();
+                    auto key = bioseq::indexing::make_gpu_index_cache_key(
+                        seg_index, gpu_identity);
+                    auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+                    auto resident = segmented_gpu_index_cache_ptr->insert_upload(
+                        gpu_rt, std::move(upload), key, true);
+                    if (!resident) {
+                        pipe::throw_vulkan_declined(
+                            "Vulkan direct segment index upload");
+                    }
+                    direct_gpu_key = key;
+                } else {
+                    seg_index.build_from_pairs(
+                        std::span<FilteredMinimizerPair>{
+                            filtered_pair_collector.pairs.data(),
+                            filtered_pair_collector.pairs.size()},
+                        target_len);
+                }
 
-            build_query_filtered_segment_index(
-                std::span<const MinimizerT>{seg_minimizers.data(), seg_minimizers.size()},
-                seg_index,
-                filtered_pairs);
-            seg_index.add_position_offset(range.cs_u * lpu);
+                MatchResultCollection seg_res = minimap2_port_with_index(
+                    query_seq, target_seq, query_minimizers, seg_index, params,
+                    segmented_gpu_index_cache_ptr,
+                    gpu_identity);
+                if (direct_gpu_key) {
+                    segmented_gpu_index_cache_ptr->erase(*direct_gpu_key);
+                }
+                seg_result_count = seg_res.results.size();
+                for (auto& result : seg_res.results) {
+                    if (result.target_start >= range.core_lo_bp
+                        && result.target_start < range.core_hi_bp) {
+                        merged.push_back(std::move(result));
+                    }
+                }
+            } else {
+                seg_collector.clear();
+                seg_collector.reserve(
+                    (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+                pipe::minimizer_dispatch_range<MinimizerT>(
+                    seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                    target_sketch_backend);
+                const std::vector<MinimizerT>& seg_minimizers =
+                    seg_collector.extract_sketches_data();
+                build_query_filtered_segment_index(
+                    std::span<const MinimizerT>{seg_minimizers.data(), seg_minimizers.size()},
+                    seg_index,
+                    filtered_pairs);
+                seg_index.add_position_offset(range.cs_u * lpu);
 
-            MatchResultCollection seg_res = minimap2_port_with_index(
-                query_seq, target_seq, query_minimizers, seg_index, params,
-                segmented_gpu_index_cache_ptr,
-                segment_gpu_identity(segment_index));
-            for (auto& result : seg_res.results) {
-                if (result.target_start >= range.core_lo_bp
-                    && result.target_start < range.core_hi_bp) {
-                    merged.push_back(std::move(result));
+                MatchResultCollection seg_res = minimap2_port_with_index(
+                    query_seq, target_seq, query_minimizers, seg_index, params,
+                    segmented_gpu_index_cache_ptr,
+                    gpu_identity);
+                seg_result_count = seg_res.results.size();
+                for (auto& result : seg_res.results) {
+                    if (result.target_start >= range.core_lo_bp
+                        && result.target_start < range.core_hi_bp) {
+                        merged.push_back(std::move(result));
+                    }
                 }
             }
             bioseq_log_lazy<DBG>([&] {
                 bioseq_log_progress<DBG>("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
                                 "(merged {}) | footprint={}MB avail={}MB",
                         range.core_lo_bp, range.core_hi_bp,
-                        merged.size(), seg_res.results.size(), merged.size(),
+                        merged.size(), seg_result_count, merged.size(),
                         bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                         bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
             });

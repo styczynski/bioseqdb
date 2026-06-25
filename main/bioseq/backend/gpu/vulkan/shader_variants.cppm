@@ -91,15 +91,11 @@ struct VulkanStaticVariantInputs {
 [[nodiscard]] inline constexpr ChainingPipelineKey choose_chaining_variant(
     const VulkanStaticVariantInputs& inputs) noexcept
 {
-    if (inputs.max_workgroup_invocations >= 1024
-        && inputs.max_shared_memory_bytes >= 40u * 1024u) {
-        return ChainingPipelineKey{1024u, 256u};
-    }
-    if (inputs.max_workgroup_invocations >= 256
-        && inputs.max_shared_memory_bytes >= 24u * 1024u) {
-        return ChainingPipelineKey{512u, 128u};
-    }
-    return ChainingPipelineKey{384u, 128u};
+    // DOC0353: subgroup-per-range chain — exactly ONE subgroup (32 lanes) owns one
+    // range, so LOCAL_SIZE_X must equal the Apple/MoltenVK subgroup size (32). A
+    // local_size > 32 would put multiple subgroups in a workgroup, racing one range.
+    (void)inputs;
+    return ChainingPipelineKey{32u, 32u};
 }
 
 [[nodiscard]] inline constexpr std::uint32_t anchor_sort_capacity(
@@ -134,9 +130,7 @@ struct VulkanStaticVariantInputs {
     if (key.kind != static_cast<std::uint32_t>(ShaderKind::chain_tiled_dp_u64)) {
         return false;
     }
-    return (key.tile_size == 1024u && key.local_size == 256u && key.max_span == 0u)
-        || (key.tile_size == 512u && key.local_size == 128u && key.max_span == 0u)
-        || (key.tile_size == 384u && key.local_size == 128u && key.max_span == 0u);
+    return key.tile_size == 32u && key.local_size == 32u && key.max_span == 0u;
 }
 
 [[nodiscard]] inline constexpr bool valid_shader_variant_key(
@@ -205,9 +199,7 @@ inline void for_each_static_shader_variant(
         }
     };
 
-    emit(make_shader_key(ShaderKind::chain_tiled_dp_u64, 1024u, 256u, 0u));
-    emit(make_shader_key(ShaderKind::chain_tiled_dp_u64, 512u, 128u, 0u));
-    emit(make_shader_key(ShaderKind::chain_tiled_dp_u64, 384u, 128u, 0u));
+    emit(make_shader_key(ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u));
     emit(make_shader_key(ShaderKind::seed_lookup_anchors, 384u, 128u, 256u));
     emit(make_shader_key(ShaderKind::sort_anchors_bitonic, 384u, 128u, 256u));
     emit(make_shader_key(ShaderKind::sort_anchors_bitonic, 384u, 256u, 256u));
