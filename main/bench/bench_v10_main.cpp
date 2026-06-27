@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
@@ -37,6 +38,7 @@ import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
 import bioseq.storage.lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
 import bioseq.instr;
+import bioseq.parallelism.memory_admission;
 import bench_framework;
 import bench.tool_minimap2;
 import bioseq.sequences.generation;
@@ -162,14 +164,28 @@ struct AlignerOutput {
     const std::size_t cached_input_bytes = fragment_count * cached_per_pair;
 
     // One unpacked dna4 reference is live while the compact pairs are produced.
-    // Add a modest scratch allowance for DP/anchor vectors used by the timed
-    // alignment call without letting the estimate dominate scheduling.
-    const std::size_t generation_peak_extra = reference_length;
-    const std::size_t aligner_scratch_extra =
+    // Add DP/anchor scratch plus the possible resident target-index footprint.
+    // Phase-C GPU builds hold a target index resident for the duration of the
+    // timed run; omitting it let XXL_HIFI co-schedule two 500 Mbp GPU rows and
+    // trip the fail-closed Vulkan admission gate before dispatch.
+    const std::uint64_t generation_peak_extra = reference_length;
+    const std::uint64_t aligner_scratch_extra =
         fragment_count * (fragment_length_mean / 2 + 1024);
+    const std::uint64_t target_index_extra =
+        bioseq::parallelism::minimizer_index_peak_bytes_for_bp(reference_length);
+    const std::uint64_t extra_memory =
+        bioseq::parallelism::saturating_add(
+            bioseq::parallelism::saturating_add(
+                generation_peak_extra,
+                aligner_scratch_extra),
+            target_index_extra);
     return {
         .base_memory  = cached_input_bytes,
-        .extra_memory = generation_peak_extra + aligner_scratch_extra,
+        .extra_memory = static_cast<std::size_t>(
+            std::min<std::uint64_t>(
+                extra_memory,
+                static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::size_t>::max)()))),
     };
 }
 

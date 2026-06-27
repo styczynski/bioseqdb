@@ -128,6 +128,7 @@ module;
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <span>
@@ -140,6 +141,8 @@ module;
 export module bioseq.scheduler.dispatch_processor;
 
 import bioseq.common.mlogging;
+import bioseq.common.hashing;
+import bioseq.common.sequan_compat;
 import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
 import bioseq.indexing.type;
@@ -155,6 +158,8 @@ import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.vulkan;   // DOC0345 Patch J — GPU sorted-pair segment seam (GPU emit + host sort; real no_index mps)
 import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.chaining.vulkan;
+import bioseq.sequences.cigar;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.gpu.vulkan.runtime;
@@ -175,7 +180,7 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-export constexpr size_t kDispatchBatchCapacity = 1000;
+export constexpr size_t kDispatchBatchCapacity = 8192;
 constexpr std::string_view kMinimizersPerFragmentIndex =
     bioseq::indexing::MinimizerHashmapFragmentIndex::index_name;
 constexpr std::string_view kMinimizersPerSequenceIndex =
@@ -265,6 +270,35 @@ pg_gpu_index_identity(
  * TupleDispatchBuffer so EXPLAIN can read it after run_batch_and_build_cursors
  * without doing a second walk.
  */
+export struct GpuBatchExecutionStats {
+    bool gpu_batched_branch_taken = false;
+    std::uint64_t gpu_problem_count = 0;
+    std::uint64_t gpu_wave_count = 0;
+    std::uint64_t gpu_segment_indexes_built = 0;
+    std::uint64_t gpu_segment_indexes_reused = 0;
+    std::uint64_t gpu_seed_dispatches = 0;
+    std::uint64_t gpu_chain_dispatches = 0;
+    std::uint64_t gpu_extend_dispatches = 0;
+    std::uint64_t cpu_fallback_rows = 0;
+    std::uint64_t simd_fallback_rows = 0;
+    std::uint64_t vulkan_declines = 0;
+
+    void merge(const GpuBatchExecutionStats& rhs) noexcept {
+        gpu_batched_branch_taken =
+            gpu_batched_branch_taken || rhs.gpu_batched_branch_taken;
+        gpu_problem_count += rhs.gpu_problem_count;
+        gpu_wave_count += rhs.gpu_wave_count;
+        gpu_segment_indexes_built += rhs.gpu_segment_indexes_built;
+        gpu_segment_indexes_reused += rhs.gpu_segment_indexes_reused;
+        gpu_seed_dispatches += rhs.gpu_seed_dispatches;
+        gpu_chain_dispatches += rhs.gpu_chain_dispatches;
+        gpu_extend_dispatches += rhs.gpu_extend_dispatches;
+        cpu_fallback_rows += rhs.cpu_fallback_rows;
+        simd_fallback_rows += rhs.simd_fallback_rows;
+        vulkan_declines += rhs.vulkan_declines;
+    }
+};
+
 export struct BatchExecutionStats {
     /// Total rows submitted to process_sequences().
     size_t targets_considered = 0;
@@ -276,6 +310,8 @@ export struct BatchExecutionStats {
     /// the user sees the actually-applied values after overrides + size-heuristic
     /// adjustments.
     Minimap2Params last_effective_params{};
+    /// Selected-Vulkan proof counters surfaced through EXPLAIN/bench reports.
+    GpuBatchExecutionStats gpu{};
 
     [[nodiscard]] float recomputed_fraction() const {
         return targets_considered == 0
@@ -507,6 +543,207 @@ choose_deferred_minimizer_persist_index(
                 == ChainingAlgorithmType::VULKAN_TILED_DP);
 }
 
+[[nodiscard]] inline bool selected_vulkan_coordinate_prereqs_active(
+        const Minimap2Params& params) noexcept {
+    return params.vulkan_enabled
+        && params.vulkan_seed_hits_enabled
+        && params.vulkan_fused_frontend_enabled
+        && params.minimizer_algorithm
+            == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+        && params.chaining_algorithm
+            == ChainingAlgorithmType::VULKAN_TILED_DP
+        && !params.compute_divergence
+        && !params.compute_mapq
+        && params.max_occ >= 0;
+}
+
+template <class Seq>
+[[nodiscard]] std::span<const std::uint32_t> append_gpu_alignment_symbols(
+        std::vector<std::uint32_t>& destination,
+        std::vector<typename Seq::traits::letter_unit>& scratch,
+        const Seq& seq,
+        sequence_size_t start_bp,
+        sequence_size_t end_bp,
+        bool reverse)
+{
+    using traits = typename Seq::traits;
+    using rank_t = typename traits::letter_unit;
+
+    if (end_bp < start_bp) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(
+            "GPU CIGAR extension received inverted sequence window");
+    }
+    const sequence_size_t len_bp = end_bp - start_bp;
+    if (len_bp > bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "GPU CIGAR extension window length {} exceeds simple CIGAR limit {}",
+            len_bp, bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len));
+    }
+    if (end_bp > static_cast<sequence_size_t>(seq.bp_size())) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(
+            "GPU CIGAR extension sequence window exceeds sequence length");
+    }
+
+    const std::size_t start = static_cast<std::size_t>(start_bp);
+    const std::size_t end = static_cast<std::size_t>(end_bp);
+    const std::size_t len = end - start;
+    const std::size_t out_offset = destination.size();
+    destination.resize(out_offset + len);
+    if (len == 0) {
+        return std::span<const std::uint32_t>{destination.data() + out_offset, 0u};
+    }
+
+    if constexpr (sizeof(rank_t) == sizeof(std::uint8_t)) {
+        scratch.resize(len);
+        auto out8 = std::span<std::uint8_t>{
+            reinterpret_cast<std::uint8_t*>(scratch.data()), len};
+        if (reverse) {
+            seq.template to_encoded_into<false, true>(out8, start, end);
+            if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
+                for (rank_t& rank : scratch) {
+                    rank = static_cast<rank_t>(
+                        traits::letter_complement(
+                            static_cast<typename traits::storage_unit>(rank)));
+                }
+            }
+        } else {
+            seq.template to_encoded_into<false, false>(out8, start, end);
+        }
+        for (std::size_t i = 0; i < len; ++i) {
+            destination[out_offset + i] = static_cast<std::uint32_t>(scratch[i]);
+        }
+    } else {
+        auto iter = seq.template iterable<BP>().begin();
+        for (std::size_t i = 0; i < start; ++i) {
+            ++iter;
+        }
+        if (reverse) {
+            for (std::size_t i = 0; i < len; ++i) {
+                const auto letter = *iter;
+                if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
+                    destination[out_offset + len - 1u - i] = static_cast<std::uint32_t>(
+                        traits::letter_complement(
+                            static_cast<typename traits::storage_unit>(letter)));
+                } else {
+                    destination[out_offset + len - 1u - i] =
+                        static_cast<std::uint32_t>(letter);
+                }
+                ++iter;
+            }
+        } else {
+            for (std::size_t i = 0; i < len; ++i) {
+                destination[out_offset + i] = static_cast<std::uint32_t>(*iter);
+                ++iter;
+            }
+        }
+    }
+
+    return std::span<const std::uint32_t>{destination.data() + out_offset, len};
+}
+
+[[nodiscard]] inline std::uint32_t gpu_alignment_common_match_run(
+        std::span<const std::uint32_t> query_symbols,
+        std::span<const std::uint32_t> target_symbols,
+        std::uint32_t query_pos,
+        std::uint32_t target_pos) noexcept
+{
+    std::uint32_t run = 0u;
+    while (query_pos + run < query_symbols.size()
+           && target_pos + run < target_symbols.size()
+           && query_symbols[query_pos + run] == target_symbols[target_pos + run]) {
+        ++run;
+    }
+    return run;
+}
+
+[[nodiscard]] inline bool gpu_alignment_unit_gap_walk_cigar_candidate(
+        std::span<const std::uint32_t> query_symbols,
+        std::span<const std::uint32_t> target_symbols) noexcept
+{
+    const std::uint32_t query_len =
+        static_cast<std::uint32_t>(query_symbols.size());
+    const std::uint32_t target_len =
+        static_cast<std::uint32_t>(target_symbols.size());
+    if (query_len == target_len) {
+        return false;
+    }
+
+    const int net_query = static_cast<int>(query_len) - static_cast<int>(target_len);
+    const int abs_net_query = net_query < 0 ? -net_query : net_query;
+    if (abs_net_query
+        > static_cast<int>(
+            bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_gap_max)) {
+        return false;
+    }
+
+    std::uint32_t query_pos = 0u;
+    std::uint32_t target_pos = 0u;
+    std::uint32_t gap_count = 0u;
+
+    while (query_pos < query_len || target_pos < target_len) {
+        std::uint32_t run_len = 0u;
+        if (query_pos < query_len && target_pos < target_len) {
+            run_len = gpu_alignment_common_match_run(
+                query_symbols, target_symbols, query_pos, target_pos);
+        }
+        if (run_len != 0u) {
+            query_pos += run_len;
+            target_pos += run_len;
+            continue;
+        }
+
+        if (gap_count
+            >= bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_gap_op_max) {
+            return false;
+        }
+        if (query_pos == query_len) {
+            target_pos = target_len;
+            ++gap_count;
+            continue;
+        }
+        if (target_pos == target_len) {
+            query_pos = query_len;
+            ++gap_count;
+            continue;
+        }
+
+        if (target_pos + 1u < target_len
+            && query_symbols[query_pos] == target_symbols[target_pos + 1u]) {
+            ++target_pos;
+            ++gap_count;
+            continue;
+        }
+        if (query_pos + 1u < query_len
+            && query_symbols[query_pos + 1u] == target_symbols[target_pos]) {
+            ++query_pos;
+            ++gap_count;
+            continue;
+        }
+
+        return false;
+    }
+
+    return gap_count != 0u;
+}
+
+inline void append_packed_cigar_slice(
+        std::vector<CigarOp>& destination,
+        std::span<const std::uint32_t> packed)
+{
+    for (std::uint32_t entry : packed) {
+        const std::uint32_t opcode = entry & 0xfU;
+        const std::uint32_t op_length = entry >> 4;
+        if (op_length == 0u) {
+            continue;
+        }
+        if (!destination.empty() && destination.back().opcode == opcode) {
+            destination.back().length += op_length;
+        } else {
+            destination.push_back(CigarOp{op_length, opcode});
+        }
+    }
+}
+
 [[noreturn]] inline void raise_vulkan_pg_error(
         std::string_view stage,
         const bioseq::gpu::vulkan::VulkanRuntimeError& err) {
@@ -533,7 +770,7 @@ template <class... Args>
 [[nodiscard]] MatchResultCollection minimap_port_pg_checked(Args&&... args) {
     return run_aligner_pg_checked(
         "minimap_port",
-        [&]() -> MatchResultCollection {
+        [&args...]() -> MatchResultCollection {
             return minimap_port(std::forward<Args>(args)...);
         });
 }
@@ -543,7 +780,7 @@ template <class... Args>
         Args&&... args) {
     return run_aligner_pg_checked(
         "minimap_port_segmented",
-        [&]() -> MatchResultCollection {
+        [&args...]() -> MatchResultCollection {
             return minimap_port_segmented(std::forward<Args>(args)...);
         });
 }
@@ -553,7 +790,7 @@ template <class... Args>
         Args&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index",
-        [&]() -> MatchResultCollection {
+        [&args...]() -> MatchResultCollection {
             return minimap2_port_with_index(std::forward<Args>(args)...);
         });
 }
@@ -1910,6 +2147,813 @@ try_materialize_target_for_segment_workers(
              */
             std::optional<std::vector<MinimapSketchData>> cached_query_minimizers;
             constexpr sequence_size_t kOpportunisticIndexMinBp = 4096;
+            constexpr std::size_t kGpuBatchMinRows = 2;
+
+            if (selected_vulkan_execution(base_params)
+                && batch_size >= kGpuBatchMinRows
+                && !chunked_scanner_forced) {
+                const bool selected_vulkan_bounded_cigar =
+                    base_params.do_cigar
+                    && base_params.vulkan_extend_enabled
+                    && selected_vulkan_coordinate_prereqs_active(base_params);
+                if ((!pipe::phase_c_coordinate_only_active(base_params)
+                     && !selected_vulkan_bounded_cigar)
+                    || !pipe::phase_c_index_build_active(base_params)) {
+                    ++stats.gpu.vulkan_declines;
+                    bioseq::gpu::vulkan::VulkanRuntimeError err{
+                        "selected Vulkan batch requires coordinate-only projection "
+                        "or bounded GPU CIGAR extension, "
+                        "Vulkan minimizers, Vulkan tiled-DP chaining, fused frontend, "
+                        "and GPU target-index build"};
+                    raise_vulkan_pg_error("Vulkan batched resident coordinate", err);
+                }
+
+                auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+                if (!runtime.usable()) {
+                    ++stats.gpu.vulkan_declines;
+                    bioseq::gpu::vulkan::VulkanRuntimeError err{
+                        "selected Vulkan batch runtime unavailable: "
+                        + runtime.initialization_error()};
+                    raise_vulkan_pg_error("Vulkan batched resident coordinate", err);
+                }
+
+                using MinimizerT = MinimapSketchData;
+                struct GpuBatchQuerySidecar {
+                    std::size_t row_index = 0;
+                    sequence_size_t query_len = 0;
+                };
+                struct GpuBatchTargetSidecar {
+                    const pgseq_t* hdr = nullptr;
+                    std::uint64_t fingerprint = 0;
+                    sequence_size_t target_len = 0;
+                    sequence_size_t max_query_len = 0;
+                    std::size_t row_count = 0;
+                    std::vector<pipe::SegmentUnitRange> ranges{};
+                    std::vector<std::shared_ptr<bioseq::indexing::GpuResidentMinimizerIndex>>
+                        residents{};
+                };
+                struct GpuBatchProblemSidecar {
+                    std::size_t row_index = 0;
+                    std::size_t target_index = 0;
+                    std::size_t segment_index = 0;
+                    sequence_size_t core_lo_bp = 0;
+                    sequence_size_t core_hi_bp = 0;
+                };
+
+                try {
+                    const std::size_t w =
+                        static_cast<std::size_t>(base_params.window_size);
+                    const std::size_t k =
+                        static_cast<std::size_t>(base_params.kmer_size);
+                    std::vector<MinimizerT> all_query_minimizers;
+                    std::vector<bioseq::gpu::vulkan::PhaseCSeedQueryRecordWire>
+                        query_records;
+                    bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>
+                        query_minimizer_device_span{};
+                    std::vector<GpuBatchQuerySidecar> query_sidecars;
+                    std::vector<std::uint32_t> row_to_query_index(
+                        batch_size,
+                        std::numeric_limits<std::uint32_t>::max());
+                    pipe::PhaseCQueryGateStorage query_gate;
+                    std::vector<bioseq::gpu::vulkan::SequenceUploadView>
+                        batch_query_uploads;
+
+                    query_sidecars.reserve(batch_size);
+                    batch_query_uploads.reserve(batch_size);
+                    for (std::size_t i = 0; i < batch_size; ++i) {
+                        const pgseq_t* row_query_hdr =
+                            per_row_query_mode ? (*per_row_query_hdrs)[i] : query_hdr;
+                        if (row_query_hdr == nullptr) {
+                            continue;
+                        }
+                        if (row_query_hdr->alphabet_code != alphabet_code
+                            || row_query_hdr->storage_unit_byte_width
+                                != storage_unit_byte_width) {
+                            continue;
+                        }
+                        compact_sequence_range<S> query_seq{*row_query_hdr};
+                        const std::uint32_t query_index =
+                            static_cast<std::uint32_t>(batch_query_uploads.size());
+                        batch_query_uploads.push_back(
+                            bioseq::gpu::vulkan::make_sequence_upload_view(query_seq));
+                        query_sidecars.push_back(GpuBatchQuerySidecar{
+                            .row_index = i,
+                            .query_len = query_seq.bp_size(),
+                        });
+                        row_to_query_index[i] = query_index;
+                    }
+                    if (!batch_query_uploads.empty()) {
+                        const auto rank_lut =
+                            bioseq::gpu::vulkan::make_vulkan_rank_lut<
+                                compact_sequence_range<S>>();
+                        auto gpu_batch_sketch =
+                            bioseq::gpu::vulkan::
+                                collect_minimap_sketch_data_vulkan_upload_batch_result(
+                                    std::span<
+                                        const bioseq::gpu::vulkan::SequenceUploadView>{
+                                        batch_query_uploads.data(),
+                                        batch_query_uploads.size()},
+                                    rank_lut,
+                                    w,
+                                    k);
+                        if (!gpu_batch_sketch) {
+                            pipe::throw_vulkan_declined(
+                                "Vulkan batched query minimizer sketch");
+                        }
+                        all_query_minimizers =
+                            std::move(gpu_batch_sketch->host_minimizers);
+                        query_records = std::move(gpu_batch_sketch->query_records);
+                        query_minimizer_device_span =
+                            gpu_batch_sketch->device_span();
+                        for (const auto& qrec : query_records) {
+                            if (qrec.minimizer_count == 0u) {
+                                continue;
+                            }
+                            const std::size_t begin = qrec.minimizer_offset;
+                            const std::size_t end =
+                                begin + static_cast<std::size_t>(qrec.minimizer_count);
+                            if (end > all_query_minimizers.size()) {
+                                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                                    "batched query minimizer record exceeds host buffer"};
+                            }
+                            query_gate.add(std::span<const MinimizerT>{
+                                all_query_minimizers.data() + begin,
+                                static_cast<std::size_t>(qrec.minimizer_count)});
+                        }
+                    }
+
+                    std::vector<GpuBatchTargetSidecar> targets;
+                    std::vector<std::uint32_t> row_to_target_index(
+                        batch_size,
+                        std::numeric_limits<std::uint32_t>::max());
+                    targets.reserve(batch_size);
+                    const auto target_storage_bytes =
+                        [] (const pgseq_t* hdr) -> std::string_view {
+                        compact_sequence_range<S> seq{*hdr};
+                        using StorageUnit =
+                            typename compact_sequence_range<S>::traits::storage_unit;
+                        const auto* bytes =
+                            reinterpret_cast<const char*>(seq.cbegin());
+                        return std::string_view{
+                            bytes,
+                            seq.size() * sizeof(StorageUnit)};
+                    };
+                    const auto target_fingerprint =
+                        [target_storage_bytes] (
+                            const pgseq_t* hdr) -> std::uint64_t {
+                        std::uint64_t hash = 14695981039346656037ull;
+                        hash = bioseq::common::hash_combine_64(
+                            hash, static_cast<std::uint64_t>(hdr->alphabet_code));
+                        hash = bioseq::common::hash_combine_64(
+                            hash, static_cast<std::uint64_t>(
+                                hdr->storage_unit_byte_width));
+                        hash = bioseq::common::hash_combine_64(
+                            hash, static_cast<std::uint64_t>(hdr->bp_size));
+                        return bioseq::common::hash_combine_64(
+                            hash, target_storage_bytes(hdr));
+                    };
+                    for (std::size_t i = 0; i < batch_size; ++i) {
+                        if (row_to_query_index[i]
+                            == std::numeric_limits<std::uint32_t>::max()) {
+                            continue;
+                        }
+                        const pgseq_t* target_hdr = target_hdrs[i];
+                        if (target_hdr == nullptr) {
+                            continue;
+                        }
+                        if (target_hdr->alphabet_code != alphabet_code
+                            || target_hdr->storage_unit_byte_width
+                                != storage_unit_byte_width) {
+                            continue;
+                        }
+                        std::uint32_t target_index =
+                            std::numeric_limits<std::uint32_t>::max();
+                        const std::uint64_t fingerprint =
+                            target_fingerprint(target_hdr);
+                        for (std::size_t existing = 0;
+                             existing < targets.size();
+                             ++existing) {
+                            if (targets[existing].fingerprint == fingerprint
+                                && targets[existing].target_len
+                                    == static_cast<sequence_size_t>(
+                                        target_hdr->bp_size)
+                                && targets[existing].hdr != nullptr
+                                && target_storage_bytes(targets[existing].hdr)
+                                    == target_storage_bytes(target_hdr)) {
+                                target_index = static_cast<std::uint32_t>(existing);
+                                break;
+                            }
+                        }
+                        const sequence_size_t row_query_len =
+                            query_sidecars[row_to_query_index[i]].query_len;
+                        if (target_index
+                            == std::numeric_limits<std::uint32_t>::max()) {
+                            target_index =
+                                static_cast<std::uint32_t>(targets.size());
+                            targets.push_back(GpuBatchTargetSidecar{
+                                .hdr = target_hdr,
+                                .fingerprint = fingerprint,
+                                .target_len =
+                                    static_cast<sequence_size_t>(target_hdr->bp_size),
+                                .max_query_len = row_query_len,
+                                .row_count = 1,
+                                .ranges = {},
+                                .residents = {},
+                            });
+                        } else {
+                            ++targets[target_index].row_count;
+                            targets[target_index].max_query_len =
+                                std::max(
+                                    targets[target_index].max_query_len,
+                                    row_query_len);
+                        }
+                        row_to_target_index[i] = target_index;
+                    }
+
+                    if (query_records.empty() || targets.empty()) {
+                        return;
+                    }
+
+                    constexpr std::size_t lpu =
+                        compact_sequence_range<S>::traits::letters_per_unit;
+                    for (std::size_t target_index = 0;
+                         target_index < targets.size();
+                         ++target_index) {
+                        GpuBatchTargetSidecar& target = targets[target_index];
+                        compact_sequence_range<S> target_seq{*target.hdr};
+                        constexpr sequence_size_t kGpuBatchHugeTargetBp =
+                            100'000'000ull;
+                        constexpr sequence_size_t kGpuBatchHugeTargetCoreBp =
+                            8'000'000ull;
+                        constexpr sequence_size_t kGpuBatchHugeTargetOverlapMaxBp =
+                            30'000'000ull;
+                        if (target.row_count > 1
+                            && target.target_len >= kGpuBatchHugeTargetBp) {
+                            target.ranges.clear();
+                            const sequence_size_t total_units =
+                                (target.target_len + lpu - 1u) / lpu;
+                            sequence_size_t overlap_bp =
+                                target.max_query_len
+                                + target.max_query_len / 4u
+                                + 100'000ull;
+                            overlap_bp = std::min(
+                                overlap_bp,
+                                kGpuBatchHugeTargetOverlapMaxBp);
+                            const sequence_size_t overlap_units =
+                                (overlap_bp + lpu - 1u) / lpu;
+                            const sequence_size_t segment_units =
+                                std::max<sequence_size_t>(
+                                    1u,
+                                    kGpuBatchHugeTargetCoreBp / lpu);
+                            for (sequence_size_t lo_u = 0; lo_u < total_units;
+                                 lo_u += segment_units) {
+                                const sequence_size_t hi_u =
+                                    std::min(lo_u + segment_units, total_units);
+                                const sequence_size_t cs_u =
+                                    lo_u > overlap_units ? lo_u - overlap_units : 0u;
+                                const sequence_size_t ce_u =
+                                    std::min(hi_u + overlap_units, total_units);
+                                target.ranges.push_back(pipe::SegmentUnitRange{
+                                    .cs_u = cs_u,
+                                    .ce_u = ce_u,
+                                    .core_lo_bp = lo_u * lpu,
+                                    .core_hi_bp = std::min(hi_u * lpu,
+                                                           target.target_len),
+                                });
+                                if (hi_u == total_units) {
+                                    break;
+                                }
+                            }
+                        } else {
+                            target.ranges = pipe::segment_unit_ranges_for_backend(
+                                target.target_len,
+                                target.max_query_len,
+                                lpu,
+                                MinimizerSketchBackend::VulkanSegment);
+                        }
+                        target.residents.reserve(target.ranges.size());
+                        for (std::size_t segment_index = 0;
+                             segment_index < target.ranges.size();
+                             ++segment_index) {
+                            const pipe::SegmentUnitRange& range =
+                                target.ranges[segment_index];
+                            const bool full_target_range =
+                                range.cs_u == 0
+                                && static_cast<std::size_t>(range.ce_u)
+                                    >= target_seq.size();
+                            auto built = full_target_range
+                                ? bioseq::gpu::vulkan::build_gpu_index_on_device<
+                                    MinimizerT>(
+                                    target_seq, w, k, query_gate.vulkan_gate())
+                                : bioseq::gpu::vulkan::build_gpu_segment_index_on_device<
+                                    MinimizerT>(
+                                    target_seq,
+                                    static_cast<std::size_t>(range.cs_u),
+                                    static_cast<std::size_t>(range.ce_u),
+                                    w,
+                                    k,
+                                    query_gate.vulkan_gate());
+                            if (!built) {
+                                pipe::throw_vulkan_declined(
+                                    "Vulkan batched segment index build");
+                            }
+                            if (!built->valid || built->position_count == 0u
+                                || built->occupied_slots == 0u) {
+                                target.residents.push_back(nullptr);
+                                continue;
+                            }
+                            bioseq::indexing::GpuMinimizerIndexCacheKey key{
+                                .source_id = static_cast<std::uint64_t>(
+                                    target_index + 1u),
+                                .caller_identity =
+                                    0xd1b54a32d192ed03ULL
+                                    ^ (static_cast<std::uint64_t>(segment_index)
+                                       + 0x9e3779b97f4a7c15ULL),
+                                .target_len = built->target_len,
+                                .table_size = built->occupied_slots,
+                                .position_count = built->position_count,
+                            };
+                            auto resident =
+                                bioseq::indexing::adopt_gpu_built_index(
+                                    runtime, std::move(*built), key);
+                            if (!resident) {
+                                pipe::throw_vulkan_declined(
+                                    "Vulkan batched segment index adoption");
+                            }
+                            resident->target_position_offset = range.cs_u * lpu;
+                            target.residents.push_back(resident);
+                            ++stats.gpu.gpu_segment_indexes_built;
+                        }
+                        if (target.row_count > 1 && !target.residents.empty()) {
+                            stats.gpu.gpu_segment_indexes_reused +=
+                                static_cast<std::uint64_t>(target.row_count - 1)
+                                * static_cast<std::uint64_t>(
+                                    target.residents.size());
+                        }
+                    }
+
+                    std::vector<bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>
+                        gpu_jobs;
+                    std::vector<GpuBatchProblemSidecar> problem_sidecars;
+                    gpu_jobs.reserve(batch_size);
+                    problem_sidecars.reserve(batch_size);
+                    for (std::size_t row = 0; row < batch_size; ++row) {
+                        const std::uint32_t query_index = row_to_query_index[row];
+                        const std::uint32_t target_index = row_to_target_index[row];
+                        if (query_index == std::numeric_limits<std::uint32_t>::max()
+                            || target_index
+                                == std::numeric_limits<std::uint32_t>::max()) {
+                            continue;
+                        }
+                        GpuBatchTargetSidecar& target = targets[target_index];
+                        for (std::size_t segment_index = 0;
+                             segment_index < target.residents.size();
+                             ++segment_index) {
+                            const auto& resident = target.residents[segment_index];
+                            if (!resident) {
+                                continue;
+                            }
+                            gpu_jobs.push_back(
+                                bioseq::gpu::vulkan::PhaseCSeedCoordinateJob{
+                                    .slots = &resident->slots,
+                                    .positions = &resident->positions,
+                                    .target_len = resident->target_len,
+                                    .slot_mask = resident->slot_mask,
+                                    .position_count = resident->position_count,
+                                    .bucket_count = resident->bucket_count,
+                                    .target_position_offset =
+                                        resident->target_position_offset,
+                                    .query_index = query_index,
+                                });
+                            const pipe::SegmentUnitRange& range =
+                                target.ranges[segment_index];
+                            problem_sidecars.push_back(GpuBatchProblemSidecar{
+                                .row_index = row,
+                                .target_index = target_index,
+                                .segment_index = segment_index,
+                                .core_lo_bp = range.core_lo_bp,
+                                .core_hi_bp = range.core_hi_bp,
+                            });
+                        }
+                    }
+
+                    if (gpu_jobs.empty()) {
+                        stats.gpu.gpu_batched_branch_taken = true;
+                        return;
+                    }
+
+                    auto cp = base_params.to_chaining_params();
+                    std::int32_t max_dist_x = cp.max_gap;
+                    std::int32_t max_dist_y = cp.max_gap;
+                    if (max_dist_x < cp.bandwidth) {
+                        max_dist_x = cp.bandwidth;
+                    }
+                    if (max_dist_y < cp.bandwidth) {
+                        max_dist_y = cp.bandwidth;
+                    }
+                    const auto chain_key =
+                        bioseq::chaining::choose_vulkan_chaining_pipeline(
+                            runtime.features());
+                    std::span<const MinimizerT> minimizer_span{
+                        all_query_minimizers.data(),
+                        all_query_minimizers.size()};
+                    bioseq::gpu::vulkan::PhaseCSeedQueryInputs query_inputs{
+                        .host_minimizer_bytes =
+                            query_minimizer_device_span.words() == nullptr
+                                ? std::as_bytes(minimizer_span)
+                                : std::span<const std::byte>{},
+                        .device_minimizer_words =
+                            query_minimizer_device_span.words(),
+                        .minimizer_count = static_cast<std::uint32_t>(
+                            all_query_minimizers.size()),
+                        .minimizer_word_kind =
+                            static_cast<std::uint32_t>(
+                                bioseq::gpu::vulkan::minimizer_wire_traits<
+                                    MinimizerT>::word_kind),
+                        .minimizer_words32_per_record =
+                            bioseq::gpu::vulkan::minimizer_wire_traits<
+                                MinimizerT>::words32_per_minimizer,
+                        .hash_shift =
+                            bioseq::gpu::vulkan::minimizer_wire_traits<
+                                MinimizerT>::hash_shift,
+                        .pos_bits =
+                            bioseq::gpu::vulkan::minimizer_wire_traits<
+                                MinimizerT>::pos_bits,
+                        .host_query_records = std::span<
+                            const bioseq::gpu::vulkan::PhaseCSeedQueryRecordWire>{
+                            query_records.data(),
+                            query_records.size()},
+                        .device_query_records = nullptr,
+                    };
+                    const auto coord_run =
+                        runtime.run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
+                            query_inputs,
+                            std::span<const bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>{
+                                gpu_jobs.data(),
+                                gpu_jobs.size()},
+                            static_cast<std::uint32_t>(base_params.kmer_size),
+                            base_params.max_occ,
+                            chain_key,
+                            max_dist_x,
+                            max_dist_y,
+                            cp.bandwidth,
+                            std::min<std::int32_t>(cp.max_chain_iter, 3000),
+                            cp.gap_penalty,
+                            cp.skip_penalty,
+                            cp.max_chain_skip,
+                            cp.min_chain_score,
+                            cp.min_seed_count,
+                            16u);
+
+                    stats.gpu.gpu_batched_branch_taken = true;
+                    stats.gpu.gpu_problem_count += coord_run.stats.problem_count;
+                    stats.gpu.gpu_wave_count += coord_run.stats.wave_count;
+                    stats.gpu.gpu_seed_dispatches +=
+                        coord_run.stats.seed_count_dispatches
+                        + coord_run.stats.seed_emit_dispatches;
+                    stats.gpu.gpu_chain_dispatches +=
+                        coord_run.stats.chain_dispatches
+                        + coord_run.stats.range_build_dispatches
+                        + coord_run.stats.coordinate_reduce_dispatches;
+
+                    struct GpuCigarPendingMatch {
+                        int32_t query_id = 0;
+                        MatchResult match{};
+                    };
+                    std::vector<GpuCigarPendingMatch> pending_cigar_matches;
+                    std::vector<bioseq::gpu::vulkan::GpuAlignmentCigarJobWire>
+                        cigar_jobs;
+                    std::vector<std::uint32_t> cigar_query_symbols;
+                    std::vector<std::uint32_t> cigar_target_symbols;
+                    std::vector<
+                        typename compact_sequence_range<S>::traits::letter_unit>
+                        cigar_symbol_scratch;
+                    std::uint32_t packed_cigar_capacity = 0;
+                    std::uint32_t traceback_word_capacity = 0;
+                    pending_cigar_matches.reserve(coord_run.results.size());
+                    cigar_jobs.reserve(coord_run.results.size());
+
+                    for (std::size_t problem_index = 0;
+                         problem_index < coord_run.results.size();
+                         ++problem_index) {
+                        const auto& coord = coord_run.results[problem_index];
+                        if (coord.valid == 0u) {
+                            continue;
+                        }
+                        const GpuBatchProblemSidecar& owner =
+                            problem_sidecars[problem_index];
+                        if (coord.target_start < owner.core_lo_bp
+                            || coord.target_start >= owner.core_hi_bp) {
+                            continue;
+                        }
+                        const std::uint32_t query_index =
+                            row_to_query_index[owner.row_index];
+                        const GpuBatchTargetSidecar& target =
+                            targets[owner.target_index];
+                        MatchResult result =
+                            pipe::phase_c_coordinate_to_match_result(
+                                coord,
+                                query_sidecars[query_index].query_len,
+                                target.target_len);
+                        if (!base_params.do_cigar) {
+                            results[query_ids[owner.row_index]].push_back(
+                                std::move(result));
+                            continue;
+                        }
+
+                        const pgseq_t* row_query_hdr =
+                            per_row_query_mode
+                                ? (*per_row_query_hdrs)[owner.row_index]
+                                : query_hdr;
+                        if (row_query_hdr == nullptr || target.hdr == nullptr) {
+                            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                "GPU CIGAR extension received null query/target sequence");
+                        }
+                        compact_sequence_range<S> row_query_seq{*row_query_hdr};
+                        compact_sequence_range<S> target_seq{*target.hdr};
+                        const sequence_size_t query_len_bp =
+                            row_query_seq.bp_size();
+                        const sequence_size_t target_len_bp =
+                            target_seq.bp_size();
+                        if (result.query_start > query_len_bp
+                            || result.target_start > target_len_bp) {
+                            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                "GPU CIGAR extension coordinate start exceeds sequence length");
+                        }
+                        result.query_end =
+                            std::min(result.query_end, query_len_bp);
+                        result.target_end =
+                            std::min(result.target_end, target_len_bp);
+                        const sequence_size_t query_span =
+                            result.query_end - result.query_start;
+                        const sequence_size_t target_span =
+                            result.target_end - result.target_start;
+                        if (query_span == 0 || target_span == 0) {
+                            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                "GPU CIGAR extension received empty coordinate span");
+                        }
+                        const auto checked_u32 =
+                            [] (std::uint64_t value,
+                                std::string_view what) -> std::uint32_t {
+                            if (value > std::numeric_limits<std::uint32_t>::max()) {
+                                throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                    fmt::format("{} exceeds uint32", what));
+                            }
+                            return static_cast<std::uint32_t>(value);
+                        };
+                        if (query_span
+                                > bioseq::gpu::vulkan::
+                                    k_gpu_alignment_simple_cigar_max_len
+                            || target_span
+                                > bioseq::gpu::vulkan::
+                                    k_gpu_alignment_simple_cigar_max_len) {
+                            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                fmt::format(
+                                    "GPU CIGAR extension simple CIGAR supports spans up to {}, "
+                                    "got query_span={} target_span={}",
+                                    bioseq::gpu::vulkan::
+                                        k_gpu_alignment_simple_cigar_max_len,
+                                    query_span,
+                                    target_span));
+                        }
+
+                        const std::uint32_t query_symbol_offset =
+                            checked_u32(cigar_query_symbols.size(),
+                                        "GPU CIGAR query symbol offset");
+                        std::span<const std::uint32_t> query_symbols =
+                            append_gpu_alignment_symbols(
+                                cigar_query_symbols,
+                                cigar_symbol_scratch,
+                                row_query_seq,
+                                result.query_start,
+                                result.query_end,
+                                false);
+                        const std::uint32_t target_symbol_offset =
+                            checked_u32(cigar_target_symbols.size(),
+                                        "GPU CIGAR target symbol offset");
+                        std::span<const std::uint32_t> target_symbols =
+                            append_gpu_alignment_symbols(
+                                cigar_target_symbols,
+                                cigar_symbol_scratch,
+                                target_seq,
+                                result.target_start,
+                                result.target_end,
+                                result.is_reverse);
+
+                        const std::uint32_t query_len =
+                            checked_u32(query_span, "GPU CIGAR query span");
+                        const std::uint32_t target_len =
+                            checked_u32(target_span, "GPU CIGAR target span");
+                        const std::uint32_t cigar_capacity =
+                            std::max<std::uint32_t>(
+                                1u,
+                                checked_u32(
+                                    query_span + target_span,
+                                    "GPU CIGAR packed capacity"));
+                        const bool bounded_dp_candidate =
+                            query_len
+                                <= bioseq::gpu::vulkan::
+                                    k_gpu_alignment_extension_max_len
+                            && target_len
+                                <= bioseq::gpu::vulkan::
+                                    k_gpu_alignment_extension_max_len;
+                        const bool exact_long_cigar_candidate =
+                            query_len == target_len
+                            && std::equal(
+                                query_symbols.begin(), query_symbols.end(),
+                                target_symbols.begin());
+                        const bool unit_gap_walk_cigar_candidate =
+                            gpu_alignment_unit_gap_walk_cigar_candidate(
+                                query_symbols, target_symbols);
+                        const std::uint64_t traceback_cells =
+                            bounded_dp_candidate
+                                ? (static_cast<std::uint64_t>(query_len) + 1u)
+                                    * (static_cast<std::uint64_t>(target_len) + 1u)
+                            : (exact_long_cigar_candidate
+                               || unit_gap_walk_cigar_candidate)
+                                ? 0u
+                                : bioseq::gpu::vulkan::
+                                    gpu_alignment_cigar_gridded_traceback_words(
+                                        query_len,
+                                        target_len,
+                                        bioseq::gpu::vulkan::
+                                            k_gpu_alignment_cigar_traceback_tile_len,
+                                        bioseq::gpu::vulkan::
+                                            k_gpu_alignment_cigar_traceback_tile_len);
+                        cigar_jobs.push_back(
+                            bioseq::gpu::vulkan::GpuAlignmentCigarJobWire{
+                                .query_symbol_offset = query_symbol_offset,
+                                .target_symbol_offset = target_symbol_offset,
+                                .query_len = query_len,
+                                .target_len = target_len,
+                                .query_global_start = checked_u32(
+                                    result.query_start,
+                                    "GPU CIGAR query global start"),
+                                .target_global_start = checked_u32(
+                                    result.target_start,
+                                    "GPU CIGAR target global start"),
+                                .band_width = std::min<std::uint32_t>(
+                                    bioseq::gpu::vulkan::
+                                        k_gpu_alignment_extension_max_band_width,
+                                    std::max(query_len, target_len)),
+                                .flags = 0,
+                                .cigar_offset = packed_cigar_capacity,
+                                .cigar_capacity = cigar_capacity,
+                                .traceback_tile_offset =
+                                    traceback_word_capacity,
+                                .traceback_tile_count = checked_u32(
+                                    traceback_cells,
+                                    "GPU CIGAR traceback cell count"),
+                            });
+                        packed_cigar_capacity = checked_u32(
+                            static_cast<std::uint64_t>(packed_cigar_capacity)
+                                + cigar_capacity,
+                            "GPU CIGAR packed capacity total");
+                        traceback_word_capacity = checked_u32(
+                            static_cast<std::uint64_t>(traceback_word_capacity)
+                                + traceback_cells,
+                            "GPU CIGAR traceback capacity total");
+                        pending_cigar_matches.push_back(GpuCigarPendingMatch{
+                            .query_id = query_ids[owner.row_index],
+                            .match = std::move(result),
+                        });
+                    }
+
+                    if (base_params.do_cigar && !cigar_jobs.empty()) {
+                        const bioseq::gpu::vulkan::GpuAlignmentCigarParams
+                            cigar_params{
+                                .alphabet_size = static_cast<std::uint32_t>(
+                                    compact_sequence_range<S>::traits::
+                                        alphabet_size_n),
+                                .max_band_width = bioseq::gpu::vulkan::
+                                    k_gpu_alignment_extension_max_band_width,
+                                .tile_query = bioseq::gpu::vulkan::
+                                    k_gpu_alignment_cigar_traceback_tile_len,
+                                .tile_target = bioseq::gpu::vulkan::
+                                    k_gpu_alignment_cigar_traceback_tile_len,
+                                .match_score = base_params.match_score,
+                                .mismatch_penalty = base_params.mismatch_pen,
+                                .gap_open_short = base_params.gap_open1,
+                                .gap_extend_short = base_params.gap_ext1,
+                                .gap_open_long = base_params.gap_open2,
+                                .gap_extend_long = base_params.gap_ext2,
+                                .z_drop = base_params.zdrop,
+                                .end_bonus = std::max<std::int32_t>(
+                                    0,
+                                    base_params.end_bonus),
+                                .flags = 0,
+                                .reserved = 0,
+                            };
+                        const auto cigar_run =
+                            runtime.run_alignment_simple_cigar_roundtrip(
+                                std::span<const std::uint32_t>{
+                                    cigar_query_symbols.data(),
+                                    cigar_query_symbols.size()},
+                                std::span<const std::uint32_t>{
+                                    cigar_target_symbols.data(),
+                                    cigar_target_symbols.size()},
+                                std::span<
+                                    const bioseq::gpu::vulkan::
+                                        GpuAlignmentCigarJobWire>{
+                                    cigar_jobs.data(),
+                                    cigar_jobs.size()},
+                                cigar_params,
+                                packed_cigar_capacity);
+                        ++stats.gpu.gpu_extend_dispatches;
+                        if (cigar_run.results.size()
+                            != pending_cigar_matches.size()) {
+                            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                "GPU CIGAR extension result count mismatch");
+                        }
+                        for (std::size_t i = 0;
+                             i < pending_cigar_matches.size();
+                             ++i) {
+                            const auto& cigar_result = cigar_run.results[i];
+                            const auto& cigar_job = cigar_jobs[i];
+                            if (cigar_result.cigar_length == 0u) {
+                                throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                    "GPU CIGAR extension returned empty CIGAR");
+                            }
+                            const std::uint64_t cigar_end =
+                                static_cast<std::uint64_t>(
+                                    cigar_result.cigar_offset)
+                                + static_cast<std::uint64_t>(
+                                    cigar_result.cigar_length);
+                            if (cigar_end > cigar_run.packed_cigar.size()) {
+                                throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                                    "GPU CIGAR extension returned invalid CIGAR slice");
+                            }
+
+                            GpuCigarPendingMatch& pending =
+                                pending_cigar_matches[i];
+                            MatchResult& match = pending.match;
+                            match.dp_score = cigar_result.score;
+                            match.dp_max_score = cigar_result.max_score;
+                            match.query_start = cigar_result.query_start;
+                            match.query_end = cigar_result.query_end;
+                            match.target_start = cigar_result.target_start;
+                            match.target_end = cigar_result.target_end;
+                            match.has_cigar = true;
+                            match.cigar.clear();
+
+                            const std::span<const std::uint32_t> packed{
+                                cigar_run.packed_cigar.data()
+                                    + cigar_result.cigar_offset,
+                                cigar_result.cigar_length};
+                            sequence_size_t block_length = 0;
+                            sequence_size_t num_matches = 0;
+                            std::uint32_t query_cursor = 0;
+                            std::uint32_t target_cursor = 0;
+                            for (std::uint32_t entry : packed) {
+                                const std::uint32_t opcode = entry & 0xfU;
+                                const std::uint32_t len = entry >> 4;
+                                if (opcode == CIGAR_MATCH
+                                    || opcode == CIGAR_EQ
+                                    || opcode == CIGAR_X) {
+                                    block_length += len;
+                                    const std::uint32_t q_base =
+                                        cigar_job.query_symbol_offset
+                                        + query_cursor;
+                                    const std::uint32_t t_base =
+                                        cigar_job.target_symbol_offset
+                                        + target_cursor;
+                                    for (std::uint32_t j = 0; j < len; ++j) {
+                                        if (cigar_query_symbols[q_base + j]
+                                            == cigar_target_symbols[
+                                                t_base + j]) {
+                                            ++num_matches;
+                                        }
+                                    }
+                                    query_cursor += len;
+                                    target_cursor += len;
+                                } else if (opcode == CIGAR_INS) {
+                                    block_length += len;
+                                    query_cursor += len;
+                                } else if (opcode == CIGAR_DEL) {
+                                    block_length += len;
+                                    target_cursor += len;
+                                }
+                            }
+                            match.block_length = block_length;
+                            match.num_matches = num_matches;
+                            append_packed_cigar_slice(match.cigar, packed);
+                            results[pending.query_id].push_back(
+                                std::move(match));
+                        }
+                    }
+                    stats.targets_considered += gpu_jobs.empty()
+                        ? 0u
+                        : static_cast<std::uint64_t>(batch_size);
+                    stats.targets_recomputed_minimizers +=
+                        static_cast<std::uint64_t>(targets.size());
+                    stats.last_effective_params = base_params;
+                    return;
+                } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& err) {
+                    ++stats.gpu.vulkan_declines;
+                    raise_vulkan_pg_error(
+                        "Vulkan batched resident coordinate", err);
+                }
+            }
 
             std::vector<std::uint8_t> parallel_done;
             std::vector<MatchResultCollection> parallel_collections;
@@ -2171,9 +3215,14 @@ try_materialize_target_for_segment_workers(
 	                                        .clip_hi_bp = clip_hi_bp,
 	                                    };
 	                                };
-	                                    auto run_fragment_backed_index =
-	                                    [&](IStore& fragment_store,
-	                                        std::string_view cache_index_name) {
+		                                    auto run_fragment_backed_index =
+		                                    [&ensure_q, &loc_opt, &idx_params,
+                                             &query_seq, &query_minimizers,
+                                             &collection, &assembled,
+                                             &make_cache_key, &fq_pg, &ft_pg,
+                                             pg_gpu_index_cache_ptr](
+                                                    IStore& fragment_store,
+		                                            std::string_view cache_index_name) {
 	                                    ensure_q();
 	                                    const sequence_size_t total_bp =
 	                                        loc_opt->total_bp_size;
