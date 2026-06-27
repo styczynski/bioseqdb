@@ -18,13 +18,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -125,6 +129,13 @@ constexpr std::string_view kMinimizersPerFragmentIndex =
 constexpr std::string_view kMinimizersPerSequenceIndex =
     bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
 
+struct E2eQueryTruth {
+    std::int32_t id = 0;
+    std::string bases;
+    std::int64_t truth_target_start = 0;
+    bool truth_is_reverse = false;
+};
+
 struct E2eInput {
     // Connection is shared (const-usable; SQL mutates the DB, not this struct).
     std::shared_ptr<it::connection_test_context> conn;
@@ -135,12 +146,17 @@ struct E2eInput {
     std::string just_index_table_per_fragment;   // loaded + per-fragment indexed in on_input
     std::string just_index_table_per_sequence;   // loaded + per-sequence indexed in on_input
     std::string no_index_table;                  // empty; loaded inside the region
+    std::string batch_pair_table;                // optional same-rel target/query proof table
     std::string target_fasta;                    // single-record, for bioseq.load
     std::string target_fasta_split;              // <=split_bp records, for minimap2
     std::string query_fasta;                     // for minimap2
     std::string mmi_path;                        // prebuilt minimap2 index
     std::string query_bases;                     // ACGTN text for the bioseq SQL literal
+    std::string target_bases;                    // shared target for batch_pair_table rows
+    std::vector<E2eQueryTruth> queries;
     int kmer_size = 15, window_size = 10;
+    bool batch_pair_mode = false;
+    bool batch_pair_load_timed = false;
     std::size_t minimap2_split_bp =
         static_cast<std::size_t>(kMinimap2SplitBp);  // PAF absolute-coord remap (§11)
     std::int64_t truth_target_start = 0;
@@ -153,7 +169,21 @@ struct E2eOutput {
     std::int64_t target_start = -1;
     bool is_reverse = false;
     std::int64_t match_count = 0;
+    std::int64_t expected_match_count = 0;
+    std::int64_t correct_match_count = 0;
     double abs_offset_bp = 0.0;
+    double max_abs_offset_bp = 0.0;
+    std::int64_t gpu_batched_branch_taken = -1;
+    std::int64_t gpu_problem_count = -1;
+    std::int64_t gpu_wave_count = -1;
+    std::int64_t gpu_segment_indexes_built = -1;
+    std::int64_t gpu_segment_indexes_reused = -1;
+    std::int64_t gpu_seed_dispatches = -1;
+    std::int64_t gpu_chain_dispatches = -1;
+    std::int64_t gpu_extend_dispatches = -1;
+    std::int64_t cpu_fallback_rows = -1;
+    std::int64_t simd_fallback_rows = -1;
+    std::int64_t vulkan_declines = -1;
     std::uint64_t measured_region_ns = 0;
     std::uint64_t peak_postgres_rss_kb = 0;
     std::uint64_t peak_minimap2_rss_kb = 0;
@@ -312,6 +342,26 @@ inline void write_split_fasta(const std::string& path, std::string_view base,
     write_fasta<A>(path, seq, base, split_bp);
 }
 
+template <sequence_alphabet A>
+void write_multi_query_fasta(
+        const std::string& path,
+        std::span<const E2eQueryTruth> queries)
+{
+    (void)sizeof(A);
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("failed to open multi-query FASTA: " + path);
+    }
+    for (const E2eQueryTruth& query : queries) {
+        out << ">query" << query.id << "\n";
+        for (std::size_t pos = 0; pos < query.bases.size(); pos += kFastaLineWidth) {
+            out << std::string_view{
+                query.bases.data() + pos,
+                std::min(kFastaLineWidth, query.bases.size() - pos)} << "\n";
+        }
+    }
+}
+
 /// Run a shell command, abort the bench on non-zero exit. Used for the untimed
 /// .mmi build. (Inside the timed region we use run_cmd_capture.)
 inline void run_cmd(const std::string& cmd) {
@@ -443,6 +493,7 @@ private:
 // [header, tstart, rev]; ORDER BY header. At fragment_count=1 there is exactly
 // one target row.
 void parse_bioseq_rows(const it::rowset_t& rows, const E2eInput& in, E2eOutput& out) {
+    out.expected_match_count = 1;
     out.match_count = static_cast<std::int64_t>(rows.size());   // matched target rows
     if (rows.empty()) { out.found = false; return; }
     const it::row_t& r0 = rows.front();                          // [header, tstart, rev]
@@ -457,6 +508,245 @@ void parse_bioseq_rows(const it::rowset_t& rows, const E2eInput& in, E2eOutput& 
     out.is_reverse    = r0[2].has_value() && (*r0[2] == "t" || *r0[2] == "true");
     out.abs_offset_bp = static_cast<double>(
         std::llabs(out.target_start - in.truth_target_start));
+    out.max_abs_offset_bp = out.abs_offset_bp;
+    out.correct_match_count =
+        out.abs_offset_bp <= static_cast<double>(kPositionToleranceBp) ? 1 : 0;
+}
+
+void parse_bioseq_batch_rows(
+        const it::rowset_t& rows,
+        const E2eInput& in,
+        E2eOutput& out)
+{
+    std::vector<std::uint8_t> found(in.queries.size(), 0);
+    std::vector<double> best_offset(in.queries.size(), kNoMatchOffsetSentinel);
+
+    for (const it::row_t& row : rows) {
+        if (row.size() < 4 || !row[0].has_value() || !row[2].has_value()) {
+            continue;
+        }
+        const std::int64_t qid64 = parse_i64(*row[0]);
+        if (qid64 < 0 || static_cast<std::size_t>(qid64) >= in.queries.size()) {
+            continue;
+        }
+        const auto qid = static_cast<std::size_t>(qid64);
+        const std::int64_t target_start = parse_i64(*row[2]);
+        const double offset = static_cast<double>(
+            std::llabs(target_start - in.queries[qid].truth_target_start));
+        best_offset[qid] = std::min(best_offset[qid], offset);
+        found[qid] = 1;
+    }
+
+    out.expected_match_count = static_cast<std::int64_t>(in.queries.size());
+    out.match_count = static_cast<std::int64_t>(rows.size());
+    out.correct_match_count = 0;
+    out.max_abs_offset_bp = 0.0;
+    for (std::size_t i = 0; i < in.queries.size(); ++i) {
+        if (found[i] && best_offset[i] <= static_cast<double>(kPositionToleranceBp)) {
+            ++out.correct_match_count;
+        }
+        out.max_abs_offset_bp = std::max(out.max_abs_offset_bp, best_offset[i]);
+    }
+    out.found = out.correct_match_count == out.expected_match_count;
+    out.abs_offset_bp = out.max_abs_offset_bp;
+}
+
+[[nodiscard]] std::int64_t explain_i64_or(
+        simdjson::dom::element value,
+        std::int64_t fallback)
+{
+    std::int64_t signed_value = 0;
+    if (value.get(signed_value) == simdjson::SUCCESS) {
+        return signed_value;
+    }
+    std::uint64_t unsigned_value = 0;
+    if (value.get(unsigned_value) == simdjson::SUCCESS
+        && unsigned_value <= static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max())) {
+        return static_cast<std::int64_t>(unsigned_value);
+    }
+    bool bool_value = false;
+    if (value.get(bool_value) == simdjson::SUCCESS) {
+        return bool_value ? 1 : 0;
+    }
+    return fallback;
+}
+
+void assign_gpu_explain_metric(
+        std::string_view key,
+        simdjson::dom::element value,
+        E2eOutput& out)
+{
+    if (key == "Batched Branch Taken") {
+        out.gpu_batched_branch_taken =
+            explain_i64_or(value, out.gpu_batched_branch_taken);
+    } else if (key == "GPU Problem Count") {
+        out.gpu_problem_count = explain_i64_or(value, out.gpu_problem_count);
+    } else if (key == "GPU Wave Count") {
+        out.gpu_wave_count = explain_i64_or(value, out.gpu_wave_count);
+    } else if (key == "GPU Segment Indexes Built") {
+        out.gpu_segment_indexes_built =
+            explain_i64_or(value, out.gpu_segment_indexes_built);
+    } else if (key == "GPU Segment Indexes Reused") {
+        out.gpu_segment_indexes_reused =
+            explain_i64_or(value, out.gpu_segment_indexes_reused);
+    } else if (key == "GPU Seed Dispatches") {
+        out.gpu_seed_dispatches = explain_i64_or(value, out.gpu_seed_dispatches);
+    } else if (key == "GPU Chain Dispatches") {
+        out.gpu_chain_dispatches = explain_i64_or(value, out.gpu_chain_dispatches);
+    } else if (key == "GPU Extend Dispatches") {
+        out.gpu_extend_dispatches =
+            explain_i64_or(value, out.gpu_extend_dispatches);
+    } else if (key == "CPU Fallback Rows") {
+        out.cpu_fallback_rows = explain_i64_or(value, out.cpu_fallback_rows);
+    } else if (key == "SIMD Fallback Rows") {
+        out.simd_fallback_rows = explain_i64_or(value, out.simd_fallback_rows);
+    } else if (key == "Vulkan Declines") {
+        out.vulkan_declines = explain_i64_or(value, out.vulkan_declines);
+    }
+}
+
+void walk_gpu_explain_json(simdjson::dom::element element, E2eOutput& out)
+{
+    const simdjson::dom::element_type type = element.type();
+    if (type == simdjson::dom::element_type::ARRAY) {
+        simdjson::dom::array array_value;
+        if (element.get(array_value) != simdjson::SUCCESS) {
+            return;
+        }
+        for (simdjson::dom::element child : array_value) {
+            walk_gpu_explain_json(child, out);
+        }
+        return;
+    }
+    if (type != simdjson::dom::element_type::OBJECT) {
+        return;
+    }
+    simdjson::dom::object object_value;
+    if (element.get(object_value) != simdjson::SUCCESS) {
+        return;
+    }
+    for (auto field : object_value) {
+        assign_gpu_explain_metric(field.key, field.value, out);
+        walk_gpu_explain_json(field.value, out);
+    }
+}
+
+[[nodiscard]] std::optional<std::int64_t> gpu_batch_text_value(
+        std::string_view line,
+        std::string_view key)
+{
+    const std::size_t key_pos = line.find(key);
+    if (key_pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t value_begin = key_pos + key.size();
+    while (value_begin < line.size() && line[value_begin] == ' ') {
+        ++value_begin;
+    }
+    std::size_t value_end = value_begin;
+    while (value_end < line.size()
+           && line[value_end] != ' '
+           && line[value_end] != ']') {
+        ++value_end;
+    }
+    const std::string_view token =
+        line.substr(value_begin, value_end - value_begin);
+    if (token == "true") {
+        return 1;
+    }
+    if (token == "false") {
+        return 0;
+    }
+    std::int64_t parsed = 0;
+    const auto* first = token.data();
+    const auto* last = token.data() + token.size();
+    const auto result = std::from_chars(first, last, parsed);
+    if (result.ec == std::errc{} && result.ptr == last) {
+        return parsed;
+    }
+    return std::nullopt;
+}
+
+void assign_gpu_text_metrics(std::string_view line, E2eOutput& out)
+{
+    if (auto value = gpu_batch_text_value(line, "taken=")) {
+        out.gpu_batched_branch_taken = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "problems=")) {
+        out.gpu_problem_count = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "waves=")) {
+        out.gpu_wave_count = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "idx_built=")) {
+        out.gpu_segment_indexes_built = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "idx_reused=")) {
+        out.gpu_segment_indexes_reused = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "seed_dispatches=")) {
+        out.gpu_seed_dispatches = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "chain_dispatches=")) {
+        out.gpu_chain_dispatches = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "extend_dispatches=")) {
+        out.gpu_extend_dispatches = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "cpu_fallback_rows=")) {
+        out.cpu_fallback_rows = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "simd_fallback_rows=")) {
+        out.simd_fallback_rows = *value;
+    }
+    if (auto value = gpu_batch_text_value(line, "declines=")) {
+        out.vulkan_declines = *value;
+    }
+}
+
+void capture_gpu_explain_text_metrics(
+        const it::connection_test_context& c,
+        const std::string& align_sql,
+        E2eOutput& out)
+{
+    const it::rowset_t explain_rows = it::query_rows(
+        c,
+        "EXPLAIN (ANALYZE, VERBOSE, FORMAT TEXT) " + align_sql);
+    for (const auto& row : explain_rows) {
+        if (row.empty() || !row.front().has_value()) {
+            continue;
+        }
+        const std::string& line = *row.front();
+        if (line.find("GPU batch [") != std::string::npos) {
+            assign_gpu_text_metrics(line, out);
+        }
+    }
+}
+
+void capture_gpu_explain_metrics(
+        const it::connection_test_context& c,
+        const std::string& align_sql,
+        E2eOutput& out)
+{
+    const it::rowset_t explain_rows = it::query_rows(
+        c,
+        "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + align_sql);
+    if (explain_rows.empty() || explain_rows.front().empty()
+        || !explain_rows.front()[0].has_value()) {
+        return;
+    }
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    const std::string& json_text = *explain_rows.front()[0];
+    if (parser.parse(json_text).get(doc) != simdjson::SUCCESS) {
+        capture_gpu_explain_text_metrics(c, align_sql, out);
+        return;
+    }
+    walk_gpu_explain_json(doc, out);
+    if (out.gpu_problem_count < 0 || out.gpu_batched_branch_taken < 0) {
+        capture_gpu_explain_text_metrics(c, align_sql, out);
+    }
 }
 
 // minimap2 PAF: tab-separated; col indices (0-based): 4 strand(+/-), 5 target name
@@ -525,6 +815,76 @@ inline void require_mapped(std::string_view algo, const E2eInput& in,
     std::abort();
 }
 
+inline void require_gpu_batch_proof(std::string_view algo, const E2eInput& in,
+                                    const E2eOutput& out) {
+    if (algo != "bioseq_block_gpu_dp_gpu_seed_no_index" || !in.batch_pair_mode) {
+        return;
+    }
+
+    const auto expected = static_cast<std::int64_t>(in.queries.size());
+    const auto fail = [algo, expected, &out](std::string_view field,
+                                             std::int64_t got,
+                                             std::int64_t want) {
+        bioseq_log<ERR>(
+            "[bench_e2e] GPU batch proof failed for {}: {}={} expected={} "
+            "(queries={}, branch={}, problems={}, waves={}, seed_dispatches={}, "
+            "chain_dispatches={}, extend_dispatches={}, idx_built={}, idx_reused={}, "
+            "cpu_fallback_rows={}, simd_fallback_rows={}, declines={}, correct={})",
+            algo, field, got, want, expected, out.gpu_batched_branch_taken,
+            out.gpu_problem_count, out.gpu_wave_count, out.gpu_seed_dispatches,
+            out.gpu_chain_dispatches, out.gpu_extend_dispatches,
+            out.gpu_segment_indexes_built, out.gpu_segment_indexes_reused,
+            out.cpu_fallback_rows, out.simd_fallback_rows, out.vulkan_declines,
+            out.correct_match_count);
+        std::fprintf(
+            stderr,
+            "[bench_e2e] GPU-BATCH-PROOF-FAIL algo=%.*s field=%.*s got=%lld "
+            "expected=%lld queries=%lld branch=%lld problems=%lld waves=%lld "
+            "seed_dispatches=%lld chain_dispatches=%lld extend_dispatches=%lld "
+            "idx_built=%lld idx_reused=%lld cpu_fallback_rows=%lld "
+            "simd_fallback_rows=%lld declines=%lld correct=%lld\n",
+            static_cast<int>(algo.size()), algo.data(),
+            static_cast<int>(field.size()), field.data(),
+            static_cast<long long>(got), static_cast<long long>(want),
+            static_cast<long long>(expected),
+            static_cast<long long>(out.gpu_batched_branch_taken),
+            static_cast<long long>(out.gpu_problem_count),
+            static_cast<long long>(out.gpu_wave_count),
+            static_cast<long long>(out.gpu_seed_dispatches),
+            static_cast<long long>(out.gpu_chain_dispatches),
+            static_cast<long long>(out.gpu_extend_dispatches),
+            static_cast<long long>(out.gpu_segment_indexes_built),
+            static_cast<long long>(out.gpu_segment_indexes_reused),
+            static_cast<long long>(out.cpu_fallback_rows),
+            static_cast<long long>(out.simd_fallback_rows),
+            static_cast<long long>(out.vulkan_declines),
+            static_cast<long long>(out.correct_match_count));
+        std::fflush(stderr);
+        std::abort();
+    };
+
+    const auto require_eq = [&fail](std::string_view field, std::int64_t got,
+                                    std::int64_t want) {
+        if (got != want) {
+            fail(field, got, want);
+        }
+    };
+
+    require_eq("gpu_batched_branch_taken", out.gpu_batched_branch_taken, 1);
+    require_eq("gpu_problem_count", out.gpu_problem_count, expected);
+    require_eq("gpu_wave_count", out.gpu_wave_count, 1);
+    require_eq("gpu_segment_indexes_built", out.gpu_segment_indexes_built, 1);
+    require_eq("gpu_segment_indexes_reused", out.gpu_segment_indexes_reused,
+               expected > 0 ? expected - 1 : 0);
+    require_eq("gpu_seed_dispatches", out.gpu_seed_dispatches, 2);
+    require_eq("gpu_chain_dispatches", out.gpu_chain_dispatches, 1);
+    require_eq("gpu_extend_dispatches", out.gpu_extend_dispatches, 0);
+    require_eq("cpu_fallback_rows", out.cpu_fallback_rows, 0);
+    require_eq("simd_fallback_rows", out.simd_fallback_rows, 0);
+    require_eq("vulkan_declines", out.vulkan_declines, 0);
+    require_eq("correct_match_count", out.correct_match_count, expected);
+}
+
 // create_e2e_table: a USING bioseq table matching the active alphabet and the
 // E2E generator's uint64 storage width.
 void create_e2e_table(it::connection_test_context& c, const std::string& t,
@@ -532,6 +892,18 @@ void create_e2e_table(it::connection_test_context& c, const std::string& t,
     it::exec_sqlf(c, "DROP TABLE IF EXISTS {} CASCADE;", t);
     it::exec_sqlf(c, "CREATE TABLE {} (header text, seq {}) USING bioseq;",
                   t, seq_type);
+}
+
+void create_e2e_batch_pair_table(
+        it::connection_test_context& c,
+        const std::string& table,
+        const std::string& seq_type) {
+    it::exec_sqlf(c, "DROP TABLE IF EXISTS {} CASCADE;", table);
+    it::exec_sqlf(
+        c,
+        "CREATE TABLE {} (id int PRIMARY KEY, header text, seq {}, query_seq {}) "
+        "USING bioseq;",
+        table, seq_type, seq_type);
 }
 
 void configure_bioseq_aligner_session(it::connection_test_context& c,
@@ -871,6 +1243,7 @@ void cleanup_e2e_input(std::string_view,
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
                       in.just_index_table_per_sequence);
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.no_index_table);
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.batch_pair_table);
     }
 
     for (const auto& path : {in.target_fasta, in.target_fasta_split,
@@ -882,6 +1255,14 @@ void cleanup_e2e_input(std::string_view,
         }
     }
 }
+
+void load_e2e_batch_pair_table(
+        const it::connection_test_context& c,
+        const E2eInput& in);
+
+void verify_e2e_batch_pair_table(
+        const it::connection_test_context& c,
+        const E2eInput& in);
 
 // ---- §10.1 on_estimate ----
 template <sequence_alphabet A>
@@ -937,6 +1318,8 @@ template <sequence_alphabet A>
     in.size_label  = jstr(data, "size_label", "x");
     in.kmer_size   = static_cast<int>(jint(data, "kmer_size", kDefaultKmerSize));
     in.window_size = static_cast<int>(jint(data, "window_size", kDefaultWindowSize));
+    in.batch_pair_mode = jbool(data, "batch_pair_mode", false);
+    in.batch_pair_load_timed = jbool(data, "batch_pair_load_timed", false);
     in.minimap2_split_bp = static_cast<std::size_t>(jint(data, "minimap2_split_bp", kMinimap2SplitBp));
     const std::size_t split_bp = in.minimap2_split_bp;
     using active_traits = typename bench_sequence_range<A>::traits;
@@ -983,26 +1366,45 @@ template <sequence_alphabet A>
         fmt::format("e2e_{}_just_mps", in.size_label);
     in.just_index_table = in.just_index_table_per_sequence;
     in.no_index_table = fmt::format("e2e_{}_noidx", in.size_label);
+    in.batch_pair_table = fmt::format("e2e_{}_batch_pair", in.size_label);
 
-    // (1) generate ONE (query, target) pair (fragment_count is forced to 1).
+    // (1) generate one shared target plus N query fragments.
     auto pairs = gen::alphabet_sequence_generator<A, bench_storage_t>(gp)
                      .generate_sequences_pairs(gp.fragment_count);
-    const bench_pair_t<A>& pair = pairs.front();
-    in.truth_target_start = static_cast<std::int64_t>(pair.truth_target_start);
-    in.truth_is_reverse   = pair.is_reverse;
+    if (pairs.empty()) {
+        std::fputs("[bench_e2e] generated zero query fragments\n", stderr);
+        std::abort();
+    }
+    in.queries.clear();
+    in.queries.reserve(pairs.size());
+    for (std::size_t i = 0; i < pairs.size(); ++i) {
+        const bench_pair_t<A>& pair = pairs[i];
+        in.queries.push_back(E2eQueryTruth{
+            .id = static_cast<std::int32_t>(i),
+            .bases = pair.query.to_string(),
+            .truth_target_start =
+                static_cast<std::int64_t>(pair.truth_target_start),
+            .truth_is_reverse = pair.is_reverse,
+        });
+    }
+    const bench_pair_t<A>& first = pairs.front();
+    in.truth_target_start = static_cast<std::int64_t>(first.truth_target_start);
+    in.truth_is_reverse   = first.is_reverse;
     in.target_bp          = static_cast<std::int64_t>(gp.reference_length);
 
     // (2) write FASTA via the bounded IO sequence_writer over zero-copy views.
-    write_single_record_fasta<A>(in.target_fasta, "ref", *pair.target);
-    write_split_fasta<A>(in.target_fasta_split, "ref", *pair.target, split_bp);
-    in.query_bases = pair.query.to_string();   // generic decode, <=5 MB; may contain N for dna5
-    write_single_record_fasta<A>(in.query_fasta, "query", pair.query);
+    write_single_record_fasta<A>(in.target_fasta, "ref", *first.target);
+    write_split_fasta<A>(in.target_fasta_split, "ref", *first.target, split_bp);
+    in.query_bases = in.queries.front().bases;   // compatibility literal path
+    in.target_bases = first.target->to_string();
+    write_multi_query_fasta<A>(in.query_fasta, in.queries);
 
     // (3) connect once; clean slate.
     in.conn = std::make_shared<it::connection_test_context>();
     it::reset_extension(*in.conn, { std::string_view{in.just_index_table_per_fragment},
                                     std::string_view{in.just_index_table_per_sequence},
-                                    std::string_view{in.no_index_table} });
+                                    std::string_view{in.no_index_table},
+                                    std::string_view{in.batch_pair_table} });
     preflight_e2e_resources(*in.conn, in.size_label, in.target_bp);
 
     // (4) force the fastest bioseq combo for the whole session.
@@ -1125,6 +1527,19 @@ template <sequence_alphabet A>
 
     // (6) no_index table: create empty; reps load into it inside the region.
     create_e2e_table(*in.conn, in.no_index_table, in.seq_type);
+    if (in.batch_pair_mode) {
+        create_e2e_batch_pair_table(
+            *in.conn, in.batch_pair_table, in.seq_type);
+        configure_bioseq_minimizer_policy(
+            *in.conn, in.batch_pair_table, kMinimizersPerFragmentIndex);
+        it::exec_sql(*in.conn, "SET bioseq.enable_bioseq_index_scan = off;");
+        it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
+        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");
+        if (!in.batch_pair_load_timed) {
+            load_e2e_batch_pair_table(*in.conn, in);
+            verify_e2e_batch_pair_table(*in.conn, in);
+        }
+    }
 
     // (7) minimap2 prebuilt .mmi for the just_index baseline (untimed).
     if (!skip_index_baseline_setup && !skip_minimap2_baseline_setup) {
@@ -1204,6 +1619,102 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
     return true;
 }
 
+void load_e2e_query_table(const it::connection_test_context& c,
+                          const E2eInput& in)
+{
+    it::exec_sql(c, fmt::format(
+        "CREATE TEMP TABLE e2e_queries(id int PRIMARY KEY, seq {});",
+        in.seq_type));
+    for (const E2eQueryTruth& query : in.queries) {
+        it::exec_sql(c, fmt::format(
+            "INSERT INTO e2e_queries VALUES ({}, '{}'::{});",
+            query.id, query.bases, in.seq_type));
+    }
+}
+
+void load_e2e_batch_pair_table(
+        const it::connection_test_context& c,
+        const E2eInput& in)
+{
+    it::exec_sql(c, "SET bioseq.enable_bioseq_index_scan = off;");
+    it::exec_sqlf(c, "TRUNCATE {};", in.batch_pair_table);
+    constexpr std::size_t kInsertChunkRows = 32;
+    for (std::size_t first = 0; first < in.queries.size(); first += kInsertChunkRows) {
+        const std::size_t last =
+            std::min(in.queries.size(), first + kInsertChunkRows);
+        std::string sql = fmt::format(
+            "INSERT INTO {} (id, header, seq, query_seq) VALUES ",
+            in.batch_pair_table);
+        for (std::size_t i = first; i < last; ++i) {
+            const E2eQueryTruth& query = in.queries[i];
+            if (i != first) {
+                sql += ",";
+            }
+            sql += fmt::format(
+                "({}, 'ref_{}', '{}'::{}, '{}'::{})",
+                query.id,
+                query.id,
+                in.target_bases,
+                in.seq_type,
+                query.bases,
+                in.seq_type);
+        }
+        it::exec_sql(c, sql);
+    }
+}
+
+void verify_e2e_batch_pair_table(
+        const it::connection_test_context& c,
+        const E2eInput& in)
+{
+    it::exec_sql(c, "SET bioseq.enable_bioseq_index_scan = off;");
+    const auto rows = it::query_rows(c, fmt::format(
+        "SELECT id FROM {} ORDER BY id", in.batch_pair_table));
+    bool ids_match = rows.size() == in.queries.size();
+    if (ids_match) {
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (rows[i].empty() || !rows[i][0].has_value()
+                || parse_i64(*rows[i][0]) != static_cast<std::int64_t>(i)) {
+                ids_match = false;
+                break;
+            }
+        }
+    }
+    if (!ids_match) {
+        const std::string msg = fmt::format(
+            "[bench_e2e] FATAL batch-pair load visibility mismatch: "
+            "table={} visible_rows={} expected_rows={}\n",
+            in.batch_pair_table,
+            rows.size(),
+            in.queries.size());
+        std::fputs(msg.c_str(), stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+}
+
+[[nodiscard]] std::string batched_coord_sql(
+        const std::string& target_table,
+        std::string_view projection)
+{
+    return fmt::format(
+        "SELECT q.id, t.header, {} "
+        "FROM {} t JOIN e2e_queries q ON mmsearch(t.seq, q.seq) "
+        "ORDER BY q.id, t.header",
+        projection, target_table);
+}
+
+[[nodiscard]] std::string batch_pair_coord_sql(
+        const std::string& pair_table,
+        std::string_view projection)
+{
+    return fmt::format(
+        "SELECT id, header, {} "
+        "FROM {} WHERE mmsearch(seq, query_seq) "
+        "ORDER BY id, header",
+        projection, pair_table);
+}
+
 [[nodiscard]] E2eOutput e2e_run(std::string_view algo, const ParamMap& params,
                                 const E2eInput& in) {
     E2eOutput out;
@@ -1281,43 +1792,67 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
         configure_bioseq_pair_sort_session(*in.conn, params);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
         configure_bioseq_minimizer_policy(
-            *in.conn, in.no_index_table, minimizer_index);
+            *in.conn,
+            in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+            minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");  // load builds NO index
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");   // align recomputes
         const std::string load_sql = fmt::format(
             "SELECT bioseq.load('{}'::regclass, '{}')", in.no_index_table, in.target_fasta);
-        const std::string align_sql = fmt::format(
-            "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
-            proj, in.no_index_table, qlit);
+        const std::string align_sql = in.batch_pair_mode
+            ? batch_pair_coord_sql(in.batch_pair_table, proj)
+            : batched_coord_sql(in.no_index_table, proj);
         ScopedResourceMonitor resources;
         const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        std::optional<it::connection_test_context> read_conn;
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: load + recompute align
-            it::exec_sql(*in.conn, load_sql);
+            if (!in.batch_pair_mode) {
+                it::exec_sql(*in.conn, load_sql);
+            }
             // A same-backend custom scan immediately after TRUNCATE + bioseq.load
             // can observe stale columnar descriptor state. Use a fresh backend for
             // the measured read; connection setup remains inside the timed region.
-            it::connection_test_context read_conn;
-            configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
-            configure_bioseq_scheduler_session(read_conn, pipeline_mode);
-            configure_bioseq_pair_sort_session(read_conn, params);
-            it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
-            it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
-            it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
+            read_conn.emplace();
+            configure_bioseq_aligner_session(*read_conn, in.kmer_size, in.window_size);
+            configure_bioseq_scheduler_session(*read_conn, pipeline_mode);
+            configure_bioseq_pair_sort_session(*read_conn, params);
+            configure_bioseq_minimizer_policy(
+                *read_conn,
+                in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+                minimizer_index);
+            it::exec_sql(*read_conn, "SET bioseq.update_index_on_insert = off;");
+            it::exec_sql(*read_conn, "SET bioseq.read_sequence_index   = off;");
+            it::exec_sqlf(*read_conn, "SET bioseq.recompute_async_persist = {};",
                           recompute_async_persist ? "on" : "off");
-            parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
-            capture_mps_build_stats(read_conn, out);
+            if (in.batch_pair_mode) {
+                it::exec_sql(
+                    *read_conn,
+                    "SET bioseq.enable_bioseq_index_scan = off;");
+                if (in.batch_pair_load_timed) {
+                    load_e2e_batch_pair_table(*read_conn, in);
+                    verify_e2e_batch_pair_table(*read_conn, in);
+                }
+            } else {
+                load_e2e_query_table(*read_conn, in);
+            }
+            parse_bioseq_batch_rows(it::query_rows(*read_conn, align_sql), in, out);
+            capture_mps_build_stats(*read_conn, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
         if (recompute_async_persist) {
             capture_index_audit_after_async_persist(
-                *in.conn, in.no_index_table, minimizer_index, out);
+                *in.conn,
+                in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+                minimizer_index, out);
             capture_mps_build_stats(*in.conn, out);
         } else {
             capture_index_audit(
-                *in.conn, in.no_index_table, minimizer_index, out);
+                *in.conn,
+                in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+                minimizer_index, out);
         }
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
@@ -1336,44 +1871,72 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
         configure_bioseq_pair_sort_session(*in.conn, params);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
         configure_bioseq_minimizer_policy(
-            *in.conn, in.no_index_table, minimizer_index);
+            *in.conn,
+            in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+            minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");  // load builds NO index
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");   // align recomputes
         const std::string load_sql = fmt::format(
             "SELECT bioseq.load('{}'::regclass, '{}')", in.no_index_table, in.target_fasta);
-        const std::string align_sql = fmt::format(
-            "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
-            proj, in.no_index_table, qlit);
+        const std::string align_sql = in.batch_pair_mode
+            ? batch_pair_coord_sql(in.batch_pair_table, proj)
+            : batched_coord_sql(in.no_index_table, proj);
         ScopedResourceMonitor resources;
         const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        std::optional<it::connection_test_context> read_conn;
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: load + GPU recompute align
-            it::exec_sql(*in.conn, load_sql);
+            if (!in.batch_pair_mode) {
+                it::exec_sql(*in.conn, load_sql);
+            }
             // Fresh backend for the measured read (see bioseq_no_index rationale);
             // connection setup stays inside the timed region.
-            it::connection_test_context read_conn;
-            configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
-            configure_bioseq_scheduler_session(read_conn, pipeline_mode);
-            configure_bioseq_pair_sort_session(read_conn, params);
-            it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
-            it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
-            it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
+            read_conn.emplace();
+            configure_bioseq_aligner_session(*read_conn, in.kmer_size, in.window_size);
+            configure_bioseq_scheduler_session(*read_conn, pipeline_mode);
+            configure_bioseq_pair_sort_session(*read_conn, params);
+            configure_bioseq_minimizer_policy(
+                *read_conn,
+                in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+                minimizer_index);
+            it::exec_sql(*read_conn, "SET bioseq.update_index_on_insert = off;");
+            it::exec_sql(*read_conn, "SET bioseq.read_sequence_index   = off;");
+            it::exec_sqlf(*read_conn, "SET bioseq.recompute_async_persist = {};",
                           recompute_async_persist ? "on" : "off");
             // GPU/Vulkan phase-C frontend (same GUCs as bioseq_block_gpu_dp_gpu_seed_just_index).
-            configure_bioseq_vulkan_index_session(read_conn, in.kmer_size, in.window_size);  // DOC0345 Patch L
-            parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
-            capture_mps_build_stats(read_conn, out);
+            configure_bioseq_vulkan_index_session(*read_conn, in.kmer_size, in.window_size);  // DOC0345 Patch L
+            if (in.batch_pair_mode) {
+                it::exec_sql(
+                    *read_conn,
+                    "SET bioseq.enable_bioseq_index_scan = off;");
+                if (in.batch_pair_load_timed) {
+                    load_e2e_batch_pair_table(*read_conn, in);
+                    verify_e2e_batch_pair_table(*read_conn, in);
+                }
+            } else {
+                load_e2e_query_table(*read_conn, in);
+            }
+            parse_bioseq_batch_rows(it::query_rows(*read_conn, align_sql), in, out);
+            capture_mps_build_stats(*read_conn, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        if (read_conn.has_value()) {
+            capture_gpu_explain_metrics(*read_conn, align_sql, out);
+        }
+        require_gpu_batch_proof(algo, in, out);
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
         if (recompute_async_persist) {
             capture_index_audit_after_async_persist(
-                *in.conn, in.no_index_table, minimizer_index, out);
+                *in.conn,
+                in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+                minimizer_index, out);
             capture_mps_build_stats(*in.conn, out);
         } else {
             capture_index_audit(
-                *in.conn, in.no_index_table, minimizer_index, out);
+                *in.conn,
+                in.batch_pair_mode ? in.batch_pair_table : in.no_index_table,
+                minimizer_index, out);
         }
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
@@ -1491,8 +2054,22 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
     std::string_view, const ParamMap&, const E2eInput&, const E2eOutput& o) {
     return {
         {"match_count",             static_cast<double>(o.match_count)},
+        {"expected_match_count",    static_cast<double>(o.expected_match_count)},
+        {"correct_match_count",     static_cast<double>(o.correct_match_count)},
         {"found_fraction",          o.found ? 1.0 : 0.0},
         {"mean_position_offset_bp", o.abs_offset_bp},
+        {"max_position_offset_bp",  o.max_abs_offset_bp},
+        {"gpu_batched_branch_taken", static_cast<double>(o.gpu_batched_branch_taken)},
+        {"gpu_problem_count", static_cast<double>(o.gpu_problem_count)},
+        {"gpu_wave_count", static_cast<double>(o.gpu_wave_count)},
+        {"gpu_segment_indexes_built", static_cast<double>(o.gpu_segment_indexes_built)},
+        {"gpu_segment_indexes_reused", static_cast<double>(o.gpu_segment_indexes_reused)},
+        {"gpu_seed_dispatches", static_cast<double>(o.gpu_seed_dispatches)},
+        {"gpu_chain_dispatches", static_cast<double>(o.gpu_chain_dispatches)},
+        {"gpu_extend_dispatches", static_cast<double>(o.gpu_extend_dispatches)},
+        {"cpu_fallback_rows", static_cast<double>(o.cpu_fallback_rows)},
+        {"simd_fallback_rows", static_cast<double>(o.simd_fallback_rows)},
+        {"vulkan_declines", static_cast<double>(o.vulkan_declines)},
         {"measured_region_ns_manual", static_cast<double>(o.measured_region_ns)},
         {"peak_postgres_rss_mb",    static_cast<double>(o.peak_postgres_rss_kb) / 1024.0},
         {"peak_minimap2_rss_mb",    static_cast<double>(o.peak_minimap2_rss_kb) / 1024.0},

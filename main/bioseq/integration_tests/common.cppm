@@ -168,11 +168,33 @@ export [[nodiscard]] inline sql_error_info sql_error(
     }
     const char* state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
     const char* primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+    const char* detail = PQresultErrorField(res, PG_DIAG_MESSAGE_DETAIL);
+    const char* hint = PQresultErrorField(res, PG_DIAG_MESSAGE_HINT);
     const char* full = PQresultErrorMessage(res);
+    std::string message;
+    if (primary != nullptr && primary[0] != '\0') {
+        message += primary;
+    }
+    if (detail != nullptr && detail[0] != '\0') {
+        if (!message.empty()) {
+            message += '\n';
+        }
+        message += "DETAIL: ";
+        message += detail;
+    }
+    if (hint != nullptr && hint[0] != '\0') {
+        if (!message.empty()) {
+            message += '\n';
+        }
+        message += "HINT: ";
+        message += hint;
+    }
+    if (message.empty() && full != nullptr) {
+        message = full;
+    }
     return sql_error_info{
         state == nullptr ? std::string{} : std::string(state),
-        primary != nullptr ? std::string(primary)
-                            : (full == nullptr ? std::string{} : std::string(full))};
+        std::move(message)};
 }
 
 // Same as `exec_sql`, but accepts a printf-style format string so callers can

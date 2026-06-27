@@ -1,6 +1,7 @@
 ai-collab
 aligner
 aligner-improve
+alignment
 bench-framework
 bench-papers
 benchmark
@@ -26,6 +27,7 @@ engineering-overview
 gpu
 gzip-io
 highway-simd
+implementation
 io-reader
 json-schema
 kmers

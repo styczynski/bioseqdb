@@ -1,0 +1,97 @@
+{
+  "params": {
+    "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "SIMD nthash + SIMD chaining + block-aligner SQL no-index control"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment"]},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off"]},
+      "pipeline_mode": {"type": "string", "default": "task_parallel", "enum": ["task_parallel"]}
+    },
+    "bioseq_block_gpu_dp_gpu_seed_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "Vulkan resident batched seed/chain coordinate SQL no-index path"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment"]},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off"]},
+      "pipeline_mode": {"type": "string", "default": "task_parallel", "enum": ["task_parallel"]}
+    }
+  },
+
+  "test_cases": {
+    "E2E_BATCH_64_SHORT_COORD": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "batch64_short_coord", "reference_length": 500000,
+        "fragment_count": 64, "fragment_length_mean": 20000, "fragment_length_stddev": 500,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 500032, "skip_index_baseline_setup": true,
+        "skip_minimap2_baseline_setup": true, "batch_pair_mode": true,
+        "batch_pair_load_timed": false, "seed": 4210064 },
+      "description": "64 dna4 same-relation queries against one 500 kbp target; coordinate-only batch proof" },
+
+    "E2E_BATCH_512_SHORT_COORD": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "batch512_short_coord", "reference_length": 100000,
+        "fragment_count": 512, "fragment_length_mean": 5000, "fragment_length_stddev": 100,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 100032, "skip_index_baseline_setup": true,
+        "skip_minimap2_baseline_setup": true, "batch_pair_mode": true,
+        "batch_pair_load_timed": false, "seed": 4210512 },
+      "description": "512 dna4 same-relation queries against one 100 kbp target; amortization proof" },
+
+    "E2E_BATCH_4096_SHORT_COORD": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "batch4096_short_coord", "reference_length": 20000,
+        "fragment_count": 4096, "fragment_length_mean": 1000, "fragment_length_stddev": 40,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 20000, "skip_index_baseline_setup": true,
+        "skip_minimap2_baseline_setup": true, "batch_pair_mode": true,
+        "batch_pair_load_timed": false, "seed": 4214096 },
+      "description": "4096 dna4 same-relation queries against one 20 kbp target; launch-amortization stress" }
+  },
+
+  "bench_e2e": {
+    "tags": ["e2e", "gpu", "batch-proof"],
+    "description": "Focused multi-query GPU proof: one same-relation target/query table produces N rows in one custom-scan batch, comparing resident batched Vulkan coordinate path against the production SIMD SQL no-index control.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": {
+        "E2E_BATCH_64_SHORT_COORD": 1,
+        "E2E_BATCH_512_SHORT_COORD": 1,
+        "E2E_BATCH_4096_SHORT_COORD": 1
+      },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "match_count": { "type": "evaluation", "rules": [] },
+        "expected_match_count": { "type": "evaluation", "rules": [] },
+        "correct_match_count": { "type": "evaluation", "rules": [] },
+        "found_fraction": { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "max_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "gpu_batched_branch_taken": { "type": "evaluation", "rules": [] },
+        "gpu_problem_count": { "type": "evaluation", "rules": [] },
+        "gpu_wave_count": { "type": "evaluation", "rules": [] },
+        "gpu_segment_indexes_built": { "type": "evaluation", "rules": [] },
+        "gpu_segment_indexes_reused": { "type": "evaluation", "rules": [] },
+        "gpu_seed_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_chain_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_extend_dispatches": { "type": "evaluation", "rules": [] },
+        "cpu_fallback_rows": { "type": "evaluation", "rules": [] },
+        "simd_fallback_rows": { "type": "evaluation", "rules": [] },
+        "vulkan_declines": { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] },
+        "peak_postgres_rss_mb": { "type": "evaluation", "rules": [] },
+        "peak_bench_rss_mb": { "type": "evaluation", "rules": [] },
+        "peak_swap_used_mb": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "regression_rules": []
+}

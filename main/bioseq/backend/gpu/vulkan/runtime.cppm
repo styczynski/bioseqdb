@@ -62,6 +62,11 @@ export namespace bioseq::gpu::vulkan {
 
 class Runtime;
 
+struct AlignmentCigarBatchResult {
+    std::vector<GpuAlignmentCigarResultWire> results{};
+    std::vector<std::uint32_t> packed_cigar{};
+};
+
 /// Capabilities probed once at init. `available == false` means there is no
 /// usable Vulkan device and selected GPU algorithms must fail.
 struct VulkanFeatureSet {
@@ -73,6 +78,7 @@ struct VulkanFeatureSet {
     std::uint32_t max_workgroup_count_x = 0;
     std::uint32_t max_shared_memory_bytes = 0;
     std::uint64_t device_local_bytes = 0;
+    std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
 
 /// RAII owner for one (VkBuffer, VkDeviceMemory) pair. Move-only; destruction
@@ -200,6 +206,15 @@ static_assert(std::is_standard_layout_v<GenerateUnitsPush>);
 struct RuntimeSketchResult {
     Buffer minimizer_words;
     std::vector<std::byte> host_minimizer_bytes;
+    std::uint64_t count = 0;
+    bool overflow = false;
+};
+
+struct RuntimeSketchBatchResult {
+    Buffer minimizer_words;
+    std::vector<std::byte> host_minimizer_bytes;
+    std::vector<std::uint32_t> tile_counts;
+    std::vector<std::uint32_t> tile_offsets;
     std::uint64_t count = 0;
     bool overflow = false;
 };
@@ -472,6 +487,15 @@ struct PhaseCSeedInputs {
 /// Common query-side inputs for a batched resident seed→chain→coordinate run.
 /// The query minimizer words are shared by every job in the batch; each job
 /// supplies its own resident target index.
+struct PhaseCSeedQueryRecordWire {
+    std::uint32_t minimizer_offset = 0;
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t query_len = 0;
+    std::uint32_t flags = 0;
+};
+static_assert(sizeof(PhaseCSeedQueryRecordWire) == 16);
+static_assert(alignof(PhaseCSeedQueryRecordWire) == alignof(std::uint32_t));
+
 struct PhaseCSeedQueryInputs {
     std::span<const std::byte> host_minimizer_bytes{};
     const Buffer* device_minimizer_words = nullptr;
@@ -480,6 +504,8 @@ struct PhaseCSeedQueryInputs {
     std::uint32_t minimizer_words32_per_record = 0;
     std::uint32_t hash_shift = 0;
     std::uint32_t pos_bits = 0;
+    std::span<const PhaseCSeedQueryRecordWire> host_query_records{};
+    const Buffer* device_query_records = nullptr;
 };
 
 /// One resident target-index job in a batched seed→coordinate run. `slots` is
@@ -493,6 +519,23 @@ struct PhaseCSeedCoordinateJob {
     std::uint32_t position_count = 0;
     std::uint32_t bucket_count = 0;
     std::uint64_t target_position_offset = 0;
+    std::uint32_t query_index = 0;
+};
+
+struct PhaseCSeedCoordinateBatchStats {
+    std::uint64_t problem_count = 0;
+    std::uint64_t wave_count = 0;
+    std::uint64_t seed_count_dispatches = 0;
+    std::uint64_t seed_emit_dispatches = 0;
+    std::uint64_t sort_dispatches = 0;
+    std::uint64_t range_build_dispatches = 0;
+    std::uint64_t chain_dispatches = 0;
+    std::uint64_t coordinate_reduce_dispatches = 0;
+};
+
+struct PhaseCSeedCoordinateBatchRun {
+    std::vector<GpuCoordinateOnlyResultWire> results{};
+    PhaseCSeedCoordinateBatchStats stats{};
 };
 
 /// The Phase A chaining runtime. One process-wide instance (`Runtime::instance`)
@@ -604,6 +647,13 @@ public:
         std::span<const std::uint32_t> query_gate_words = {},
         std::uint32_t query_gate_mask = 0u);
 
+    RuntimeSketchBatchResult run_phase_c_sketch_tile_batch_roundtrip(
+        std::span<const std::byte> packed_sequence,
+        const VulkanRankLut& rank_lut,
+        const VulkanSketchParams& params,
+        std::span<const PhaseCSketchTileWire> tiles,
+        std::uint64_t max_minimizers);
+
     // DOC0310 Phase C — build the target minimizer index entirely on device
     // (§12): parallel sketch → device radix sort → race-free GPU slot table.
     // `max_target_minimizers` bounds the pessimistic device allocation.
@@ -649,6 +699,17 @@ public:
         std::span<const GpuAlignmentExtensionJobWire> jobs,
         const GpuAlignmentExtensionParams& params);
 
+    // DOC0354 Part 2 first slice — CIGAR-capable GPU extension ABI. This
+    // exact-match implementation writes packed CIGAR ops on device and rejects
+    // unsupported geometry/mismatches; it does not fall back to CPU extension.
+    [[nodiscard]] AlignmentCigarBatchResult
+    run_alignment_simple_cigar_roundtrip(
+        std::span<const std::uint32_t> query_symbols,
+        std::span<const std::uint32_t> target_symbols,
+        std::span<const GpuAlignmentCigarJobWire> jobs,
+        const GpuAlignmentCigarParams& params,
+        std::uint32_t packed_cigar_capacity);
+
     [[nodiscard]] std::uint64_t seq_sort_dispatch_count() const noexcept {
         return seq_sort_dispatch_count_.load(std::memory_order_relaxed);
     }
@@ -670,6 +731,23 @@ public:
         const PhaseCSeedInputs& inputs,
         std::uint64_t query_len,
         std::uint64_t target_len,
+        std::uint32_t kmer_size,
+        std::int32_t max_occ,
+        const ChainingPipelineKey& chain_key,
+        std::int32_t max_dist_x,
+        std::int32_t max_dist_y,
+        std::int32_t bandwidth,
+        std::int32_t max_iter,
+        float gap_penalty,
+        float skip_penalty,
+        std::int32_t max_chain_skip,
+        std::int32_t min_chain_score,
+        std::int32_t min_seed_count,
+        std::uint32_t probe_limit);
+
+    PhaseCSeedCoordinateBatchRun run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
+        const PhaseCSeedQueryInputs& query_inputs,
+        std::span<const PhaseCSeedCoordinateJob> jobs,
         std::uint32_t kmer_size,
         std::int32_t max_occ,
         const ChainingPipelineKey& chain_key,
@@ -2146,6 +2224,9 @@ void Runtime::init() {
     }
 
     features_.available = true;
+    std::strncpy(features_.device_name.data(), props.deviceName,
+                 features_.device_name.size() - 1u);
+    features_.device_name.back() = '\0';
     init_error_.clear();
     bioseq_log<DBG>(
         "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
@@ -2854,6 +2935,26 @@ struct AlignmentExtensionPush {
 static_assert(sizeof(AlignmentExtensionPush) == 44);
 static_assert(std::is_standard_layout_v<AlignmentExtensionPush>);
 
+struct AlignmentCigarPush {
+    std::uint32_t job_count = 0;
+    std::uint32_t alphabet_size = 0;
+    std::uint32_t max_band_width = 0;
+    std::uint32_t tile_query = 0;
+    std::uint32_t tile_target = 0;
+    std::int32_t match_score = 0;
+    std::int32_t mismatch_penalty = 0;
+    std::int32_t gap_open_short = 0;
+    std::int32_t gap_extend_short = 0;
+    std::int32_t gap_open_long = 0;
+    std::int32_t gap_extend_long = 0;
+    std::int32_t z_drop = 0;
+    std::int32_t end_bonus = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t reserved = 0;
+};
+static_assert(sizeof(AlignmentCigarPush) == 60);
+static_assert(std::is_standard_layout_v<AlignmentCigarPush>);
+
 [[nodiscard]] AlignmentExtensionPush alignment_extension_push(
     std::uint32_t job_count,
     const GpuAlignmentExtensionParams& params) noexcept
@@ -2870,6 +2971,28 @@ static_assert(std::is_standard_layout_v<AlignmentExtensionPush>);
         params.gap_extend_penalty,
         params.flags,
         params.reserved0};
+}
+
+[[nodiscard]] AlignmentCigarPush alignment_cigar_push(
+    std::uint32_t job_count,
+    const GpuAlignmentCigarParams& params) noexcept
+{
+    return AlignmentCigarPush{
+        job_count,
+        params.alphabet_size,
+        params.max_band_width,
+        params.tile_query,
+        params.tile_target,
+        params.match_score,
+        params.mismatch_penalty,
+        params.gap_open_short,
+        params.gap_extend_short,
+        params.gap_open_long,
+        params.gap_extend_long,
+        params.z_drop,
+        params.end_bonus,
+        params.flags,
+        params.reserved};
 }
 
 void validate_alignment_extension_score(const char* name, std::int32_t value) {
@@ -2980,6 +3103,119 @@ void validate_alignment_extension_inputs(
             params.alphabet_size, "query", i);
         validate_alignment_extension_symbols(
             target_symbols, job.target_offset, job.target_len,
+            params.alphabet_size, "target", i);
+    }
+}
+
+void validate_alignment_cigar_score(const char* name, std::int32_t value) {
+    constexpr std::int32_t kMaxAbsScore = 1'000'000;
+    if (value < 0 || value > kMaxAbsScore) {
+        throw VulkanRuntimeError(fmt::format(
+            "alignment CIGAR extension {} {} out of range (0..{})",
+            name, value, kMaxAbsScore));
+    }
+}
+
+void validate_alignment_cigar_inputs(
+    std::span<const std::uint32_t> query_symbols,
+    std::span<const std::uint32_t> target_symbols,
+    std::span<const GpuAlignmentCigarJobWire> jobs,
+    const GpuAlignmentCigarParams& params,
+    std::uint32_t packed_cigar_capacity)
+{
+    if (jobs.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError("alignment CIGAR extension job_count exceeds uint32");
+    }
+    if (query_symbols.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError(
+            "alignment CIGAR extension query symbol stream exceeds uint32 offsets");
+    }
+    if (target_symbols.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError(
+            "alignment CIGAR extension target symbol stream exceeds uint32 offsets");
+    }
+    if (params.alphabet_size == 0 || params.alphabet_size > 256u) {
+        throw VulkanRuntimeError(fmt::format(
+            "alignment CIGAR extension alphabet_size {} out of range (1..256)",
+            params.alphabet_size));
+    }
+    if (params.max_band_width > k_gpu_alignment_extension_max_band_width) {
+        throw VulkanRuntimeError(fmt::format(
+            "alignment CIGAR extension max_band_width {} exceeds {}",
+            params.max_band_width, k_gpu_alignment_extension_max_band_width));
+    }
+    if (params.tile_query == 0 || params.tile_query > k_gpu_alignment_extension_max_len
+        || params.tile_target == 0
+        || params.tile_target > k_gpu_alignment_extension_max_len) {
+        throw VulkanRuntimeError(fmt::format(
+            "alignment CIGAR extension tile geometry {}x{} out of range (1..{})",
+            params.tile_query, params.tile_target, k_gpu_alignment_extension_max_len));
+    }
+    validate_alignment_cigar_score("match_score", params.match_score);
+    validate_alignment_cigar_score("mismatch_penalty", params.mismatch_penalty);
+    validate_alignment_cigar_score("gap_open_short", params.gap_open_short);
+    validate_alignment_cigar_score("gap_extend_short", params.gap_extend_short);
+    validate_alignment_cigar_score("gap_open_long", params.gap_open_long);
+    validate_alignment_cigar_score("gap_extend_long", params.gap_extend_long);
+    validate_alignment_cigar_score("z_drop", params.z_drop);
+    validate_alignment_cigar_score("end_bonus", params.end_bonus);
+    if (params.match_score == 0) {
+        throw VulkanRuntimeError("alignment CIGAR extension match_score must be positive");
+    }
+    if (params.flags != 0 || params.reserved != 0) {
+        throw VulkanRuntimeError("alignment CIGAR extension params flags/reserved must be zero");
+    }
+    if (packed_cigar_capacity == 0) {
+        throw VulkanRuntimeError("alignment CIGAR extension packed CIGAR capacity is zero");
+    }
+
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const GpuAlignmentCigarJobWire& job = jobs[i];
+        if (job.query_len > k_gpu_alignment_extension_max_len
+            || job.target_len > k_gpu_alignment_extension_max_len) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension job {} length {}x{} exceeds {}",
+                i, job.query_len, job.target_len,
+                k_gpu_alignment_extension_max_len));
+        }
+        if (job.band_width > params.max_band_width) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension job {} band_width {} exceeds max_band_width {}",
+                i, job.band_width, params.max_band_width));
+        }
+        if (job.cigar_capacity == 0) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension job {} CIGAR capacity is zero", i));
+        }
+        const std::uint64_t traceback_cells =
+            (static_cast<std::uint64_t>(job.query_len) + 1u)
+            * (static_cast<std::uint64_t>(job.target_len) + 1u);
+        const std::uint64_t traceback_end =
+            static_cast<std::uint64_t>(job.traceback_tile_offset)
+            + static_cast<std::uint64_t>(job.traceback_tile_count);
+        if (job.traceback_tile_count < traceback_cells) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension job {} traceback capacity {} below required {}",
+                i, job.traceback_tile_count, traceback_cells));
+        }
+        if (traceback_end > std::numeric_limits<std::uint32_t>::max()) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension job {} traceback range [{}, {}) exceeds uint32",
+                i, job.traceback_tile_offset, traceback_end));
+        }
+        const std::uint64_t cigar_end =
+            static_cast<std::uint64_t>(job.cigar_offset)
+            + static_cast<std::uint64_t>(job.cigar_capacity);
+        if (cigar_end > packed_cigar_capacity) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension job {} CIGAR range [{}, {}) exceeds capacity {}",
+                i, job.cigar_offset, cigar_end, packed_cigar_capacity));
+        }
+        validate_alignment_extension_symbols(
+            query_symbols, job.query_symbol_offset, job.query_len,
+            params.alphabet_size, "query", i);
+        validate_alignment_extension_symbols(
+            target_symbols, job.target_symbol_offset, job.target_len,
             params.alphabet_size, "target", i);
     }
 }
@@ -3151,6 +3387,17 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
             vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError("SPIR-V alignment extension layout mismatch");
+        }
+        if (kind == ShaderKind::align_extend_simple_cigar &&
+            (!scan.has_binding(0) || !scan.has_binding(1) ||
+             !scan.has_binding(2) || !scan.has_binding(3) ||
+             !scan.has_binding(4) || !scan.has_binding(5) ||
+             !scan.has_array_stride(4) ||
+             !scan.has_array_stride(40) || !scan.has_array_stride(48))) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError("SPIR-V alignment CIGAR extension layout mismatch");
         }
 
         VkShaderModuleCreateInfo module_info{};
@@ -3448,7 +3695,7 @@ struct IndexPushC {
 static_assert(sizeof(IndexPushC) == 24);
 
 struct HostQRec {
-    std::uint32_t min_offset, min_count, anchor_offset, query_len;
+    std::uint32_t min_offset, min_count, query_len, flags;
 };
 static_assert(sizeof(HostQRec) == 16);
 
@@ -3663,10 +3910,10 @@ void Runtime::ensure_phase_c_pool_locked() {
     if (phase_c_pool_ != VK_NULL_HANDLE) return;
     VkDescriptorPoolSize size{};
     size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = 256u * 9u;
+    size.descriptorCount = 4096u * 9u;
     VkDescriptorPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    info.maxSets = 256u;
+    info.maxSets = 4096u;
     info.poolSizeCount = 1;
     info.pPoolSizes = &size;
     check_vk(vkCreateDescriptorPool(device_, &info, nullptr, &phase_c_pool_),
@@ -4065,6 +4312,258 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     }
     arena.rewind(mark);
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(pc_sketch-post)");
+    chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return result;
+}
+
+RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
+    std::span<const std::byte> packed_sequence,
+    const VulkanRankLut& rank_lut,
+    const VulkanSketchParams& params,
+    std::span<const PhaseCSketchTileWire> tiles,
+    std::uint64_t max_minimizers)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    RuntimeSketchBatchResult result;
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "run_phase_c_sketch_tile_batch_roundtrip on unavailable device");
+    }
+    const std::uint32_t w = params.window_size;
+    const std::uint32_t k = params.kmer_size;
+    if (tiles.empty() || w == 0u || k == 0u || max_minimizers == 0u) {
+        return result;
+    }
+    if (tiles.size()
+        > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
+        throw VulkanRuntimeError("phase_c sketch tile batch exceeds uint32 tile count");
+    }
+    if (max_minimizers
+        > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
+        throw VulkanRuntimeError("phase_c sketch tile batch capacity exceeds ABI");
+    }
+
+    const std::uint32_t tile_count = static_cast<std::uint32_t>(tiles.size());
+    const std::uint32_t num_blocks =
+        std::max<std::uint32_t>(ceil_div_u32(tile_count, kPhaseCScanBlock), 1u);
+    const std::uint32_t sketch_groups = std::min(
+        ceil_div_u32(tile_count, kPhaseCSketchLocal),
+        features_.max_workgroup_count_x);
+    if (sketch_groups == 0u) {
+        return result;
+    }
+
+    const std::uint64_t out_bytes = std::max<std::uint64_t>(
+        minimizer_device_bytes(
+            params.minimizer_word_kind,
+            params.minimizer_words32,
+            max_minimizers),
+        4u);
+    auto add_aligned =
+        [] (std::uint64_t total, std::uint64_t bytes) -> std::uint64_t {
+        return sat_add(
+            total,
+            phase_c_align_up(
+                std::max<std::uint64_t>(bytes, 4u),
+                kPhaseCSlotOffsetAlign));
+    };
+    std::uint64_t arena_bytes = 0u;
+    arena_bytes = add_aligned(arena_bytes, packed_sequence.size());
+    arena_bytes = add_aligned(arena_bytes, sizeof(VulkanRankLut));
+    arena_bytes = add_aligned(
+        arena_bytes,
+        static_cast<std::uint64_t>(tiles.size()) * sizeof(PhaseCSketchTileWire));
+    arena_bytes = add_aligned(arena_bytes, static_cast<std::uint64_t>(tile_count) * 4u);
+    arena_bytes = add_aligned(arena_bytes, static_cast<std::uint64_t>(tile_count) * 4u);
+    arena_bytes = add_aligned(arena_bytes, static_cast<std::uint64_t>(num_blocks) * 4u);
+    arena_bytes = add_aligned(arena_bytes, 8u);
+    arena_bytes = add_aligned(arena_bytes, 16u);
+
+    Buffer out_words = create_device_buffer(out_bytes, kPhaseBBufferUsage);
+    if (out_words.mapped == nullptr) {
+        throw VulkanRuntimeError("phase_c sketch tile batch non-unified output memory");
+    }
+
+    GpuArena& arena = phase_c_arena();
+    if (!arena.ensure_capacity(arena_bytes, 0u, 0u)) {
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c sketch tile batch arena grow failed (tiles={}, arena_bytes={})",
+            tile_count,
+            arena_bytes));
+    }
+    const GpuArenaMark mark = arena.mark();
+
+    const GpuArenaSlice seq_s = arena.allocate_device(
+        std::max<std::uint64_t>(packed_sequence.size(), 4u), 16u);
+    const GpuArenaSlice lut_s =
+        arena.allocate_device(sizeof(VulkanRankLut), 16u);
+    const GpuArenaSlice tiles_s = arena.allocate_device(
+        static_cast<std::uint64_t>(tiles.size()) * sizeof(PhaseCSketchTileWire),
+        16u);
+    const GpuArenaSlice counts_s =
+        arena.allocate_device(static_cast<std::uint64_t>(tile_count) * 4u, 16u);
+    const GpuArenaSlice offsets_s =
+        arena.allocate_device(static_cast<std::uint64_t>(tile_count) * 4u, 16u);
+    const GpuArenaSlice blocks_s =
+        arena.allocate_device(static_cast<std::uint64_t>(num_blocks) * 4u, 16u);
+    const GpuArenaSlice counters_s = arena.allocate_device(8u, 16u);
+    const GpuArenaSlice pairvals_s = arena.allocate_device(16u, 16u);
+    if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid()
+        || !counts_s.valid() || !offsets_s.valid() || !blocks_s.valid()
+        || !counters_s.valid() || !pairvals_s.valid()) {
+        arena.rewind(mark);
+        throw VulkanRuntimeError(fmt::format(
+            "phase_c sketch tile batch arena oversub (tiles={} arena_bytes={})",
+            tile_count,
+            arena_bytes));
+    }
+
+    auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
+    std::memset(base + seq_s.offset, 0, static_cast<std::size_t>(seq_s.size));
+    if (!packed_sequence.empty()) {
+        std::memcpy(
+            base + seq_s.offset,
+            packed_sequence.data(),
+            packed_sequence.size());
+    }
+    std::memcpy(base + lut_s.offset, &rank_lut, sizeof(rank_lut));
+    std::memcpy(
+        base + tiles_s.offset,
+        tiles.data(),
+        tiles.size() * sizeof(PhaseCSketchTileWire));
+    std::memset(base + counts_s.offset, 0, static_cast<std::size_t>(counts_s.size));
+    std::memset(base + offsets_s.offset, 0, static_cast<std::size_t>(offsets_s.size));
+    std::memset(base + blocks_s.offset, 0, static_cast<std::size_t>(blocks_s.size));
+    std::memset(base + counters_s.offset, 0, static_cast<std::size_t>(counters_s.size));
+    if (params.minimizer_word_kind == 0u) {
+        std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
+    }
+
+    const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sketch_tile,
+        kPhaseCSketchLocal,
+        std::max<std::uint32_t>(w, 1u));
+    const PhaseBPipeline scan_block_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_block,
+        1u,
+        1u);
+    const PhaseBPipeline scan_add_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_add,
+        128u,
+        1u);
+    reset_phase_c_pool_locked();
+
+    const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
+        {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+        {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
+        {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
+        {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
+        {out_words.buffer, 0, VK_WHOLE_SIZE},
+        {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+        {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
+        {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
+        {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+    }};
+    const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
+        {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
+        {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
+        {blocks_s.buffer->buffer, blocks_s.offset, blocks_s.size},
+    }};
+
+    SketchPushC push{
+        0u,
+        w,
+        k,
+        params.hash_bits,
+        params.hash_shift,
+        params.pos_bits,
+        params.minimizer_word_kind,
+        params.minimizer_words32,
+        k,
+        params.alphabet_kind,
+        params.unit_bits,
+        params.bits_per_char,
+        params.letters_per_unit,
+        params.char_mask,
+        tile_count,
+        0u,
+        0u,
+        0u};
+    ScanPushC scan0{tile_count, kPhaseCScanBlock, num_blocks, 0u};
+    ScanPushC scan1{tile_count, kPhaseCScanBlock, num_blocks, 1u};
+
+    static const auto* _qsketch_d =
+        bioseq::instr::register_region_static("phase_c_query_sketch_batch");
+    auto _qsketch_s = bioseq::instr::region(_qsketch_d);
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(pc_sketch_batch)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(
+        vkBeginCommandBuffer(command_buffer_, &begin),
+        "vkBeginCommandBuffer(pc_sketch_batch)");
+    record_host_to_shader(command_buffer_);
+    record_phase_c_dispatch_locked(
+        command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    record_compute_barrier(command_buffer_);
+    record_phase_c_dispatch_locked(
+        command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0), num_blocks);
+    record_compute_barrier(command_buffer_);
+    record_phase_c_dispatch_locked(
+        command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u);
+    record_compute_barrier(command_buffer_);
+    record_phase_c_dispatch_locked(
+        command_buffer_, scan_add_pipe, scan_infos, &scan1, sizeof(scan1),
+        ceil_div_u32(tile_count, 128u));
+    record_compute_barrier(command_buffer_);
+    push.emit_mode = 1u;
+    record_phase_c_dispatch_locked(
+        command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    record_shader_to_host(command_buffer_);
+    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(pc_sketch_batch)");
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command_buffer_;
+    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch_batch)");
+    check_vk(
+        vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+        "vkWaitForFences(pc_sketch_batch)");
+    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch_batch)");
+
+    result.tile_counts.resize(tiles.size());
+    result.tile_offsets.resize(tiles.size());
+    std::memcpy(
+        result.tile_counts.data(),
+        base + counts_s.offset,
+        result.tile_counts.size() * sizeof(std::uint32_t));
+    std::memcpy(
+        result.tile_offsets.data(),
+        base + offsets_s.offset,
+        result.tile_offsets.size() * sizeof(std::uint32_t));
+    const std::uint64_t total =
+        static_cast<std::uint64_t>(result.tile_offsets.back())
+        + static_cast<std::uint64_t>(result.tile_counts.back());
+
+    if (total > max_minimizers) {
+        result.overflow = true;
+    } else {
+        result.count = total;
+        const std::uint64_t host_bytes =
+            minimizer_host_bytes(params.minimizer_word_kind, total);
+        result.host_minimizer_bytes.resize(static_cast<std::size_t>(host_bytes));
+        if (host_bytes > 0u) {
+            std::memcpy(
+                result.host_minimizer_bytes.data(),
+                out_words.mapped,
+                static_cast<std::size_t>(host_bytes));
+        }
+        result.minimizer_words = std::move(out_words);
+    }
+    arena.rewind(mark);
+    check_vk(
+        vkResetCommandBuffer(command_buffer_, 0),
+        "vkResetCommandBuffer(pc_sketch_batch-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return result;
 }
@@ -5007,9 +5506,127 @@ std::vector<GpuAlignmentExtensionResultWire> Runtime::run_alignment_extension_ro
     return results;
 }
 
+AlignmentCigarBatchResult Runtime::run_alignment_simple_cigar_roundtrip(
+    std::span<const std::uint32_t> query_symbols,
+    std::span<const std::uint32_t> target_symbols,
+    std::span<const GpuAlignmentCigarJobWire> jobs,
+    const GpuAlignmentCigarParams& params,
+    std::uint32_t packed_cigar_capacity)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError("run_alignment_simple_cigar_roundtrip on unavailable device");
+    }
+    if (jobs.empty()) {
+        return {};
+    }
+    validate_alignment_cigar_inputs(
+        query_symbols, target_symbols, jobs, params, packed_cigar_capacity);
+    if (features_.max_workgroup_count_x == 0) {
+        throw VulkanRuntimeError(
+            "alignment CIGAR extension device reports zero max workgroup count");
+    }
+
+    constexpr std::uint32_t kAlignmentCigarLocal = 1u;
+    const PhaseBPipeline pipe = get_phase_b_pipeline_locked(
+        ShaderKind::align_extend_simple_cigar,
+        kAlignmentCigarLocal,
+        k_gpu_alignment_extension_max_len);
+
+    const std::uint64_t query_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(query_symbols.size()) * sizeof(std::uint32_t), 4u);
+    const std::uint64_t target_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(target_symbols.size()) * sizeof(std::uint32_t), 4u);
+    const std::uint64_t job_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(jobs.size()) * sizeof(GpuAlignmentCigarJobWire), 4u);
+    const std::uint64_t result_bytes =
+        static_cast<std::uint64_t>(jobs.size()) * sizeof(GpuAlignmentCigarResultWire);
+    const std::uint64_t cigar_bytes =
+        static_cast<std::uint64_t>(packed_cigar_capacity) * sizeof(std::uint32_t);
+    std::uint64_t traceback_words = 0;
+    for (const GpuAlignmentCigarJobWire& job : jobs) {
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(job.traceback_tile_offset)
+            + static_cast<std::uint64_t>(job.traceback_tile_count);
+        traceback_words = std::max(traceback_words, end);
+    }
+    const std::uint64_t traceback_bytes =
+        std::max<std::uint64_t>(traceback_words * sizeof(std::uint32_t), 4u);
+
+    Buffer query_buf = create_device_buffer(query_bytes, kPhaseBBufferUsage);
+    Buffer target_buf = create_device_buffer(target_bytes, kPhaseBBufferUsage);
+    Buffer jobs_buf = create_device_buffer(job_bytes, kPhaseBBufferUsage);
+    Buffer results_buf = create_device_buffer(result_bytes, kPhaseBBufferUsage);
+    Buffer cigar_buf = create_device_buffer(cigar_bytes, kPhaseBBufferUsage);
+    Buffer traceback_buf = create_device_buffer(traceback_bytes, kPhaseBBufferUsage);
+    if (query_buf.mapped == nullptr || target_buf.mapped == nullptr
+        || jobs_buf.mapped == nullptr || results_buf.mapped == nullptr
+        || cigar_buf.mapped == nullptr || traceback_buf.mapped == nullptr) {
+        throw VulkanRuntimeError(
+            "run_alignment_simple_cigar_roundtrip: device buffer alloc failed");
+    }
+    if (!query_symbols.empty()) {
+        std::memcpy(query_buf.mapped, query_symbols.data(),
+                    query_symbols.size() * sizeof(std::uint32_t));
+    }
+    if (!target_symbols.empty()) {
+        std::memcpy(target_buf.mapped, target_symbols.data(),
+                    target_symbols.size() * sizeof(std::uint32_t));
+    }
+    std::memcpy(jobs_buf.mapped, jobs.data(),
+                jobs.size() * sizeof(GpuAlignmentCigarJobWire));
+    std::memset(results_buf.mapped, 0, static_cast<std::size_t>(result_bytes));
+    std::memset(cigar_buf.mapped, 0, static_cast<std::size_t>(cigar_bytes));
+    std::memset(traceback_buf.mapped, 0, static_cast<std::size_t>(traceback_bytes));
+
+    const std::array<VkDescriptorBufferInfo, 6> infos{{
+        {query_buf.buffer, 0, query_buf.bytes},
+        {target_buf.buffer, 0, target_buf.bytes},
+        {jobs_buf.buffer, 0, jobs_buf.bytes},
+        {results_buf.buffer, 0, results_buf.bytes},
+        {cigar_buf.buffer, 0, cigar_buf.bytes},
+        {traceback_buf.buffer, 0, traceback_buf.bytes},
+    }};
+    const AlignmentCigarPush push = alignment_cigar_push(
+        static_cast<std::uint32_t>(jobs.size()), params);
+    const std::uint32_t groups = std::min(
+        static_cast<std::uint32_t>(jobs.size()), features_.max_workgroup_count_x);
+
+    reset_phase_c_pool_locked();
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(align_cigar)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(align_cigar)");
+    record_host_to_shader(command_buffer_);
+    record_phase_c_dispatch_locked(
+        command_buffer_, pipe, infos, &push, sizeof(push), groups);
+    record_shader_to_host(command_buffer_);
+    submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(align_cigar)");
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(align_cigar_post)");
+
+    AlignmentCigarBatchResult out{};
+    out.results.resize(jobs.size());
+    out.packed_cigar.resize(packed_cigar_capacity);
+    std::memcpy(out.results.data(), results_buf.mapped,
+                static_cast<std::size_t>(result_bytes));
+    std::memcpy(out.packed_cigar.data(), cigar_buf.mapped,
+                static_cast<std::size_t>(cigar_bytes));
+    for (std::size_t i = 0; i < out.results.size(); ++i) {
+        if (out.results[i].status != k_gpu_alignment_extension_status_ok) {
+            throw VulkanRuntimeError(fmt::format(
+                "alignment CIGAR extension shader rejected job {} with status {}",
+                i, out.results[i].status));
+        }
+    }
+    alignment_extension_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return out;
+}
+
 namespace {
 
-constexpr std::uint32_t kPhaseCSeedCoordinateBatchWave = 8u;
+constexpr std::uint32_t kPhaseCSeedCoordinateBatchWave = 4096u;
+constexpr bool kPhaseCCoordinateVoteFastPath = true;
 
 struct ChainRangePushLocal {
     std::uint32_t query_count;
@@ -5017,15 +5634,30 @@ struct ChainRangePushLocal {
 };
 static_assert(sizeof(ChainRangePushLocal) == 8);
 
+struct PhaseCCoordinateVoteJobWire {
+    std::uint32_t anchor_offset;
+    std::uint32_t anchor_count;
+    std::uint32_t query_len_lo;
+    std::uint32_t query_len_hi;
+};
+static_assert(sizeof(PhaseCCoordinateVoteJobWire) == 16);
+
 struct PhaseCSeedCoordinateWaveState {
     std::size_t result_index = 0;
     PhaseCSeedCoordinateJob job{};
+    PhaseCSeedQueryRecordWire query_record{};
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t num_blocks = 0;
+    std::uint32_t seed_groups = 0;
+    std::uint64_t query_len = 0;
     GpuArenaSlice counts_s{};
     GpuArenaSlice prefix_s{};
     GpuArenaSlice blocks_s{};
     SeedPushC seed_push{};
     std::uint64_t total_anchors = 0;
     std::uint32_t total_anchors_u32 = 0;
+    std::uint32_t anchor_offset = 0;
+    std::uint32_t vote_result_index = 0;
     WgPlan anchor_wg{};
     Buffer anchors_buf;
     Buffer anchor_keys_buf;
@@ -5072,11 +5704,10 @@ struct PhaseCSeedCoordinateWaveState {
 
 }  // namespace
 
-std::vector<GpuCoordinateOnlyResultWire>
-Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
+PhaseCSeedCoordinateBatchRun
+Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     const PhaseCSeedQueryInputs& query_inputs,
     std::span<const PhaseCSeedCoordinateJob> jobs,
-    std::uint64_t query_len,
     std::uint32_t kmer_size,
     std::int32_t max_occ,
     const ChainingPipelineKey& chain_key,
@@ -5099,29 +5730,49 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
     if (features_.max_workgroup_count_x == 0u) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate batch has zero workgroup limit");
     }
-    if (query_len > std::numeric_limits<std::uint32_t>::max()) {
-        throw VulkanRuntimeError("phase_c seed-to-coordinate query length exceeds ABI");
+    if (query_inputs.device_query_records != nullptr) {
+        throw VulkanRuntimeError("phase_c seed-to-coordinate device query records are not implemented");
     }
     for (const PhaseCSeedCoordinateJob& job : jobs) {
         if (job.slots == nullptr || job.positions == nullptr) {
             throw VulkanRuntimeError(
                 "phase_c seed-to-coordinate batch missing resident index buffers");
         }
+        if (job.query_index >= query_inputs.host_query_records.size()) {
+            throw VulkanRuntimeError("phase_c seed-to-coordinate job query_index out of range");
+        }
     }
 
-    std::vector<GpuCoordinateOnlyResultWire> results(jobs.size());
-    const std::uint32_t mc = query_inputs.minimizer_count;
-    if (jobs.empty() || mc == 0u || max_occ < 0) {
-        return results;
+    PhaseCSeedCoordinateBatchRun run{};
+    run.results.resize(jobs.size());
+    run.stats.problem_count = static_cast<std::uint64_t>(jobs.size());
+    const std::uint32_t total_mc = query_inputs.minimizer_count;
+    if (jobs.empty() || total_mc == 0u || max_occ < 0) {
+        return run;
+    }
+    if (query_inputs.host_query_records.empty()) {
+        throw VulkanRuntimeError("phase_c seed-to-coordinate batch missing query records");
+    }
+    for (const PhaseCSeedQueryRecordWire& qrec : query_inputs.host_query_records) {
+        if (qrec.query_len > std::numeric_limits<std::uint32_t>::max()) {
+            throw VulkanRuntimeError("phase_c seed-to-coordinate query length exceeds ABI");
+        }
+        if (qrec.minimizer_count == 0u) {
+            continue;
+        }
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(qrec.minimizer_offset) + qrec.minimizer_count;
+        if (end > total_mc) {
+            throw VulkanRuntimeError("phase_c seed-to-coordinate query minimizer slice exceeds buffer");
+        }
     }
 
-    const std::uint32_t num_blocks = ceil_div_u32(mc, kPhaseCScanBlock);
     const std::uint64_t min_words_bytes = query_inputs.device_minimizer_words == nullptr
         ? std::max<std::uint64_t>(
               minimizer_device_bytes(
                   query_inputs.minimizer_word_kind,
                   query_inputs.minimizer_words32_per_record,
-                  mc),
+                  total_mc),
               4u)
         : 0u;
     if (query_inputs.device_minimizer_words == nullptr
@@ -5142,7 +5793,19 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_chain_range_build, 1u, 1u);
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
+    const PhaseBPipeline vote_coord_pipe =
+        get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_vote_reduce, 128u, 1u);
+    const PhaseBPipeline vote_coord_batch_pipe =
+        get_phase_b_pipeline_locked(
+            ShaderKind::phase_c_coordinate_vote_reduce_batch, 128u, 1u);
     const VkPipeline chain_pipeline = create_pipeline_locked(chain_key);
+
+    constexpr std::uint64_t qrec_stride = kPhaseCSlotOffsetAlign;
+    const std::uint64_t query_record_bytes = std::max<std::uint64_t>(
+        bioseq::parallelism::saturating_mul(
+            static_cast<std::uint64_t>(query_inputs.host_query_records.size()),
+            qrec_stride),
+        qrec_stride);
 
     GpuArena& arena = phase_c_arena();
     std::uint64_t submitted_waves = 0;
@@ -5151,16 +5814,24 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
         const std::size_t wave_end =
             std::min<std::size_t>(jobs.size(), wave_begin + kPhaseCSeedCoordinateBatchWave);
         const std::size_t wave_count = wave_end - wave_begin;
-        const std::uint64_t per_job_arena_bytes =
-            sat_add(std::uint64_t{mc} * 8u, std::uint64_t{num_blocks} * 4u);
+        std::uint64_t per_wave_problem_bytes = 0u;
+        for (std::size_t job_index = wave_begin; job_index < wave_end; ++job_index) {
+            const PhaseCSeedQueryRecordWire& qrec =
+                query_inputs.host_query_records[jobs[job_index].query_index];
+            const std::uint32_t qblocks =
+                std::max<std::uint32_t>(ceil_div_u32(qrec.minimizer_count, kPhaseCScanBlock), 1u);
+            per_wave_problem_bytes = sat_add(
+                per_wave_problem_bytes,
+                sat_add(
+                    std::uint64_t{qrec.minimizer_count} * 8u,
+                    std::uint64_t{qblocks} * 4u));
+        }
         const std::uint64_t arena_bytes = sat_add(
-            sat_add(min_words_bytes, 16u),
+            sat_add(min_words_bytes, query_record_bytes),
             sat_add(
+                per_wave_problem_bytes,
                 bioseq::parallelism::saturating_mul(
-                    static_cast<std::uint64_t>(wave_count),
-                    per_job_arena_bytes),
-                bioseq::parallelism::saturating_mul(
-                    static_cast<std::uint64_t>(wave_count + 2u),
+                    static_cast<std::uint64_t>(3u * wave_count + 2u),
                     std::uint64_t{kPhaseCSlotOffsetAlign})));
         if (!arena.ensure_capacity(arena_bytes, 0u, 0u)) {
             throw VulkanRuntimeError("phase_c seed-to-coordinate batch arena grow failed");
@@ -5168,7 +5839,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
         const GpuArenaMark mark = arena.mark();
         try {
             auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
-            const GpuArenaSlice qrec_s = arena.allocate_device(16u, 16u);
+            const GpuArenaSlice qrec_s = arena.allocate_device(query_record_bytes, 16u);
             GpuArenaSlice minw_s{};
             if (query_inputs.device_minimizer_words == nullptr) {
                 minw_s = arena.allocate_device(min_words_bytes, 16u);
@@ -5194,9 +5865,16 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                         query_inputs.host_minimizer_bytes.size());
                 }
             }
-
-            const HostQRec qrec{0u, mc, 0u, static_cast<std::uint32_t>(query_len)};
-            std::memcpy(base + qrec_s.offset, &qrec, sizeof(qrec));
+            std::memset(base + qrec_s.offset, 0, static_cast<std::size_t>(qrec_s.size));
+            for (std::size_t qrec_index = 0;
+                 qrec_index < query_inputs.host_query_records.size();
+                 ++qrec_index) {
+                std::memcpy(
+                    base + qrec_s.offset
+                        + static_cast<std::uint64_t>(qrec_index) * qrec_stride,
+                    &query_inputs.host_query_records[qrec_index],
+                    sizeof(PhaseCSeedQueryRecordWire));
+            }
 
             std::vector<PhaseCSeedCoordinateWaveState> states;
             states.reserve(wave_count);
@@ -5205,11 +5883,25 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 PhaseCSeedCoordinateWaveState& state = states.emplace_back();
                 state.result_index = job_index;
                 state.job = jobs[job_index];
-                state.skip_seed = state.job.position_count == 0u;
-                state.counts_s = arena.allocate_device(std::uint64_t{mc} * 4u, 16u);
-                state.prefix_s = arena.allocate_device(std::uint64_t{mc} * 4u, 16u);
+                state.query_record =
+                    query_inputs.host_query_records[state.job.query_index];
+                state.minimizer_count = state.query_record.minimizer_count;
+                state.query_len = state.query_record.query_len;
+                state.num_blocks = std::max<std::uint32_t>(
+                    ceil_div_u32(state.minimizer_count, kPhaseCScanBlock), 1u);
+                state.seed_groups = std::max<std::uint32_t>(
+                    1u,
+                    std::min(
+                        ceil_div_u32(state.minimizer_count, 128u),
+                        features_.max_workgroup_count_x));
+                state.skip_seed =
+                    state.job.position_count == 0u || state.minimizer_count == 0u;
+                state.counts_s = arena.allocate_device(
+                    std::max<std::uint64_t>(state.minimizer_count, 1u) * 4u, 16u);
+                state.prefix_s = arena.allocate_device(
+                    std::max<std::uint64_t>(state.minimizer_count, 1u) * 4u, 16u);
                 state.blocks_s = arena.allocate_device(
-                    std::max<std::uint64_t>(num_blocks, 1u) * 4u, 16u);
+                    std::uint64_t{state.num_blocks} * 4u, 16u);
                 if (!state.counts_s.valid() || !state.prefix_s.valid()
                     || !state.blocks_s.valid()) {
                     throw VulkanRuntimeError(
@@ -5247,9 +5939,355 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 continue;
             }
 
-            const std::uint32_t seed_groups = std::max<std::uint32_t>(
-                1u,
-                std::min(ceil_div_u32(mc, 128u), features_.max_workgroup_count_x));
+            if (kPhaseCCoordinateVoteFastPath) {
+                std::vector<PhaseCSeedCoordinateWaveState*> active_states;
+                active_states.reserve(seed_active_count);
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (!state.skip_seed) {
+                        active_states.push_back(&state);
+                    }
+                }
+
+                const PhaseCSeedCoordinateWaveState* first_active =
+                    active_states.empty() ? nullptr : active_states.front();
+                bool same_target_wave = active_states.size() >= 2u;
+                if (same_target_wave) {
+                    for (const PhaseCSeedCoordinateWaveState* state : active_states) {
+                        if (state->job.slots != first_active->job.slots
+                            || state->job.positions != first_active->job.positions
+                            || state->job.target_len != first_active->job.target_len
+                            || state->job.slot_mask != first_active->job.slot_mask
+                            || state->job.position_count != first_active->job.position_count
+                            || state->job.bucket_count != first_active->job.bucket_count
+                            || state->job.target_position_offset
+                                != first_active->job.target_position_offset) {
+                            same_target_wave = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (same_target_wave) {
+                    const std::uint32_t total_blocks =
+                        std::max<std::uint32_t>(
+                            ceil_div_u32(total_mc, kPhaseCScanBlock),
+                            1u);
+                    const std::uint64_t counts_bytes =
+                        std::max<std::uint64_t>(std::uint64_t{total_mc} * 4u, 4u);
+                    const std::uint64_t blocks_bytes =
+                        std::max<std::uint64_t>(std::uint64_t{total_blocks} * 4u, 4u);
+                    const std::uint64_t dense_qrec_bytes =
+                        std::max<std::uint64_t>(
+                            static_cast<std::uint64_t>(active_states.size())
+                                * sizeof(PhaseCSeedQueryRecordWire),
+                            sizeof(PhaseCSeedQueryRecordWire));
+
+                    Buffer batch_counts_buf =
+                        create_device_buffer(counts_bytes, kPhaseBBufferUsage);
+                    Buffer batch_prefix_buf =
+                        create_device_buffer(counts_bytes, kPhaseBBufferUsage);
+                    Buffer batch_blocks_buf =
+                        create_device_buffer(blocks_bytes, kPhaseBBufferUsage);
+                    Buffer batch_qrec_buf =
+                        create_device_buffer(dense_qrec_bytes, kPhaseBBufferUsage);
+                    if (batch_counts_buf.mapped == nullptr
+                        || batch_prefix_buf.mapped == nullptr
+                        || batch_blocks_buf.mapped == nullptr
+                        || batch_qrec_buf.mapped == nullptr) {
+                        throw VulkanRuntimeError(
+                            "phase_c seed-to-coordinate multi-record batch non-unified memory");
+                    }
+                    std::memset(
+                        batch_counts_buf.mapped, 0,
+                        static_cast<std::size_t>(batch_counts_buf.bytes));
+                    std::memset(
+                        batch_prefix_buf.mapped, 0,
+                        static_cast<std::size_t>(batch_prefix_buf.bytes));
+                    std::memset(
+                        batch_blocks_buf.mapped, 0,
+                        static_cast<std::size_t>(batch_blocks_buf.bytes));
+                    std::memset(
+                        batch_qrec_buf.mapped, 0,
+                        static_cast<std::size_t>(batch_qrec_buf.bytes));
+                    for (std::size_t active_index = 0;
+                         active_index < active_states.size();
+                         ++active_index) {
+                        std::memcpy(
+                            static_cast<std::byte*>(batch_qrec_buf.mapped)
+                                + active_index * sizeof(PhaseCSeedQueryRecordWire),
+                            &active_states[active_index]->query_record,
+                            sizeof(PhaseCSeedQueryRecordWire));
+                    }
+
+                    SeedPushC batch_seed_push = first_active->seed_push;
+                    batch_seed_push.record_count =
+                        static_cast<std::uint32_t>(active_states.size());
+                    batch_seed_push.emit_mode = 0u;
+                    const std::array<VkDescriptorBufferInfo, 8> count_infos{{
+                        {min_words_buffer, min_words_offset, min_words_range},
+                        {first_active->job.slots->buffer, 0, VK_WHOLE_SIZE},
+                        {first_active->job.positions->buffer, 0, VK_WHOLE_SIZE},
+                        {batch_qrec_buf.buffer, 0, batch_qrec_buf.bytes},
+                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
+                        {batch_prefix_buf.buffer, 0, batch_prefix_buf.bytes},
+                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
+                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
+                    }};
+                    const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
+                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
+                        {batch_prefix_buf.buffer, 0, batch_prefix_buf.bytes},
+                        {batch_blocks_buf.buffer, 0, batch_blocks_buf.bytes},
+                    }};
+                    ScanPushC scan{
+                        total_mc, kPhaseCScanBlock, total_blocks, 0u};
+
+                    reset_phase_c_pool_locked();
+                    check_vk(
+                        vkResetCommandBuffer(command_buffer_, 0),
+                        "reset(pc_seed_coord_mrec1)");
+                    VkCommandBufferBeginInfo begin{};
+                    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                    check_vk(
+                        vkBeginCommandBuffer(command_buffer_, &begin),
+                        "begin(pc_seed_coord_mrec1)");
+                    record_host_to_shader(command_buffer_);
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, count_pipe, count_infos,
+                        &batch_seed_push, sizeof(batch_seed_push),
+                        static_cast<std::uint32_t>(active_states.size()));
+                    run.stats.seed_count_dispatches += 1u;
+                    record_compute_barrier(command_buffer_);
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, scanb, scan_infos,
+                        &scan, sizeof(scan), total_blocks);
+                    record_compute_barrier(command_buffer_);
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, scana, scan_infos,
+                        &scan, sizeof(scan), 1u);
+                    record_compute_barrier(command_buffer_);
+                    scan.pass = 1u;
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, scana, scan_infos,
+                        &scan, sizeof(scan), ceil_div_u32(total_mc, 128u));
+                    record_shader_to_host(command_buffer_);
+                    submit_and_wait(
+                        device_, queue_, command_buffer_, fence_,
+                        "submit(pc_seed_coord_mrec1)");
+
+                    std::uint32_t wave_total_prefix = 0u;
+                    std::uint32_t wave_total_count = 0u;
+                    std::memcpy(
+                        &wave_total_prefix,
+                        static_cast<std::byte*>(batch_prefix_buf.mapped)
+                            + std::uint64_t{total_mc - 1u} * 4u,
+                        4u);
+                    std::memcpy(
+                        &wave_total_count,
+                        static_cast<std::byte*>(batch_counts_buf.mapped)
+                            + std::uint64_t{total_mc - 1u} * 4u,
+                        4u);
+                    const std::uint64_t wave_total_anchors =
+                        static_cast<std::uint64_t>(wave_total_prefix)
+                        + wave_total_count;
+                    if (wave_total_anchors > std::numeric_limits<std::uint32_t>::max()) {
+                        throw VulkanRuntimeError(
+                            "phase_c seed-to-coordinate multi-record anchor overflow");
+                    }
+
+                    std::uint32_t anchor_active_count = 0;
+                    for (PhaseCSeedCoordinateWaveState* state : active_states) {
+                        const std::uint32_t begin_min =
+                            state->query_record.minimizer_offset;
+                        const std::uint32_t end_min =
+                            begin_min + state->query_record.minimizer_count - 1u;
+                        std::uint32_t anchor_begin = 0u;
+                        std::uint32_t anchor_end_prefix = 0u;
+                        std::uint32_t anchor_end_count = 0u;
+                        std::memcpy(
+                            &anchor_begin,
+                            static_cast<std::byte*>(batch_prefix_buf.mapped)
+                                + std::uint64_t{begin_min} * 4u,
+                            4u);
+                        std::memcpy(
+                            &anchor_end_prefix,
+                            static_cast<std::byte*>(batch_prefix_buf.mapped)
+                                + std::uint64_t{end_min} * 4u,
+                            4u);
+                        std::memcpy(
+                            &anchor_end_count,
+                            static_cast<std::byte*>(batch_counts_buf.mapped)
+                                + std::uint64_t{end_min} * 4u,
+                            4u);
+                        const std::uint64_t anchor_end =
+                            static_cast<std::uint64_t>(anchor_end_prefix)
+                            + anchor_end_count;
+                        if (anchor_end < anchor_begin) {
+                            throw VulkanRuntimeError(
+                                "phase_c seed-to-coordinate multi-record invalid prefix");
+                        }
+                        state->total_anchors =
+                            anchor_end - static_cast<std::uint64_t>(anchor_begin);
+                        if (state->total_anchors == 0u) {
+                            continue;
+                        }
+                        if (state->total_anchors
+                            > std::numeric_limits<std::uint32_t>::max()) {
+                            throw VulkanRuntimeError(
+                                "phase_c seed-to-coordinate multi-record per-query overflow");
+                        }
+                        state->total_anchors_u32 =
+                            static_cast<std::uint32_t>(state->total_anchors);
+                        state->anchor_offset = anchor_begin;
+                        state->has_anchors = true;
+                        anchor_active_count += 1u;
+                    }
+
+                    if (anchor_active_count == 0u || wave_total_anchors == 0u) {
+                        arena.rewind(mark);
+                        submitted_waves += 1u;
+                        run.stats.wave_count += 1u;
+                        continue;
+                    }
+
+                    const std::uint64_t anchor_bytes =
+                        wave_total_anchors * 3u * sizeof(std::uint64_t);
+                    Buffer batch_anchors_buf =
+                        create_device_buffer(anchor_bytes, kPhaseBBufferUsage);
+                    Buffer batch_anchor_keys_buf = create_device_buffer(
+                        wave_total_anchors * sizeof(std::uint64_t),
+                        kPhaseBBufferUsage);
+                    if (batch_anchors_buf.mapped == nullptr
+                        || batch_anchor_keys_buf.mapped == nullptr) {
+                        throw VulkanRuntimeError(
+                            "phase_c seed-to-coordinate multi-record anchor memory");
+                    }
+                    std::memset(
+                        batch_anchors_buf.mapped, 0,
+                        static_cast<std::size_t>(batch_anchors_buf.bytes));
+                    std::memset(
+                        batch_anchor_keys_buf.mapped, 0,
+                        static_cast<std::size_t>(batch_anchor_keys_buf.bytes));
+
+                    std::vector<PhaseCCoordinateVoteJobWire> vote_jobs;
+                    vote_jobs.reserve(anchor_active_count);
+                    for (PhaseCSeedCoordinateWaveState* state : active_states) {
+                        if (!state->has_anchors) {
+                            continue;
+                        }
+                        state->vote_result_index =
+                            static_cast<std::uint32_t>(vote_jobs.size());
+                        vote_jobs.push_back(PhaseCCoordinateVoteJobWire{
+                            .anchor_offset = state->anchor_offset,
+                            .anchor_count = state->total_anchors_u32,
+                            .query_len_lo = static_cast<std::uint32_t>(
+                                state->query_len & 0xffffffffull),
+                            .query_len_hi = static_cast<std::uint32_t>(
+                                state->query_len >> 32),
+                        });
+                    }
+                    const std::uint64_t vote_job_bytes =
+                        std::max<std::uint64_t>(
+                            static_cast<std::uint64_t>(vote_jobs.size())
+                                * sizeof(PhaseCCoordinateVoteJobWire),
+                            sizeof(PhaseCCoordinateVoteJobWire));
+                    const std::uint64_t vote_result_bytes =
+                        std::max<std::uint64_t>(
+                            static_cast<std::uint64_t>(vote_jobs.size())
+                                * sizeof(GpuCoordinateOnlyResultWire),
+                            sizeof(GpuCoordinateOnlyResultWire));
+                    Buffer vote_jobs_buf =
+                        create_device_buffer(vote_job_bytes, kPhaseBBufferUsage);
+                    Buffer vote_results_buf =
+                        create_device_buffer(vote_result_bytes, kPhaseBBufferUsage);
+                    if (vote_jobs_buf.mapped == nullptr
+                        || vote_results_buf.mapped == nullptr) {
+                        throw VulkanRuntimeError(
+                            "phase_c seed-to-coordinate multi-record vote memory");
+                    }
+                    std::memset(
+                        vote_jobs_buf.mapped, 0,
+                        static_cast<std::size_t>(vote_jobs_buf.bytes));
+                    std::memset(
+                        vote_results_buf.mapped, 0,
+                        static_cast<std::size_t>(vote_results_buf.bytes));
+                    std::memcpy(
+                        vote_jobs_buf.mapped, vote_jobs.data(),
+                        vote_jobs.size() * sizeof(PhaseCCoordinateVoteJobWire));
+
+                    reset_phase_c_pool_locked();
+                    check_vk(
+                        vkResetCommandBuffer(command_buffer_, 0),
+                        "reset(pc_seed_coord_mrec2)");
+                    begin = VkCommandBufferBeginInfo{};
+                    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                    check_vk(
+                        vkBeginCommandBuffer(command_buffer_, &begin),
+                        "begin(pc_seed_coord_mrec2)");
+                    record_host_to_shader(command_buffer_);
+                    batch_seed_push.emit_mode = 1u;
+                    const std::array<VkDescriptorBufferInfo, 8> emit_infos{{
+                        {min_words_buffer, min_words_offset, min_words_range},
+                        {first_active->job.slots->buffer, 0, VK_WHOLE_SIZE},
+                        {first_active->job.positions->buffer, 0, VK_WHOLE_SIZE},
+                        {batch_qrec_buf.buffer, 0, batch_qrec_buf.bytes},
+                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
+                        {batch_prefix_buf.buffer, 0, batch_prefix_buf.bytes},
+                        {batch_anchors_buf.buffer, 0, batch_anchors_buf.bytes},
+                        {batch_anchor_keys_buf.buffer, 0, batch_anchor_keys_buf.bytes},
+                    }};
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, emit_pipe, emit_infos,
+                        &batch_seed_push, sizeof(batch_seed_push),
+                        static_cast<std::uint32_t>(active_states.size()));
+                    run.stats.seed_emit_dispatches += 1u;
+                    record_compute_barrier(command_buffer_);
+                    const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
+                        {batch_anchors_buf.buffer, 0, batch_anchors_buf.bytes},
+                        {vote_jobs_buf.buffer, 0, vote_jobs_buf.bytes},
+                        {batch_anchor_keys_buf.buffer, 0, batch_anchor_keys_buf.bytes},
+                        {vote_results_buf.buffer, 0, vote_results_buf.bytes},
+                        {vote_results_buf.buffer, 0, vote_results_buf.bytes},
+                        {vote_results_buf.buffer, 0, vote_results_buf.bytes},
+                    }};
+                    GpuCoordinateReducePush coord_push{
+                        .anchor_count = static_cast<std::uint32_t>(vote_jobs.size()),
+                        .query_len_lo = 0u,
+                        .query_len_hi = 0u,
+                        .min_chain_score = min_chain_score,
+                        .min_seed_count = min_seed_count,
+                        .probe_limit = probe_limit,
+                        .reserved = 0u,
+                    };
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, vote_coord_batch_pipe, coord_infos,
+                        &coord_push, sizeof(coord_push),
+                        static_cast<std::uint32_t>(vote_jobs.size()));
+                    run.stats.coordinate_reduce_dispatches += 1u;
+                    record_shader_to_host(command_buffer_);
+                    submit_and_wait(
+                        device_, queue_, command_buffer_, fence_,
+                        "submit(pc_seed_coord_mrec2)");
+
+                    for (PhaseCSeedCoordinateWaveState* state : active_states) {
+                        if (state->has_anchors) {
+                            std::memcpy(
+                                &run.results[state->result_index],
+                                static_cast<std::byte*>(vote_results_buf.mapped)
+                                    + static_cast<std::uint64_t>(
+                                        state->vote_result_index)
+                                        * sizeof(GpuCoordinateOnlyResultWire),
+                                sizeof(GpuCoordinateOnlyResultWire));
+                        }
+                    }
+
+                    arena.rewind(mark);
+                    submitted_waves += 1u;
+                    run.stats.wave_count += 1u;
+                    continue;
+                }
+            }
 
             reset_phase_c_pool_locked();
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch1)");
@@ -5266,7 +6304,10 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     {min_words_buffer, min_words_offset, min_words_range},
                     {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
                     {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
-                    {qrec_s.buffer->buffer, qrec_s.offset, qrec_s.size},
+                    {qrec_s.buffer->buffer,
+                     qrec_s.offset + std::uint64_t{state.job.query_index}
+                         * qrec_stride,
+                     sizeof(PhaseCSeedQueryRecordWire)},
                     {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
                     {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
                     {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
@@ -5274,7 +6315,8 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 }};
                 record_phase_c_dispatch_locked(
                     command_buffer_, count_pipe, seed_infos,
-                    &state.seed_push, sizeof(state.seed_push), seed_groups);
+                    &state.seed_push, sizeof(state.seed_push), state.seed_groups);
+                run.stats.seed_count_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -5286,9 +6328,10 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
                     {state.blocks_s.buffer->buffer, state.blocks_s.offset, state.blocks_s.size},
                 }};
-                ScanPushC scan{mc, kPhaseCScanBlock, num_blocks, 0u};
+                ScanPushC scan{
+                    state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
-                    command_buffer_, scanb, scan_infos, &scan, sizeof(scan), num_blocks);
+                    command_buffer_, scanb, scan_infos, &scan, sizeof(scan), state.num_blocks);
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -5300,7 +6343,8 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
                     {state.blocks_s.buffer->buffer, state.blocks_s.offset, state.blocks_s.size},
                 }};
-                ScanPushC scan{mc, kPhaseCScanBlock, num_blocks, 0u};
+                ScanPushC scan{
+                    state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
                     command_buffer_, scana, scan_infos, &scan, sizeof(scan), 1u);
             }
@@ -5314,10 +6358,11 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
                     {state.blocks_s.buffer->buffer, state.blocks_s.offset, state.blocks_s.size},
                 }};
-                ScanPushC scan{mc, kPhaseCScanBlock, num_blocks, 1u};
+                ScanPushC scan{
+                    state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 1u};
                 record_phase_c_dispatch_locked(
                     command_buffer_, scana, scan_infos, &scan, sizeof(scan),
-                    ceil_div_u32(mc, 128u));
+                    ceil_div_u32(state.minimizer_count, 128u));
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
@@ -5330,8 +6375,16 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 }
                 std::uint32_t plast = 0;
                 std::uint32_t clast = 0;
-                std::memcpy(&plast, base + state.prefix_s.offset + (mc - 1u) * 4u, 4u);
-                std::memcpy(&clast, base + state.counts_s.offset + (mc - 1u) * 4u, 4u);
+                std::memcpy(
+                    &plast,
+                    base + state.prefix_s.offset
+                        + std::uint64_t{state.minimizer_count - 1u} * 4u,
+                    4u);
+                std::memcpy(
+                    &clast,
+                    base + state.counts_s.offset
+                        + std::uint64_t{state.minimizer_count - 1u} * 4u,
+                    4u);
                 state.total_anchors = static_cast<std::uint64_t>(plast) + clast;
                 if (state.total_anchors == 0u) {
                     continue;
@@ -5348,6 +6401,22 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     create_device_buffer(anchor_u64 * 8u, kPhaseBBufferUsage);
                 state.anchor_keys_buf =
                     create_device_buffer(state.total_anchors * 8u, kPhaseBBufferUsage);
+                if (kPhaseCCoordinateVoteFastPath) {
+                    state.result_buf = create_device_buffer(
+                        sizeof(GpuCoordinateOnlyResultWire), kPhaseBBufferUsage);
+                    if (state.anchors_buf.mapped == nullptr
+                        || state.anchor_keys_buf.mapped == nullptr
+                        || state.result_buf.mapped == nullptr) {
+                        throw VulkanRuntimeError(
+                            "phase_c seed-to-coordinate vote batch non-unified memory");
+                    }
+                    std::memset(
+                        state.result_buf.mapped, 0,
+                        static_cast<std::size_t>(state.result_buf.bytes));
+                    state.has_anchors = true;
+                    anchor_active_count += 1u;
+                    continue;
+                }
                 state.anchors_scratch_buf =
                     create_device_buffer(anchor_u64 * 8u, kPhaseBBufferUsage);
                 state.anchor_keys_scratch_buf =
@@ -5391,6 +6460,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
             if (anchor_active_count == 0u) {
                 arena.rewind(mark);
                 submitted_waves += 1u;
+                run.stats.wave_count += 1u;
                 continue;
             }
 
@@ -5413,7 +6483,10 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     {min_words_buffer, min_words_offset, min_words_range},
                     {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
                     {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
-                    {qrec_s.buffer->buffer, qrec_s.offset, qrec_s.size},
+                    {qrec_s.buffer->buffer,
+                     qrec_s.offset + std::uint64_t{state.job.query_index}
+                         * qrec_stride,
+                     sizeof(PhaseCSeedQueryRecordWire)},
                     {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
                     {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
                     {anchors_s.buffer->buffer, anchors_s.offset, anchors_s.size},
@@ -5421,9 +6494,60 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 }};
                 record_phase_c_dispatch_locked(
                     command_buffer_, emit_pipe, seed_infos,
-                    &emit_push, sizeof(emit_push), seed_groups);
+                    &emit_push, sizeof(emit_push), state.seed_groups);
+                run.stats.seed_emit_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
+            if (kPhaseCCoordinateVoteFastPath) {
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (!state.has_anchors) {
+                        continue;
+                    }
+                    GpuArenaSlice anchors_s = state.anchors_slice();
+                    GpuArenaSlice anchor_keys_s = state.anchor_keys_slice();
+                    const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
+                        {anchors_s.buffer->buffer, anchors_s.offset, anchors_s.size},
+                        {anchor_keys_s.buffer->buffer, anchor_keys_s.offset, anchor_keys_s.size},
+                        {anchor_keys_s.buffer->buffer, anchor_keys_s.offset, anchor_keys_s.size},
+                        {state.result_buf.buffer, 0, state.result_buf.bytes},
+                        {state.result_buf.buffer, 0, state.result_buf.bytes},
+                        {state.result_buf.buffer, 0, state.result_buf.bytes},
+                    }};
+                    GpuCoordinateReducePush coord_push{
+                        .anchor_count = state.total_anchors_u32,
+                        .query_len_lo = static_cast<std::uint32_t>(
+                            state.query_len & 0xffffffffull),
+                        .query_len_hi = static_cast<std::uint32_t>(
+                            state.query_len >> 32),
+                        .min_chain_score = min_chain_score,
+                        .min_seed_count = min_seed_count,
+                        .probe_limit = probe_limit,
+                        .reserved = 0u,
+                    };
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, vote_coord_pipe, coord_infos,
+                        &coord_push, sizeof(coord_push), 1u);
+                    run.stats.coordinate_reduce_dispatches += 1u;
+                }
+                record_shader_to_host(command_buffer_);
+                submit_and_wait(
+                    device_, queue_, command_buffer_, fence_,
+                    "submit(pc_seed_coord_vote_batch2)");
+
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (state.has_anchors) {
+                        std::memcpy(
+                            &run.results[state.result_index],
+                            state.result_buf.mapped,
+                            sizeof(GpuCoordinateOnlyResultWire));
+                    }
+                }
+
+                arena.rewind(mark);
+                submitted_waves += 1u;
+                run.stats.wave_count += 1u;
+                continue;
+            }
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (!state.has_anchors) {
                     continue;
@@ -5451,6 +6575,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     state.anchor_wg.elems_per_wg,
                     3u,
                     state.sorted_in_scratch);
+                run.stats.sort_dispatches += 1u;
                 const GpuArenaSlice sorted_anchors =
                     state.sorted_in_scratch ? anchors_scratch_s : anchors_s;
                 const GpuArenaSlice compacted_anchors_s = state.compacted_anchors_slice();
@@ -5471,6 +6596,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 record_phase_c_dispatch_locked(
                     command_buffer_, range_pipe, range_infos,
                     &range_push, sizeof(range_push), 1u);
+                run.stats.range_build_dispatches += 1u;
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
@@ -5528,6 +6654,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
             if (chain_active_count == 0u) {
                 arena.rewind(mark);
                 submitted_waves += 1u;
+                run.stats.wave_count += 1u;
                 continue;
             }
 
@@ -5608,6 +6735,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                     command_buffer_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                     0, sizeof(chain_push), &chain_push);
                 vkCmdDispatch(command_buffer_, chain_groups, 1, 1);
+                run.stats.chain_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -5633,8 +6761,8 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 }};
                 GpuCoordinateReducePush coord_push{
                     .anchor_count = state.active_anchor_count,
-                    .query_len_lo = static_cast<std::uint32_t>(query_len & 0xffffffffull),
-                    .query_len_hi = static_cast<std::uint32_t>(query_len >> 32),
+                    .query_len_lo = static_cast<std::uint32_t>(state.query_len & 0xffffffffull),
+                    .query_len_hi = static_cast<std::uint32_t>(state.query_len >> 32),
                     .min_chain_score = min_chain_score,
                     .min_seed_count = min_seed_count,
                     .probe_limit = probe_limit,
@@ -5643,6 +6771,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
                 record_phase_c_dispatch_locked(
                     command_buffer_, coord_pipe, coord_infos,
                     &coord_push, sizeof(coord_push), 1u);
+                run.stats.coordinate_reduce_dispatches += 1u;
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
@@ -5651,7 +6780,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (state.chain_active) {
                     std::memcpy(
-                        &results[state.result_index],
+                        &run.results[state.result_index],
                         state.result_buf.mapped,
                         sizeof(GpuCoordinateOnlyResultWire));
                 }
@@ -5659,6 +6788,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
 
             arena.rewind(mark);
             submitted_waves += 1u;
+            run.stats.wave_count += 1u;
         } catch (...) {
             arena.rewind(mark);
             throw;
@@ -5669,7 +6799,57 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
     if (submitted_waves != 0u) {
         chaining_dispatch_count_.fetch_add(submitted_waves, std::memory_order_relaxed);
     }
-    return results;
+    return run;
+}
+
+std::vector<GpuCoordinateOnlyResultWire>
+Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
+    const PhaseCSeedQueryInputs& query_inputs,
+    std::span<const PhaseCSeedCoordinateJob> jobs,
+    std::uint64_t query_len,
+    std::uint32_t kmer_size,
+    std::int32_t max_occ,
+    const ChainingPipelineKey& chain_key,
+    std::int32_t max_dist_x,
+    std::int32_t max_dist_y,
+    std::int32_t bandwidth,
+    std::int32_t max_iter,
+    float gap_penalty,
+    float skip_penalty,
+    std::int32_t max_chain_skip,
+    std::int32_t min_chain_score,
+    std::int32_t min_seed_count,
+    std::uint32_t probe_limit)
+{
+    if (query_len > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError("phase_c seed-to-coordinate query length exceeds ABI");
+    }
+    const PhaseCSeedQueryRecordWire qrec{
+        .minimizer_offset = 0u,
+        .minimizer_count = query_inputs.minimizer_count,
+        .query_len = static_cast<std::uint32_t>(query_len),
+        .flags = 0u,
+    };
+    PhaseCSeedQueryInputs forwarded = query_inputs;
+    forwarded.host_query_records =
+        std::span<const PhaseCSeedQueryRecordWire>{&qrec, 1u};
+    forwarded.device_query_records = nullptr;
+    return run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
+        forwarded,
+        jobs,
+        kmer_size,
+        max_occ,
+        chain_key,
+        max_dist_x,
+        max_dist_y,
+        bandwidth,
+        max_iter,
+        gap_penalty,
+        skip_penalty,
+        max_chain_skip,
+        min_chain_score,
+        min_seed_count,
+        probe_limit).results;
 }
 
 GpuCoordinateOnlyResultWire Runtime::run_phase_c_seed_to_coordinate_roundtrip(
@@ -5756,7 +6936,7 @@ GpuCoordinateOnlyResultWire Runtime::run_phase_c_seed_to_coordinate_roundtrip(
                         inputs.host_minimizer_bytes.size());
         }
     }
-    const HostQRec qrec{0u, mc, 0u, static_cast<std::uint32_t>(query_len)};
+    const HostQRec qrec{0u, mc, static_cast<std::uint32_t>(query_len), 0u};
     std::memcpy(base + qrec_s.offset, &qrec, sizeof(qrec));
 
     const PhaseBPipeline count_pipe =
@@ -6097,7 +7277,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
             std::memcpy(base + minw_s.offset, inputs.host_minimizer_bytes.data(), inputs.host_minimizer_bytes.size());
         }
     }
-    const HostQRec qrec{0u, mc, 0u, static_cast<std::uint32_t>(query_len)};
+    const HostQRec qrec{0u, mc, static_cast<std::uint32_t>(query_len), 0u};
     std::memcpy(base + qrec_s.offset, &qrec, sizeof(qrec));
 
     const PhaseBPipeline count_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_seed_count, 128u, 1u);

@@ -348,6 +348,313 @@ TEST_CASE("DOC0304 §10.3 — end-to-end GPU chaining smoke",
     }
 }
 
+TEST_CASE("DOC0354 Part 2 slice - Vulkan simple extension emits CIGAR",
+          "[g3sa][vulkan][gpu][cigar]") {
+    auto& runtime = gv::Runtime::instance();
+    INFO("Vulkan runtime error: " << runtime.initialization_error());
+    REQUIRE(ch::vulkan_chaining_supported());
+
+    constexpr std::uint32_t kLen = 100u;
+    std::vector<std::uint32_t> query_symbols(kLen);
+    std::vector<std::uint32_t> target_symbols(kLen);
+    for (std::uint32_t i = 0; i < kLen; ++i) {
+        const std::uint32_t symbol = (i * 7u + 3u) & 3u;
+        query_symbols[i] = symbol;
+        target_symbols[i] = symbol;
+    }
+
+    const std::vector<gv::GpuAlignmentCigarJobWire> jobs{
+        gv::GpuAlignmentCigarJobWire{
+            .query_symbol_offset = 0,
+            .target_symbol_offset = 0,
+            .query_len = kLen,
+            .target_len = kLen,
+            .query_global_start = 11,
+            .target_global_start = 2007,
+            .band_width = kLen,
+            .flags = 0,
+            .cigar_offset = 0,
+            .cigar_capacity = 1,
+            .traceback_tile_offset = 0,
+            .traceback_tile_count = (kLen + 1u) * (kLen + 1u),
+        },
+    };
+    const gv::GpuAlignmentCigarParams params{
+        .alphabet_size = 4,
+        .max_band_width = kLen,
+        .tile_query = 128,
+        .tile_target = 128,
+        .match_score = 2,
+        .mismatch_penalty = 4,
+        .gap_open_short = 4,
+        .gap_extend_short = 2,
+        .gap_open_long = 24,
+        .gap_extend_long = 1,
+        .z_drop = 400,
+        .end_bonus = 0,
+        .flags = 0,
+        .reserved = 0,
+    };
+
+    const std::uint64_t before = runtime.alignment_extension_dispatch_count();
+    const gv::AlignmentCigarBatchResult result =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            query_symbols, target_symbols, jobs, params,
+            /*packed_cigar_capacity=*/1u);
+    const std::uint64_t after = runtime.alignment_extension_dispatch_count();
+
+    REQUIRE(after > before);
+    REQUIRE(result.results.size() == 1);
+    REQUIRE(result.packed_cigar.size() == 1);
+    const gv::GpuAlignmentCigarResultWire& r = result.results.front();
+    CHECK(r.status == gv::k_gpu_alignment_extension_status_ok);
+    CHECK(r.score == static_cast<std::int32_t>(kLen * params.match_score));
+    CHECK(r.max_score == r.score);
+    CHECK(r.query_start == 11u);
+    CHECK(r.query_end == 11u + kLen);
+    CHECK(r.target_start == 2007u);
+    CHECK(r.target_end == 2007u + kLen);
+    CHECK(r.cigar_offset == 0u);
+    CHECK(r.cigar_length == 1u);
+    CHECK(result.packed_cigar[0] == ((kLen << 4) | 0u));
+}
+
+TEST_CASE("DOC0354 Part 2 slice - Vulkan simple CIGAR scores mismatches",
+          "[g3sa][vulkan][gpu][cigar]") {
+    auto& runtime = gv::Runtime::instance();
+    INFO("Vulkan runtime error: " << runtime.initialization_error());
+    REQUIRE(ch::vulkan_chaining_supported());
+
+    constexpr std::uint32_t kLen = 16u;
+    std::vector<std::uint32_t> query_symbols(kLen);
+    std::vector<std::uint32_t> target_symbols(kLen);
+    for (std::uint32_t i = 0; i < kLen; ++i) {
+        const std::uint32_t symbol = i & 3u;
+        query_symbols[i] = symbol;
+        target_symbols[i] = symbol;
+    }
+    target_symbols[3] = (target_symbols[3] + 1u) & 3u;
+    target_symbols[9] = (target_symbols[9] + 2u) & 3u;
+    target_symbols[14] = (target_symbols[14] + 3u) & 3u;
+
+    const std::vector<gv::GpuAlignmentCigarJobWire> jobs{
+        gv::GpuAlignmentCigarJobWire{
+            .query_symbol_offset = 0,
+            .target_symbol_offset = 0,
+            .query_len = kLen,
+            .target_len = kLen,
+            .query_global_start = 101,
+            .target_global_start = 909,
+            .band_width = kLen,
+            .flags = 0,
+            .cigar_offset = 0,
+            .cigar_capacity = 1,
+            .traceback_tile_offset = 0,
+            .traceback_tile_count = (kLen + 1u) * (kLen + 1u),
+        },
+    };
+    const gv::GpuAlignmentCigarParams params{
+        .alphabet_size = 4,
+        .max_band_width = kLen,
+        .tile_query = 128,
+        .tile_target = 128,
+        .match_score = 2,
+        .mismatch_penalty = 4,
+        .gap_open_short = 4,
+        .gap_extend_short = 2,
+        .gap_open_long = 24,
+        .gap_extend_long = 1,
+        .z_drop = 400,
+        .end_bonus = 0,
+        .flags = 0,
+        .reserved = 0,
+    };
+
+    const gv::AlignmentCigarBatchResult result =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            query_symbols, target_symbols, jobs, params,
+            /*packed_cigar_capacity=*/1u);
+
+    REQUIRE(result.results.size() == 1);
+    REQUIRE(result.packed_cigar.size() == 1);
+    const gv::GpuAlignmentCigarResultWire& r = result.results.front();
+    CHECK(r.status == gv::k_gpu_alignment_extension_status_ok);
+    CHECK(r.score == static_cast<std::int32_t>((13u * params.match_score) -
+                                               (3u * params.mismatch_penalty)));
+    CHECK(r.max_score == r.score);
+    CHECK(r.query_start == 101u);
+    CHECK(r.query_end == 101u + kLen);
+    CHECK(r.target_start == 909u);
+    CHECK(r.target_end == 909u + kLen);
+    CHECK(r.cigar_offset == 0u);
+    CHECK(r.cigar_length == 1u);
+    CHECK(result.packed_cigar[0] == ((kLen << 4) | 0u));
+}
+
+TEST_CASE("DOC0354 Part 2 slice - Vulkan simple CIGAR emits one-base gaps",
+          "[g3sa][vulkan][gpu][cigar]") {
+    auto& runtime = gv::Runtime::instance();
+    INFO("Vulkan runtime error: " << runtime.initialization_error());
+    REQUIRE(ch::vulkan_chaining_supported());
+
+    const std::vector<std::uint32_t> query_symbols{
+        0, 1, 2, 3, 0,
+        0, 1, 3, 0,
+    };
+    const std::vector<std::uint32_t> target_symbols{
+        0, 1, 3, 0,
+        0, 1, 2, 3, 0,
+    };
+
+    const std::vector<gv::GpuAlignmentCigarJobWire> jobs{
+        gv::GpuAlignmentCigarJobWire{
+            .query_symbol_offset = 0,
+            .target_symbol_offset = 0,
+            .query_len = 5,
+            .target_len = 4,
+            .query_global_start = 10,
+            .target_global_start = 20,
+            .band_width = 5,
+            .flags = 0,
+            .cigar_offset = 0,
+            .cigar_capacity = 3,
+            .traceback_tile_offset = 0,
+            .traceback_tile_count = 30,
+        },
+        gv::GpuAlignmentCigarJobWire{
+            .query_symbol_offset = 5,
+            .target_symbol_offset = 4,
+            .query_len = 4,
+            .target_len = 5,
+            .query_global_start = 30,
+            .target_global_start = 40,
+            .band_width = 5,
+            .flags = 0,
+            .cigar_offset = 3,
+            .cigar_capacity = 3,
+            .traceback_tile_offset = 30,
+            .traceback_tile_count = 30,
+        },
+    };
+    const gv::GpuAlignmentCigarParams params{
+        .alphabet_size = 4,
+        .max_band_width = 5,
+        .tile_query = 128,
+        .tile_target = 128,
+        .match_score = 2,
+        .mismatch_penalty = 4,
+        .gap_open_short = 4,
+        .gap_extend_short = 2,
+        .gap_open_long = 24,
+        .gap_extend_long = 1,
+        .z_drop = 400,
+        .end_bonus = 0,
+        .flags = 0,
+        .reserved = 0,
+    };
+
+    const gv::AlignmentCigarBatchResult result =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            query_symbols, target_symbols, jobs, params,
+            /*packed_cigar_capacity=*/6u);
+
+    REQUIRE(result.results.size() == 2);
+    REQUIRE(result.packed_cigar.size() == 6);
+    const std::int32_t expected_score = static_cast<std::int32_t>(
+        (4u * params.match_score) -
+        (params.gap_open_short + params.gap_extend_short));
+
+    CHECK(result.results[0].status == gv::k_gpu_alignment_extension_status_ok);
+    CHECK(result.results[0].score == expected_score);
+    CHECK(result.results[0].query_start == 10u);
+    CHECK(result.results[0].query_end == 15u);
+    CHECK(result.results[0].target_start == 20u);
+    CHECK(result.results[0].target_end == 24u);
+    CHECK(result.results[0].cigar_offset == 0u);
+    CHECK(result.results[0].cigar_length == 3u);
+    CHECK(result.packed_cigar[0] == ((2u << 4) | 0u));
+    CHECK(result.packed_cigar[1] == ((1u << 4) | 1u));
+    CHECK(result.packed_cigar[2] == ((2u << 4) | 0u));
+
+    CHECK(result.results[1].status == gv::k_gpu_alignment_extension_status_ok);
+    CHECK(result.results[1].score == expected_score);
+    CHECK(result.results[1].query_start == 30u);
+    CHECK(result.results[1].query_end == 34u);
+    CHECK(result.results[1].target_start == 40u);
+    CHECK(result.results[1].target_end == 45u);
+    CHECK(result.results[1].cigar_offset == 3u);
+    CHECK(result.results[1].cigar_length == 3u);
+    CHECK(result.packed_cigar[3] == ((2u << 4) | 0u));
+    CHECK(result.packed_cigar[4] == ((1u << 4) | 2u));
+    CHECK(result.packed_cigar[5] == ((2u << 4) | 0u));
+}
+
+TEST_CASE("DOC0354 Part 2 slice - Vulkan bounded DP CIGAR emits multiple gaps",
+          "[g3sa][vulkan][gpu][cigar]") {
+    auto& runtime = gv::Runtime::instance();
+    INFO("Vulkan runtime error: " << runtime.initialization_error());
+    REQUIRE(ch::vulkan_chaining_supported());
+
+    const std::vector<std::uint32_t> query_symbols{0, 1, 2, 3, 0, 1, 2};
+    const std::vector<std::uint32_t> target_symbols{0, 1, 3, 0, 2, 1, 2};
+
+    const std::vector<gv::GpuAlignmentCigarJobWire> jobs{
+        gv::GpuAlignmentCigarJobWire{
+            .query_symbol_offset = 0,
+            .target_symbol_offset = 0,
+            .query_len = 7,
+            .target_len = 7,
+            .query_global_start = 100,
+            .target_global_start = 200,
+            .band_width = 7,
+            .flags = 0,
+            .cigar_offset = 0,
+            .cigar_capacity = 5,
+            .traceback_tile_offset = 0,
+            .traceback_tile_count = 64,
+        },
+    };
+    const gv::GpuAlignmentCigarParams params{
+        .alphabet_size = 4,
+        .max_band_width = 7,
+        .tile_query = 128,
+        .tile_target = 128,
+        .match_score = 2,
+        .mismatch_penalty = 4,
+        .gap_open_short = 4,
+        .gap_extend_short = 2,
+        .gap_open_long = 24,
+        .gap_extend_long = 1,
+        .z_drop = 400,
+        .end_bonus = 0,
+        .flags = 0,
+        .reserved = 0,
+    };
+
+    const gv::AlignmentCigarBatchResult result =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            query_symbols, target_symbols, jobs, params,
+            /*packed_cigar_capacity=*/5u);
+
+    REQUIRE(result.results.size() == 1);
+    REQUIRE(result.packed_cigar.size() == 5);
+    const gv::GpuAlignmentCigarResultWire& r = result.results.front();
+    CHECK(r.status == gv::k_gpu_alignment_extension_status_ok);
+    CHECK(r.score == 0);
+    CHECK(r.max_score == r.score);
+    CHECK(r.query_start == 100u);
+    CHECK(r.query_end == 107u);
+    CHECK(r.target_start == 200u);
+    CHECK(r.target_end == 207u);
+    CHECK(r.cigar_offset == 0u);
+    CHECK(r.cigar_length == 5u);
+    CHECK(result.packed_cigar[0] == ((2u << 4) | 0u));
+    CHECK(result.packed_cigar[1] == ((1u << 4) | 1u));
+    CHECK(result.packed_cigar[2] == ((2u << 4) | 0u));
+    CHECK(result.packed_cigar[3] == ((1u << 4) | 2u));
+    CHECK(result.packed_cigar[4] == ((2u << 4) | 0u));
+}
+
 // ===========================================================================
 // §10.4 — Large coordinates (> 2^32) are not truncated
 // ===========================================================================

@@ -78,11 +78,14 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::phase_c_index_emit_slots):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_chain_range_build):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_coordinate_reduce):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_coordinate_vote_reduce):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_coordinate_vote_reduce_batch):
         case static_cast<std::uint32_t>(ShaderKind::generate_units):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_extract_key_dna4):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_extract_key_generic):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_tiebreak_dna4):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_tiebreak_generic):
+        case static_cast<std::uint32_t>(ShaderKind::align_extend_simple_cigar):
             return static_cast<ShaderKind>(raw);
         default:
             throw ShaderCompileError("unknown shader kind " + std::to_string(raw));
@@ -169,6 +172,8 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::phase_c_chain_range_build:
             return key.tile_size == 384u && key.local_size == 1u && key.max_span == 1u;
         case ShaderKind::phase_c_coordinate_reduce:
+        case ShaderKind::phase_c_coordinate_vote_reduce:
+        case ShaderKind::phase_c_coordinate_vote_reduce_batch:
             return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
         case ShaderKind::generate_units:
             return key.tile_size == 384u && key.local_size == 256u
@@ -179,6 +184,9 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::seq_sort_tiebreak_generic:
             return key.tile_size == 384u && key.local_size == 256u
                 && key.max_span == 0u;
+        case ShaderKind::align_extend_simple_cigar:
+            return key.tile_size == 384u && key.local_size == 1u
+                && key.max_span == 512u;
         default:
             return false;
     }
@@ -224,12 +232,15 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::phase_c_index_emit_buckets, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_chain_range_build, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_coordinate_reduce, 384u, 128u, 1u));
+    emit(make_shader_key(ShaderKind::phase_c_coordinate_vote_reduce, 384u, 128u, 1u));
+    emit(make_shader_key(ShaderKind::phase_c_coordinate_vote_reduce_batch, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::generate_units, 384u, 256u, 32u));
     emit(make_shader_key(ShaderKind::generate_units, 384u, 256u, 64u));
     emit(make_shader_key(ShaderKind::seq_sort_extract_key_dna4, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_extract_key_generic, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_tiebreak_dna4, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_tiebreak_generic, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u));
 }
 
 } // namespace bioseq::gpu::vulkan
