@@ -80,20 +80,26 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 24);
+    REQUIRE(keys.size() == 27);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         return gv::cache_file_stem(a) < gv::cache_file_stem(b);
     });
     CHECK(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
 
-    CHECK(gv::choose_chaining_variant(inputs) == gv::ChainingPipelineKey{512u, 128u});
+    CHECK(gv::choose_chaining_variant(inputs) == gv::ChainingPipelineKey{32u, 32u});
     CHECK(contains_key(keys, gv::make_shader_key(
-        gv::ShaderKind::chain_tiled_dp_u64, 1024u, 256u, 0u)));
+        gv::ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::seed_lookup_anchors, 384u, 128u, 256u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::phase_c_sketch_tile, 384u, 64u, 10u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::phase_c_coordinate_vote_reduce, 384u, 128u, 1u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::phase_c_coordinate_vote_reduce_batch, 384u, 128u, 1u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::generate_units, 384u, 256u, 64u)));
     CHECK(contains_key(keys, gv::make_shader_key(

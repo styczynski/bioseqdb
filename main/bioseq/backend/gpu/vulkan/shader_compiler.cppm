@@ -60,6 +60,8 @@ enum class ShaderKind : std::uint8_t {
     phase_c_index_emit_slots,
     phase_c_chain_range_build,
     phase_c_coordinate_reduce,
+    phase_c_coordinate_vote_reduce,
+    phase_c_coordinate_vote_reduce_batch,
     generate_units,
     // DOC0346 — GPU sequence sort. Two stages × two alphabets. The cache keys on
     // ShaderKind, so the dna4 and generic variants are distinct SPIR-V modules
@@ -69,6 +71,7 @@ enum class ShaderKind : std::uint8_t {
     seq_sort_tiebreak_dna4,
     seq_sort_tiebreak_generic,
     align_extend_banded_affine,
+    align_extend_simple_cigar,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -89,6 +92,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
     generate_units,
     seq_sort,   // DOC0346 — { SeqWords, Descs, KeysOrIndex, ValsOrRanges }
     align_extension,  // { QuerySymbols, TargetSymbols, Jobs, Results }
+    align_extension_cigar,  // { QuerySymbols, TargetSymbols, Jobs, Results, Cigar, Traceback }
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -110,6 +114,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::generate_units:         return 2;
         case DescriptorLayoutKind::seq_sort:               return 4;
         case DescriptorLayoutKind::align_extension:        return 4;
+        case DescriptorLayoutKind::align_extension_cigar:  return 6;
     }
     return 0;
 }
@@ -138,13 +143,17 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_index_claim_slots:
         case ShaderKind::phase_c_index_emit_slots:    return DescriptorLayoutKind::phase_c_index;
         case ShaderKind::phase_c_chain_range_build:   return DescriptorLayoutKind::phase_c_chain_range;
-        case ShaderKind::phase_c_coordinate_reduce:   return DescriptorLayoutKind::phase_c_coordinate_reduce;
+        case ShaderKind::phase_c_coordinate_reduce:
+        case ShaderKind::phase_c_coordinate_vote_reduce:
+        case ShaderKind::phase_c_coordinate_vote_reduce_batch:
+            return DescriptorLayoutKind::phase_c_coordinate_reduce;
         case ShaderKind::generate_units:              return DescriptorLayoutKind::generate_units;
         case ShaderKind::seq_sort_extract_key_dna4:
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
         case ShaderKind::seq_sort_tiebreak_generic:   return DescriptorLayoutKind::seq_sort;
         case ShaderKind::align_extend_banded_affine:  return DescriptorLayoutKind::align_extension;
+        case ShaderKind::align_extend_simple_cigar:   return DescriptorLayoutKind::align_extension_cigar;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -173,13 +182,17 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_index_claim_slots:
         case ShaderKind::phase_c_index_emit_slots:    return 24;  // IndexPushC (6 × u32)
         case ShaderKind::phase_c_chain_range_build:   return 8;   // ChainRangePushC (2 × u32)
-        case ShaderKind::phase_c_coordinate_reduce:   return 28;  // GpuCoordinateReducePush
+        case ShaderKind::phase_c_coordinate_reduce:
+        case ShaderKind::phase_c_coordinate_vote_reduce:
+        case ShaderKind::phase_c_coordinate_vote_reduce_batch:
+            return 28;  // GpuCoordinateReducePush
         case ShaderKind::generate_units:              return 48;  // GenerateUnitsPush (12 × u32)
         case ShaderKind::seq_sort_extract_key_dna4:
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
         case ShaderKind::seq_sort_tiebreak_generic:   return 32;  // SeqSortPush (8 × u32)
         case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
+        case ShaderKind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
     }
     return 0;
 }
@@ -1082,7 +1095,7 @@ constexpr std::string_view kPhaseCSeedBody = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
 struct GpuMinimizerSlot { uint64_t hash; uint pos_offset; uint pos_count; };
-struct QRec { uint min_offset; uint min_count; uint anchor_offset; uint query_len; };
+struct QRec { uint min_offset; uint min_count; uint query_len; uint flags; };
 struct AnchorWire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
 
 layout(std430, set = 0, binding = 0) readonly buffer MinWords { uint min_words[]; };
@@ -1186,9 +1199,9 @@ uint find_slot(uint64_t hash) {
 }
 
 void main() {
-    // Fast fused-MPF path: Runtime currently provides one QRec. Flatten the
-    // record so every global invocation owns minimizers by grid stride instead
-    // of making one workgroup loop over the entire query.
+    // Fast fused-MPF path: Runtime binds one QRec per problem. The QRec points
+    // into a concatenated minimizer-word buffer, while counts/prefix are local
+    // to the current problem.
     if (pc.record_count == 1u) {
         QRec q = qrecs[0];
         uint64_t reverse_base = uint64_t(q.query_len - 2u + pc.kmer_size);
@@ -1203,12 +1216,12 @@ void main() {
                 if (slot.pos_count <= pc.max_occ) cnt = slot.pos_count;
             }
             if (pc.emit_mode == 0u) {
-                counts[gi] = cnt;
+                counts[local] = cnt;
                 continue;
             }
             if (cnt == 0u) continue;
             GpuMinimizerSlot slot = slots[slot_idx];
-            uint dst = prefix[gi];
+            uint dst = prefix[local];
             uint64_t q_encoded = read_min_pos_strand(gi);
             uint64_t q_pos = q_encoded >> 1;
             uint q_strand = uint(q_encoded & uint64_t(1));
@@ -1859,6 +1872,311 @@ void main() {
 }
 )GLSL";
 
+constexpr std::string_view kPhaseCCoordinateVoteReduceBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct AnchorWire {
+    uint64_t ref_position;
+    uint64_t query_position;
+    uint is_reverse;
+    uint span_flags_segment;
+};
+
+struct CoordinateResult {
+    uint64_t query_start;
+    uint64_t query_end;
+    uint64_t target_start;
+    uint64_t target_end;
+    uint64_t match_length;
+    uint64_t block_length;
+    int chain_score;
+    int seed_count;
+    uint is_reverse;
+    uint valid;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Unused1 { int unused1[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Unused2 { int64_t unused2[]; };
+layout(std430, set = 0, binding = 3) buffer Unused3 { uint unused3[]; };
+layout(std430, set = 0, binding = 4) buffer Unused4 { uint unused4[]; };
+layout(std430, set = 0, binding = 5) buffer Result { CoordinateResult result; };
+
+layout(push_constant) uniform Params {
+    uint anchor_count;
+    uint query_len_lo;
+    uint query_len_hi;
+    int min_chain_score;
+    int min_seed_count;
+    uint probe_limit;
+    uint reserved;
+} pc;
+
+shared int sh_score[LOCAL_SIZE_X];
+shared uint sh_index[LOCAL_SIZE_X];
+shared int selected_score;
+shared uint selected_anchor;
+
+uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+
+uint64_t query_len() {
+    return uint64_t(pc.query_len_lo) | (uint64_t(pc.query_len_hi) << 32);
+}
+
+int64_t anchor_diag(AnchorWire a) {
+    return int64_t(a.ref_position) - int64_t(a.query_position);
+}
+
+bool better_candidate(int score, uint idx, int best_score, uint best_idx) {
+    return score > best_score || (score == best_score && idx < best_idx);
+}
+
+void write_vote_result(uint idx, int score) {
+    AnchorWire a = anchors[idx];
+    uint span = anchor_span(a);
+    int64_t diag = anchor_diag(a);
+    if (diag < int64_t(0)) {
+        diag = int64_t(0);
+    }
+    uint64_t qlen = query_len();
+    uint64_t target_start = uint64_t(diag);
+    result.query_start = uint64_t(0);
+    result.query_end = qlen;
+    result.target_start = target_start;
+    result.target_end = target_start + qlen;
+    result.match_length = qlen;
+    result.block_length = qlen;
+    result.chain_score = score * int(span == 0u ? 1u : span);
+    result.seed_count = score;
+    result.is_reverse = a.is_reverse != 0u ? 1u : 0u;
+    result.valid = 1u;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    if (lane == 0u) {
+        result.valid = 0u;
+        selected_score = 0;
+        selected_anchor = 0u;
+    }
+    barrier();
+
+    int local_score = 0;
+    uint local_idx = 0u;
+    for (uint i = lane; i < pc.anchor_count; i += LOCAL_SIZE_X) {
+        AnchorWire cand = anchors[i];
+        int64_t cand_diag = anchor_diag(cand);
+        int score = 0;
+        for (uint j = 0u; j < pc.anchor_count; ++j) {
+            AnchorWire other = anchors[j];
+            if (other.is_reverse != cand.is_reverse) {
+                continue;
+            }
+            int64_t d = anchor_diag(other) - cand_diag;
+            if (d < int64_t(0)) {
+                d = -d;
+            }
+            if (d <= int64_t(50)) {
+                ++score;
+            }
+        }
+        if (better_candidate(score, i, local_score, local_idx)) {
+            local_score = score;
+            local_idx = i;
+        }
+    }
+    sh_score[lane] = local_score;
+    sh_index[lane] = local_idx;
+    barrier();
+
+    if (lane == 0u) {
+        int best_score = 0;
+        uint best_idx = 0u;
+        for (uint i = 0u; i < LOCAL_SIZE_X; ++i) {
+            if (better_candidate(sh_score[i], sh_index[i], best_score, best_idx)) {
+                best_score = sh_score[i];
+                best_idx = sh_index[i];
+            }
+        }
+        selected_score = best_score;
+        selected_anchor = best_idx;
+    }
+    barrier();
+
+    if (lane == 0u) {
+        if (pc.anchor_count != 0u
+            && selected_score >= pc.min_seed_count
+            && selected_score * int(anchor_span(anchors[selected_anchor])) >= pc.min_chain_score) {
+            write_vote_result(selected_anchor, selected_score);
+        }
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCCoordinateVoteReduceBatchBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct AnchorWire {
+    uint64_t ref_position;
+    uint64_t query_position;
+    uint is_reverse;
+    uint span_flags_segment;
+};
+
+struct CoordinateResult {
+    uint64_t query_start;
+    uint64_t query_end;
+    uint64_t target_start;
+    uint64_t target_end;
+    uint64_t match_length;
+    uint64_t block_length;
+    int chain_score;
+    int seed_count;
+    uint is_reverse;
+    uint valid;
+};
+
+struct VoteJob {
+    uint anchor_offset;
+    uint anchor_count;
+    uint query_len_lo;
+    uint query_len_hi;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer VoteJobs { VoteJob jobs[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Unused2 { int unused2[]; };
+layout(std430, set = 0, binding = 3) buffer Unused3 { uint unused3[]; };
+layout(std430, set = 0, binding = 4) buffer Unused4 { uint unused4[]; };
+layout(std430, set = 0, binding = 5) buffer Results { CoordinateResult results[]; };
+
+layout(push_constant) uniform Params {
+    uint job_count;
+    uint unused_query_len_lo;
+    uint unused_query_len_hi;
+    int min_chain_score;
+    int min_seed_count;
+    uint probe_limit;
+    uint reserved;
+} pc;
+
+const uint VOTE_SAMPLE_LIMIT = 32u;
+
+shared int sh_score[LOCAL_SIZE_X];
+shared uint sh_index[LOCAL_SIZE_X];
+shared int selected_score;
+shared uint selected_anchor;
+
+uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+
+uint64_t query_len(VoteJob job) {
+    return uint64_t(job.query_len_lo) | (uint64_t(job.query_len_hi) << 32);
+}
+
+AnchorWire job_anchor(VoteJob job, uint idx) {
+    return anchors[job.anchor_offset + idx];
+}
+
+int64_t anchor_diag(AnchorWire a) {
+    return int64_t(a.ref_position) - int64_t(a.query_position);
+}
+
+bool better_candidate(int score, uint idx, int best_score, uint best_idx) {
+    return score > best_score || (score == best_score && idx < best_idx);
+}
+
+void write_vote_result(uint job_id, VoteJob job, uint idx, int score) {
+    AnchorWire a = job_anchor(job, idx);
+    uint span = anchor_span(a);
+    int64_t diag = anchor_diag(a);
+    if (diag < int64_t(0)) {
+        diag = int64_t(0);
+    }
+    uint64_t qlen = query_len(job);
+    uint64_t target_start = uint64_t(diag);
+    results[job_id].query_start = uint64_t(0);
+    results[job_id].query_end = qlen;
+    results[job_id].target_start = target_start;
+    results[job_id].target_end = target_start + qlen;
+    results[job_id].match_length = qlen;
+    results[job_id].block_length = qlen;
+    results[job_id].chain_score = score * int(span == 0u ? 1u : span);
+    results[job_id].seed_count = score;
+    results[job_id].is_reverse = a.is_reverse != 0u ? 1u : 0u;
+    results[job_id].valid = 1u;
+}
+
+void main() {
+    uint job_id = gl_WorkGroupID.x;
+    if (job_id >= pc.job_count) return;
+
+    VoteJob job = jobs[job_id];
+    uint lane = gl_LocalInvocationID.x;
+    if (lane == 0u) {
+        results[job_id].valid = 0u;
+        selected_score = 0;
+        selected_anchor = 0u;
+    }
+    barrier();
+
+    uint sample_count = min(job.anchor_count, VOTE_SAMPLE_LIMIT);
+    int local_score = 0;
+    uint local_idx = 0u;
+    for (uint i = lane; i < job.anchor_count; i += LOCAL_SIZE_X) {
+        AnchorWire cand = job_anchor(job, i);
+        int64_t cand_diag = anchor_diag(cand);
+        int score = 0;
+        for (uint s = 0u; s < sample_count; ++s) {
+            uint j = (s * job.anchor_count) / sample_count;
+            AnchorWire other = job_anchor(job, j);
+            if (other.is_reverse != cand.is_reverse) {
+                continue;
+            }
+            int64_t d = anchor_diag(other) - cand_diag;
+            if (d < int64_t(0)) {
+                d = -d;
+            }
+            if (d <= int64_t(50)) {
+                ++score;
+            }
+        }
+        if (better_candidate(score, i, local_score, local_idx)) {
+            local_score = score;
+            local_idx = i;
+        }
+    }
+    sh_score[lane] = local_score;
+    sh_index[lane] = local_idx;
+    barrier();
+
+    if (lane == 0u) {
+        int best_score = 0;
+        uint best_idx = 0u;
+        for (uint i = 0u; i < LOCAL_SIZE_X; ++i) {
+            if (better_candidate(sh_score[i], sh_index[i], best_score, best_idx)) {
+                best_score = sh_score[i];
+                best_idx = sh_index[i];
+            }
+        }
+        selected_score = best_score;
+        selected_anchor = best_idx;
+    }
+    barrier();
+
+    if (lane == 0u) {
+        uint estimated_score = sample_count == 0u
+            ? 0u
+            : (uint(selected_score) * job.anchor_count + sample_count - 1u) / sample_count;
+        if (job.anchor_count != 0u
+            && estimated_score >= uint(pc.min_seed_count)
+            && int(estimated_score) * int(anchor_span(job_anchor(job, selected_anchor)))
+                >= pc.min_chain_score) {
+            write_vote_result(job_id, job, selected_anchor, int(estimated_score));
+        }
+    }
+}
+)GLSL";
+
 /// Score/end-point-only banded affine extension. This prototype runs one
 /// scalar DP per job and dispatches the batch as grid-strided workgroups. The
 /// ABI is intentionally symbol-rank based (`uint` per symbol) so parent
@@ -2013,6 +2331,685 @@ void main() {
     if (stride == 0u) return;
     for (uint job_index = gl_WorkGroupID.x; job_index < pc.job_count; job_index += stride) {
         solve_job(job_index);
+    }
+}
+)GLSL";
+
+constexpr std::string_view kAlignmentExtensionSimpleCigarBody = R"GLSL(
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+const int NEG_INF = -1073741824;
+const uint STATUS_OK = 0u;
+const uint STATUS_UNSUPPORTED_GEOMETRY = 1u;
+const uint STATUS_CIGAR_OVERFLOW = 2u;
+const uint CIGAR_MATCH = 0u;
+const uint CIGAR_INS = 1u;
+const uint CIGAR_DEL = 2u;
+const uint SIMPLE_GAP_MAX = 256u;
+const uint SIMPLE_GAP_OP_MAX = 16u;
+const uint SIMPLE_GAP_ANCHOR_MIN = 8u;
+
+struct AlignmentCigarJob {
+    uint query_symbol_offset;
+    uint target_symbol_offset;
+    uint query_len;
+    uint target_len;
+    uint query_global_start;
+    uint target_global_start;
+    uint band_width;
+    uint flags;
+    uint cigar_offset;
+    uint cigar_capacity;
+    uint traceback_tile_offset;
+    uint traceback_tile_count;
+};
+
+struct AlignmentCigarResult {
+    int score;
+    int max_score;
+    uint query_start;
+    uint query_end;
+    uint target_start;
+    uint target_end;
+    uint cigar_offset;
+    uint cigar_length;
+    uint status;
+    uint reserved;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer QuerySymbols { uint query_symbols[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TargetSymbols { uint target_symbols[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Jobs { AlignmentCigarJob jobs[]; };
+layout(std430, set = 0, binding = 3) buffer Results { AlignmentCigarResult results[]; };
+layout(std430, set = 0, binding = 4) buffer PackedCigar { uint packed_cigar[]; };
+layout(std430, set = 0, binding = 5) buffer Traceback { uint traceback[]; };
+
+layout(push_constant) uniform Params {
+    uint job_count;
+    uint alphabet_size;
+    uint max_band_width;
+    uint tile_query;
+    uint tile_target;
+    int match_score;
+    int mismatch_penalty;
+    int gap_open_short;
+    int gap_extend_short;
+    int gap_open_long;
+    int gap_extend_long;
+    int z_drop;
+    int end_bonus;
+    uint flags;
+    uint reserved;
+} pc;
+
+void write_reject(uint job_index, uint status) {
+    results[job_index].score = 0;
+    results[job_index].max_score = 0;
+    results[job_index].query_start = 0u;
+    results[job_index].query_end = 0u;
+    results[job_index].target_start = 0u;
+    results[job_index].target_end = 0u;
+    results[job_index].cigar_offset = 0u;
+    results[job_index].cigar_length = 0u;
+    results[job_index].status = status;
+    results[job_index].reserved = 0u;
+}
+
+int substitution_score(uint query_symbol, uint target_symbol) {
+    return query_symbol == target_symbol ? pc.match_score : -pc.mismatch_penalty;
+}
+
+int gap_cost_short(uint len) {
+    return pc.gap_open_short + pc.gap_extend_short * int(len);
+}
+
+int gap_cost_long(uint len) {
+    return pc.gap_open_long + pc.gap_extend_long * int(len);
+}
+
+uint traceback_index(AlignmentCigarJob job, uint target_cols, uint query_i, uint target_j) {
+    return job.traceback_tile_offset + query_i * target_cols + target_j;
+}
+
+uint best_gap_state(uint len, bool insertion) {
+    int short_cost = gap_cost_short(len);
+    int long_cost = gap_cost_long(len);
+    if (long_cost < short_cost) {
+        return insertion ? 3u : 4u;
+    }
+    return insertion ? 1u : 2u;
+}
+
+void write_success(
+    uint job_index,
+    AlignmentCigarJob job,
+    int score,
+    uint cigar_length) {
+    results[job_index].score = score;
+    results[job_index].max_score = score;
+    results[job_index].query_start = job.query_global_start;
+    results[job_index].query_end = job.query_global_start + job.query_len;
+    results[job_index].target_start = job.target_global_start;
+    results[job_index].target_end = job.target_global_start + job.target_len;
+    results[job_index].cigar_offset = job.cigar_offset;
+    results[job_index].cigar_length = cigar_length;
+    results[job_index].status = STATUS_OK;
+    results[job_index].reserved = 0u;
+}
+
+bool append_reverse_cigar(AlignmentCigarJob job, inout uint cigar_length, uint op) {
+    if (cigar_length > 0u) {
+        uint last_index = job.cigar_offset + cigar_length - 1u;
+        if ((packed_cigar[last_index] & 15u) == op) {
+            packed_cigar[last_index] += 16u;
+            return true;
+        }
+    }
+    if (cigar_length >= job.cigar_capacity) {
+        return false;
+    }
+    packed_cigar[job.cigar_offset + cigar_length] = (1u << 4) | op;
+    ++cigar_length;
+    return true;
+}
+
+void reverse_cigar_slice(AlignmentCigarJob job, uint cigar_length) {
+    for (uint i = 0u; i < cigar_length / 2u; ++i) {
+        uint left_index = job.cigar_offset + i;
+        uint right_index = job.cigar_offset + cigar_length - 1u - i;
+        uint tmp = packed_cigar[left_index];
+        packed_cigar[left_index] = packed_cigar[right_index];
+        packed_cigar[right_index] = tmp;
+    }
+}
+
+int best_gap_cost_value(uint len) {
+    int short_cost = gap_cost_short(len);
+    int long_cost = gap_cost_long(len);
+    return long_cost < short_cost ? long_cost : short_cost;
+}
+
+bool append_forward_cigar(
+    AlignmentCigarJob job,
+    inout uint cigar_length,
+    uint len,
+    uint op) {
+    if (len == 0u) {
+        return true;
+    }
+    if (cigar_length > 0u) {
+        uint last_index = job.cigar_offset + cigar_length - 1u;
+        if ((packed_cigar[last_index] & 15u) == op) {
+            packed_cigar[last_index] += (len << 4u);
+            return true;
+        }
+    }
+    if (cigar_length >= job.cigar_capacity) {
+        return false;
+    }
+    packed_cigar[job.cigar_offset + cigar_length] = (len << 4u) | op;
+    ++cigar_length;
+    return true;
+}
+
+uint common_match_run(AlignmentCigarJob job, uint query_pos, uint target_pos) {
+    uint run = 0u;
+    while (query_pos + run < job.query_len
+           && target_pos + run < job.target_len
+           && query_symbols[job.query_symbol_offset + query_pos + run]
+              == target_symbols[job.target_symbol_offset + target_pos + run]) {
+        ++run;
+    }
+    return run;
+}
+
+bool try_one_gap_script(
+    AlignmentCigarJob job,
+    uint gap_op,
+    uint gap_len,
+    out uint prefix_len,
+    out uint suffix_len) {
+    prefix_len = common_match_run(job, 0u, 0u);
+    uint query_pos = prefix_len;
+    uint target_pos = prefix_len;
+    if (gap_op == CIGAR_INS) {
+        query_pos += gap_len;
+    } else {
+        target_pos += gap_len;
+    }
+    if (query_pos > job.query_len || target_pos > job.target_len) {
+        return false;
+    }
+    suffix_len = common_match_run(job, query_pos, target_pos);
+    return query_pos + suffix_len == job.query_len
+        && target_pos + suffix_len == job.target_len;
+}
+
+bool try_two_gap_script(
+    AlignmentCigarJob job,
+    uint first_op,
+    uint first_len,
+    uint second_op,
+    uint second_len,
+    out uint prefix_len,
+    out uint mid_len,
+    out uint suffix_len) {
+    prefix_len = common_match_run(job, 0u, 0u);
+    uint query_pos = prefix_len;
+    uint target_pos = prefix_len;
+    if (first_op == CIGAR_INS) {
+        query_pos += first_len;
+    } else {
+        target_pos += first_len;
+    }
+    if (query_pos > job.query_len || target_pos > job.target_len) {
+        return false;
+    }
+    mid_len = common_match_run(job, query_pos, target_pos);
+    query_pos += mid_len;
+    target_pos += mid_len;
+    if (second_op == CIGAR_INS) {
+        query_pos += second_len;
+    } else {
+        target_pos += second_len;
+    }
+    if (query_pos > job.query_len || target_pos > job.target_len) {
+        return false;
+    }
+    suffix_len = common_match_run(job, query_pos, target_pos);
+    return query_pos + suffix_len == job.query_len
+        && target_pos + suffix_len == job.target_len;
+}
+
+bool better_greedy_gap_candidate(
+    uint run_len,
+    uint gap_len,
+    uint op,
+    uint best_run,
+    uint best_len,
+    uint best_op) {
+    return run_len > best_run
+        || (run_len == best_run
+            && (best_len == 0u || gap_len < best_len
+                || (gap_len == best_len && op < best_op)));
+}
+
+bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
+    uint query_pos = 0u;
+    uint target_pos = 0u;
+    uint cigar_length = 0u;
+    uint match_count = 0u;
+    uint gap_cost = 0u;
+    uint gap_count = 0u;
+
+    while (query_pos < job.query_len || target_pos < job.target_len) {
+        uint run_len = 0u;
+        if (query_pos < job.query_len && target_pos < job.target_len) {
+            run_len = common_match_run(job, query_pos, target_pos);
+        }
+        if (run_len != 0u) {
+            if (!append_forward_cigar(job, cigar_length, run_len, CIGAR_MATCH)) {
+                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                return true;
+            }
+            query_pos += run_len;
+            target_pos += run_len;
+            match_count += run_len;
+            continue;
+        }
+
+        if (query_pos == job.query_len) {
+            uint gap_len = job.target_len - target_pos;
+            if (!append_forward_cigar(job, cigar_length, gap_len, CIGAR_DEL)) {
+                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                return true;
+            }
+            gap_cost += uint(best_gap_cost_value(gap_len));
+            target_pos = job.target_len;
+            ++gap_count;
+            continue;
+        }
+        if (target_pos == job.target_len) {
+            uint gap_len = job.query_len - query_pos;
+            if (!append_forward_cigar(job, cigar_length, gap_len, CIGAR_INS)) {
+                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                return true;
+            }
+            gap_cost += uint(best_gap_cost_value(gap_len));
+            query_pos = job.query_len;
+            ++gap_count;
+            continue;
+        }
+
+        uint best_op = 99u;
+        uint best_len = 0u;
+        uint best_run = 0u;
+        for (uint gap_len = 1u; gap_len <= SIMPLE_GAP_MAX; ++gap_len) {
+            if (target_pos + gap_len < job.target_len
+                && query_symbols[job.query_symbol_offset + query_pos]
+                    == target_symbols[job.target_symbol_offset + target_pos + gap_len]) {
+                uint candidate_run =
+                    common_match_run(job, query_pos, target_pos + gap_len);
+                if (better_greedy_gap_candidate(
+                        candidate_run, gap_len, CIGAR_DEL,
+                        best_run, best_len, best_op)) {
+                    best_run = candidate_run;
+                    best_len = gap_len;
+                    best_op = CIGAR_DEL;
+                }
+            }
+            if (query_pos + gap_len < job.query_len
+                && query_symbols[job.query_symbol_offset + query_pos + gap_len]
+                    == target_symbols[job.target_symbol_offset + target_pos]) {
+                uint candidate_run =
+                    common_match_run(job, query_pos + gap_len, target_pos);
+                if (better_greedy_gap_candidate(
+                        candidate_run, gap_len, CIGAR_INS,
+                        best_run, best_len, best_op)) {
+                    best_run = candidate_run;
+                    best_len = gap_len;
+                    best_op = CIGAR_INS;
+                }
+            }
+        }
+
+        if (best_len == 0u || best_run < SIMPLE_GAP_ANCHOR_MIN
+            || gap_count >= SIMPLE_GAP_OP_MAX) {
+            return false;
+        }
+        if (!append_forward_cigar(job, cigar_length, best_len, best_op)) {
+            write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            return true;
+        }
+        gap_cost += uint(best_gap_cost_value(best_len));
+        ++gap_count;
+        if (best_op == CIGAR_INS) {
+            query_pos += best_len;
+        } else {
+            target_pos += best_len;
+        }
+    }
+
+    int score = int(match_count) * pc.match_score - int(gap_cost);
+    write_success(job_index, job, score, cigar_length);
+    return true;
+}
+
+bool emit_simple_script_success(
+    uint job_index,
+    AlignmentCigarJob job,
+    uint prefix_len,
+    uint first_op,
+    uint first_len,
+    uint mid_len,
+    uint second_op,
+    uint second_len,
+    uint suffix_len,
+    uint gap_count) {
+    uint cigar_length = 0u;
+    if (!append_forward_cigar(job, cigar_length, prefix_len, CIGAR_MATCH)
+        || (gap_count >= 1u
+            && !append_forward_cigar(job, cigar_length, first_len, first_op))
+        || !append_forward_cigar(job, cigar_length, mid_len, CIGAR_MATCH)
+        || (gap_count >= 2u
+            && !append_forward_cigar(job, cigar_length, second_len, second_op))
+        || !append_forward_cigar(job, cigar_length, suffix_len, CIGAR_MATCH)) {
+        return false;
+    }
+
+    int score = int(prefix_len + mid_len + suffix_len) * pc.match_score;
+    if (gap_count >= 1u) {
+        score -= best_gap_cost_value(first_len);
+    }
+    if (gap_count >= 2u) {
+        score -= best_gap_cost_value(second_len);
+    }
+    write_success(job_index, job, score, cigar_length);
+    return true;
+}
+
+bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
+    if (job.cigar_capacity == 0u) {
+        write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+        return true;
+    }
+
+    uint exact_len = common_match_run(job, 0u, 0u);
+    if (exact_len == job.query_len && exact_len == job.target_len) {
+        return emit_simple_script_success(
+            job_index, job,
+            exact_len, CIGAR_MATCH, 0u,
+            0u, CIGAR_MATCH, 0u,
+            0u, 0u);
+    }
+
+    int net_query = int(job.query_len) - int(job.target_len);
+    int abs_net_query = net_query < 0 ? -net_query : net_query;
+    if (abs_net_query > int(SIMPLE_GAP_MAX)) {
+        return false;
+    }
+
+    if (net_query > 0) {
+        uint prefix_len = 0u;
+        uint suffix_len = 0u;
+        uint gap_len = uint(net_query);
+        if (try_one_gap_script(
+                job, CIGAR_INS, gap_len, prefix_len, suffix_len)) {
+            return emit_simple_script_success(
+                job_index, job,
+                prefix_len, CIGAR_INS, gap_len,
+                suffix_len, CIGAR_MATCH, 0u,
+                0u, 1u);
+        }
+    } else if (net_query < 0) {
+        uint prefix_len = 0u;
+        uint suffix_len = 0u;
+        uint gap_len = uint(-net_query);
+        if (try_one_gap_script(
+                job, CIGAR_DEL, gap_len, prefix_len, suffix_len)) {
+            return emit_simple_script_success(
+                job_index, job,
+                prefix_len, CIGAR_DEL, gap_len,
+                suffix_len, CIGAR_MATCH, 0u,
+                0u, 1u);
+        }
+    }
+
+    for (uint del_len = 1u; del_len <= SIMPLE_GAP_MAX; ++del_len) {
+        int ins_len_i = int(del_len) + net_query;
+        if (ins_len_i <= 0 || ins_len_i > int(SIMPLE_GAP_MAX)) {
+            continue;
+        }
+        uint ins_len = uint(ins_len_i);
+
+        uint prefix_len = 0u;
+        uint mid_len = 0u;
+        uint suffix_len = 0u;
+        if (try_two_gap_script(
+                job,
+                CIGAR_DEL, del_len,
+                CIGAR_INS, ins_len,
+                prefix_len, mid_len, suffix_len)) {
+            return emit_simple_script_success(
+                job_index, job,
+                prefix_len, CIGAR_DEL, del_len,
+                mid_len, CIGAR_INS, ins_len,
+                suffix_len, 2u);
+        }
+
+        prefix_len = 0u;
+        mid_len = 0u;
+        suffix_len = 0u;
+        if (try_two_gap_script(
+                job,
+                CIGAR_INS, ins_len,
+                CIGAR_DEL, del_len,
+                prefix_len, mid_len, suffix_len)) {
+            return emit_simple_script_success(
+                job_index, job,
+                prefix_len, CIGAR_INS, ins_len,
+                mid_len, CIGAR_DEL, del_len,
+                suffix_len, 2u);
+        }
+    }
+
+    if (try_emit_greedy_gap_cigar(job_index, job)) {
+        return true;
+    }
+
+    return false;
+}
+
+void solve_bounded_dp(uint job_index) {
+    AlignmentCigarJob job = jobs[job_index];
+    if (pc.alphabet_size == 0u || pc.flags != 0u || pc.reserved != 0u
+        || job.flags != 0u || job.query_len == 0u || job.target_len == 0u
+        || job.band_width > pc.max_band_width) {
+        write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+        return;
+    }
+    if (job.cigar_capacity == 0u) {
+        write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+        return;
+    }
+
+    for (uint i = 0u; i < job.query_len; ++i) {
+        if (query_symbols[job.query_symbol_offset + i] >= pc.alphabet_size) {
+            write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+            return;
+        }
+    }
+    for (uint i = 0u; i < job.target_len; ++i) {
+        if (target_symbols[job.target_symbol_offset + i] >= pc.alphabet_size) {
+            write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+            return;
+        }
+    }
+
+    if (try_emit_simple_cigar(job_index, job)) {
+        return;
+    }
+
+    uint target_cols = job.target_len + 1u;
+    uint traceback_cells = (job.query_len + 1u) * target_cols;
+    if (job.query_len > MAX_SPAN || job.target_len > MAX_SPAN
+        || job.traceback_tile_count < traceback_cells) {
+        write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+        return;
+    }
+
+    int h_prev[MAX_SPAN + 1];
+    int h_cur[MAX_SPAN + 1];
+    int i1_prev[MAX_SPAN + 1];
+    int i1_cur[MAX_SPAN + 1];
+    int i2_prev[MAX_SPAN + 1];
+    int i2_cur[MAX_SPAN + 1];
+    int d1_cur[MAX_SPAN + 1];
+    int d2_cur[MAX_SPAN + 1];
+
+    h_prev[0] = 0;
+    i1_prev[0] = NEG_INF;
+    i2_prev[0] = NEG_INF;
+    traceback[traceback_index(job, target_cols, 0u, 0u)] = 0u;
+    for (uint j = 1u; j <= job.target_len; ++j) {
+        int short_score = -gap_cost_short(j);
+        int long_score = -gap_cost_long(j);
+        bool use_long = long_score > short_score;
+        h_prev[j] = use_long ? long_score : short_score;
+        i1_prev[j] = NEG_INF;
+        i2_prev[j] = NEG_INF;
+        uint source = use_long ? 4u : 2u;
+        uint cont_bit = j > 1u ? (use_long ? (1u << 6u) : (1u << 4u)) : 0u;
+        traceback[traceback_index(job, target_cols, 0u, j)] = source | cont_bit;
+    }
+
+    for (uint i = 1u; i <= job.query_len; ++i) {
+        int short_score = -gap_cost_short(i);
+        int long_score = -gap_cost_long(i);
+        bool use_long = long_score > short_score;
+        h_cur[0] = use_long ? long_score : short_score;
+        i1_cur[0] = short_score;
+        i2_cur[0] = long_score;
+        d1_cur[0] = NEG_INF;
+        d2_cur[0] = NEG_INF;
+        uint source = use_long ? 3u : 1u;
+        uint cont_bit = i > 1u ? (use_long ? (1u << 5u) : (1u << 3u)) : 0u;
+        traceback[traceback_index(job, target_cols, i, 0u)] = source | cont_bit;
+
+        for (uint j = 1u; j <= job.target_len; ++j) {
+            int i1_open = h_prev[j] - pc.gap_open_short - pc.gap_extend_short;
+            int i1_extend = i1_prev[j] - pc.gap_extend_short;
+            bool i1_cont = i1_extend >= i1_open;
+            i1_cur[j] = i1_cont ? i1_extend : i1_open;
+
+            int i2_open = h_prev[j] - pc.gap_open_long - pc.gap_extend_long;
+            int i2_extend = i2_prev[j] - pc.gap_extend_long;
+            bool i2_cont = i2_extend >= i2_open;
+            i2_cur[j] = i2_cont ? i2_extend : i2_open;
+
+            int d1_open = h_cur[j - 1u] - pc.gap_open_short - pc.gap_extend_short;
+            int d1_extend = d1_cur[j - 1u] - pc.gap_extend_short;
+            bool d1_cont = d1_extend >= d1_open;
+            d1_cur[j] = d1_cont ? d1_extend : d1_open;
+
+            int d2_open = h_cur[j - 1u] - pc.gap_open_long - pc.gap_extend_long;
+            int d2_extend = d2_cur[j - 1u] - pc.gap_extend_long;
+            bool d2_cont = d2_extend >= d2_open;
+            d2_cur[j] = d2_cont ? d2_extend : d2_open;
+
+            uint q = query_symbols[job.query_symbol_offset + i - 1u];
+            uint t = target_symbols[job.target_symbol_offset + j - 1u];
+            int best_score = h_prev[j - 1u] + substitution_score(q, t);
+            uint best_source = 0u;
+            if (i1_cur[j] > best_score) {
+                best_score = i1_cur[j];
+                best_source = 1u;
+            }
+            if (d1_cur[j] > best_score) {
+                best_score = d1_cur[j];
+                best_source = 2u;
+            }
+            if (i2_cur[j] > best_score) {
+                best_score = i2_cur[j];
+                best_source = 3u;
+            }
+            if (d2_cur[j] > best_score) {
+                best_score = d2_cur[j];
+                best_source = 4u;
+            }
+            h_cur[j] = best_score;
+
+            uint trace = best_source;
+            if (i1_cont) trace |= 1u << 3u;
+            if (d1_cont) trace |= 1u << 4u;
+            if (i2_cont) trace |= 1u << 5u;
+            if (d2_cont) trace |= 1u << 6u;
+            traceback[traceback_index(job, target_cols, i, j)] = trace;
+        }
+
+        for (uint j = 0u; j <= job.target_len; ++j) {
+            h_prev[j] = h_cur[j];
+            i1_prev[j] = i1_cur[j];
+            i2_prev[j] = i2_cur[j];
+        }
+    }
+
+    uint i = job.query_len;
+    uint j = job.target_len;
+    uint state = 0u;
+    uint cigar_length = 0u;
+    while (i > 0u || j > 0u) {
+        uint trace = traceback[traceback_index(job, target_cols, i, j)];
+        if (state == 0u) {
+            uint source = trace & 7u;
+            if (source == 0u && i > 0u && j > 0u) {
+                if (!append_reverse_cigar(job, cigar_length, CIGAR_MATCH)) {
+                    write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                    return;
+                }
+                --i;
+                --j;
+            } else if ((source == 1u || source == 3u) && i > 0u) {
+                state = source;
+            } else if ((source == 2u || source == 4u) && j > 0u) {
+                state = source;
+            } else if (i > 0u) {
+                state = best_gap_state(i, true);
+            } else if (j > 0u) {
+                state = best_gap_state(j, false);
+            } else {
+                break;
+            }
+        } else if (state == 1u || state == 3u) {
+            if (!append_reverse_cigar(job, cigar_length, CIGAR_INS)) {
+                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                return;
+            }
+            bool cont = state == 1u ? ((trace & (1u << 3u)) != 0u)
+                                    : ((trace & (1u << 5u)) != 0u);
+            --i;
+            state = cont ? state : 0u;
+        } else {
+            if (!append_reverse_cigar(job, cigar_length, CIGAR_DEL)) {
+                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                return;
+            }
+            bool cont = state == 2u ? ((trace & (1u << 4u)) != 0u)
+                                    : ((trace & (1u << 6u)) != 0u);
+            --j;
+            state = cont ? state : 0u;
+        }
+    }
+
+    reverse_cigar_slice(job, cigar_length);
+    write_success(job_index, job, h_prev[job.target_len], cigar_length);
+}
+
+void main() {
+    uint stride = gl_NumWorkGroups.x;
+    if (stride == 0u) return;
+    for (uint job_index = gl_WorkGroupID.x; job_index < pc.job_count; job_index += stride) {
+        solve_bounded_dp(job_index);
     }
 }
 )GLSL";
@@ -2372,6 +3369,10 @@ void main() {
             return std::string{kPhaseCChainRangeBuildBody};
         case ShaderKind::phase_c_coordinate_reduce:
             return std::string{kPhaseCCoordinateReduceBody};
+        case ShaderKind::phase_c_coordinate_vote_reduce:
+            return std::string{kPhaseCCoordinateVoteReduceBody};
+        case ShaderKind::phase_c_coordinate_vote_reduce_batch:
+            return std::string{kPhaseCCoordinateVoteReduceBatchBody};
         case ShaderKind::generate_units:
             return std::string{kGenerateUnitsBody};
         case ShaderKind::seq_sort_extract_key_dna4:
@@ -2384,6 +3385,8 @@ void main() {
             return seq_sort_body(/*dna4=*/false, /*key_stage=*/false);
         case ShaderKind::align_extend_banded_affine:
             return std::string{kAlignmentExtensionBandedAffineBody};
+        case ShaderKind::align_extend_simple_cigar:
+            return std::string{kAlignmentExtensionSimpleCigarBody};
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }
@@ -2525,7 +3528,8 @@ std::vector<std::uint32_t> compile_shader_spirv(const ShaderCompileRequest& requ
     if (request.local_size == 0) {
         throw ShaderCompileError("compile_shader_spirv: local_size must be non-zero");
     }
-    if (request.kind == ShaderKind::align_extend_banded_affine
+    if ((request.kind == ShaderKind::align_extend_banded_affine
+         || request.kind == ShaderKind::align_extend_simple_cigar)
         && (request.max_span == 0 || request.max_span > 512)) {
         throw ShaderCompileError(fmt::format(
             "compile_shader_spirv: alignment max_span {} out of range (1..512)",

@@ -51,6 +51,7 @@ import bioseq.table.types;
 import bioseq.table.scan_state;
 import bioseq.pg_utils;
 import bioseq.scheduler.dispatch_buffer;
+import bioseq.scheduler.dispatch_processor;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.parallelism.mode;
 import bioseq.sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
@@ -97,7 +98,7 @@ using namespace bioseq::pg_utils;         // DOC0333 — node view/walker/mutato
  * scan; the buffer reallocates linearly past this if a query produces
  * more buffered tuples.
  */
-constexpr std::size_t kBioseqRuntimeBufferReserve = 1000;
+constexpr std::size_t kBioseqRuntimeBufferReserve = 8192;
 
 /*
  * Per-scan projection usage flags. Walked from the plan target list once
@@ -5308,6 +5309,58 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 
 
 static void
+ExplainGpuBatchStats(
+	const bioseq::simd::N_NEON::GpuBatchExecutionStats& gpu,
+	ExplainState* es)
+{
+	if (es->format == EXPLAIN_FORMAT_TEXT) {
+		appendStringInfoSpaces(es->str, es->indent * 2);
+		appendStringInfo(es->str,
+			"* GPU batch [taken=%s problems=%llu waves=%llu "
+			"idx_built=%llu idx_reused=%llu seed_dispatches=%llu "
+			"chain_dispatches=%llu extend_dispatches=%llu "
+			"cpu_fallback_rows=%llu simd_fallback_rows=%llu declines=%llu]\n",
+			gpu.gpu_batched_branch_taken ? "true" : "false",
+			static_cast<unsigned long long>(gpu.gpu_problem_count),
+			static_cast<unsigned long long>(gpu.gpu_wave_count),
+			static_cast<unsigned long long>(gpu.gpu_segment_indexes_built),
+			static_cast<unsigned long long>(gpu.gpu_segment_indexes_reused),
+			static_cast<unsigned long long>(gpu.gpu_seed_dispatches),
+			static_cast<unsigned long long>(gpu.gpu_chain_dispatches),
+			static_cast<unsigned long long>(gpu.gpu_extend_dispatches),
+			static_cast<unsigned long long>(gpu.cpu_fallback_rows),
+			static_cast<unsigned long long>(gpu.simd_fallback_rows),
+			static_cast<unsigned long long>(gpu.vulkan_declines));
+		return;
+	}
+
+	ExplainOpenGroup("Bioseq GPU Batch", "Bioseq GPU Batch", true, es);
+	ExplainPropertyBool("Batched Branch Taken",
+		gpu.gpu_batched_branch_taken, es);
+	ExplainPropertyUInteger("GPU Problem Count", nullptr,
+		gpu.gpu_problem_count, es);
+	ExplainPropertyUInteger("GPU Wave Count", nullptr,
+		gpu.gpu_wave_count, es);
+	ExplainPropertyUInteger("GPU Segment Indexes Built", nullptr,
+		gpu.gpu_segment_indexes_built, es);
+	ExplainPropertyUInteger("GPU Segment Indexes Reused", nullptr,
+		gpu.gpu_segment_indexes_reused, es);
+	ExplainPropertyUInteger("GPU Seed Dispatches", nullptr,
+		gpu.gpu_seed_dispatches, es);
+	ExplainPropertyUInteger("GPU Chain Dispatches", nullptr,
+		gpu.gpu_chain_dispatches, es);
+	ExplainPropertyUInteger("GPU Extend Dispatches", nullptr,
+		gpu.gpu_extend_dispatches, es);
+	ExplainPropertyUInteger("CPU Fallback Rows", nullptr,
+		gpu.cpu_fallback_rows, es);
+	ExplainPropertyUInteger("SIMD Fallback Rows", nullptr,
+		gpu.simd_fallback_rows, es);
+	ExplainPropertyUInteger("Vulkan Declines", nullptr,
+		gpu.vulkan_declines, es);
+	ExplainCloseGroup("Bioseq GPU Batch", "Bioseq GPU Batch", true, es);
+}
+
+static void
 BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							   ExplainState *es)
 {
@@ -5851,6 +5904,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				} else {
 					print_submit("Submit results");
 				}
+				ExplainGpuBatchStats(stats.gpu, es);
 			} else {
 				print_submit("Submit results");
 			}
@@ -5934,6 +5988,10 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				ExplainCloseGroup("Pipeline Stages", "Pipeline Stages", false, es);
 			}
 			ExplainCloseGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
+			if (explain_runtime != nullptr) {
+				const auto& stats = explain_runtime->buffer.execution_stats();
+				ExplainGpuBatchStats(stats.gpu, es);
+			}
 		}
 	}
 
