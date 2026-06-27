@@ -153,6 +153,33 @@ template <class MinimizerT>
     return total;
 }
 
+template <class MinimizerT>
+[[nodiscard]] std::uint64_t vulkan_phase_c_seed_count_reserved_bytes(
+    std::uint64_t minimizer_count,
+    bool has_device_minimizers) noexcept
+{
+    using bioseq::parallelism::saturating_mul;
+    const std::uint64_t min_bytes = has_device_minimizers
+        ? 0u
+        : minimizer_wire_traits<MinimizerT>::device_bytes_for_count(minimizer_count);
+    constexpr std::uint64_t scan_block = 256u;
+    constexpr std::uint64_t arena_alignment_slack = 6u * 256u;
+    const std::uint64_t num_blocks = minimizer_count == 0u
+        ? 1u
+        : (minimizer_count + scan_block - 1u) / scan_block;
+    std::uint64_t total = 0;
+    total = bioseq::gpu::vulkan::sat_add(
+        total, saturating_mul(minimizer_count, sizeof(std::uint32_t)));  // counts
+    total = bioseq::gpu::vulkan::sat_add(
+        total, saturating_mul(minimizer_count, sizeof(std::uint32_t)));  // prefix
+    total = bioseq::gpu::vulkan::sat_add(
+        total, saturating_mul(num_blocks, sizeof(std::uint32_t)));       // scan blocks
+    total = bioseq::gpu::vulkan::sat_add(total, 16u);                    // qrec
+    total = bioseq::gpu::vulkan::sat_add(total, min_bytes);              // optional min words
+    total = bioseq::gpu::vulkan::sat_add(total, arena_alignment_slack);
+    return total;
+}
+
 // ===========================================================================
 // Seed-hit lookup entry point (DOC0307 §8)
 // ===========================================================================
@@ -189,14 +216,18 @@ template <class MinimizerT>
     // (no CPU prefix prepass, no CPU anchor sort). If selected, failures are
     // hard errors; Phase B is used only when fused_frontend is false.
     if (fused_frontend && max_occ >= 0) {
-        const std::uint64_t reserve = vulkan_seed_reserved_bytes<MinimizerT>(
-            query_minimizers.size(), query_minimizers.size(), fused_device_words != nullptr);
-        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-            .try_reserve(reserve);
+        const std::uint64_t reserve =
+            vulkan_phase_c_seed_count_reserved_bytes<MinimizerT>(
+                query_minimizers.size(), fused_device_words != nullptr);
+        auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+        auto permit = admission.try_reserve(reserve);
         if (!permit) {
             throw VulkanRuntimeError(fmt::format(
-                "Vulkan fused seed lookup memory admission failed for {} bytes",
-                reserve));
+                "Vulkan fused seed lookup count memory admission failed for {} bytes "
+                "(reserved={} allocatable={})",
+                reserve,
+                admission.reserved_bytes(),
+                admission.allocatable_after_reservations()));
         }
         bioseq::gpu::vulkan::PhaseCSeedInputs inputs{
             .host_minimizer_bytes = fused_device_words != nullptr
