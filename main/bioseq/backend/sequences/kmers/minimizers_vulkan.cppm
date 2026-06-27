@@ -664,6 +664,18 @@ struct VulkanSketchResult {
 };
 
 template <class MinimizerT>
+struct VulkanBatchSketchResult {
+    std::vector<MinimizerT> host_minimizers;
+    std::vector<PhaseCSeedQueryRecordWire> query_records;
+    std::shared_ptr<VulkanDeviceMinimizerStorage<MinimizerT>> device;
+    bool overflow = false;
+
+    [[nodiscard]] VulkanDeviceMinimizerSpan<MinimizerT> device_span() const noexcept {
+        return VulkanDeviceMinimizerSpan<MinimizerT>{.owner = device};
+    }
+};
+
+template <class MinimizerT>
 [[nodiscard]] std::vector<MinimizerT> decode_host_minimizer_bytes(
     std::span<const std::byte> bytes, std::uint64_t count)
 {
@@ -1122,6 +1134,244 @@ collect_minimizers_vulkan_result(
     }
 }
 
+template <class MinimizerT, class Seq>
+[[nodiscard]] std::optional<VulkanBatchSketchResult<MinimizerT>>
+collect_minimizers_vulkan_batch_result(
+    std::span<const Seq> seqs,
+    std::size_t window_size,
+    std::size_t kmer_size) = delete;
+
+[[nodiscard]] std::optional<
+    VulkanBatchSketchResult<::bioseq::simd::HWY_NAMESPACE::MinimapSketchData>>
+collect_minimap_sketch_data_vulkan_upload_batch_result(
+    std::span<const SequenceUploadView> uploads,
+    const VulkanRankLut& rank_lut,
+    std::size_t window_size,
+    std::size_t kmer_size)
+{
+    using MinimizerT = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using bioseq::parallelism::MemoryAdmissionController;
+    using bioseq::parallelism::saturating_mul;
+
+    VulkanBatchSketchResult<MinimizerT> result{};
+    result.query_records.resize(uploads.size());
+    if (uploads.empty()) {
+        return result;
+    }
+    if (kmer_size == 0 || kmer_size > 32 || window_size == 0 || window_size > 256) {
+        return std::nullopt;
+    }
+
+    auto& runtime = Runtime::instance();
+    if (!runtime.usable() || runtime.features().max_workgroup_count_x == 0u) {
+        return std::nullopt;
+    }
+
+    struct QueryTileRange {
+        std::uint32_t begin = 0;
+        std::uint32_t count = 0;
+    };
+
+    std::vector<std::byte> packed_sequence;
+    std::vector<PhaseCSketchTileWire> tiles;
+    std::vector<QueryTileRange> tile_ranges(uploads.size());
+
+    std::uint64_t max_minimizers = 0u;
+    std::uint64_t max_bp = 0u;
+    const SequenceUploadView& first = uploads.front();
+    const std::uint32_t letters_per_unit = first.letters_per_unit;
+    const std::uint32_t unit_bits = first.unit_bits;
+    const std::uint32_t bits_per_char = first.bits_per_char;
+    const std::uint32_t char_mask = first.char_mask;
+    const std::uint32_t alphabet_size = first.alphabet_size;
+    const std::uint32_t padding_letters = first.padding_letters;
+    const std::uint32_t alphabet_kind = static_cast<std::uint32_t>(first.alphabet_kind);
+
+    for (std::size_t query_index = 0; query_index < uploads.size(); ++query_index) {
+        const SequenceUploadView& upload = uploads[query_index];
+        if (upload.bp_size > std::numeric_limits<std::uint32_t>::max()
+            || upload.padded_byte_size == std::numeric_limits<std::uint64_t>::max()
+            || upload.letters_per_unit != letters_per_unit
+            || upload.unit_bits != unit_bits
+            || upload.bits_per_char != bits_per_char
+            || upload.char_mask != char_mask
+            || upload.alphabet_size != alphabet_size
+            || static_cast<std::uint32_t>(upload.alphabet_kind) != alphabet_kind) {
+            return std::nullopt;
+        }
+        max_bp = std::max(max_bp, upload.bp_size);
+        max_minimizers = sat_add(
+            max_minimizers,
+            estimate_vulkan_minimizer_capacity(upload.bp_size, window_size));
+        if (max_minimizers
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::uint32_t>::max)())) {
+            return std::nullopt;
+        }
+
+        const std::size_t aligned_begin =
+            (packed_sequence.size() + sizeof(std::uint32_t) - 1u)
+            & ~(sizeof(std::uint32_t) - 1u);
+        packed_sequence.resize(aligned_begin);
+        const std::uint32_t seq_word_offset =
+            static_cast<std::uint32_t>(aligned_begin / sizeof(std::uint32_t));
+        const std::size_t append_begin = packed_sequence.size();
+        packed_sequence.resize(
+            append_begin + static_cast<std::size_t>(upload.padded_byte_size));
+        std::memset(
+            packed_sequence.data() + append_begin,
+            0,
+            static_cast<std::size_t>(upload.padded_byte_size));
+        if (upload.byte_size != 0u && upload.bytes != nullptr) {
+            std::memcpy(
+                packed_sequence.data() + append_begin,
+                upload.bytes,
+                static_cast<std::size_t>(upload.byte_size));
+        }
+
+        const std::uint32_t tile_begin = static_cast<std::uint32_t>(tiles.size());
+        if (upload.bp_size >= kmer_size) {
+            const PhaseCSketchTilePlan tile_plan = phase_c_tile_plan(
+                upload.bp_size,
+                static_cast<std::uint32_t>(kmer_size),
+                static_cast<std::uint32_t>(window_size),
+                upload.letters_per_unit,
+                runtime.features().max_workgroup_count_x);
+            if (!tile_plan.dispatchable || tile_plan.tile_count == 0u) {
+                return std::nullopt;
+            }
+            const std::uint32_t bp =
+                static_cast<std::uint32_t>(upload.bp_size);
+            const std::uint32_t overlap = phase_c_replay_overlap_bp(
+                static_cast<std::uint32_t>(kmer_size),
+                static_cast<std::uint32_t>(window_size));
+            for (std::uint32_t tile = 0u; tile < tile_plan.tile_count; ++tile) {
+                const std::uint32_t lo = tile * tile_plan.tile_bp;
+                const std::uint32_t hi =
+                    std::min(bp, (tile + 1u) * tile_plan.tile_bp);
+                tiles.push_back(PhaseCSketchTileWire{
+                    .seq_word_offset = seq_word_offset,
+                    .bp_count = bp,
+                    .replay_lo = lo > overlap ? lo - overlap : 0u,
+                    .tile_lo = lo,
+                    .tile_hi = hi,
+                    .out_base = 0u,
+                });
+            }
+        }
+        tile_ranges[query_index] = QueryTileRange{
+            .begin = tile_begin,
+            .count = static_cast<std::uint32_t>(tiles.size() - tile_begin),
+        };
+    }
+
+    if (tiles.empty() || max_minimizers == 0u) {
+        return result;
+    }
+
+    const std::uint64_t resident_bytes =
+        vulkan_sketch_resident_bytes<MinimizerT>(max_minimizers);
+    const std::uint64_t host_minimizer_bytes =
+        saturating_mul(max_minimizers, sizeof(MinimizerT));
+    const std::uint64_t scaffold_bytes = sat_add(
+        sat_add(
+            static_cast<std::uint64_t>(packed_sequence.size()),
+            static_cast<std::uint64_t>(tiles.size())
+                * sizeof(PhaseCSketchTileWire)),
+        sat_add(
+            static_cast<std::uint64_t>(tiles.size()) * 8u,
+            static_cast<std::uint64_t>(uploads.size())
+                * sizeof(PhaseCSeedQueryRecordWire)));
+    auto dispatch_permit = MemoryAdmissionController::instance().try_reserve(
+        sat_add(sat_add(resident_bytes, host_minimizer_bytes), scaffold_bytes));
+    if (!dispatch_permit) {
+        return std::nullopt;
+    }
+
+    const VulkanSketchParams sketch_params{
+        .bp_size = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(
+                max_bp,
+                static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::uint32_t>::max)()))),
+        .window_size = static_cast<std::uint32_t>(window_size),
+        .kmer_size = static_cast<std::uint32_t>(kmer_size),
+        .hash_bits = minimizer_wire_traits<MinimizerT>::hash_bits,
+        .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
+        .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
+        .minimizer_word_kind = static_cast<std::uint32_t>(
+            minimizer_wire_traits<MinimizerT>::word_kind),
+        .minimizer_words32 =
+            minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+        .alphabet_kind = alphabet_kind,
+        .unit_bits = unit_bits,
+        .bits_per_char = bits_per_char,
+        .letters_per_unit = letters_per_unit,
+        .alphabet_size = alphabet_size,
+        .seq_word_offset = 0u,
+        .char_mask = char_mask,
+        .padding_letters = padding_letters,
+    };
+
+    RuntimeSketchBatchResult raw =
+        runtime.run_phase_c_sketch_tile_batch_roundtrip(
+            std::span<const std::byte>{
+                packed_sequence.data(),
+                packed_sequence.size()},
+            rank_lut,
+            sketch_params,
+            std::span<const PhaseCSketchTileWire>{tiles.data(), tiles.size()},
+            max_minimizers);
+    if (raw.overflow) {
+        result.overflow = true;
+        return std::nullopt;
+    }
+
+    result.host_minimizers = decode_host_minimizer_bytes<MinimizerT>(
+        std::span<const std::byte>{
+            raw.host_minimizer_bytes.data(),
+            raw.host_minimizer_bytes.size()},
+        raw.count);
+    for (std::size_t query_index = 0; query_index < uploads.size(); ++query_index) {
+        const QueryTileRange range = tile_ranges[query_index];
+        std::uint64_t minimizer_count = 0u;
+        for (std::uint32_t tile = 0u; tile < range.count; ++tile) {
+            minimizer_count += raw.tile_counts[range.begin + tile];
+        }
+        const std::uint32_t minimizer_offset =
+            range.count == 0u ? 0u : raw.tile_offsets[range.begin];
+        if (minimizer_count
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::uint32_t>::max)())) {
+            throw VulkanRuntimeError{
+                "Vulkan batch query minimizer count exceeds ABI"};
+        }
+        if (uploads[query_index].bp_size
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::uint32_t>::max)())) {
+            throw VulkanRuntimeError{"Vulkan batch query length exceeds ABI"};
+        }
+        result.query_records[query_index] = PhaseCSeedQueryRecordWire{
+            .minimizer_offset = minimizer_offset,
+            .minimizer_count = static_cast<std::uint32_t>(minimizer_count),
+            .query_len = static_cast<std::uint32_t>(uploads[query_index].bp_size),
+            .flags = 0u,
+        };
+    }
+    dispatch_permit->shrink_to(
+        sat_add(resident_bytes, saturating_mul(raw.count, sizeof(MinimizerT))));
+    raw.host_minimizer_bytes.clear();
+    raw.host_minimizer_bytes.shrink_to_fit();
+
+    auto storage = std::make_shared<VulkanDeviceMinimizerStorage<MinimizerT>>();
+    storage->words = std::move(raw.minimizer_words);
+    storage->permit = std::move(*dispatch_permit);
+    storage->count = raw.count;
+    storage->capacity = max_minimizers;
+    result.device = std::move(storage);
+    return result;
+}
+
 /// DOC0310 §12 — build the target minimizer index entirely on the GPU from the
 /// target sequence (parallel sketch → device radix sort → race-free slot table).
 /// Returns `std::nullopt` for shapes the GPU cannot run before dispatch.
@@ -1220,7 +1470,8 @@ template <class MinimizerT, class Seq>
         bioseq::instr::register_region_static("phase_c_gpu_segment_index_build");
     auto _pc_idx_scope = bioseq::instr::region(_pc_idx_desc);
     using bare = std::remove_cvref_t<Seq>;
-    if constexpr (!vulkan_sketchable_segment_sequence<bare>) {
+    if constexpr (!vulkan_sketchable_segment_sequence<bare>
+                  && !vulkan_sketchable_sequence<bare>) {
         return std::nullopt;
     } else {
         using traits = typename bare::traits;
@@ -1246,16 +1497,22 @@ template <class MinimizerT, class Seq>
                 return std::nullopt;
             }
 
-            const std::size_t unit_count = descriptor.hi_unit - descriptor.lo_unit;
-            std::vector<storage_unit> scratch;
-            scratch.resize(unit_count);
             auto begin_iter = seq.cbegin();
             begin_iter += static_cast<bioseq::storage::sequence_size_t>(
                 descriptor.lo_unit);
-            const storage_unit* base = seq.read_cptr(
-                begin_iter,
-                std::span<storage_unit>{scratch.data(), scratch.size()},
-                unit_count);
+            const storage_unit* base = nullptr;
+            std::vector<storage_unit> scratch;
+            if constexpr (vulkan_sketchable_segment_sequence<bare>) {
+                const std::size_t unit_count =
+                    descriptor.hi_unit - descriptor.lo_unit;
+                scratch.resize(unit_count);
+                base = seq.read_cptr(
+                    begin_iter,
+                    std::span<storage_unit>{scratch.data(), scratch.size()},
+                    unit_count);
+            } else {
+                base = seq.read_cptr(begin_iter);
+            }
             const SequenceUploadView upload =
                 make_upload_view_from_window<bare>(seq, base, descriptor);
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
