@@ -1285,6 +1285,7 @@ public:
             last_stats.targets_with_prebuilt_index += wave_stats.targets_with_prebuilt_index;
             last_stats.targets_recomputed_minimizers += wave_stats.targets_recomputed_minimizers;
             last_stats.last_effective_params = wave_stats.last_effective_params;
+            last_stats.gpu.merge(wave_stats.gpu);
         };
 
         match_map.clear();

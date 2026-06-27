@@ -25,6 +25,7 @@ extern "C" {
 }
 
 #include <array>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +45,7 @@ import bioseq.indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_coun
 import bioseq.storage.indexing_pg.admin;    // DOC0279 §11.4/§12 — update_index_impl, list helpers, letter_to_rank
 import bioseq.storage.indexing_pg.chunked_storage;       // DOC0279 §8.8 — g_last_index_merge_run_count, format_seqidx helpers
 import bioseq.scheduler.supervisor_pg;
+import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.mode;
 import bioseq.common.sequan_compat;
 import bioseq.column.tam;   // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (the leaf replaces the former extern "C++" reaches)
@@ -323,6 +325,40 @@ Datum bioseq_gpu_warmup_shader_cache(PG_FUNCTION_ARGS) {
 	PG_RETURN_TEXT_P(cstring_to_text_with_len(
 		report.data(),
 		static_cast<int>(report.size())));
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_vulkan_runtime_status);
+Datum bioseq_vulkan_runtime_status(PG_FUNCTION_ARGS) {
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq.vulkan_runtime_status() must be called as a composite-returning function")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+	const auto& features = runtime.features();
+
+	Datum values[6]{};
+	bool nulls[6]{};
+	values[0] = BoolGetDatum(features.available);
+	values[1] = CStringGetTextDatum(features.device_name.data());
+	values[2] = Int32GetDatum(static_cast<std::int32_t>(
+		std::min<std::uint32_t>(
+			features.max_workgroup_count_x,
+			static_cast<std::uint32_t>(
+				std::numeric_limits<std::int32_t>::max()))));
+	values[3] = BoolGetDatum(features.scalar_block_layout);
+	values[4] = CStringGetTextDatum(runtime.initialization_error().c_str());
+	values[5] = Int64GetDatum(static_cast<std::int64_t>(
+		std::min<std::uint64_t>(
+			features.device_local_bytes,
+			static_cast<std::uint64_t>(
+				std::numeric_limits<std::int64_t>::max()))));
+
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 	/*
