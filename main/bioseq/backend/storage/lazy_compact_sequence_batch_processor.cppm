@@ -37,7 +37,7 @@
 module;
 
 // DOC0192 — anchor <hwy/highway.h> before importing the HWY-wrapped simd BMI
-// (cpu_sort_sequences calls bioseq::simd::N_NEON::compare_sequences_scalar).
+// (cpu_sort_sequences calls bioseq::simd::active_target::compare_sequences_scalar).
 #include "common_simd.h"
 #include "common.h"
 
@@ -60,7 +60,7 @@ export module bioseq.storage.batch_processor;
 import bioseq.storage.lazy;        // lazy_compact_sequence
 import bioseq.storage.scanner;     // is_valid_sequence_scanner, sequence_scanner_none
 import bioseq.sequences;           // supports_compact_sequence_range, compact_sequence_range
-import bioseq.sequences.simd;      // N_NEON::compare_sequences_scalar (CPU fallback)
+import bioseq.sequences.simd;      // active_target::compare_sequences_scalar (CPU fallback)
 import bioseq.parallelism.pool;    // GlobalPool::parallel_sort
 // DOC0346 — the GPU sort façade. NB: this is folded INTO this module (rather than
 // the spec's separate `bioseq.gpu.sort` module) because adding a brand-new module
@@ -306,7 +306,7 @@ struct lazy_compact_sequence_batch_processor {
         const bool desc = spec.descending;
         auto less = [&batch, desc](std::size_t i, std::size_t j) {
             const std::strong_ordering c =
-                bioseq::simd::N_NEON::compare_sequences_scalar(batch[i].underlying(),
+                bioseq::simd::active_target::compare_sequences_scalar(batch[i].underlying(),
                                                                batch[j].underlying());
             if (c != 0) return desc ? c > 0 : c < 0;
             return desc ? i > j : i < j;   // symmetric tiebreak (§7.4)

@@ -83,7 +83,7 @@ TEST_CASE("DOC0258: round-trip cstring -> compact_sequence_stdc -> ascii",
 
             std::string decoded;
             hdr->convert_to([&]<class S>(const compact_sequence_range<S>& seq) {
-                decoded = ::bioseq::simd::N_NEON::decode_sequence_simd<S>(seq);
+                decoded = ::bioseq::simd::active_target::decode_sequence_simd<S>(seq);
             });
             REQUIRE(decoded == input);
         }
@@ -102,7 +102,7 @@ TEST_CASE("DOC0258: round-trip cstring -> compact_sequence_stdc -> ascii",
             REQUIRE(hdr->alphabet_code == 1u);
             std::string decoded;
             hdr->convert_to([&]<class S>(const compact_sequence_range<S>& seq) {
-                decoded = ::bioseq::simd::N_NEON::decode_sequence_simd<S>(seq);
+                decoded = ::bioseq::simd::active_target::decode_sequence_simd<S>(seq);
             });
             REQUIRE(decoded == with_n);
         }

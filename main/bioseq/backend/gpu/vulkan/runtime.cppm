@@ -42,7 +42,9 @@ module;
 #include <vector>
 
 #include <dlfcn.h>
+#if defined(__APPLE__)
 #include <dispatch/dispatch.h>
+#endif
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 

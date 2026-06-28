@@ -53,7 +53,7 @@ import bioseq.storage.lazy;             // lazy_compact_sequence, make_lazy_in_m
 import bioseq.storage.scanner;          // sequence_scanner_none
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
-import bioseq.sequences.simd;           // N_NEON::stdc_compare
+import bioseq.sequences.simd;           // active_target::stdc_compare
 import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
 import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
@@ -211,7 +211,7 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	            const bool descending = rt->spec.descending;
 	            auto less = [&headers, descending](std::size_t i, std::size_t j) {
 	                const std::strong_ordering c =
-	                    bioseq::simd::N_NEON::stdc_compare(*headers[i], *headers[j]);
+	                    bioseq::simd::active_target::stdc_compare(*headers[i], *headers[j]);
 	                if (c != 0) return descending ? c > 0 : c < 0;
 	                return descending ? i > j : i < j;
 	            };

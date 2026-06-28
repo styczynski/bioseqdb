@@ -323,7 +323,7 @@ Datum pg_compact_sequence_in(PG_FUNCTION_ARGS)
 	pgseq_t* hdr = nullptr;
 	pgseq_supported_alphabets::dispatch_alphabet_by_code(tp.alphabet_code,
 		[&]<class A>() {
-			hdr = ::bioseq::simd::N_NEON::stdc_convert_from_cstr<pgseq_t, A>(
+			hdr = ::bioseq::simd::active_target::stdc_convert_from_cstr<pgseq_t, A>(
 				tp.storage_unit_byte_width,
 				static_cast<pgseq_t::bp_size_t>(length),
 				lit,
@@ -351,7 +351,7 @@ Datum pg_compact_sequence_out(PG_FUNCTION_ARGS)
 
 	std::string decoded;
 	hdr->convert_to([&]<class S>(const compact_sequence_range<S>& seq) {
-		decoded = ::bioseq::simd::N_NEON::decode_sequence_simd<S>(seq);
+		decoded = ::bioseq::simd::active_target::decode_sequence_simd<S>(seq);
 	});
 
 	char* out = static_cast<char*>(palloc(decoded.size() + 1));
@@ -384,7 +384,7 @@ Datum pg_compact_sequence_cast(PG_FUNCTION_ARGS)
 		PG_RETURN_POINTER(src);
 
 	pgseq_t* result =
-		::bioseq::simd::N_NEON::stdc_recode_to_type_params(*src, target, pg_alloc);
+		::bioseq::simd::active_target::stdc_recode_to_type_params(*src, target, pg_alloc);
 	if (result == nullptr)
 		ereport(ERROR,
 		        (errcode(ERRCODE_OUT_OF_MEMORY),
@@ -624,7 +624,7 @@ inline std::uint64_t pgseq_locator_total_bp_size(const pgseq_t* hdr) noexcept {
 		                static_cast<unsigned>(a->alphabet_code),
 		                static_cast<unsigned>(b->alphabet_code))));
 
-	const auto ord = ::bioseq::simd::N_NEON::stdc_compare(*a, *b);
+	const auto ord = ::bioseq::simd::active_target::stdc_compare(*a, *b);
 	if (ord == std::strong_ordering::less)    return -1;
 	if (ord == std::strong_ordering::greater) return  1;
 	return 0;

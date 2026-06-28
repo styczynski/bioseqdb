@@ -86,7 +86,7 @@ template <class Batch>
     std::vector<std::size_t> order(n);
     std::iota(order.begin(), order.end(), std::size_t{0});
     std::sort(order.begin(), order.end(), [&batch, descending](std::size_t i, std::size_t j) {
-        const std::strong_ordering c = bioseq::simd::N_NEON::compare_sequences_scalar(
+        const std::strong_ordering c = bioseq::simd::active_target::compare_sequences_scalar(
             batch[i].underlying(), batch[j].underlying());
         if (c != 0) return descending ? c > 0 : c < 0;
         return descending ? i > j : i < j;

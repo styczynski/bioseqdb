@@ -16,7 +16,7 @@
  * geometrically across thousands of records.
  *
  * Highway is included directly so the FSM can call
- * `bioseq::simd::N_NEON::encode_body_chunk*` without a
+ * `bioseq::simd::active_target::encode_body_chunk*` without a
  * translation layer. This mirrors the pattern in
  * `pg_compact_sequence.cppm` and `kmers/index.cppm` (both include
  * highway and import `bioseq_sequences.simd`).
@@ -86,7 +86,7 @@ struct alignas(64) fasta_parser_state {
     /// record's header bytes start. Captured at the AT_HEADER_SIGIL →
     /// IN_HEADER transition. Used by the emit_record callback.
     std::size_t header_start_offset = 0;
-    bioseq::simd::N_NEON::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
+    bioseq::simd::active_target::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
     /// Borrowed pointer to the batch's shared header buffer. The FSM
     /// pushes header bytes into this directly to avoid the v1
     /// per-record `std::string` allocation.
@@ -237,7 +237,7 @@ template <
             // the previous separate `simd::scan_first_byte('>', …)`
             // pass over the body, halving the memory traffic.
             const std::size_t consumed =
-                bioseq::simd::N_NEON::encode_body_chunk_dna4_simd_multiline_until_byte<
+                bioseq::simd::active_target::encode_body_chunk_dna4_simd_multiline_until_byte<
                     std::uint8_t{'>'}, std::uint64_t, 2, 32>(
                         state.body, slab_data + cursor, remaining,
                         /*newline_count_out=*/nullptr);
@@ -276,9 +276,9 @@ template <
                     if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
                         line_size -= 1;
                     }
-                    bioseq::simd::N_NEON::encode_body_chunk<
+                    bioseq::simd::active_target::encode_body_chunk<
                         alphabet_t,
-                        bioseq::simd::N_NEON::unknown_byte_policy::DROP,
+                        bioseq::simd::active_target::unknown_byte_policy::DROP,
                         storage_unit_t, bits_per_char, letters_per_unit>(
                             state.body, slab_data + cursor, line_size);
                     cursor += remaining;
@@ -291,9 +291,9 @@ template <
             if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
                 line_size -= 1;
             }
-            bioseq::simd::N_NEON::encode_body_chunk<
+            bioseq::simd::active_target::encode_body_chunk<
                 alphabet_t,
-                bioseq::simd::N_NEON::unknown_byte_policy::DROP,
+                bioseq::simd::active_target::unknown_byte_policy::DROP,
                 storage_unit_t, bits_per_char, letters_per_unit>(
                     state.body, slab_data + cursor, line_size);
             cursor += newline_offset + 1;  // consume '\n'
@@ -306,7 +306,7 @@ template <
             state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] =
-            bioseq::simd::N_NEON::finalize_encode_state<storage_unit_t,
+            bioseq::simd::active_target::finalize_encode_state<storage_unit_t,
                                                   bits_per_char,
                                                   letters_per_unit>(state.body);
         emit_record(state.header_start_offset,

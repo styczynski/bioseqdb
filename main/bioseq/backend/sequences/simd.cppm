@@ -2499,7 +2499,7 @@ struct hwy_vector_string_printer<T, InfoT, I> {
 // DOC0258: SIMD-using free functions over `compact_sequence_stdc<…>`.
 // These live in `bioseq_sequences.simd` (the module that owns the SIMD
 // encoder / decoder) so the templated bodies can call those primitives
-// directly. The functions are exposed via the `bioseq::simd::N_NEON`
+// directly. The functions are exposed via the `bioseq::simd::active_target`
 // namespace so the postgres binding (`pg_compact_sequence.cppm`) can
 // call them without naming a different namespace.
 //
@@ -2756,5 +2756,12 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
 
 }
 HWY_AFTER_NAMESPACE();
+
+namespace bioseq::simd {
+// Target-neutral import surface for code outside HWY_NAMESPACE. This aliases
+// the Highway namespace selected for this module build instead of hardcoding
+// a concrete architecture.
+namespace active_target = ::bioseq::simd::HWY_NAMESPACE;
+}
 
 }

@@ -19,9 +19,9 @@ module;
 // (bioseq_sequences, bioseq_sequences.simd, bioseq_sequences.minimap_port,
 // bioseq_sequences.pipe, bioseq_sidecar, bioseq_scheduler.dispatch_buffer,
 // bioseq_types.pg_compact_sequence), clang's loader has a TU-local "anchor"
-// copy of `hwy::N_NEON::*` to collapse the per-BMI copies against. Without
+// copy of the current `hwy::HWY_NAMESPACE::*` to collapse the per-BMI copies against. Without
 // this anchor the loader can't merge them and emits
-// `definition with same mangled name '_ZN3hwy6N_NEONL7BitCast...' as another
+// `definition with same mangled name '_ZN3hwy...BitCast...' as another
 // definition`. Mirrors the fix applied to bioseq_io_bench/bench_test.cpp
 // (DOC0192 §6). common_simd.h forwards #include <hwy/highway.h>.
 #include "common_simd.h"
@@ -129,22 +129,22 @@ struct BioseqScanFeatureFlags {
  * Stored here (rather than inside buffer) so BioseqColumnScan_ExplainCustomScan
  * can print the *exact* parameters that were fed to the batch processor —
  * including any aligner_options() overrides — without a second plan walk.
- * The Minimap2Params struct lives in bioseq::simd::N_NEON.
+ * The Minimap2Params struct lives in bioseq::simd::active_target.
  */
 struct PerScanAlignerState {
-	bioseq::simd::N_NEON::Minimap2Params params{};
+	bioseq::simd::active_target::Minimap2Params params{};
 	BioseqScanFeatureFlags              features{};
 	bool                                params_captured = false;
 
 	/*
 	 * Structured pipeline description captured at BeginCustomScan via
-	 * `bioseq::simd::N_NEON::pipe::describe_pipeline_for(...)`.  Populated
+	 * `bioseq::simd::active_target::pipe::describe_pipeline_for(...)`.  Populated
 	 * once per scan (cold path) and consumed by
 	 * `BioseqColumnScan_ExplainCustomScan` to render the per-stage breakdown
 	 * without hardcoded knowledge of which parameters belong to which
 	 * stage (DOC0249 §11, §12.2).
 	 */
-	std::optional<bioseq::simd::N_NEON::pipe::PipelineDescription> pipeline_desc{};
+	std::optional<bioseq::simd::active_target::pipe::PipelineDescription> pipeline_desc{};
 };
 
 /*
@@ -277,7 +277,7 @@ struct BioseqPlaceholderConsts {
  * alive) without racing the callback.
  */
 struct BioseqScanRuntime {
-	bioseq::simd::N_NEON::TupleDispatchBuffer buffer{kBioseqRuntimeBufferReserve};
+	bioseq::simd::active_target::TupleDispatchBuffer buffer{kBioseqRuntimeBufferReserve};
 	BioseqPlaceholderConsts                   placeholder_consts{};
 	List*                                     newtargetlist = nullptr;
 	PerScanAlignerState                       aligner_state{};
@@ -767,10 +767,10 @@ explain_detect_typmod_coalesce(List* qual, const BioseqStubOids& oids)
  * FuncExpr. Keeping the two passes separate makes the precedence order
  * obvious: GUC → aligner_options() override → size-heuristic → pipeline.
  */
-[[nodiscard]] static bioseq::simd::N_NEON::Minimap2Params
+[[nodiscard]] static bioseq::simd::active_target::Minimap2Params
 build_params_from_gucs()
 {
-	bioseq::simd::N_NEON::Minimap2Params params;
+	bioseq::simd::active_target::Minimap2Params params;
 	params.kmer_size        = bioseq_aligner_kmer_size;
 	params.window_size      = bioseq_aligner_window_size;
 	params.max_gap          = bioseq_aligner_max_gap;
@@ -801,13 +801,13 @@ build_params_from_gucs()
 	params.block_max_size   = static_cast<size_t>(bioseq_aligner_block_max_size);
 	params.bandwidth_long   = bioseq_aligner_bandwidth_long;
 	params.chaining_algorithm =
-		static_cast<bioseq::simd::N_NEON::ChainingAlgorithmType>(
+		static_cast<bioseq::simd::active_target::ChainingAlgorithmType>(
 			bioseq_aligner_chaining_algorithm);
 	params.base_alignment_algorithm =
-		static_cast<bioseq::simd::N_NEON::BaseAlignmentAlgorithmType>(
+		static_cast<bioseq::simd::active_target::BaseAlignmentAlgorithmType>(
 			bioseq_aligner_base_alignment_algorithm);
 	params.minimizer_algorithm =
-		static_cast<bioseq::simd::N_NEON::MinimizerAlgorithmType>(
+		static_cast<bioseq::simd::active_target::MinimizerAlgorithmType>(
 			bioseq_aligner_minimizer_algorithm);
 	params.enable_profiling = bioseq_aligner_enable_profiling;
 	params.vulkan_enabled = bioseq_aligner_vulkan_enabled;
@@ -836,7 +836,7 @@ build_params_from_gucs()
  */
 static void
 apply_aligner_options_override(FuncExpr* mmsearch_fe,
-							   bioseq::simd::N_NEON::Minimap2Params& params,
+							   bioseq::simd::active_target::Minimap2Params& params,
 							   const BioseqStubOids& oids)
 {
 	(void) oids; // composite decoding is self-contained
@@ -954,7 +954,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		const int32_t raw = DatumGetInt32(values[idx]);
 		if (raw >= 0 && raw <= 3) {
 			params.chaining_algorithm =
-				static_cast<bioseq::simd::N_NEON::ChainingAlgorithmType>(raw);
+				static_cast<bioseq::simd::active_target::ChainingAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -966,7 +966,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		const int32_t raw = DatumGetInt32(values[idx]);
 		if (raw >= 0 && raw <= 1) {
 			params.base_alignment_algorithm =
-				static_cast<bioseq::simd::N_NEON::BaseAlignmentAlgorithmType>(raw);
+				static_cast<bioseq::simd::active_target::BaseAlignmentAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -982,7 +982,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		const int32_t raw = DatumGetInt32(values[idx]);
 		if (raw >= 0 && raw <= 3) {
 			params.minimizer_algorithm =
-				static_cast<bioseq::simd::N_NEON::MinimizerAlgorithmType>(raw);
+				static_cast<bioseq::simd::active_target::MinimizerAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3852,7 +3852,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 				pgseq_t* recoded =
 					(src_hdr2->get_type_params() == unpacked_typmod)
 						? nullptr
-						: ::bioseq::simd::N_NEON::stdc_recode_to_type_params(
+						: ::bioseq::simd::active_target::stdc_recode_to_type_params(
 							*src_hdr2, unpacked_typmod, pg_alloc);
 				if (reinterpret_cast<void*>(src_hdr2)
 					!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
@@ -3955,7 +3955,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 */
 	const BioseqScanFeatureFlags features = detect_feature_flags(
 		cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
-	bioseq::simd::N_NEON::Minimap2Params aligner_params = build_params_from_gucs();
+	bioseq::simd::active_target::Minimap2Params aligner_params = build_params_from_gucs();
 	FuncExpr* mmsearch_fe = find_mmsearch_funcexpr(
 		cscan->scan.plan.qual, scan_stub_oids);
 	apply_aligner_options_override(mmsearch_fe, aligner_params, scan_stub_oids);
@@ -3968,9 +3968,9 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		|| aligner_params.vulkan_gpu_index_build_enabled
 		|| aligner_params.vulkan_extend_enabled
 		|| aligner_params.minimizer_algorithm
-			== bioseq::simd::N_NEON::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+			== bioseq::simd::active_target::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
 		|| aligner_params.chaining_algorithm
-			== bioseq::simd::N_NEON::ChainingAlgorithmType::VULKAN_TILED_DP;
+			== bioseq::simd::active_target::ChainingAlgorithmType::VULKAN_TILED_DP;
 	if (features.has_mmsearch && selected_vulkan && !aligner_params.vulkan_enabled) {
 		bioseq_report<ERR, PG>()
 			.code(ERRCODE_INTERNAL_ERROR)
@@ -4001,7 +4001,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		compact_sequence_range<QR_default> empty_query_proto{};
 		compact_sequence_range<TR_default> empty_target_proto{};
 		runtime.aligner_state.pipeline_desc =
-			bioseq::simd::N_NEON::pipe::describe_pipeline_for(
+			bioseq::simd::active_target::pipe::describe_pipeline_for(
 				aligner_params, empty_query_proto, empty_target_proto);
 	}
 
@@ -4352,14 +4352,14 @@ var_injector(Node *node, VarInjectorCtx *injector_context)
  * for the POC we accept the per-query leak (see SPEC_HOW_TO_CONNECT_ALIGNER_2.md §6.2).
  *
  * MatchResult and format_cigar live inside bioseq::simd::HWY_NAMESPACE
- * (expanded to N_NEON on this arm64 target); this file does not use
+ * (expanded to the current Highway target namespace); this file does not use
  * HWY_BEFORE_NAMESPACE() so we qualify with the full path.
  */
 static void
 populate_placeholder_consts(BioseqPlaceholderConsts& consts,
-							const bioseq::simd::N_NEON::MatchResult& match)
+							const bioseq::simd::active_target::MatchResult& match)
 {
-	using bioseq::simd::N_NEON::format_cigar;
+	using bioseq::simd::active_target::format_cigar;
 	// DOC0274 §1.8 — MatchResult absolute coordinates / lengths are
 	// `sequence_size_t` (uint64; minimap_port.cppm:334). They are projected
 	// through BIGINT (int8) placeholders so positions / lengths in sequences
@@ -5310,7 +5310,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 
 static void
 ExplainGpuBatchStats(
-	const bioseq::simd::N_NEON::GpuBatchExecutionStats& gpu,
+	const bioseq::simd::active_target::GpuBatchExecutionStats& gpu,
 	ExplainState* es)
 {
 	if (es->format == EXPLAIN_FORMAT_TEXT) {
@@ -5833,10 +5833,10 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		&& aligner_snapshot->params_captured
 		&& aligner_snapshot->features.has_mmsearch)
 	{
-		using bioseq::simd::N_NEON::ChainingAlgorithmType;
-		using bioseq::simd::N_NEON::BaseAlignmentAlgorithmType;
-		using bioseq::simd::N_NEON::chaining_algorithm_name;
-		using bioseq::simd::N_NEON::base_alignment_algorithm_name;
+		using bioseq::simd::active_target::ChainingAlgorithmType;
+		using bioseq::simd::active_target::BaseAlignmentAlgorithmType;
+		using bioseq::simd::active_target::chaining_algorithm_name;
+		using bioseq::simd::active_target::base_alignment_algorithm_name;
 		const auto& params = aligner_snapshot->params;
 		const auto& features = aligner_snapshot->features;
 

@@ -31,11 +31,8 @@ cmake_minimum_required(VERSION 3.20..3.24)
 if(DEFINED ENV{CMAKE_NAMED_ENV_TYPE})
   set(CMAKE_NAMED_ENV_TYPE "$ENV{CMAKE_NAMED_ENV_TYPE}")
 elseif(NOT DEFINED CMAKE_NAMED_ENV_TYPE)
-  set(CMAKE_NAMED_ENV_TYPE "W")
+  set(CMAKE_NAMED_ENV_TYPE "H")
 endif()
-
-# Override environment, don't change it
-set(CMAKE_NAMED_ENV_TYPE "H")
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@22/bin/clang)

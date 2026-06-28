@@ -208,16 +208,18 @@ target_sources(bioseq_modules_nopg
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_MODULES})
 
-add_executable(bioseq_gpu_archive_builder
-  ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
-  ${BIOSEQ_GPU_METAL_ARCHIVE_SRC})
-target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
-target_include_directories(bioseq_gpu_archive_builder PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/backend")
-if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
-  install(TARGETS bioseq_gpu_archive_builder
-    RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
-    COMPONENT ${PROJECT_NAME})
+if(APPLE)
+  add_executable(bioseq_gpu_archive_builder
+    ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
+    ${BIOSEQ_GPU_METAL_ARCHIVE_SRC})
+  target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
+  target_include_directories(bioseq_gpu_archive_builder PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/backend")
+  if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
+    install(TARGETS bioseq_gpu_archive_builder
+      RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
+      COMPONENT ${PROJECT_NAME})
+  endif()
 endif()
 
 # ============================================================================
@@ -398,7 +400,9 @@ AddCommonTargetX(
   HWY 1.3.0
 )
 
-add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
+if(TARGET bioseq_gpu_archive_builder)
+  add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
+endif()
 
 # DOC0270 — disable LTO on the Postgres extension. The default IPO=TRUE set
 # by AddPostgreSQLExtension.cmake doubles the per-build wall-clock for the

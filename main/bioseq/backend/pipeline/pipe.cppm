@@ -5,7 +5,7 @@
  * This module implements the constexpr-dispatched stage pipeline described in
  * `TEMPLATED_MINIMAP_PORT_PIPELINE_API_V2_CONSTEXPR_DISPATCHED_STAGES_AND_METADATA__DOC0249.md`.
  * It is a parallel API layer that sits above the existing kernel functions in
- * `bioseq::simd::N_NEON` and provides:
+ * `bioseq::simd::active_target` and provides:
  *
  *   - Compile-time parameter packs (`ConstexprAlignerParams<W,K,L>` /
  *     `ConstexprAlignerFallbackParams<L>`).
@@ -3782,8 +3782,8 @@ PipelineDescription describe_pipeline_for(
 // 9.7 Public entry points (DOC0249 §9.7) — relocated from minimap_port.cppm so
 // they can delegate to `pipe::dispatch_pipeline` without forming a circular
 // import.  Live in `bioseq::simd::HWY_NAMESPACE` so callers' fully-qualified
-// names (`bioseq::simd::N_NEON::minimap_port(...)`,
-// `bioseq::simd::N_NEON::minimap2_port_with_index(...)`) are unchanged.
+// names (`bioseq::simd::active_target::minimap_port(...)`,
+// `bioseq::simd::active_target::minimap2_port_with_index(...)`) are unchanged.
 // =============================================================================
 
 namespace bioseq::simd::HWY_NAMESPACE {
