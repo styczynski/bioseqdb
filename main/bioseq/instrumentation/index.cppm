@@ -40,7 +40,7 @@ import bioseq.instr.detail.siglock;
 import bioseq.instr.detail.spinlock;
 import bioseq.instr.detail.arch;
 import bioseq.instr.detail.do_not_optimize;
-import bioseq.instr.pmu.linux;
+import bioseq.instr.pmu.linux_backend_mod;
 import bioseq.instr.pmu.macos;
 import bioseq.instr.pmu.stub;
 import bioseq.instr.sampler.posix;
