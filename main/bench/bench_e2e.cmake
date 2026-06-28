@@ -60,9 +60,9 @@ AddCommonTargetX(
   HWY 1.3.0)
 
 target_compile_definitions(bioseq_bench_e2e PRIVATE
-  "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bioseq_bench_e2e_doc0301_async_mps_build\""
+  "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bioseq_bench_e2e_batch_gpu_proof\""
   "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
-  "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_doc0296_per_sequence_no_index_focus.json\""
+  "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_batch_gpu_proof.json\""
   "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")   # default: PATH 'minimap2'
 
 if(APPLE)

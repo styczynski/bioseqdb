@@ -41,9 +41,44 @@ inline constexpr std::uint32_t k_phase_c_sketch_tile_span_max = 384u;
 inline constexpr std::uint32_t k_phase_c_scan_block = 256u;
 inline constexpr std::uint32_t k_phase_c_slot_offset_align = 256u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_max_len = 512u;
+inline constexpr std::uint32_t k_gpu_alignment_cigar_traceback_tile_len = 128u;
+inline constexpr std::uint32_t k_gpu_alignment_simple_cigar_max_len = 16'384u;
+inline constexpr std::uint32_t k_gpu_alignment_simple_cigar_gap_max = 256u;
+inline constexpr std::uint32_t k_gpu_alignment_simple_cigar_gap_op_max = 64u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
+inline constexpr std::uint32_t k_gpu_alignment_extension_status_cigar_overflow = 2u;
+
+[[nodiscard]] inline constexpr std::uint64_t gpu_alignment_cigar_ceil_div_u64(
+    const std::uint64_t value,
+    const std::uint64_t divisor) noexcept
+{
+    return divisor == 0 ? 0 : (value + divisor - 1u) / divisor;
+}
+
+[[nodiscard]] inline constexpr std::uint64_t
+gpu_alignment_cigar_gridded_traceback_words(
+    const std::uint32_t query_len,
+    const std::uint32_t target_len,
+    const std::uint32_t tile_query,
+    const std::uint32_t tile_target) noexcept
+{
+    if (query_len == 0 || target_len == 0 || tile_query == 0 || tile_target == 0) {
+        return 0;
+    }
+    const std::uint64_t query_tiles =
+        gpu_alignment_cigar_ceil_div_u64(query_len, tile_query);
+    const std::uint64_t target_tiles =
+        gpu_alignment_cigar_ceil_div_u64(target_len, tile_target);
+    const std::uint64_t boundary_words_per_tile =
+        5u * (static_cast<std::uint64_t>(tile_query) + 1u
+              + static_cast<std::uint64_t>(tile_target) + 1u);
+    const std::uint64_t scratch_words =
+        (static_cast<std::uint64_t>(tile_query) + 1u)
+        * (static_cast<std::uint64_t>(tile_target) + 1u);
+    return query_tiles * target_tiles * boundary_words_per_tile + scratch_words;
+}
 
 enum class PhaseCSketchUse : std::uint8_t {
     minimizer_words,
@@ -538,6 +573,54 @@ struct GpuAlignmentExtensionParams {
     std::uint32_t reserved0 = 0;
 };
 
+/// CIGAR-capable extension job ABI (DOC0354 Part 2). This exact-match first
+/// implementation uses the same wire shape the future traceback kernel will
+/// consume, so host/result/cigar buffers do not need another ABI migration.
+struct GpuAlignmentCigarJobWire {
+    std::uint32_t query_symbol_offset = 0;
+    std::uint32_t target_symbol_offset = 0;
+    std::uint32_t query_len = 0;
+    std::uint32_t target_len = 0;
+    std::uint32_t query_global_start = 0;
+    std::uint32_t target_global_start = 0;
+    std::uint32_t band_width = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t cigar_offset = 0;
+    std::uint32_t cigar_capacity = 0;
+    std::uint32_t traceback_tile_offset = 0;
+    std::uint32_t traceback_tile_count = 0;
+};
+
+struct GpuAlignmentCigarResultWire {
+    std::int32_t score = 0;
+    std::int32_t max_score = 0;
+    std::uint32_t query_start = 0;
+    std::uint32_t query_end = 0;
+    std::uint32_t target_start = 0;
+    std::uint32_t target_end = 0;
+    std::uint32_t cigar_offset = 0;
+    std::uint32_t cigar_length = 0;
+    std::uint32_t status = 0;
+    std::uint32_t reserved = 0;
+};
+
+struct GpuAlignmentCigarParams {
+    std::uint32_t alphabet_size = 0;
+    std::uint32_t max_band_width = 0;
+    std::uint32_t tile_query = 0;
+    std::uint32_t tile_target = 0;
+    std::int32_t match_score = 0;
+    std::int32_t mismatch_penalty = 0;
+    std::int32_t gap_open_short = 0;
+    std::int32_t gap_extend_short = 0;
+    std::int32_t gap_open_long = 0;
+    std::int32_t gap_extend_long = 0;
+    std::int32_t z_drop = 0;
+    std::int32_t end_bonus = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t reserved = 0;
+};
+
 /// Aggregate counters downloaded after the count submit.
 struct GpuPhaseCCounters {
     std::uint64_t query_minimizers;
@@ -612,5 +695,33 @@ static_assert(offsetof(GpuAlignmentExtensionResultWire, target_end) == 8);
 static_assert(offsetof(GpuAlignmentExtensionResultWire, status) == 12);
 static_assert(std::is_standard_layout_v<GpuAlignmentExtensionParams>);
 static_assert(sizeof(GpuAlignmentExtensionParams) == 40);
+static_assert(std::is_standard_layout_v<GpuAlignmentCigarJobWire>);
+static_assert(sizeof(GpuAlignmentCigarJobWire) == 48);
+static_assert(offsetof(GpuAlignmentCigarJobWire, query_symbol_offset) == 0);
+static_assert(offsetof(GpuAlignmentCigarJobWire, target_symbol_offset) == 4);
+static_assert(offsetof(GpuAlignmentCigarJobWire, query_len) == 8);
+static_assert(offsetof(GpuAlignmentCigarJobWire, target_len) == 12);
+static_assert(offsetof(GpuAlignmentCigarJobWire, query_global_start) == 16);
+static_assert(offsetof(GpuAlignmentCigarJobWire, target_global_start) == 20);
+static_assert(offsetof(GpuAlignmentCigarJobWire, band_width) == 24);
+static_assert(offsetof(GpuAlignmentCigarJobWire, flags) == 28);
+static_assert(offsetof(GpuAlignmentCigarJobWire, cigar_offset) == 32);
+static_assert(offsetof(GpuAlignmentCigarJobWire, cigar_capacity) == 36);
+static_assert(offsetof(GpuAlignmentCigarJobWire, traceback_tile_offset) == 40);
+static_assert(offsetof(GpuAlignmentCigarJobWire, traceback_tile_count) == 44);
+static_assert(std::is_standard_layout_v<GpuAlignmentCigarResultWire>);
+static_assert(sizeof(GpuAlignmentCigarResultWire) == 40);
+static_assert(offsetof(GpuAlignmentCigarResultWire, score) == 0);
+static_assert(offsetof(GpuAlignmentCigarResultWire, max_score) == 4);
+static_assert(offsetof(GpuAlignmentCigarResultWire, query_start) == 8);
+static_assert(offsetof(GpuAlignmentCigarResultWire, query_end) == 12);
+static_assert(offsetof(GpuAlignmentCigarResultWire, target_start) == 16);
+static_assert(offsetof(GpuAlignmentCigarResultWire, target_end) == 20);
+static_assert(offsetof(GpuAlignmentCigarResultWire, cigar_offset) == 24);
+static_assert(offsetof(GpuAlignmentCigarResultWire, cigar_length) == 28);
+static_assert(offsetof(GpuAlignmentCigarResultWire, status) == 32);
+static_assert(offsetof(GpuAlignmentCigarResultWire, reserved) == 36);
+static_assert(std::is_standard_layout_v<GpuAlignmentCigarParams>);
+static_assert(sizeof(GpuAlignmentCigarParams) == 56);
 
 } // namespace bioseq::gpu::vulkan

@@ -1652,6 +1652,18 @@ CREATE OR REPLACE FUNCTION bioseq.gpu_warmup_shader_cache()
     AS 'MODULE_PATHNAME', 'bioseq_gpu_warmup_shader_cache'
     LANGUAGE C VOLATILE;
 
+CREATE OR REPLACE FUNCTION bioseq.vulkan_runtime_status(
+    OUT available boolean,
+    OUT device_name text,
+    OUT max_workgroup_count_x integer,
+    OUT scalar_block_layout boolean,
+    OUT initialization_error text,
+    OUT device_local_bytes bigint
+)
+    RETURNS record
+    AS 'MODULE_PATHNAME', 'bioseq_vulkan_runtime_status'
+    LANGUAGE C STABLE PARALLEL SAFE;
+
 -- DOC0279 §12.2 — admin/test SQL surface for the new chunked index storage.
 CREATE OR REPLACE FUNCTION bioseq.set_index_policy(rel regclass, name text, policy text) RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_set_index_policy' LANGUAGE C VOLATILE STRICT;
