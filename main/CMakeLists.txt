@@ -27,7 +27,8 @@ cmake_minimum_required(VERSION 3.20..3.24)
 # field or `export CMAKE_NAMED_ENV_TYPE=...`) wins; then any pre-set cache/normal
 # value; otherwise it defaults to "H" (the arm64 macOS "home" box). This keeps a
 # single checked-in default while letting the AWS x86_64 reference box select its
-# own toolchain via the `aws-x64-linux` preset. Supported: "W", "H", "AWS_MACHINE_X64".
+# own toolchain via the `aws-x64-linux` preset. Supported: "W", "H",
+# "AWS_MACHINE_X64", "AWS_MACHINE_X64_GCC16".
 if(DEFINED ENV{CMAKE_NAMED_ENV_TYPE})
   set(CMAKE_NAMED_ENV_TYPE "$ENV{CMAKE_NAMED_ENV_TYPE}")
 elseif(NOT DEFINED CMAKE_NAMED_ENV_TYPE)
@@ -80,6 +81,24 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
   # Build directly with the install rpath instead; the preset is disposable and
   # always runs from the vcpkg-installed tree paths.
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64_GCC16")
+  # Experimental GCC 16 build for the AWS x86_64 box. This keeps the production
+  # AWS Clang/libc++ preset intact while letting us test whether GCC's C++26
+  # module implementation compiles the template-heavy PostgreSQL target faster.
+  if(DEFINED ENV{BIOSEQ_GCC16_ROOT})
+    set(BIOSEQ_GCC16_ROOT "$ENV{BIOSEQ_GCC16_ROOT}")
+  else()
+    set(BIOSEQ_GCC16_ROOT /usr)
+  endif()
+  set(CMAKE_C_COMPILER ${BIOSEQ_GCC16_ROOT}/bin/gcc-16)
+  set(CMAKE_CXX_COMPILER ${BIOSEQ_GCC16_ROOT}/bin/g++-16)
+  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+  if(DEFINED ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON})
+    set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON}")
+  else()
+    set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
+  endif()
   set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
@@ -151,6 +170,12 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     "AWS_MACHINE_X64 requires clang++ >= 22.1.6; found "
     "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}. "
     "Re-run main/infra/testing_infra/scripts/bootstrap.sh.")
+endif()
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16"
+    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "16")
+  message(FATAL_ERROR
+    "AWS_MACHINE_X64_GCC16 requires g++ >= 16; found "
+    "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}.")
 endif()
 
 # --- Build-speed: Reduced BMI for C++ modules -------------------------------

@@ -111,6 +111,25 @@
         }
       },
       {
+        "name": "aws-x64-linux-gcc16",
+        "displayName": "AWS x86_64 Linux benchmark box (GCC 16 + libstdc++)",
+        "description": "Experimental GCC 16 build used to compare C++ module compile time against clang-22 on the AWS reference box. Uses the stock x64-linux vcpkg triplet and libstdc++ std-module metadata from the GCC 16 package. This is not the default production remote preset.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64_GCC16"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "VCPKG_TARGET_TRIPLET": "x64-linux",
+          "VCPKG_TARGET_ARCHITECTURE": "x64"
+        }
+      },
+      {
         "name": "prod",
         "displayName": "Default release config",
          "description": "Default build using Ninja generator",
