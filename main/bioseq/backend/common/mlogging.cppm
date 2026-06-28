@@ -124,6 +124,10 @@ module;
 #    include <io.h>
 #  endif
 #endif
+#if defined(__APPLE__)
+#  include <AvailabilityMacros.h>
+#  include <pthread.h>
+#endif
 #ifdef _WIN32
 #  if defined(__GLIBCXX__)
 #    include <ext/stdio_filebuf.h>
@@ -1162,7 +1166,7 @@ public:
     uint32_t tid = static_cast<uint32_t>(::GetCurrentThreadId());
 #else
     // XXX: Deprecated on new MACOSX
-    #if __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
+    #if defined(__APPLE__) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
     uint64_t tid64;
     pthread_threadid_np(NULL, &tid64);
     uint32_t tid = static_cast<uint32_t>(tid64);
