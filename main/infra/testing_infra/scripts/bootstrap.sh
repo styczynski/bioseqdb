@@ -27,6 +27,7 @@ LLVM_ROOT="${LLVM_ROOT:-/usr/lib/llvm-$LLVM_VERSION}"
 CMAKE_VERSION=4.2.1
 NINJA_VERSION=1.12.1
 PG_VERSION=17
+SWAP_SIZE_GB="${SWAP_SIZE_GB:-64}"
 export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /opt/bioseq
@@ -34,7 +35,51 @@ status() { echo "$1" > /opt/bioseq/PROVISION_STATUS; }
 fail()   { echo "[bootstrap] FATAL: $*" >&2; status "BOOTSTRAP_FAILED:$*"; exit 1; }
 status "BOOTSTRAP_RUNNING"
 
-# --- 1. System build dependencies (incl. vcpkg Vulkan WSI prerequisites) -----
+# --- 1. Host survivability: keep SSH responsive and add swap backstop --------
+echo "[bootstrap] SSH priority + ${SWAP_SIZE_GB}GiB swap backstop"
+mkdir -p /etc/systemd/system/ssh.service.d
+cat > /etc/systemd/system/ssh.service.d/10-bioseq-priority.conf <<'EOF'
+[Service]
+# Heavy clang++ module compiles can saturate CPU and memory. Keep sshd
+# responsive enough for diagnostics instead of letting build jobs starve it.
+Nice=-10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+OOMScoreAdjust=-900
+EOF
+systemctl daemon-reload || true
+
+# Apply priority to already-running sshd processes without restarting ssh.service
+# (restarting during an interactive bootstrap rerun could sever that session).
+if command -v pgrep >/dev/null 2>&1; then
+  for pid in $(pgrep -x sshd 2>/dev/null || true); do
+    renice -n -10 -p "$pid" >/dev/null 2>&1 || true
+    ionice -c 2 -n 0 -p "$pid" >/dev/null 2>&1 || true
+    echo "[bootstrap] prioritized sshd pid=$pid"
+  done
+fi
+
+if [ ! -f /swapfile ]; then
+  echo "[bootstrap] creating /swapfile (${SWAP_SIZE_GB}GiB)"
+  fallocate -l "${SWAP_SIZE_GB}G" /swapfile 2>/dev/null \
+    || dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_SIZE_GB * 1024)) status=progress \
+    || fail "create swapfile"
+  chmod 600 /swapfile
+  mkswap /swapfile || fail "mkswap /swapfile"
+fi
+chmod 600 /swapfile
+if ! grep -q '^/swapfile ' /proc/swaps 2>/dev/null; then
+  swapon /swapfile || { mkswap /swapfile && swapon /swapfile; } || fail "enable /swapfile"
+fi
+grep -qE '^/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]' /etc/fstab \
+  || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+cat > /etc/sysctl.d/90-bioseq-swap.conf <<'EOF'
+vm.swappiness=10
+EOF
+sysctl --system >/dev/null 2>&1 || true
+swapon --show || true
+
+# --- 2. System build dependencies (incl. vcpkg Vulkan WSI prerequisites) -----
 echo "[bootstrap] apt: base + build + graphics deps"
 for i in 1 2 3 4 5; do apt-get update -y && break || sleep 15; done
 apt-get install -y --no-install-recommends \
@@ -52,7 +97,7 @@ apt-get install -y --no-install-recommends \
   libwayland-dev wayland-protocols libxkbcommon-dev \
   || fail "apt base deps"
 
-# --- 2. clang / libc++ 22 (apt.llvm.org, with prebuilt-tarball fallback) -----
+# --- 3. clang / libc++ 22 (apt.llvm.org, with prebuilt-tarball fallback) -----
 echo "[bootstrap] LLVM/clang $LLVM_VERSION (min $LLVM_MIN_VERSION)"
 clang_version() {
   "$1" --version 2>/dev/null \
@@ -114,7 +159,7 @@ dpkg --compare-versions "$CLANG_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
   || fail "clang $CLANG_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
 "$LLVM_ROOT/bin/clang" --version | head -1 || fail "clang not runnable"
 
-# --- 3. CMake (pinned: its import-std UUID is hardcoded in CMakeLists.txt) ----
+# --- 4. CMake (pinned: its import-std UUID is hardcoded in CMakeLists.txt) ----
 echo "[bootstrap] CMake $CMAKE_VERSION"
 if ! /opt/cmake/bin/cmake --version 2>/dev/null | grep -q "$CMAKE_VERSION"; then
   url="https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-x86_64.tar.gz"
@@ -125,7 +170,7 @@ fi
 for t in cmake ctest cpack; do ln -sf "/opt/cmake/bin/$t" "/usr/local/bin/$t"; done
 /opt/cmake/bin/cmake --version | head -1
 
-# --- 4. Ninja (recent build for robust C++ module dyndep) --------------------
+# --- 5. Ninja (recent build for robust C++ module dyndep) --------------------
 echo "[bootstrap] Ninja $NINJA_VERSION"
 if ! /usr/local/bin/ninja --version 2>/dev/null | grep -q "$NINJA_VERSION"; then
   curl -fL "https://github.com/ninja-build/ninja/releases/download/v$NINJA_VERSION/ninja-linux.zip" -o /tmp/ninja.zip || fail "download ninja"
@@ -134,7 +179,7 @@ if ! /usr/local/bin/ninja --version 2>/dev/null | grep -q "$NINJA_VERSION"; then
 fi
 /usr/local/bin/ninja --version
 
-# --- 5. PostgreSQL 17 (pg_config + server headers + libpq) -------------------
+# --- 6. PostgreSQL 17 (pg_config + server headers + libpq) -------------------
 echo "[bootstrap] PostgreSQL $PG_VERSION (PGDG)"
 if [ ! -x "/usr/lib/postgresql/$PG_VERSION/bin/pg_config" ]; then
   install -d /usr/share/postgresql-common/pgdg
@@ -147,7 +192,7 @@ if [ ! -x "/usr/lib/postgresql/$PG_VERSION/bin/pg_config" ]; then
 fi
 "/usr/lib/postgresql/$PG_VERSION/bin/pg_config" --version
 
-# --- 6. vcpkg ----------------------------------------------------------------
+# --- 7. vcpkg ----------------------------------------------------------------
 echo "[bootstrap] vcpkg"
 VCPKG_ROOT=/opt/vcpkg
 if [ ! -x "$VCPKG_ROOT/vcpkg" ]; then
@@ -159,12 +204,12 @@ chown -R "$TARGET_USER:$TARGET_USER" "$VCPKG_ROOT" 2>/dev/null || true
 # Shared binary cache so reconfigures (and a clean re-provision sharing a snapshot) stay fast.
 mkdir -p /opt/vcpkg-cache && chmod 0777 /opt/vcpkg-cache
 
-# --- 7. Discover the libc++ modules.json (multiarch sub-path varies) ---------
+# --- 8. Discover the libc++ modules.json (multiarch sub-path varies) ---------
 MODULES_JSON="$(find "$LLVM_ROOT/" -name 'libc++.modules.json' 2>/dev/null | head -1)"
 echo "[bootstrap] libc++ modules.json = ${MODULES_JSON:-<NOT FOUND>}"
 [ -n "$MODULES_JSON" ] || echo "[bootstrap] WARNING: libc++.modules.json not found; import std may fail to configure"
 
-# --- 8. Persist environment for SSH sessions + verify.sh --------------------
+# --- 9. Persist environment for SSH sessions + verify.sh --------------------
 cat > /etc/profile.d/bioseq.sh <<EOF
 export VCPKG_ROOT=$VCPKG_ROOT
 export VCPKG_DEFAULT_BINARY_CACHE=/opt/vcpkg-cache
@@ -183,7 +228,7 @@ chmod -R a+rwX /opt/bioseq 2>/dev/null || true
 echo "[bootstrap] toolchain installed"
 status "TOOLCHAIN_READY"
 
-# --- 9. Optional verification ------------------------------------------------
+# --- 10. Optional verification -----------------------------------------------
 if [ "$RUN_VERIFY" = "1" ]; then
   VERIFY="$REPO_DEST/main/infra/testing_infra/scripts/verify.sh"
   if [ -f "$VERIFY" ]; then

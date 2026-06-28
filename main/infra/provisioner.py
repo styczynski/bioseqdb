@@ -147,9 +147,56 @@ def tofu_outputs() -> dict:
         return {}
     try:
         raw = json.loads(res.stdout)
-        return {k: v.get("value") for k, v in raw.items()}
+        outs = {k: v.get("value") for k, v in raw.items()}
+        return refresh_live_network_outputs(outs)
     except json.JSONDecodeError:
         return {}
+
+
+def refresh_live_network_outputs(outs: dict) -> dict:
+    """Refresh network fields that change after EC2 stop/start.
+
+    Terraform outputs keep the public IP/DNS captured at apply time. A stopped
+    and started instance keeps its instance id and volume but gets a new public
+    IP, so SSH helpers must prefer the live EC2 value.
+    """
+    instance_id = outs.get("instance_id")
+    region = (outs.get("region")
+              or os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION")
+              or "us-east-1")
+    if not instance_id or not shutil.which("aws"):
+        return outs
+
+    res = run(
+        ["aws", "ec2", "describe-instances", "--region", region,
+         "--instance-ids", str(instance_id),
+         "--query", "Reservations[0].Instances[0].{state:State.Name,ip:PublicIpAddress,dns:PublicDnsName}",
+         "--output", "json"],
+        capture=True, check=False,
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        return outs
+    try:
+        live = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return outs
+    if not isinstance(live, dict) or live.get("state") != "running":
+        return outs
+
+    ip = live.get("ip")
+    dns = live.get("dns")
+    if ip:
+        outs["public_ip"] = ip
+        key = outs.get("ssh_key_path")
+        if key:
+            outs["ssh_command"] = (
+                f"ssh -i {key} -o StrictHostKeyChecking=accept-new ubuntu@{ip}")
+            outs["provision_log_hint"] = (
+                f"ssh -i {key} ubuntu@{ip} 'tail -f /var/log/bioseq-provision.log'")
+    if dns:
+        outs["public_dns"] = dns
+    return outs
 
 
 def ensure_init():
