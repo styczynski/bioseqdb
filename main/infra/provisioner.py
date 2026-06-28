@@ -168,12 +168,12 @@ def refresh_live_network_outputs(outs: dict) -> dict:
     if not instance_id or not shutil.which("aws"):
         return outs
 
-    res = run(
+    res = subprocess.run(
         ["aws", "ec2", "describe-instances", "--region", region,
          "--instance-ids", str(instance_id),
          "--query", "Reservations[0].Instances[0].{state:State.Name,ip:PublicIpAddress,dns:PublicDnsName}",
          "--output", "json"],
-        capture=True, check=False,
+        text=True, capture_output=True, check=False,
     )
     if res.returncode != 0 or not res.stdout.strip():
         return outs
