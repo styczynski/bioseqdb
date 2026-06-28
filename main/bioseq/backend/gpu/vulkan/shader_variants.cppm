@@ -85,6 +85,12 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_extract_key_generic):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_tiebreak_dna4):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_tiebreak_generic):
+        case static_cast<std::uint32_t>(ShaderKind::seq_sort_global_compare_dna4):
+        case static_cast<std::uint32_t>(ShaderKind::seq_sort_global_compare_generic):
+        case static_cast<std::uint32_t>(ShaderKind::seq_sort_dense_scatter_dna4):
+        case static_cast<std::uint32_t>(ShaderKind::seq_sort_dense_scatter_generic):
+        case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_dna4):
+        case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_generic):
         case static_cast<std::uint32_t>(ShaderKind::align_extend_simple_cigar):
             return static_cast<ShaderKind>(raw);
         default:
@@ -182,6 +188,12 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
         case ShaderKind::seq_sort_tiebreak_generic:
+        case ShaderKind::seq_sort_global_compare_dna4:
+        case ShaderKind::seq_sort_global_compare_generic:
+        case ShaderKind::seq_sort_dense_scatter_dna4:
+        case ShaderKind::seq_sort_dense_scatter_generic:
+        case ShaderKind::seq_sort_prefix_check_dna4:
+        case ShaderKind::seq_sort_prefix_check_generic:
             return key.tile_size == 384u && key.local_size == 256u
                 && key.max_span == 0u;
         case ShaderKind::align_extend_simple_cigar:
@@ -241,6 +253,12 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::seq_sort_extract_key_generic, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_tiebreak_dna4, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_tiebreak_generic, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::seq_sort_global_compare_dna4, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::seq_sort_global_compare_generic, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::seq_sort_dense_scatter_dna4, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::seq_sort_dense_scatter_generic, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::seq_sort_prefix_check_dna4, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::seq_sort_prefix_check_generic, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 64u, 512u));
 }

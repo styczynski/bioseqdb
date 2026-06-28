@@ -2564,6 +2564,235 @@ void verify_e2e_batch_pair_table(
     };
 }
 
+struct SortScanInput {
+    std::shared_ptr<it::connection_test_context> conn;
+    std::string table;
+    std::string seq_type = "bioseq.seq('dna4', 64)";
+    std::vector<long long> expected_pks;
+    std::size_t row_count = 0;
+    std::size_t sequence_length = 0;
+};
+
+struct SortScanOutput {
+    std::int64_t row_count = 0;
+    std::int64_t sorted_correct = 0;
+    std::int64_t custom_scan_taken = 0;
+    std::int64_t accelerator_gpu = 0;
+    std::int64_t accelerator_stdc_compare = 0;
+    std::int64_t gpu_sort_dispatches = 0;
+    std::int64_t gpu_global_compare_dispatches = 0;
+    std::int64_t gpu_dense_scatter_dispatches = 0;
+    std::int64_t gpu_sort_uploaded_bytes = 0;
+    std::int64_t cpu_refine_rows = 0;
+    std::int64_t sort_runtime_ns = 0;
+    std::uint64_t measured_region_ns = 0;
+};
+
+[[nodiscard]] std::string sort_scan_identifier(std::string_view raw) {
+    std::string out;
+    out.reserve(raw.size() + 16u);
+    for (char ch : raw) {
+        if (ch >= 'A' && ch <= 'Z') {
+            out.push_back(static_cast<char>(ch - 'A' + 'a'));
+        } else if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+            out.push_back(ch);
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty() || (out.front() >= '0' && out.front() <= '9')) {
+        out.insert(out.begin(), 's');
+    }
+    return out;
+}
+
+[[nodiscard]] std::int64_t sort_scan_explain_int(
+    std::span<const std::string> plan,
+    std::string_view key,
+    std::int64_t fallback = -1)
+{
+    const auto value = it::find_explain_property(plan, key);
+    if (!value.has_value()) return fallback;
+    return std::stoll(*value);
+}
+
+[[nodiscard]] RunConstraints sort_scan_estimate(
+    std::string_view, std::string_view, simdjson::dom::element data)
+{
+    const std::size_t rows = static_cast<std::size_t>(jint(data, "row_count", 65536));
+    const std::size_t seq_len = static_cast<std::size_t>(jint(data, "sequence_length", 32));
+    const std::size_t packed_bytes = (seq_len + 3u) / 4u;
+    return {
+        .base_memory = rows * (packed_bytes + 64u),
+        .extra_memory = rows * (packed_bytes + 32u),
+    };
+}
+
+[[nodiscard]] SortScanInput sort_scan_input(
+    std::string_view,
+    std::string_view test_case_name,
+    simdjson::dom::element data,
+    const RunConstraints&)
+{
+    SortScanInput in;
+    in.conn = std::make_shared<it::connection_test_context>();
+    in.table = "bench_sort_scan_" + sort_scan_identifier(test_case_name);
+    in.row_count = static_cast<std::size_t>(jint(data, "row_count", 65536));
+    in.sequence_length = static_cast<std::size_t>(jint(data, "sequence_length", 32));
+    const std::size_t prefix_len = static_cast<std::size_t>(jint(data, "prefix_length", 0));
+    const std::size_t key_digits = static_cast<std::size_t>(jint(data, "key_digits", 32));
+    const std::int64_t multiplier = jint(data, "permutation_multiplier", 32771);
+    if (in.sequence_length < prefix_len + key_digits) {
+        bioseq_log<ERR>(
+            "[bench_sort_scan] invalid case {}: sequence_length={} prefix_length={} key_digits={}",
+            test_case_name,
+            in.sequence_length,
+            prefix_len,
+            key_digits);
+        std::abort();
+    }
+    const std::size_t tail_len = in.sequence_length - prefix_len - key_digits;
+
+    in.expected_pks.assign(in.row_count, -1);
+    for (std::size_t pk = 0; pk < in.row_count; ++pk) {
+        const std::size_t key = static_cast<std::size_t>(
+            (static_cast<std::int64_t>(pk) * multiplier)
+            % static_cast<std::int64_t>(in.row_count));
+        if (key >= in.row_count || in.expected_pks[key] != -1) {
+            bioseq_log<ERR>(
+                "[bench_sort_scan] permutation_multiplier={} is not a permutation for row_count={}",
+                multiplier,
+                in.row_count);
+            std::abort();
+        }
+        in.expected_pks[key] = static_cast<long long>(pk);
+    }
+    it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.table);
+    it::exec_sql(
+        *in.conn,
+        "CREATE OR REPLACE FUNCTION pg_temp.bioseq_sort_scan_dna4_text("
+        "v bigint, key_digits integer, prefix_len integer, tail_len integer) "
+        "RETURNS text LANGUAGE SQL IMMUTABLE AS $$ "
+        "SELECT repeat('A', prefix_len) || "
+        "       (SELECT string_agg(substr('ACGT', ((((v >> ((2 * g)::integer)) & 3) + 1)::integer), 1), '' "
+        "                          ORDER BY g DESC) "
+        "        FROM generate_series(0, key_digits - 1) AS gs(g)) || "
+        "       repeat('C', tail_len) $$;");
+    it::exec_sqlf(
+        *in.conn,
+        "CREATE TABLE {} (pk bigint PRIMARY KEY, seq0 {});",
+        in.table,
+        in.seq_type);
+    it::exec_sqlf(
+        *in.conn,
+        "INSERT INTO {} "
+        "SELECT i::bigint, "
+        "       pg_temp.bioseq_sort_scan_dna4_text("
+        "           ((i::bigint * {}) % {})::bigint, {}, {}, {})::{} "
+        "FROM generate_series(0, {}::bigint - 1) AS g(i);",
+        in.table,
+        multiplier,
+        static_cast<unsigned long long>(in.row_count),
+        static_cast<unsigned long long>(key_digits),
+        static_cast<unsigned long long>(prefix_len),
+        static_cast<unsigned long long>(tail_len),
+        in.seq_type,
+        static_cast<unsigned long long>(in.row_count));
+    it::exec_sqlf(*in.conn, "ANALYZE {};", in.table);
+    return in;
+}
+
+void cleanup_sort_scan_input(
+    std::string_view,
+    std::string_view,
+    simdjson::dom::element,
+    const SortScanInput& in)
+{
+    const char* keep_artifacts_env = std::getenv("BIOSEQ_E2E_KEEP_ARTIFACTS");
+    if (keep_artifacts_env != nullptr && std::string_view{keep_artifacts_env} == "1") {
+        return;
+    }
+    if (in.conn != nullptr) {
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.table);
+    }
+}
+
+[[nodiscard]] SortScanOutput sort_scan_run(
+    std::string_view algo,
+    const ParamMap& params,
+    const SortScanInput& in)
+{
+    SortScanOutput out;
+    out.row_count = static_cast<std::int64_t>(in.row_count);
+    const std::string implementation = param_string(params, "implementation", "gpu");
+    const bool use_gpu = implementation == "gpu" || algo == "sort_scan_gpu";
+    it::exec_sql(*in.conn, "SET bioseq.enable_sequence_sort_scan = on;");
+    it::exec_sqlf(*in.conn, "SET bioseq.aligner.vulkan_enabled = {};",
+                  use_gpu ? "on" : "off");
+
+    const std::string sql = fmt::format("SELECT pk FROM {} ORDER BY seq0;", in.table);
+    ScopedResourceMonitor resources;
+    const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    std::vector<long long> pks;
+    {
+        auto _scope = bioseq::instr::region(kMeasuredRegion);
+        pks = it::query_int_column(*in.conn, sql);
+    }
+    const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    (void)resources.stop();
+    out.measured_region_ns = end_ns - start_ns;
+    out.sorted_correct = (pks == in.expected_pks) ? 1 : 0;
+    if (out.sorted_correct == 0) {
+        bioseq_log<ERR>(
+            "[bench_sort_scan] correctness failure algo={} got={} expected={}",
+            algo,
+            pks.size(),
+            in.expected_pks.size());
+    }
+
+    const auto plan = it::explain_text<true>(*in.conn, sql);
+    out.custom_scan_taken = it::plan_contains(plan, "Custom Scan (BioseqBatchSortScan)") ? 1 : 0;
+    const auto accelerator = it::find_explain_property(plan, "Bioseq Sort Accelerator");
+    if (accelerator.has_value()) {
+        out.accelerator_gpu = (*accelerator == "gpu") ? 1 : 0;
+        out.accelerator_stdc_compare = (*accelerator == "stdc_compare") ? 1 : 0;
+    }
+    out.gpu_sort_dispatches =
+        sort_scan_explain_int(plan, "Bioseq GPU Sort Dispatches", 0);
+    out.gpu_global_compare_dispatches =
+        sort_scan_explain_int(plan, "Bioseq GPU Global Compare Dispatches", 0);
+    out.gpu_dense_scatter_dispatches =
+        sort_scan_explain_int(plan, "Bioseq GPU Dense Scatter Dispatches", 0);
+    out.gpu_sort_uploaded_bytes =
+        sort_scan_explain_int(plan, "Bioseq GPU Sort Uploaded Bytes", 0);
+    out.sort_runtime_ns =
+        sort_scan_explain_int(plan, "Bioseq Sort Runtime Ns", 0);
+    out.cpu_refine_rows = 0;  // The source path has no host refinement callback.
+    return out;
+}
+
+[[nodiscard]] std::map<std::string, double> sort_scan_eval(
+    std::string_view,
+    const ParamMap&,
+    const SortScanInput&,
+    const SortScanOutput& out)
+{
+    return {
+        {"row_count", static_cast<double>(out.row_count)},
+        {"sorted_correct", static_cast<double>(out.sorted_correct)},
+        {"custom_scan_taken", static_cast<double>(out.custom_scan_taken)},
+        {"accelerator_gpu", static_cast<double>(out.accelerator_gpu)},
+        {"accelerator_stdc_compare", static_cast<double>(out.accelerator_stdc_compare)},
+        {"gpu_sort_dispatches", static_cast<double>(out.gpu_sort_dispatches)},
+        {"gpu_global_compare_dispatches", static_cast<double>(out.gpu_global_compare_dispatches)},
+        {"gpu_dense_scatter_dispatches", static_cast<double>(out.gpu_dense_scatter_dispatches)},
+        {"gpu_sort_uploaded_bytes", static_cast<double>(out.gpu_sort_uploaded_bytes)},
+        {"cpu_refine_rows", static_cast<double>(out.cpu_refine_rows)},
+        {"sort_runtime_ns", static_cast<double>(out.sort_runtime_ns)},
+        {"measured_region_ns_manual", static_cast<double>(out.measured_region_ns)},
+    };
+}
+
 }  // anonymous namespace
 HWY_AFTER_NAMESPACE();    // close the Highway per-target namespace
 
@@ -2580,8 +2809,16 @@ int main(int argc, char** argv) {
     auto run = std::function<E2eOutput(std::string_view, const ParamMap&, const E2eInput&)>{e2e_run};
     auto evl = std::function<std::map<std::string,double>(std::string_view, const ParamMap&, const E2eInput&, const E2eOutput&)>{e2e_eval};
     auto cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const E2eInput&)>{cleanup_e2e_input};
+    auto sort_est = std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>{sort_scan_estimate};
+    auto sort_inp = std::function<SortScanInput(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>{sort_scan_input};
+    auto sort_run = std::function<SortScanOutput(std::string_view, const ParamMap&, const SortScanInput&)>{sort_scan_run};
+    auto sort_evl = std::function<std::map<std::string,double>(std::string_view, const ParamMap&, const SortScanInput&, const SortScanOutput&)>{sort_scan_eval};
+    auto sort_cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const SortScanInput&)>{cleanup_sort_scan_input};
     return bioseq::bench_framework::run(argc, argv, rep, data,
         bioseq::bench_framework::create_benchmark<E2eInput, E2eOutput>(
             "End-to-end SQL bioseq.load + mmsearch vs minimap2 (2/4 Gbp dna4/dna5)",
-            "bench_e2e", cfg, est, inp, run, evl, cln));
+            "bench_e2e", cfg, est, inp, run, evl, cln),
+        bioseq::bench_framework::create_benchmark<SortScanInput, SortScanOutput>(
+            "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
+            "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));
 }

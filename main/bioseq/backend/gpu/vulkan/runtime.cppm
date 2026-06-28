@@ -384,7 +384,7 @@ struct GpuCoordinateChainTraceResult {
 
 /// DOC0346 — GPU sequence sort wire structs. Byte layout pinned to the GLSL
 /// `P` push block and `SeqDesc`/`SeqSortRange` declarations in shader_compiler.
-struct SeqSortPush {   // 32 bytes; == GLSL pc (seq_sort kernels)
+struct SeqSortPush {   // 40 bytes; == GLSL pc (seq_sort kernels)
     std::uint32_t count = 0;              // row_count (key stage) / range_count (tiebreak stage)
     std::uint32_t unit_bits = 0;          // 8/16/32/64
     std::uint32_t bits_per_char = 0;      // generic only
@@ -392,9 +392,11 @@ struct SeqSortPush {   // 32 bytes; == GLSL pc (seq_sort kernels)
     std::uint32_t char_mask = 0;          // generic only
     std::uint32_t used_mask_lo = 0;
     std::uint32_t used_mask_hi = 0;
-    std::uint32_t pad = 0;
+    std::uint32_t key_unit_offset = 0;       // dense scatter stage: selected key unit
+    std::uint32_t sort_size = 0;           // global bitonic stage: k
+    std::uint32_t sort_stride = 0;         // global bitonic stage: j
 };
-static_assert(sizeof(SeqSortPush) == 32);
+static_assert(sizeof(SeqSortPush) == 40);
 
 struct SeqDescWire {   // 16 bytes; == GLSL SeqDesc. word_offset in uint32 words.
     std::uint32_t word_offset = 0;
@@ -403,6 +405,12 @@ struct SeqDescWire {   // 16 bytes; == GLSL SeqDesc. word_offset in uint32 words
     std::uint32_t pad = 0;
 };
 static_assert(sizeof(SeqDescWire) == 16);
+
+struct SeqSortUploadChunk {
+    const void* bytes = nullptr;
+    std::uint64_t byte_size = 0;
+    std::uint64_t padded_byte_size = 0;
+};
 
 /// Resolved by the façade from compact_sequence_range<S>::traits.
 struct SeqSortKernelParams {
@@ -678,16 +686,17 @@ public:
 
     // DOC0346 — order a batch of in-RAM compact sequences on device. Extracts a
     // 64-bit canonical lexicographic key per row, LSD-radix-sorts (reusing the
-    // Phase C radix), then breaks equal-key ties with a per-run bitonic over the
-    // full canonical compare; equal-key runs longer than LOCAL_SIZE_X are refined
-    // on the host by `refine`. Returns the ascending permutation of [0,n).
-    // `refine(begin, len, idx)` sorts idx[begin..begin+len) by the same order the
-    // device uses (the façade supplies compare_sequences_scalar over those rows).
+    // Phase C radix), then breaks equal-key ties with GPU full canonical compares.
+    // Runs longer than LOCAL_SIZE_X trigger a device-side global bitonic compare
+    // pass over the padded permutation; no host refinement is permitted here.
     [[nodiscard]] std::vector<std::uint32_t> run_sequence_sort_roundtrip(
         std::span<const std::byte> packed_units,
         std::span<const SeqDescWire> descs,
-        const SeqSortKernelParams& params,
-        const std::function<void(std::uint32_t, std::uint32_t, std::uint32_t*)>& refine);
+        const SeqSortKernelParams& params);
+    [[nodiscard]] std::vector<std::uint32_t> run_sequence_sort_roundtrip(
+        std::span<const SeqSortUploadChunk> chunks,
+        std::span<const SeqDescWire> descs,
+        const SeqSortKernelParams& params);
 
     // Score/end-point-only banded affine extension batch. Inputs are uint32
     // alphabet ranks; unsupported geometry throws `VulkanRuntimeError` before
@@ -712,6 +721,15 @@ public:
 
     [[nodiscard]] std::uint64_t seq_sort_dispatch_count() const noexcept {
         return seq_sort_dispatch_count_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t seq_sort_global_compare_dispatch_count() const noexcept {
+        return seq_sort_global_compare_dispatch_count_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t seq_sort_dense_scatter_dispatch_count() const noexcept {
+        return seq_sort_dense_scatter_dispatch_count_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t seq_sort_uploaded_bytes_count() const noexcept {
+        return seq_sort_uploaded_bytes_.load(std::memory_order_relaxed);
     }
     [[nodiscard]] std::uint64_t alignment_extension_dispatch_count() const noexcept {
         return alignment_extension_dispatch_count_.load(std::memory_order_relaxed);
@@ -901,6 +919,9 @@ private:
     std::atomic<std::uint64_t> chaining_dispatch_count_{0};
     std::atomic<std::uint64_t> generate_units_dispatch_count_{0};
     std::atomic<std::uint64_t> seq_sort_dispatch_count_{0};  // DOC0346
+    std::atomic<std::uint64_t> seq_sort_global_compare_dispatch_count_{0};  // DOC0360
+    std::atomic<std::uint64_t> seq_sort_dense_scatter_dispatch_count_{0};  // DOC0360
+    std::atomic<std::uint64_t> seq_sort_uploaded_bytes_{0};  // DOC0360 full-payload proof
     std::atomic<std::uint64_t> alignment_extension_dispatch_count_{0};
     std::mutex mu_;
 };
@@ -5285,13 +5306,26 @@ GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
 // DOC0346 — GPU sequence sort. Two submits (modelled on the index build):
 //   1: upload seq+descs -> extract 64-bit canonical key per row -> radix sort.
 //   host: build equal-key run ranges; seed `index` from the sorted row ids.
-//   2: per-run bitonic tie-break over the full canonical compare.
-//   host: refine runs longer than LOCAL_SIZE_X; download the permutation.
+//   2: per-run bitonic tie-break over the full canonical compare; if any run is
+//      oversized, continue in the same submit with global full-compare bitonic
+//      stages over the padded permutation. Then download the permutation.
 std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
     std::span<const std::byte> packed_units,
     std::span<const SeqDescWire> descs,
-    const SeqSortKernelParams& params,
-    const std::function<void(std::uint32_t, std::uint32_t, std::uint32_t*)>& refine)
+    const SeqSortKernelParams& params)
+{
+    const SeqSortUploadChunk chunk{
+        packed_units.data(),
+        static_cast<std::uint64_t>(packed_units.size()),
+        static_cast<std::uint64_t>(packed_units.size())};
+    return run_sequence_sort_roundtrip(std::span<const SeqSortUploadChunk>(&chunk, 1u),
+                                       descs, params);
+}
+
+std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
+    std::span<const SeqSortUploadChunk> chunks,
+    std::span<const SeqDescWire> descs,
+    const SeqSortKernelParams& params)
 {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -5301,6 +5335,24 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
     if (n == 0) return {};
     if (n == 1) return std::vector<std::uint32_t>{0u};
 
+    std::uint64_t packed_unit_bytes = 0;
+    for (const SeqSortUploadChunk& chunk : chunks) {
+        if (chunk.byte_size > chunk.padded_byte_size) {
+            throw VulkanRuntimeError("run_sequence_sort_roundtrip: invalid upload chunk padding");
+        }
+        if (chunk.byte_size > 0u && chunk.bytes == nullptr) {
+            throw VulkanRuntimeError("run_sequence_sort_roundtrip: non-empty upload chunk has null data");
+        }
+        if (packed_unit_bytes >
+            (std::numeric_limits<std::uint64_t>::max)() - chunk.padded_byte_size) {
+            throw VulkanRuntimeError("run_sequence_sort_roundtrip: upload chunks exceed uint64");
+        }
+        packed_unit_bytes += chunk.padded_byte_size;
+    }
+    seq_sort_uploaded_bytes_.fetch_add(
+        packed_unit_bytes,
+        std::memory_order_relaxed);
+
     static constexpr std::uint32_t kSeqSortLocal = 256u;
     const bool dna4 =
         params.alphabet_kind == static_cast<std::uint32_t>(AlphabetKernelKind::dna4_nt4);
@@ -5308,13 +5360,36 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
                                      : ShaderKind::seq_sort_extract_key_generic;
     const ShaderKind tb_kind  = dna4 ? ShaderKind::seq_sort_tiebreak_dna4
                                      : ShaderKind::seq_sort_tiebreak_generic;
+    const ShaderKind gc_kind  = dna4 ? ShaderKind::seq_sort_global_compare_dna4
+                                     : ShaderKind::seq_sort_global_compare_generic;
+    const ShaderKind dense_kind = dna4 ? ShaderKind::seq_sort_dense_scatter_dna4
+                                       : ShaderKind::seq_sort_dense_scatter_generic;
+    const ShaderKind prefix_kind = dna4 ? ShaderKind::seq_sort_prefix_check_dna4
+                                        : ShaderKind::seq_sort_prefix_check_generic;
     const PhaseBPipeline key_pipe = get_phase_b_pipeline_locked(key_kind, kSeqSortLocal, 0u);
     const PhaseBPipeline tb_pipe  = get_phase_b_pipeline_locked(tb_kind, kSeqSortLocal, 0u);
+    const PhaseBPipeline gc_pipe  = get_phase_b_pipeline_locked(gc_kind, kSeqSortLocal, 0u);
+    const PhaseBPipeline dense_pipe = get_phase_b_pipeline_locked(dense_kind, kSeqSortLocal, 0u);
+    const PhaseBPipeline prefix_pipe = get_phase_b_pipeline_locked(prefix_kind, kSeqSortLocal, 0u);
     const WgPlan swg = plan_workgroups(n, features_.max_workgroup_count_x);
+    auto next_power_of_two = [](std::uint32_t value) -> std::uint32_t {
+        if (value <= 1u) return 1u;
+        if (value > 0x80000000u) {
+            throw VulkanRuntimeError("run_sequence_sort_roundtrip: batch too large for padded bitonic index");
+        }
+        value -= 1u;
+        value |= value >> 1u;
+        value |= value >> 2u;
+        value |= value >> 4u;
+        value |= value >> 8u;
+        value |= value >> 16u;
+        return value + 1u;
+    };
+    const std::uint32_t padded_n = next_power_of_two(n);
 
     // Device buffers (unified/host-coherent on Apple). seq is the concatenated,
     // 4-byte-aligned per-row unit blocks viewed as `uint seq_words[]`.
-    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_units.size(), 4u);
+    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_unit_bytes, 4u);
     Buffer seq        = create_device_buffer(seq_bytes, kPhaseBBufferUsage);
     Buffer descs_buf  = create_device_buffer(std::uint64_t{n} * 16u, kPhaseBBufferUsage);
     Buffer keys       = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
@@ -5322,14 +5397,38 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
     Buffer keys_scr   = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
     Buffer vals_scr   = create_device_buffer(std::uint64_t{n} * 8u, kPhaseBBufferUsage);
     Buffer hist       = create_device_buffer(std::uint64_t{swg.num_workgroups} * 256u * 4u, kPhaseBBufferUsage);
-    Buffer index_buf  = create_device_buffer(std::uint64_t{n} * 4u, kPhaseBBufferUsage);
+    Buffer index_buf  = create_device_buffer(std::uint64_t{padded_n} * 4u, kPhaseBBufferUsage);
+    Buffer dense_status = create_device_buffer(4u, kPhaseBBufferUsage);
     if (seq.mapped == nullptr || descs_buf.mapped == nullptr || keys.mapped == nullptr
         || vals.mapped == nullptr || keys_scr.mapped == nullptr || vals_scr.mapped == nullptr
-        || hist.mapped == nullptr || index_buf.mapped == nullptr) {
+        || hist.mapped == nullptr || index_buf.mapped == nullptr
+        || dense_status.mapped == nullptr) {
         throw VulkanRuntimeError("run_sequence_sort_roundtrip: device buffer alloc failed");
     }
-    if (!packed_units.empty())
-        std::memcpy(seq.mapped, packed_units.data(), packed_units.size());
+    auto* seq_base = static_cast<std::byte*>(seq.mapped);
+    std::uint64_t write_offset = 0;
+    for (const SeqSortUploadChunk& chunk : chunks) {
+        if (chunk.byte_size >
+            static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+            throw VulkanRuntimeError("run_sequence_sort_roundtrip: upload chunk exceeds size_t");
+        }
+        if (chunk.padded_byte_size - chunk.byte_size >
+            static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+            throw VulkanRuntimeError("run_sequence_sort_roundtrip: upload padding exceeds size_t");
+        }
+        const auto* bytes = static_cast<const std::byte*>(chunk.bytes);
+        const std::size_t byte_count = static_cast<std::size_t>(chunk.byte_size);
+        if (byte_count > 0u)
+            std::memcpy(seq_base + write_offset, bytes, byte_count);
+        write_offset += chunk.byte_size;
+        const std::size_t pad_count =
+            static_cast<std::size_t>(chunk.padded_byte_size - chunk.byte_size);
+        if (pad_count > 0u)
+            std::memset(seq_base + write_offset, 0, pad_count);
+        write_offset += chunk.padded_byte_size - chunk.byte_size;
+    }
+    if (write_offset < seq_bytes)
+        std::memset(seq_base + write_offset, 0, static_cast<std::size_t>(seq_bytes - write_offset));
     std::memcpy(descs_buf.mapped, descs.data(), descs.size() * sizeof(SeqDescWire));
 
     const GpuArenaSlice seq_s{&seq, 0, seq.bytes};
@@ -5339,11 +5438,74 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
     const GpuArenaSlice keys_scr_s{&keys_scr, 0, keys_scr.bytes};
     const GpuArenaSlice vals_scr_s{&vals_scr, 0, vals_scr.bytes};
     const GpuArenaSlice hist_s{&hist, 0, hist.bytes};
+    const GpuArenaSlice index_s{&index_buf, 0, index_buf.bytes};
+    const GpuArenaSlice dense_status_s{&dense_status, 0, dense_status.bytes};
+
+    auto bump = [this]() { seq_sort_dispatch_count_.fetch_add(1, std::memory_order_relaxed); };
+
+    // Dense-rank GPU fast path. Offset 0 handles short/front-key batches. The
+    // tail offset handles long fixed-length common-prefix batches only when the
+    // shader proves the prefix identity and the selected key is [0,n)-dense.
+    auto* index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);
+    auto* dense_status_ptr = static_cast<std::uint32_t*>(dense_status.mapped);
+    const std::uint32_t units_for_64 =
+        std::max<std::uint32_t>(1u, (64u + params.unit_bits - 1u) / params.unit_bits);
+    std::array<std::uint32_t, 2> dense_offsets{0u, 0u};
+    std::uint32_t dense_offset_count = 1u;
+    if (descs.front().unit_count > units_for_64) {
+        const std::uint32_t tail_offset = descs.front().unit_count - units_for_64;
+        if (tail_offset != 0u) dense_offsets[dense_offset_count++] = tail_offset;
+    }
+    for (std::uint32_t attempt = 0; attempt < dense_offset_count; ++attempt) {
+        const std::uint32_t key_offset = dense_offsets[attempt];
+        const std::uint64_t prefix_work =
+            static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(key_offset);
+        if (prefix_work > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+            continue;
+        }
+        std::fill(index_ptr, index_ptr + padded_n, 0xffffffffu);
+        *dense_status_ptr = 0u;
+        const SeqSortPush dense_push{
+            n, params.unit_bits, params.bits_per_char, params.letters_per_unit, params.char_mask,
+            static_cast<std::uint32_t>(params.used_storage_mask & 0xffffffffu),
+            static_cast<std::uint32_t>(params.used_storage_mask >> 32),
+            key_offset, key_offset == 0u ? 0u : 1u, 0u};
+        reset_phase_c_pool_locked();
+        check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(seqsort-dense)");
+        VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(seqsort-dense)");
+        record_host_to_shader(command_buffer_);
+        const std::array<VkDescriptorBufferInfo, 4> dense_infos{{
+            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+            {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
+            {index_s.buffer->buffer, index_s.offset, index_s.size},
+            {dense_status_s.buffer->buffer, dense_status_s.offset, dense_status_s.size},
+        }};
+        if (key_offset != 0u) {
+            record_phase_c_dispatch_locked(
+                command_buffer_, prefix_pipe, dense_infos, &dense_push, sizeof(dense_push),
+                ceil_div_u32(static_cast<std::uint32_t>(prefix_work), kSeqSortLocal));
+            record_compute_barrier(command_buffer_);
+        }
+        record_phase_c_dispatch_locked(command_buffer_, dense_pipe, dense_infos,
+                                       &dense_push, sizeof(dense_push),
+                                       ceil_div_u32(n, kSeqSortLocal));
+        record_shader_to_host(command_buffer_);
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(seqsort-dense)");
+        if (*dense_status_ptr == 0u
+            && std::find(index_ptr, index_ptr + n, 0xffffffffu) == index_ptr + n) {
+            std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
+            seq_sort_dense_scatter_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+            bump();
+            return perm;
+        }
+    }
 
     const SeqSortPush key_push{
         n, params.unit_bits, params.bits_per_char, params.letters_per_unit, params.char_mask,
         static_cast<std::uint32_t>(params.used_storage_mask & 0xffffffffu),
-        static_cast<std::uint32_t>(params.used_storage_mask >> 32), 0u};
+        static_cast<std::uint32_t>(params.used_storage_mask >> 32), 0u, 0u, 0u};
 
     // --- Submit 1: extract keys, then radix sort (key,value=row index) ---
     bool sorted_in_scratch = false;
@@ -5377,21 +5539,25 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
         static_cast<const std::uint64_t*>((sorted_in_scratch ? vals_scr : vals).mapped);
 
     // Seed `index` from the sorted row ids (ascending by key, radix-stable on ties).
-    auto* index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);
     for (std::uint32_t i = 0; i < n; ++i)
         index_ptr[i] = static_cast<std::uint32_t>(sorted_vals[i] & 0xffffffffu);
+    for (std::uint32_t i = n; i < padded_n; ++i)
+        index_ptr[i] = 0xffffffffu;
 
     // Build equal-key run ranges (only runs of length > 1 need a tie-break).
     struct RunRange { std::uint32_t begin; std::uint32_t len; };
     std::vector<RunRange> ranges;
+    bool has_oversized_run = false;
     for (std::uint32_t i = 0; i < n; ) {
         std::uint32_t j = i + 1u;
         while (j < n && sorted_keys[j] == sorted_keys[i]) ++j;
-        if (j - i > 1u) ranges.push_back(RunRange{i, j - i});
+        if (j - i > 1u) {
+            const std::uint32_t len = j - i;
+            ranges.push_back(RunRange{i, len});
+            has_oversized_run = has_oversized_run || len > kSeqSortLocal;
+        }
         i = j;
     }
-
-    auto bump = [this]() { seq_sort_dispatch_count_.fetch_add(1, std::memory_order_relaxed); };
 
     if (ranges.empty()) {
         // No equal-key collisions: the 64-bit key fully ordered the batch.
@@ -5400,18 +5566,19 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
         return perm;
     }
 
-    // --- Submit 2: per-run bitonic tie-break over the full canonical compare ---
+    // --- Submit 2: GPU full-compare tie-break. Oversized collisions continue
+    // through a device-side global bitonic network before the one host readback.
     Buffer ranges_buf = create_device_buffer(std::uint64_t{ranges.size()} * 8u, kPhaseBBufferUsage);
     if (ranges_buf.mapped == nullptr)
         throw VulkanRuntimeError("run_sequence_sort_roundtrip: ranges buffer alloc failed");
     std::memcpy(ranges_buf.mapped, ranges.data(), ranges.size() * sizeof(RunRange));
-    const GpuArenaSlice index_s{&index_buf, 0, index_buf.bytes};
     const GpuArenaSlice ranges_s{&ranges_buf, 0, ranges_buf.bytes};
     const SeqSortPush tb_push{
         static_cast<std::uint32_t>(ranges.size()), params.unit_bits, params.bits_per_char,
         params.letters_per_unit, params.char_mask,
         static_cast<std::uint32_t>(params.used_storage_mask & 0xffffffffu),
-        static_cast<std::uint32_t>(params.used_storage_mask >> 32), 0u};
+        static_cast<std::uint32_t>(params.used_storage_mask >> 32), 0u, 0u, 0u};
+    std::uint64_t global_compare_dispatches = 0;
     {
         reset_phase_c_pool_locked();
         check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(seqsort2)");
@@ -5428,16 +5595,40 @@ std::vector<std::uint32_t> Runtime::run_sequence_sort_roundtrip(
         record_phase_c_dispatch_locked(command_buffer_, tb_pipe, tb_infos,
                                        &tb_push, sizeof(tb_push),
                                        static_cast<std::uint32_t>(ranges.size()));
+        if (has_oversized_run) {
+            const std::array<VkDescriptorBufferInfo, 4> gc_infos{{
+                {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+                {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
+                {index_s.buffer->buffer, index_s.offset, index_s.size},
+                {ranges_s.buffer->buffer, ranges_s.offset, ranges_s.size},
+            }};
+            for (std::uint32_t sort_size = 2u; sort_size <= padded_n; ) {
+                for (std::uint32_t stride = sort_size >> 1u; stride > 0u; stride >>= 1u) {
+                    record_compute_barrier(command_buffer_);
+                    SeqSortPush gc_push{
+                        padded_n, params.unit_bits, params.bits_per_char,
+                        params.letters_per_unit, params.char_mask,
+                        static_cast<std::uint32_t>(params.used_storage_mask & 0xffffffffu),
+                        static_cast<std::uint32_t>(params.used_storage_mask >> 32),
+                        0u, sort_size, stride};
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, gc_pipe, gc_infos, &gc_push, sizeof(gc_push),
+                        ceil_div_u32(padded_n, kSeqSortLocal));
+                    ++global_compare_dispatches;
+                }
+                if (sort_size == padded_n) break;
+                sort_size <<= 1u;
+            }
+        }
         record_shader_to_host(command_buffer_);
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(seqsort2)");
     }
 
-    // Host-refine equal-key runs that exceeded one workgroup (the device skipped them).
-    index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);  // mapping is stable; re-fetch defensively
-    for (const RunRange& r : ranges) {
-        if (r.len > kSeqSortLocal) refine(r.begin, r.len, index_ptr);
+    if (global_compare_dispatches != 0) {
+        seq_sort_global_compare_dispatch_count_.fetch_add(
+            global_compare_dispatches, std::memory_order_relaxed);
     }
-
+    index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);  // mapping is stable; re-fetch defensively
     std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
     bump();
     return perm;

@@ -11,6 +11,14 @@
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment"]},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off"]},
       "pipeline_mode": {"type": "string", "default": "task_parallel", "enum": ["task_parallel"]}
+    },
+    "sort_scan_stdc_compare": {
+      "_": {"type": "integer", "default": 0, "description": "BioseqBatchSortScan scalar stdc_compare control"},
+      "implementation": {"type": "string", "default": "stdc_compare", "enum": ["stdc_compare"]}
+    },
+    "sort_scan_gpu": {
+      "_": {"type": "integer", "default": 0, "description": "BioseqBatchSortScan Vulkan GPU seq-sort path"},
+      "implementation": {"type": "string", "default": "gpu", "enum": ["gpu"]}
     }
   },
 
@@ -180,7 +188,17 @@
         "skip_minimap2_baseline_setup": true, "batch_pair_mode": true,
         "batch_pair_load_timed": false, "cigar_projection": true,
         "seed": 4218192 },
-      "description": "8192 dna4 same-relation queries with <=512 bp alignment spans; strict amortization proof for bounded GPU CIGAR/final-alignment" }
+      "description": "8192 dna4 same-relation queries with <=512 bp alignment spans; strict amortization proof for bounded GPU CIGAR/final-alignment" },
+
+    "SORT_SCAN_LONG_262144_4096_SHARED_PREFIX": { "concurrency": 1, "data": {
+        "row_count": 262144, "sequence_length": 4096, "prefix_length": 4064,
+        "key_digits": 32, "permutation_multiplier": 196613 },
+      "description": "Sort scan proof case: high number of long dna4 sequences with a shared prefix, dense tail key, and full-payload GPU upload" },
+
+    "SORT_SCAN_SHORT_262144_32": { "concurrency": 1, "data": {
+        "row_count": 262144, "sequence_length": 32, "prefix_length": 0,
+        "key_digits": 32, "permutation_multiplier": 196613 },
+      "description": "Sort scan proof case: very high number of very short dna4 sequences" }
   },
 
   "bench_e2e": {
@@ -257,6 +275,40 @@
         "peak_postgres_rss_mb": { "type": "evaluation", "rules": [] },
         "peak_bench_rss_mb": { "type": "evaluation", "rules": [] },
         "peak_swap_used_mb": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "bench_sort_scan": {
+    "tags": ["e2e", "gpu", "sort-scan"],
+    "description": "SQL ORDER BY bioseq.seq custom sort-scan proof: scalar stdc_compare control vs Vulkan GPU seq-sort, with correctness and dispatch metrics.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": {
+        "SORT_SCAN_LONG_262144_4096_SHARED_PREFIX": 1,
+        "SORT_SCAN_SHORT_262144_32": 1
+      },
+      "over": {
+        "sort_scan_stdc_compare": {"implementation": ["stdc_compare"]},
+        "sort_scan_gpu": {"implementation": ["gpu"]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "row_count": { "type": "evaluation", "rules": [] },
+        "sorted_correct": { "type": "evaluation", "rules": [] },
+        "custom_scan_taken": { "type": "evaluation", "rules": [] },
+        "accelerator_gpu": { "type": "evaluation", "rules": [] },
+        "accelerator_stdc_compare": { "type": "evaluation", "rules": [] },
+        "gpu_sort_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_global_compare_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_dense_scatter_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_sort_uploaded_bytes": { "type": "evaluation", "rules": [] },
+        "cpu_refine_rows": { "type": "evaluation", "rules": [] },
+        "sort_runtime_ns": { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] }
       }
     }
   },

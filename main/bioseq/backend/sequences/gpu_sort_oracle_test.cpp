@@ -210,6 +210,55 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
     }
 }
 
+template <class R>
+void run_oversized_equal_key_case(const char* label) {
+    using traits = typename compact_sequence_range<R>::traits;
+    using scanner_t = sequence_scanner_none<typename traits::storage_unit>;
+    using processor = lazy_compact_sequence_batch_processor<R, scanner_t>;
+
+    constexpr std::size_t count = 300;  // > seq-sort LOCAL_SIZE_X (256)
+    constexpr std::size_t suffix_digits = 6;  // 4^6 leaves plenty of unique suffixes
+    const std::size_t prefix_len = traits::letters_per_unit * 3u;
+
+    OwnedBatch<R> ob;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t value = (i * 73u) % count;  // deterministic unsorted permutation
+        std::vector<std::uint8_t> ranks(prefix_len, A);
+        for (std::size_t digit = 0; digit < suffix_digits; ++digit) {
+            const std::size_t shift = 2u * (suffix_digits - 1u - digit);
+            ranks.push_back(static_cast<std::uint8_t>((value >> shift) & 0x3u));
+        }
+        ob.push(ranks);
+    }
+    auto batch = ob.span();
+
+    auto& rt = vk::Runtime::instance();
+    const bool gpu_present = rt.usable();
+    for (bool descending : {false, true}) {
+        DYNAMIC_SECTION(label << " oversized equal-key run" << (descending ? " DESC" : " ASC")) {
+            const std::vector<std::size_t> expected = oracle_order(ob, descending);
+
+            batch_sort_spec gspec{}; gspec.descending = descending; gspec.vulkan_enabled = true;
+            const std::uint64_t sort_before = rt.seq_sort_dispatch_count();
+            const std::uint64_t global_before = rt.seq_sort_global_compare_dispatch_count();
+            const auto got_gpu = processor::lazy_compact_sequence_batch_sort(batch, gspec);
+            const std::uint64_t sort_after = rt.seq_sort_dispatch_count();
+            const std::uint64_t global_after = rt.seq_sort_global_compare_dispatch_count();
+
+            REQUIRE(got_gpu == expected);
+            if (gpu_present) {
+                REQUIRE(sort_after > sort_before);
+                REQUIRE(global_after > global_before);
+            }
+
+            batch_sort_spec cspec{}; cspec.descending = descending; cspec.vulkan_enabled = false;
+            const auto got_cpu = processor::lazy_compact_sequence_batch_sort(batch, cspec);
+            REQUIRE(got_cpu == expected);
+            REQUIRE(got_gpu == got_cpu);
+        }
+    }
+}
+
 }  // namespace
 
 TEST_CASE("DOC0346 oracle — dna4 GPU sort permutation == compare_sequences_scalar", "[gpu][seq-sort]") {
@@ -229,6 +278,7 @@ TEST_CASE("DOC0346 oracle — dna4 GPU sort permutation == compare_sequences_sca
         run_case<dna4_u32>("dna4/u32", n, 0xC0FFEE000ull + n, 4);
         run_case<dna4_u64>("dna4/u64", n, 0xD00D00000ull + n, 4);
     }
+    run_oversized_equal_key_case<dna4_u64>("dna4/u64");
 }
 
 TEST_CASE("DOC0346 oracle — dna5 generic GPU sort permutation == compare_sequences_scalar", "[gpu][seq-sort]") {

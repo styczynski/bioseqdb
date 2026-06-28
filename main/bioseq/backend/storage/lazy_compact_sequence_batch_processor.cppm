@@ -112,34 +112,6 @@ gpu_sort_sequences(const LazyBatch& batch, const Spec& spec) {
     // every bp_size below UINT32_MAX (§6.3 / §7.2).
     if (n >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) return std::nullopt;
 
-    // Concatenate each row's packed units (4-byte aligned) + one SeqDescWire/row.
-    std::vector<std::byte> packed;
-    std::vector<bioseq::gpu::vulkan::SeqDescWire> descs;
-    descs.reserve(n);
-    const std::uint32_t lpu = static_cast<std::uint32_t>(traits::letters_per_unit);
-    for (const auto& lz : batch) {
-        const auto view = bioseq::gpu::vulkan::make_sequence_upload_view(lz.underlying());
-        if (view.bp_size > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
-            return std::nullopt;
-        const std::uint32_t word_off = static_cast<std::uint32_t>(packed.size() / 4u);
-        const std::uint32_t bp = static_cast<std::uint32_t>(view.bp_size);
-        const std::uint32_t unit_count = (bp + lpu - 1u) / lpu;
-        const std::size_t before = packed.size();
-        const std::size_t add = static_cast<std::size_t>(view.byte_size);
-        packed.resize(static_cast<std::size_t>(bioseq::gpu::vulkan::round_up4(
-            static_cast<std::uint64_t>(before + add))), std::byte{0});
-        if (add > 0 && view.bytes != nullptr)
-            std::memcpy(packed.data() + before, view.bytes, add);
-        descs.push_back(bioseq::gpu::vulkan::SeqDescWire{word_off, unit_count, bp, 0u});
-    }
-
-    const std::uint64_t per_row = 8u + 8u + 16u + 4u + 256u; /* keys+vals+scr+index+hist slack */
-    const std::uint64_t reserve = bioseq::parallelism::saturating_add(
-        static_cast<std::uint64_t>(packed.size()),
-        bioseq::parallelism::saturating_mul(static_cast<std::uint64_t>(n), per_row));
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(reserve);
-    if (!permit) return std::nullopt;
-
     const bioseq::gpu::vulkan::SeqSortKernelParams params{
         static_cast<std::uint32_t>(bioseq::gpu::vulkan::choose_alphabet_kernel<range_t>()),
         static_cast<std::uint32_t>(traits::unit_width),
@@ -148,32 +120,132 @@ gpu_sort_sequences(const LazyBatch& batch, const Spec& spec) {
         static_cast<std::uint32_t>(traits::char_mask),
         static_cast<std::uint64_t>(traits::used_storage_mask)};
 
-    // Host refinement for equal-key runs > LOCAL_SIZE_X: same order as the device
-    // (ascending sequence, then ascending original row index — §7.4). Explicit
-    // captures (no [&], guideline §5).
-    const auto refine = [&batch](std::uint32_t begin, std::uint32_t len, std::uint32_t* index) {
-        std::sort(index + begin, index + begin + len,
-                  [&batch](std::uint32_t i, std::uint32_t j) {
-                      const std::strong_ordering c =
-                          bioseq::simd::N_NEON::compare_sequences_scalar(
-                              batch[i].underlying(), batch[j].underlying());
-                      if (c != 0) return c < 0;
-                      return i < j;
-                  });
+    const std::uint32_t lpu = static_cast<std::uint32_t>(traits::letters_per_unit);
+    const std::uint32_t units_for_64 =
+        std::max<std::uint32_t>(1u, (64u + params.unit_bits - 1u) / params.unit_bits);
+    const std::size_t unit_bytes = sizeof(typename traits::storage_unit);
+
+    struct packed_sort_batch {
+        std::vector<bioseq::gpu::vulkan::SeqSortUploadChunk> chunks;
+        std::vector<bioseq::gpu::vulkan::SeqDescWire> descs;
+        std::uint64_t packed_bytes = 0;
     };
 
-    std::vector<std::uint32_t> perm32;
-    try {
-        perm32 = rt.run_sequence_sort_roundtrip(packed, descs, params, refine);
-    } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& e) {
-        bioseq_log<ERR>("[gpu.sort] {}", e.what());
-        return std::nullopt;
+    auto pack_batch = [&](std::optional<std::uint32_t> max_units)
+        -> std::optional<packed_sort_batch> {
+        packed_sort_batch out;
+        out.chunks.reserve(n);
+        out.descs.reserve(n);
+        std::uint64_t total_padded_bytes = 0;
+        for (const auto& lz : batch) {
+            const auto view = bioseq::gpu::vulkan::make_sequence_upload_view(lz.underlying());
+            if (view.bp_size > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                return std::nullopt;
+            if (view.byte_size > 0u && view.bytes == nullptr)
+                return std::nullopt;
+            const std::uint32_t bp = static_cast<std::uint32_t>(view.bp_size);
+            const std::uint32_t unit_count = (bp + lpu - 1u) / lpu;
+            const std::uint32_t upload_units =
+                max_units ? std::min<std::uint32_t>(unit_count, *max_units) : unit_count;
+            const std::uint64_t upload_bp64 = std::min<std::uint64_t>(
+                view.bp_size,
+                static_cast<std::uint64_t>(upload_units) * static_cast<std::uint64_t>(lpu));
+            const std::uint64_t upload_bytes64 = std::min<std::uint64_t>(
+                view.byte_size,
+                static_cast<std::uint64_t>(upload_units) * static_cast<std::uint64_t>(unit_bytes));
+            const std::uint64_t padded_bytes =
+                bioseq::gpu::vulkan::round_up4(upload_bytes64);
+            if (padded_bytes == (std::numeric_limits<std::uint64_t>::max)())
+                return std::nullopt;
+            const std::uint64_t word_off64 = total_padded_bytes / 4u;
+            if (word_off64 > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+                return std::nullopt;
+            if (total_padded_bytes > (std::numeric_limits<std::uint64_t>::max)() - padded_bytes)
+                return std::nullopt;
+            total_padded_bytes += padded_bytes;
+            if (total_padded_bytes >
+                static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()))
+                return std::nullopt;
+            out.descs.push_back(bioseq::gpu::vulkan::SeqDescWire{
+                static_cast<std::uint32_t>(word_off64),
+                upload_units,
+                static_cast<std::uint32_t>(upload_bp64),
+                0u});
+            out.chunks.push_back(bioseq::gpu::vulkan::SeqSortUploadChunk{
+                view.bytes,
+                upload_bytes64,
+                padded_bytes});
+        }
+        out.packed_bytes = total_padded_bytes;
+        return out;
+    };
+
+    auto run_packed = [&](const packed_sort_batch& candidate, bool log_errors)
+        -> std::optional<std::vector<std::uint32_t>> {
+        const std::uint64_t per_row = 8u + 8u + 16u + 4u + 256u; /* keys+vals+scr+index+hist slack */
+        const std::uint64_t reserve = bioseq::parallelism::saturating_add(
+            candidate.packed_bytes,
+            bioseq::parallelism::saturating_mul(static_cast<std::uint64_t>(n), per_row));
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(reserve);
+        if (!permit) return std::nullopt;
+        try {
+            return rt.run_sequence_sort_roundtrip(candidate.chunks, candidate.descs, params);
+        } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& e) {
+            if (log_errors)
+                bioseq_log<ERR>("[gpu.sort] {}", e.what());
+            return std::nullopt;
+        }
+    };
+
+    auto materialize_order = [&](const std::vector<std::uint32_t>& perm32) {
+        std::vector<std::size_t> order(perm32.size());
+        for (std::size_t i = 0; i < perm32.size(); ++i)
+            order[i] = static_cast<std::size_t>(perm32[i]);
+        return apply_direction(std::move(order), spec.descending);
+    };
+
+    auto sampled_first_key_varies = [&]() -> bool {
+        const auto first_view =
+            bioseq::gpu::vulkan::make_sequence_upload_view(batch[0].underlying());
+        if (first_view.byte_size < unit_bytes || first_view.bytes == nullptr)
+            return false;
+        std::vector<std::byte> first(unit_bytes);
+        std::memcpy(first.data(), first_view.bytes, unit_bytes);
+        const std::size_t sample = std::min<std::size_t>(n, 64u);
+        for (std::size_t i = 1; i < sample; ++i) {
+            const auto view =
+                bioseq::gpu::vulkan::make_sequence_upload_view(batch[i].underlying());
+            if (view.byte_size >= unit_bytes && view.bytes != nullptr
+                && std::memcmp(first.data(), view.bytes, unit_bytes) != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // If the first 64 bits are GPU-proven to be a dense [0,n) permutation, the
+    // first differing unit determines lexicographic order. Uploading only that
+    // prefix avoids moving long tails for the common front-key sort case. The
+    // trimmed result is accepted only when the runtime's dense-scatter counter
+    // proves that the GPU dense path succeeded; otherwise it is discarded and
+    // the full-payload path below is used.
+    if (sampled_first_key_varies()) {
+        if (auto probe_batch = pack_batch(units_for_64)) {
+            const std::uint64_t dense_before = rt.seq_sort_dense_scatter_dispatch_count();
+            if (auto probe_perm = run_packed(*probe_batch, false)) {
+                const std::uint64_t dense_after = rt.seq_sort_dense_scatter_dispatch_count();
+                if (dense_after > dense_before) {
+                    return materialize_order(*probe_perm);
+                }
+            }
+        }
     }
 
-    std::vector<std::size_t> order(perm32.size());
-    for (std::size_t i = 0; i < perm32.size(); ++i)
-        order[i] = static_cast<std::size_t>(perm32[i]);
-    return apply_direction(std::move(order), spec.descending);
+    auto full_batch = pack_batch(std::nullopt);
+    if (!full_batch) return std::nullopt;
+    auto perm32 = run_packed(*full_batch, true);
+    if (!perm32) return std::nullopt;
+    return materialize_order(*perm32);
 }
 
 }  // namespace bioseq::gpu::sort
@@ -181,10 +253,9 @@ gpu_sort_sequences(const LazyBatch& batch, const Spec& spec) {
 export namespace bioseq::storage {
 
 /*
- * Ordering parameters mirrored from the SQL `ORDER BY` clause. The reverse
- * placeholder ignores these (it always reverses); a real comparator-based
- * sort would honour them. Kept as a small value type so the custom scan can
- * forward the planner's sort direction without coupling to Postgres types.
+ * Ordering parameters mirrored from the SQL `ORDER BY` clause. Kept as a small
+ * value type so the custom scan can forward the planner's sort direction and
+ * GPU enablement without coupling this storage module to Postgres types.
  */
 struct batch_sort_spec {
     bool descending  = false;   //< ORDER BY ... DESC
@@ -224,8 +295,8 @@ struct lazy_compact_sequence_batch_processor {
      * permutations are bit-identical even on duplicate sequences. Explicit
      * captures (no `[&]`, guideline §5).
      *
-     * This is also the refinement path for GPU declines and for equal-key runs
-     * longer than one workgroup.
+     * This is also the fallback path for explicit GPU declines. Oversized
+     * equal-key runs are refined on device in the GPU runtime.
      */
     [[nodiscard]] static std::vector<std::size_t>
     cpu_sort_sequences(const Batch& batch, const batch_sort_spec& spec) {

@@ -80,7 +80,7 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 28);
+    REQUIRE(keys.size() == 34);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         return gv::cache_file_stem(a) < gv::cache_file_stem(b);
@@ -108,6 +108,12 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         gv::ShaderKind::seq_sort_extract_key_dna4, 384u, 256u, 0u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::seq_sort_tiebreak_generic, 384u, 256u, 0u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::seq_sort_global_compare_dna4, 384u, 256u, 0u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::seq_sort_dense_scatter_dna4, 384u, 256u, 0u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::seq_sort_prefix_check_dna4, 384u, 256u, 0u)));
 
     CHECK_FALSE(gv::valid_shader_variant_key(gv::make_shader_key(
         gv::ShaderKind::chain_tiled_dp_u64, 384u, 256u, 0u)));

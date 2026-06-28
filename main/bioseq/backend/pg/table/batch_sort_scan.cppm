@@ -19,11 +19,10 @@
  *      to obtain an output ordering (a permutation);
  *   4. re-emits the buffered rows in that order.
  *
- * The batch processor's ordering is a placeholder (reverse) — real sequence
- * comparison is out of scope (see lazy_compact_sequence_batch_processor.cppm).
- * The reverse makes the wiring provable: with ORDER BY on a sequence column the
- * rows come out in the exact reverse of the scan order, and `EXPLAIN` shows
- * `Custom Scan (BioseqBatchSortScan)` with NO `Sort` node.
+ * The batch processor orders with the GPU seq-sort path when Vulkan is enabled.
+ * When `bioseq.aligner_vulkan_enabled` is disabled, this executor sorts the
+ * buffered compact_sequence_stdc headers directly with `stdc_compare`, which is
+ * the scalar comparator used by the SQL surface.
  *
  * Layout invariant: BioseqBatchSortState keeps CustomScanState as its first
  * field (standard-layout) so PostgreSQL's CustomScanState* <-> our state*
@@ -39,7 +38,10 @@ module;
 #include "common_simd.h"
 #include "common.h"
 
+#include <chrono>
+#include <compare>
 #include <cstddef>
+#include <numeric>
 #include <span>
 #include <vector>
 
@@ -51,8 +53,11 @@ import bioseq.storage.lazy;             // lazy_compact_sequence, make_lazy_in_m
 import bioseq.storage.scanner;          // sequence_scanner_none
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
+import bioseq.sequences.simd;           // N_NEON::stdc_compare
 import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
 import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
+import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
+import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
 
 namespace {
 
@@ -69,12 +74,19 @@ struct BioseqBatchSortRuntime {
     bool                            sorted    = false;   //< child drained + ordered?
     std::size_t                     emit_idx  = 0;       //< next index into `order`
     AttrNumber                      seq_attno = 0;       //< 1-based seq column in scan tuple
-    bioseq::storage::batch_sort_spec spec{};            //< ORDER BY direction (placeholder ignores)
-    MemoryContext                   tuple_cxt = nullptr; //< owns the buffered MinimalTuples
-    std::vector<MinimalTuple>       tuples;              //< all child output rows (scan order)
-    std::vector<std::size_t>        order;               //< emit permutation from the processor
-    TupleTableSlot*                 sortslot  = nullptr; //< MinimalTuple slot used for emit/deform
-};
+    bioseq::storage::batch_sort_spec spec{};            //< ORDER BY direction + GPU enablement
+	    MemoryContext                   tuple_cxt = nullptr; //< owns the buffered MinimalTuples
+	    std::vector<MinimalTuple>       tuples;              //< all child output rows (scan order)
+	    std::vector<std::size_t>        order;               //< emit permutation from the processor
+	    TupleTableSlot*                 sortslot  = nullptr; //< MinimalTuple slot used for emit/deform
+	    const char*                     accelerator = "not executed";
+	    std::size_t                     sorted_rows = 0;
+	    std::uint64_t                   gpu_dispatch_delta = 0;
+	    std::uint64_t                   gpu_global_compare_dispatch_delta = 0;
+	    std::uint64_t                   gpu_dense_scatter_dispatch_delta = 0;
+	    std::uint64_t                   gpu_uploaded_bytes_delta = 0;
+	    std::uint64_t                   sort_runtime_ns = 0;
+	};
 
 /* State object passed across the C ABI. CustomScanState MUST be first. */
 struct BioseqBatchSortState {
@@ -128,12 +140,13 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 /* Build the lazy batch from the buffered rows and run the (placeholder)*/
 /* ordering. Returns the emit permutation over rt->tuples.              */
 /* ------------------------------------------------------------------ */
-[[nodiscard]] std::vector<std::size_t>
-build_batch_order(CustomScanState* node, BioseqBatchSortRuntime* rt) {
-    const std::size_t row_count = rt->tuples.size();
-    if (row_count == 0) {
-        return {};
-    }
+	[[nodiscard]] std::vector<std::size_t>
+	build_batch_order(CustomScanState* node, BioseqBatchSortRuntime* rt) {
+	    const std::size_t row_count = rt->tuples.size();
+	    rt->sorted_rows = row_count;
+	    if (row_count == 0) {
+	        return {};
+	    }
 
     /* All rows in one column share an alphabet/width; dispatch once on row 0.
      * Detoast/headers/ranges/lazies are transient — they only need to live for
@@ -189,11 +202,33 @@ build_batch_order(CustomScanState* node, BioseqBatchSortRuntime* rt) {
                                        "(locator-stub) sequences are out of scope "
                                        "for this prototype")));
             }
-            headers.push_back(hdr);
-        }
+	            headers.push_back(hdr);
+	        }
 
-        /* Ranges view the headers; lazies reference the ranges (pointer-sized,
-         * copyable for the no-fragment scanner). Both are reserved up front so
+	        if (!rt->spec.vulkan_enabled) {
+	            std::vector<std::size_t> stdc_order(row_count);
+	            std::iota(stdc_order.begin(), stdc_order.end(), std::size_t{0});
+	            const bool descending = rt->spec.descending;
+	            auto less = [&headers, descending](std::size_t i, std::size_t j) {
+	                const std::strong_ordering c =
+	                    bioseq::simd::N_NEON::stdc_compare(*headers[i], *headers[j]);
+	                if (c != 0) return descending ? c > 0 : c < 0;
+	                return descending ? i > j : i < j;
+	            };
+	            const auto sort_start = std::chrono::steady_clock::now();
+	            bioseq::parallelism::GlobalPool::instance().parallel_sort(
+	                stdc_order.begin(), stdc_order.end(), less);
+	            const auto sort_end = std::chrono::steady_clock::now();
+	            rt->sort_runtime_ns = static_cast<std::uint64_t>(
+	                std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                    sort_end - sort_start).count());
+	            order = std::move(stdc_order);
+	            rt->accelerator = "stdc_compare";
+	            return;
+	        }
+
+	        /* Ranges view the headers; lazies reference the ranges (pointer-sized,
+	         * copyable for the no-fragment scanner). Both are reserved up front so
          * neither vector reallocates and invalidates the back-references. */
         std::vector<compact_sequence_range<S>> ranges;
         ranges.reserve(row_count);
@@ -204,12 +239,31 @@ build_batch_order(CustomScanState* node, BioseqBatchSortRuntime* rt) {
         lazies.reserve(row_count);
         for (std::size_t i = 0; i < row_count; ++i) {
             lazies.push_back(bioseq::storage::make_lazy_in_memory(ranges[i]));
-        }
+	        }
 
-        std::span<lazy_t> batch(lazies.data(), lazies.size());
-        order = bioseq::storage::lazy_compact_sequence_batch_processor<S, scanner_t>::
-                    lazy_compact_sequence_batch_sort(batch, rt->spec);
-    });
+	        std::span<lazy_t> batch(lazies.data(), lazies.size());
+	        auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+	        const std::uint64_t dispatch_before = gpu_rt.seq_sort_dispatch_count();
+	        const std::uint64_t global_before = gpu_rt.seq_sort_global_compare_dispatch_count();
+	        const std::uint64_t dense_before = gpu_rt.seq_sort_dense_scatter_dispatch_count();
+	        const std::uint64_t uploaded_before = gpu_rt.seq_sort_uploaded_bytes_count();
+	        const auto sort_start = std::chrono::steady_clock::now();
+	        order = bioseq::storage::lazy_compact_sequence_batch_processor<S, scanner_t>::
+	                    lazy_compact_sequence_batch_sort(batch, rt->spec);
+	        const auto sort_end = std::chrono::steady_clock::now();
+	        const std::uint64_t dispatch_after = gpu_rt.seq_sort_dispatch_count();
+	        const std::uint64_t global_after = gpu_rt.seq_sort_global_compare_dispatch_count();
+	        const std::uint64_t dense_after = gpu_rt.seq_sort_dense_scatter_dispatch_count();
+	        const std::uint64_t uploaded_after = gpu_rt.seq_sort_uploaded_bytes_count();
+	        rt->gpu_dispatch_delta = dispatch_after - dispatch_before;
+	        rt->gpu_global_compare_dispatch_delta = global_after - global_before;
+	        rt->gpu_dense_scatter_dispatch_delta = dense_after - dense_before;
+	        rt->gpu_uploaded_bytes_delta = uploaded_after - uploaded_before;
+	        rt->sort_runtime_ns = static_cast<std::uint64_t>(
+	            std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                sort_end - sort_start).count());
+	        rt->accelerator = rt->gpu_dispatch_delta == 0 ? "compare_sequences_scalar" : "gpu";
+	    });
 
     MemoryContextSwitchTo(old_cxt);
     MemoryContextDelete(scratch);
@@ -339,12 +393,42 @@ BioseqBatchSort_ReScanCustomScan(CustomScanState* node)
     rt->emit_idx = 0;
     rt->tuples.clear();
     rt->order.clear();
+    rt->accelerator = "not executed";
+    rt->sorted_rows = 0;
+    rt->gpu_dispatch_delta = 0;
+    rt->gpu_global_compare_dispatch_delta = 0;
+    rt->gpu_dense_scatter_dispatch_delta = 0;
+    rt->sort_runtime_ns = 0;
     if (rt->tuple_cxt != nullptr) {
         MemoryContextReset(rt->tuple_cxt);
     }
     if (PlanState* child = outerPlanState(node)) {
         ExecReScan(child);
     }
+}
+
+void
+BioseqBatchSort_ExplainCustomScan(CustomScanState* node, List* ancestors, ExplainState* es)
+{
+    (void)ancestors;
+    auto* rt = runtime_of(node);
+    if (rt == nullptr) {
+        ExplainPropertyText("Bioseq Sort Accelerator", "not initialized", es);
+        return;
+    }
+    ExplainPropertyText("Bioseq Sort Accelerator", rt->accelerator, es);
+    ExplainPropertyInteger("Bioseq Sort Rows", nullptr,
+                           static_cast<int64>(rt->sorted_rows), es);
+    ExplainPropertyInteger("Bioseq Sort Runtime Ns", nullptr,
+                           static_cast<int64>(rt->sort_runtime_ns), es);
+    ExplainPropertyInteger("Bioseq GPU Sort Dispatches", nullptr,
+                           static_cast<int64>(rt->gpu_dispatch_delta), es);
+    ExplainPropertyInteger("Bioseq GPU Global Compare Dispatches", nullptr,
+                           static_cast<int64>(rt->gpu_global_compare_dispatch_delta), es);
+    ExplainPropertyInteger("Bioseq GPU Dense Scatter Dispatches", nullptr,
+                           static_cast<int64>(rt->gpu_dense_scatter_dispatch_delta), es);
+    ExplainPropertyInteger("Bioseq GPU Sort Uploaded Bytes", nullptr,
+                           static_cast<int64>(rt->gpu_uploaded_bytes_delta), es);
 }
 
 /* Method tables are defined AFTER their callbacks (DOC0326 — no forward
@@ -356,6 +440,7 @@ const CustomExecMethods BioseqBatchSortExecMethods = {
     .ExecCustomScan    = BioseqBatchSort_ExecCustomScan,
     .EndCustomScan     = BioseqBatchSort_EndCustomScan,
     .ReScanCustomScan  = BioseqBatchSort_ReScanCustomScan,
+    .ExplainCustomScan = BioseqBatchSort_ExplainCustomScan,
 };
 
 Node*
@@ -456,7 +541,7 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
     }
     /* Opt-in (default OFF): leave PostgreSQL's own Sort in place unless the
      * operator turns this prototype on. Doubles as the A/B toggle (off => core
-     * Sort sorts the sequence; on => our reverse-placeholder node). */
+     * Sort sorts the sequence; on => this custom batch sort node). */
     if (!bioseq_enable_sequence_sort_scan) {
         return;
     }
@@ -525,9 +610,7 @@ bioseq_batch_sort_init()
     DefineCustomBoolVariable(
         "bioseq.enable_sequence_sort_scan",
         "Route ORDER BY on a bioseq.seq column through the BioseqBatchSortScan "
-        "outer custom scan instead of a core Sort. Prototype: the batch processor "
-        "currently REVERSES the batch rather than sorting (real comparison is out "
-        "of scope), so this is OFF by default.",
+        "outer custom scan instead of a core Sort. Prototype: OFF by default.",
         NULL,
         &bioseq_enable_sequence_sort_scan,
         false,

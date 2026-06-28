@@ -70,6 +70,12 @@ enum class ShaderKind : std::uint8_t {
     seq_sort_extract_key_generic,
     seq_sort_tiebreak_dna4,
     seq_sort_tiebreak_generic,
+    seq_sort_global_compare_dna4,
+    seq_sort_global_compare_generic,
+    seq_sort_dense_scatter_dna4,
+    seq_sort_dense_scatter_generic,
+    seq_sort_prefix_check_dna4,
+    seq_sort_prefix_check_generic,
     align_extend_banded_affine,
     align_extend_simple_cigar,
 };
@@ -151,7 +157,14 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::seq_sort_extract_key_dna4:
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
-        case ShaderKind::seq_sort_tiebreak_generic:   return DescriptorLayoutKind::seq_sort;
+        case ShaderKind::seq_sort_tiebreak_generic:
+        case ShaderKind::seq_sort_global_compare_dna4:
+        case ShaderKind::seq_sort_global_compare_generic:
+        case ShaderKind::seq_sort_dense_scatter_dna4:
+        case ShaderKind::seq_sort_dense_scatter_generic:
+        case ShaderKind::seq_sort_prefix_check_dna4:
+        case ShaderKind::seq_sort_prefix_check_generic:
+            return DescriptorLayoutKind::seq_sort;
         case ShaderKind::align_extend_banded_affine:  return DescriptorLayoutKind::align_extension;
         case ShaderKind::align_extend_simple_cigar:   return DescriptorLayoutKind::align_extension_cigar;
     }
@@ -190,7 +203,14 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::seq_sort_extract_key_dna4:
         case ShaderKind::seq_sort_extract_key_generic:
         case ShaderKind::seq_sort_tiebreak_dna4:
-        case ShaderKind::seq_sort_tiebreak_generic:   return 32;  // SeqSortPush (8 × u32)
+        case ShaderKind::seq_sort_tiebreak_generic:
+        case ShaderKind::seq_sort_global_compare_dna4:
+        case ShaderKind::seq_sort_global_compare_generic:
+        case ShaderKind::seq_sort_dense_scatter_dna4:
+        case ShaderKind::seq_sort_dense_scatter_generic:
+        case ShaderKind::seq_sort_prefix_check_dna4:
+        case ShaderKind::seq_sort_prefix_check_generic:
+            return 40;  // SeqSortPush (10 × u32)
         case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
         case ShaderKind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
     }
@@ -3635,15 +3655,15 @@ void main() {
 //
 // Each kind's body is composed (in shader_body_for) as:
 //   kSeqSortPush + kSeqSortCommon + (dna4?kCanonDna4:kCanonGeneric)
-//                + (key?kSeqSortKeyMain:kSeqSortTiebreakMain)
+//                + one stage main
 // so the dna4/generic canonicalizer is chosen BY ShaderKind (no request
 // threading). Storage width is runtime via pc.unit_bits + read_storage_unit64
 // (the verbatim helper copied from the candidate body — it is function-local
 // there, not a shared symbol). LOCAL_SIZE_X comes from the injected prelude.
 // ===========================================================================
 
-/// Push-constant block (32 bytes == SeqSortPush in runtime.cppm). Identical for
-/// all four kinds so one struct serves every stage.
+/// Push-constant block (40 bytes == SeqSortPush in runtime.cppm). Identical for
+/// all seq-sort kinds so one struct serves every stage.
 constexpr std::string_view kSeqSortPush = R"GLSL(
 layout(push_constant) uniform P {
     uint count;              // row_count (key stage) / range_count (tiebreak stage)
@@ -3653,7 +3673,9 @@ layout(push_constant) uniform P {
     uint char_mask;          // generic only
     uint used_mask_lo;       // used_storage_mask low 32
     uint used_mask_hi;       // used_storage_mask high 32
-    uint pad;
+    uint key_unit_offset;       // dense scatter stage: first unit for the 64-bit key
+    uint sort_size;          // global bitonic stage: k
+    uint sort_stride;        // global bitonic stage: j
 } pc;
 )GLSL";
 
@@ -3716,6 +3738,24 @@ uint64_t canon_key(SeqDesc d) {
         uint base0 = j * lpu();
         uint valid = min(lpu(), d.bp_size - base0);
         uint64_t cu = canon(read_unit(d, j), valid);   // valid bases in TOP ub bits
+        if (filled + ub <= 64u) key |= cu << (64u - filled - ub);
+        else                    key |= cu >> (filled + ub - 64u);
+        filled += ub;
+    }
+    return key;
+}
+
+// 64-bit lexicographic radix key starting at a unit offset. This is used by the
+// dense scatter fast path after a GPU common-prefix proof has established that
+// earlier units are identical across the whole batch.
+uint64_t canon_key_at(SeqDesc d, uint start_unit) {
+    uint64_t key = 0ul; uint filled = 0u;
+    uint ub = unit_bits();
+    for (uint j = start_unit; j < d.unit_count && filled < 64u; ++j) {
+        uint base0 = j * lpu();
+        if (base0 >= d.bp_size) break;
+        uint valid = min(lpu(), d.bp_size - base0);
+        uint64_t cu = canon(read_unit(d, j), valid);
         if (filled + ub <= 64u) key |= cu << (64u - filled - ub);
         else                    key |= cu >> (filled + ub - 64u);
         filled += ub;
@@ -3816,7 +3856,7 @@ void main() {
     uint rid = gl_WorkGroupID.x; uint t = gl_LocalInvocationID.x;
     if (rid >= pc.count) return;
     SeqSortRange r = ranges[rid];
-    if (r.len > LOCAL_SIZE_X) return;                       // CPU handles oversized runs
+    if (r.len > LOCAL_SIZE_X) return;                       // global GPU pass handles oversized runs
     sh_idx[t] = (t < r.len) ? index[r.begin + t] : 0xffffffffu;   // sentinel sorts last
     barrier();
     for (uint size = 2u; size <= LOCAL_SIZE_X; size <<= 1u)
@@ -3837,17 +3877,143 @@ void main() {
 }
 )GLSL";
 
+/// Kernel C main: one global bitonic compare-swap pass over the padded index
+/// buffer. Used only when a 64-bit key collision run is too large for the
+/// per-workgroup tiebreak kernel.
+constexpr std::string_view kSeqSortGlobalCompareMain = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X) in;
+layout(std430, set=0, binding=2) buffer Index { uint index[]; };
+layout(std430, set=0, binding=3) readonly buffer UnusedRanges { uint unused_ranges[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    uint other = i ^ pc.sort_stride;
+    if (other <= i || other >= pc.count) return;
+
+    uint ia = index[i];
+    uint ib = index[other];
+    bool up = (i & pc.sort_size) == 0u;
+    int c;
+    if (ia == 0xffffffffu) c = 1;
+    else if (ib == 0xffffffffu) c = -1;
+    else {
+        c = canon_cmp(descs[ia], descs[ib]);
+        if (c == 0) c = (ia < ib) ? -1 : 1;
+    }
+    bool do_swap = up ? (c > 0) : (c < 0);
+    if (do_swap) {
+        index[i] = ib;
+        index[other] = ia;
+    }
+}
+)GLSL";
+
+/// Kernel D main: dense-rank scatter. This is a verified fast path for batches
+/// whose selected 64-bit canonical key is exactly a permutation of [0,count).
+/// For non-zero key offsets the shader also proves, on device, that all earlier
+/// units match row 0; otherwise sorting by a later key would not be lexicographic.
+constexpr std::string_view kSeqSortDenseScatterMain = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X) in;
+layout(std430, set=0, binding=2) buffer Index { uint index[]; };
+layout(std430, set=0, binding=3) buffer Status { uint status[]; };
+
+bool prefix_matches_first(SeqDesc d) {
+    if (pc.key_unit_offset == 0u) return true;
+    if (pc.sort_size != 0u) return true;  // prefix_check stage already proved it
+    SeqDesc first = descs[0];
+    if (d.bp_size != first.bp_size || d.unit_count != first.unit_count) return false;
+    if (pc.key_unit_offset > d.unit_count) return false;
+    for (uint j = 0u; j < pc.key_unit_offset; ++j) {
+        uint base0 = j * lpu();
+        if (base0 >= d.bp_size) break;
+        uint valid = min(lpu(), d.bp_size - base0);
+        uint64_t ca = canon(read_unit(d, j), valid);
+        uint64_t cb = canon(read_unit(first, j), valid);
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    SeqDesc d = descs[i];
+    if (!prefix_matches_first(d)) {
+        atomicOr(status[0], 2u);
+        return;
+    }
+    uint64_t key = canon_key_at(d, pc.key_unit_offset);
+    if ((key >> 32) != 0ul || uint(key) >= pc.count) {
+        atomicOr(status[0], 1u);
+        return;
+    }
+    uint dst = uint(key);
+    uint old = atomicExchange(index[dst], i);
+    if (old != 0xffffffffu) {
+        atomicOr(status[0], 1u);
+    }
+}
+)GLSL";
+
+/// Kernel E main: parallel common-prefix proof for dense tail keys. One
+/// invocation checks one (row, unit-before-key) pair against row 0 and ORs the
+/// status word on any mismatch. Dense scatter then runs after a command-buffer
+/// barrier with pc.sort_size != 0 to avoid rechecking the prefix serially.
+constexpr std::string_view kSeqSortPrefixCheckMain = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X) in;
+layout(std430, set=0, binding=2) readonly buffer UnusedIndex { uint unused_index[]; };
+layout(std430, set=0, binding=3) buffer Status { uint status[]; };
+
+void main() {
+    if (pc.key_unit_offset == 0u) return;
+    uint linear_id = gl_GlobalInvocationID.x;
+    uint row = linear_id / pc.key_unit_offset;
+    uint j = linear_id - row * pc.key_unit_offset;
+    if (row >= pc.count) return;
+
+    SeqDesc d = descs[row];
+    SeqDesc first = descs[0];
+    if (d.bp_size != first.bp_size || d.unit_count != first.unit_count
+        || pc.key_unit_offset > d.unit_count) {
+        atomicOr(status[0], 2u);
+        return;
+    }
+    uint base0 = j * lpu();
+    if (base0 >= d.bp_size) return;
+    uint valid = min(lpu(), d.bp_size - base0);
+    uint64_t ca = canon(read_unit(d, j), valid);
+    uint64_t cb = canon(read_unit(first, j), valid);
+    if (ca != cb) {
+        atomicOr(status[0], 2u);
+    }
+}
+)GLSL";
+
+enum class SeqSortStage : std::uint8_t {
+    key,
+    tiebreak,
+    global_compare,
+    dense_scatter,
+    prefix_check,
+};
+
 /// Compose a seq-sort kind's full body from the shared snippets. Order matters:
 /// push -> readers/low_symbol_mask -> canon (defines lpu/unit_bits/canon) ->
 /// key/compare (uses canon) -> stage main.
-[[nodiscard]] std::string seq_sort_body(bool dna4, bool key_stage) {
+[[nodiscard]] std::string seq_sort_body(bool dna4, SeqSortStage stage) {
     std::string s;
     s.reserve(kSeqSortPush.size() + kSeqSortReaders.size() + kSeqSortKeyCmp.size() + 1536);
     s += kSeqSortPush;
     s += kSeqSortReaders;
     s += (dna4 ? kCanonDna4 : kCanonGeneric);
     s += kSeqSortKeyCmp;
-    s += (key_stage ? kSeqSortKeyMain : kSeqSortTiebreakMain);
+    switch (stage) {
+        case SeqSortStage::key:            s += kSeqSortKeyMain; break;
+        case SeqSortStage::tiebreak:       s += kSeqSortTiebreakMain; break;
+        case SeqSortStage::global_compare: s += kSeqSortGlobalCompareMain; break;
+        case SeqSortStage::dense_scatter:  s += kSeqSortDenseScatterMain; break;
+        case SeqSortStage::prefix_check:   s += kSeqSortPrefixCheckMain; break;
+    }
     return s;
 }
 
@@ -3900,13 +4066,25 @@ void main() {
         case ShaderKind::generate_units:
             return std::string{kGenerateUnitsBody};
         case ShaderKind::seq_sort_extract_key_dna4:
-            return seq_sort_body(/*dna4=*/true,  /*key_stage=*/true);
+            return seq_sort_body(/*dna4=*/true,  SeqSortStage::key);
         case ShaderKind::seq_sort_extract_key_generic:
-            return seq_sort_body(/*dna4=*/false, /*key_stage=*/true);
+            return seq_sort_body(/*dna4=*/false, SeqSortStage::key);
         case ShaderKind::seq_sort_tiebreak_dna4:
-            return seq_sort_body(/*dna4=*/true,  /*key_stage=*/false);
+            return seq_sort_body(/*dna4=*/true,  SeqSortStage::tiebreak);
         case ShaderKind::seq_sort_tiebreak_generic:
-            return seq_sort_body(/*dna4=*/false, /*key_stage=*/false);
+            return seq_sort_body(/*dna4=*/false, SeqSortStage::tiebreak);
+        case ShaderKind::seq_sort_global_compare_dna4:
+            return seq_sort_body(/*dna4=*/true,  SeqSortStage::global_compare);
+        case ShaderKind::seq_sort_global_compare_generic:
+            return seq_sort_body(/*dna4=*/false, SeqSortStage::global_compare);
+        case ShaderKind::seq_sort_dense_scatter_dna4:
+            return seq_sort_body(/*dna4=*/true,  SeqSortStage::dense_scatter);
+        case ShaderKind::seq_sort_dense_scatter_generic:
+            return seq_sort_body(/*dna4=*/false, SeqSortStage::dense_scatter);
+        case ShaderKind::seq_sort_prefix_check_dna4:
+            return seq_sort_body(/*dna4=*/true,  SeqSortStage::prefix_check);
+        case ShaderKind::seq_sort_prefix_check_generic:
+            return seq_sort_body(/*dna4=*/false, SeqSortStage::prefix_check);
         case ShaderKind::align_extend_banded_affine:
             return std::string{kAlignmentExtensionBandedAffineBody};
         case ShaderKind::align_extend_simple_cigar:
