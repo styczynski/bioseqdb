@@ -1560,17 +1560,17 @@ def tool_subagent_status() -> str:
 # =========================================================================== #
 # remote operations — AWS benchmark machine (main/infra)
 # =========================================================================== #
-# Five tools — remote-status / remote-manage / remote-ssh / remote-run /
-# remote-git — drive the disposable x86_64 Ubuntu benchmark box defined under
+# Remote tools drive the disposable x86_64 Ubuntu benchmark box defined under
 # main/infra/ (OpenTofu + provisioner.py). See main/infra/README.md.
 #
-# MUTEX: every remote operation EXCEPT remote-ssh shares ONE global slot
+# MUTEX: mutating/long remote operations share ONE global slot
 # (REMOTE_STATE_FILE), so at most one remote operation runs at a time across all
 # Claude Code sessions. This is the same anti-footgun guard the local builds have,
 # widened to the remote: it stops an agent from firing `up` ten times and stacking
 # ten paid EC2 instances, or mutating the box's git tree while a remote build is
-# mid-flight. remote-ssh is deliberately OUTSIDE the mutex — it is the read-only
-# escape hatch you use to look around the box while a long remote-run holds the slot.
+# mid-flight. remote-ssh / remote-status-ps / remote-debug are deliberately
+# OUTSIDE the mutex — read-only escape hatches for diagnostics while a long
+# remote-run holds the slot.
 #
 # Long operations (provision, build) detach into a worker (`--run-remote <op_id>`)
 # and return immediately; you poll by re-calling any remote tool (a *running* slot
@@ -2473,6 +2473,62 @@ def tool_remote_debug(arguments: dict) -> str:
     return "\n\n".join(parts)
 
 
+REMOTE_STATUS_PS_CMD = r"""
+echo "## date"
+date
+echo
+echo "## host/build identity"
+echo "host=$(hostname)"
+echo "provision_status=$(cat /opt/bioseq/PROVISION_STATUS 2>/dev/null || true)"
+echo "repo_commit=$(git -C ~/bioseqdb rev-parse --short HEAD 2>/dev/null || true)"
+echo
+echo "## load"
+uptime || true
+echo "nproc=$(nproc 2>/dev/null || true)"
+echo
+echo "## swap"
+swapon --show || true
+echo
+echo "## memory"
+free -h | sed -n '1,3p'
+echo
+echo "## disk"
+df -h / ~/bioseqdb/main/build/aws-x64-linux 2>/dev/null || true
+echo
+echo "## build processes"
+ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args \
+  | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[l]d\.lld|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; }
+"""
+
+
+def tool_remote_status_ps(arguments: dict) -> str:
+    """remote-status-ps — read-only SSH snapshot of build processes and resources.
+
+    This intentionally does not use the remote mutex. It is a narrower, cheaper
+    version of remote-debug for agents that only need the current on-box date,
+    swap, memory, disk, and cmake/ninja/clang/linker/bioseq process list.
+    """
+    timeout = max(5, min(REMOTE_OP_TIMEOUTS["ssh"],
+                         int(arguments.get("timeout", 300))))
+    try:
+        res = subprocess.run(_remote_ssh_argv(REMOTE_STATUS_PS_CMD),
+                             cwd=str(INFRA_DIR), text=True,
+                             capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return (f"remote-status-ps timed out after {timeout}s. "
+                "The box may be too saturated for a fresh SSH session; try "
+                "remote-debug without include_ssh for AWS/SSM-side diagnostics.")
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"remote-status-ps failed to launch: {e}"
+
+    body = res.stdout or ""
+    if (res.stderr or "").strip():
+        body += "\n----- stderr -----\n" + res.stderr
+    if not body.strip():
+        body = "(no output)"
+    return f"remote-status-ps exit={res.returncode}\n{body}"
+
+
 def tool_remote_manage(arguments: dict) -> str:
     """remote-manage — thin wrapper over provisioner.py up/down/status/logs/verify/
     wait/output, under the remote mutex."""
@@ -3060,6 +3116,28 @@ TOOL_DEFINITIONS += [
         },
     },
     {
+        "name": "remote-status-ps",
+        "description": (
+            "Run a concise read-only SSH status snapshot on the AWS box without "
+            "acquiring the remote mutex. It prints date, host/provision status, "
+            "repo commit, load, `swapon --show`, `free -h`, root/build disk "
+            "usage, and the current cmake/ninja/clang/linker/bioseq process list. "
+            "Use it while a long remote-run owns the slot to inspect memory, CPU, "
+            "swap, and active build processes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timeout": {
+                    "type": "integer", "minimum": 5, "maximum": REMOTE_OP_TIMEOUTS["ssh"],
+                    "default": 300,
+                    "description": "Subprocess timeout in seconds for the SSH snapshot.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "remote-manage",
         "description": (
             "Manage the AWS benchmark box — wraps `provisioner.py <operation>` for "
@@ -3490,6 +3568,8 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_remote_status()
     elif name == "remote-debug":
         text = tool_remote_debug(args)
+    elif name == "remote-status-ps":
+        text = tool_remote_status_ps(args)
     elif name == "remote-manage":
         text = tool_remote_manage(args)
     elif name == "remote-ssh":
