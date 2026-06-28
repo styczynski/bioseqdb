@@ -72,6 +72,11 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   else()
     set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/lib/llvm-22/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json)
   endif()
+  # CMake 4.2 + Ninja on the AWS box cannot relink the PostgreSQL extension to
+  # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
+  # Build directly with the install rpath instead; the preset is disposable and
+  # always runs from the vcpkg-installed tree paths.
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
 endif()
