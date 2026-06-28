@@ -1625,6 +1625,7 @@ REMOTE_TERMINAL_STATUSES = {"completed", "failed", "killed_timeout", "aborted"}
 REMOTE_MANAGE_OPS = {"up", "down", "status", "logs", "verify", "wait", "output"}
 # How much of the captured log to inline in a tool response (full log via path).
 REMOTE_LOG_INLINE_CAP = 6000
+REMOTE_DEBUG_INLINE_CAP = 14000
 
 
 # --------------------------- remote state I/O ------------------------------
@@ -1741,6 +1742,200 @@ def _provisioner_outputs() -> dict:
 
 def _provisioner_region() -> str | None:
     return (_provisioner_outputs() or {}).get("region")
+
+
+def _capture_cmd(argv: list[str], *, cwd: Path | None = None,
+                 timeout: int = 20) -> tuple[int | None, str]:
+    try:
+        res = subprocess.run(
+            argv, cwd=str(cwd) if cwd else None, text=True,
+            capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout}s: {' '.join(argv)}"
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"failed to launch {' '.join(argv)}: {e}"
+    body = res.stdout or ""
+    if (res.stderr or "").strip():
+        body += ("\n----- stderr -----\n" + res.stderr)
+    return res.returncode, body.strip() or "(no output)"
+
+
+def _format_cmd_result(title: str, argv: list[str], *, cwd: Path | None = None,
+                       timeout: int = 20, cap: int = REMOTE_DEBUG_INLINE_CAP) -> str:
+    rc, body = _capture_cmd(argv, cwd=cwd, timeout=timeout)
+    if len(body) > cap:
+        body = "…(truncated)…\n" + body[-cap:]
+    return f"## {title}\nexit={rc}\n```\n{body}\n```"
+
+
+def _tail_path(path_text: str | None, lines: int, cap: int = REMOTE_DEBUG_INLINE_CAP) -> str:
+    if not path_text:
+        return "(no log path)"
+    path = Path(path_text)
+    try:
+        data = path.read_text(errors="replace")
+    except OSError as e:
+        return f"(cannot read {path}: {e})"
+    tail = "\n".join(data.splitlines()[-max(1, lines):])
+    if len(tail) > cap:
+        tail = "…(truncated)…\n" + tail[-cap:]
+    return tail or "(empty log)"
+
+
+def _json_dump_limited(obj: Any, cap: int = REMOTE_DEBUG_INLINE_CAP) -> str:
+    text = json.dumps(obj, indent=2, sort_keys=True, default=str)
+    if len(text) > cap:
+        text = text[:cap] + "\n…(truncated)…"
+    return text
+
+
+def _aws_json(args: list[str], *, region: str | None,
+              timeout: int = 20) -> tuple[int | None, Any | str]:
+    argv = ["aws", *args]
+    if region:
+        argv += ["--region", region]
+    argv += ["--output", "json"]
+    rc, body = _capture_cmd(argv, timeout=timeout)
+    if rc != 0:
+        return rc, body
+    try:
+        return rc, json.loads(body)
+    except json.JSONDecodeError:
+        return rc, body
+
+
+def _summarize_instance(data: Any) -> dict:
+    if not isinstance(data, dict):
+        return {"raw": data}
+    reservations = data.get("Reservations") or []
+    instances = []
+    for res in reservations:
+        instances.extend(res.get("Instances") or [])
+    if not instances:
+        return {"instances": []}
+    inst = instances[0]
+    return {
+        "instance_id": inst.get("InstanceId"),
+        "state": (inst.get("State") or {}).get("Name"),
+        "instance_type": inst.get("InstanceType"),
+        "launch_time": inst.get("LaunchTime"),
+        "public_ip": inst.get("PublicIpAddress"),
+        "private_ip": inst.get("PrivateIpAddress"),
+        "subnet_id": inst.get("SubnetId"),
+        "vpc_id": inst.get("VpcId"),
+        "cpu_options": inst.get("CpuOptions"),
+        "root_device_name": inst.get("RootDeviceName"),
+        "volumes": [
+            {
+                "device": b.get("DeviceName"),
+                "volume_id": ((b.get("Ebs") or {}).get("VolumeId")),
+                "delete_on_termination": ((b.get("Ebs") or {}).get("DeleteOnTermination")),
+            }
+            for b in inst.get("BlockDeviceMappings", [])
+        ],
+    }
+
+
+def _summarize_instance_status(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    statuses = data.get("InstanceStatuses") or []
+    if not statuses:
+        return {"instance_statuses": []}
+    st = statuses[0]
+    return {
+        "instance_id": st.get("InstanceId"),
+        "state": (st.get("InstanceState") or {}).get("Name"),
+        "system_status": st.get("SystemStatus"),
+        "instance_status": st.get("InstanceStatus"),
+        "events": st.get("Events"),
+    }
+
+
+def _summarize_cpu_datapoints(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    points = data.get("Datapoints") or []
+    points = sorted(points, key=lambda p: str(p.get("Timestamp")))[-20:]
+    return [
+        {
+            "timestamp": p.get("Timestamp"),
+            "avg": p.get("Average"),
+            "max": p.get("Maximum"),
+            "unit": p.get("Unit"),
+        }
+        for p in points
+    ]
+
+
+def _summarize_ssm_info(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    infos = data.get("InstanceInformationList") or []
+    if not infos:
+        return {"instance_information": []}
+    info = infos[0]
+    return {
+        "instance_id": info.get("InstanceId"),
+        "ping_status": info.get("PingStatus"),
+        "last_ping": info.get("LastPingDateTime"),
+        "agent_version": info.get("AgentVersion"),
+        "is_latest_version": info.get("IsLatestVersion"),
+        "platform": info.get("PlatformName"),
+        "platform_version": info.get("PlatformVersion"),
+        "private_ip": info.get("IPAddress"),
+        "computer_name": info.get("ComputerName"),
+    }
+
+
+def _ssm_read_only_probe(instance_id: str, region: str | None,
+                         timeout: int) -> tuple[int | None, Any | str]:
+    commands = [
+        "echo now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+        "cat /opt/bioseq/PROVISION_STATUS 2>/dev/null || true",
+        "git -C ~/bioseqdb rev-parse --short HEAD 2>/dev/null || true",
+        ("ps -eo pid,ppid,stat,pcpu,pmem,etime,args "
+         "| grep -E 'dispatch_processor\\.cppm|cmake --build .*/aws-x64-linux|"
+         "ninja .*postgresql_bioseq|clang\\+\\+|ld\\.lld' | grep -v grep | tail -40"),
+        "free -h | sed -n '1,2p'",
+        "df -h / /home /opt 2>/dev/null || true",
+    ]
+    rc, data = _aws_json(
+        ["ssm", "send-command",
+         "--instance-ids", instance_id,
+         "--document-name", "AWS-RunShellScript",
+         "--comment", "bioseq-build remote-debug read-only process probe",
+         "--parameters", json.dumps({"commands": commands}),
+         "--timeout-seconds", str(timeout)],
+        region=region,
+        timeout=timeout)
+    if rc != 0 or not isinstance(data, dict):
+        return rc, data
+    command_id = ((data.get("Command") or {}).get("CommandId"))
+    if not command_id:
+        return rc, data
+
+    deadline = time.time() + timeout
+    last: Any | str = data
+    while time.time() < deadline:
+        time.sleep(2)
+        rc, last = _aws_json(
+            ["ssm", "get-command-invocation",
+             "--command-id", command_id,
+             "--instance-id", instance_id],
+            region=region,
+            timeout=max(5, min(20, int(deadline - time.time()) or 5)))
+        if rc == 0 and isinstance(last, dict):
+            status = last.get("Status")
+            if status not in {"Pending", "InProgress", "Delayed"}:
+                return rc, {
+                    "command_id": command_id,
+                    "status": status,
+                    "response_code": last.get("ResponseCode"),
+                    "stdout": last.get("StandardOutputContent"),
+                    "stderr": last.get("StandardErrorContent"),
+                }
+    return None, {"command_id": command_id, "status": "timed_out_waiting"}
 
 
 def _current_local_branch() -> str | None:
@@ -2137,6 +2332,145 @@ def tool_remote_status() -> str:
         "status",
         "provisioner status (AWS box state + on-box PROVISION_STATUS)",
         argv=_provisioner_cmd("status"))
+
+
+def tool_remote_debug(arguments: dict) -> str:
+    """Read-only diagnostics for an active remote operation.
+
+    This intentionally does not use the remote mutex and does not mutate the box.
+    It is the fallback when an already-running remote build holds the mutex and
+    new SSH sessions are slow or timing out during a saturated compile.
+    """
+    log_lines = max(1, min(500, int(arguments.get("log_lines", 80))))
+    cloudwatch_minutes = max(5, min(360, int(arguments.get("cloudwatch_minutes", 120))))
+    include_ssh = parse_bool("include_ssh", arguments.get("include_ssh", False))
+    include_ssm = parse_bool("include_ssm", arguments.get("include_ssm", False))
+    ssh_timeout = max(5, min(120, int(arguments.get("ssh_timeout", 20))))
+    ssm_timeout = max(10, min(120, int(arguments.get("ssm_timeout", 30))))
+
+    state = _load_remote_state()
+    outputs = _provisioner_outputs()
+    instance_id = outputs.get("instance_id")
+    region = outputs.get("region") or _provisioner_region()
+    now = time.time()
+
+    parts: list[str] = [
+        "# Remote Debug",
+        "Read-only diagnostic snapshot. This tool does not acquire the remote "
+        "mutex, does not start/stop instances, and does not signal build processes.",
+        "",
+        "## MCP Remote Slot",
+        "```json\n" + _json_dump_limited({
+            "status": state.get("status"),
+            "step": state.get("step"),
+            "kind": state.get("kind"),
+            "label": state.get("label"),
+            "pid": state.get("pid"),
+            "worker_alive": _is_pid_alive(state.get("pid")),
+            "elapsed": _remote_elapsed(state.get("started_at", now)),
+            "timeout_sec": state.get("timeout_sec"),
+            "log_file": state.get("log_file"),
+            "exit_code": state.get("exit_code"),
+            "notes": state.get("notes"),
+            "classification": state.get("classification"),
+            "payload": state.get("payload"),
+        }) + "\n```",
+    ]
+
+    pid = state.get("pid")
+    if pid:
+        parts.append(_format_cmd_result(
+            "Local Worker Process",
+            ["ps", "-p", str(pid), "-o", "pid,ppid,stat,etime,pcpu,pmem,args"],
+            timeout=5))
+        parts.append(_format_cmd_result(
+            "Local Worker Children",
+            ["pgrep", "-P", str(pid), "-a"],
+            timeout=5))
+
+    parts += [
+        "## Remote Worker Log Tail",
+        f"`{state.get('log_file')}` last {log_lines} lines:",
+        "```\n" + _tail_path(state.get("log_file"), log_lines) + "\n```",
+        "## Terraform Outputs",
+        "```json\n" + _json_dump_limited(outputs) + "\n```",
+    ]
+
+    if instance_id:
+        rc, data = _aws_json(
+            ["ec2", "describe-instances", "--instance-ids", instance_id],
+            region=region)
+        parts.append(
+            "## EC2 Instance\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(_summarize_instance(data))}\n```")
+
+        rc, data = _aws_json(
+            ["ec2", "describe-instance-status", "--include-all-instances",
+             "--instance-ids", instance_id],
+            region=region)
+        parts.append(
+            "## EC2 Status Checks\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(_summarize_instance_status(data))}\n```")
+
+        end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+        start = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(now - cloudwatch_minutes * 60))
+        rc, data = _aws_json(
+            ["cloudwatch", "get-metric-statistics",
+             "--namespace", "AWS/EC2",
+             "--metric-name", "CPUUtilization",
+             "--dimensions", f"Name=InstanceId,Value={instance_id}",
+             "--start-time", start,
+             "--end-time", end,
+             "--period", "60",
+             "--statistics", "Average", "Maximum"],
+            region=region)
+        parts.append(
+            f"## CloudWatch CPU ({cloudwatch_minutes} min)\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(_summarize_cpu_datapoints(data))}\n```")
+
+        rc, data = _aws_json(
+            ["ssm", "describe-instance-information",
+             "--filters", f"Key=InstanceIds,Values={instance_id}"],
+            region=region)
+        ssm_summary = _summarize_ssm_info(data)
+        parts.append(
+            "## SSM Instance Status\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(ssm_summary)}\n```")
+
+        if include_ssm:
+            ping_status = (ssm_summary or {}).get("ping_status") if isinstance(ssm_summary, dict) else None
+            if ping_status == "Online":
+                rc, data = _ssm_read_only_probe(instance_id, region, ssm_timeout)
+                parts.append(
+                    f"## Optional SSM Probe (timeout {ssm_timeout}s)\n"
+                    f"exit={rc}\n```json\n{_json_dump_limited(data)}\n```")
+            else:
+                parts.append(
+                    "## Optional SSM Probe\n"
+                    f"Skipped because SSM PingStatus is {ping_status!r}, not 'Online'.")
+    else:
+        parts.append("## AWS\nNo instance_id found in Terraform outputs.")
+
+    if include_ssh:
+        ssh_cmd = (
+            "echo now=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); "
+            "echo status=$(cat /opt/bioseq/PROVISION_STATUS 2>/dev/null || true); "
+            "git -C ~/bioseqdb rev-parse --short HEAD 2>/dev/null || true; "
+            "ps -eo pid,ppid,stat,pcpu,pmem,etime,args "
+            "| grep -E 'dispatch_processor\\.cppm|cmake --build .*/aws-x64-linux|"
+            "ninja .*postgresql_bioseq|clang\\+\\+|ld\\.lld' | grep -v grep | tail -40; "
+            "free -h | sed -n '1,2p'; "
+            "df -h / /home /opt 2>/dev/null")
+        parts.append(_format_cmd_result(
+            f"Optional SSH Probe (timeout {ssh_timeout}s)",
+            _remote_ssh_argv(ssh_cmd),
+            cwd=INFRA_DIR,
+            timeout=ssh_timeout,
+            cap=REMOTE_DEBUG_INLINE_CAP))
+
+    return "\n\n".join(parts)
 
 
 def tool_remote_manage(arguments: dict) -> str:
@@ -2679,6 +3013,53 @@ TOOL_DEFINITIONS += [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "remote-debug",
+        "description": (
+            "Read-only diagnostics for the AWS benchmark box and the local remote "
+            "MCP worker. Unlike remote-status/remote-manage/remote-run, this tool "
+            "does NOT acquire the remote mutex and can be called while a long build "
+            "owns the slot. It reports local worker process state, the worker log "
+            "tail, Terraform outputs, EC2 instance/status-check data, and recent "
+            "CloudWatch CPU via AWS APIs. Set include_ssh=true to also attempt a "
+            "short bounded read-only SSH process probe; by default it avoids SSH so "
+            "it still works when SSH banner exchange is slow during saturated "
+            "compiles."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "log_lines": {
+                    "type": "integer", "minimum": 1, "maximum": 500, "default": 80,
+                    "description": "Number of local remote-worker log lines to include.",
+                },
+                "cloudwatch_minutes": {
+                    "type": "integer", "minimum": 5, "maximum": 360, "default": 120,
+                    "description": "Lookback window for AWS/EC2 CPUUtilization datapoints.",
+                },
+                "include_ssh": {
+                    "type": "boolean", "default": False,
+                    "description": "Also attempt a bounded read-only SSH ps/free/df probe.",
+                },
+                "include_ssm": {
+                    "type": "boolean", "default": False,
+                    "description": (
+                        "Also attempt a read-only AWS Systems Manager RunCommand "
+                        "ps/free/df probe when the SSM agent is Online."
+                    ),
+                },
+                "ssh_timeout": {
+                    "type": "integer", "minimum": 5, "maximum": 120, "default": 20,
+                    "description": "Subprocess timeout for the optional SSH probe.",
+                },
+                "ssm_timeout": {
+                    "type": "integer", "minimum": 10, "maximum": 120, "default": 30,
+                    "description": "Timeout for the optional SSM read-only probe.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "remote-manage",
         "description": (
             "Manage the AWS benchmark box — wraps `provisioner.py <operation>` for "
@@ -2735,8 +3116,10 @@ TOOL_DEFINITIONS += [
             "NOT under the remote mutex — use it as the read-only escape hatch to "
             "inspect the box (e.g. `cat /opt/bioseq/PROVISION_STATUS`, `git -C "
             "~/bioseqdb log -1`, `nvidia-smi`, `free -h`) while a long remote-run "
-            "holds the slot. Synchronous and bounded (~5 min). For long-running work "
-            "use remote-run / remote-manage, not this."
+            "holds the slot. Synchronous and bounded by the configured remote SSH "
+            "timeout (currently long enough to tolerate saturated compiles). For "
+            "long-running work use remote-run / remote-manage, not this; for "
+            "non-SSH diagnostics use remote-debug."
         ),
         "inputSchema": {
             "type": "object",
@@ -3105,6 +3488,8 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_subagent_status()
     elif name == "remote-status":
         text = tool_remote_status()
+    elif name == "remote-debug":
+        text = tool_remote_debug(args)
     elif name == "remote-manage":
         text = tool_remote_manage(args)
     elif name == "remote-ssh":
