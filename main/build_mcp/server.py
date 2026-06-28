@@ -1709,7 +1709,17 @@ def _remote_ssh_argv(remote_command: str) -> list[str]:
     Workhorse for remote-ssh, remote-git, the logs/verify manage ops, and every
     box-side step of remote-run. (cmd_ssh/cmd_logs themselves os.execvp an
     interactive `ssh -t`, which we avoid here.)"""
-    return _provisioner_cmd("ssh", "bash -lc " + shlex.quote(remote_command))
+    # ssh.service itself is intentionally reniced by bootstrap so fresh SSH
+    # sessions stay reachable under memory-heavy compiles. Commands launched
+    # through those sessions should not inherit the same elevated priority,
+    # otherwise a remote build started over SSH competes with sshd at equal nice.
+    normal_priority_command = (
+        "renice -n 0 -p $$ >/dev/null 2>&1 || true; "
+        "ionice -c 2 -n 4 -p $$ >/dev/null 2>&1 || true; "
+        + remote_command
+    )
+    return _provisioner_cmd("ssh",
+                            "bash -lc " + shlex.quote(normal_priority_command))
 
 
 def _remote_exec(cmd: list[str], log_handle, deadline: float) -> int:
