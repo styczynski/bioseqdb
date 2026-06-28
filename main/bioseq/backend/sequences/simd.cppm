@@ -37,6 +37,13 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+#if HWY_TARGET == HWY_SSE2 || HWY_TARGET == HWY_SSSE3 || \
+    HWY_TARGET == HWY_SSE4 || HWY_TARGET == HWY_AVX2
+#define BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128 1
+#else
+#define BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128 0
+#endif
+
 
 /// Behaviour for ASCII bytes that don't map to a valid alphabet rank.
 ///
@@ -1197,6 +1204,16 @@ template <class D>
 HWY_INLINE std::uint32_t pack_16_dna4_to_u32(
     D d_byte,
     hn::Vec<D> ranks) noexcept {
+#if BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
+    HWY_ALIGN std::uint8_t scratch[16];
+    hn::Store(ranks, d_byte, scratch);
+    std::uint32_t packed = 0;
+    for (std::size_t i = 0; i < 16; ++i) {
+        packed |= static_cast<std::uint32_t>(scratch[i] & 0x03u)
+                  << (2 * i);
+    }
+    return packed;
+#else
     HWY_ALIGN constexpr std::uint8_t shift_pattern[16] = {
         0, 2, 4, 6, 0, 2, 4, 6,
         0, 2, 4, 6, 0, 2, 4, 6};
@@ -1212,6 +1229,7 @@ HWY_INLINE std::uint32_t pack_16_dna4_to_u32(
     const auto multipliers = hn::LoadU(d_u32, multiplier_pattern);
     const auto multiplied = hn::Mul(sums, multipliers);
     return hn::ReduceSum(d_u32, multiplied);
+#endif
 }
 
 /// Detect whether any rank in the 16-byte vector equals the skip
@@ -1961,6 +1979,7 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
     std::size_t cursor = 0;
 
     // Compaction shuffles for the SIMD pack fast path.
+#if !BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
     HWY_ALIGN constexpr std::uint8_t even_indices_pattern[16] = {
         0, 2, 4, 6, 8, 10, 12, 14,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -1969,6 +1988,7 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     const auto even_indices = hn::LoadU(d_byte, even_indices_pattern);
     const auto odd_indices = hn::LoadU(d_byte, odd_indices_pattern);
+#endif
     HWY_ALIGN std::uint8_t store_buf[16];
 
     while (cursor + lanes <= body_size) {
@@ -1994,10 +2014,19 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
         // the SIMD pack writes 8 contiguous bytes. If partial_letters
         // == 1, fall back to scalar to keep state coherent (rare).
         if (local_partial_letters == 0) {
+#if BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
+            HWY_ALIGN std::uint8_t scratch[16];
+            hn::Store(ranks, d_byte, scratch);
+            for (std::size_t i = 0; i < lanes; i += 2) {
+                store_buf[i / 2] = static_cast<std::uint8_t>(
+                    (scratch[i] & 0x07u) | ((scratch[i + 1] & 0x07u) << 3));
+            }
+#else
             const auto evens = hn::TableLookupBytes(ranks, even_indices);
             const auto odds = hn::TableLookupBytes(ranks, odd_indices);
             const auto packed = hn::Or(evens, hn::ShiftLeft<3>(odds));
             hn::Store(packed, d_byte, store_buf);
+#endif
             packed_words->insert(packed_words->end(),
                                   store_buf, store_buf + 8);
             local_total_letters += lanes;
@@ -2756,6 +2785,8 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
 
 }
 HWY_AFTER_NAMESPACE();
+
+#undef BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
 
 namespace bioseq::simd {
 // Target-neutral import surface for code outside HWY_NAMESPACE. This aliases
