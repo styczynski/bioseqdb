@@ -17,9 +17,9 @@ variable "instance_type" {
 }
 
 variable "root_volume_size_gb" {
-  description = "Root EBS volume size (GiB). The build needs room for LLVM (~3 GB), the vcpkg buildtrees/downloads (~15-25 GB), the CMake build tree (~10 GB) plus the repo; 150 GiB leaves comfortable headroom for benchmark temp-file spill."
+  description = "Root EBS volume size (GiB). The build needs room for LLVM, vcpkg buildtrees/downloads, the CMake build tree, the repo, benchmark temp files, and a large swapfile for template-heavy clang module compiles."
   type        = number
-  default     = 150
+  default     = 300
 }
 
 variable "root_volume_type" {

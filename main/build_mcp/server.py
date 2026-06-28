@@ -3093,7 +3093,7 @@ TOOL_DEFINITIONS += [
                 "ami": {"type": "string",
                         "description": "[up] override AMI id (default: latest Ubuntu 24.04 x86_64)."},
                 "volume_size": {"type": "integer", "minimum": 1,
-                                "description": "[up] root volume GiB (default 150)."},
+                                "description": "[up] root volume GiB (default 300)."},
                 "no_verify": {"type": "boolean", "default": False,
                               "description": "[up] skip the on-box build verification."},
                 "wait": {"type": "boolean", "default": True,

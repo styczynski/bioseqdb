@@ -469,7 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--repo", help="owner/name to clone (default styczynski/bioseqdb)")
     up.add_argument("--branch", default="main",
                     help="branch to clone (default main; use research/aws-machine for the unmerged toolchain support)")
-    up.add_argument("--volume-size", dest="volume_size", type=int, help="root volume GiB (default 150)")
+    up.add_argument("--volume-size", dest="volume_size", type=int, help="root volume GiB (default 300)")
     up.add_argument("--ami", help="override AMI id (default: latest Ubuntu 24.04 x86_64)")
     up.add_argument("--ssh-cidr", dest="ssh_cidr", help="CIDR allowed to SSH (default: your detected /32)")
     up.add_argument("--no-verify", action="store_true", help="skip the on-box build verification")

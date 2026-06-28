@@ -8,7 +8,7 @@ instance_type = "m4.4xlarge"
 
 # Roomy root volume: LLVM + vcpkg buildtrees + the CMake build tree + benchmark
 # temp-file spill all live here.
-root_volume_size_gb = 150
+root_volume_size_gb = 300
 root_volume_type    = "gp3"
 
 # What to clone. NOTE: the AWS_MACHINE_X64 toolchain support lives on
