@@ -36,6 +36,8 @@ echo "[verify] cmake   : $(command -v cmake) -> $(cmake --version | head -1)"
 echo "[verify] ninja   : $(command -v ninja) -> $(ninja --version 2>/dev/null)"
 echo "[verify] vcpkg   : ${VCPKG_ROOT:-<unset>}"
 echo "[verify] env type: ${CMAKE_NAMED_ENV_TYPE:-<unset>}"
+echo "[verify] llvm    : ${BIOSEQ_LLVM_ROOT:-<unset>}"
+echo "[verify] clang   : $(command -v clang++) -> $(clang++ --version | head -1)"
 echo "[verify] modules : ${BIOSEQ_LIBCXX_MODULES_JSON:-<unset>}"
 
 # ---- 1. Configure (this is the long step: vcpkg builds all dependencies) -----
@@ -50,7 +52,7 @@ echo "[verify] configure OK (all dependencies resolved)"
 
 # ---- 2. Build a core target (errors expected ONLY in our code) --------------
 echo "[verify] building target '$TARGET' (keep-going) ..."
-timeout 2400 cmake --build "$BUILD_DIR" --target "$TARGET" -j "$(nproc)" -- -k 0 2>&1 | tee "$BLD_LOG"
+timeout 5400 cmake --build "$BUILD_DIR" --target "$TARGET" -j "$(nproc)" -- -k 0 2>&1 | tee "$BLD_LOG"
 build_rc=${PIPESTATUS[0]}
 
 # ---- 3. Classify -----------------------------------------------------------

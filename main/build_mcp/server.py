@@ -1607,10 +1607,10 @@ REMOTE_OP_TIMEOUTS = {
     "output":  6 * 60,
     "logs":    6 * 60,
     "git":    20 * 60,
-    "ssh":     5 * 60,     # remote-ssh is synchronous; this is its subprocess timeout
+    "ssh":    90 * 60,     # remote-ssh is synchronous; tolerate saturated compiles
     "up":    140 * 60,
     "down":   30 * 60,
-    "verify": 60 * 60,
+    "verify": 90 * 60,
     "wait":  140 * 60,
     "run":   200 * 60,     # provision (if needed) + git sync + full build/bench
 }

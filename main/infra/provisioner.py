@@ -238,14 +238,14 @@ def ssh_target() -> tuple[str, str]:
 
 
 def ssh_base(key: str) -> list[str]:
-    # ConnectTimeout bounds the TCP/handshake wait so an unreachable box fails
-    # fast (e.g. when the bioseq-build MCP drives ssh from a detached worker)
-    # instead of hanging on the ~75s default. ServerAliveInterval/CountMax drops
-    # a session whose box went away mid-command rather than blocking indefinitely.
+    # The reference builder can spend ~50 minutes in a single heavily templated
+    # clang++ translation unit with CPU saturated. Keep SSH alive through that
+    # compile and let the MCP/build hard timeout, not SSH liveness, decide when a
+    # clean build has really exceeded the 90-minute budget.
     return ["ssh", "-i", key, "-o", "StrictHostKeyChecking=accept-new",
             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-            "-o", "ConnectTimeout=10",
-            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
+            "-o", "ConnectTimeout=90",
+            "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=90"]
 
 
 def remote_status() -> str | None:

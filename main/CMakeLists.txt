@@ -59,18 +59,22 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "W")
 elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   # x86_64 Ubuntu reference box provisioned by main/infra (see
   # main/infra/testing_infra + main/infra/provisioner.py). clang/libc++ 22 are
-  # installed from apt.llvm.org under /usr/lib/llvm-22; CMake is pinned to 4.2.1,
-  # whose import-std experimental UUID is the same value the "H" box uses. The
-  # libc++ modules.json lives under a multiarch sub-path on Linux, so the
-  # provisioner discovers the exact file and exports BIOSEQ_LIBCXX_MODULES_JSON;
-  # we honour that override and otherwise fall back to the canonical location.
-  set(CMAKE_C_COMPILER /usr/lib/llvm-22/bin/clang)
-  set(CMAKE_CXX_COMPILER /usr/lib/llvm-22/bin/clang++)
+  # installed by bootstrap.sh at version >= 22.1.6. apt.llvm.org normally uses
+  # /usr/lib/llvm-22; the official tarball fallback uses /opt/llvm-22, exported
+  # as BIOSEQ_LLVM_ROOT. CMake is pinned to 4.2.1, whose import-std experimental
+  # UUID is the same value the "H" box uses.
+  if(DEFINED ENV{BIOSEQ_LLVM_ROOT})
+    set(BIOSEQ_LLVM_ROOT "$ENV{BIOSEQ_LLVM_ROOT}")
+  else()
+    set(BIOSEQ_LLVM_ROOT /usr/lib/llvm-22)
+  endif()
+  set(CMAKE_C_COMPILER ${BIOSEQ_LLVM_ROOT}/bin/clang)
+  set(CMAKE_CXX_COMPILER ${BIOSEQ_LLVM_ROOT}/bin/clang++)
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
   if(DEFINED ENV{BIOSEQ_LIBCXX_MODULES_JSON})
     set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}")
   else()
-    set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/lib/llvm-22/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json)
+    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json)
   endif()
   # CMake 4.2 + Ninja on the AWS box cannot relink the PostgreSQL extension to
   # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
@@ -140,6 +144,14 @@ project(
   VERSION 4.2.3
   LANGUAGES CXX
 )
+
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
+    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "22.1.6")
+  message(FATAL_ERROR
+    "AWS_MACHINE_X64 requires clang++ >= 22.1.6; found "
+    "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}. "
+    "Re-run main/infra/testing_infra/scripts/bootstrap.sh.")
+endif()
 
 # --- Build-speed: Reduced BMI for C++ modules -------------------------------
 # clang's reduced BMI (P2615) drops definitions that importers don't need from

@@ -356,21 +356,6 @@ AddCommonTargetX(
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql")
 
-set(BIOSEQ_LOW_MEMORY_DISPATCH_PROCESSOR_DEFAULT OFF)
-if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64")
-  set(BIOSEQ_LOW_MEMORY_DISPATCH_PROCESSOR_DEFAULT ON)
-endif()
-option(BIOSEQ_LOW_MEMORY_DISPATCH_PROCESSOR_OPT
-  "Compile the PostgreSQL dispatch_processor module with lower optimization on memory-constrained reference builders."
-  ${BIOSEQ_LOW_MEMORY_DISPATCH_PROCESSOR_DEFAULT})
-if(BIOSEQ_LOW_MEMORY_DISPATCH_PROCESSOR_OPT)
-  set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor.cppm"
-    PROPERTIES COMPILE_OPTIONS "-O1")
-  message(STATUS
-    "bioseq: dispatch_processor.cppm compile-memory relief enabled (-O1 for this source)")
-endif()
-
 AddCommonTargetX(
   postgresql_bioseq
   TYPE POSTGRES_EXTENSION

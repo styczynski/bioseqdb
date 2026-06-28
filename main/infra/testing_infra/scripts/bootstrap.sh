@@ -21,6 +21,9 @@ USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 REPO_DEST="${REPO_DEST:-$USER_HOME/bioseqdb}"
 RUN_VERIFY="${RUN_VERIFY:-1}"
 LLVM_VERSION=22
+LLVM_MIN_VERSION=22.1.6
+LLVM_RELEASE_CANDIDATES=(22.1.8 22.1.7 22.1.6)
+LLVM_ROOT="${LLVM_ROOT:-/usr/lib/llvm-$LLVM_VERSION}"
 CMAKE_VERSION=4.2.1
 NINJA_VERSION=1.12.1
 PG_VERSION=17
@@ -50,9 +53,28 @@ apt-get install -y --no-install-recommends \
   || fail "apt base deps"
 
 # --- 2. clang / libc++ 22 (apt.llvm.org, with prebuilt-tarball fallback) -----
-echo "[bootstrap] LLVM/clang $LLVM_VERSION"
+echo "[bootstrap] LLVM/clang $LLVM_VERSION (min $LLVM_MIN_VERSION)"
+clang_version() {
+  "$1" --version 2>/dev/null \
+    | sed -nE 's/.*version ([0-9]+[.][0-9]+[.][0-9]+).*/\1/p' \
+    | head -1
+}
+
+llvm_root_meets_min() {
+  local root="$1"
+  local clang="$root/bin/clang++"
+  local have
+  [ -x "$clang" ] || return 1
+  have="$(clang_version "$clang")"
+  [ -n "$have" ] || return 1
+  dpkg --compare-versions "$have" ge "$LLVM_MIN_VERSION"
+}
+
 install_llvm() {
-  [ -x "/usr/lib/llvm-$LLVM_VERSION/bin/clang++" ] && return 0
+  if llvm_root_meets_min "/usr/lib/llvm-$LLVM_VERSION"; then
+    LLVM_ROOT="/usr/lib/llvm-$LLVM_VERSION"
+    return 0
+  fi
   # Preferred: apt.llvm.org (installs into the canonical /usr/lib/llvm-N path).
   if curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh; then
     chmod +x /tmp/llvm.sh
@@ -60,10 +82,13 @@ install_llvm() {
     apt-get install -y \
       "clang-$LLVM_VERSION" "lld-$LLVM_VERSION" "llvm-$LLVM_VERSION-dev" \
       "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" "libunwind-$LLVM_VERSION-dev" || true
-    [ -x "/usr/lib/llvm-$LLVM_VERSION/bin/clang++" ] && return 0
+    if llvm_root_meets_min "/usr/lib/llvm-$LLVM_VERSION"; then
+      LLVM_ROOT="/usr/lib/llvm-$LLVM_VERSION"
+      return 0
+    fi
   fi
-  echo "[bootstrap] apt.llvm.org unavailable; falling back to official LLVM release tarball"
-  for v in 22.1.6 22.1.5 22.1.4 22.1.3 22.1.2 22.1.1 22.1.0; do
+  echo "[bootstrap] apt.llvm.org unavailable or below $LLVM_MIN_VERSION; falling back to official LLVM release tarball"
+  for v in "${LLVM_RELEASE_CANDIDATES[@]}"; do
     for name in "LLVM-$v-Linux-X64.tar.xz" \
                 "clang+llvm-$v-x86_64-linux-gnu-ubuntu-24.04.tar.xz" \
                 "clang+llvm-$v-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
@@ -74,14 +99,20 @@ install_llvm() {
       curl -fL "$url" -o /tmp/llvm.tar.xz || continue
       rm -rf "/opt/llvm-$LLVM_VERSION"; mkdir -p "/opt/llvm-$LLVM_VERSION"
       tar --strip-components=1 -xJf /tmp/llvm.tar.xz -C "/opt/llvm-$LLVM_VERSION" || continue
-      ln -sfn "/opt/llvm-$LLVM_VERSION" "/usr/lib/llvm-$LLVM_VERSION"
-      [ -x "/usr/lib/llvm-$LLVM_VERSION/bin/clang++" ] && return 0
+      if llvm_root_meets_min "/opt/llvm-$LLVM_VERSION"; then
+        LLVM_ROOT="/opt/llvm-$LLVM_VERSION"
+        return 0
+      fi
     done
   done
   return 1
 }
 install_llvm || fail "llvm install (apt + tarball both failed)"
-"/usr/lib/llvm-$LLVM_VERSION/bin/clang" --version | head -1 || fail "clang not runnable"
+CLANG_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang")"
+[ -n "$CLANG_ACTUAL_VERSION" ] || fail "clang version not parseable at $LLVM_ROOT/bin/clang"
+dpkg --compare-versions "$CLANG_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
+  || fail "clang $CLANG_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
+"$LLVM_ROOT/bin/clang" --version | head -1 || fail "clang not runnable"
 
 # --- 3. CMake (pinned: its import-std UUID is hardcoded in CMakeLists.txt) ----
 echo "[bootstrap] CMake $CMAKE_VERSION"
@@ -129,7 +160,7 @@ chown -R "$TARGET_USER:$TARGET_USER" "$VCPKG_ROOT" 2>/dev/null || true
 mkdir -p /opt/vcpkg-cache && chmod 0777 /opt/vcpkg-cache
 
 # --- 7. Discover the libc++ modules.json (multiarch sub-path varies) ---------
-MODULES_JSON="$(find "/usr/lib/llvm-$LLVM_VERSION/" -name 'libc++.modules.json' 2>/dev/null | head -1)"
+MODULES_JSON="$(find "$LLVM_ROOT/" -name 'libc++.modules.json' 2>/dev/null | head -1)"
 echo "[bootstrap] libc++ modules.json = ${MODULES_JSON:-<NOT FOUND>}"
 [ -n "$MODULES_JSON" ] || echo "[bootstrap] WARNING: libc++.modules.json not found; import std may fail to configure"
 
@@ -138,9 +169,10 @@ cat > /etc/profile.d/bioseq.sh <<EOF
 export VCPKG_ROOT=$VCPKG_ROOT
 export VCPKG_DEFAULT_BINARY_CACHE=/opt/vcpkg-cache
 export CMAKE_NAMED_ENV_TYPE=AWS_MACHINE_X64
+export BIOSEQ_LLVM_ROOT=$LLVM_ROOT
 export POSTGRESQL_VERSION=$PG_VERSION
 export BIOSEQ_LIBCXX_MODULES_JSON=${MODULES_JSON}
-export PATH=/opt/cmake/bin:/usr/local/bin:/usr/lib/postgresql/$PG_VERSION/bin:/usr/lib/llvm-$LLVM_VERSION/bin:\$PATH
+export PATH=/opt/cmake/bin:/usr/local/bin:/usr/lib/postgresql/$PG_VERSION/bin:$LLVM_ROOT/bin:\$PATH
 EOF
 chmod 0644 /etc/profile.d/bioseq.sh
 
