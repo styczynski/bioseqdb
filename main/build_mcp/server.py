@@ -2305,6 +2305,11 @@ def _classify_remote_run(payload: dict, rc: int, log_path: Path) -> str | None:
     if rc == 0:
         return ("build_succeeded — the remote build completed with no errors. The "
                 "::NEON / dispatch.h x86_64 gap appears to be closed on this branch.")
+    if "selected Vulkan execution requires a hardware GPU" in text:
+        return ("expected_vulkan_software_device_rejection — selected Vulkan "
+                "execution refused the active software/CPU Vulkan ICD instead of "
+                "silently falling back to CPU. This is the expected policy on a "
+                "box without a trusted hardware Vulkan device.")
     err_lines = [ln for ln in text.splitlines()
                  if " error: " in ln or " fatal error: " in ln]
     our = [ln for ln in err_lines if "/main/bioseq/" in ln]
@@ -2906,11 +2911,30 @@ def tool_remote_run(arguments: dict) -> str:
                     f"{', '.join(sorted(VALID_MODES))}.")
         build_only = parse_bool("build_only", arguments.get("build_only", False))
         debug = parse_bool("debug", arguments.get("debug", False))
+        bench_filter = arguments.get("filter")
+        debug_report = parse_bool("debug_report",
+                                  arguments.get("debug_report", False))
+        mode_details = MODES[mode]
+        if (bench_filter or debug_report) and not mode_details.is_bench_mode:
+            return (f"`filter`/`debug_report` are only valid for bench modes "
+                    f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
+        filter_args, ferr = _filter_to_cli_args(bench_filter)
+        if ferr is not None:
+            return f"Invalid filter: {ferr}"
+        if debug_report and not filter_args:
+            return ("`debug_report` requires a non-empty `filter` — debug is for "
+                    "targeted runs, not for instrumenting an entire benchmark sweep.")
+        bench_flags = list(filter_args)
+        if debug_report:
+            bench_flags.append("--debug")
         payload = {"operation": "build", "mode": mode, "build_only": build_only,
                    "debug": debug, "branch": branch, "sync": sync,
-                   "auto_provision": auto_provision}
+                   "auto_provision": auto_provision,
+                   "bench_flags": bench_flags}
         label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
                  f"(branch={branch}, preset={REMOTE_BUILD_PRESET})")
+        if bench_flags:
+            label += f" bench_flags={' '.join(bench_flags)}"
     elif operation == "inspect":
         function_name = arguments.get("function_name")
         if not isinstance(function_name, str) or not function_name:
@@ -3475,21 +3499,15 @@ TOOL_DEFINITIONS += [
             "using the box-side server.py with the aws-x64-linux preset.\n\n"
             "Two operation shapes (oneOf):\n"
             "  operation='build' — runs one start_build mode (unit+integration, "
-            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug "
-            "semantics as the local start_build tool.\n"
+            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
+            "filter/debug_report semantics as the local start_build tool.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
             "same parameters as the local inspect tool.\n\n"
             "IMPORTANT CAVEATS:\n"
-            "  - The box is x86_64. The build currently fails ON OUR OWN CODE at the "
-            "Highway ::NEON SIMD / macOS dispatch.h (which don't exist on x86_64) — "
-            "this is the EXPECTED outcome (exit non-zero, verdict "
-            "'expected_our_code_failure'); it proves the toolchain + all third-party "
-            "deps build. A 3rd-party/toolchain error would be the real failure.\n"
-            "  - build_only=true is the reliable path today (configure + compile to "
-            "the ::NEON gap). Test/bench modes additionally need a configured "
-            "PostgreSQL + bioseq DB on the box, which the base provisioning does not "
-            "set up; they will only run end-to-end once the ::NEON port lands and the "
-            "DB is prepared.\n"
+            "  - The box is x86_64 Linux. Build/test/bench modes expect the "
+            "provisioned PostgreSQL + bioseq DB to be ready on the box; failures in "
+            "our code should now be treated as real regressions, not as an expected "
+            "::NEON/macOS dispatch.h gap.\n"
             "  - remote inspect needs a successfully-built binary on the box, so it "
             "won't return useful disassembly until the build succeeds." + _REMOTE_MUTEX_NOTE
         ),
@@ -3521,6 +3539,47 @@ TOOL_DEFINITIONS += [
                             "description": ("Use the debug build tree (adds -g + "
                                             "-save-temps for inspect). Rarely needed "
                                             "on the box."),
+                        },
+                        "filter": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "description": (
+                                "Bench-only. Subset selection for bench/bench-fast/"
+                                "bench-io/bench-e2e, translated to the bench binary's "
+                                "repeatable --filter flag. Each present array is an "
+                                "OR-set; the three arrays AND together. Omit an array "
+                                "to leave that axis unconstrained. Values may not "
+                                "contain ',' or '='."
+                            ),
+                            "properties": {
+                                "tags": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                    "description": "Run only benchmarks whose `tags` intersect this set.",
+                                },
+                                "cases": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                    "description": "Within selected benchmarks, run only these matrix.over cases (algorithm names).",
+                                },
+                                "benchmarks": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                    "description": "Run only these benchmark keys. (Maps to the bench CLI's singular `benchmark=`.)",
+                                },
+                            },
+                        },
+                        "debug_report": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Bench-only. Pass --debug to the bench binary and "
+                                "stream report_debug_<N>.jsonl next to report_<N>.json. "
+                                "Requires a non-empty filter."
+                            ),
                         },
                         **_REMOTE_RUN_COMMON_PROPS,
                     },
