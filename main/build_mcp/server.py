@@ -683,6 +683,48 @@ def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
     return cmd
 
 
+def _prepare_aws_postgresql_test_database(active_preset: str, log_handle,
+                                          deadline: float) -> None:
+    """Make the AWS PostgreSQL instance match integration-test defaults."""
+    if not _is_aws_preset(active_preset):
+        return
+
+    log_handle.write(
+        "\n# Preparing AWS PostgreSQL test auth/database "
+        "(postgres/postgres, database bioseq) ...\n")
+    log_handle.flush()
+
+    psql = shutil.which("psql") or "psql"
+    rc = _stream_subprocess(
+        ["sudo", "-n", "-u", "postgres", psql,
+         "-v", "ON_ERROR_STOP=1",
+         "--dbname", "postgres",
+         "--command", "ALTER ROLE postgres WITH LOGIN PASSWORD 'postgres';"],
+        log_handle,
+        deadline,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"PostgreSQL test role setup exited with code {rc}")
+
+    create_db_script = (
+        "set -euo pipefail\n"
+        "if ! psql -Atq --dbname=postgres "
+        "--command \"SELECT 1 FROM pg_database WHERE datname = 'bioseq';\" "
+        "| grep -qx 1; then\n"
+        "  createdb --owner=postgres bioseq\n"
+        "fi\n"
+    )
+    rc = _stream_subprocess(
+        ["sudo", "-n", "-u", "postgres", "bash", "-lc", create_db_script],
+        log_handle,
+        deadline,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"PostgreSQL test database setup exited with code {rc}")
+
+
 def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
     pretty = " ".join(restart_cmd)
     log_handle.write(f"\n+ {pretty}\n")
@@ -887,6 +929,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
     elif active_preset == "aws-x64-linux-gcc16":
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
+    if _is_aws_preset(active_preset):
+        env.setdefault("BIOSEQ_TEST_PGUSER", "postgres")
+        env.setdefault("BIOSEQ_TEST_PGPASSWORD", "postgres")
+        env.setdefault("BIOSEQ_TEST_PGHOST", "localhost")
+        env.setdefault("BIOSEQ_TEST_PGDATABASE", "bioseq")
+        env.setdefault("BIOSEQ_TEST_PGPORT", "5432")
 
     try:
         _update_entry(mode, step="configuring", build_only=build_only,
@@ -1054,6 +1102,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         f"exited with code {rc}")
                 _restart_postgresql(active_build_dir, active_preset,
                                     log_handle, deadline)
+                _prepare_aws_postgresql_test_database(
+                    active_preset, log_handle, deadline)
 
             _update_entry(mode, step="running")
             for cmd in mode_details.commands:

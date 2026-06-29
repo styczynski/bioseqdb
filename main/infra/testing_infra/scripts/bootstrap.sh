@@ -193,6 +193,20 @@ if [ ! -x "/usr/lib/postgresql/$PG_VERSION/bin/pg_config" ]; then
 fi
 "/usr/lib/postgresql/$PG_VERSION/bin/pg_config" --version
 
+echo "[bootstrap] PostgreSQL test auth/database"
+systemctl start postgresql 2>/dev/null || service postgresql start || fail "start postgres"
+sudo -u postgres "/usr/lib/postgresql/$PG_VERSION/bin/psql" \
+  -v ON_ERROR_STOP=1 --dbname postgres \
+  --command "ALTER ROLE postgres WITH LOGIN PASSWORD 'postgres';" \
+  || fail "set postgres test password"
+if ! sudo -u postgres "/usr/lib/postgresql/$PG_VERSION/bin/psql" \
+    -Atq --dbname postgres \
+    --command "SELECT 1 FROM pg_database WHERE datname = 'bioseq';" \
+    | grep -qx 1; then
+  sudo -u postgres "/usr/lib/postgresql/$PG_VERSION/bin/createdb" \
+    --owner=postgres bioseq || fail "create bioseq test database"
+fi
+
 # --- 7. vcpkg ----------------------------------------------------------------
 echo "[bootstrap] vcpkg"
 VCPKG_ROOT=/opt/vcpkg
