@@ -1988,9 +1988,23 @@ try_materialize_target_for_segment_workers(
             constexpr sequence_size_t kOpportunisticIndexMinBp = 4096;
             constexpr std::size_t kGpuBatchMinRows = 2;
 
-            if (selected_vulkan_execution(base_params)
-                && batch_size >= kGpuBatchMinRows
-                && !chunked_scanner_forced) {
+            constexpr bool kSelectedVulkanBatchCompiled =
+#if defined(__APPLE__)
+                true;
+#else
+                false;
+#endif
+
+            if constexpr (!kSelectedVulkanBatchCompiled) {
+                if (selected_vulkan_execution(base_params)
+                    && batch_size >= kGpuBatchMinRows
+                    && !chunked_scanner_forced) {
+                    ++stats.gpu.vulkan_declines;
+                    bioseq_log<DBG>("[bioseq] pg: selected Vulkan resident batch disabled on this platform; falling through to per-row pipeline");
+                }
+            } else if (selected_vulkan_execution(base_params)
+                       && batch_size >= kGpuBatchMinRows
+                       && !chunked_scanner_forced) {
                 const bool selected_vulkan_bounded_cigar =
                     base_params.do_cigar
                     && base_params.vulkan_extend_enabled
