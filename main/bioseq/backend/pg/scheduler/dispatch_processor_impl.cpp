@@ -393,6 +393,41 @@ choose_deferred_minimizer_persist_index(
                 == ChainingAlgorithmType::VULKAN_TILED_DP);
 }
 
+[[nodiscard]] inline bool selected_vulkan_pipeline_trusted_on_this_platform()
+        noexcept {
+#if defined(__APPLE__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+[[nodiscard]] inline Minimap2Params
+fallback_untrusted_selected_vulkan_params(Minimap2Params params) noexcept
+{
+    if (selected_vulkan_pipeline_trusted_on_this_platform()
+        || !selected_vulkan_execution(params)) {
+        return params;
+    }
+
+    params.vulkan_enabled = false;
+    params.vulkan_seed_hits_enabled = false;
+    params.vulkan_index_cache_enabled = false;
+    params.vulkan_fused_frontend_enabled = false;
+    params.vulkan_gpu_index_build_enabled = false;
+    params.vulkan_extend_enabled = false;
+    if (params.minimizer_algorithm
+        == MinimizerAlgorithmType::VULKAN_MINIMAP_INT) {
+        params.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+    }
+    if (params.chaining_algorithm
+        == ChainingAlgorithmType::VULKAN_TILED_DP) {
+        params.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+        params.chaining_mode = ChainingMode::SCALAR_DP;
+    }
+    return params;
+}
+
 [[nodiscard]] inline bool selected_vulkan_coordinate_prereqs_active(
         const Minimap2Params& params) noexcept {
     return params.vulkan_enabled
@@ -1949,10 +1984,22 @@ try_materialize_target_for_segment_workers(
         [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
          per_row_query_hdrs, per_row_query_mode, &target_hdrs, &query_ids,
          &base_params, &stats, scanner_pg_ctx, &results] {
+        const bool selected_vulkan_fallback =
+            selected_vulkan_execution(base_params)
+            && !selected_vulkan_pipeline_trusted_on_this_platform();
+        const Minimap2Params dispatch_params =
+            fallback_untrusted_selected_vulkan_params(base_params);
+        if (selected_vulkan_fallback) {
+            ++stats.gpu.vulkan_declines;
+            bioseq_log<DBG>(
+                "[bioseq] pg: selected Vulkan execution disabled on this "
+                "platform; falling back to scalar CPU minimizer/chaining path");
+        }
+
         pgseq_t::dispatch_instance(alphabet_code, storage_unit_byte_width,
             [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
              per_row_query_hdrs, per_row_query_mode, &target_hdrs, &query_ids,
-             &base_params, &stats, scanner_pg_ctx, &results]<class S>() {
+             &dispatch_params, &stats, scanner_pg_ctx, &results]<class S>() {
             const char* _force_chunked_guc =
                 GetConfigOptionByName("bioseq.test_force_chunked_scanner", NULL, true);
             const bool chunked_scanner_forced =
@@ -1996,22 +2043,22 @@ try_materialize_target_for_segment_workers(
 #endif
 
             if constexpr (!kSelectedVulkanBatchCompiled) {
-                if (selected_vulkan_execution(base_params)
+                if (selected_vulkan_execution(dispatch_params)
                     && batch_size >= kGpuBatchMinRows
                     && !chunked_scanner_forced) {
                     ++stats.gpu.vulkan_declines;
                     bioseq_log<DBG>("[bioseq] pg: selected Vulkan resident batch disabled on this platform; falling through to per-row pipeline");
                 }
-            } else if (selected_vulkan_execution(base_params)
+            } else if (selected_vulkan_execution(dispatch_params)
                        && batch_size >= kGpuBatchMinRows
                        && !chunked_scanner_forced) {
                 const bool selected_vulkan_bounded_cigar =
-                    base_params.do_cigar
-                    && base_params.vulkan_extend_enabled
-                    && selected_vulkan_coordinate_prereqs_active(base_params);
-                if ((!pipe::phase_c_coordinate_only_active(base_params)
+                    dispatch_params.do_cigar
+                    && dispatch_params.vulkan_extend_enabled
+                    && selected_vulkan_coordinate_prereqs_active(dispatch_params);
+                if ((!pipe::phase_c_coordinate_only_active(dispatch_params)
                      && !selected_vulkan_bounded_cigar)
-                    || !pipe::phase_c_index_build_active(base_params)) {
+                    || !pipe::phase_c_index_build_active(dispatch_params)) {
                     ++stats.gpu.vulkan_declines;
                     bioseq::gpu::vulkan::VulkanRuntimeError err{
                         "selected Vulkan batch requires coordinate-only projection "
@@ -2055,9 +2102,9 @@ try_materialize_target_for_segment_workers(
 
                 try {
                     const std::size_t w =
-                        static_cast<std::size_t>(base_params.window_size);
+                        static_cast<std::size_t>(dispatch_params.window_size);
                     const std::size_t k =
-                        static_cast<std::size_t>(base_params.kmer_size);
+                        static_cast<std::size_t>(dispatch_params.kmer_size);
                     std::vector<MinimizerT> all_query_minimizers;
                     std::vector<bioseq::gpu::vulkan::PhaseCSeedQueryRecordWire>
                         query_records;
@@ -2448,7 +2495,7 @@ try_materialize_target_for_segment_workers(
                         return;
                     }
 
-                    auto cp = base_params.to_chaining_params();
+                    auto cp = dispatch_params.to_chaining_params();
                     std::int32_t max_dist_x = cp.max_gap;
                     std::int32_t max_dist_y = cp.max_gap;
                     if (max_dist_x < cp.bandwidth) {
@@ -2499,8 +2546,8 @@ try_materialize_target_for_segment_workers(
                             std::span<const bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>{
                                 gpu_jobs.data(),
                                 gpu_jobs.size()},
-                            static_cast<std::uint32_t>(base_params.kmer_size),
-                            base_params.max_occ,
+                            static_cast<std::uint32_t>(dispatch_params.kmer_size),
+                            dispatch_params.max_occ,
                             chain_key,
                             max_dist_x,
                             max_dist_y,
@@ -2571,7 +2618,7 @@ try_materialize_target_for_segment_workers(
                                 coord,
                                 query_sidecars[query_index].query_len,
                                 target.target_len);
-                        if (!base_params.do_cigar) {
+                        if (!dispatch_params.do_cigar) {
                             results[query_ids[owner.row_index]].push_back(
                                 std::move(result));
                             continue;
@@ -2766,7 +2813,7 @@ try_materialize_target_for_segment_workers(
                     stats.gpu.gpu_cigar_prepare_ns +=
                         gpu_cigar_now_ns() - cigar_prepare_begin_ns;
 
-                    if (base_params.do_cigar && !cigar_jobs.empty()) {
+                    if (dispatch_params.do_cigar && !cigar_jobs.empty()) {
                         const bioseq::gpu::vulkan::GpuAlignmentCigarParams
                             cigar_params{
                                 .alphabet_size = static_cast<std::uint32_t>(
@@ -2778,16 +2825,16 @@ try_materialize_target_for_segment_workers(
                                     k_gpu_alignment_cigar_traceback_tile_len,
                                 .tile_target = bioseq::gpu::vulkan::
                                     k_gpu_alignment_cigar_traceback_tile_len,
-                                .match_score = base_params.match_score,
-                                .mismatch_penalty = base_params.mismatch_pen,
-                                .gap_open_short = base_params.gap_open1,
-                                .gap_extend_short = base_params.gap_ext1,
-                                .gap_open_long = base_params.gap_open2,
-                                .gap_extend_long = base_params.gap_ext2,
-                                .z_drop = base_params.zdrop,
+                                .match_score = dispatch_params.match_score,
+                                .mismatch_penalty = dispatch_params.mismatch_pen,
+                                .gap_open_short = dispatch_params.gap_open1,
+                                .gap_extend_short = dispatch_params.gap_ext1,
+                                .gap_open_long = dispatch_params.gap_open2,
+                                .gap_extend_long = dispatch_params.gap_ext2,
+                                .z_drop = dispatch_params.zdrop,
                                 .end_bonus = std::max<std::int32_t>(
                                     0,
-                                    base_params.end_bonus),
+                                    dispatch_params.end_bonus),
                                 .flags = 0,
                                 .reserved = 0,
                             };
@@ -2901,7 +2948,7 @@ try_materialize_target_for_segment_workers(
                         : static_cast<std::uint64_t>(batch_size);
                     stats.targets_recomputed_minimizers +=
                         static_cast<std::uint64_t>(targets.size());
-                    stats.last_effective_params = base_params;
+                    stats.last_effective_params = dispatch_params;
                     stats.gpu.gpu_batch_pipeline_ns +=
                         gpu_batch_now_ns() - gpu_batch_pipeline_begin_ns;
                     return;
@@ -2918,8 +2965,8 @@ try_materialize_target_for_segment_workers(
 
             auto& pool = bioseq::parallelism::GlobalPool::instance();
             const bool may_dispatch_parallel =
-                !base_params.enable_profiling
-                && !selected_vulkan_execution(base_params)
+                !dispatch_params.enable_profiling
+                && !selected_vulkan_execution(dispatch_params)
                 && !use_scanner_pg
                 && !chunked_scanner_forced
                 && bioseq::parallelism::dispatch_parallel(pool.mode())
@@ -2934,7 +2981,7 @@ try_materialize_target_for_segment_workers(
                     bioseq::parallelism::range_body{
                     [batch_size, alphabet_code, storage_unit_byte_width,
                      query_hdr, per_row_query_hdrs, per_row_query_mode,
-                     &target_hdrs, &base_params, &parallel_done,
+                     &target_hdrs, &dispatch_params, &parallel_done,
                      &parallel_collections, &parallel_params](
                             std::size_t lo, std::size_t hi) {
                         for (std::size_t i = lo; i < hi && i < batch_size; ++i) {
@@ -2958,7 +3005,7 @@ try_materialize_target_for_segment_workers(
                             const size_t min_bp = std::min<size_t>(
                                 static_cast<size_t>(query_seq.bp_size()),
                                 static_cast<size_t>(target_seq.bp_size()));
-                            Minimap2Params params = apply_size_heuristic(base_params, min_bp);
+                            Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
                             auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
                             auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
                             parallel_collections[i] = minimap_port_pg_checked(lazy_query, lazy_target, params);
@@ -3067,7 +3114,7 @@ try_materialize_target_for_segment_workers(
                 MatchResultCollection collection;
                 {
                     ++stats.targets_recomputed_minimizers;
-                    Minimap2Params params = apply_size_heuristic(base_params, min_bp);
+                    Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
                     std::optional<std::vector<MinimapSketchData>> row_query_minimizers;
                     if (use_scanner_pg) {
                         // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
@@ -3111,7 +3158,7 @@ try_materialize_target_for_segment_workers(
                                 // The stored index is ALWAYS w=10,k=15 (pinned at build); the query
                                 // minimizers + the seed pipeline MUST use the same w,k (NOT the size
                                 // heuristic's reduced k), exactly as the legacy prebuilt branch does.
-                                Minimap2Params idx_params = base_params;
+                                Minimap2Params idx_params = dispatch_params;
                                 idx_params.kmer_size = 15; idx_params.window_size = 10;
                                 if (min_bp < 50) { idx_params.min_chain_score = 10; idx_params.min_seed_count = 1; }
                                 else if (min_bp < 200) { idx_params.min_chain_score = 20; idx_params.min_seed_count = 2; }
@@ -3698,7 +3745,7 @@ try_materialize_target_for_segment_workers(
                             if (!assembled) {
                                 const bool try_resident_segment_workers =
                                     target_bp_size > kPgSegmentationThresholdBp
-                                    && !base_params.enable_profiling
+                                    && !dispatch_params.enable_profiling
                                     && bioseq::parallelism::task_parallel(pool.mode())
                                     && pool.max_concurrency() > 1;
                                 if (try_resident_segment_workers) {
