@@ -20,6 +20,7 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.pipe;
 import bioseq.storage.lazy;
 import bioseq.sequences.chaining.utils;
+import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.minimap_port;
 import bioseq.indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq.indexing.minimizer_vulkan;    // GpuIndexCacheIdentity
@@ -834,6 +835,12 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
     gpu.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
     gpu.vulkan_enabled = true;
     gpu.vulkan_seed_hits_enabled = true;
+    if (!::bioseq::chaining::vulkan_chaining_supported()) {
+        REQUIRE_THROWS_AS(
+            doc0307_e2e::run(query, target, gpu),
+            bioseq::gpu::vulkan::VulkanRuntimeError);
+        return;
+    }
     const auto gpu_res = doc0307_e2e::run(query, target, gpu);
 
     REQUIRE_FALSE(cpu_res.results.empty());

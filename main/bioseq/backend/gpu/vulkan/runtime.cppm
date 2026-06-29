@@ -76,6 +76,8 @@ struct VulkanFeatureSet {
     bool shader_int64 = false;
     bool scalar_block_layout = false;
     bool timeline_semaphore = false;
+    bool software_device = false;
+    std::uint32_t device_type = 0;
     std::uint32_t max_workgroup_invocations = 0;
     std::uint32_t max_workgroup_count_x = 0;
     std::uint32_t max_shared_memory_bytes = 0;
@@ -2164,6 +2166,8 @@ void Runtime::init() {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physical_, &props);
+    features_.device_type = static_cast<std::uint32_t>(props.deviceType);
+    features_.software_device = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     features_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
     features_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
     features_.max_shared_memory_bytes = props.limits.maxComputeSharedMemorySize;
@@ -2275,10 +2279,10 @@ void Runtime::init() {
     init_error_.clear();
     bioseq_log<DBG>(
         "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
-        "maxSharedMem={}B, scalarBlockLayout={})",
+        "maxSharedMem={}B, scalarBlockLayout={}, softwareDevice={})",
         props.deviceName, features_.max_workgroup_invocations,
         features_.max_workgroup_count_x, features_.max_shared_memory_bytes,
-        features_.scalar_block_layout);
+        features_.scalar_block_layout, features_.software_device);
 }
 
 void Runtime::shutdown() noexcept {

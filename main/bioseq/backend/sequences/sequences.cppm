@@ -1754,7 +1754,7 @@ public:
     static constexpr std::pair<base_container, size_t> _convert(R&& input_seq) {
         const size_t f_len = input_seq.size() / traits::letters_per_unit + (input_seq.size() % traits::letters_per_unit != 0);
         base_container data(f_len);
-        typename traits::storage_unit buf;
+        typename traits::storage_unit buf = 0;
         size_t bit_count = traits::letters_per_unit;
         size_t write_pos = 0;
         for(const auto& letter : input_seq) {
@@ -2675,4 +2675,3 @@ struct formatter<compact_sequence_range<R>>: formatter<std::string> {
 };
 
 static_assert(fmt::has_formatter<compact_sequence_range<std::vector<seq::dna4>>, char>());
-
