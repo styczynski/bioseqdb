@@ -340,8 +340,8 @@ Datum bioseq_vulkan_runtime_status(PG_FUNCTION_ARGS) {
 	auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
 	const auto& features = runtime.features();
 
-	Datum values[6]{};
-	bool nulls[6]{};
+	Datum values[7]{};
+	bool nulls[7]{};
 	values[0] = BoolGetDatum(features.available);
 	values[1] = CStringGetTextDatum(features.device_name.data());
 	values[2] = Int32GetDatum(static_cast<std::int32_t>(
@@ -356,6 +356,7 @@ Datum bioseq_vulkan_runtime_status(PG_FUNCTION_ARGS) {
 			features.device_local_bytes,
 			static_cast<std::uint64_t>(
 				std::numeric_limits<std::int64_t>::max()))));
+	values[6] = BoolGetDatum(features.software_device);
 
 	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));

@@ -54,6 +54,7 @@ import bioseq.scheduler.dispatch_buffer;
 import bioseq.scheduler.dispatch_processor;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.parallelism.mode;
+import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
 import bioseq.sequences.simd;             // stdc_recode_to_type_params
 import bioseq.sequences.minimap_port;  // for MatchResult
@@ -3981,6 +3982,26 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	if (features.has_mmsearch && selected_vulkan && aligner_params.vulkan_enabled) {
 		bioseq::parallelism::pg::install_pg_shader_provider_if_available();
 		bioseq::parallelism::pg::wait_for_runtime_ready();
+		auto& vulkan_runtime = bioseq::gpu::vulkan::Runtime::instance();
+		if (!vulkan_runtime.usable()) {
+			bioseq_report<ERR, PG>()
+				.code(ERRCODE_INTERNAL_ERROR)
+				.msg("Vulkan aligner execution failed")
+				.detail(fmt::format(
+					"selected Vulkan execution requires a usable Vulkan runtime; initialization_error={}",
+					vulkan_runtime.initialization_error()))
+				.hint("Install a working Vulkan ICD, or select non-Vulkan minimizer/chaining algorithms before dispatch.");
+		}
+		if (vulkan_runtime.features().software_device) {
+			bioseq_report<ERR, PG>()
+				.code(ERRCODE_INTERNAL_ERROR)
+				.msg("Vulkan aligner execution failed")
+				.detail(fmt::format(
+					"selected Vulkan execution requires a hardware GPU; active Vulkan device '{}' is a software/CPU Vulkan device (VkPhysicalDeviceType={})",
+					vulkan_runtime.features().device_name.data(),
+					vulkan_runtime.features().device_type))
+				.hint("Use a hardware Vulkan ICD, or select non-Vulkan minimizer/chaining algorithms before dispatch.");
+		}
 	}
 
 	runtime.aligner_state.params          = aligner_params;

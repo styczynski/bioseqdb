@@ -27,6 +27,14 @@ namespace {
 
 constexpr std::string_view kHoe = "hoe_int";
 
+[[nodiscard]] bool selected_vulkan_runtime_untrusted(
+    const connection_test_context& ctx) {
+    return query_scalar(
+        ctx,
+        "SELECT (NOT available) OR software_device "
+        "FROM bioseq.vulkan_runtime_status();") == "t";
+}
+
 }  // namespace
 
 TEST_CASE("mmsearch on columnar table runs without errors and stays in domain",
@@ -270,7 +278,9 @@ TEST_CASE("selected Vulkan batch rejects CIGAR projection instead of CPU fallbac
     REQUIRE(err.sqlstate == "XX000");
     REQUIRE(err.contains("Vulkan aligner execution failed"));
     REQUIRE((err.contains("GPU CIGAR/extension is not implemented")
-             || err.contains("bounded GPU CIGAR extension")));
+             || err.contains("bounded GPU CIGAR extension")
+             || err.contains("software/CPU Vulkan device")
+             || err.contains("usable Vulkan runtime")));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
@@ -296,6 +306,16 @@ TEST_CASE("selected Vulkan batch emits bounded GPU CIGAR when extension is enabl
         "ORDER BY pk;",
         kHoe,
         hoe_probe_literal());
+    if (selected_vulkan_runtime_untrusted(ctx)) {
+        const auto err = sql_error(ctx, sql);
+        REQUIRE(err.sqlstate == "XX000");
+        REQUIRE(err.contains("Vulkan aligner execution failed"));
+        REQUIRE((err.contains("software/CPU Vulkan device")
+                 || err.contains("usable Vulkan runtime")));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        return;
+    }
+
     const auto rows = query_rows(ctx, sql);
     REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
