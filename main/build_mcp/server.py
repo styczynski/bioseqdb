@@ -683,6 +683,33 @@ def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
     return cmd
 
 
+def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
+    pretty = " ".join(restart_cmd)
+    log_handle.write(f"\n+ {pretty}\n")
+    log_handle.flush()
+    sys.stderr.write(f"\n+ {pretty}\n")
+    sys.stderr.flush()
+    try:
+        result = subprocess.run(
+            restart_cmd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            timeout=90,
+        )
+        log_handle.flush()
+        if result.returncode != 0:
+            msg = (
+                f"PostgreSQL restart exited {result.returncode}; refusing to "
+                "run with a potentially stale bioseq.dylib")
+            _log(f"ERROR: {msg}")
+            raise RuntimeError(msg)
+        _log("PostgreSQL restarted — new dylib is now live")
+    except subprocess.TimeoutExpired as exc:
+        msg = "PostgreSQL restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg) from exc
+
+
 def _restart_postgresql(active_build_dir: Path, active_preset: str,
                         log_handle, deadline: float) -> None:
     """Restart the PostgreSQL postmaster after installing a new extension dylib.
@@ -694,6 +721,16 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
     postmaster restart evicts the stale mapping; the first CREATE EXTENSION
     after restart loads the freshly installed dylib.
     """
+    if sys.platform != "darwin" and _is_aws_preset(active_preset):
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            _log("Restarting PostgreSQL via systemd service to evict stale dylib cache ...")
+            _run_postgresql_restart_cmd(
+                ["sudo", "-n", systemctl, "restart", "postgresql"],
+                log_handle,
+            )
+            return
+
     cmake_cache = active_build_dir / "CMakeCache.txt"
     pg_config: str | None = None
     if cmake_cache.exists():
@@ -768,31 +805,7 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
     # then calls proc.wait() which returns as soon as pg_ctl itself exits
     # (after the postmaster signals readiness), regardless of what the
     # postmaster does with the file handle afterwards.
-    pretty = " ".join(restart_cmd)
-    log_handle.write(f"\n+ {pretty}\n")
-    log_handle.flush()
-    sys.stderr.write(f"\n+ {pretty}\n")
-    sys.stderr.flush()
-    try:
-        result = subprocess.run(
-            restart_cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            timeout=90,
-        )
-        log_handle.flush()
-        if result.returncode != 0:
-            msg = (
-                f"pg_ctl restart exited {result.returncode}; refusing to run "
-                "with a potentially stale bioseq.dylib")
-            _log(f"ERROR: {msg}")
-            raise RuntimeError(msg)
-        else:
-            _log("PostgreSQL restarted — new dylib is now live")
-    except subprocess.TimeoutExpired as exc:
-        msg = "pg_ctl restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
-        _log(f"ERROR: {msg}")
-        raise RuntimeError(msg) from exc
+    _run_postgresql_restart_cmd(restart_cmd, log_handle)
 
 
 # --------------------------- build worker ----------------------------------
