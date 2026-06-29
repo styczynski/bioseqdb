@@ -19,6 +19,9 @@ option(BIOSEQ_ENABLE_PGINDENT_FORMAT_TARGETS
 # Find module already discovers Postgres via pg_config and honours
 # PostgreSQL_ROOT / hints below for non-system install locations
 # (e.g. Postgres.app, Homebrew's postgresql@N).
+if(DEFINED VCPKG_TARGET_TRIPLET)
+  find_package(OpenSSL REQUIRED)
+endif()
 find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
 # Helper command to add extensions

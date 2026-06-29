@@ -153,8 +153,17 @@ HARD_TIMEOUT_MIN = 90.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
+AWS_LEGACY_VCPKG_TRIPLET = "x64-linux"
 AWS_LIBCXX_OVERLAY_TRIPLETS = PROJECT_ROOT / "cmake" / "triplets"
 AWS_LIBCXX_OVERLAY_PORTS = PROJECT_ROOT / "cmake" / "ports"
+AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS = (
+    "OPENSSL*",
+    "_OPENSSL*",
+    "OpenSSL*",
+    "PostgreSQL*",
+    "FIND_PACKAGE_MESSAGE_DETAILS_OpenSSL",
+    "FIND_PACKAGE_MESSAGE_DETAILS_PostgreSQL",
+)
 
 
 def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
@@ -853,6 +862,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             repair_args = [
                 f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
             ]
+            repair_unset_args = []
             repair_reasons = []
             if current_heavy_jobs != AWS_HEAVY_JOBS:
                 repair_reasons.append(
@@ -862,6 +872,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
                 current_overlay = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_TRIPLETS")
                 current_overlay_ports = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_PORTS")
+                current_openssl_details = (
+                    _cmake_cache_value(active_build_dir, "FIND_PACKAGE_MESSAGE_DETAILS_OpenSSL")
+                    or "")
                 overlay_str = str(AWS_LIBCXX_OVERLAY_TRIPLETS)
                 overlay_ports_str = str(AWS_LIBCXX_OVERLAY_PORTS)
                 repair_args += [
@@ -873,6 +886,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     repair_reasons.append(
                         f"VCPKG_TARGET_TRIPLET={AWS_LIBCXX_VCPKG_TRIPLET} "
                         f"(was {current_triplet or 'unset'})")
+                    repair_unset_args.extend(
+                        f"-U{pattern}" for pattern in AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS)
                 if current_overlay != overlay_str:
                     repair_reasons.append(
                         f"VCPKG_OVERLAY_TRIPLETS={overlay_str} "
@@ -881,13 +896,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     repair_reasons.append(
                         f"VCPKG_OVERLAY_PORTS={overlay_ports_str} "
                         f"(was {current_overlay_ports or 'unset'})")
+                if (
+                    f"/vcpkg_installed/{AWS_LEGACY_VCPKG_TRIPLET}/" in current_openssl_details
+                    and f"/vcpkg_installed/{AWS_LIBCXX_VCPKG_TRIPLET}/"
+                    not in current_openssl_details
+                ):
+                    repair_reasons.append(
+                        "clearing stale OpenSSL/PostgreSQL find-package cache "
+                        f"from {AWS_LEGACY_VCPKG_TRIPLET}")
+                    repair_unset_args.extend(
+                        f"-U{pattern}" for pattern in AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS)
             if repair_reasons:
                 log_handle.write("# AWS cache repair: setting "
                                  + "; ".join(repair_reasons) + ".\n")
                 log_handle.flush()
                 rc = _stream_subprocess(
                     ["cmake", "-S", str(PROJECT_ROOT), "-B", str(active_build_dir),
-                     *repair_args],
+                     *dict.fromkeys(repair_unset_args), *repair_args],
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
                 if rc != 0:
