@@ -25,7 +25,7 @@ Architecture:
     - Per-run logs live in /tmp/bioseq_build_mcp_<mode>_<timestamp>.log.
     - Builds are detached via start_new_session=True so they survive Claude
       Code session restarts (a 25-min bench is too long to lose to a closed
-      window). The worker self-enforces a 35-min hard timeout.
+      window). The worker self-enforces a configurable hard timeout.
 
 The MCP protocol is implemented from scratch (initialize, tools/list,
 tools/call) — it's ~30 lines of JSON-RPC, so pulling in the official `mcp`
@@ -138,7 +138,7 @@ def _safe_parallel_jobs() -> int:
     each peak around ~3-4 GB RSS at -O3 + thin-LTO. The previous hardcoded
     -j 32 launched dozens of them at once; on a 16 GB box that swap-thrashed
     to a near-total stall (a cold postgresql_bioseq build completed only 2
-    build edges in the full 35-min hard-timeout window). Budgeting ~3 GB per
+    build edges in the historical 35-min hard-timeout window). Budgeting ~3 GB per
     concurrent heavy compile keeps cold builds making forward progress without
     paging. On this 8-core / 16 GB machine this yields -j 5."""
     cpus = os.cpu_count() or 4
@@ -150,7 +150,7 @@ def _safe_parallel_jobs() -> int:
 
 
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
-HARD_TIMEOUT_MIN = 90.0
+HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "150.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
@@ -386,7 +386,7 @@ class ModeDefinition:
 MODES: Dict[str, ModeDefinition] = {
     "unit+integration": ModeDefinition(
         lock_group="tests",
-        expected_duration_min=22.0,
+        expected_duration_min=120.0,
         build_only_expected_duration_min=10.0,
         label="Unit/integration tests",
         docs="Run all bioseq unit and integration tests",
