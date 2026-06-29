@@ -1939,27 +1939,16 @@ try_materialize_target_for_segment_workers(
     }
 
     /*
-     * Profiler dispatch fork. Picks one of the two pipelines based
-     * on bioseq.aligner.enable_profiling (mirrored into
-     * Minimap2Params::enable_profiling by build_params_from_gucs in
-     * columnar_customscan.cppm). The two compile to genuinely
-     * different code: every templated bioseq::instr::region/loop
-     * call below is instantiated per Args, so the no-profiling
-     * instantiation collapses to nothing.
-     *
-     * We use the run_pipeline lambda + a per-args constexpr-if dispatcher
-     * to share the pipeline body; the templated outer scope owns the
-     * ProfilerBlock + RAII installer when profiling is on.
+     * Profiler dispatch fork. The expensive batch body does not depend on
+     * the instrumentation Args tag, so keep it non-templated and install the
+     * optional top-level profiler scope only around the call. This avoids
+     * compiling the full pgseq_t dispatch tree twice (profiling/no-profiling)
+     * while preserving the downstream non-templated region()/loop() scopes.
      */
     auto run_pipeline_body =
         [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
          per_row_query_hdrs, per_row_query_mode, &target_hdrs, &query_ids,
-         &base_params, &stats, scanner_pg_ctx, &results]
-        <bioseq::instr::is_context_args Args>() {
-        static const auto* batch_desc =
-            bioseq::instr::register_region_static("BatchProcessor.process_sequences");
-        auto _batch_scope = bioseq::instr::region<Args>(batch_desc);
-
+         &base_params, &stats, scanner_pg_ctx, &results] {
         pgseq_t::dispatch_instance(alphabet_code, storage_unit_byte_width,
             [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
              per_row_query_hdrs, per_row_query_mode, &target_hdrs, &query_ids,
@@ -3873,10 +3862,12 @@ try_materialize_target_for_segment_workers(
             bioseq::instr::persistent_profiler_block<TimingArgs>();
         bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
         bioseq::instr::installed_profiler_scope<TimingArgs> timing_guard(timing_profiler_block);
-        run_pipeline_body.template operator()<Args>();
+        static const auto* batch_desc =
+            bioseq::instr::register_region_static("BatchProcessor.process_sequences");
+        auto _batch_scope = bioseq::instr::region<Args>(batch_desc);
+        run_pipeline_body();
     } else {
-        using Args = bioseq::instr::context_args_no_profiling;
-        run_pipeline_body.template operator()<Args>();
+        run_pipeline_body();
     }
 
     return results;
