@@ -154,6 +154,7 @@ HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
 AWS_LIBCXX_OVERLAY_TRIPLETS = PROJECT_ROOT / "cmake" / "triplets"
+AWS_LIBCXX_OVERLAY_PORTS = PROJECT_ROOT / "cmake" / "ports"
 
 
 def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
@@ -860,10 +861,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if active_preset == "aws-x64-linux":
                 current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
                 current_overlay = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_TRIPLETS")
+                current_overlay_ports = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_PORTS")
                 overlay_str = str(AWS_LIBCXX_OVERLAY_TRIPLETS)
+                overlay_ports_str = str(AWS_LIBCXX_OVERLAY_PORTS)
                 repair_args += [
                     f"-DVCPKG_TARGET_TRIPLET={AWS_LIBCXX_VCPKG_TRIPLET}",
                     f"-DVCPKG_OVERLAY_TRIPLETS={overlay_str}",
+                    f"-DVCPKG_OVERLAY_PORTS={overlay_ports_str}",
                 ]
                 if current_triplet != AWS_LIBCXX_VCPKG_TRIPLET:
                     repair_reasons.append(
@@ -873,6 +877,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     repair_reasons.append(
                         f"VCPKG_OVERLAY_TRIPLETS={overlay_str} "
                         f"(was {current_overlay or 'unset'})")
+                if current_overlay_ports != overlay_ports_str:
+                    repair_reasons.append(
+                        f"VCPKG_OVERLAY_PORTS={overlay_ports_str} "
+                        f"(was {current_overlay_ports or 'unset'})")
             if repair_reasons:
                 log_handle.write("# AWS cache repair: setting "
                                  + "; ".join(repair_reasons) + ".\n")

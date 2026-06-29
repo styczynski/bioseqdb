@@ -24,7 +24,7 @@ set(VCPKG_C_FLAGS "")
 # it is compiled into a function without the waitpkg target feature. Disabling
 # that optional path is safer than adding `-mwaitpkg`, because the current AWS
 # m4 host does not advertise WAITPKG.
-set(VCPKG_CXX_FLAGS "-stdlib=libc++ -D__TBB_WAITPKG_INTRINSICS_PRESENT=0")
+set(VCPKG_CXX_FLAGS "-stdlib=libc++ -D__TBB_WAITPKG_INTRINSICS_PRESENT=0 -Wno-unused-command-line-argument")
 set(VCPKG_LINKER_FLAGS "-stdlib=libc++")
 
 # Pins the compiler to clang-22 for port builds (vcpkg uses its own bundled

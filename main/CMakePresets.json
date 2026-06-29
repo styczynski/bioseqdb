@@ -108,6 +108,7 @@
           "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
           "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
           "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports",
           "VCPKG_TARGET_ARCHITECTURE": "x64",
           "BIOSEQ_HEAVY_JOBS": "4"
         }

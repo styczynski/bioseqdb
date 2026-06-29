@@ -1,0 +1,12 @@
+diff --git a/src/linux/disk.cpp b/src/linux/disk.cpp
+index 4c3f0a4..a9d32ad 100644
+--- a/src/linux/disk.cpp
++++ b/src/linux/disk.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <fstream>
+ #include <regex>
++#include <sstream>
+ #include <vector>
+ 
+ namespace {
