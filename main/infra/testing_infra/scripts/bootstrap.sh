@@ -95,6 +95,7 @@ apt-get install -y --no-install-recommends \
   libxcb-randr0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxcb-shape0-dev libxcb-sync-dev \
   libxcb-render-util0-dev libxcb-cursor-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev \
+  mesa-vulkan-drivers vulkan-tools \
   || fail "apt base deps"
 
 # --- 3. clang / libc++ 22 (apt.llvm.org, with prebuilt-tarball fallback) -----

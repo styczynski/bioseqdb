@@ -3307,18 +3307,11 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmTyp
     using target_t = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
     using enum_t   = target_t;  // legacy alias.
     static constexpr target_t default_value = target_t::SCALAR_MM2;
-#if defined(__APPLE__)
     using value_list = value_sequence<target_t,
         target_t::SCALAR_MM2,
         target_t::SIMD_MM2,
         target_t::RMQ,
         target_t::VULKAN_TILED_DP>;
-#else
-    using value_list = value_sequence<target_t,
-        target_t::SCALAR_MM2,
-        target_t::SIMD_MM2,
-        target_t::RMQ>;
-#endif
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
