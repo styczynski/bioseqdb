@@ -461,10 +461,19 @@ struct ResourceSample {
 
     out.tmp_available_kb = parse_u64_prefix(
         run_cmd_capture("df -k /tmp | awk 'NR==2 {print $4}'"));
+#if defined(__APPLE__)
     out.swap_used_mb = parse_double_prefix(run_cmd_capture(
         "sysctl -n vm.swapusage | awk "
         "'{for (i=1; i<=NF; ++i) if ($i == \"used\") {v=$(i+2); "
         "gsub(\"M\", \"\", v); print v; exit}}'"));
+#elif defined(__linux__)
+    out.swap_used_mb = parse_double_prefix(run_cmd_capture(
+        "awk '/^SwapTotal:/ {total=$2} /^SwapFree:/ {free=$2} "
+        "END {if (total >= free) printf \"%.3f\\n\", (total - free) / 1024.0; "
+        "else print 0}' /proc/meminfo"));
+#else
+    out.swap_used_mb = 0.0;
+#endif
     return out;
 }
 
