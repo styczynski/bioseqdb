@@ -152,6 +152,8 @@ CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = 90.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
+AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
+AWS_LIBCXX_OVERLAY_TRIPLETS = PROJECT_ROOT / "cmake" / "triplets"
 
 
 def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
@@ -814,6 +816,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     env = os.environ.copy()
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
+    if active_preset == "aws-x64-linux":
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
+    elif active_preset == "aws-x64-linux-gcc16":
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
 
     try:
         _update_entry(mode, step="configuring", build_only=build_only,
@@ -843,19 +849,42 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
         if active_preset.startswith("aws-x64-linux"):
             current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
+            repair_args = [
+                f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
+            ]
+            repair_reasons = []
             if current_heavy_jobs != AWS_HEAVY_JOBS:
-                log_handle.write(
-                    f"# AWS cache repair: setting BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
-                    f"(was {current_heavy_jobs or 'unset'}).\n")
+                repair_reasons.append(
+                    f"BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
+                    f"(was {current_heavy_jobs or 'unset'})")
+            if active_preset == "aws-x64-linux":
+                current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
+                current_overlay = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_TRIPLETS")
+                overlay_str = str(AWS_LIBCXX_OVERLAY_TRIPLETS)
+                repair_args += [
+                    f"-DVCPKG_TARGET_TRIPLET={AWS_LIBCXX_VCPKG_TRIPLET}",
+                    f"-DVCPKG_OVERLAY_TRIPLETS={overlay_str}",
+                ]
+                if current_triplet != AWS_LIBCXX_VCPKG_TRIPLET:
+                    repair_reasons.append(
+                        f"VCPKG_TARGET_TRIPLET={AWS_LIBCXX_VCPKG_TRIPLET} "
+                        f"(was {current_triplet or 'unset'})")
+                if current_overlay != overlay_str:
+                    repair_reasons.append(
+                        f"VCPKG_OVERLAY_TRIPLETS={overlay_str} "
+                        f"(was {current_overlay or 'unset'})")
+            if repair_reasons:
+                log_handle.write("# AWS cache repair: setting "
+                                 + "; ".join(repair_reasons) + ".\n")
                 log_handle.flush()
                 rc = _stream_subprocess(
                     ["cmake", "-S", str(PROJECT_ROOT), "-B", str(active_build_dir),
-                     f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}"],
+                     *repair_args],
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
                 if rc != 0:
                     raise RuntimeError(
-                        f"AWS BIOSEQ_HEAVY_JOBS cache repair exited with code {rc}")
+                        f"AWS cache repair exited with code {rc}")
 
         _update_entry(mode, step="building", build_only=build_only,
                       debug=debug)
