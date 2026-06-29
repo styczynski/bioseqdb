@@ -1222,11 +1222,17 @@ inline void require_gpu_batch_proof(std::string_view algo, const E2eInput& in,
 
 // create_e2e_table: a USING bioseq table matching the active alphabet and the
 // E2E generator's uint64 storage width.
+void disable_e2e_autovacuum(const it::connection_test_context& c,
+                            const std::string& table) {
+    it::exec_sqlf(c, "ALTER TABLE {} SET (autovacuum_enabled = false);", table);
+}
+
 void create_e2e_table(it::connection_test_context& c, const std::string& t,
                       const std::string& seq_type) {
     it::exec_sqlf(c, "DROP TABLE IF EXISTS {} CASCADE;", t);
     it::exec_sqlf(c, "CREATE TABLE {} (header text, seq {}) USING bioseq;",
                   t, seq_type);
+    disable_e2e_autovacuum(c, t);
 }
 
 void create_e2e_batch_pair_table(
@@ -1239,6 +1245,7 @@ void create_e2e_batch_pair_table(
         "CREATE TABLE {} (id int PRIMARY KEY, header text, seq {}, query_seq {}) "
         "USING bioseq;",
         table, seq_type, seq_type);
+    disable_e2e_autovacuum(c, table);
 }
 
 void configure_bioseq_aligner_session(it::connection_test_context& c,
@@ -2024,6 +2031,7 @@ void load_e2e_batch_pair_table(
             "(header text, seq {}) USING bioseq;",
             shared_target_table,
             in.seq_type);
+        disable_e2e_autovacuum(c, shared_target_table);
         it::exec_sqlf(
             c,
             "SELECT bioseq.load('{}'::regclass, '{}');",
@@ -2692,6 +2700,7 @@ struct SortScanOutput {
         "CREATE TABLE {} (pk bigint PRIMARY KEY, seq0 {});",
         in.table,
         in.seq_type);
+    disable_e2e_autovacuum(*in.conn, in.table);
     it::exec_sqlf(
         *in.conn,
         "INSERT INTO {} "
