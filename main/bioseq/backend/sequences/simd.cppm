@@ -1278,16 +1278,18 @@ HWY_INLINE void merge_variable_chunk_into_partial(
     std::uint32_t packed_chunk,
     std::size_t count) noexcept {
     if (count == 0) return;
+    const std::uint32_t valid_mask = (count >= 16)
+        ? std::uint32_t{0xFFFFFFFFu}
+        : static_cast<std::uint32_t>((std::uint64_t{1} << (2 * count)) - 1u);
+    const storage_unit_t valid_chunk =
+        static_cast<storage_unit_t>(packed_chunk & valid_mask);
     const std::size_t shift_amount = 2 * local_partial_letters;
-    local_partial_word |=
-        static_cast<storage_unit_t>(packed_chunk) << shift_amount;
+    local_partial_word |= valid_chunk << shift_amount;
     const std::size_t new_total = local_partial_letters + count;
     if (new_total >= 32) {
         packed_words->push_back(local_partial_word);
         if (new_total > 32) {
-            local_partial_word =
-                static_cast<storage_unit_t>(packed_chunk) >>
-                (64 - shift_amount);
+            local_partial_word = valid_chunk >> (64 - shift_amount);
             local_partial_letters = new_total - 32;
         } else {
             local_partial_word = 0;
