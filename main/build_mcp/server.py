@@ -895,6 +895,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     f"legacy {AWS_LEGACY_VCPKG_TRIPLET} package paths remain "
                     f"after switching to {AWS_LIBCXX_VCPKG_TRIPLET}",
                 )
+            current_generator = _cmake_cache_value(active_build_dir, "CMAKE_GENERATOR")
+            if current_generator and current_generator != "Ninja":
+                _clear_cmake_configure_cache(
+                    active_build_dir,
+                    log_handle,
+                    f"unexpected generator {current_generator!r}; AWS presets require Ninja",
+                )
             current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
             repair_args = [
                 f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
@@ -948,7 +955,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                                  + "; ".join(repair_reasons) + ".\n")
                 log_handle.flush()
                 rc = _stream_subprocess(
-                    ["cmake", "-S", str(PROJECT_ROOT), "-B", str(active_build_dir),
+                    ["cmake", "--preset", active_preset,
                      *dict.fromkeys(repair_unset_args), *repair_args],
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
