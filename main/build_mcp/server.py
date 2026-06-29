@@ -2723,12 +2723,16 @@ echo
 echo "## memory"
 free -h | sed -n '1,3p'
 echo
+echo "## vmstat"
+vmstat 1 3 2>/dev/null || true
+echo
 echo "## disk"
 df -h / ~/bioseqdb/main/build/aws-x64-linux 2>/dev/null || true
 echo
 echo "## build processes"
-ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args \
-  | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[l]d\.lld|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; }
+ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args --cols 220 \
+  | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[l]d\.lld|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; } \
+  | awk '{ if (length($0) > 220) print substr($0, 1, 217) "..."; else print; }'
 """
 
 
