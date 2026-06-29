@@ -107,7 +107,8 @@
           "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
           "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
           "VCPKG_TARGET_TRIPLET": "x64-linux",
-          "VCPKG_TARGET_ARCHITECTURE": "x64"
+          "VCPKG_TARGET_ARCHITECTURE": "x64",
+          "BIOSEQ_HEAVY_JOBS": "4"
         }
       },
       {
@@ -126,7 +127,8 @@
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
           "VCPKG_TARGET_TRIPLET": "x64-linux",
-          "VCPKG_TARGET_ARCHITECTURE": "x64"
+          "VCPKG_TARGET_ARCHITECTURE": "x64",
+          "BIOSEQ_HEAVY_JOBS": "4"
         }
       },
       {

@@ -1,0 +1,6 @@
+module;
+
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION process_sequences_dna4_w1
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET seq::dna4
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH 1
+#include "dispatch_processor_typed_impl.inc"

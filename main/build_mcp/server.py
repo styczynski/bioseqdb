@@ -151,6 +151,22 @@ def _safe_parallel_jobs() -> int:
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = 90.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
+AWS_HEAVY_JOBS = "4"
+
+
+def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return None
+    prefix = f"{key}:"
+    try:
+        with cache.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(prefix):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        return None
+    return None
 
 # Prompt template injected into every `subagent` call.
 # Placeholders replaced at call time via str.replace (not f-string so the JSON
@@ -824,6 +840,22 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 "skipping redundant `cmake --preset` to avoid a full C++-module "
                 "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
             log_handle.flush()
+
+        if active_preset.startswith("aws-x64-linux"):
+            current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
+            if current_heavy_jobs != AWS_HEAVY_JOBS:
+                log_handle.write(
+                    f"# AWS cache repair: setting BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
+                    f"(was {current_heavy_jobs or 'unset'}).\n")
+                log_handle.flush()
+                rc = _stream_subprocess(
+                    ["cmake", "-S", str(PROJECT_ROOT), "-B", str(active_build_dir),
+                     f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}"],
+                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        f"AWS BIOSEQ_HEAVY_JOBS cache repair exited with code {rc}")
 
         _update_entry(mode, step="building", build_only=build_only,
                       debug=debug)
