@@ -72,6 +72,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import ipaddress
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -281,7 +282,160 @@ def ssh_target() -> tuple[str, str]:
         key_path = (TF_DIR / key).resolve()
     if not key_path.exists():
         die(f"ssh key not found at {key_path} — was the stack created on this machine?")
+    ensure_current_ssh_ingress(outs)
     return ip, str(key_path)
+
+
+def _aws_json_quiet(args: list[str], region: str) -> tuple[int, object | None, str]:
+    if not shutil.which("aws"):
+        return 127, None, "aws CLI not found"
+    res = subprocess.run(
+        ["aws", *args, "--region", region, "--output", "json"],
+        text=True, capture_output=True, check=False,
+    )
+    if res.returncode != 0:
+        return res.returncode, None, res.stderr.strip()
+    if not res.stdout.strip():
+        return 0, None, ""
+    try:
+        return 0, json.loads(res.stdout), ""
+    except json.JSONDecodeError as exc:
+        return 1, None, f"invalid AWS JSON output: {exc}"
+
+
+def _cidr_allows_ip(cidr: str, ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+
+
+def _is_stale_auto_ssh_rule(ip_range: dict, current_cidr: str) -> bool:
+    cidr = ip_range.get("CidrIp")
+    description = ip_range.get("Description") or ""
+    if cidr == current_cidr:
+        return False
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    if network.version != 4 or network.prefixlen != 32:
+        return False
+    return description in {
+        "SSH",
+        "SSH current Codex client",
+        "SSH auto-refresh current client IP",
+    }
+
+
+def ensure_current_ssh_ingress(outs: dict) -> None:
+    """Keep SSH reachable when the caller's public IP changes.
+
+    The Terraform stack intentionally locks port 22 to a /32 detected at `up`
+    time. Many residential/ISP links rotate public IPs, so every SSH entry point
+    refreshes the security group with the caller's current /32 before connecting.
+    This does not start/stop/recreate the instance.
+    """
+    if os.environ.get("BIOSEQ_SKIP_DYNAMIC_SSH_INGRESS"):
+        return
+    instance_id = outs.get("instance_id")
+    region = (outs.get("region")
+              or os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION")
+              or "us-east-1")
+    if not instance_id:
+        return
+
+    current_ip = detect_public_ip()
+    if not current_ip:
+        return
+    current_cidr = f"{current_ip}/32"
+
+    rc, instance, err = _aws_json_quiet(
+        ["ec2", "describe-instances",
+         "--instance-ids", str(instance_id),
+         "--query", "Reservations[0].Instances[0].{state:State.Name,sg:SecurityGroups[].GroupId}"],
+        region,
+    )
+    if rc != 0 or not isinstance(instance, dict) or instance.get("state") != "running":
+        if err:
+            print(c(f"warning: could not refresh SSH ingress: {err}", "yellow"), file=sys.stderr)
+        return
+
+    group_ids = [g for g in (instance.get("sg") or []) if isinstance(g, str)]
+    if not group_ids:
+        return
+
+    rc, groups, err = _aws_json_quiet(
+        ["ec2", "describe-security-groups",
+         "--group-ids", *group_ids,
+         "--query", "SecurityGroups[].{id:GroupId,perms:IpPermissions}"],
+        region,
+    )
+    if rc != 0 or not isinstance(groups, list):
+        if err:
+            print(c(f"warning: could not inspect SSH ingress: {err}", "yellow"), file=sys.stderr)
+        return
+
+    for group in groups:
+        group_id = group.get("id") if isinstance(group, dict) else None
+        if not group_id:
+            continue
+        already_allowed = False
+        stale_cidrs: list[str] = []
+        for perm in group.get("perms") or []:
+            if perm.get("IpProtocol") != "tcp":
+                continue
+            if perm.get("FromPort") != 22 or perm.get("ToPort") != 22:
+                continue
+            for ip_range in perm.get("IpRanges") or []:
+                cidr = ip_range.get("CidrIp")
+                if cidr and _cidr_allows_ip(cidr, current_ip):
+                    already_allowed = True
+                if _is_stale_auto_ssh_rule(ip_range, current_cidr):
+                    stale_cidrs.append(cidr)
+        if not already_allowed:
+            permission = [{
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "IpRanges": [{
+                    "CidrIp": current_cidr,
+                    "Description": "SSH auto-refresh current client IP",
+                }],
+            }]
+            rc, _, err = _aws_json_quiet(
+                ["ec2", "authorize-security-group-ingress",
+                 "--group-id", group_id,
+                 "--ip-permissions", json.dumps(permission)],
+                region,
+            )
+            if rc == 0:
+                print(c(f"SSH ingress refreshed for {current_cidr} on {group_id}", "blue"),
+                      file=sys.stderr)
+            elif "InvalidPermission.Duplicate" not in err:
+                print(c(f"warning: could not add SSH ingress for {current_cidr}: {err}", "yellow"),
+                      file=sys.stderr)
+
+        for stale_cidr in sorted(set(stale_cidrs)):
+            permission = [{
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "IpRanges": [{"CidrIp": stale_cidr}],
+            }]
+            rc, _, err = _aws_json_quiet(
+                ["ec2", "revoke-security-group-ingress",
+                 "--group-id", group_id,
+                 "--ip-permissions", json.dumps(permission)],
+                region,
+            )
+            if rc == 0:
+                print(c(f"stale SSH ingress removed for {stale_cidr} on {group_id}", "blue"),
+                      file=sys.stderr)
+            elif "InvalidPermission.NotFound" not in err:
+                print(c(f"warning: could not remove stale SSH ingress {stale_cidr}: {err}", "yellow"),
+                      file=sys.stderr)
 
 
 def ssh_base(key: str) -> list[str]:
