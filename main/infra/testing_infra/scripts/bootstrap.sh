@@ -89,6 +89,7 @@ apt-get install -y --no-install-recommends \
   bison flex autoconf automake autoconf-archive libtool libltdl-dev m4 gettext \
   rsync ninja-build \
   zlib1g-dev libssl-dev \
+  minimap2 \
   xorg-dev libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
   libxfixes-dev libxcursor-dev libxinerama-dev \
   libxcb1-dev libxcb-util-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-image0-dev \
