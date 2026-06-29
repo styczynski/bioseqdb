@@ -45,6 +45,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -179,6 +180,29 @@ def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
     except OSError:
         return None
     return None
+
+
+def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    try:
+        return needle in cache.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
+    log_handle.write(f"# AWS cache repair: clearing CMake configure cache ({reason}).\n")
+    log_handle.flush()
+    for path in (build_dir / "CMakeCache.txt", build_dir / "CMakeFiles"):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError as e:
+            raise RuntimeError(f"failed to remove stale CMake cache path {path}: {e}") from e
 
 # Prompt template injected into every `subagent` call.
 # Placeholders replaced at call time via str.replace (not f-string so the JSON
@@ -858,6 +882,19 @@ def _run_build_worker(mode: str, build_only: bool = False,
             log_handle.flush()
 
         if active_preset.startswith("aws-x64-linux"):
+            if (
+                active_preset == "aws-x64-linux"
+                and _cmake_cache_contains(
+                    active_build_dir,
+                    f"/vcpkg_installed/{AWS_LEGACY_VCPKG_TRIPLET}/",
+                )
+            ):
+                _clear_cmake_configure_cache(
+                    active_build_dir,
+                    log_handle,
+                    f"legacy {AWS_LEGACY_VCPKG_TRIPLET} package paths remain "
+                    f"after switching to {AWS_LIBCXX_VCPKG_TRIPLET}",
+                )
             current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
             repair_args = [
                 f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
