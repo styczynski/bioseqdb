@@ -2733,6 +2733,25 @@ echo "## build processes"
 ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args --cols 220 \
   | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[l]d\.lld|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; } \
   | awk '{ if (length($0) > 220) print substr($0, 1, 217) "..."; else print; }'
+echo
+echo "## postgres processes"
+ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args --cols 220 \
+  | { read -r header; echo "$header"; grep -E '[p]ostgres(:| -D)' | tail -n 80 || true; } \
+  | awk '{ if (length($0) > 220) print substr($0, 1, 217) "..."; else print; }'
+echo
+echo "## pg_stat_activity"
+if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then
+  sudo -u postgres psql -XAt -d postgres -c "select coalesce(datname,'') || '|' || pid || '|' || state || '|' || coalesce(wait_event_type,'') || '|' || coalesce(wait_event,'') || '|' || coalesce(extract(epoch from now()-query_start)::int::text,'') || 's|' || left(regexp_replace(coalesce(query,''), E'[\\n\\r\\t]+', ' ', 'g'), 220) from pg_stat_activity order by query_start nulls last limit 30;" || true
+else
+  echo "(psql or postgres user unavailable)"
+fi
+echo
+echo "## postgres waiting locks"
+if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then
+  sudo -u postgres psql -XAt -d postgres -c "select pid || '|' || locktype || '|' || mode || '|' || granted || '|' || coalesce(relation::regclass::text,'') from pg_locks where not granted limit 30;" || true
+else
+  echo "(psql or postgres user unavailable)"
+fi
 """
 
 
