@@ -671,7 +671,20 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
                 pass
 
 
-def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> None:
+def _is_aws_preset(preset: str) -> bool:
+    return preset.startswith("aws-x64-linux")
+
+
+def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
+    cmake = shutil.which("cmake") or "cmake"
+    cmd = [cmake, "--install", str(active_build_dir), "--component", "bioseq"]
+    if _is_aws_preset(active_preset):
+        return ["sudo", "-n", *cmd]
+    return cmd
+
+
+def _restart_postgresql(active_build_dir: Path, active_preset: str,
+                        log_handle, deadline: float) -> None:
     """Restart the PostgreSQL postmaster after installing a new extension dylib.
 
     On macOS, fork()d backend processes inherit the postmaster's dyld image
@@ -737,6 +750,13 @@ def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> 
     # Rosetta and dyld interact badly with arm64-only extension dylibs.
     if sys.platform == "darwin":
         restart_cmd = ["arch", "-arm64", pg_ctl, "-D", data_dir, "restart"]
+    elif _is_aws_preset(active_preset):
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            restart_cmd = ["sudo", "-n", systemctl, "restart", "postgresql"]
+        else:
+            restart_cmd = ["sudo", "-n", "-u", "postgres",
+                           pg_ctl, "-D", data_dir, "restart"]
     else:
         restart_cmd = [pg_ctl, "-D", data_dir, "restart"]
 
@@ -1012,15 +1032,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if mode_details.install_extension:
                 _update_entry(mode, step="installing extension")
                 rc = _stream_subprocess(
-                    ["cmake", "--install", str(active_build_dir),
-                     "--component", "bioseq"],
+                    _cmake_install_cmd(active_build_dir, active_preset),
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
                 if rc != 0:
                     raise RuntimeError(
                         "extension install (cmake --install --component bioseq) "
                         f"exited with code {rc}")
-                _restart_postgresql(active_build_dir, log_handle, deadline)
+                _restart_postgresql(active_build_dir, active_preset,
+                                    log_handle, deadline)
 
             _update_entry(mode, step="running")
             for cmd in mode_details.commands:
