@@ -109,7 +109,7 @@ TEST_CASE("DOC0258: round-trip cstring -> compact_sequence_stdc -> ascii",
     }
 }
 
-TEST_CASE("dna4 uint64 multiline SIMD encoder masks compacted tail lanes",
+TEST_CASE("dna4 uint64 multiline SIMD encoder handles sentinel chunks",
           "[simd][doc0258]") {
     using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using range_t = compact_sequence_range<config_t>;

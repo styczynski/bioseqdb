@@ -1559,45 +1559,24 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline(
             continue;
         }
 
-        // Slow path: chunk straddles a line boundary. Compact valid
-        // lanes via the precomputed shuffle tables, then pack.
-        const std::uint64_t bits =
-            hn::BitsFromMask(d_byte, hn::Not(sentinel_eq));
-        const std::uint8_t low_mask =
-            static_cast<std::uint8_t>(bits & 0xFFu);
-        const std::uint8_t high_mask =
-            static_cast<std::uint8_t>((bits >> 8) & 0xFFu);
-        const std::size_t low_count =
-            static_cast<std::size_t>(std::popcount(low_mask));
-        const std::size_t high_count =
-            static_cast<std::size_t>(std::popcount(high_mask));
-        const std::size_t total_count = low_count + high_count;
-
-        if (total_count == 0) {
-            read_cursor += lanes;
-            continue;
+        // Slow path: chunk contains newline/unknown sentinels. Keep this
+        // target-independent; mask bit ordering differs across Highway
+        // backends, while this path only runs at multiline boundaries.
+        for (std::size_t lane = 0; lane < lanes; ++lane) {
+            const std::uint8_t letter_rank =
+                fallback_lut[body_bytes[read_cursor + lane]];
+            if (letter_rank == 0xFF) continue;
+            local_partial_word |=
+                static_cast<storage_unit_t>(letter_rank)
+                << (BitsPerChar * local_partial_letters);
+            local_partial_letters += 1;
+            local_total_letters += 1;
+            if (local_partial_letters == LettersPerUnit) {
+                packed_words->push_back(local_partial_word);
+                local_partial_word = 0;
+                local_partial_letters = 0;
+            }
         }
-
-        const auto low_indices = hn::LoadU(
-            d_byte, kCompactLowTable[low_mask].data());
-        const auto high_indices = hn::LoadU(
-            d_byte, kCompactHighTable[high_mask].data());
-        const auto low_compacted =
-            hn::TableLookupBytes(ranks, low_indices);
-        const auto high_compacted =
-            hn::TableLookupBytes(ranks, high_indices);
-        const auto shift_indices = hn::LoadU(
-            d_byte, kShiftLeftByteTable[low_count].data());
-        const auto high_shifted =
-            hn::TableLookupBytes(high_compacted, shift_indices);
-        const auto compacted = hn::Or(low_compacted, high_shifted);
-
-        const std::uint32_t packed_chunk =
-            pack_16_dna4_to_u32(d_byte, compacted);
-        merge_variable_chunk_into_partial(
-            local_partial_word, local_partial_letters, packed_words,
-            packed_chunk, total_count);
-        local_total_letters += total_count;
         read_cursor += lanes;
     }
 
@@ -1730,16 +1709,6 @@ encode_body_chunk_dna4_simd_multiline_until_byte(
             continue;
         }
 
-        const std::uint64_t bits =
-            hn::BitsFromMask(d_byte, hn::Not(sentinel_eq));
-        const std::uint8_t low_mask =
-            static_cast<std::uint8_t>(bits & 0xFFu);
-        const std::uint8_t high_mask =
-            static_cast<std::uint8_t>((bits >> 8) & 0xFFu);
-        const std::size_t low_count =
-            static_cast<std::size_t>(std::popcount(low_mask));
-        const std::size_t total_count = low_count +
-            static_cast<std::size_t>(std::popcount(high_mask));
         const auto lf_eq = hn::Eq(chunk_bytes, lf_marker);
         const auto cr_eq = hn::Eq(chunk_bytes, cr_marker);
         const std::uint64_t newline_bits =
@@ -1747,31 +1716,25 @@ encode_body_chunk_dna4_simd_multiline_until_byte(
         local_newline_count += static_cast<std::size_t>(
             std::popcount(newline_bits & 0xFFFFu));
 
-        if (total_count == 0) {
-            read_cursor += lanes;
-            continue;
+        // Boundary was checked above; this chunk only needs newline/unknown
+        // filtering. Keep the rare multiline-boundary path scalar so it is
+        // independent of target-specific mask bit ordering.
+        for (std::size_t lane = 0; lane < lanes; ++lane) {
+            const std::uint8_t current_byte = body_bytes[read_cursor + lane];
+            if (current_byte == '\n' || current_byte == '\r') continue;
+            const std::uint8_t rank = fallback_lut[current_byte];
+            if (rank == 0xFF) continue;
+            local_partial_word |=
+                static_cast<storage_unit_t>(rank)
+                << (BitsPerChar * local_partial_letters);
+            local_partial_letters += 1;
+            local_total_letters += 1;
+            if (local_partial_letters == LettersPerUnit) {
+                packed_words->push_back(local_partial_word);
+                local_partial_word = 0;
+                local_partial_letters = 0;
+            }
         }
-
-        const auto low_indices = hn::LoadU(
-            d_byte, kCompactLowTable[low_mask].data());
-        const auto high_indices = hn::LoadU(
-            d_byte, kCompactHighTable[high_mask].data());
-        const auto low_compacted =
-            hn::TableLookupBytes(ranks, low_indices);
-        const auto high_compacted =
-            hn::TableLookupBytes(ranks, high_indices);
-        const auto shift_indices = hn::LoadU(
-            d_byte, kShiftLeftByteTable[low_count].data());
-        const auto high_shifted =
-            hn::TableLookupBytes(high_compacted, shift_indices);
-        const auto compacted = hn::Or(low_compacted, high_shifted);
-
-        const std::uint32_t packed_chunk =
-            pack_16_dna4_to_u32(d_byte, compacted);
-        merge_variable_chunk_into_partial(
-            local_partial_word, local_partial_letters, packed_words,
-            packed_chunk, total_count);
-        local_total_letters += total_count;
         read_cursor += lanes;
     }
 
