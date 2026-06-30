@@ -114,9 +114,9 @@
         }
       },
       {
-        "name": "aws-x64-linux-gcc16",
-        "displayName": "AWS x86_64 Linux benchmark box (GCC 16 + libstdc++)",
-        "description": "Experimental GCC 16 build used to compare C++ module compile time against clang-22 on the AWS reference box. Uses the stock x64-linux vcpkg triplet and libstdc++ std-module metadata from the GCC 16 package. This is not the default production remote preset.",
+        "name": "aws-x64-linux-gcc161",
+        "displayName": "AWS x86_64 Linux benchmark box (GCC 16.1 + libstdc++)",
+        "description": "GCC 16.1+ build tree for the AWS x86_64 box. Uses the stock x64-linux vcpkg triplet and libstdc++ std-module metadata from the official GCC 16.1+ install under /opt.",
         "generator": "Ninja",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "environment": {

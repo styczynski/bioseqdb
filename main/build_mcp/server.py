@@ -927,7 +927,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
     if active_preset == "aws-x64-linux":
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
-    elif active_preset == "aws-x64-linux-gcc16":
+    elif active_preset == "aws-x64-linux-gcc161":
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
     if _is_aws_preset(active_preset):
         env.setdefault("BIOSEQ_TEST_PGUSER", "postgres")
@@ -1813,7 +1813,10 @@ PROVISIONER = INFRA_DIR / "provisioner.py"
 # that by exporting BIOSEQ_BUILD_PRESET when we invoke the box-side server.py.
 REMOTE_REPO_PATH = "~/bioseqdb"
 REMOTE_BUILD_PRESET = "aws-x64-linux"
-REMOTE_BUILD_PRESETS = {"aws-x64-linux", "aws-x64-linux-gcc16"}
+REMOTE_BUILD_PRESETS = {
+    "aws-x64-linux",
+    "aws-x64-linux-gcc161",
+}
 
 REMOTE_STATE_FILE = Path("/tmp/bioseq_remote_mcp_state.json")
 REMOTE_LOCK_FILE = Path("/tmp/bioseq_remote_mcp.lock")
@@ -3347,7 +3350,7 @@ _REMOTE_RUN_COMMON_PROPS = {
         "description": (
             "Remote CMake preset exported as BIOSEQ_BUILD_PRESET for the box-side "
             "build worker. The default is the Clang/libc++ AWS preset; use "
-            "aws-x64-linux-gcc16 for the separate GCC 16 build tree."
+            "aws-x64-linux-gcc161 for the separate GCC 16.1 build tree."
         ),
     },
 }
