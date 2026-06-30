@@ -121,6 +121,7 @@ set(BIOSEQ_NOPG_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
 
