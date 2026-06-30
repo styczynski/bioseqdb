@@ -118,6 +118,7 @@ list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
 set(BIOSEQ_NOPG_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
 

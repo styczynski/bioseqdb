@@ -211,7 +211,15 @@ extern "C++" {
 #include "fmt/ostream.h"
 #include "fmt/printf.h"
 #include "fmt/ranges.h"
-#include "fmt/std.h"
+#if defined(__GNUC__) && !defined(__clang__)
+#  undef FMT_EXPORT
+#  define FMT_EXPORT
+#  include "fmt/std.h"
+#  undef FMT_EXPORT
+#  define FMT_EXPORT export
+#else
+#  include "fmt/std.h"
+#endif
 #include "fmt/xchar.h"
 
 #include "src/format.cc"
