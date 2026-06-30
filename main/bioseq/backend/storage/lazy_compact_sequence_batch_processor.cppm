@@ -84,7 +84,9 @@ export namespace bioseq::gpu::sort {
 /// the CPU's symmetric DESC tiebreak even on duplicate sequences.
 [[nodiscard]] inline std::vector<std::size_t>
 apply_direction(std::vector<std::size_t> perm, bool descending) {
-    if (descending) std::reverse(perm.begin(), perm.end());
+    if (descending) {
+        std::reverse(perm.data(), perm.data() + perm.size());
+    }
     return perm;
 }
 
@@ -105,7 +107,7 @@ gpu_sort_sequences(const LazyBatch& batch, const Spec& spec) {
     const std::size_t n = std::ranges::size(batch);
     if (n <= 1) {
         std::vector<std::size_t> order(n);
-        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::iota(order.data(), order.data() + order.size(), std::size_t{0});
         return apply_direction(std::move(order), spec.descending);
     }
     // The 0xffffffff bitonic sentinel + the uint32 GLSL indices require n and
@@ -302,7 +304,9 @@ struct lazy_compact_sequence_batch_processor {
     cpu_sort_sequences(const Batch& batch, const batch_sort_spec& spec) {
         const std::size_t n = std::ranges::size(batch);
         std::vector<std::size_t> order(n);
-        std::iota(order.begin(), order.end(), std::size_t{0});
+        auto* order_begin = order.data();
+        auto* order_end = order_begin + order.size();
+        std::iota(order_begin, order_end, std::size_t{0});
         const bool desc = spec.descending;
         auto less = [&batch, desc](std::size_t i, std::size_t j) {
             const std::strong_ordering c =
@@ -311,7 +315,7 @@ struct lazy_compact_sequence_batch_processor {
             if (c != 0) return desc ? c > 0 : c < 0;
             return desc ? i > j : i < j;   // symmetric tiebreak (§7.4)
         };
-        bioseq::parallelism::GlobalPool::instance().parallel_sort(order.begin(), order.end(), less);
+        bioseq::parallelism::GlobalPool::instance().parallel_sort(order_begin, order_end, less);
         return order;
     }
 
@@ -339,7 +343,7 @@ struct lazy_compact_sequence_batch_processor {
                                      const batch_sort_spec& spec = {}) {
         const std::size_t n = std::ranges::size(batch);
         std::vector<std::size_t> order(n);
-        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::iota(order.data(), order.data() + order.size(), std::size_t{0});
         if (n <= 1) return order;
         if constexpr (!Scanner::supports_fragments()) {   // in-RAM only
             if (auto gpu = bioseq::gpu::sort::gpu_sort_sequences(batch, spec)) {
