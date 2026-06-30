@@ -718,7 +718,7 @@ using kernel_t = typename algorithm_traits<AlgoEnumValue>::kernel_type;
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -750,7 +750,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -782,7 +782,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -816,7 +816,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -2384,7 +2384,7 @@ struct SinkStage {
     sequence_size_t        query_len  = 0;
     sequence_size_t        target_len = 0;
 
-    [[gnu::always_inline]] void on_batch(std::span<AlignRegion> regions) {
+    [[gnu::always_inline]] inline void on_batch(std::span<AlignRegion> regions) {
         dst_->results.reserve(dst_->results.size() + regions.size());
         // `region_slot` is move-consumed into the converted MatchResult; the
         // slot is left in a valid-but-moved-from state and reclaimed by
@@ -2395,7 +2395,7 @@ struct SinkStage {
         }
     }
 
-    [[gnu::always_inline]] void on_completed() noexcept { /* no-op */ }
+    [[gnu::always_inline]] inline void on_completed() noexcept { /* no-op */ }
 };
 
 // =============================================================================
