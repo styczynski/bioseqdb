@@ -20,6 +20,8 @@
  */
 module;
 
+#include <cstdint>
+
 #include "headers/pg_compat.h"
 
 extern "C" {
@@ -43,8 +45,8 @@ export module bioseq.types.pg_compact_sequence;
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
-import bioseq.sequences;
 import bioseq.sequences.simd;
+import bioseq.sequences;
 import bioseq.pg_utils;
 
 export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
