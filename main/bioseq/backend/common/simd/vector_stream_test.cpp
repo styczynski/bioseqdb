@@ -2,7 +2,7 @@
 #include "common_tests.h"
 #include "common.h"
 
-import bioseq.simd.utils;
+import bioseq.sequences.simd;
 import bioseq.simd.vector_stream;
 import bioseq.common.mlogging;
 import bioseq.common.testing;

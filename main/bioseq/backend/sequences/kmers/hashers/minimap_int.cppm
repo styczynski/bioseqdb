@@ -16,7 +16,6 @@ import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
-import bioseq.simd.utils;
 
 export {
 

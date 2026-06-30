@@ -2,13 +2,107 @@
 #include "common_tests.h"
 #include "common.h"
 
-import bioseq.simd.utils;
+import bioseq.sequences.simd;
 import bioseq.common.testing;
 
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+template <class D_IN, class vec_in_t = hn::Vec<D_IN>>
+struct vector_upscaler {
+    template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+    struct rescaled_type { using type = void; };
+
+    template <class D_OUT> requires (d_simd_cmp<D_IN, D_OUT>)
+    struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 1>; };
+
+    template <class D_OUT> requires (d_simd_cmp_1x<D_IN, D_OUT>)
+    struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 2>; };
+
+    template <class D_OUT> requires (d_simd_cmp_2x<D_IN, D_OUT>)
+    struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 4>; };
+
+    template <class D_OUT> requires (d_simd_cmp_3x<D_IN, D_OUT>)
+    struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 8>; };
+
+    template <class D_OUT>
+    using rescaled_t = rescaled_type<D_OUT>::type;
+
+    template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+    [[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+        D_IN& d_in,
+        D_OUT& d_out,
+        vec_in_t v
+    ) requires (d_simd_cmp<D_IN, D_OUT>) {
+        return {v};
+    }
+
+    template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+    [[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+        D_IN& d_in,
+        D_OUT& d_out,
+        vec_in_t v
+    ) requires (d_simd_cmp_1x<D_IN, D_OUT>) {
+        vec_in_t z0 = Zero(d_in);
+        return {
+            BitCast(d_out, InterleaveLower(d_in, v, z0)),
+            BitCast(d_out, InterleaveUpper(d_in, v, z0)),
+        };
+    }
+
+    template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+    [[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+        D_IN& d_in,
+        D_OUT& d_out,
+        vec_in_t v
+    ) requires (d_simd_cmp_2x<D_IN, D_OUT>) {
+        const hn::RepartitionToWide<D_IN> dw;
+        using vec_dw = hn::Vec<decltype(dw)>;
+        vec_in_t z0 = Zero(d_in);
+        vec_dw v0 = Zero(dw);
+        vec_dw v1 = BitCast(dw, InterleaveLower(d_in, v, z0));
+        vec_dw v2 = BitCast(dw, InterleaveUpper(d_in, v, z0));
+        return {
+            BitCast(d_out, InterleaveLower(dw, v1, v0)),
+            BitCast(d_out, InterleaveUpper(dw, v1, v0)),
+            BitCast(d_out, InterleaveLower(dw, v2, v0)),
+            BitCast(d_out, InterleaveUpper(dw, v2, v0)),
+        };
+    }
+
+    template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+    [[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+        D_IN& d_in,
+        D_OUT& d_out,
+        vec_in_t v
+    ) requires (d_simd_cmp_3x<D_IN, D_OUT>) {
+        const hn::RepartitionToWide<D_IN> dw;
+        using vec_dw = hn::Vec<decltype(dw)>;
+        const hn::RepartitionToWideX2<D_IN> dww;
+        using vec_dww = hn::Vec<decltype(dww)>;
+        vec_in_t z0 = Zero(d_in);
+        vec_dw v0 = Zero(dw);
+        vec_dw v1 = BitCast(dw, InterleaveLower(d_in, v, z0));
+        vec_dw v2 = BitCast(dw, InterleaveUpper(d_in, v, z0));
+        vec_dww t0 = Zero(dww);
+        vec_dww t1 = BitCast(dww, InterleaveLower(dw, v1, v0));
+        vec_dww t2 = BitCast(dww, InterleaveUpper(dw, v1, v0));
+        vec_dww t3 = BitCast(dww, InterleaveLower(dw, v2, v0));
+        vec_dww t4 = BitCast(dww, InterleaveUpper(dw, v2, v0));
+        return {
+            BitCast(d_out, InterleaveLower(dww, t1, t0)),
+            BitCast(d_out, InterleaveUpper(dww, t1, t0)),
+            BitCast(d_out, InterleaveLower(dww, t2, t0)),
+            BitCast(d_out, InterleaveUpper(dww, t2, t0)),
+            BitCast(d_out, InterleaveLower(dww, t3, t0)),
+            BitCast(d_out, InterleaveUpper(dww, t3, t0)),
+            BitCast(d_out, InterleaveLower(dww, t4, t0)),
+            BitCast(d_out, InterleaveUpper(dww, t4, t0)),
+        };
+    }
+};
 
 TEMPLATE_TEST_CASE("Correct upscaling of the vector", "[simd]", uint8_t, uint16_t, uint32_t, uint64_t) {
     using unit_t = TestType;

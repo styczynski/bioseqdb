@@ -49,7 +49,6 @@ export module bioseq.sequences.chaining.simd;
 
 import bioseq.common.mlogging;
 import bioseq.sequences.chaining.utils;
-import bioseq.simd.utils;
 import bioseq.common.context;
 import bioseq.instr;
 
@@ -65,6 +64,34 @@ using bioseq::chaining::Chain;
 using bioseq::chaining::ChainingParams;
 using bioseq::chaining::compute_chaining_score;
 using bioseq::chaining::backtrack_chains;
+
+template<class D_I, class D_F>
+HWY_INLINE hn::Vec<D_F> vectorized_fast_log2(
+    D_I d_int, D_F d_float, hn::Vec<D_I> input_int)
+{
+    const auto input_as_float = hn::ConvertTo(d_float, input_int);
+    const auto float_as_int_bits = hn::BitCast(d_int, input_as_float);
+
+    const auto raw_exponent = hn::And(hn::ShiftRight<23>(float_as_int_bits), hn::Set(d_int, 255));
+    const auto biased_exponent = hn::Sub(raw_exponent, hn::Set(d_int, 128));
+    const auto exponent_as_float = hn::ConvertTo(d_float, biased_exponent);
+
+    const auto exponent_clear_mask = hn::Set(d_int, ~(255 << 23));
+    const auto exponent_rebias = hn::Set(d_int, 127 << 23);
+    const auto mantissa_bits = hn::Add(
+        hn::And(float_as_int_bits, exponent_clear_mask), exponent_rebias);
+    const auto normalized_mantissa = hn::BitCast(d_float, mantissa_bits);
+
+    constexpr float poly_c1 = -0.34484843f;
+    constexpr float poly_c2 =  2.02466578f;
+    constexpr float poly_c3 =  0.67487759f;
+
+    const auto inner_term = hn::MulAdd(
+        hn::Set(d_float, poly_c1), normalized_mantissa, hn::Set(d_float, poly_c2));
+    const auto fractional_part = hn::MulSub(inner_term, normalized_mantissa, hn::Set(d_float, poly_c3));
+
+    return hn::Add(exponent_as_float, fractional_part);
+}
 
 // ============================================================================
 // Structure-of-Arrays (SoA) anchor layout for SIMD
