@@ -890,17 +890,13 @@ struct compact_sequence_range_base {
 
     template<IteratorMode M>
     struct iterator_traits {
-        using dereference_t = void;
-    };
-
-    template<>
-    struct iterator_traits<BP> {
-        using dereference_t = traits::storage_unit;
-    };
-
-    template<>
-    struct iterator_traits<SYMBOL> {
-        using dereference_t = traits::alphabet_type;
+        using dereference_t = std::conditional_t<
+            M == BP,
+            typename traits::storage_unit,
+            std::conditional_t<
+                M == SYMBOL,
+                typename traits::alphabet_type,
+                void>>;
     };
 
     template<
@@ -964,20 +960,17 @@ struct compact_sequence_range_base {
         }
 
         template<IteratorMode M>
-        typename iterator_traits<M>::dereference_t _dereference() const;
-
-
-        template<> inline iterator_traits<BP>::dereference_t _dereference<BP>() const {
-            if constexpr (traits::letters_per_unit == 1) {
-                return *this->base();
-            } else {
-                return _current_unit & traits::char_mask;
+        inline typename iterator_traits<M>::dereference_t _dereference() const {
+            if constexpr (M == BP) {
+                if constexpr (traits::letters_per_unit == 1) {
+                    return *this->base();
+                } else {
+                    return _current_unit & traits::char_mask;
+                }
+            } else if constexpr (M == SYMBOL) {
+                typename traits::alphabet_type alph;
+                return alph.assign_rank(_dereference<BP>());
             }
-        }
-
-        template<> inline iterator_traits<SYMBOL>::dereference_t _dereference<SYMBOL>() const {
-            typename traits::alphabet_type alph;
-            return alph.assign_rank(_dereference<BP>());
         }
 
         auto dereference() const {

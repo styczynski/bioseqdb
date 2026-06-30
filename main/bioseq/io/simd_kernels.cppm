@@ -42,8 +42,6 @@ export module bioseq.io.simd_kernels;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 
-export {
-
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::io::simd::HWY_NAMESPACE {
@@ -566,6 +564,8 @@ HWY_AFTER_NAMESPACE();
 // units define non-inline functions exactly once — perfect for this
 // "expose a Highway-backed primitive but hide the templates" use
 // case.
+
+export {
 
 namespace bioseq::io::simd {
 
