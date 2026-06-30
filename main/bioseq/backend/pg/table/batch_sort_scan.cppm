@@ -207,7 +207,9 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 
 	        if (!rt->spec.vulkan_enabled) {
 	            std::vector<std::size_t> stdc_order(row_count);
-	            std::iota(stdc_order.begin(), stdc_order.end(), std::size_t{0});
+	            auto* order_begin = stdc_order.data();
+	            auto* order_end = order_begin + stdc_order.size();
+	            std::iota(order_begin, order_end, std::size_t{0});
 	            const bool descending = rt->spec.descending;
 	            auto less = [&headers, descending](std::size_t i, std::size_t j) {
 	                const std::strong_ordering c =
@@ -217,7 +219,7 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	            };
 	            const auto sort_start = std::chrono::steady_clock::now();
 	            bioseq::parallelism::GlobalPool::instance().parallel_sort(
-	                stdc_order.begin(), stdc_order.end(), less);
+	                order_begin, order_end, less);
 	            const auto sort_end = std::chrono::steady_clock::now();
 	            rt->sort_runtime_ns = static_cast<std::uint64_t>(
 	                std::chrono::duration_cast<std::chrono::nanoseconds>(
