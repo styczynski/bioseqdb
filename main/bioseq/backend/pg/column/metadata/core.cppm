@@ -208,7 +208,7 @@ export struct FormDataBioseqOptions
 	NameData compression;
 
 	// Translate this raw catalog row into the in-memory domain options.
-	[[gnu::always_inline]] BioseqColumnOptions to_options() const {
+	[[gnu::always_inline]] inline BioseqColumnOptions to_options() const {
 		return BioseqColumnOptions{
 			.stripeRowCount   = static_cast<uint64>(stripe_row_limit),
 			.chunkRowCount    = static_cast<uint32>(chunk_group_row_limit),
@@ -2245,13 +2245,13 @@ export struct SubTableRow {
 export struct SubTableManager {
 	// Relation-id resolvers (trivial, hot) — drop the redundant SubTableMetadata
 	// prefix; it is obvious these resolve seq_sub_table relations.
-	[[gnu::always_inline]] static Oid relid() {
+	[[gnu::always_inline]] static inline Oid relid() {
 		return safe_get_relname_relid("seq_sub_table", BioseqColumnNamespaceId());
 	}
-	[[gnu::always_inline]] static Oid pkey_index_relid() {
+	[[gnu::always_inline]] static inline Oid pkey_index_relid() {
 		return safe_get_relname_relid("seq_sub_table_pkey", BioseqColumnNamespaceId());
 	}
-	[[gnu::always_inline]] static Oid active_shard_index_relid() {
+	[[gnu::always_inline]] static inline Oid active_shard_index_relid() {
 		return safe_get_relname_relid("seq_sub_table_active_shard_idx", BioseqColumnNamespaceId());
 	}
 
