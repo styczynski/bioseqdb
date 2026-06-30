@@ -172,7 +172,7 @@ static Oid BioseqColumnChunkIndexRelationId(void);
 static Oid BioseqColumnChunkGroupIndexRelationId(void);
 export Oid BioseqColumnRowMaskIndexRelationId(void);
 static Oid BioseqColumnRowMaskStripeIndexRelationId(void);
-static Oid BioseqColumnNamespaceId(void);
+Oid BioseqColumnNamespaceId(void);
 static uint64_t GetHighestUsedRowNumber(uint64_t storageId);
 static void DeleteStorageFromBioseqColumnMetadataTable(Oid metadataTableId,
 												   AttrNumber storageIdAtrrNumber,
@@ -2071,7 +2071,7 @@ BioseqColumnRowMaskStripeIndexRelationId(void)
  * BioseqColumnNamespaceId returns namespace id of the schema we store columnar
  * related tables.
  */
-static Oid
+Oid
 BioseqColumnNamespaceId(void)
 {
 	Oid nspace = get_namespace_oid("bioseq_internal", true);
