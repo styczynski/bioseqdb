@@ -1813,6 +1813,7 @@ PROVISIONER = INFRA_DIR / "provisioner.py"
 # that by exporting BIOSEQ_BUILD_PRESET when we invoke the box-side server.py.
 REMOTE_REPO_PATH = "~/bioseqdb"
 REMOTE_BUILD_PRESET = "aws-x64-linux"
+REMOTE_BUILD_PRESETS = {"aws-x64-linux", "aws-x64-linux-gcc16"}
 
 REMOTE_STATE_FILE = Path("/tmp/bioseq_remote_mcp_state.json")
 REMOTE_LOCK_FILE = Path("/tmp/bioseq_remote_mcp.lock")
@@ -2265,7 +2266,8 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
                 f"git sync of box to origin/{branch} failed (exit {rc}). Is the "
                 f"branch pushed to origin? Use remote-git / remote-ssh to inspect.")
 
-    env_prefix = f"BIOSEQ_BUILD_PRESET={shlex.quote(REMOTE_BUILD_PRESET)} "
+    active_preset = payload.get("preset", REMOTE_BUILD_PRESET)
+    env_prefix = f"BIOSEQ_BUILD_PRESET={shlex.quote(active_preset)} "
     server_dir = f"{REMOTE_REPO_PATH}/main/build_mcp"
     if operation == "build":
         mode = payload["mode"]
@@ -2903,6 +2905,10 @@ def tool_remote_run(arguments: dict) -> str:
     branch = arguments.get("branch") or _current_local_branch() or "main"
     sync = parse_bool("sync", arguments.get("sync", True))
     auto_provision = parse_bool("auto_provision", arguments.get("auto_provision", True))
+    preset = arguments.get("preset", REMOTE_BUILD_PRESET)
+    if preset not in REMOTE_BUILD_PRESETS:
+        return (f"Invalid preset '{preset}'. remote-run presets: "
+                f"{', '.join(sorted(REMOTE_BUILD_PRESETS))}.")
 
     if operation == "build":
         mode = arguments.get("mode")
@@ -2930,9 +2936,9 @@ def tool_remote_run(arguments: dict) -> str:
         payload = {"operation": "build", "mode": mode, "build_only": build_only,
                    "debug": debug, "branch": branch, "sync": sync,
                    "auto_provision": auto_provision,
-                   "bench_flags": bench_flags}
+                   "bench_flags": bench_flags, "preset": preset}
         label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
-                 f"(branch={branch}, preset={REMOTE_BUILD_PRESET})")
+                 f"(branch={branch}, preset={preset})")
         if bench_flags:
             label += f" bench_flags={' '.join(bench_flags)}"
     elif operation == "inspect":
@@ -2944,8 +2950,9 @@ def tool_remote_run(arguments: dict) -> str:
                          "source_basename", "max_llc_bc_files", "llc_on_bc", "debug")
                         if k in arguments}
         payload = {"operation": "inspect", "inspect_args": inspect_args,
-                   "branch": branch, "sync": sync, "auto_provision": auto_provision}
-        label = f"remote inspect '{function_name}' (branch={branch})"
+                   "branch": branch, "sync": sync, "auto_provision": auto_provision,
+                   "preset": preset}
+        label = f"remote inspect '{function_name}' (branch={branch}, preset={preset})"
     else:
         return ("Invalid 'operation' for remote-run. Use operation='build' (with a "
                 "'mode') or operation='inspect' (with a 'function_name').")
@@ -3331,6 +3338,16 @@ _REMOTE_RUN_COMMON_PROPS = {
             "If no box is currently running, provision one (provisioner up --wait) "
             "before building. This launches a PAID EC2 instance. Set false to fail "
             "fast instead when no box exists."
+        ),
+    },
+    "preset": {
+        "type": "string",
+        "enum": sorted(REMOTE_BUILD_PRESETS),
+        "default": REMOTE_BUILD_PRESET,
+        "description": (
+            "Remote CMake preset exported as BIOSEQ_BUILD_PRESET for the box-side "
+            "build worker. The default is the Clang/libc++ AWS preset; use "
+            "aws-x64-linux-gcc16 for the separate GCC 16 build tree."
         ),
     },
 }

@@ -88,6 +88,8 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64_GCC16")
   # module implementation compiles the template-heavy PostgreSQL target faster.
   if(DEFINED ENV{BIOSEQ_GCC16_ROOT})
     set(BIOSEQ_GCC16_ROOT "$ENV{BIOSEQ_GCC16_ROOT}")
+  elseif(EXISTS /opt/gcc-16.1.0/bin/g++-16)
+    set(BIOSEQ_GCC16_ROOT /opt/gcc-16.1.0)
   else()
     set(BIOSEQ_GCC16_ROOT /usr)
   endif()
@@ -96,6 +98,10 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64_GCC16")
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
   if(DEFINED ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON})
     set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON}")
+  elseif(EXISTS ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-pc-linux-gnu/16.1.0/libstdc++.modules.json)
+    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-pc-linux-gnu/16.1.0/libstdc++.modules.json)
+  elseif(EXISTS ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
+    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
   else()
     set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
   endif()
@@ -172,9 +178,9 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     "Re-run main/infra/testing_infra/scripts/bootstrap.sh.")
 endif()
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16"
-    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "16")
+    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "16.1")
   message(FATAL_ERROR
-    "AWS_MACHINE_X64_GCC16 requires g++ >= 16; found "
+    "AWS_MACHINE_X64_GCC16 requires g++ >= 16.1; found "
     "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}.")
 endif()
 
