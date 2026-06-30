@@ -2,8 +2,20 @@
 #include "common_tests.h"
 #include "common.h"
 
-import bioseq.simd.utils;
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+import bioseq.common.mlogging;
 import bioseq.common.testing;
+
+#include "common/simd/utils_impl.hpp"
 
 HWY_BEFORE_NAMESPACE();
 

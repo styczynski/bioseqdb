@@ -5,8 +5,14 @@ module;
 
 #include "common.h"
 #include <array>
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 #include <functional>
 
 export module bioseq.sequences.kmers.hashers.base;
@@ -16,7 +22,8 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.common.circular_append_buffer;
-import bioseq.simd.utils;
+
+#include "common/simd/utils_impl.hpp"
 
 export {
 

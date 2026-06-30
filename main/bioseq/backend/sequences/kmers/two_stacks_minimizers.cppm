@@ -5,9 +5,16 @@ module;
 
 #include "common.h"
 
+#include <algorithm>
 #include <array>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <ranges>
+#include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 export module bioseq.sequences.kmers.two_stacks;
 
@@ -17,10 +24,11 @@ import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
-import bioseq.simd.utils;            // for_each_index<W>
 import bioseq.simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
 import bioseq.common.circular_append_buffer;
 import bioseq.instr;
+
+#include "common/simd/utils_impl.hpp"
 
 export {
 

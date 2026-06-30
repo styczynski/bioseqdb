@@ -4,8 +4,10 @@ module;
 #include <hwy/aligned_allocator.h>
 
 #include "common.h"
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -24,8 +26,9 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 
-export import bioseq.simd.utils;
 export import bioseq.simd.vector_stream;
+
+#include "common/simd/utils_impl.hpp"
 
 export {
 

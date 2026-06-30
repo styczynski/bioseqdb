@@ -20,6 +20,8 @@ module;
 
 #include "common.h"
 
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -29,19 +31,21 @@ module;
 #include <type_traits>
 #include <tuple>
 #include <string>
+#include <utility>
 
 export module bioseq.alignment.block_aligner;
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
-import bioseq.simd.utils;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
 import bioseq.alignment.utils;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
 import bioseq.storage.lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
+
+#include "common/simd/utils_impl.hpp"
 
 export {
 

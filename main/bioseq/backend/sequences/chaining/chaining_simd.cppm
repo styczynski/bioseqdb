@@ -38,20 +38,27 @@ module;
 
 #include "common.h"
 
+#include <array>
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <span>
 #include <cstring>
 #include <limits>
 #include <algorithm>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 export module bioseq.sequences.chaining.simd;
 
 import bioseq.common.mlogging;
 import bioseq.sequences.chaining.utils;
-import bioseq.simd.utils;
 import bioseq.common.context;
 import bioseq.instr;
+
+#include "common/simd/utils_impl.hpp"
 
 export {
 
