@@ -102,6 +102,7 @@ struct simd_array_allocator {
 	}
 };
 
+#if defined(BIOSEQ_SIMD_UTILS_ENABLE_DEBUG_PRINTING)
 template <typename T, typename InfoT, typename I = void>
 struct hwy_vector_string_printer {
 	static inline std::string format_block(const InfoT info, const void* ptr) {
@@ -110,6 +111,7 @@ struct hwy_vector_string_printer {
 		return std::string(str);
 	}
 };
+#endif
 
 template <class D, typename T, class VecT = hn::Vec<D>>
 std::vector<T> hwy_to_vector(D& d, const VecT& v) {
@@ -130,6 +132,7 @@ std::vector<T> hwy_to_vector(D& d, const VecT& v) {
 	return std::vector<T>(lanes, lanes+N);
 };
 
+#if defined(BIOSEQ_SIMD_UTILS_ENABLE_DEBUG_PRINTING)
 template <class D, typename I = void, class VecT = hn::Vec<D>>
 requires (
     requires (D& d, const VecT& v) {
@@ -187,6 +190,7 @@ auto hwy_str(D& d, const VecT& v) {
 
 	return buf;
 }
+#endif
 
 template <typename T>
 inline constexpr std::pair<T, T> int_div_floor(const T& val, const T& div) {
@@ -561,6 +565,7 @@ public:
 	}
 };
 
+#if defined(BIOSEQ_SIMD_UTILS_ENABLE_DEBUG_PRINTING)
 template <class D, typename I = void, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
 auto hwy_str(D& d, const square_lane_matrix<D, VecT, p_matrix_t>& v) {
 	const size_t dim = hn::Lanes(d);
@@ -576,7 +581,7 @@ template <typename I, typename D, typename ValT>
 auto hwy_str_as(D& d, const ValT& v) {
 	return hwy_str<D, I>(d, v);
 }
-
+#endif
 
 template <class D_IN, class vec_in_t = hn::Vec<D_IN>>
 struct vector_upscaler {
@@ -711,6 +716,7 @@ public:
 	};
 };
 
+#if defined(BIOSEQ_SIMD_UTILS_ENABLE_DEBUG_PRINTING)
 inline void dosomething() {
 	const hn::ScalableTag<uint8_t> d_in;
 	using D_IN = decltype(d_in);
@@ -732,6 +738,7 @@ inline void dosomething() {
 		}
 	});
 }
+#endif
 
 /// Vectorized fast_log2 approximation using IEEE 754 bit tricks.
 ///
