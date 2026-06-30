@@ -57,8 +57,8 @@ export struct BioseqColumnScanDescData
      * DOC0260 Phase A — deferred-hydration switch and per-scan relation
      * cache. seq_cache is a `bioseq::storage::seq_caches*` allocated
      * separately in scanContext via placement-new; the void* erasure keeps
-     * this struct standard-layout (the seq_caches embeds a std::map that
-     * is not standard-layout).
+     * this struct standard-layout (the seq_caches embeds a non-standard-layout
+     * cache container).
      */
     bool defer_seq_hydration;
     void* seq_cache;
