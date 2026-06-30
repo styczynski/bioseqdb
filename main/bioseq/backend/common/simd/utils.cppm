@@ -3,9 +3,15 @@ module;
 #include <hwy/print-inl.h>
 #include <hwy/aligned_allocator.h>
 
-#include "common.h"
-
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 export module bioseq.simd.utils;
 import bioseq.common.mlogging;
@@ -57,7 +63,9 @@ HWY_INLINE stored_type extract_lane(D d, hn::Vec<D> v, size_t lane) {
 template<class D, typename stored_type = hn::TFromD<D>>
 HWY_INLINE size_t lane_hargmax(D d, hn::Vec<D> v, stored_type max_val) {
     const auto idx = hn::FindFirstTrue(d, hn::Eq(v, hn::Set(d, max_val)));
-    DEBUG_ASSERT(idx >= 0, "ba_hargmax: max_val must exist in vector");
+    if (idx < 0) [[unlikely]] {
+        std::abort();
+    }
     return static_cast<size_t>(idx >= 0 ? idx : 0);
 }
 
@@ -248,7 +256,7 @@ private:
 	};
 
 	static constexpr void transpose4(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x1<D>) {
-		ASSERT(false);
+		std::abort();
 	}
 
 	static constexpr void transpose4(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x1<D>) {
@@ -271,7 +279,7 @@ private:
 	};
 
 	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x2<D>) {
-		ASSERT(false);
+		std::abort();
 	}
 
 	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x2<D>) {
@@ -323,7 +331,7 @@ private:
 	};
 
 	static constexpr void transpose16(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x3<D>) {
-		ASSERT(false);
+		std::abort();
 	}
 
 	static constexpr void transpose16(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x3<D>) {
@@ -414,7 +422,9 @@ public:
 	constexpr std::pair<size_t, size_t> partial_fill_with_offsets(
 		D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
 	) {
-		DEBUG_ASSERT(K >= hn::Lanes(d), "Number of offsets cannot be larger than number of lanes");
+		if (K < hn::Lanes(d)) [[unlikely]] {
+			std::abort();
+		}
 
 		const size_t rows_to_load = hn::Lanes(d);
 		size_t partial_filled_rows = 0;
@@ -428,7 +438,9 @@ public:
 					matrix[i] = hn::Zero(d);
 				} else {
 					const size_t rows_to_load = data_available - offset;
-					DEBUG_ASSERT(offset + rows_to_load <= data_available, "Cannot load past available data");
+					if (offset + rows_to_load > data_available) [[unlikely]] {
+						std::abort();
+					}
 					matrix[i] = hn::LoadN(d, &(data[offset]), rows_to_load);
 					partial_filled_rows = rows_to_load;
 				}
@@ -537,7 +549,7 @@ public:
 		} else if (hn::Lanes(d) == 16) {
 			transpose16(d, matrix);
 		} else {
-			ASSERT(false, fmt::format("square_lane_matrix does not support transpose() for lane number: {}", hn::Lanes(d)));
+			std::abort();
 		}
 	}
 };
