@@ -5,7 +5,7 @@
     "bioseq_ksw2_scalar_dp_scalar_mm":          {"_": {"type": "integer", "default": 0}},
     "bioseq_ksw2_simd_dp_scalar_mm":            {"_": {"type": "integer", "default": 0}},
     "bioseq_ksw2_simd_dp_two_stack_nthash":     {"_": {"type": "integer", "default": 0}},
-    "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "DOC0304 Phase A G3SA Vulkan tiled-DP chaining (runtime-falls back to scalar-mm2)"}},
+    "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "DOC0304 Phase A G3SA Vulkan tiled-DP chaining (explicit GPU path; fails without hardware Vulkan)"}},
     "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "DOC0254 §11 inter-region batched KSW2"}},
     "bioseq_ksw2_simd_dp_simd_minimap2_slow":   {"_": {"type": "integer", "default": 0}},
     "bioseq_block_simd_dp_scalar_mm":           {"_": {"type": "integer", "default": 0}},

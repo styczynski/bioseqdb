@@ -930,6 +930,27 @@ private:
     std::mutex mu_;
 };
 
+[[nodiscard]] inline bool hardware_device_available(const Runtime& runtime) noexcept {
+    return runtime.usable() && !runtime.features().software_device;
+}
+
+inline void require_hardware_device(const Runtime& runtime, const char* operation) {
+    if (!runtime.usable()) {
+        throw VulkanRuntimeError(fmt::format(
+            "{} selected but Vulkan runtime is unavailable: {}",
+            operation,
+            runtime.initialization_error()));
+    }
+    if (runtime.features().software_device) {
+        throw VulkanRuntimeError(fmt::format(
+            "{} selected but active Vulkan device '{}' is a CPU/software device "
+            "(VkPhysicalDeviceType={}); explicit GPU execution requires a hardware Vulkan device",
+            operation,
+            runtime.features().device_name.data(),
+            runtime.features().device_type));
+    }
+}
+
 [[nodiscard]] inline std::uint64_t sat_add(std::uint64_t a, std::uint64_t b) noexcept {
     constexpr std::uint64_t max_value = (std::numeric_limits<std::uint64_t>::max)();
     if (a > max_value - b) return max_value;

@@ -287,8 +287,8 @@ struct AlgorithmDispatch {
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
     } else if (algo == "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash") {
-        // DOC0304 Phase A: G3SA-style Vulkan tiled-DP chaining (runtime-falls
-        // back to scalar-mm2 when no usable Vulkan device exists). Identical
+        // DOC0304 Phase A: G3SA-style Vulkan tiled-DP chaining. Explicit GPU
+        // selection fails loudly when no hardware Vulkan device exists. Identical
         // minimizer (two-stack nthash) + base aligner (KSW2) to
         // bioseq_ksw2_simd_dp_two_stack_nthash, so the only varied dimension is
         // the chaining backend: SIMD_MM2 vs VULKAN_TILED_DP.
@@ -321,8 +321,7 @@ struct AlgorithmDispatch {
         // minimizers + SIMD chaining + block aligner) are the seeding (GPU
         // sketch + GPU seed-hit lookup) and the chaining backend; the base
         // aligner stays block (no G3SA extension kernel in Phase B, §0/§10).
-        // All GPU stages runtime-fall back to their CPU equivalents when no
-        // usable Vulkan device exists.
+        // All GPU stages fail loudly when no hardware Vulkan device exists.
         dispatch.params.chaining_algorithm        = ChainingAlgorithmType::VULKAN_TILED_DP;
         dispatch.params.base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
         dispatch.params.minimizer_algorithm       = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
@@ -339,8 +338,8 @@ struct AlgorithmDispatch {
         // race-free slot table) + GPU seed count/emit + device anchor sort +
         // Vulkan tiled-DP chaining + block aligner. Same aligner as the fastest
         // CPU row (block aligner); the varied dimensions are the GPU frontend and
-        // the GPU index build. Runtime-falls back to the CPU/SIMD path with no
-        // usable Vulkan device. This row is compared against
+        // the GPU index build. It fails loudly when no hardware Vulkan device
+        // exists. This row is compared against
         // `bioseq_block_simd_dp_two_stack_nthash` (SIMD minimizers + SIMD
         // chaining + block aligner) and `minimap2_dp`.
         dispatch.params.chaining_algorithm        = ChainingAlgorithmType::VULKAN_TILED_DP;

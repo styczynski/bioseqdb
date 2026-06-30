@@ -89,7 +89,7 @@ apply_direction(std::vector<std::size_t> perm, bool descending) {
 }
 
 /// Order an in-RAM lazy batch on the GPU. Returns nullopt on any decline (GUC
-/// off, no usable device, oversize), in which case the caller uses the CPU path.
+/// off, no hardware device, oversize), in which case the caller uses the CPU path.
 /// `Spec` is duck-typed: it must expose `.vulkan_enabled` and `.descending`.
 template <class LazyBatch, class Spec>
 [[nodiscard]] std::optional<std::vector<std::size_t>>
@@ -100,7 +100,7 @@ gpu_sort_sequences(const LazyBatch& batch, const Spec& spec) {
 
     if (!spec.vulkan_enabled) return std::nullopt;
     auto& rt = bioseq::gpu::vulkan::Runtime::instance();
-    if (!rt.usable()) return std::nullopt;
+    if (!bioseq::gpu::vulkan::hardware_device_available(rt)) return std::nullopt;
 
     const std::size_t n = std::ranges::size(batch);
     if (n <= 1) {

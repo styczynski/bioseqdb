@@ -131,9 +131,15 @@ using bioseq::storage::sequence_size_t;
 
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-    const std::string detail = runtime.usable()
-        ? "GPU path declined"
-        : fmt::format("runtime unavailable: {}", runtime.initialization_error());
+    const std::string detail = !runtime.usable()
+        ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
+        : runtime.features().software_device
+            ? fmt::format(
+                  "active Vulkan device '{}' is a CPU/software device "
+                  "(VkPhysicalDeviceType={}); explicit GPU execution requires a hardware Vulkan device",
+                  runtime.features().device_name.data(),
+                  runtime.features().device_type)
+            : "GPU path declined";
     throw bioseq::gpu::vulkan::VulkanRuntimeError(
         fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
 }
@@ -1946,7 +1952,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                           bioseq::indexing::MinimizerHashmapFragmentIndex>) {
                 auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-                if (runtime.usable()) {
+                if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                     auto key = bioseq::indexing::make_gpu_index_cache_key(
                         target_index_ref, gpu_index_identity);
                     auto resident_index = gpu_index_cache == nullptr
@@ -2662,7 +2668,7 @@ template <is_constexpr_aligner_params Cep,
     if (external_gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
-        std::uint64_t limit = gpu_rt.usable()
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
@@ -2697,7 +2703,7 @@ template <is_constexpr_aligner_params Cep,
             && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
-            if (gpu_rt.usable()) {
+            if (bioseq::gpu::vulkan::hardware_device_available(gpu_rt)) {
                 auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
                     target_seq,
                     static_cast<std::size_t>(params.window_size),
@@ -2855,7 +2861,7 @@ template <is_constexpr_aligner_params Cep,
     if (gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
-        std::uint64_t limit = gpu_rt.usable()
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
@@ -2883,7 +2889,7 @@ template <is_constexpr_aligner_params Cep,
             && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
-            if (gpu_rt.usable()) {
+            if (bioseq::gpu::vulkan::hardware_device_available(gpu_rt)) {
                 auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
                     target_seq,
                     static_cast<std::size_t>(params.window_size),
@@ -2932,7 +2938,7 @@ template <is_constexpr_aligner_params Cep,
             && allow_gpu_target_index_build
             && effective_index.table.empty()) {
             auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-            if (!runtime.usable()) {
+            if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                 throw_vulkan_declined("Phase C resident seed-to-coordinate");
             }
             auto key = bioseq::indexing::make_gpu_index_cache_key(
@@ -4402,7 +4408,7 @@ template <supports_compact_sequence_range QueryRange,
     std::optional<bioseq::indexing::GpuMinimizerIndexCache> segmented_gpu_index_cache;
     if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
-        std::uint64_t limit = gpu_rt.usable()
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
@@ -4751,7 +4757,7 @@ template <supports_compact_sequence_range QueryRange,
 
     auto run_vulkan_segment_coordinate_batch = [&]() -> MatchResultCollection {
         auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-        if (!runtime.usable()) {
+        if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
             pipe::throw_vulkan_declined("VulkanSegment resident coordinate batch");
         }
         const auto ranges =

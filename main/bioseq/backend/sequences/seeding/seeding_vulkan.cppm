@@ -204,7 +204,7 @@ template <class MinimizerT>
     if (!resident_index) return false;
     if (query_minimizers.size() > std::numeric_limits<std::uint32_t>::max()) return false;
     auto& runtime = Runtime::instance();
-    if (!runtime.usable()) return false;
+    if (!hardware_device_available(runtime)) return false;
 
     const Buffer* fused_device_words =
         (device_minimizers && device_minimizers->words() != nullptr &&

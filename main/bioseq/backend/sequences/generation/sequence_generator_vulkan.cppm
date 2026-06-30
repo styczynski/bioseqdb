@@ -72,7 +72,7 @@ template <typename Traits>
         return false;
     } else {
         auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-        return runtime.usable() &&
+        return bioseq::gpu::vulkan::hardware_device_available(runtime) &&
             make_generate_units_push<Traits>(symbols_per_seq, seq_count, seed, chunk_units)
                 .has_value();
     }
@@ -106,7 +106,7 @@ template <typename Traits>
         return false;
     } else {
         auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-        if (!runtime.usable()) {
+        if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
             return false;
         }
 

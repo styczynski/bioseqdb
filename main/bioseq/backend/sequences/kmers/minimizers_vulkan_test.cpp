@@ -5,7 +5,7 @@
  * Tests 1-4: dna4 parity for (15,10)/(7,5)/(27,10), dna5 T/N parity (N resets,
  * T hashes as nt4 code 3), generic-alphabet smoke (no throw), and the
  * 16/32/64/128-bit `MinimizerRepr` layouts round-tripping raw fields. All GPU
- * comparisons skip cleanly (SUCCEED) when no usable Vulkan device exists.
+ * comparisons skip cleanly (SUCCEED) when no hardware Vulkan device exists.
  */
 #include "common_simd.h"
 #include "common_tests.h"
@@ -47,7 +47,12 @@ using minimizer_tuple_t =
     std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
 
 [[nodiscard]] static bool vulkan_ready() {
-    return vk::Runtime::instance().usable();
+    return vk::hardware_device_available(vk::Runtime::instance());
+}
+
+[[nodiscard]] static bool software_vulkan_ready() {
+    auto& runtime = vk::Runtime::instance();
+    return runtime.usable() && runtime.features().software_device;
 }
 
 /// Sorted (last_pos, kmer, strand) tuples of a minimizer vector.
@@ -200,7 +205,7 @@ static std::vector<seq::dna5> DNA5_WITH_N{
 
 TEST_CASE("vulkan minimizer: dna4 parity equals scalar mm-sketch",
           "[vulkan][seeding][phase-c]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
     for (auto [w, k] : std::vector<std::pair<std::size_t, std::size_t>>{
              {10, 15}, {5, 7}, {10, 27}}) {
         const auto cpu = triples(cpu_sketch<MinimapSketchData>(DNA4_FIXTURE, w, k));
@@ -217,7 +222,7 @@ TEST_CASE("vulkan minimizer: dna4 parity equals scalar mm-sketch",
 
 TEST_CASE("vulkan minimizer: dna5 with T parity (T is nt4 code 3)",
           "[vulkan][seeding][phase-c]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
     constexpr std::uint32_t w = 10;
     constexpr std::uint32_t k = 15;
     const auto cpu = cpu_sketch<MinimapSketchData>(DNA5_WITH_T, w, k);
@@ -238,7 +243,7 @@ TEST_CASE("vulkan minimizer: dna5 with T parity (T is nt4 code 3)",
 
 TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
           "[vulkan][seeding][phase-c]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
     constexpr std::uint32_t w = 10;
     constexpr std::uint32_t k = 15;
     const auto cpu_values = cpu_sketch<MinimapSketchData>(DNA5_WITH_N, w, k);
@@ -272,7 +277,7 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
 
 TEST_CASE("vulkan minimizer: Phase-C dna5 tile-boundary extras are bounded",
           "[vulkan][seeding][phase-c][dna5]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
 
     constexpr std::size_t w = 10;
     constexpr std::size_t k = 15;
@@ -310,7 +315,7 @@ TEST_CASE("vulkan minimizer: Phase-C dna5 tile-boundary extras are bounded",
 
 TEST_CASE("vulkan minimizer: generic alphabet functional superset",
           "[vulkan][seeding][phase-c]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint8_t>;
     constexpr std::uint32_t w = 5;
     constexpr std::uint32_t k = 7;
@@ -345,9 +350,43 @@ TEST_CASE("vulkan minimizer: oversized k declines before dispatch (no throw)",
     ASSERT(!big_w.has_value(), "oversized window must decline (nullopt)", 0);
 }
 
+TEST_CASE("vulkan minimizer: software device declines selected paths",
+          "[vulkan][seeding][phase-c][mandatory]") {
+    if (!software_vulkan_ready()) {
+        SUCCEED("No software Vulkan device detected; hardware GPU cases cover the selected path");
+        return;
+    }
+
+    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_t = compact_sequence_range<config_t>;
+    using storage_unit = typename range_t::traits::storage_unit;
+    using scanner_t =
+        bioseq::storage::sequence_scanner_test_chunked<
+            storage_unit,
+            bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+    using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
+
+    range_t range(DNA4_FIXTURE);
+    auto result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(range, 10, 15);
+    REQUIRE_FALSE(result.has_value());
+
+    lazy_t fragmented{scanner_t::from_range(range)};
+    REQUIRE_THROWS_AS(
+        vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+            fragmented,
+            0,
+            static_cast<std::size_t>(fragmented.size()),
+            0,
+            0,
+            static_cast<bioseq::storage::sequence_size_t>(fragmented.bp_size()),
+            10,
+            15),
+        vk::VulkanRuntimeError);
+}
+
 TEST_CASE("vulkan minimizer: MinimizerRepr 16/32/64/128-bit layouts round-trip",
           "[vulkan][seeding][phase-c]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
     // 16-bit: pos_bits=10, hash fits 5 bits -> uint16 storage.
     using R16 = MinimizerRepr<10u, 2u>;
     using R32 = MinimizerRepr<10u, 9u>;       // pos 10 + hash 21 -> uint32 storage
@@ -390,7 +429,7 @@ TEST_CASE("vulkan minimizer: MinimizerRepr 16/32/64/128-bit layouts round-trip",
 
 TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
           "[vulkan][minimizer][segment]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
 
     auto run_case = []<class alphabet_t>() {
         using config_t = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
@@ -507,7 +546,7 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
 
 TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position",
           "[vulkan][minimizer][segment][sort]") {
-    if (!vulkan_ready()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
 
     {
         using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;

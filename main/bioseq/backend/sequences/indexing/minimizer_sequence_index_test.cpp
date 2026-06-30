@@ -42,7 +42,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.gpu.vulkan.runtime;   // DOC0345 §16.3 — Runtime::usable() skip guard
+import bioseq.gpu.vulkan.runtime;   // DOC0345 §16.3 — hardware Vulkan skip guard
 import bioseq.gpu.vulkan.phase_c_abi;
 
 #include "index_test_fakes.h"
@@ -327,8 +327,9 @@ TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer und
 // DOC0351 — persisted mpf + mps built with Vulkan must cover scalar lookups.
 TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
           "[indexing][vulkan][minimizer]") {
-    if (!bioseq::gpu::vulkan::Runtime::instance().usable()) {
-        SUCCEED("no usable Vulkan device; skipped");
+    if (!bioseq::gpu::vulkan::hardware_device_available(
+            bioseq::gpu::vulkan::Runtime::instance())) {
+        SUCCEED("no hardware Vulkan device; skipped");
         return;
     }
 

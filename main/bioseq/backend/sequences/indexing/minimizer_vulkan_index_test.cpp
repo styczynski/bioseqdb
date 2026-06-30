@@ -122,7 +122,10 @@ TEST_CASE("vulkan index: distinct assembly identities do not share a cache key",
 TEST_CASE("vulkan index: resident upload + cache reuse (device path)",
           "[vulkan][index][phase-b]") {
     auto& runtime = ::bioseq::gpu::vulkan::Runtime::instance();
-    if (!runtime.usable()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!::bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
 
     auto idx = build_demo_index();
     idx_ns::GpuMinimizerIndexCache cache{std::uint64_t{64} << 20};
