@@ -59,8 +59,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
     const auto idx = build_demo_index();
     const auto upload = idx_ns::build_gpu_minimizer_upload(idx);
 
-    for (const auto& kv : idx.table) {
-        const std::uint64_t kmer = kv.first;
+    idx.for_each_table_entry([&](std::uint64_t kmer, std::uint64_t) {
         const auto cpu_hits = idx.lookup(kmer);  // span of encoded positions
         const std::uint32_t slot_idx = host_find_slot(upload, kmer);
         ASSERT(slot_idx != 0xffffffffu,
@@ -74,7 +73,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
             ASSERT(upload.positions[slot.pos_offset + j] == cpu_hits[j],
                    fmt::format("kmer {} position {} mismatch", kmer, j), j);
         }
-    }
+    });
     // A kmer not in the index must miss.
     ASSERT(host_find_slot(upload, 0xDEADBEEFULL) == 0xffffffffu,
            "absent kmer unexpectedly found in slot table", 0);

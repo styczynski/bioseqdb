@@ -2699,7 +2699,7 @@ template <is_constexpr_aligner_params Cep,
     if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                   bioseq::indexing::MinimizerHashmapFragmentIndex>) {
         if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
-            && allow_gpu_target_index_build && target_index.table.empty()
+            && allow_gpu_target_index_build && target_index.table_empty()
             && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
@@ -2885,7 +2885,7 @@ template <is_constexpr_aligner_params Cep,
     if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                   bioseq::indexing::MinimizerHashmapFragmentIndex>) {
         if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
-            && allow_gpu_target_index_build && target_index.table.empty()
+            && allow_gpu_target_index_build && target_index.table_empty()
             && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
@@ -2936,7 +2936,7 @@ template <is_constexpr_aligner_params Cep,
         // normal Vulkan seed+chain path (DOC0353 2026-06-25).
         if (phase_c_coordinate_only_active(params)
             && allow_gpu_target_index_build
-            && effective_index.table.empty()) {
+            && effective_index.table_empty()) {
             auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
             if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                 throw_vulkan_declined("Phase C resident seed-to-coordinate");

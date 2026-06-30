@@ -16,12 +16,13 @@ module;
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 #include <utility>
-#include <boost/unordered/unordered_flat_map.hpp>
 export module bioseq.indexing.minimizer_hashmap;
 import bioseq.common.mlogging;                                     // bioseq_log_progress<DBG>(enable_logging)
 import bioseq.indexing.type;
@@ -41,6 +42,10 @@ import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
+namespace bioseq::indexing::detail {
+struct MinimizerHashmapFragmentIndexTable;
+}
+
 export namespace bioseq::indexing {
 using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
@@ -54,9 +59,23 @@ using bioseq::storage::lazy_compact_sequence;
 
 // (1) the lookup structure — the old TargetIndex, renamed & relocated, storage-free
 struct MinimizerHashmapFragmentIndex {
-    boost::unordered_flat_map<std::uint64_t, std::uint64_t> table;
+private:
+    std::unique_ptr<detail::MinimizerHashmapFragmentIndexTable> table_;
+
+    void clear_table();
+    void reserve_table(std::size_t bucket_count);
+    void emplace_table(std::uint64_t hash, std::uint64_t packed);
+
+public:
     std::vector<std::uint64_t> positions;        // (last_pos<<1)|strand, full uint64
     sequence_size_t target_len = 0;
+
+    MinimizerHashmapFragmentIndex();
+    ~MinimizerHashmapFragmentIndex();
+    MinimizerHashmapFragmentIndex(const MinimizerHashmapFragmentIndex& other);
+    MinimizerHashmapFragmentIndex& operator=(const MinimizerHashmapFragmentIndex& other);
+    MinimizerHashmapFragmentIndex(MinimizerHashmapFragmentIndex&& other) noexcept;
+    MinimizerHashmapFragmentIndex& operator=(MinimizerHashmapFragmentIndex&& other) noexcept;
 
     static constexpr std::uint32_t kSerializeMagic   = 0xB1000001u;   // unchanged wire format
     static constexpr std::uint32_t kSerializeVersion = 2u;
@@ -82,6 +101,22 @@ struct MinimizerHashmapFragmentIndex {
     static_assert(std::endian::native == std::endian::little, "wire format requires little-endian host");
     static_assert(sizeof(std::size_t) >= 8, "wire format requires 64-bit size_t");
 
+    [[nodiscard]] std::size_t table_size() const noexcept;
+    [[nodiscard]] bool table_empty() const noexcept;
+    void for_each_table_entry_erased(
+        void* ctx,
+        void (*emit)(void* ctx, std::uint64_t hash, std::uint64_t packed)) const;
+
+    template <class F>
+    void for_each_table_entry(F&& emit) const {
+        using Fn = std::remove_reference_t<F>;
+        for_each_table_entry_erased(
+            &emit,
+            [](void* ctx, std::uint64_t hash, std::uint64_t packed) {
+                (*static_cast<Fn*>(ctx))(hash, packed);
+            });
+    }
+
     template <class MinimizerT>
     void build(const std::vector<MinimizerT>& target_minimizers,
                sequence_size_t target_length) {
@@ -89,7 +124,7 @@ struct MinimizerHashmapFragmentIndex {
             bioseq::instr::register_region_static("target_index_build");
         auto _scope = bioseq::instr::region(_desc);
         target_len = target_length;
-        table.clear();
+        clear_table();
         positions.clear();
 
         const std::size_t total = target_minimizers.size();
@@ -98,7 +133,7 @@ struct MinimizerHashmapFragmentIndex {
         }
         struct KmerKey {
             [[nodiscard, gnu::always_inline]]
-            std::uint64_t operator()(const MinimizerT& m) const noexcept { return m.kmer(); }
+            inline std::uint64_t operator()(const MinimizerT& m) const noexcept { return m.kmer(); }
         };
         static thread_local std::vector<MinimizerT> sorted_scratch;
         sorted_scratch.assign(target_minimizers.begin(), target_minimizers.end());
@@ -106,7 +141,7 @@ struct MinimizerHashmapFragmentIndex {
             sorted_scratch.data(), sorted_scratch.data() + total, KmerKey{});
 
         positions.resize(total);
-        table.reserve(total / 2 + 16);
+        reserve_table(total / 2 + 16);
         std::size_t i = 0;
         while (i < total) {
             const std::uint64_t kmer = sorted_scratch[i].kmer();
@@ -115,7 +150,7 @@ struct MinimizerHashmapFragmentIndex {
                 positions[j] = sorted_scratch[j].pos_strand_encoded();
                 ++j;
             }
-            table.emplace(kmer,
+            emplace_table(kmer,
                 (static_cast<std::uint64_t>(static_cast<std::uint32_t>(i)) << 32)
                 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(j - i)));
             i = j;
@@ -125,117 +160,20 @@ struct MinimizerHashmapFragmentIndex {
     /// NEW (§9.4): radix-bin over pre-extracted globalised (kmer, encoded_pos) pairs.
     /// `pairs` is MUTABLE and radix-sorted IN PLACE (caller-owned scratch; no copy).
     void build_from_pairs(std::span<std::pair<std::uint64_t,std::uint64_t>> pairs,
-                          sequence_size_t target_length) {
-        target_len = target_length; table.clear(); positions.clear();
-        const std::size_t n = pairs.size(); if (n == 0) return;
-        if (n > UINT32_MAX) index_corruption_panic("build_from_pairs: >UINT32_MAX positions (pos_offset is u32)");
-        bioseq::sorting::radix_sort(pairs.data(), pairs.data() + n,
-            [](const auto& p) noexcept { return p.first; });
-        positions.resize(n); table.reserve(n / 2 + 16);
-        std::size_t i = 0;
-        while (i < n) {
-            const std::uint64_t kmer = pairs[i].first; std::size_t j = i;
-            while (j < n && pairs[j].first == kmer) { positions[j] = pairs[j].second; ++j; }
-            if (j - i > UINT32_MAX) index_corruption_panic("build_from_pairs: kmer count > u32 (packed count field)");
-            table.emplace(kmer, ((std::uint64_t)(std::uint32_t)i << 32) | (std::uint32_t)(j - i));
-            i = j;
-        }
-    }
+                          sequence_size_t target_length);
 
-    [[nodiscard]] std::span<const std::uint64_t> lookup(std::uint64_t kmer_hash) const {
-        auto iter = table.find(kmer_hash);
-        if (iter == table.end()) {
-            return {};
-        }
-        const std::uint64_t packed = iter->second;
-        const std::uint32_t off    = static_cast<std::uint32_t>(packed >> 32);
-        const std::uint32_t count  = static_cast<std::uint32_t>(packed);
-        return std::span<const std::uint64_t>(positions.data() + off, count);
-    }
+    [[nodiscard]] std::span<const std::uint64_t> lookup(std::uint64_t kmer_hash) const;
 
-    void add_position_offset(sequence_size_t offset) {
-        if (offset == 0) return;
-        for (std::uint64_t& encoded : positions) {
-            const std::uint64_t pos    = (encoded >> 1) + static_cast<std::uint64_t>(offset);
-            const std::uint64_t strand = encoded & 1ULL;
-            encoded = (pos << 1) | strand;
-        }
-    }
+    void add_position_offset(sequence_size_t offset);
 
     [[nodiscard]] sequence_size_t target_length() const { return target_len; }
 
-    [[nodiscard]] std::size_t serialize_binary_size() const {
-        return kSerializeHeaderBytes
-             + kSerializeBucketBytes * table.size()
-             + 8 * positions.size();
-    }
+    [[nodiscard]] std::size_t serialize_binary_size() const;
 
-    void serialize_to_binary(char* output) const {
-        const std::uint32_t bucket_count    = static_cast<std::uint32_t>(table.size());
-        const std::uint64_t total_positions = static_cast<std::uint64_t>(positions.size());
-        const SerializedHeader header{
-            kSerializeMagic, kSerializeVersion, target_len, bucket_count, 0u, total_positions,
-        };
-        std::memcpy(output, &header, sizeof(header));
-        char* bucket_cursor   = output + kSerializeHeaderBytes;
-        char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
-        for (const auto& kv : table) {
-            const std::uint64_t packed   = kv.second;
-            const std::uint32_t pos_off  = static_cast<std::uint32_t>(packed >> 32);
-            const std::uint32_t pos_cnt  = static_cast<std::uint32_t>(packed);
-            const SerializedBucket bucket{ kv.first, pos_off, pos_cnt };
-            std::memcpy(bucket_cursor, &bucket, sizeof(bucket));
-            bucket_cursor += kSerializeBucketBytes;
-        }
-        if (total_positions > 0) {
-            std::memcpy(position_cursor, positions.data(), total_positions * 8);
-        }
-    }
+    void serialize_to_binary(char* output) const;
 
     [[nodiscard]] static MinimizerHashmapFragmentIndex deserialize_from_binary(
-        const char* input, std::size_t input_size)
-    {
-        if (input_size < kSerializeHeaderBytes) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: truncated blob");
-        }
-        SerializedHeader header{};
-        std::memcpy(&header, input, sizeof(header));
-        if (header.magic != kSerializeMagic) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: magic mismatch");
-        }
-        if (header.version != kSerializeVersion) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: version mismatch");
-        }
-        const std::size_t expected_size =
-            kSerializeHeaderBytes
-          + kSerializeBucketBytes * header.bucket_count
-          + 8 * header.total_positions;
-        if (input_size != expected_size) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: size mismatch");
-        }
-        MinimizerHashmapFragmentIndex idx;
-        idx.target_len = header.target_len;
-        idx.table.reserve(header.bucket_count);
-        const char* bucket_cursor   = input + kSerializeHeaderBytes;
-        const char* position_cursor = bucket_cursor + kSerializeBucketBytes * header.bucket_count;
-        idx.positions.resize(header.total_positions);
-        if (header.total_positions > 0) {
-            std::memcpy(idx.positions.data(), position_cursor, header.total_positions * 8);
-        }
-        for (std::uint32_t b = 0; b < header.bucket_count; ++b) {
-            SerializedBucket bucket{};
-            std::memcpy(&bucket, bucket_cursor, sizeof(bucket));
-            bucket_cursor += kSerializeBucketBytes;
-            if (static_cast<std::uint64_t>(bucket.pos_offset) + bucket.pos_count > header.total_positions) {
-                index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: bucket range exceeds total_positions");
-            }
-            const std::uint64_t packed =
-                (static_cast<std::uint64_t>(bucket.pos_offset) << 32)
-                | static_cast<std::uint64_t>(bucket.pos_count);
-            idx.table.emplace(bucket.hash, packed);
-        }
-        return idx;
-    }
+        const char* input, std::size_t input_size);
 };
 static_assert(MinimizerIndex<MinimizerHashmapFragmentIndex>,
               "MinimizerHashmapFragmentIndex must model MinimizerIndex");

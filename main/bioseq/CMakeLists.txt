@@ -119,6 +119,7 @@ list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
 set(BIOSEQ_NOPG_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp

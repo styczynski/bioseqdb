@@ -15,7 +15,6 @@ module;
 #include "common_simd.h"
 #include "common.h"            // DEBUG_ASSERT, bioseq_log<DBG>, CXX_PG_FUNCTION_INFO_V1, fmt
 #include <boost/integer.hpp>
-#include <boost/container/flat_map.hpp>   // identifier_routing containers (DOC0295 §4.3)
 #include <boost/container/small_vector.hpp>
 #include <climits>
 #include <condition_variable>
