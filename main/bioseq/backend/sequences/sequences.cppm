@@ -1633,7 +1633,8 @@ public:
         friend class boost::iterator_core_access;
         friend class compact_sequence_range<R>;
 
-        template <typename R2> friend class compact_sequence_range<R2>;
+        template <typename>
+        friend struct compact_sequence_range;
 
         iterator_impl() = default;
 
