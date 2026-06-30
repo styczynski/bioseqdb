@@ -222,7 +222,9 @@ extern "C++" {
 #endif
 #include "fmt/xchar.h"
 
-#include "src/format.cc"
+#if !(defined(__GNUC__) && !defined(__clang__))
+#  include "src/format.cc"
+#endif
 
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE
 }
@@ -920,10 +922,8 @@ inline bool fmtlogT<_>::checkLogLevel(LogLevel logLevel) noexcept {
 }
 
 
-namespace {
-void fmtlogEmptyFun(void*) {
+inline void fmtlogEmptyFun(void*) {
 }
-} // namespace
 
 template<int ___ = 0>
 class fmtlogDetailT
@@ -1524,6 +1524,7 @@ template class fmtlogT<0>;
 
 
 
+#if !(defined(__GNUC__) && !defined(__clang__))
 export {
 namespace fmt {
   
@@ -1563,6 +1564,7 @@ struct formatter<T>: formatter<std::string> {
 
 }
 }
+#endif
 
 export bool enable_logging = false;
 
