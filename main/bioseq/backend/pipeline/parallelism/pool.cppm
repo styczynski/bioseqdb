@@ -118,8 +118,7 @@ public:
     template <class RandomIt, class Compare>
     void parallel_sort(RandomIt first, RandomIt last, Compare comp) {
         ensure_configured();
-        // Avoid libstdc++ iterator <=> instantiation in GCC module BMIs.
-        if ((last - first) <= 0) {
+        if (last <= first) {
             return;
         }
         if (max_concurrency_ <= 1) {

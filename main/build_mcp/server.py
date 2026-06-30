@@ -154,7 +154,7 @@ HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
 AWS_GCC161_CXX_FLAGS = (
-    "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive "
+    "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 "
     "-Wno-expose-global-module-tu-local -Wno-external-tu-local "
     "-Wno-template-names-tu-local -Wno-global-module -Wno-template-body"
 )
