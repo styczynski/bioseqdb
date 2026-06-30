@@ -30,6 +30,16 @@ HIGHWAY_HEADER_UNITS = (
     "hwy/print-inl.h",
 )
 
+HEADER_UNIT_DEFINE_PREFIXES = (
+    "HWY",
+    "TOOLCHAIN_",
+    "_GLIBCXX",
+)
+
+HEADER_UNIT_DEFINE_NAMES = {
+    "NDEBUG",
+}
+
 OPTIONS_WITH_VALUE = {
     "-I",
     "-D",
@@ -213,7 +223,8 @@ def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list
     The generated CMI is shared by modules from several CMake targets. Target
     defines such as NO_POSTGRES or *_EXPORTS do not affect Highway, but they do
     change GCC's header-unit CRC if included in the build. Keep only flags that
-    can affect Highway preprocessing or target selection.
+    can affect Highway preprocessing, target selection, or libstdc++'s header
+    configuration.
     """
 
     flags: list[str] = []
@@ -230,18 +241,21 @@ def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list
         if arg == "-D":
             if idx + 1 < len(raw_flags):
                 define = raw_flags[idx + 1]
-                if define.startswith(("HWY", "TOOLCHAIN_")):
+                define_name = define.split("=", 1)[0]
+                if define.startswith(HEADER_UNIT_DEFINE_PREFIXES) or define_name in HEADER_UNIT_DEFINE_NAMES:
                     flags.extend([arg, define])
             idx += 2
             continue
         if arg.startswith("-D"):
             define = arg[2:]
-            if define.startswith(("HWY", "TOOLCHAIN_")):
+            define_name = define.split("=", 1)[0]
+            if define.startswith(HEADER_UNIT_DEFINE_PREFIXES) or define_name in HEADER_UNIT_DEFINE_NAMES:
                 flags.append(arg)
             idx += 1
             continue
         if (
             arg.startswith("-std=")
+            or arg.startswith("-O")
             or arg == "-fmodules-ts"
             or arg == "-fPIC"
             or arg == "-fpermissive"
