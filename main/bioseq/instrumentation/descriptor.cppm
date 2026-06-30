@@ -14,6 +14,7 @@
 module;
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
