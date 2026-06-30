@@ -156,7 +156,7 @@ AWS_HEAVY_JOBS = "4"
 AWS_GCC161_CXX_FLAGS = (
     "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive "
     "-Wno-expose-global-module-tu-local -Wno-external-tu-local "
-    "-Wno-template-names-tu-local"
+    "-Wno-template-names-tu-local -Wno-global-module -Wno-template-body"
 )
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
 AWS_LEGACY_VCPKG_TRIPLET = "x64-linux"
