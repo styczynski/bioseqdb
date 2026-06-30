@@ -2738,7 +2738,7 @@ df -h / ~/bioseqdb/main/build/aws-x64-linux 2>/dev/null || true
 echo
 echo "## build processes"
 ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args --cols 220 \
-  | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[l]d\.lld|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; } \
+  | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[g]\+\+|[g]cc|[x]gcc|[c]c1(plus)?|[l]d\.lld|[c]ollect2|/opt/[g]cc-build|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; } \
   | awk '{ if (length($0) > 220) print substr($0, 1, 217) "..."; else print; }'
 echo
 echo "## postgres processes"
@@ -3416,7 +3416,7 @@ TOOL_DEFINITIONS += [
             "Run a concise read-only SSH status snapshot on the AWS box without "
             "acquiring the remote mutex. It prints date, host/provision status, "
             "repo commit, load, `swapon --show`, `free -h`, root/build disk "
-            "usage, and the current cmake/ninja/clang/linker/bioseq process list. "
+            "usage, and the current cmake/ninja/clang/gcc/linker/bioseq process list. "
             "Use it while a long remote-run owns the slot to inspect memory, CPU, "
             "swap, and active build processes."
         ),
