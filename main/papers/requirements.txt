@@ -7,3 +7,5 @@ numpy==2.2.5
 matplotlib==3.10.1
 latexminted==0.5.1
 click==8.1.8
+pandas==2.2.3
+pympler==1.1

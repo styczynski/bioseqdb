@@ -38,16 +38,20 @@ from __future__ import annotations
 from typing import List, Dict, Set, Optional, Any
 
 import argparse
+import base64
 import contextlib
 import errno
 import fcntl
 import json
 import os
+import re
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -104,6 +108,30 @@ DEBUG_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET_DEBUG", "bench-opt-debu
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
+
+# --------------------------- papers (LaTeX) build --------------------------
+# The `papers` subdir (main/papers) is a SELF-CONTAINED CMake LaTeX project
+# (PROJECT(LatexProject NONE)). It is *also* add_subdirectory()'d into the main
+# build, but there ${CMAKE_SOURCE_DIR} resolves to main/ — so the in-tree
+# `latex-all` target degenerates to an EMPTY phony (its content glob,
+# ${CMAKE_SOURCE_DIR}/src/content/**/main.tex, finds nothing). PDFs are produced
+# only when the project is configured STANDALONE with its own source dir
+# == main/papers (exactly what papers/build.sh does): then ${CMAKE_SOURCE_DIR}
+# == main/papers, every per-document src/content/**/main.tex is discovered, and
+# each renders to pdf/<job>.pdf. The papers-build tool therefore drives the
+# standalone configure rather than the main bench-opt tree.
+PAPERS_DIR = PROJECT_ROOT / "papers"
+PAPERS_BUILD_DIR = PAPERS_DIR / "build"           # matches papers/build.sh; gitignored (build*/)
+PAPERS_PDF_DIR = PAPERS_DIR / "pdf"               # latex-all output; gitignored (pdf/)
+PAPERS_CONTENT_DIR = PAPERS_DIR / "src" / "content"
+PAPERS_LATEX_TARGET = "latex-all"
+# Sync build ceiling. The first run pays a one-time cost: a Python venv + pip
+# install of requirements.txt (numpy/matplotlib ship arm64 wheels, ~1-2 min)
+# plus a full multi-pass lualatex of every document. Later runs are incremental.
+PAPERS_BUILD_HARD_TIMEOUT_SEC = 30 * 60.0
+# Upper bound on the combined base64 image payload papers-view returns in one
+# call, so a long document can't blow up the tool result / context.
+PAPERS_VIEW_B64_CAP = 12 * 1024 * 1024
 
 
 def preset_for(debug: bool) -> str:
@@ -1334,6 +1362,509 @@ def tool_status(mode: str) -> str:
                 f"Log: {log_path}")
 
     return f"{mode_details.label} status: {status}. Log: {log_path}"
+
+
+# --------------------------- papers (LaTeX) tools -----------------------------
+
+@dataclass
+class PaperJob:
+    """One LaTeX document discovered under src/content/**/main.tex."""
+    name: str       # TEX_JOB == output basename (pdf/<name>.pdf)
+    rel: str        # path relative to src/content, e.g. "bioseqdb/thesis"
+    main_tex: Path
+    has_bib: bool   # a sibling main.bib => the build routes through biber
+
+
+def _c_identifier(text: str) -> str:
+    """Mirror CMake's STRING(MAKE_C_IDENTIFIER): replace every char outside
+    [A-Za-z0-9_] with '_', and prefix a leading digit with '_'. This reproduces
+    the TEX_JOB name papers/CMakeLists.txt derives from each document's path
+    relative to src/content/ — which is also the output basename pdf/<job>.pdf."""
+    ident = re.sub(r"[^A-Za-z0-9_]", "_", text)
+    if ident and ident[0].isdigit():
+        ident = "_" + ident
+    return ident
+
+
+def _discover_paper_jobs() -> list[PaperJob]:
+    """Enumerate the documents latex-all would build (one per
+    src/content/**/main.tex), in deterministic order."""
+    if not PAPERS_CONTENT_DIR.is_dir():
+        return []
+    jobs: list[PaperJob] = []
+    for main_tex in sorted(PAPERS_CONTENT_DIR.rglob("main.tex")):
+        job_dir = main_tex.parent
+        rel = job_dir.relative_to(PAPERS_CONTENT_DIR).as_posix()
+        jobs.append(PaperJob(
+            name=_c_identifier(rel),
+            rel=rel,
+            main_tex=main_tex,
+            has_bib=(job_dir / "main.bib").exists(),
+        ))
+    return jobs
+
+
+def _pdf_page_count(pdf: Path) -> Optional[int]:
+    """Page count via `pdfinfo`, or None if unavailable."""
+    try:
+        proc = subprocess.run(["pdfinfo", str(pdf)], capture_output=True,
+                              text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        if line.lower().startswith("pages:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _extract_log_errors(log_path: Path, max_lines: int = 40) -> str:
+    """Pull the salient error lines out of a LaTeX build log (which is mostly
+    noise). Prefer lines that look like errors; fall back to the plain tail."""
+    try:
+        lines = log_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    needles = ("error", "fatal", "! ", "no rule to make", "not found",
+               "undefined control", "emergency stop", "cannot", "failed")
+    hits = [ln for ln in lines if any(n in ln.lower() for n in needles)]
+    chosen = hits[-max_lines:] if hits else lines[-max_lines:]
+    return "\n".join(chosen)
+
+
+def _python_minor(path: Optional[str]) -> Optional[int]:
+    """CPython minor version of `path` (e.g. 12 for 3.12), or None if it can't
+    be run or is not a Python 3.x interpreter."""
+    if not path:
+        return None
+    try:
+        proc = subprocess.run(
+            [path, "-c", "import sys;print('%d %d' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.split()
+    if len(parts) != 2 or parts[0] != "3":
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def _select_papers_python(override: Optional[str] = None) -> Optional[str]:
+    """Pick a Python interpreter for the papers venv. requirements.txt pins
+    numpy==2.2.5 / matplotlib==3.10.1, which need Python >=3.10 and ship no
+    wheels for very new interpreters (3.14+) — yet CMake's FIND_PACKAGE(Python3)
+    frequently defaults to the macOS system python (3.9), which breaks the venv
+    pip install. Prefer an explicit override, else the newest CPython in
+    [3.10, 3.13] on PATH. Returns an absolute path, or None to leave CMake's
+    own choice untouched."""
+    if override:
+        return override
+    for name in ("python3.13", "python3.12", "python3.11", "python3.10"):
+        path = shutil.which(name)
+        if not path:
+            continue
+        minor = _python_minor(path)
+        if minor is not None and 10 <= minor <= 13:
+            return path
+    return None
+
+
+def _cmake_cache_value(build_dir: Path, key: str) -> Optional[str]:
+    """Read `key`'s value out of build_dir/CMakeCache.txt (KEY:TYPE=VALUE)."""
+    try:
+        for line in (build_dir / "CMakeCache.txt").read_text(errors="replace").splitlines():
+            name, sep, value = line.partition("=")
+            if sep and name.split(":", 1)[0] == key:
+                return value.strip()
+    except OSError:
+        return None
+    return None
+
+
+def tool_papers_build(arguments: dict) -> str:
+    """Build the LaTeX `latex-all` target SYNCHRONOUSLY.
+
+    Configures the standalone main/papers CMake project (the only configuration
+    in which latex-all actually emits PDFs — see the PAPERS_* notes) and builds
+    every document under src/content/**/main.tex to pdf/<job>.pdf, using make's
+    keep-going (-k) so a document that fails (e.g. one needing the missing biber)
+    does not block the others. Streams to a /tmp log and returns a per-document
+    summary plus, on failure, the salient log lines. pdf/<job>.pdf is the source
+    of truth for what built, regardless of the make exit code."""
+    try:
+        clean = parse_bool("clean", arguments.get("clean", False))
+    except RuntimeError as e:
+        return str(e)
+
+    timeout_sec = arguments.get("timeout_sec", PAPERS_BUILD_HARD_TIMEOUT_SEC)
+    try:
+        timeout_sec = float(timeout_sec)
+    except (TypeError, ValueError):
+        timeout_sec = PAPERS_BUILD_HARD_TIMEOUT_SEC
+    timeout_sec = max(60.0, min(timeout_sec, PAPERS_BUILD_HARD_TIMEOUT_SEC))
+
+    if not (PAPERS_DIR / "CMakeLists.txt").exists():
+        return f"papers project not found at {PAPERS_DIR} (no CMakeLists.txt)."
+
+    jobs = _discover_paper_jobs()
+    if not jobs:
+        return (f"No documents found under {PAPERS_CONTENT_DIR} "
+                f"(expected src/content/**/main.tex).")
+
+    # Non-blocking toolchain pre-flight (cmake/make report authoritatively).
+    missing = [t for t in ("cmake", "make", "lualatex", "rsync")
+               if shutil.which(t) is None]
+    biber_missing = shutil.which("biber") is None
+    bib_jobs = [j.name for j in jobs if j.has_bib]
+
+    started_at = time.time()
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
+    log_path = LOG_DIR / f"bioseq_papers_build_{timestamp}.log"
+    deadline = started_at + timeout_sec
+    env = os.environ.copy()
+    # Don't let an unrelated *active* virtualenv drive the build: CMake's
+    # FindPython3 defaults to Python3_FIND_VIRTUALENV=FIRST, so a leaked
+    # VIRTUAL_ENV (e.g. a project's .venv39) gets picked for the papers venv and
+    # breaks the >=3.10 pins. We also pin -DPython3_EXECUTABLE below.
+    env.pop("VIRTUAL_ENV", None)
+    # Expose ONLY python/python3 from the build venv (which has requirements.txt
+    # installed: matplotlib/numpy/Pygments) to the LaTeX run, via a small shim dir
+    # of wrapper scripts prepended to PATH. robust-externalize compiles embedded
+    # matplotlib figure blocks by shelling out to `python` (see common.tex
+    # \robExtConfigure), so it needs the venv interpreter. Two subtleties:
+    #   * the wrapper must exec the venv python BY ABSOLUTE PATH (not be a symlink
+    #     to it) — Python only activates the venv (finds pyvenv.cfg / its
+    #     site-packages, hence matplotlib) when the interpreter runs from venv/bin;
+    #     a bare symlink elsewhere silently loses the venv;
+    #   * we expose only python/python3, NOT the whole venv/bin — prepending that
+    #     would also shadow TeX Live's `latexminted` (minted's helper, 0.7.0) with
+    #     the venv's pinned-older 0.5.1 and break minted.
+    # The venv is created mid-build; PATH resolves at exec time, by which point the
+    # figure jobs run.
+    venv_python = PAPERS_BUILD_DIR / "venv" / "bin" / "python3"
+    shim_dir = PAPERS_BUILD_DIR.parent / "build_pyshim"
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        for nm in ("python", "python3"):
+            w = shim_dir / nm
+            if w.is_symlink() or w.exists():
+                w.unlink()
+            w.write_text(f'#!/bin/sh\nexec "{venv_python}" "$@"\n')
+            w.chmod(0o755)
+        env["PATH"] = f"{shim_dir}{os.pathsep}" + env.get("PATH", "")
+    except OSError:
+        # Fallback: whole venv bin (provides an in-place python; may shadow latexminted).
+        env["PATH"] = f"{PAPERS_BUILD_DIR / 'venv' / 'bin'}{os.pathsep}" + env.get("PATH", "")
+    parallel = max(1, min(4, CMAKE_PARALLEL_JOBS))
+
+    python_override = arguments.get("python")
+    if not isinstance(python_override, str) or not python_override.strip():
+        python_override = None
+    selected_python = _select_papers_python(python_override)
+
+    log_handle = log_path.open("w", buffering=1)
+    log_handle.write(
+        f"# bioseq papers build — pid={os.getpid()} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
+        f"# papers_dir={PAPERS_DIR}\n# build_dir={PAPERS_BUILD_DIR}\n"
+        f"# pdf_dir={PAPERS_PDF_DIR}\n# target={PAPERS_LATEX_TARGET}\n"
+        f"# venv_python={selected_python or '(cmake default)'}\n"
+        f"# jobs={[j.name for j in jobs]}\n# timeout_sec={timeout_sec:.0f}\n")
+    log_handle.flush()
+
+    configure_rc = 0
+    build_rc: Optional[int] = None
+    timed_out = False
+    error_note: Optional[str] = None
+    try:
+        # Self-heal the #1 failure mode: a prior configure cached an unsuitable
+        # interpreter (e.g. the macOS system Python 3.9) for the venv. Recreating
+        # the venv with a good interpreter requires a clean reconfigure (the
+        # venv/bin/python output already exists, so make would otherwise keep the
+        # broken one). Force clean when the cached Python is < 3.10 or gone.
+        if not clean and (PAPERS_BUILD_DIR / "CMakeCache.txt").exists():
+            # FindPython3 caches the chosen interpreter as Python3_EXECUTABLE
+            # (public, when set via -D) or _Python3_EXECUTABLE:INTERNAL (auto).
+            cached_py = (_cmake_cache_value(PAPERS_BUILD_DIR, "Python3_EXECUTABLE")
+                         or _cmake_cache_value(PAPERS_BUILD_DIR, "_Python3_EXECUTABLE"))
+            cached_minor = _python_minor(cached_py)
+            if cached_minor is None or cached_minor < 10:
+                clean = True
+                log_handle.write(
+                    f"# cached Python ({cached_py or 'unknown'}) is unsuitable "
+                    "(need >=3.10); forcing a clean reconfigure\n")
+                log_handle.flush()
+
+        if clean and PAPERS_BUILD_DIR.exists():
+            log_handle.write(f"\n# removing {PAPERS_BUILD_DIR}\n")
+            log_handle.flush()
+            shutil.rmtree(PAPERS_BUILD_DIR, ignore_errors=True)
+
+        # Configure only when needed (fresh dir / no Makefile). A reconfigure is
+        # required to re-glob after a NEW document is added — pass clean=true.
+        needs_configure = not (PAPERS_BUILD_DIR / "Makefile").exists()
+        if needs_configure and (PAPERS_BUILD_DIR / "CMakeCache.txt").exists():
+            # Foreign/partial cache (e.g. a previous Ninja configure) — wipe so
+            # `-G "Unix Makefiles"` configures cleanly instead of erroring on a
+            # generator mismatch.
+            log_handle.write("# stale CMake cache without a Makefile; wiping build dir\n")
+            log_handle.flush()
+            shutil.rmtree(PAPERS_BUILD_DIR, ignore_errors=True)
+        if needs_configure:
+            PAPERS_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+            configure_cmd = ["cmake", "-S", str(PAPERS_DIR), "-B",
+                             str(PAPERS_BUILD_DIR), "-G", "Unix Makefiles"]
+            if selected_python:
+                # Pin the venv interpreter (numpy/matplotlib pins need >=3.10).
+                configure_cmd.append(f"-DPython3_EXECUTABLE={selected_python}")
+            configure_rc = _stream_subprocess(
+                configure_cmd, log_handle, deadline, cwd=PAPERS_DIR, env=env,
+            )
+        else:
+            log_handle.write("# build dir already configured; skipping cmake configure\n")
+            log_handle.flush()
+
+        if configure_rc == 0:
+            build_rc = _stream_subprocess(
+                ["cmake", "--build", str(PAPERS_BUILD_DIR),
+                 "--target", PAPERS_LATEX_TARGET, "--", "-k", f"-j{parallel}"],
+                log_handle, deadline, cwd=PAPERS_BUILD_DIR, env=env,
+            )
+    except TimeoutError as e:
+        timed_out = True
+        error_note = str(e)
+        log_handle.write(f"\n# killed by {timeout_sec / 60:.0f}-min timeout: {e}\n")
+    except Exception as e:  # noqa: BLE001 — report any failure, never raise to the agent
+        error_note = str(e)
+        log_handle.write(f"\n# papers build error: {e}\n")
+    finally:
+        log_handle.close()
+
+    duration_min = (time.time() - started_at) / 60.0
+
+    # Report from pdf/<job>.pdf — the ground truth, independent of make's rc.
+    doc_lines: list[str] = []
+    built = 0
+    for j in jobs:
+        pdf = PAPERS_PDF_DIR / f"{j.name}.pdf"
+        if pdf.exists():
+            built += 1
+            pages = _pdf_page_count(pdf)
+            size_kb = pdf.stat().st_size / 1024.0
+            pg = f"{pages} pages" if pages is not None else "pages: ?"
+            doc_lines.append(f"  [ok]   {j.name}.pdf — {pg}, {size_kb:.0f} KB"
+                             + ("  (bib)" if j.has_bib else ""))
+        else:
+            doc_lines.append(f"  [fail] {j.name}.pdf — NOT produced"
+                             + ("  (needs biber)" if j.has_bib else ""))
+
+    if timed_out:
+        verdict = f"TIMED OUT after {_format_minutes(duration_min)}"
+    elif configure_rc != 0:
+        verdict = f"CONFIGURE FAILED (cmake rc={configure_rc})"
+    elif error_note and build_rc is None:
+        verdict = f"FAILED ({error_note})"
+    elif build_rc == 0 and built == len(jobs):
+        verdict = f"OK — all {built}/{len(jobs)} documents built"
+    else:
+        verdict = f"PARTIAL — {built}/{len(jobs)} documents built"
+        if build_rc not in (0, None):
+            verdict += f" (make rc={build_rc})"
+
+    out = [
+        f"papers `{PAPERS_LATEX_TARGET}` build: {verdict} in {_format_minutes(duration_min)}.",
+        f"PDF output dir: {PAPERS_PDF_DIR}",
+        "Documents:",
+        *doc_lines,
+    ]
+    if missing:
+        out.append(f"WARNING: missing tool(s) on PATH: {', '.join(missing)} — the "
+                   "LaTeX build cannot succeed without them.")
+    if biber_missing and bib_jobs:
+        out.append(f"NOTE: `biber` not found; documents with a main.bib "
+                   f"({', '.join(bib_jobs)}) need it for their bibliography pass and "
+                   "will fail until it is installed (e.g. `tlmgr install biber` or "
+                   "`brew install biber`). The remaining documents still build.")
+    if selected_python:
+        out.append(f"venv Python: {selected_python}")
+    out.append(f"Log: {log_path}")
+    if built < len(jobs):
+        errs = _extract_log_errors(log_path)
+        if errs:
+            out.append("\n--- salient log lines ---\n" + errs)
+    if built:
+        out.append(f"\nUse papers-view (e.g. pdf=\"{jobs[0].name}\") to inspect a "
+                   "PDF's pages as images.")
+    return "\n".join(out)
+
+
+def _resolve_pdf(selector: str, available: list[Path]) -> Optional[Path]:
+    """Map a papers-view `pdf` selector (job name, <name>.pdf, or a path) to a
+    PDF on disk. Falls back to a case-insensitive / unique-substring match
+    against the built PDFs."""
+    sel = selector.strip()
+    direct = Path(sel)
+    if direct.is_file() and direct.suffix.lower() == ".pdf":
+        return direct
+    stem = sel[:-4] if sel.lower().endswith(".pdf") else sel
+    cand = PAPERS_PDF_DIR / f"{stem}.pdf"
+    if cand.is_file():
+        return cand
+    low = stem.lower()
+    for ap in available:
+        if ap.stem.lower() == low or ap.name.lower() == sel.lower():
+            return ap
+    subs = [ap for ap in available if low in ap.stem.lower()]
+    if len(subs) == 1:
+        return subs[0]
+    return None
+
+
+def _parse_page_spec(spec: Any, page_count: int, max_pages: int) -> tuple[int, int]:
+    """Resolve a `pages` selector ("3" or "1-5") into a clamped, capped
+    inclusive 1-based (first, last) range."""
+    first, last = 1, page_count
+    if isinstance(spec, str) and spec.strip():
+        s = spec.strip()
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", s)
+        if m:
+            first, last = int(m.group(1)), int(m.group(2))
+        elif s.isdigit():
+            first = last = int(s)
+    first = max(1, min(first, page_count))
+    last = max(first, min(last, page_count))
+    if last - first + 1 > max_pages:
+        last = first + max_pages - 1
+    return first, last
+
+
+def tool_papers_view(arguments: dict):
+    """Render pages of a built paper PDF to PNGs and return them as inline image
+    content blocks so the agent can SEE the output (diagram alignment, rotated or
+    garbled figures, layout artifacts, overfull boxes…). Returns an MCP content
+    list (text header + image blocks); on a resolution problem returns a plain
+    string. With no/unknown `pdf`, returns a text listing of available PDFs."""
+    available = sorted(PAPERS_PDF_DIR.glob("*.pdf")) if PAPERS_PDF_DIR.is_dir() else []
+
+    def _listing(prefix: Optional[str] = None) -> str:
+        if available:
+            rows = []
+            for p in available:
+                pages = _pdf_page_count(p)
+                rows.append(f"  - {p.stem}  ({pages if pages is not None else '?'} "
+                            f"pages, {p.stat().st_size / 1024.0:.0f} KB)")
+            names = "\n".join(rows)
+        else:
+            names = "  (none — run papers-build first)"
+        head = (prefix + "\n") if prefix else ""
+        return (f"{head}Available PDFs in {PAPERS_PDF_DIR}:\n{names}\n\n"
+                "Call papers-view with pdf=\"<name>\" (and optional pages, e.g. "
+                "pages=\"1-5\") to view pages as images.")
+
+    pdf_arg = arguments.get("pdf")
+    if not pdf_arg or not isinstance(pdf_arg, str):
+        return _listing()
+
+    pdf_path = _resolve_pdf(pdf_arg, available)
+    if pdf_path is None:
+        return _listing(f"PDF '{pdf_arg}' not found.")
+
+    if shutil.which("pdftoppm") is None:
+        return (f"Cannot render: `pdftoppm` (poppler) not found on PATH. "
+                f"The PDF is at {pdf_path}.")
+
+    page_count = _pdf_page_count(pdf_path)
+
+    try:
+        max_pages = int(arguments.get("max_pages", 8))
+    except (TypeError, ValueError):
+        max_pages = 8
+    max_pages = max(1, min(max_pages, 25))
+
+    first, last = _parse_page_spec(
+        arguments.get("pages"),
+        page_count if page_count is not None else 10 ** 6,
+        max_pages,
+    )
+
+    # Resolution: a fixed DPI if given, else bound the longest side via -scale-to
+    # (predictable payload). pdftoppm clamps -l to the real last page.
+    render_args: list[str]
+    dpi = arguments.get("dpi")
+    if dpi is not None:
+        try:
+            render_args = ["-r", str(max(36, min(int(dpi), 400)))]
+        except (TypeError, ValueError):
+            render_args = []
+    else:
+        render_args = []
+    if not render_args:
+        try:
+            scale_to = int(arguments.get("scale_to", 1600))
+        except (TypeError, ValueError):
+            scale_to = 1600
+        scale_to = max(256, min(scale_to, 3000))
+        render_args = ["-scale-to", str(scale_to)]
+
+    tmp = Path(tempfile.mkdtemp(prefix="bioseq_papers_view_"))
+    rendered: list[bytes] = []
+    try:
+        prefix = tmp / "page"
+        cmd = ["pdftoppm", "-png", "-f", str(first), "-l", str(last),
+               *render_args, str(pdf_path), str(prefix)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            return (f"pdftoppm failed (rc={proc.returncode}) for {pdf_path}:\n"
+                    f"{(proc.stderr or '').strip()[:2000]}")
+        for png in sorted(tmp.glob("page*.png")):
+            rendered.append(png.read_bytes())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if not rendered:
+        return (f"No pages rendered from {pdf_path} (requested {first}-{last}; "
+                f"document has {page_count if page_count is not None else '?'} pages).")
+
+    pages_total = page_count if page_count is not None else "?"
+    res_desc = (f"{render_args[1]} DPI" if render_args[0] == "-r"
+                else f"max {render_args[1]} px")
+    header = (f"{pdf_path.name} — {pages_total} pages total; showing up to "
+              f"{len(rendered)} page(s) from {first} at {res_desc}.")
+
+    content: list[dict] = [{"type": "text", "text": header}]
+    total = len(header)
+    shown = 0
+    truncated = False
+    for idx, data in enumerate(rendered):
+        b64 = base64.b64encode(data).decode("ascii")
+        if shown >= 1 and total + len(b64) > PAPERS_VIEW_B64_CAP:
+            truncated = True
+            break
+        content.append({"type": "text", "text": f"Page {first + idx}:"})
+        content.append({"type": "image", "data": b64, "mimeType": "image/png"})
+        total += len(b64)
+        shown += 1
+
+    notes = []
+    if truncated:
+        notes.append(f"stopped after {shown} page(s) to bound payload size")
+    last_shown = first + shown - 1
+    if isinstance(page_count, int) and last_shown < page_count:
+        nxt = min(page_count, last_shown + max_pages)
+        notes.append(f"{page_count - last_shown} more page(s) not shown — request "
+                     f"pages=\"{last_shown + 1}-{nxt}\" to continue")
+    if notes:
+        content.append({"type": "text", "text": "(" + "; ".join(notes) + ".)"})
+    return content
 
 
 # --------------------------- subagent worker ----------------------------------
@@ -2967,6 +3498,108 @@ TOOL_DEFINITIONS += [
             "required": ["doc"],
         },
     },
+    {
+        "name": "papers-build",
+        "description": (
+            "Build the LaTeX `latex-all` CMake target: render every document under "
+            "main/papers/src/content/**/main.tex to main/papers/pdf/<job>.pdf. Runs "
+            "synchronously and returns a per-document summary (which PDFs were produced, "
+            "page counts, sizes) plus the salient error lines on failure. Configures the "
+            "papers project STANDALONE (the only mode in which latex-all actually emits "
+            "PDFs) and uses make keep-going so one failing document does not block the "
+            "others. The FIRST run also creates a Python venv and pip-installs the build "
+            "requirements (one-time, ~1-2 min); later runs are incremental. After building, "
+            "use `papers-view` to inspect a PDF's pages as images. NOTE: documents that have "
+            "a main.bib require `biber`; if it is not installed those documents fail their "
+            "bibliography pass while the rest still build."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "clean": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Remove the papers build dir first, forcing a full reconfigure + "
+                        "rebuild. Use after adding a NEW document (so its main.tex is "
+                        "re-discovered) or to recover from a broken build tree."
+                    ),
+                },
+                "timeout_sec": {
+                    "type": "integer",
+                    "description": (
+                        "Hard wall-clock ceiling for configure+build in seconds "
+                        "(default and max 1800). The build is killed if it is exceeded."
+                    ),
+                },
+                "python": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the Python interpreter used to create the "
+                        "build venv. Optional — by default the newest CPython in "
+                        "[3.10, 3.13] on PATH is chosen, because requirements.txt pins "
+                        "numpy/matplotlib versions that need Python >=3.10 (CMake's "
+                        "default is often the macOS system python 3.9, which fails)."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "papers-view",
+        "description": (
+            "Browse a built paper's PDF pages as inline PNG images so you can actually SEE "
+            "the rendered output — check diagrams for misalignment, rotated or garbled "
+            "figures, layout artifacts, overfull boxes, etc. Returns a text header followed "
+            "by one image per page. Call with no `pdf` (or an unknown one) to list the "
+            "available PDFs under main/papers/pdf/. Build the PDFs first with `papers-build`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pdf": {
+                    "type": "string",
+                    "description": (
+                        "Which PDF to view: a job name (e.g. \"bioseqdb_thesis\"), a "
+                        "\"<name>.pdf\" filename, or an absolute path. Omit to list the "
+                        "available PDFs."
+                    ),
+                },
+                "pages": {
+                    "type": "string",
+                    "description": (
+                        "Page selection: a single page (\"3\") or an inclusive range "
+                        "(\"1-5\"). Defaults to the first pages. Capped to `max_pages`."
+                    ),
+                },
+                "max_pages": {
+                    "type": "integer",
+                    "default": 8,
+                    "minimum": 1,
+                    "maximum": 25,
+                    "description": "Maximum number of pages (images) to return in one call.",
+                },
+                "scale_to": {
+                    "type": "integer",
+                    "default": 1600,
+                    "description": (
+                        "Render each page to fit within a scale_to x scale_to pixel box "
+                        "(bounds the image payload; clamped to 256-3000). Ignored if `dpi` "
+                        "is set."
+                    ),
+                },
+                "dpi": {
+                    "type": "integer",
+                    "description": (
+                        "Render at a fixed resolution in DPI (clamped to 36-400) instead of "
+                        "`scale_to`. Higher is sharper but produces a larger payload."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -3113,6 +3746,15 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_remote_run(args)
     elif name == "remote-git":
         text = tool_remote_git(args.get("command", ""))
+    elif name == "papers-build":
+        text = tool_papers_build(args)
+    elif name == "papers-view":
+        # papers-view may return a content list (text header + image blocks) so
+        # the agent can see rendered pages; a plain string is an error/listing.
+        result = tool_papers_view(args)
+        if isinstance(result, list):
+            return {"content": result}
+        text = result
     elif name in ("doc_create", "doc_archive", "doc_search", "doc_read"):
         # Doc-tool requests are JSON-Schema-validated server-side inside operations
         # (docs/schemas.py). ensure_doc_env() lazily provisions qmd + jsonschema on first use.

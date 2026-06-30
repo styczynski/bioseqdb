@@ -494,10 +494,10 @@ $\,\to\,$ & Dec 2025 & Stage III: Custom storage  \\
 \begin{frame}
   \frametitle{Problem specification}
 
-  \begin{tcolorbox}[colback=green!5,colframe=green!40!black,title=Time]
+  \begin{exampleblock}{Time}
   Aligning short sequences up to 1k bases with $5\% \pm 5\%$ error rate.
-  Given the reference sequence of length≤20 Mbp, a collection of reads should be processed in at most 2+r/10 minutes (max 1000 reads) (i.e avg. 6s per read) and memory<1GB
-  \end{tcolorbox}
+  Given the reference sequence of length$\le$20 Mbp, a collection of reads should be processed in at most 2+r/10 minutes (max 1000 reads) (i.e avg. 6s per read) and memory$<$1GB
+  \end{exampleblock}
 \end{frame}
 
 
@@ -701,10 +701,10 @@ $\,\to\,$ & Dec 2025 & Stage III: Custom storage  \\
 
 \begin{frame}[fragile]
   \frametitle{Bonus: we can encode sequence signature as List[uint64]}
-  \begin{tcolorbox}[fontlower=\tiny, colback=green!5,colframe=green!40!black,title=Bonus!]
+  \begin{exampleblock}{Bonus!}\tiny
     We then have short signature vectors representing single sequence or entire sets of sequences.
     This means we can do LSH to detect similarity of sequences' datasets (easy clsutering) and predict evolutionary direction.
-  \end{tcolorbox}
+  \end{exampleblock}
 \end{frame}
 
 \begin{frame}
@@ -1180,8 +1180,8 @@ $\,\to\,$ & Dec 2025 & Stage III: Custom storage  \\
   \item Materialize
   \end{enumerate}
 
-  \begin{tcolorbox}[fontlower=\tiny, colback=green!5,colframe=green!40!black,title=Note from funcapi.h]
-    \tcblower
+  \begin{exampleblock}{Note from funcapi.h}\tiny
+    \par\medskip
     NOTE: there is no guarantee that a SRF using ValuePerCall mode will be
     run to completion; for example, a query with LIMIT might stop short of
     fetching all the rows.  Therefore, do not expect that you can do resource
@@ -1192,7 +1192,7 @@ $\,\to\,$ & Dec 2025 & Stage III: Custom storage  \\
     tuplestore during a single call, as set up by InitMaterializedSRF() (see
     fmgr/README).  Alternatively, set up a callback to release resources
     at query shutdown, using RegisterExprContextCallback().
-  \end{tcolorbox}
+  \end{exampleblock}
 \end{frame}
 
 \begin{frame}[fragile]
@@ -1393,13 +1393,13 @@ $\,\to\,$ & Dec 2025 & Stage III: Custom storage  \\
   \hline
   \end{tabular} \newline
 
-  \begin{tcolorbox}[colback=green!5,colframe=green!40!black,title=Memory]
+  \begin{exampleblock}{Memory}
   This comparison is for 20K dataset. Around $10\%$ overhead for PG for storage footprint.
   Minimal $4\%$ overall footprint for memory usage.
-  \end{tcolorbox}
-  \begin{tcolorbox}[colback=green!5,colframe=green!40!black,title=Time]
+  \end{exampleblock}
+  \begin{exampleblock}{Time}
   PG is on average $15\%$ slower with a minimal constant penalty of 0.01-0.05s
-  \end{tcolorbox}
+  \end{exampleblock}
 \end{frame}
 
 
