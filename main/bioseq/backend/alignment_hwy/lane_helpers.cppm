@@ -21,6 +21,7 @@ module;
 
 #include <cstdint>
 #include <array>
+#include <cstring>
 
 export module bioseq.alignment.lane_helpers;
 
