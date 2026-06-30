@@ -24,7 +24,6 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 
-import bioseq.simd.utils;
 export import bioseq.simd.vector_stream;
 
 export {
@@ -725,7 +724,9 @@ inline void iterate_sequence_bp_simd_offsets(
 	);
 
 	const size_t bps_per_lane = (context_units + units_per_lane) * seq_traits::letters_per_unit;
-	auto [full_chunks_count_raw, bps_last_chunk_raw] = int_div_floor(bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit);
+	const size_t bps_per_matrix = hn::Lanes(d) * seq_traits::letters_per_unit;
+	const size_t full_chunks_count_raw = bps_per_lane / bps_per_matrix;
+	const size_t bps_last_chunk_raw = bps_per_lane % bps_per_matrix;
 	// When the sequence length is an exact multiple of (Lanes * letters_per_unit) per
 	// lane we end up with bps_last_chunk == 0. That means:
 	//   (a) the partial-matrix loop never runs, so `finish_fn` is never invoked, and
@@ -1052,9 +1053,9 @@ iterate_sequence_bp_simd_v2(
 
 	const size_t bps_per_lane =
 		(context_units + units_per_lane) * seq_traits::letters_per_unit;
-	auto [full_chunks_count_raw, bps_last_chunk_raw] =
-		int_div_floor(bps_per_lane,
-			lanes_per_stream * seq_traits::letters_per_unit);
+	const size_t bps_per_stream = lanes_per_stream * seq_traits::letters_per_unit;
+	const size_t full_chunks_count_raw = bps_per_lane / bps_per_stream;
+	const size_t bps_last_chunk_raw = bps_per_lane % bps_per_stream;
 
 	// Same `bps_last_chunk == 0` fix-up as v1 — keeps the partial-mask
 	// transitions firing and `finish_fn` reachable on exact-fit lengths.
