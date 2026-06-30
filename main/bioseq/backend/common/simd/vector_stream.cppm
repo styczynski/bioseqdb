@@ -19,11 +19,11 @@ module;
 #  error "bioseq_simd.vector_stream: vectors are sizeless on RVV/SVE; this module is only enabled for fixed-vector targets (NEON, SSE/AVX, AVX-512, SCALAR)."
 #endif
 
+#include "common/simd/utils_impl.hpp"
+
 export module bioseq.simd.vector_stream;
 
 import bioseq.common.mlogging;
-
-#include "common/simd/utils_impl.hpp"
 
 export {
 

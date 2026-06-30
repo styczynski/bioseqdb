@@ -33,6 +33,8 @@ module;
 #include <string>
 #include <utility>
 
+#include "common/simd/utils_impl.hpp"
+
 export module bioseq.alignment.block_aligner;
 
 import bioseq.common.mlogging;
@@ -44,8 +46,6 @@ import bioseq.alignment.utils;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
 import bioseq.storage.lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
-
-#include "common/simd/utils_impl.hpp"
 
 export {
 

@@ -538,7 +538,7 @@ public:
 		} else if (hn::Lanes(d) == 16) {
 			transpose16(d, matrix);
 		} else {
-			ASSERT(false, fmt::format("square_lane_matrix does not support transpose() for lane number: {}", hn::Lanes(d)));
+			ASSERT(false, "square_lane_matrix does not support transpose() for this lane number");
 		}
 	}
 };

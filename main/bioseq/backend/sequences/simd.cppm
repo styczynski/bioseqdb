@@ -19,6 +19,8 @@ module;
 
 #include <boost/integer.hpp>
 
+#include "common/simd/utils_impl.hpp"
+
 export module bioseq.sequences.simd;
 
 import bioseq.common.mlogging;
@@ -27,8 +29,6 @@ import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 
 export import bioseq.simd.vector_stream;
-
-#include "common/simd/utils_impl.hpp"
 
 export {
 

@@ -15,6 +15,8 @@ module;
 #include <vector>
 #include <functional>
 
+#include "common/simd/utils_impl.hpp"
+
 export module bioseq.sequences.kmers.hashers.base;
 
 import bioseq.common.mlogging;
@@ -22,8 +24,6 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.common.circular_append_buffer;
-
-#include "common/simd/utils_impl.hpp"
 
 export {
 

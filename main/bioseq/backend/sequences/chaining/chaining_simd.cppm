@@ -51,14 +51,14 @@ module;
 #include <type_traits>
 #include <utility>
 
+#include "common/simd/utils_impl.hpp"
+
 export module bioseq.sequences.chaining.simd;
 
 import bioseq.common.mlogging;
 import bioseq.sequences.chaining.utils;
 import bioseq.common.context;
 import bioseq.instr;
-
-#include "common/simd/utils_impl.hpp"
 
 export {
 

@@ -16,6 +16,8 @@ module;
 #include <utility>
 #include <vector>
 
+#include "common/simd/utils_impl.hpp"
+
 export module bioseq.sequences.kmers.two_stacks;
 
 import bioseq.common.mlogging;
@@ -27,8 +29,6 @@ import bioseq.sequences.kmers.hashers;
 import bioseq.simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
 import bioseq.common.circular_append_buffer;
 import bioseq.instr;
-
-#include "common/simd/utils_impl.hpp"
 
 export {
 
