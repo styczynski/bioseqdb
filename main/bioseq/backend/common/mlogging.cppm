@@ -211,7 +211,14 @@ extern "C++" {
 #include "fmt/ostream.h"
 #include "fmt/printf.h"
 #include "fmt/ranges.h"
+// fmt/std.h only applies FMT_EXPORT to formatter specializations. Those
+// specializations are attached to the exported formatter primary already, and
+// GCC rejects spelling them as unbraced `export template ...` declarations.
+#undef FMT_EXPORT
+#define FMT_EXPORT
 #include "fmt/std.h"
+#undef FMT_EXPORT
+#define FMT_EXPORT export
 #include "fmt/xchar.h"
 
 #include "src/format.cc"
