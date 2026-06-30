@@ -728,7 +728,7 @@ void flush_seq_cache_write_states(seq_caches* caches,
 // Shard open / create / lookup helpers.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
                      seq_caches* cache,
                      std::int16_t column_attno, std::int16_t bucket_idx,
@@ -785,7 +785,7 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
     return rel;
 }
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                             std::int16_t column_attno, TupleDesc parent_tupdesc,
                             std::int16_t bucket_idx, std::int32_t starting_shard_idx,
@@ -924,7 +924,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 column_attno, bucket_idx, row.shard_idx);
 }
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                      std::int16_t column_attno, TupleDesc parent_tupdesc,
                      std::int16_t bucket_idx,

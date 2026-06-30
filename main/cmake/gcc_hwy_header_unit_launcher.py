@@ -207,6 +207,63 @@ def buildable_flags(args: list[str]) -> list[str]:
     return flags
 
 
+def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list[str]:
+    """Return a stable flag set for Highway header units.
+
+    The generated CMI is shared by modules from several CMake targets. Target
+    defines such as NO_POSTGRES or *_EXPORTS do not affect Highway, but they do
+    change GCC's header-unit CRC if included in the build. Keep only flags that
+    can affect Highway preprocessing or target selection.
+    """
+
+    flags: list[str] = []
+    raw_flags = buildable_flags(args)
+    idx = 0
+    while idx < len(raw_flags):
+        arg = raw_flags[idx]
+        if arg in {"-I", "-isystem", "-iquote", "-idirafter"}:
+            idx += 2
+            continue
+        if arg.startswith("-I") or arg.startswith("-isystem"):
+            idx += 1
+            continue
+        if arg == "-D":
+            if idx + 1 < len(raw_flags):
+                define = raw_flags[idx + 1]
+                if define.startswith(("HWY", "TOOLCHAIN_")):
+                    flags.extend([arg, define])
+            idx += 2
+            continue
+        if arg.startswith("-D"):
+            define = arg[2:]
+            if define.startswith(("HWY", "TOOLCHAIN_")):
+                flags.append(arg)
+            idx += 1
+            continue
+        if (
+            arg.startswith("-std=")
+            or arg == "-fmodules-ts"
+            or arg == "-fPIC"
+            or arg == "-fpermissive"
+            or arg.startswith("-Wno-")
+            or arg.startswith(("-march=", "-mtune=", "-mcpu="))
+            or arg.startswith(("-mavx", "-msse", "-mfma", "-mbmi", "-mlzcnt", "-mpopcnt"))
+        ):
+            flags.append(arg)
+        idx += 1
+
+    seen_roots: set[Path] = set()
+    for root in header_roots:
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        flags.extend(["-isystem", str(root)])
+
+    if "-fmodules-ts" not in flags:
+        flags.append("-fmodules-ts")
+    return flags
+
+
 def fingerprint(parts: Iterable[str]) -> str:
     digest = hashlib.sha256()
     for part in parts:
@@ -245,16 +302,19 @@ def prebuild_header_units(
 ) -> None:
     include_dirs = collect_include_dirs(parsed_args, cwd)
     header_paths: list[Path] = []
+    header_roots: list[Path] = []
     for header in HIGHWAY_HEADER_UNITS:
         for include_dir in include_dirs:
             candidate = include_dir / header
             if candidate.exists():
                 header_paths.append(candidate.resolve())
+                header_roots.append(include_dir)
                 break
         else:
             return
 
-    cache_key = fingerprint([compiler, *buildable_flags(parsed_args), *header_signature(header_paths)])
+    header_flags = highway_header_unit_flags(parsed_args, header_roots)
+    cache_key = fingerprint([compiler, *header_flags, *header_signature(header_paths)])
     cache_dir = cwd / ".gcc-hwy-header-units" / cache_key
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -265,7 +325,6 @@ def prebuild_header_units(
         mapper_cache.write_text(f"$root {cache_dir}\n", encoding="utf-8")
 
         built_entries: list[str] = []
-        header_flags = buildable_flags(parsed_args)
         for header, header_abs in zip(HIGHWAY_HEADER_UNITS, header_paths):
             cmi = cmi_path(cache_dir, header_abs)
             cmi.parent.mkdir(parents=True, exist_ok=True)
