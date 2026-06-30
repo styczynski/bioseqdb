@@ -153,6 +153,7 @@ CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
+AWS_GCC161_CXX_FLAGS = "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive"
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
 AWS_LEGACY_VCPKG_TRIPLET = "x64-linux"
 AWS_LIBCXX_OVERLAY_TRIPLETS = PROJECT_ROOT / "cmake" / "triplets"
@@ -993,6 +994,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 repair_reasons.append(
                     f"BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
                     f"(was {current_heavy_jobs or 'unset'})")
+            if active_preset == "aws-x64-linux-gcc161":
+                current_cxx_flags = _cmake_cache_value(active_build_dir, "CMAKE_CXX_FLAGS")
+                repair_args.append(f"-DCMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS}")
+                if current_cxx_flags != AWS_GCC161_CXX_FLAGS:
+                    repair_reasons.append(
+                        f"CMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS} "
+                        f"(was {current_cxx_flags or 'unset'})")
             if active_preset == "aws-x64-linux":
                 current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
                 current_overlay = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_TRIPLETS")
