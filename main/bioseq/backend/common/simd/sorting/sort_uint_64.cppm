@@ -10,6 +10,7 @@
  */
 export module bioseq.simd.sorting.uint64;
 
+#if !defined(__GNUC__) || defined(__clang__)
 import bioseq.simd.sorting;
 
 export namespace bioseq::simd::sorting::uint64 {
@@ -20,3 +21,4 @@ using ::bioseq::simd::sorting::vqsort_threshold_bytes;
 using ::bioseq::simd::sorting::vqsort_threshold_keys;
 
 }  // namespace bioseq::simd::sorting::uint64
+#endif

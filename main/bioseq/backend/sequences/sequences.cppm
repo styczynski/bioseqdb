@@ -863,8 +863,9 @@ struct compact_sequence_range_base {
 
     using derived_range_t = derived_t;
 
-    template<size_t N> static constexpr bool has_valid_padding = true;
-    template<> static constexpr bool has_valid_padding<1> = (derived_range_t::padding() == 0);
+    template<size_t N>
+    static constexpr bool has_valid_padding =
+        (N != 1) || (derived_range_t::padding() == 0);
 
     template<typename I>
     struct is_valid_derived_iter {
@@ -1603,7 +1604,14 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
     0
 > {
 public:
-    using traits = compact_sequence_range<R>::compact_sequence_range_base::traits;
+    using traits = typename compact_sequence_range_base<
+        compact_sequence_range<R>,
+        std::remove_reference_t<std::ranges::range_reference_t<R>>,
+        typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<
+            std::remove_reference_t<std::ranges::range_reference_t<R>>
+        >)>::least,
+        0
+    >::traits;
     using base_iterator_type = decltype(std::declval<R>().cbegin());
 
     const R& _data;
@@ -1612,8 +1620,8 @@ public:
         return 0;
     }
 
-    explicit constexpr compact_sequence_range<R>(R&& base_range): _data(std::move(base_range)) {};
-    explicit constexpr compact_sequence_range<R>(R& base_range): _data(base_range) {};
+    explicit constexpr compact_sequence_range(R&& base_range): _data(std::move(base_range)) {};
+    explicit constexpr compact_sequence_range(R& base_range): _data(base_range) {};
 
     class iterator_impl : public boost::iterator_adaptor<
         iterator_impl,
@@ -1634,7 +1642,7 @@ public:
         friend class boost::iterator_core_access;
         friend class compact_sequence_range<R>;
 
-        template <typename R2> friend class compact_sequence_range<R2>::iterator_impl;
+        template <typename R2> friend struct compact_sequence_range;
 
         iterator_impl() = default;
 
@@ -1734,7 +1742,12 @@ struct compact_sequence_range<C> : compact_sequence_range_base<
     //seqan3::detail::ceil_log2(seqan3::alphabet_size<C::alphabet_type>)
 > {
 public:
-    using traits = compact_sequence_range<C>::compact_sequence_range_base::traits;
+    using traits = typename compact_sequence_range_base<
+        compact_sequence_range<C>,
+        typename C::alphabet_type,
+        typename C::storage_unit,
+        C::letter_bit_width
+    >::traits;
 
     using base_container = std::vector<typename traits::storage_unit>;
     using iterator = std::vector<typename traits::storage_unit>::const_iterator;
@@ -1832,9 +1845,9 @@ template<
 struct compact_sequence_range<A> : compact_sequence_range<sequence_custom_alphabet<A>> {
 public:
     using parent = compact_sequence_range<sequence_custom_alphabet<A>>;
-    using traits = compact_sequence_range<A>::parent::traits;
-    using base_container = compact_sequence_range<A>::parent::base_container;
-    using iterator = compact_sequence_range<A>::parent::iterator;
+    using traits = typename parent::traits;
+    using base_container = typename parent::base_container;
+    using iterator = typename parent::iterator;
 
     // template <typename R>
     // requires (
@@ -2236,7 +2249,12 @@ struct compact_sequence_range<S> : public compact_sequence_range_base<
 > {
 public:
     using traits =
-        typename compact_sequence_range<S>::compact_sequence_range_base::traits;
+        typename compact_sequence_range_base<
+            compact_sequence_range<S>,
+            typename S::alphabet_type,
+            typename S::storage_unit,
+            S::letter_bit_width
+        >::traits;
     using base_container =
         const typename S::compact_sequence_stdc_type*;
     // DOC0268 (this run) — keep the iterator's element type in lockstep
