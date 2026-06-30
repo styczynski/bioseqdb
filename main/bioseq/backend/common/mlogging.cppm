@@ -39,9 +39,9 @@ module;
 #include <utility>
 #include <vector>
 
-// For generic serialization
-#include <rfl/json.hpp>
-#include <rfl.hpp>
+// For generic enum logging.
+#include <rfl/thirdparty/enchantum/bitflags.hpp>
+#include <rfl/thirdparty/enchantum/enchantum.hpp>
 
 // FMT LOGIC
 #define FMT_MODULE
@@ -220,8 +220,6 @@ extern "C++" {
 #undef FMT_EXPORT
 #define FMT_EXPORT export
 #include "fmt/xchar.h"
-
-#include "src/format.cc"
 
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE
 }
@@ -919,10 +917,8 @@ inline bool fmtlogT<_>::checkLogLevel(LogLevel logLevel) noexcept {
 }
 
 
-namespace {
-void fmtlogEmptyFun(void*) {
+inline void fmtlogEmptyFun(void*) {
 }
-} // namespace
 
 template<int ___ = 0>
 class fmtlogDetailT
@@ -1522,6 +1518,27 @@ void fmtlogT<_>::stopPollingThread() noexcept {
 template class fmtlogT<0>;
 
 
+namespace bioseq_fmt_detail {
+
+template<enchantum::Enum T>
+std::string enum_to_string(T value)
+{
+  if constexpr (enchantum::is_bitflag<T>) {
+    auto name = enchantum::to_string_bitflag(value);
+    if (!name.empty()) {
+      return name;
+    }
+  } else {
+    auto name = enchantum::to_string(value);
+    if (!name.empty()) {
+      return std::string{name.data(), name.size()};
+    }
+  }
+  return std::to_string(+enchantum::to_underlying(value));
+}
+
+} // namespace bioseq_fmt_detail
+
 
 export {
 namespace fmt {
@@ -1532,16 +1549,13 @@ namespace fmt {
 // };
 
 template<typename T>
-requires (
-  //default_serializer_format<T>::value && 
-  requires (const T& value) {
-     { rfl::enum_to_string(value) } -> std::convertible_to<std::string>;
-  }
-)
+requires enchantum::Enum<T>
 struct formatter<T>: formatter<std::string> {
     template <typename FormatContext>
     auto format(const T& value, FormatContext& ctx) const {
-      return formatter<std::string>::format(rfl::enum_to_string(value), ctx);
+      return formatter<std::string>::format(
+          bioseq_fmt_detail::enum_to_string(value),
+          ctx);
     }
 };
 
@@ -2260,7 +2274,7 @@ public:
     return *this;
   }
 
-  [[gnu::always_inline]] ~BioseqReport()
+  [[gnu::always_inline]] inline ~BioseqReport()
   {
     if (!enabled_) {
       return;
