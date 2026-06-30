@@ -36,15 +36,26 @@ module;
 #include "hwy/contrib/sort/vqsort-inl.h"
 
 #include <algorithm>
+#include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
+
+#if defined(__GNUC__) && !defined(__clang__)
+#include "common/simd/utils_impl.hpp"
+#include "common/simd/vector_stream_impl.hpp"
+#endif
 
 export module bioseq.simd.sorting;
 
 import bioseq.common.mlogging;
+#if !defined(__GNUC__) || defined(__clang__)
 import bioseq.simd.vector_stream;
+#endif
 
 export {
 

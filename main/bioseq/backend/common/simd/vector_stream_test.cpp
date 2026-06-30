@@ -12,11 +12,14 @@
 #include <utility>
 #include <vector>
 
+#include "common/simd/utils_impl.hpp"
+#if defined(__GNUC__) && !defined(__clang__)
+#include "common/simd/vector_stream_impl.hpp"
+#else
 import bioseq.simd.vector_stream;
+#endif
 import bioseq.common.mlogging;
 import bioseq.common.testing;
-
-#include "common/simd/utils_impl.hpp"
 
 HWY_BEFORE_NAMESPACE();
 

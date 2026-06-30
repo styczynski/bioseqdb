@@ -17,6 +17,9 @@ module;
 #include <vector>
 
 #include "common/simd/utils_impl.hpp"
+#if defined(__GNUC__) && !defined(__clang__)
+#include "common/simd/vector_stream_impl.hpp"
+#endif
 
 export module bioseq.sequences.kmers.two_stacks;
 
@@ -26,7 +29,9 @@ import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
+#if !defined(__GNUC__) || defined(__clang__)
 import bioseq.simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
+#endif
 import bioseq.common.circular_append_buffer;
 import bioseq.instr;
 

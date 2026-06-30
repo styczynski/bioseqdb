@@ -20,6 +20,9 @@ module;
 #include <boost/integer.hpp>
 
 #include "common/simd/utils_impl.hpp"
+#if defined(__GNUC__) && !defined(__clang__)
+#include "common/simd/vector_stream_impl.hpp"
+#endif
 
 export module bioseq.sequences.simd;
 
@@ -28,7 +31,9 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 
+#if !defined(__GNUC__) || defined(__clang__)
 export import bioseq.simd.vector_stream;
+#endif
 
 export {
 
