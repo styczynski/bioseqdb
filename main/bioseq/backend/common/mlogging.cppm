@@ -40,8 +40,10 @@ module;
 #include <vector>
 
 // For generic serialization
-#include <rfl/json.hpp>
-#include <rfl.hpp>
+#if !(defined(__GNUC__) && !defined(__clang__))
+#  include <rfl/json.hpp>
+#  include <rfl.hpp>
+#endif
 
 // FMT LOGIC
 #define FMT_MODULE
