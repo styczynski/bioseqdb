@@ -153,7 +153,11 @@ CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
-AWS_GCC161_CXX_FLAGS = "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive"
+AWS_GCC161_CXX_FLAGS = (
+    "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive "
+    "-Wno-expose-global-module-tu-local -Wno-external-tu-local "
+    "-Wno-template-names-tu-local"
+)
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
 AWS_LEGACY_VCPKG_TRIPLET = "x64-linux"
 AWS_LIBCXX_OVERLAY_TRIPLETS = PROJECT_ROOT / "cmake" / "triplets"
