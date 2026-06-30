@@ -24,7 +24,7 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 
-export import bioseq.simd.utils;
+import bioseq.simd.utils;
 export import bioseq.simd.vector_stream;
 
 export {
