@@ -403,9 +403,6 @@ public:
 	constexpr size_t fill_with_offsets(
 		D& d, const std::array<size_t, K> offsets, const T* data
 	) {
-		assert(K >= hn::Lanes(d));
-		assert(std::is_sorted(offsets));
-		
 		const size_t rows_to_load = hn::Lanes(d);
 		for(size_t i = 0; i < rows_to_load; ++i) {
 			matrix[i] = hn::LoadU(d, &(data[offsets[i]]));
@@ -482,7 +479,6 @@ public:
 	constexpr size_t fill(
 		D& d, const size_t context, const T* data
 	) {
-		assert(context <= hn::Lanes(d));
 		const size_t rows_to_load = hn::Lanes(d);
 		const size_t row_offset = rows_to_load - context;
 		for(size_t i = 0; i < rows_to_load; ++i) {
@@ -495,8 +491,6 @@ public:
 	constexpr std::pair<size_t, size_t> partial_fill(
 		D& d, const size_t data_available, const size_t context, const T* data
 	) {
-		assert(context <= hn::Lanes(d));
-
 		if (data_available < context) [[unlikely]] {
 			const size_t loaded_units = std::min(data_available, hn::Lanes(d));
 			matrix[0] = hn::LoadN(d, data, loaded_units);
