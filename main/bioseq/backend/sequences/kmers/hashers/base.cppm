@@ -16,6 +16,7 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.common.circular_append_buffer;
+import bioseq.simd.utils;
 
 export {
 
@@ -23,19 +24,6 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
-
-template <typename T, typename D>
-inline constexpr std::vector<T> extract_lanes(const D& d, const hn::Vec<D>& input) {
-    HWY_ALIGN T storage_buffer[hn::MaxLanes(d)];
-    hn::StoreU(input, d, storage_buffer);
-    const size_t lanes_no = hn::Lanes(d);
-    return std::vector<T>(storage_buffer, storage_buffer + lanes_no);
-}
-
-template <typename T, typename D>
-inline constexpr std::vector<T> extract_lanes(const D& d, const hn::Mask<D>& input) {
-    return extract_lanes<T>(d, hn::VecFromMask(d, input));
-}
 
 // hasher
 template<

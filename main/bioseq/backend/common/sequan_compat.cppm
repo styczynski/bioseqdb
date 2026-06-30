@@ -45,17 +45,17 @@ export {
 
 
 template <typename alphabet_type>
-    requires (
-        seqan3::alphabet<std::remove_cvref_t<alphabet_type>> &&
-        !std::integral<std::remove_cvref_t<alphabet_type>>
-    )
+    requires requires (alphabet_type const a) {
+        { seqan3::to_char(a) };
+    }
 struct fmt::formatter<alphabet_type>: formatter<std::string> {
   // parse is inherited from formatter<string_view>.
   template <typename FormatContext>
   auto format(alphabet_type symbol, FormatContext& ctx) const {
-    return formatter<std::string>::format(std::string(1, seqan3::to_char(symbol)), ctx);
+    return formatter<std::string>::format(std::string(1, symbol.to_char()), ctx);
   }
 };
 
 
 export namespace seq = seqan3;
+
