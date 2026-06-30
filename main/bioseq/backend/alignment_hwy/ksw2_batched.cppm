@@ -178,7 +178,7 @@ bucket_fills_by_geometry(
 
     struct ByBucketThenOrder {
         std::int32_t default_bw;
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const FillDescriptor& a, const FillDescriptor& b) const noexcept
         {
             const FillBucketKey ka = bucket_key_for(a, default_bw);
@@ -422,7 +422,7 @@ inline void stitch_cigars_into_regions(
     ::bioseq::chaining::ArenaSlab<FillDescriptor>&  fills)
 {
     struct ChainOrder {
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const FillDescriptor& a, const FillDescriptor& b) const noexcept
         {
             if (a.region_idx != b.region_idx) return a.region_idx < b.region_idx;
