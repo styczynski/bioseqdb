@@ -1164,12 +1164,12 @@ const CustomExecMethods BioseqColumnScanExecuteMethods = {
 	.EndCustomScan = BioseqColumnScan_EndCustomScan,
 	.ReScanCustomScan = BioseqColumnScan_ReScanCustomScan,
 
-	.ExplainCustomScan = BioseqColumnScan_ExplainCustomScan,
-
 	.EstimateDSMCustomScan = BioseqColumn_EstimateDSMCustomScan,
 	.InitializeDSMCustomScan = BioseqColumn_InitializeDSMCustomScan,
 	.ReInitializeDSMCustomScan = BioseqColumn_ReinitializeDSMCustomScan,
-	.InitializeWorkerCustomScan = BioseqColumn_InitializeWorkerCustomScan
+	.InitializeWorkerCustomScan = BioseqColumn_InitializeWorkerCustomScan,
+
+	.ExplainCustomScan = BioseqColumnScan_ExplainCustomScan
 };
 
 static const config_enum_entry debug_level_options[] = {
