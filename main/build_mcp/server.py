@@ -150,7 +150,7 @@ def _safe_parallel_jobs() -> int:
 
 
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
-HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "150.0"))
+HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
 AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
