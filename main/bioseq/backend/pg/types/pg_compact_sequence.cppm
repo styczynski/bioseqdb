@@ -20,7 +20,7 @@
  */
 module;
 
-#include "common.h"
+#include "headers/pg_compat.h"
 
 extern "C" {
 #pragma GCC diagnostic push
