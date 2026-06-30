@@ -87,7 +87,6 @@ struct SortedRunStoreStats {
 } // namespace bioseq::storage::indexing
 
 namespace bioseq::storage::indexing {
-namespace {
 
 struct SortedPairWire {
     std::uint64_t kmer = 0;
@@ -320,7 +319,6 @@ struct MergeHeadGreater {
     }
 };
 
-} // namespace
 } // namespace bioseq::storage::indexing
 
 export namespace bioseq::storage::indexing {
