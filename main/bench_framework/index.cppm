@@ -5333,6 +5333,27 @@ kAggregatedStatsRegistry{ {
     return finite;
 }
 
+[[nodiscard]] inline bool has_any_finite_sample(
+    const std::vector<double>& samples) noexcept
+{
+    return std::any_of(samples.begin(), samples.end(),
+        [](double value) { return std::isfinite(value); });
+}
+
+/// A benchmark can mark an execution cell as "not measured" by returning only
+/// non-finite evaluation metrics. Wall-clock still exists because the framework
+/// times `on_run`, but regression rules must not compare a deliberate skip's
+/// microsecond-scale bookkeeping time against real historical GPU work.
+[[nodiscard]] inline bool region_has_nonfinite_evaluation_sentinel(
+    const std::map<std::string, std::vector<double>>& region_metrics) noexcept
+{
+    for (const auto& [metric_name, samples] : region_metrics) {
+        if (metric_name == "wall_clock_ns" || samples.empty()) continue;
+        if (!has_any_finite_sample(samples)) return true;
+    }
+    return false;
+}
+
 /// Read the requested aggregate from a *raw sample vector*. Non-
 /// finite samples (NaN / ±inf) are filtered out before any
 /// arithmetic, matching `aggregate_samples_for_report` so a rule
@@ -6635,6 +6656,9 @@ struct HistoricalReportCache {
 
                             const auto region_it = merged_samples.find(region_name);
                             if (region_it == merged_samples.end()) continue;
+                            const bool not_measured_cell =
+                                region_has_nonfinite_evaluation_sentinel(region_it->second);
+
                             const auto metric_it = region_it->second.find(rule.metric);
                             if (metric_it == region_it->second.end()
                                 || metric_it->second.empty()) continue;
@@ -6645,10 +6669,8 @@ struct HistoricalReportCache {
                             // explicit Vulkan rows on a software ICD), so the
                             // regression rule is satisfied for this cell.
                             ++matched_count;
-                            const bool current_has_finite = std::any_of(
-                                metric_it->second.begin(), metric_it->second.end(),
-                                [](double value) { return std::isfinite(value); });
-                            if (!current_has_finite) {
+                            if (not_measured_cell
+                                || !has_any_finite_sample(metric_it->second)) {
                                 continue;
                             }
                             const double now_value =
