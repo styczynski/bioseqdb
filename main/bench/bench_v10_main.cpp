@@ -20,6 +20,7 @@
 
 #include <simdjson.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -42,6 +43,7 @@ import bioseq.parallelism.memory_admission;
 import bench_framework;
 import bench.tool_minimap2;
 import bioseq.sequences.generation;
+import bioseq.gpu.vulkan.runtime;
 
 #ifndef BIOSEQ_BENCH_REPORT_DIR
 #error "BIOSEQ_BENCH_REPORT_DIR must be defined by the build system"
@@ -95,6 +97,7 @@ struct AlignerOutput {
     std::size_t correct_pairs          = 0;
     std::size_t total_pairs            = 0;
     double      sum_abs_position_offset = 0.0;
+    bool        vulkan_hardware_unavailable = false;
 };
 
 /// Pull a numeric field out of a simdjson element with a fallback.
@@ -259,8 +262,36 @@ struct AlignerOutput {
 /// REPR_STORAGE test cases via the test-case name passed via the input.
 struct AlgorithmDispatch {
     bool is_minimap2_reference = false;
+    bool explicit_vulkan = false;
     Minimap2Params params{};
 };
+
+[[nodiscard]] bool is_explicit_vulkan_hardware_available(std::string_view algo) {
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+        return true;
+    }
+
+    static std::atomic_bool logged_unavailable{false};
+    if (!logged_unavailable.exchange(true, std::memory_order_relaxed)) {
+        if (runtime.usable()) {
+            bioseq_log<WRN>(
+                "[bench_v10] explicit Vulkan benchmark rows are not measured on this host "
+                "(first algo='{}'): active Vulkan device '{}' is a CPU/software device "
+                "(VkPhysicalDeviceType={}); hardware Vulkan is required for GPU timing/parity",
+                algo,
+                runtime.features().device_name.data(),
+                runtime.features().device_type);
+        } else {
+            bioseq_log<WRN>(
+                "[bench_v10] explicit Vulkan benchmark rows are not measured on this host "
+                "(first algo='{}'): Vulkan runtime is unavailable: {}",
+                algo,
+                runtime.initialization_error());
+        }
+    }
+    return false;
+}
 
 [[nodiscard]] AlgorithmDispatch dispatch_algorithm(std::string_view algo,
                                                     std::int32_t kmer_override) {
@@ -295,6 +326,7 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::VULKAN_TILED_DP;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+        dispatch.explicit_vulkan = true;
     } else if (algo == "bioseq_ksw2_batched_simd_dp_two_stack_nthash") {
         // DOC0254 §11.9: KSW2_BATCHED selected via runtime params.
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
@@ -332,6 +364,7 @@ struct AlgorithmDispatch {
         // comparison row. This no longer selects a Phase-B minimizer sketch.
         dispatch.params.vulkan_fused_frontend_enabled  = false;
         dispatch.params.vulkan_gpu_index_build_enabled = false;
+        dispatch.explicit_vulkan = true;
     } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {
         // DOC0310 Phase C — the resident two-submit Vulkan frontend: parallel
         // ordered tile sketch + GPU target-index build (device radix sort +
@@ -351,6 +384,7 @@ struct AlgorithmDispatch {
         dispatch.params.vulkan_fused_frontend_enabled  = true;
         dispatch.params.vulkan_gpu_index_build_enabled = true;
         dispatch.params.vulkan_extend_enabled          = false;
+        dispatch.explicit_vulkan = true;
     } else if (algo == "bioseq_ksw2_rmq_scalar_mm") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::RMQ;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
@@ -371,6 +405,10 @@ struct AlgorithmDispatch {
 
     AlignerOutput output;
     output.total_pairs = input.pairs.size();
+    if (dispatch.explicit_vulkan && !is_explicit_vulkan_hardware_available(algo)) {
+        output.vulkan_hardware_unavailable = true;
+        return output;
+    }
     for (std::size_t pair_index = 0; pair_index < input.pairs.size(); ++pair_index) {
         auto& pair = input.pairs[pair_index];     // pairs are `mutable` in AlignerInput; see field comment
         MatchResultCollection results;
@@ -397,6 +435,18 @@ struct AlgorithmDispatch {
                 results = bioseq::simd::HWY_NAMESPACE::minimap_port(
                     bench_lazy_query, bench_lazy_target, dispatch.params);
             }
+        } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& exception) {
+            bioseq_log<ERR>("[bench_v10] selected Vulkan aligner failed (algo='{}', pair_index={}, "
+                 "query_len={}, target_len={}, k={}): {}",
+                 algo, pair_index,
+                 input.queries_acgt[pair_index].size(),
+                 input.targets_acgt[pair_index].size(),
+                 dispatch.params.kmer_size,
+                 exception.what());
+            if (dispatch.explicit_vulkan) {
+                throw;
+            }
+            continue;
         } catch (const std::exception& exception) {
             bioseq_log<ERR>("[bench_v10] aligner threw exception (algo='{}', pair_index={}, "
                  "query_len={}, target_len={}, k={}): {}",
@@ -440,6 +490,13 @@ struct AlgorithmDispatch {
     const AlignerOutput& output)
 {
     std::map<std::string, double> metrics;
+    if (output.vulkan_hardware_unavailable) {
+        const double not_measured = std::numeric_limits<double>::quiet_NaN();
+        metrics.emplace("match_count", not_measured);
+        metrics.emplace("primary_correct_fraction", not_measured);
+        metrics.emplace("mean_position_offset_bp", not_measured);
+        return metrics;
+    }
     metrics.emplace("match_count", static_cast<double>(output.total_results));
     const double pairs_d = static_cast<double>(output.total_pairs);
     metrics.emplace("primary_correct_fraction",

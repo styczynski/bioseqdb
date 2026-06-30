@@ -6032,6 +6032,22 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return std::string{commit_text};
 }
 
+/// Pull the `meta.fast` flag from a parsed report. Missing metadata means an
+/// older report predates the flag; callers decide whether that is comparable.
+[[nodiscard]] inline std::optional<bool> fast_from_report(
+    simdjson::dom::element report_root) noexcept
+{
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return std::nullopt;
+    const auto meta_obj = try_get_object(*root_obj, "meta");
+    if (!meta_obj.has_value()) return std::nullopt;
+    bool fast = false;
+    if ((*meta_obj).at_key("fast").get(fast) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return fast;
+}
+
 /// Read a JSON `number` field as a double, falling back to
 /// `default_value` on any miss (key absent, wrong type, parse
 /// failure). Coerces through `int64_t` / `uint64_t` so an
@@ -6555,6 +6571,7 @@ struct HistoricalReportCache {
 [[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
     const RegressionRulesByConfig& regression_rules_by_config,
     const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const ReportMeta&              current_meta,
     std::size_t                    current_index,
     HistoricalReportCache&         history_cache,
     std::vector<ValidationDiag>&   diagnostics_out) noexcept
@@ -6623,8 +6640,17 @@ struct HistoricalReportCache {
                                 || metric_it->second.empty()) continue;
 
                             // Cell has data → counts toward matched_count
-                            // regardless of baseline presence.
+                            // regardless of baseline presence. All-non-finite
+                            // current samples mean "not measured" (for example,
+                            // explicit Vulkan rows on a software ICD), so the
+                            // regression rule is satisfied for this cell.
                             ++matched_count;
+                            const bool current_has_finite = std::any_of(
+                                metric_it->second.begin(), metric_it->second.end(),
+                                [](double value) { return std::isfinite(value); });
+                            if (!current_has_finite) {
+                                continue;
+                            }
                             const double now_value =
                                 aggregate_samples(rule.aggregate, metric_it->second);
 
@@ -6645,6 +6671,24 @@ struct HistoricalReportCache {
                             auto* baseline_report = fetch_report(current_index - 1);
                             std::optional<AggregatedSamples> baseline_aggregate;
                             if (baseline_report != nullptr) {
+                                const auto baseline_fast = fast_from_report(baseline_report->root);
+                                if (baseline_fast.has_value()
+                                    && *baseline_fast != current_meta.fast) {
+                                    diagnostics_out.push_back({
+                                        ValidationDiag::Severity::Warning,
+                                        "regression_baseline_mode_mismatch",
+                                        rule_location,
+                                        fmt::format("report_{}.json has meta.fast={} but current run has meta.fast={}; no comparable baseline for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
+                                                    current_index - 1,
+                                                    *baseline_fast ? "true" : "false",
+                                                    current_meta.fast ? "true" : "false",
+                                                    state->config.benchmark_key,
+                                                    tuple.algorithm_name,
+                                                    test_case_name, region_name,
+                                                    rule.metric)
+                                    });
+                                    continue;
+                                }
                                 baseline_aggregate = aggregated_from_report(
                                     baseline_report->root,
                                     state->config.benchmark_key,
@@ -6652,7 +6696,7 @@ struct HistoricalReportCache {
                                     test_case_name, region_name, rule.metric);
                             }
                             if (!baseline_aggregate.has_value()
-                                || baseline_aggregate->samples_count == 0) {
+                                || !has_finite_samples(*baseline_aggregate)) {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_baseline_missing",
@@ -6691,13 +6735,18 @@ struct HistoricalReportCache {
                                 if (hist_report == nullptr) {
                                     history_gap = true; break;
                                 }
+                                const auto hist_fast = fast_from_report(hist_report->root);
+                                if (hist_fast.has_value()
+                                    && *hist_fast != current_meta.fast) {
+                                    history_gap = true; break;
+                                }
                                 auto hist_aggregate = aggregated_from_report(
                                     hist_report->root,
                                     state->config.benchmark_key,
                                     tuple.algorithm_name, tuple.params,
                                     test_case_name, region_name, rule.metric);
                                 if (!hist_aggregate.has_value()
-                                    || hist_aggregate->samples_count == 0) {
+                                    || !has_finite_samples(*hist_aggregate)) {
                                     history_gap = true; break;
                                 }
                                 const double hist_value =
@@ -10033,7 +10082,7 @@ struct BenchmarkFilterMetadata {
     std::vector<ValidationDiag> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
         regression_rules_by_config, reports,
-        current_index, history_cache, regression_eval_diagnostics);
+        run_meta, current_index, history_cache, regression_eval_diagnostics);
     const bool regression_eval_had_errors = report_diagnostics(
         std::span<const ValidationDiag>{regression_eval_diagnostics},
         "regression");
