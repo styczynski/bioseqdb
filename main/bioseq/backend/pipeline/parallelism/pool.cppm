@@ -11,6 +11,7 @@ module;
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -118,7 +119,21 @@ public:
     template <class RandomIt, class Compare>
     void parallel_sort(RandomIt first, RandomIt last, Compare comp) {
         ensure_configured();
-        if (last <= first) {
+        const auto count = last - first;
+        if (count <= 0) {
+            return;
+        }
+        if constexpr (std::contiguous_iterator<RandomIt>) {
+            auto* first_ptr = std::to_address(first);
+            auto* last_ptr = first_ptr + count;
+            if (max_concurrency_ <= 1) {
+                std::sort(first_ptr, last_ptr, comp);
+                return;
+            }
+            const auto impl = impl_;
+            impl->arena->execute([first_ptr, last_ptr, &comp] {
+                otbb::parallel_sort(first_ptr, last_ptr, comp);
+            });
             return;
         }
         if (max_concurrency_ <= 1) {
