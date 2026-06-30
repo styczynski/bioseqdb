@@ -259,6 +259,7 @@ def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list
             or arg == "-fmodules-ts"
             or arg == "-fPIC"
             or arg == "-fpermissive"
+            or arg.startswith("-fabi-version")
             or arg.startswith("-Wno-")
             or arg.startswith(("-march=", "-mtune=", "-mcpu="))
             or arg.startswith(("-mavx", "-msse", "-mfma", "-mbmi", "-mlzcnt", "-mpopcnt"))
