@@ -1656,7 +1656,7 @@ template <sequence_alphabet A>
     gp.deletion_length_mean   = jdbl(data, "deletion_length_mean", 1.0);
     gp.reverse_complement_rate= jdbl(data, "reverse_complement_rate", 0.5);
     gp.seed                   = static_cast<std::uint64_t>(jint(data, "seed", 3219876));
-    gp.use_vulkan             = true;  // hard-fail if GPU unavailable: catches broken Vulkan early
+    gp.use_vulkan             = jbool(data, "use_vulkan_generation", false);
 
     E2eInput in;
     in.alphabet    = std::string{bench_alphabet_name<A>()};
