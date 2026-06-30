@@ -21,8 +21,7 @@
  */
 module;
 
-#include "common_simd.h"   // <hwy/highway.h> + friends (tolerated header), for mask_and/mask_or
-
+#include <concepts>
 #include <cstdint>
 #include <span>
 #include <utility>
@@ -74,46 +73,6 @@ concept is_compare_result_sink = requires(S s, std::uint32_t n) {
 
 }  // namespace bioseq::column::vec
 
-/* ---- Highway implementation of the same-width bool mask combiners ---- */
-HWY_BEFORE_NAMESPACE();
-namespace bioseq::column::vec::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
-
-// lhs[i] &= rhs[i]   (operates on bool[] reinterpreted as uint8[])
-HWY_INLINE void mask_and_impl(std::span<bool> lhs, std::span<const bool> rhs) {
-    const hn::ScalableTag<std::uint8_t> d;
-    const std::size_t N = hn::Lanes(d);
-    const std::size_t n = lhs.size() < rhs.size() ? lhs.size() : rhs.size();
-    std::uint8_t* HWY_RESTRICT lp = reinterpret_cast<std::uint8_t*>(lhs.data());
-    const std::uint8_t* HWY_RESTRICT rp = reinterpret_cast<const std::uint8_t*>(rhs.data());
-    std::size_t i = 0;
-    for (; i + N <= n; i += N)
-        hn::StoreU(hn::And(hn::LoadU(d, lp + i), hn::LoadU(d, rp + i)), d, lp + i);
-    if (i < n) {
-        const std::size_t rem = n - i;
-        hn::StoreN(hn::And(hn::LoadN(d, lp + i, rem), hn::LoadN(d, rp + i, rem)), d, lp + i, rem);
-    }
-}
-
-// lhs[i] |= rhs[i]
-HWY_INLINE void mask_or_impl(std::span<bool> lhs, std::span<const bool> rhs) {
-    const hn::ScalableTag<std::uint8_t> d;
-    const std::size_t N = hn::Lanes(d);
-    const std::size_t n = lhs.size() < rhs.size() ? lhs.size() : rhs.size();
-    std::uint8_t* HWY_RESTRICT lp = reinterpret_cast<std::uint8_t*>(lhs.data());
-    const std::uint8_t* HWY_RESTRICT rp = reinterpret_cast<const std::uint8_t*>(rhs.data());
-    std::size_t i = 0;
-    for (; i + N <= n; i += N)
-        hn::StoreU(hn::Or(hn::LoadU(d, lp + i), hn::LoadU(d, rp + i)), d, lp + i);
-    if (i < n) {
-        const std::size_t rem = n - i;
-        hn::StoreN(hn::Or(hn::LoadN(d, lp + i, rem), hn::LoadN(d, rp + i, rem)), d, lp + i, rem);
-    }
-}
-
-}  // namespace bioseq::column::vec::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
-
 /* ---- Public kernel API (non-HWY-namespaced) ---- */
 export namespace bioseq::column::vec {
 
@@ -140,12 +99,8 @@ void compare_column(const ValueT* vp, const bool* np, std::uint32_t n,
     }
 }
 
-inline void mask_and(std::span<bool> lhs, std::span<const bool> rhs) noexcept {
-    bioseq::column::vec::HWY_NAMESPACE::mask_and_impl(lhs, rhs);
-}
+void mask_and(std::span<bool> lhs, std::span<const bool> rhs) noexcept;
 
-inline void mask_or(std::span<bool> lhs, std::span<const bool> rhs) noexcept {
-    bioseq::column::vec::HWY_NAMESPACE::mask_or_impl(lhs, rhs);
-}
+void mask_or(std::span<bool> lhs, std::span<const bool> rhs) noexcept;
 
 }  // namespace bioseq::column::vec
