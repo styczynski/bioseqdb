@@ -58,6 +58,22 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
         "Use -Og or -O1 -g for debug builds of pipe.cppm."
 #endif
 
+#ifndef BIOSEQ_PIPELINE_FORCE_INLINE
+#define BIOSEQ_PIPELINE_FORCE_INLINE 1
+#endif
+
+#if BIOSEQ_PIPELINE_FORCE_INLINE
+#define BIOSEQ_PIPELINE_INLINE_ATTR [[gnu::always_inline]]
+#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR [[gnu::always_inline, gnu::flatten]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard, gnu::always_inline, gnu::flatten]]
+#else
+#define BIOSEQ_PIPELINE_INLINE_ATTR
+#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard]]
+#endif
+
 #include <hwy/highway.h>
 
 #include "common.h"
@@ -3564,7 +3580,8 @@ struct pipeline_run_leaf {
         "pipeline_run_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
     template <class QueryMinimizers>
-    [[nodiscard, gnu::always_inline]] static MatchResultCollection call(
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static MatchResultCollection call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
         const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
@@ -3665,7 +3682,8 @@ struct describe_leaf {
         ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
         "describe_leaf: CA must be ChainingAlgorithmType (from ca_step).");
 
-    [[nodiscard, gnu::always_inline]] static PipelineDescription call(
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static PipelineDescription call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         const compact_sequence_range<QR>& q,
         const compact_sequence_range<TR>& t,
@@ -3729,7 +3747,7 @@ template <EntryPoint EP,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QR>::traits::storage_unit>,
           class QueryMinimizers = std::vector<MinimizerT>>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection dispatch_pipeline(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
@@ -3767,7 +3785,7 @@ MatchResultCollection dispatch_pipeline(
 
 template <supports_compact_sequence_range QR,
           supports_compact_sequence_range TR>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     const compact_sequence_range<QR>& query_seq_proto,
@@ -3931,7 +3949,8 @@ struct sketch_leaf {
         ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
         "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
-    [[gnu::always_inline]] static void call(
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static void call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         Collector& collector, Range& range,
         const std::size_t& window_len, const std::size_t& kmer_len)
@@ -3953,7 +3972,8 @@ struct sketch_traits {
 /// `params.minimizer_algorithm`.  The chain pins MA at compile time and the
 /// leaf dispatches via the trait's kernel.
 template <class MinimizerT, class Collector, class Range>
-[[gnu::always_inline, gnu::flatten]] void sketch_one(
+BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
+void sketch_one(
     Collector& collector, Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
@@ -3971,7 +3991,8 @@ template <class MinimizerT, class Collector, class Range>
 /// boilerplate repeated for the target and query passes in the legacy
 /// `minimap_port_with_repr` body.
 template <class MinimizerT, class Range>
-[[gnu::always_inline]] void sketch_into_collector(
+BIOSEQ_PIPELINE_INLINE_ATTR
+void sketch_into_collector(
     sketch_collector_t<MinimizerT>& collector,
     Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
@@ -4062,7 +4083,8 @@ struct minimap_port_repr_leaf {
     static_assert(std::is_same_v<decltype(K), std::size_t>,
         "minimap_port_repr_leaf: K must be std::size_t (from kmer_size_step).");
 
-    [[gnu::always_inline]] static MatchResultCollection call(
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static MatchResultCollection call(
         const Minimap2Params& params,
         bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  q,
         bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& t)
@@ -4100,7 +4122,7 @@ template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QueryRange>::traits::storage_unit>>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection minimap_port(
     bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
     bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,

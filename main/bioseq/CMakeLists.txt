@@ -322,6 +322,11 @@ if(NOT BIOSEQ_GCC_TYPED_DISPATCH_JOBS MATCHES "^[0-9]+$")
     "'${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}'")
 endif()
 
+set(BIOSEQ_GCC_TEMPLATE_FORCE_INLINE "ON" CACHE BOOL
+  "Keep forced always_inline/flatten attributes in template dispatch modules \
+for the GCC 16.1 AWS preset. OFF preserves algorithm selection but lets GCC \
+avoid constructing very large inlining graphs while compiling typed dispatch.")
+
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_scanner_pg.cpp
@@ -380,6 +385,11 @@ set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked_segmented.cpp)
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
+    target_compile_definitions(bioseq_modules_nopg PRIVATE
+      BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
+      BIOSEQ_PIPELINE_FORCE_INLINE=0)
+  endif()
   if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS
       gcc_typed_dispatch_compile=${BIOSEQ_GCC_TYPED_DISPATCH_JOBS})
@@ -393,7 +403,8 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   message(STATUS
     "bioseq: GCC typed dispatch wrapper TUs use "
     "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
-    "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}; set "
+    "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}, template force-inline="
+    "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
     "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 to restore the global preset")
 endif()
 

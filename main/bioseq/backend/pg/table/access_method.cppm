@@ -2888,8 +2888,8 @@ export const TableAmRoutine bioseq_am_methods = {
 	.index_fetch_tuple = bioseq_index_fetch_tuple,
 
 	.tuple_fetch_row_version = bioseq_fetch_row_version,
-	.tuple_get_latest_tid = bioseq_get_latest_tid,
 	.tuple_tid_valid = bioseq_tuple_tid_valid,
+	.tuple_get_latest_tid = bioseq_get_latest_tid,
 	.tuple_satisfies_snapshot = bioseq_tuple_satisfies_snapshot,
 	.index_delete_tuples = bioseq_index_delete_tuples,
 
