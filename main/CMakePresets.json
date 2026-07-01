@@ -131,7 +131,7 @@
           "VCPKG_TARGET_TRIPLET": "x64-linux",
           "VCPKG_TARGET_ARCHITECTURE": "x64",
           "BIOSEQ_HEAVY_JOBS": "4",
-          "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL": "O1",
+          "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL": "O0",
           "BIOSEQ_GCC_TYPED_DISPATCH_JOBS": "1"
         }
       },
