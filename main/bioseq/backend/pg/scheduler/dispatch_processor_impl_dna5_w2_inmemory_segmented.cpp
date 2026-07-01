@@ -1,0 +1,7 @@
+#include "dispatch_processor_typed_source_prelude.inc"
+
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY 1
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION process_inmemory_segmented_row_dna5_w2
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET seq::dna5
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH 2
+#include "dispatch_processor_typed_impl.inc"

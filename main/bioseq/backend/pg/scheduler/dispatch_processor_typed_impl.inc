@@ -121,6 +121,19 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY) \
+    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY) \
+    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY) \
+    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY) \
+    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY 1
+#endif
+
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY) \
+    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY 1
+#endif
+
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
 #ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION
 #error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION must name the concrete scanner helper"
@@ -154,6 +167,37 @@ namespace hn = hwy::HWY_NAMESPACE;
     sequence_size_t target_bp_size,
     const Minimap2Params& params,
     bool chunked_scanner_forced);
+#endif
+
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_LEAF_HELPERS)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION must name the concrete standard in-memory helper"
+#endif
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION must name the concrete segmented in-memory helper"
+#endif
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION must name the concrete chunked in-memory helper"
+#endif
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION must name the concrete chunked segmented in-memory helper"
+#endif
+[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params);
+[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params);
+[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params);
+[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params);
 #endif
 
 namespace {
@@ -1923,7 +1967,7 @@ try_materialize_target_for_segment_workers(
 }
 
 #if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER) \
-    && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY)
+    && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
 template <class S>
@@ -2677,9 +2721,79 @@ template <class S>
 }
 #endif
 
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY)
+template <class S>
+[[nodiscard]] MatchResultCollection process_inmemory_standard_row_typed(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    compact_sequence_range<S> query_seq{*row_query_hdr};
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
+    compact_sequence_range<S> target_seq{*target_hdr};
+    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+    return minimap_port_pg_checked(lazy_query, lazy_target, params);
+}
+#endif
+
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY)
+template <class S>
+[[nodiscard]] MatchResultCollection process_inmemory_segmented_row_typed(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    compact_sequence_range<S> query_seq{*row_query_hdr};
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
+    compact_sequence_range<S> target_seq{*target_hdr};
+    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+    return minimap_port_segmented_pg_checked(lazy_query, lazy_target, params);
+}
+#endif
+
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY)
+template <class S>
+[[nodiscard]] MatchResultCollection process_inmemory_chunked_row_typed(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    compact_sequence_range<S> query_seq{*row_query_hdr};
+    compact_sequence_range<S> target_seq{*target_hdr};
+    using chunked = bioseq::storage::sequence_scanner_test_chunked<
+        typename compact_sequence_range<S>::traits::storage_unit,
+        bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+    bioseq::storage::lazy_compact_sequence<S, chunked> fq{
+        chunked::from_range(query_seq)};
+    bioseq::storage::lazy_compact_sequence<S, chunked> ft{
+        chunked::from_range(target_seq)};
+    return minimap_port_pg_checked(fq, ft, params);
+}
+#endif
+
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
+template <class S>
+[[nodiscard]] MatchResultCollection process_inmemory_chunked_segmented_row_typed(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    compact_sequence_range<S> query_seq{*row_query_hdr};
+    compact_sequence_range<S> target_seq{*target_hdr};
+    using chunked = bioseq::storage::sequence_scanner_test_chunked<
+        typename compact_sequence_range<S>::traits::storage_unit,
+        bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+    bioseq::storage::lazy_compact_sequence<S, chunked> fq{
+        chunked::from_range(query_seq)};
+    bioseq::storage::lazy_compact_sequence<S, chunked> ft{
+        chunked::from_range(target_seq)};
+    return minimap_port_segmented_pg_checked(fq, ft, params);
+}
+#endif
+
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY) \
     || (!defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER) \
-        && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY))
+        && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY))
 template <class S>
 [[nodiscard]] MatchResultCollection process_inmemory_row_typed(
     const pgseq_t* row_query_hdr,
@@ -2688,6 +2802,21 @@ template <class S>
     const Minimap2Params& params,
     const bool chunked_scanner_forced)
 {
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_LEAF_HELPERS)
+    const bool segmented = target_bp_size > kPgSegmentationThresholdBp;
+    if (chunked_scanner_forced) {
+        return segmented
+            ? BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
+                row_query_hdr, target_hdr, params)
+            : BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
+                row_query_hdr, target_hdr, params);
+    }
+    return segmented
+        ? BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
+            row_query_hdr, target_hdr, params)
+        : BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
+            row_query_hdr, target_hdr, params);
+#else
     compact_sequence_range<S> query_seq{*row_query_hdr};
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
@@ -2707,11 +2836,11 @@ template <class S>
     return (target_bp_size > kPgSegmentationThresholdBp)
         ? minimap_port_segmented_pg_checked(lazy_query, lazy_target, params)
         : minimap_port_pg_checked(lazy_query, lazy_target, params);
+#endif
 }
 #endif
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY) \
-    && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY)
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY)
 template <class S>
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_typed(
     const size_t batch_size,
@@ -4027,6 +4156,86 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
         target_bp_size,
         params,
         chunked_scanner_forced);
+}
+#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION must name the concrete standard in-memory helper"
+#endif
+
+[[nodiscard]] MatchResultCollection
+BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    using S = compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+    return process_inmemory_standard_row_typed<S>(
+        row_query_hdr,
+        target_hdr,
+        params);
+}
+#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION must name the concrete segmented in-memory helper"
+#endif
+
+[[nodiscard]] MatchResultCollection
+BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    using S = compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+    return process_inmemory_segmented_row_typed<S>(
+        row_query_hdr,
+        target_hdr,
+        params);
+}
+#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION must name the concrete chunked in-memory helper"
+#endif
+
+[[nodiscard]] MatchResultCollection
+BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    using S = compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+    return process_inmemory_chunked_row_typed<S>(
+        row_query_hdr,
+        target_hdr,
+        params);
+}
+#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION must name the concrete chunked segmented in-memory helper"
+#endif
+
+[[nodiscard]] MatchResultCollection
+BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const Minimap2Params& params)
+{
+    using S = compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+    return process_inmemory_chunked_segmented_row_typed<S>(
+        row_query_hdr,
+        target_hdr,
+        params);
 }
 #else
 #ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION
