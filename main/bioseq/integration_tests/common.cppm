@@ -2,6 +2,7 @@ module;
 #include "common.h"
 #include <cctype>
 #include <cstdlib>
+#include <fmt/format.h>
 #include <libpq-fe.h>
 
 #include <algorithm>
@@ -16,7 +17,6 @@ module;
 
 export module bioseq.integration_tests.common;
 
-export import bioseq.common.mlogging;
 export import bioseq.storage.scanner;  // DOC0263 §11.1 — scanner types for parametrise_scanner_combinations
 
 namespace bioseq_int_tests {
