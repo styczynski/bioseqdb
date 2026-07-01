@@ -331,6 +331,46 @@ def append_missing_mapper_entries(mapper_path: Path, lines: list[str]) -> None:
     mapper_path.write_text("\n".join([*retained, *missing]) + "\n", encoding="utf-8")
 
 
+def mapper_key_is_highway_header_unit(key: str) -> bool:
+    return any(key == header or key.endswith(f"/{header}") for header in HIGHWAY_HEADER_UNITS)
+
+
+def remove_highway_mapper_entries(mapper_path: Path) -> None:
+    if not mapper_path.exists():
+        return
+    existing = mapper_path.read_text().splitlines()
+    retained = [
+        line
+        for line in existing
+        if (key := mapper_entry_key(line)) is None or not mapper_key_is_highway_header_unit(key)
+    ]
+    if retained == existing:
+        return
+    mapper_path.write_text("\n".join(retained) + "\n", encoding="utf-8")
+
+
+def source_paths(args: list[str], cwd: Path) -> list[Path]:
+    paths: list[Path] = []
+    for arg in args:
+        if Path(arg).suffix in SOURCE_SUFFIXES:
+            paths.append(resolve_path(arg, cwd))
+    return paths
+
+
+def is_catch_test_translation_unit(args: list[str], cwd: Path) -> bool:
+    for source in source_paths(args, cwd):
+        source_text = source.as_posix()
+        source_name = source.name
+        if (
+            source_name.endswith("_test.cpp")
+            or "/integration_tests/test_" in source_text
+            or source_text.endswith("/integration_tests/common.cppm")
+            or source_text.endswith("/backend/common/testing.cppm")
+        ):
+            return True
+    return False
+
+
 def prebuild_header_units(
     compiler: str,
     parsed_args: list[str],
@@ -420,7 +460,10 @@ def main() -> None:
 
     mapper_path = find_module_mapper(parsed_args, cwd)
     if mapper_path is not None and has_modules_ts(parsed_args):
-        prebuild_header_units(compiler, parsed_args, cwd, mapper_path)
+        if is_catch_test_translation_unit(parsed_args, cwd):
+            remove_highway_mapper_entries(mapper_path)
+        else:
+            prebuild_header_units(compiler, parsed_args, cwd, mapper_path)
 
     os.execv(compiler, [compiler, *original_args])
 

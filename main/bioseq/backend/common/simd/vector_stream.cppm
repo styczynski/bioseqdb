@@ -15,7 +15,6 @@ module;
 
 export module bioseq.simd.vector_stream;
 
-import bioseq.common.mlogging;
 import bioseq.simd.utils;     // for_each_index<W>
 
 export {
