@@ -25,8 +25,7 @@ extern "C" {
 export module bioseq.column;
 
 import bioseq.common.mlogging;
-import bioseq.table:access_method;        // bioseq_tableam_init
-import bioseq.table:custom_scan;          // bioseq_customscan_init
+import bioseq.table;                      // bioseq_tableam_init, bioseq_customscan_init
 import bioseq.config;
 import bioseq.pg_utils;
 import bioseq.storage.manager;

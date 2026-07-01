@@ -20,8 +20,7 @@ module;
 export module bioseq.column.planner_hook;
 
 import bioseq.common.mlogging;
-import bioseq.table:index_scan;           // bioseq_create_indexscan_node, bioseq_register_indexscan_node
-import bioseq.table:custom_scan;          // bioseq_customscan_methods
+import bioseq.table;                      // custom/index scan planner API
 import bioseq.pg_utils;
 import bioseq.config;                    // DOC0322 §9.3 — bioseq_enable_vectorization, bioseq_index_scan GUCs
 import bioseq.vector.execution;   // GetVectorizedProcedureOid
