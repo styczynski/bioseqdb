@@ -26,6 +26,7 @@ export module bioseq.column;
 
 import bioseq.common.mlogging;
 import bioseq.table;                      // bioseq_tableam_init, bioseq_customscan_init
+import bioseq.table.am_cache;             // bioseq_am_cache_invalidate
 import bioseq.config;
 import bioseq.pg_utils;
 import bioseq.storage.manager;
