@@ -153,6 +153,7 @@ CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
+AWS_GCC_TYPED_DISPATCH_OPT_LEVEL = "O2"
 AWS_GCC161_CXX_FLAGS = (
     "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 "
     "-Wno-expose-global-module-tu-local -Wno-external-tu-local "
@@ -1038,11 +1039,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         f"-U{pattern}" for pattern in AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS)
             elif active_preset == "aws-x64-linux-gcc161":
                 current_cxx_flags = _cmake_cache_value(active_build_dir, "CMAKE_CXX_FLAGS")
+                current_typed_dispatch_opt = _cmake_cache_value(
+                    active_build_dir,
+                    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL",
+                )
                 repair_args.append(f"-DCMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS}")
+                repair_args.append(
+                    "-DBIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
+                    f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL}")
                 if current_cxx_flags != AWS_GCC161_CXX_FLAGS:
                     repair_reasons.append(
                         f"CMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS!r} "
                         f"(was {current_cxx_flags or 'unset'})")
+                if current_typed_dispatch_opt != AWS_GCC_TYPED_DISPATCH_OPT_LEVEL:
+                    repair_reasons.append(
+                        "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
+                        f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL} "
+                        f"(was {current_typed_dispatch_opt or 'unset'})")
             if repair_reasons:
                 log_handle.write("# AWS cache repair: setting "
                                  + "; ".join(repair_reasons) + ".\n")

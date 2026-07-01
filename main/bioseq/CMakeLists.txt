@@ -299,6 +299,39 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
 
+# GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
+# dispatch wrapper at -O3. Keep this as a build knob, not a C++ ifdef:
+# runtime dispatch and algorithm selection are unchanged, and non-GCC
+# builds stay on the preset's normal -O3 path.
+set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O2" CACHE STRING
+  "Optimization level for GCC 16.1 AWS typed dispatch wrapper TUs. \
+Allowed: O1, O2, O3. O3 preserves the global preset behavior.")
+set_property(CACHE BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL PROPERTY STRINGS O1 O2 O3)
+if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[123]$")
+  message(FATAL_ERROR
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL must be one of O1, O2, O3; got "
+    "'${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}'")
+endif()
+
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8.cpp)
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16"
+    AND NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
+  set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+  message(STATUS
+    "bioseq: GCC typed dispatch wrapper TUs use "
+    "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}; set "
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 to restore the global preset")
+endif()
+
 # Per-target module set for the aligner (and its tests_exec sibling): just
 # testing.cppm; every other Domain N module is delivered via
 # bioseq_modules_nopg. tests_exec adds the _test.cpp files to SOURCES via
