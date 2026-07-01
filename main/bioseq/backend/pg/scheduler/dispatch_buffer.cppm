@@ -76,12 +76,7 @@ import bioseq.column.tam;               // DOC0322 §7.4 — tid_to_row_number (
 
 export namespace bioseq::scheduler {
 
-namespace current_target = ::bioseq::simd::HWY_NAMESPACE;
-using current_target::BatchExecutionStats;
-using current_target::BatchProcessor;
-using current_target::MatchResult;
-using current_target::Minimap2Params;
-using current_target::kDispatchBatchCapacity;
+constexpr size_t kDispatchBatchCapacity = 8192;
 
 // Fixed upper bound on a single batch. Matches the TupleDispatchBuffer
 // constructor hint; entries beyond this get truncated with a log line.
@@ -264,11 +259,11 @@ public:
 
     struct NextOutput {
         BufferedScanEntry* entry;
-        const MatchResult* match;
+        const ::bioseq::simd::HWY_NAMESPACE::MatchResult* match;
     };
 
 private:
-    BatchProcessor processor;
+    ::bioseq::simd::HWY_NAMESPACE::BatchProcessor processor;
     MmsearchContext mmsearch_context;
 
     /*
@@ -278,7 +273,7 @@ private:
      * row inherits these values with size-heuristic tuning applied if the
      * user left the minimap2 defaults in place.
      */
-    Minimap2Params base_params{};
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params base_params{};
 
     /*
      * Controls whether submit_scan will attempt an index_sidecar lookup.
@@ -301,10 +296,10 @@ private:
      * Recomputed" percentage from runtime truth instead of the
      * plan-time estimate.
      */
-    BatchExecutionStats last_stats{};
+    ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats last_stats{};
 
     std::vector<BufferedScanEntry> buffered_entries;
-    std::map<int32_t, std::vector<MatchResult>> match_map;
+    std::map<int32_t, std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>> match_map;
     std::vector<OutputCursor> output_cursors;
     int output_position = -1;
 
@@ -363,7 +358,7 @@ public:
      * aligner_options() overrides have been applied. Must be called before
      * the first submit_scan.
      */
-    void configure_params(const Minimap2Params& params,
+    void configure_params(const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
                           bool read_sequence_index,
                           Oid scan_user_relid,
                           Oid scan_user_database_oid,
@@ -375,7 +370,7 @@ public:
         user_main_database_oid       = scan_user_database_oid;
         user_main_tablespace_oid     = scan_user_tablespace_oid;
         user_main_relfilenode        = scan_user_main_relfilenode;
-        last_stats                   = BatchExecutionStats{};
+        last_stats                   = ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats{};
         /*
          * DOC0260 §9.4 — the payload arena is parented on CurrentMemoryContext
          * at BeginCustomScan time (the executor per-query context), so the
@@ -390,8 +385,8 @@ public:
         }
     }
 
-    [[nodiscard]] const Minimap2Params& base_aligner_params() const { return base_params; }
-    [[nodiscard]] const BatchExecutionStats& execution_stats() const { return last_stats; }
+    [[nodiscard]] const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& base_aligner_params() const { return base_params; }
+    [[nodiscard]] const ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats& execution_stats() const { return last_stats; }
     [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
 
     /* DOC0260 §9.6 — per-scan storage-bucket EXPLAIN counters. */
@@ -1190,7 +1185,7 @@ public:
                 per_row_mode(),
                 mmsearch_context.recompute_due_to_alphabet_mismatch);
 
-        last_stats = BatchExecutionStats{};
+        last_stats = ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats{};
 
         // DOC0264 §9.2 / DOC0274 — wire scanner_pg into the dispatch loop.
         // Allocates a fresh seq_caches for scanner_pg's PG-backed reads.
@@ -1208,7 +1203,7 @@ public:
         scanner_pg_cache->main_tablespace_oid = user_main_tablespace_oid;
         scanner_pg_cache->main_relfilenode    = user_main_relfilenode;
 
-        typename BatchProcessor::ScannerPgContext scanner_pg_ctx{};
+        typename ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext scanner_pg_ctx{};
         scanner_pg_ctx.db_oid             = user_main_database_oid;
         scanner_pg_ctx.tablespace_oid     = user_main_tablespace_oid;
         scanner_pg_ctx.main_relfilenode   = user_main_relfilenode;
@@ -1284,7 +1279,7 @@ public:
             return bytes;
         };
         auto merge_stats =
-            [this](const BatchExecutionStats& wave_stats) {
+            [this](const ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats& wave_stats) {
             last_stats.targets_considered += wave_stats.targets_considered;
             last_stats.targets_with_prebuilt_index += wave_stats.targets_with_prebuilt_index;
             last_stats.targets_recomputed_minimizers += wave_stats.targets_recomputed_minimizers;
@@ -1317,8 +1312,8 @@ public:
             refresh_row_arrays(rows);
             install_scanner_wave(rows);
 
-            BatchExecutionStats wave_stats{};
-            std::map<int32_t, std::vector<MatchResult>> wave_match_map;
+            ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats wave_stats{};
+            std::map<int32_t, std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>> wave_match_map;
             if (per_row_mode()) {
                 wave_match_map = processor.process_sequences(
                     batch_size,
@@ -1359,7 +1354,7 @@ public:
                 const pgseq_t* extra_hdr =
                     reinterpret_cast<const pgseq_t*>(
                         extra_bytes.data());
-                BatchExecutionStats discarded_stats{};
+                ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats discarded_stats{};
                 auto extra_match_map =
                     processor.process_sequences(
                         batch_size,
@@ -1436,7 +1431,7 @@ public:
              * meaningful (passed `min_seed_count` / `min_chain_score`).
              */
             for (size_t m = 0; m < hit->second.size(); ++m) {
-                const MatchResult& match_candidate = hit->second[m];
+                const ::bioseq::simd::HWY_NAMESPACE::MatchResult& match_candidate = hit->second[m];
                 if (base_params.do_cigar
                     && (!match_candidate.has_cigar
                         || match_candidate.cigar.empty())) {
