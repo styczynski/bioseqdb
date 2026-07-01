@@ -1,14 +1,30 @@
-// GCC 16 can emit an external reference for oneTBB's partitioner.h
-// internal helper when TBB parallel_sort is instantiated through a C++ module.
-// The body matches partitioner.h exactly: stolen means the current execution
-// slot differs from the task's original slot.
+// GCC 16.1 can emit external references for oneTBB partitioner.h helpers when
+// parallel_sort is instantiated through C++ modules. This file is linked only
+// by the AWS GCC16 build and keeps the helper body identical to oneTBB.
 
 #include <oneapi/tbb/detail/_task.h>
+
+namespace {
+
+bool bioseq_tbb_is_stolen_task_impl(const tbb::detail::d1::execution_data& ed) {
+    return tbb::detail::d1::execution_slot(ed) != tbb::detail::d1::original_slot(ed);
+}
+
+}  // namespace
 
 namespace tbb::detail::d1 {
 
 bool is_stolen_task(const execution_data& ed) {
-    return execution_slot(ed) != original_slot(ed);
+    return bioseq_tbb_is_stolen_task_impl(ed);
 }
 
 }  // namespace tbb::detail::d1
+
+extern "C" bool bioseq_tbb_d1_local_is_stolen_task(
+    const tbb::detail::d1::execution_data& ed)
+    asm("_ZN3tbb6detail2d1L14is_stolen_taskERKNS1_14execution_dataE");
+
+extern "C" bool bioseq_tbb_d1_local_is_stolen_task(
+    const tbb::detail::d1::execution_data& ed) {
+    return bioseq_tbb_is_stolen_task_impl(ed);
+}

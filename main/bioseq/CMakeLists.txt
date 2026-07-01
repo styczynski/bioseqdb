@@ -117,14 +117,20 @@ file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
+set(BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/tbb_partition_link_shim.cpp)
+
 set(BIOSEQ_NOPG_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/tbb_partition_link_shim.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+endif()
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
 
 add_library(bioseq_modules_nopg OBJECT)
