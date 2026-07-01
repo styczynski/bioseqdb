@@ -21,6 +21,7 @@ module;
 
 module bioseq.scheduler.dispatch_buffer_api;
 
+import bioseq.scheduler.dispatch_processor;
 import bioseq.scheduler.dispatch_buffer;
 import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
