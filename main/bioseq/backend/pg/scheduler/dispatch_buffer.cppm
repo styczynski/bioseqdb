@@ -34,7 +34,6 @@
  */
 module;
 
-#include <hwy/highway.h>
 #include "common.h"
 
 #include <array>
@@ -74,10 +73,14 @@ import bioseq.parallelism.memory_admission;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.column.tam;               // DOC0322 §7.4 — tid_to_row_number (leaf; replaces the former extern "C++" reach into the table AM)
 
-HWY_BEFORE_NAMESPACE();
+export namespace bioseq::scheduler {
 
-namespace bioseq::simd::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
+namespace active_target = bioseq::simd::active_target;
+using active_target::BatchExecutionStats;
+using active_target::BatchProcessor;
+using active_target::MatchResult;
+using active_target::Minimap2Params;
+using active_target::kDispatchBatchCapacity;
 
 // Fixed upper bound on a single batch. Matches the TupleDispatchBuffer
 // constructor hint; entries beyond this get truncated with a log line.
@@ -1552,5 +1555,4 @@ public:
     }
 };
 
-} // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+} // namespace bioseq::scheduler

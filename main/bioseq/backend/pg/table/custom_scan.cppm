@@ -17,8 +17,8 @@ module;
 // DOC0192 — pull <hwy/highway.h> into THIS TU's global module fragment so that
 // when columnar_customscan imports multiple HWY-wrapped module BMIs
 // (bioseq_sequences, bioseq_sequences.simd, bioseq_sequences.minimap_port,
-// bioseq_sequences.pipe, bioseq_sidecar, bioseq_scheduler.dispatch_buffer,
-// bioseq_types.pg_compact_sequence), clang's loader has a TU-local "anchor"
+// bioseq_sequences.pipe, bioseq_sidecar, bioseq_types.pg_compact_sequence),
+// clang's loader has a TU-local "anchor"
 // copy of the current `hwy::HWY_NAMESPACE::*` to collapse the per-BMI copies against. Without
 // this anchor the loader can't merge them and emits
 // `definition with same mangled name '_ZN3hwy...BitCast...' as another
@@ -277,7 +277,7 @@ struct BioseqPlaceholderConsts {
  * alive) without racing the callback.
  */
 struct BioseqScanRuntime {
-	bioseq::simd::active_target::TupleDispatchBuffer buffer{kBioseqRuntimeBufferReserve};
+	bioseq::scheduler::TupleDispatchBuffer buffer{kBioseqRuntimeBufferReserve};
 	BioseqPlaceholderConsts                   placeholder_consts{};
 	List*                                     newtargetlist = nullptr;
 	PerScanAlignerState                       aligner_state{};
