@@ -24,7 +24,8 @@ SOFTWARE.
 module;
 
 
-#define FMT_HEADER_ONLY
+//#define FMT_HEADER_ONLY
+#define FMT_ATTACH_TO_GLOBAL_MODULE
 #include <atomic>
 #include <chrono>
 #include <concepts>
