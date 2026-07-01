@@ -34,6 +34,7 @@
  */
 module;
 
+#include <hwy/highway.h>  // only for HWY_NAMESPACE when naming active-target scheduler types
 #include "common.h"
 
 #include <array>
@@ -75,16 +76,16 @@ import bioseq.column.tam;               // DOC0322 §7.4 — tid_to_row_number (
 
 export namespace bioseq::scheduler {
 
-namespace active_target = bioseq::simd::active_target;
-using active_target::BatchExecutionStats;
-using active_target::BatchProcessor;
-using active_target::MatchResult;
-using active_target::Minimap2Params;
-using active_target::kDispatchBatchCapacity;
+namespace current_target = ::bioseq::simd::HWY_NAMESPACE;
+using current_target::BatchExecutionStats;
+using current_target::BatchProcessor;
+using current_target::MatchResult;
+using current_target::Minimap2Params;
+using current_target::kDispatchBatchCapacity;
 
 // Fixed upper bound on a single batch. Matches the TupleDispatchBuffer
 // constructor hint; entries beyond this get truncated with a log line.
-export class TupleDispatchBuffer {
+class TupleDispatchBuffer {
 public:
     /*
      * Context captured at BeginCustomScan from cscan->scan.plan.qual /
