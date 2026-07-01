@@ -228,6 +228,7 @@ def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list
     """
 
     flags: list[str] = []
+    optimization_flag_seen = False
     raw_flags = buildable_flags(args)
     idx = 0
     while idx < len(raw_flags):
@@ -253,9 +254,17 @@ def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list
                 flags.append(arg)
             idx += 1
             continue
+        if arg.startswith("-O"):
+            # CMake appends source-level COMPILE_OPTIONS after the target flags.
+            # Header units must stay compatible with module CMIs built from the
+            # target flag set, so ignore later per-source optimization overrides.
+            if not optimization_flag_seen:
+                flags.append(arg)
+                optimization_flag_seen = True
+            idx += 1
+            continue
         if (
             arg.startswith("-std=")
-            or arg.startswith("-O")
             or arg == "-fmodules-ts"
             or arg == "-fPIC"
             or arg == "-fpermissive"
@@ -295,18 +304,30 @@ def header_signature(header_paths: list[Path]) -> list[str]:
     return signature
 
 
+def mapper_entry_key(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("$"):
+        return None
+    return stripped.split(maxsplit=1)[0]
+
+
 def append_missing_mapper_entries(mapper_path: Path, lines: list[str]) -> None:
     existing = mapper_path.read_text().splitlines() if mapper_path.exists() else []
-    existing_set = set(existing)
-    missing = [line for line in lines if line not in existing_set]
-    if not missing:
+    replacement_keys = {
+        key
+        for line in lines
+        if (key := mapper_entry_key(line)) is not None
+    }
+    retained = [
+        line
+        for line in existing
+        if mapper_entry_key(line) not in replacement_keys
+    ]
+    retained_set = set(retained)
+    missing = [line for line in lines if line not in retained_set]
+    if not missing and retained == existing:
         return
-    with mapper_path.open("a", encoding="utf-8") as mapper_file:
-        if existing and existing[-1] != "":
-            mapper_file.write("\n")
-        for line in missing:
-            mapper_file.write(line)
-            mapper_file.write("\n")
+    mapper_path.write_text("\n".join([*retained, *missing]) + "\n", encoding="utf-8")
 
 
 def prebuild_header_units(
