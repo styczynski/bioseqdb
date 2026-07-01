@@ -1,4 +1,10 @@
+module;
+
 #include "dispatch_processor_typed_source_prelude.inc"
+
+module bioseq.scheduler.dispatch_processor;
+
+#include "dispatch_processor_typed_module_imports.inc"
 
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY 1
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION process_inmemory_standard_row_dna5_w4

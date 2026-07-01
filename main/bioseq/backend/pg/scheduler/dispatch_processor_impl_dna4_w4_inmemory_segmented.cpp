@@ -1,4 +1,10 @@
+module;
+
 #include "dispatch_processor_typed_source_prelude.inc"
+
+module bioseq.scheduler.dispatch_processor;
+
+#include "dispatch_processor_typed_module_imports.inc"
 
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY 1
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION process_inmemory_segmented_row_dna4_w4
