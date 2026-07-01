@@ -129,6 +129,7 @@ constexpr std::string_view kMinimizersPerSequenceIndex =
     bioseq::indexing::index_descriptor<
         bioseq::indexing::MinimizerSequenceMergedIndex>::index_name;
 constexpr sequence_size_t kPgSegmentationThresholdBp = 256'000'000;
+constexpr sequence_size_t kOpportunisticIndexMinBp = 4096;
 
 [[nodiscard]] inline bool pg_vulkan_seed_lookup_selected(
         const Minimap2Params& params) noexcept
@@ -2698,7 +2699,6 @@ template <class S>
              * for those rows via the optional nested-scope.
              */
             std::optional<std::vector<MinimapSketchData>> cached_query_minimizers;
-            constexpr sequence_size_t kOpportunisticIndexMinBp = 4096;
             constexpr std::size_t kGpuBatchMinRows = 2;
 
             constexpr bool kSelectedVulkanBatchCompiled =
