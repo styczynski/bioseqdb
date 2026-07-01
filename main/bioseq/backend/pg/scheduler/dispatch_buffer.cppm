@@ -628,7 +628,7 @@ public:
      * column value, and copies the slot into a MinimalTuple-backed
      * clone so the data outlives the next ExecScanFetch call.
      */
-    [[gnu::always_inline]] void submit_scan(TupleTableSlot* scan_slot) {
+    [[gnu::always_inline]] inline void submit_scan(TupleTableSlot* scan_slot) {
         if (!mmsearch_context.active) {
             bioseq_log<DBG>("[bioseq] pg: submit_scan called while mmsearch_context inactive; skipping");
             return;
@@ -1510,7 +1510,7 @@ public:
      * MinimalTuple slots allocated in submit_scan; leaves
      * mmsearch_context untouched so callers can reuse configuration.
      */
-    [[gnu::always_inline]] void clear_slots() {
+    [[gnu::always_inline]] inline void clear_slots() {
         bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::clear_slots() entered; freeing {} slots, {} outputs",
                 buffered_entries.size(), output_cursors.size());
         for (auto& entry : buffered_entries) {
@@ -1546,7 +1546,7 @@ public:
      * caller today, but the explicit `true` makes the contract
      * loud rather than relying on the default's semantics.
      */
-    [[gnu::always_inline]] void clear() {
+    [[gnu::always_inline]] inline void clear() {
         clear_slots();
         clear_mmsearch_context(/*clear_extras=*/true);
     }
