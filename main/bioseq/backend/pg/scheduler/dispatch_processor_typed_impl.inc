@@ -121,6 +121,29 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION must name the concrete scanner helper"
+#endif
+[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
+    compact_sequence_range<compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>>& query_seq,
+    const pgseq_t* target_hdr,
+    std::size_t i,
+    sequence_size_t target_bp_size,
+    std::size_t min_bp,
+    const Minimap2Params& dispatch_params,
+    const Minimap2Params& params,
+    bool per_row_query_mode,
+    std::optional<std::vector<MinimapSketchData>>& cached_query_minimizers,
+    uint8_t alphabet_code,
+    uint8_t storage_unit_byte_width,
+    BatchProcessor::ScannerPgContext* scanner_pg_ctx,
+    bioseq::parallelism::GlobalPool& pool);
+#endif
+
 namespace {
 
 constexpr std::string_view kMinimizersPerFragmentIndex =
@@ -1887,6 +1910,7 @@ try_materialize_target_for_segment_workers(
     }
 }
 
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
 template <class S>
@@ -2638,7 +2662,9 @@ template <class S>
 
     return collection;
 }
+#endif
 
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY)
 template <class S>
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_typed(
     const size_t batch_size,
@@ -3783,6 +3809,22 @@ template <class S>
                     ++stats.targets_recomputed_minimizers;
                     Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
                     if (use_scanner_pg) {
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
+                        collection = BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
+                            query_seq,
+                            target_hdr,
+                            i,
+                            target_bp_size,
+                            min_bp,
+                            dispatch_params,
+                            params,
+                            per_row_query_mode,
+                            cached_query_minimizers,
+                            alphabet_code,
+                            storage_unit_byte_width,
+                            scanner_pg_ctx,
+                            pool);
+#else
                         collection = process_scanner_pg_row_typed<S>(
                             query_seq,
                             target_hdr,
@@ -3797,6 +3839,7 @@ template <class S>
                             storage_unit_byte_width,
                             scanner_pg_ctx,
                             pool);
+#endif
                     } else if (target_hdr != nullptr) {
                         auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
                         compact_sequence_range<S> target_seq{*target_hdr};
@@ -3851,17 +3894,63 @@ template <class S>
             }
     return results;
 }
+#endif
 
 } // namespace
 
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION must name the concrete typed dispatch function"
-#endif
 #ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET
 #error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET must name the concrete sequence alphabet"
 #endif
 #ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH
 #error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH must name the concrete storage-unit byte width"
+#endif
+
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION must name the concrete scanner helper"
+#endif
+
+[[nodiscard]] MatchResultCollection
+BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
+    compact_sequence_range<compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>>& query_seq,
+    const pgseq_t* target_hdr,
+    const std::size_t i,
+    const sequence_size_t target_bp_size,
+    const std::size_t min_bp,
+    const Minimap2Params& dispatch_params,
+    const Minimap2Params& params,
+    const bool per_row_query_mode,
+    std::optional<std::vector<MinimapSketchData>>& cached_query_minimizers,
+    const uint8_t alphabet_code,
+    const uint8_t storage_unit_byte_width,
+    BatchProcessor::ScannerPgContext* scanner_pg_ctx,
+    bioseq::parallelism::GlobalPool& pool)
+{
+    using S = compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+    return process_scanner_pg_row_typed<S>(
+        query_seq,
+        target_hdr,
+        i,
+        target_bp_size,
+        min_bp,
+        dispatch_params,
+        params,
+        per_row_query_mode,
+        cached_query_minimizers,
+        alphabet_code,
+        storage_unit_byte_width,
+        scanner_pg_ctx,
+        pool);
+}
+#else
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION must name the concrete typed dispatch function"
 #endif
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>>
@@ -3893,6 +3982,7 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
         stats,
         scanner_pg_ctx);
 }
+#endif
 
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

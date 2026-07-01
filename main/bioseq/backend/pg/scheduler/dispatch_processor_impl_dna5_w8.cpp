@@ -58,6 +58,8 @@ import bioseq.parallelism.memory_admission;
 import bioseq.scheduler.supervisor_pg;
 
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION process_sequences_dna5_w8
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION process_scanner_pg_row_dna5_w8
+#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER 1
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET seq::dna5
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH 8
 #include "dispatch_processor_typed_impl.inc"
