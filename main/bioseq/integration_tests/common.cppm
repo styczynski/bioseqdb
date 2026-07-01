@@ -3,7 +3,6 @@ module;
 #include <cctype>
 #include <cstdlib>
 #include <libpq-fe.h>
-#include <sqlgen/postgres.hpp>
 
 #include <algorithm>
 #include <array>
@@ -25,6 +24,100 @@ namespace bioseq_int_tests {
 export using row_t = std::vector<std::optional<std::string>>;
 export using rowset_t = std::vector<row_t>;
 
+namespace detail {
+
+struct pg_result {
+    PGresult* ptr = nullptr;
+
+    explicit pg_result(PGresult* value) noexcept : ptr(value) {}
+    pg_result(const pg_result&) = delete;
+    pg_result& operator=(const pg_result&) = delete;
+    pg_result(pg_result&& other) noexcept : ptr(std::exchange(other.ptr, nullptr)) {}
+    pg_result& operator=(pg_result&& other) noexcept {
+        if (this != &other) {
+            if (ptr != nullptr) {
+                PQclear(ptr);
+            }
+            ptr = std::exchange(other.ptr, nullptr);
+        }
+        return *this;
+    }
+    ~pg_result() {
+        if (ptr != nullptr) {
+            PQclear(ptr);
+        }
+    }
+};
+
+struct pg_credentials {
+    std::string user;
+    std::string password;
+    std::string host;
+    std::string dbname;
+    std::string port;
+};
+
+inline bool command_success(ExecStatusType status) noexcept {
+    return status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK ||
+           status == PGRES_SINGLE_TUPLE;
+}
+
+inline pg_result exec(PGconn* conn, std::string_view sql) {
+    return pg_result(PQexec(conn, std::string(sql).c_str()));
+}
+
+inline std::string connection_error(PGconn* conn) {
+    const char* message = conn == nullptr ? nullptr : PQerrorMessage(conn);
+    return message == nullptr ? std::string{} : std::string(message);
+}
+
+inline std::string env_or(const char* name, std::string_view fallback) {
+    const char* value = std::getenv(name);
+    return value && *value ? std::string(value) : std::string(fallback);
+}
+
+inline pg_credentials make_default_credentials() {
+    const auto user_str = env_or("BIOSEQ_TEST_PGUSER", "postgres");
+    const auto pass_str = env_or("BIOSEQ_TEST_PGPASSWORD", "postgres");
+    const auto host_str = env_or("BIOSEQ_TEST_PGHOST", "localhost");
+    const auto db_str = env_or("BIOSEQ_TEST_PGDATABASE", "bioseq");
+    const auto port_str = env_or("BIOSEQ_TEST_PGPORT", "5432");
+    return pg_credentials{
+        .user = user_str,
+        .password = pass_str,
+        .host = host_str,
+        .dbname = db_str,
+        .port = port_str,
+    };
+}
+
+inline PGconn* connect_raw(const pg_credentials& credentials) {
+    const char* keywords[] = {
+        "user", "password", "host", "dbname", "port", nullptr,
+    };
+    const char* values[] = {
+        credentials.user.c_str(),
+        credentials.password.c_str(),
+        credentials.host.c_str(),
+        credentials.dbname.c_str(),
+        credentials.port.c_str(),
+        nullptr,
+    };
+    PGconn* raw = PQconnectdbParams(keywords, values, 0);
+    if (raw == nullptr || PQstatus(raw) != CONNECTION_OK) {
+        const std::string message = connection_error(raw);
+        if (raw != nullptr) {
+            PQfinish(raw);
+        }
+        throw std::runtime_error(fmt::format(
+            "Failed to connect to Postgres at {}:{} (db={}): {}",
+            credentials.host, credentials.port, credentials.dbname, message));
+    }
+    return raw;
+}
+
+}  // namespace detail
+
 // DOC0263 §11.1 — invoke  once per scanner type
 // (the no-fragment baseline + the three synthetic chunked fragment sizes). Used
 // to parametrise scanner-combination matrix tests; the algorithm-level parity is
@@ -45,60 +138,40 @@ inline void parametrise_scanner_combinations(TestBody&& body) {
 // returns the real per-rank tally (tally_symbol_counts). Tests assert the real
 // goldens directly (e.g. 'ACGTACGTACGTACGT' -> A=C=G=T=4).
 
-// Wraps a single libpq PGconn (via sqlgen's PostgresV2Connection) for raw SQL
-// against the bioseq Postgres extension. Tests build their state from raw SQL
-// because typed sqlgen reads cannot describe `bioseq.seq('dna4', 32)` typmods.
+// Wraps a single libpq PGconn for raw SQL against the bioseq Postgres extension.
+// Tests build their state from raw SQL because typed SQL wrappers cannot
+// describe `bioseq.seq('dna4', 32)` typmods.
 export class connection_test_context {
 private:
-    sqlgen::postgres::Credentials _credentials;
-    sqlgen::postgres::PostgresV2Connection _raw_conn;
-
-    static std::string env_or(const char* name, std::string_view fallback) {
-        const char* value = std::getenv(name);
-        return value && *value ? std::string(value) : std::string(fallback);
-    }
-
-    // Environment overrides keep CI / multi-developer setups from forcing a
-    // single Postgres instance; the suite still defaults to the DSN baked
-    // into setup.sql so a developer with a fresh checkout can just run.
-    static sqlgen::postgres::Credentials make_default_credentials() {
-        const auto user_str = env_or("BIOSEQ_TEST_PGUSER", "postgres");
-        const auto pass_str = env_or("BIOSEQ_TEST_PGPASSWORD", "postgres");
-        const auto host_str = env_or("BIOSEQ_TEST_PGHOST", "localhost");
-        const auto db_str = env_or("BIOSEQ_TEST_PGDATABASE", "bioseq");
-        const auto port_str = env_or("BIOSEQ_TEST_PGPORT", "5432");
-        return sqlgen::postgres::Credentials{
-            .user = user_str,
-            .password = pass_str,
-            .host = host_str,
-            .dbname = db_str,
-            .port = std::stoi(port_str),
-        };
-    }
-
-    static sqlgen::postgres::PostgresV2Connection connect_raw(
-        const sqlgen::postgres::Credentials& credentials) {
-        auto raw = sqlgen::postgres::PostgresV2Connection::make(
-            credentials.to_str());
-        if (!raw) {
-            throw std::runtime_error(fmt::format(
-                "Failed to connect to Postgres at {}:{} (db={}): {}",
-                credentials.host, credentials.port, credentials.dbname,
-                raw.error().what()));
-        }
-        return raw.value();
-    }
+    PGconn* _raw_conn = nullptr;
 
 public:
     connection_test_context()
-        : connection_test_context(make_default_credentials()) {}
+        : _raw_conn(detail::connect_raw(detail::make_default_credentials())) {}
 
-    explicit connection_test_context(sqlgen::postgres::Credentials credentials)
-        : _credentials(std::move(credentials)),
-          _raw_conn(connect_raw(_credentials)) {}
+    connection_test_context(const connection_test_context&) = delete;
+    connection_test_context& operator=(const connection_test_context&) = delete;
 
-    [[nodiscard, always_inline]] const sqlgen::postgres::PostgresV2Connection&
-    raw() const {
+    connection_test_context(connection_test_context&& other) noexcept
+        : _raw_conn(std::exchange(other._raw_conn, nullptr)) {}
+
+    connection_test_context& operator=(connection_test_context&& other) noexcept {
+        if (this != &other) {
+            if (_raw_conn != nullptr) {
+                PQfinish(_raw_conn);
+            }
+            _raw_conn = std::exchange(other._raw_conn, nullptr);
+        }
+        return *this;
+    }
+
+    ~connection_test_context() {
+        if (_raw_conn != nullptr) {
+            PQfinish(_raw_conn);
+        }
+    }
+
+    [[nodiscard, always_inline]] PGconn* raw() const noexcept {
         return _raw_conn;
     }
 };
@@ -107,12 +180,14 @@ public:
 // so each call site can stay free of error-handling boilerplate.
 export inline void exec_sql(const connection_test_context& ctx,
                             std::string_view sql) {
-    const auto result = sqlgen::postgres::PostgresV2Result::make(
-        std::string(sql), ctx.raw());
-    if (!result) {
+    auto result = detail::exec(ctx.raw(), sql);
+    if (result.ptr == nullptr ||
+        !detail::command_success(PQresultStatus(result.ptr))) {
         ASSERT(false,
                fmt::format("exec_sql failed for `{}`: {}", sql,
-                           result.error().what()),
+                           result.ptr == nullptr
+                               ? detail::connection_error(ctx.raw())
+                               : PQresultErrorMessage(result.ptr)),
                sql);
     }
 }
@@ -123,9 +198,9 @@ export inline void exec_sql(const connection_test_context& ctx,
 // the statement raised at all.
 export [[nodiscard]] inline bool sql_fails(
     const connection_test_context& ctx, std::string_view sql) {
-    const auto result = sqlgen::postgres::PostgresV2Result::make(
-        std::string(sql), ctx.raw());
-    return !result;
+    auto result = detail::exec(ctx.raw(), sql);
+    return result.ptr == nullptr ||
+           !detail::command_success(PQresultStatus(result.ptr));
 }
 
 // DOC0286 §13 — server-side error captured for SQLSTATE-sensitive negative
@@ -143,23 +218,16 @@ export struct sql_error_info {
 export [[nodiscard]] inline sql_error_info sql_error(
     const connection_test_context& ctx, std::string_view sql) {
     const std::string sql_owned(sql);
-    PGresult* raw = PQexec(ctx.raw().ptr(), sql_owned.c_str());
-    if (raw == nullptr) {
+    auto result = detail::pg_result(PQexec(ctx.raw(), sql_owned.c_str()));
+    if (result.ptr == nullptr) {
         return sql_error_info{
             "",
-            fmt::format("PQexec returned null: {}", PQerrorMessage(ctx.raw().ptr()))};
+            fmt::format("PQexec returned null: {}",
+                        detail::connection_error(ctx.raw()))};
     }
-    const auto result = sqlgen::postgres::PostgresV2Result::make(raw);
-    if (!result) {
-        ASSERT(false,
-               fmt::format("sql_error: could not wrap PGresult for `{}`: {}",
-                           sql_owned, result.error().what()),
-               sql_owned);
-    }
-    PGresult* res = result.value().ptr();
+    PGresult* res = result.ptr;
     const ExecStatusType status = PQresultStatus(res);
-    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK ||
-        status == PGRES_SINGLE_TUPLE) {
+    if (detail::command_success(status)) {
         ASSERT(false,
                fmt::format("sql_error: statement unexpectedly SUCCEEDED "
                            "(expected a server error): `{}`", sql_owned),
@@ -209,15 +277,16 @@ inline void exec_sqlf(const connection_test_context& ctx,
 // can then post-process via `parse_int_cell` etc.
 export [[nodiscard]] inline rowset_t query_rows(
     const connection_test_context& ctx, std::string_view sql) {
-    auto pgres =
-        sqlgen::postgres::PostgresV2Result::make(std::string(sql), ctx.raw());
-    if (!pgres) {
+    auto pgres = detail::exec(ctx.raw(), sql);
+    if (pgres.ptr == nullptr || PQresultStatus(pgres.ptr) != PGRES_TUPLES_OK) {
         ASSERT(false,
                fmt::format("query_rows failed for `{}`: {}", sql,
-                           pgres.error().what()),
+                           pgres.ptr == nullptr
+                               ? detail::connection_error(ctx.raw())
+                               : PQresultErrorMessage(pgres.ptr)),
                sql);
     }
-    PGresult* res = pgres.value().ptr();
+    PGresult* res = pgres.ptr;
     const int n_rows = PQntuples(res);
     const int n_cols = PQnfields(res);
     rowset_t out;
@@ -421,8 +490,8 @@ public:
     ~guc_scope() {
         if (_active && _ctx != nullptr) {
             // Best-effort reset; do not throw from the destructor.
-            (void)sqlgen::postgres::PostgresV2Result::make(
-                fmt::format("RESET {};", _name), _ctx->raw());
+            detail::pg_result reset_result(
+                PQexec(_ctx->raw(), fmt::format("RESET {};", _name).c_str()));
         }
     }
 };
@@ -473,8 +542,8 @@ export inline void reset_extension(const connection_test_context& ctx,
     });
     for (const auto guc : kGucsToReset) {
         // Best-effort: GUCs not yet set by anyone are silently fine.
-        (void)sqlgen::postgres::PostgresV2Result::make(
-            fmt::format("RESET {};", guc), ctx.raw());
+        detail::pg_result reset_result(
+            PQexec(ctx.raw(), fmt::format("RESET {};", guc).c_str()));
     }
 }
 
