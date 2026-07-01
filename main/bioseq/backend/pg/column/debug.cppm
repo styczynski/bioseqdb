@@ -18,7 +18,6 @@ export module bioseq.storage.debug;
 import bioseq.common.mlogging;
 import bioseq.storage.physical;
 import bioseq.storage.metadata;
-import bioseq.table;
 import bioseq.column.tam;   // IsBioseqColumnTableAmTable (moved out of bioseq_table:utils, DOC0322 §7.4)
 import bioseq.pg_utils;
 
