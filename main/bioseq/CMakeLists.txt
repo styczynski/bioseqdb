@@ -405,7 +405,8 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
     "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
     "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}, template force-inline="
     "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
-    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 to restore the global preset")
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 and "
+    "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
 endif()
 
 # Per-target module set for the aligner (and its tests_exec sibling): just

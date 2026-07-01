@@ -51,7 +51,6 @@ import bioseq.table.types;
 import bioseq.table.scan_state;
 import bioseq.pg_utils;
 import bioseq.scheduler.dispatch_buffer;
-import bioseq.scheduler.dispatch_processor;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.parallelism.mode;
 import bioseq.gpu.vulkan.runtime;
