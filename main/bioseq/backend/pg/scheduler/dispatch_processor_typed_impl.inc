@@ -1963,6 +1963,7 @@ template <class S>
                     ++stats.gpu.vulkan_declines;
                     bioseq_log<DBG>("[bioseq] pg: selected Vulkan resident batch disabled on this platform; falling through to per-row pipeline");
                 }
+#if defined(__APPLE__)
             } else if (selected_vulkan_execution(dispatch_params)
                        && batch_size >= kGpuBatchMinRows
                        && !chunked_scanner_forced) {
@@ -2871,6 +2872,7 @@ template <class S>
                     raise_vulkan_pg_error(
                         "Vulkan batched resident coordinate", err);
                 }
+#endif
             }
 
             std::vector<std::uint8_t> parallel_done;
