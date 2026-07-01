@@ -2,6 +2,8 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <sstream>
+
 import bioseq.simd.utils;
 
 HWY_BEFORE_NAMESPACE();
@@ -225,9 +227,20 @@ TEMPLATE_TEST_CASE("SIMD matrix partial_fill_with_offsets()/fill_with_offsets() 
         expected_full_rows += (256 - lanes);
     }
 
+    std::ostringstream full_rows_message;
+    full_rows_message
+        << "Correct count of loaded full rows fake_context=" << fake_context
+        << " is_full=" << is_full
+        << " lanes=" << lanes;
+
+    std::ostringstream partial_rows_message;
+    partial_rows_message
+        << "Correct count of loaded partial rows fake_context=" << fake_context
+        << " is_full=" << is_full;
+
     ASSERT(loaded == expected_matrix);
-    ASSERT(loaded_full_rows == expected_full_rows, fmt::format("Correct count of loaded full rows fake_context={} is_full={} lanes={}", fake_context, is_full, lanes));
-    ASSERT(loaded_partial_filled_rows == expected_partial_filled_rows, fmt::format("Correct count of loaded partial rows fake_context={} is_full={}", fake_context, is_full));
+    ASSERT(loaded_full_rows == expected_full_rows, full_rows_message.str());
+    ASSERT(loaded_partial_filled_rows == expected_partial_filled_rows, partial_rows_message.str());
     
 }
 
