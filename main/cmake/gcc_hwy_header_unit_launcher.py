@@ -263,10 +263,11 @@ def highway_header_unit_flags(args: list[str], header_roots: list[Path]) -> list
                 optimization_flag_seen = True
             idx += 1
             continue
+        # Do not retain codegen/linkage-only flags such as -fPIC here. Shared
+        # module BMIs and executable consumers must import the same Highway CMI.
         if (
             arg.startswith("-std=")
             or arg == "-fmodules-ts"
-            or arg == "-fPIC"
             or arg == "-fpermissive"
             or arg.startswith("-fabi-version")
             or arg.startswith("-Wno-")
