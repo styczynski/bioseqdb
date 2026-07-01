@@ -12,6 +12,8 @@ module;
 
 #include "common.h"
 
+#include <hwy/highway.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -41,7 +43,7 @@ using BufferImpl = TupleDispatchBuffer;
 }
 
 [[nodiscard]] DispatchGpuBatchExecutionStats copy_gpu_stats(
-    const bioseq::simd::active_target::GpuBatchExecutionStats& src) {
+    const ::bioseq::simd::HWY_NAMESPACE::GpuBatchExecutionStats& src) {
     DispatchGpuBatchExecutionStats dst{};
     dst.gpu_batched_branch_taken = src.gpu_batched_branch_taken;
     dst.gpu_problem_count = src.gpu_problem_count;
@@ -79,7 +81,7 @@ using BufferImpl = TupleDispatchBuffer;
 }
 
 [[nodiscard]] DispatchBatchExecutionStats copy_stats(
-    const bioseq::simd::active_target::BatchExecutionStats& src) {
+    const ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats& src) {
     DispatchBatchExecutionStats dst{};
     dst.targets_considered = src.targets_considered;
     dst.targets_with_prebuilt_index = src.targets_with_prebuilt_index;
