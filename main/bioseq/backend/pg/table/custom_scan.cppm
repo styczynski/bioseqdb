@@ -29,6 +29,7 @@ module;
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 
 extern "C" {
