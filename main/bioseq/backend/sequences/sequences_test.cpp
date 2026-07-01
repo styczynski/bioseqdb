@@ -15,7 +15,6 @@ import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

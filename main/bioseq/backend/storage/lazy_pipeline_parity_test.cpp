@@ -29,7 +29,6 @@ import bioseq.sequences.minimap_port;   // MatchResult / MatchResultCollection
 import bioseq.sequences.pipe;           // minimap_port entry
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

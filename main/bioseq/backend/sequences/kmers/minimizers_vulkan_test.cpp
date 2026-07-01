@@ -32,7 +32,6 @@ import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;   // DOC0345 §16 — sequence_scanner_test_chunked + SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT
 import bioseq.storage.lazy;      // DOC0345 §16 — lazy_compact_sequence
 import bioseq.storage.size;      // DOC0345 §16 — sequence_size_t
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

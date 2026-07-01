@@ -28,7 +28,6 @@ import bioseq.indexing.minimizer_vulkan;
 import bioseq.sequences.seeding.vulkan;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.size;
-import bioseq.common.testing;
 
 namespace {
 

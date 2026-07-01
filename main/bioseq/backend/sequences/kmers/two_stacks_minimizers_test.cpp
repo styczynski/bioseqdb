@@ -51,7 +51,6 @@ import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.kmers.hashers;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

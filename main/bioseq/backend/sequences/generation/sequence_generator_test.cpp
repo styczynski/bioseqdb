@@ -21,7 +21,6 @@
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
-import bioseq.common.testing;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.indexing.symbol_counts;

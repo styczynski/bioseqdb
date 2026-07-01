@@ -18,7 +18,6 @@
 #include <span>
 #include <vector>
 
-import bioseq.common.testing;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.storage.scanner;

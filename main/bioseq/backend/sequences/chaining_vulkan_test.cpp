@@ -42,7 +42,6 @@ import bioseq.sequences.chaining.vulkan;// chain_anchors_vulkan / vulkan_chainin
 import bioseq.gpu.vulkan.runtime;       // Runtime / scan_spirv_layout / pipeline key
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.storage.lazy;             // make_lazy_in_memory
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

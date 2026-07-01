@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <vector>
 
-import bioseq.common.testing;
 import bioseq.common.context;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;

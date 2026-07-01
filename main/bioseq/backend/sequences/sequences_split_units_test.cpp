@@ -14,7 +14,6 @@
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
-import bioseq.common.testing;
 
 namespace {
 

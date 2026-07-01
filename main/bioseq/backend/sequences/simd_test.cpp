@@ -7,7 +7,6 @@ import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.simd;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

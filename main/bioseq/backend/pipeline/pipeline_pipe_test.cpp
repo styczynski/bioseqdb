@@ -27,7 +27,6 @@ import bioseq.indexing.minimizer_vulkan;    // GpuIndexCacheIdentity
 import bioseq.sequences.cigar;
 import bioseq.alignment;
 import bioseq.alignment.utils;
-import bioseq.common.testing;
 import bioseq.gpu.vulkan.runtime;
 
 HWY_BEFORE_NAMESPACE();

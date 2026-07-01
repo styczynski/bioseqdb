@@ -19,7 +19,6 @@ import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_vulkan;
 import bioseq.gpu.vulkan.runtime;
-import bioseq.common.testing;
 
 namespace {
 

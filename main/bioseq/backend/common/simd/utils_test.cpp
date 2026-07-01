@@ -3,7 +3,6 @@
 #include "common.h"
 
 import bioseq.simd.utils;
-import bioseq.common.testing;
 
 HWY_BEFORE_NAMESPACE();
 

@@ -26,7 +26,6 @@ import bioseq.alignment.utils;      // ScoringMatrix
 import bioseq.common.context;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 
