@@ -144,6 +144,18 @@ namespace hn = hwy::HWY_NAMESPACE;
     bioseq::parallelism::GlobalPool& pool);
 #endif
 
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION must name the concrete in-memory helper"
+#endif
+[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    sequence_size_t target_bp_size,
+    const Minimap2Params& params,
+    bool chunked_scanner_forced);
+#endif
+
 namespace {
 
 constexpr std::string_view kMinimizersPerFragmentIndex =
@@ -1910,7 +1922,8 @@ try_materialize_target_for_segment_workers(
     }
 }
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER) \
+    && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY)
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
 template <class S>
@@ -2664,7 +2677,41 @@ template <class S>
 }
 #endif
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY)
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY) \
+    || (!defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER) \
+        && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY))
+template <class S>
+[[nodiscard]] MatchResultCollection process_inmemory_row_typed(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const sequence_size_t target_bp_size,
+    const Minimap2Params& params,
+    const bool chunked_scanner_forced)
+{
+    compact_sequence_range<S> query_seq{*row_query_hdr};
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
+    compact_sequence_range<S> target_seq{*target_hdr};
+    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+    if (chunked_scanner_forced) {
+        using chunked = bioseq::storage::sequence_scanner_test_chunked<
+            typename compact_sequence_range<S>::traits::storage_unit,
+            bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+        bioseq::storage::lazy_compact_sequence<S, chunked> fq{
+            chunked::from_range(query_seq)};
+        bioseq::storage::lazy_compact_sequence<S, chunked> ft{
+            chunked::from_range(target_seq)};
+        return (target_bp_size > kPgSegmentationThresholdBp)
+            ? minimap_port_segmented_pg_checked(fq, ft, params)
+            : minimap_port_pg_checked(fq, ft, params);
+    }
+    return (target_bp_size > kPgSegmentationThresholdBp)
+        ? minimap_port_segmented_pg_checked(lazy_query, lazy_target, params)
+        : minimap_port_pg_checked(lazy_query, lazy_target, params);
+}
+#endif
+
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY) \
+    && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY)
 template <class S>
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_typed(
     const size_t batch_size,
@@ -3694,15 +3741,26 @@ template <class S>
                             if (target_hdr->bp_size > kPgSegmentationThresholdBp) {
                                 continue;
                             }
-                            compact_sequence_range<S> query_seq{*row_query_hdr};
-                            compact_sequence_range<S> target_seq{*target_hdr};
                             const size_t min_bp = std::min<size_t>(
-                                static_cast<size_t>(query_seq.bp_size()),
-                                static_cast<size_t>(target_seq.bp_size()));
+                                static_cast<size_t>(row_query_hdr->bp_size),
+                                static_cast<size_t>(target_hdr->bp_size));
                             Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
-                            auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
-                            auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-                            parallel_collections[i] = minimap_port_pg_checked(lazy_query, lazy_target, params);
+                            parallel_collections[i] =
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
+                                BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+                                    row_query_hdr,
+                                    target_hdr,
+                                    static_cast<sequence_size_t>(target_hdr->bp_size),
+                                    params,
+                                    false);
+#else
+                                process_inmemory_row_typed<S>(
+                                    row_query_hdr,
+                                    target_hdr,
+                                    static_cast<sequence_size_t>(target_hdr->bp_size),
+                                    params,
+                                    false);
+#endif
                             parallel_params[i] = params;
                             parallel_done[i] = 1;
                         }
@@ -3751,12 +3809,6 @@ template <class S>
                             static_cast<unsigned>(storage_unit_byte_width));
                     continue;
                 }
-                /*
-                 * Build the query compact_sequence_range inside the row loop
-                 * so per-row mmsearch can batch-dispatch without broadcasting
-                 * one row's query to the rest of the batch.
-                 */
-                compact_sequence_range<S> query_seq{*row_query_hdr};
                 const pgseq_t* target_hdr = target_hdrs[i];
                 // DOC0274 — when use_scanner_pg=true AND a locator was captured
                 // for this row (e.g. a stub whose materialised varlena would
@@ -3799,7 +3851,7 @@ template <class S>
                     : scanner_pg_ctx->target_locators[i]->total_bp_size;
 
                 const size_t min_bp = std::min<size_t>(
-                    static_cast<size_t>(query_seq.bp_size()),
+                    static_cast<size_t>(row_query_hdr->bp_size),
                     static_cast<size_t>(target_bp_size));
 
                 ++stats.targets_considered;
@@ -3809,6 +3861,13 @@ template <class S>
                     ++stats.targets_recomputed_minimizers;
                     Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
                     if (use_scanner_pg) {
+                        /*
+                         * Build the query compact_sequence_range inside the
+                         * row loop so per-row mmsearch can batch-dispatch
+                         * without broadcasting one row's query to the rest of
+                         * the batch.
+                         */
+                        compact_sequence_range<S> query_seq{*row_query_hdr};
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
                         collection = BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
                             query_seq,
@@ -3841,25 +3900,22 @@ template <class S>
                             pool);
 #endif
                     } else if (target_hdr != nullptr) {
-                        auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
-                        compact_sequence_range<S> target_seq{*target_hdr};
-                        auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-                        if (chunked_scanner_forced) {
-                            using chunked = bioseq::storage::sequence_scanner_test_chunked<
-                                typename compact_sequence_range<S>::traits::storage_unit,
-                                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-                            bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
-                            bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
-                            collection =
-                                (target_bp_size > kPgSegmentationThresholdBp)
-                                    ? minimap_port_segmented_pg_checked(fq, ft, params)
-                                    : minimap_port_pg_checked(fq, ft, params);
-                        } else {
-                            collection =
-                                (target_bp_size > kPgSegmentationThresholdBp)
-                                    ? minimap_port_segmented_pg_checked(lazy_query, lazy_target, params)
-                                    : minimap_port_pg_checked(lazy_query, lazy_target, params);
-                        }
+                        collection =
+#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
+                            BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+                                row_query_hdr,
+                                target_hdr,
+                                target_bp_size,
+                                params,
+                                chunked_scanner_forced);
+#else
+                            process_inmemory_row_typed<S>(
+                                row_query_hdr,
+                                target_hdr,
+                                target_bp_size,
+                                params,
+                                chunked_scanner_forced);
+#endif
                     } else if (scanner_pg_ctx != nullptr
                                && scanner_pg_ctx->target_locators[i].has_value()) {
                         // DOC0274 (round-2 revert): inmemory_forced=ON cannot satisfy its
@@ -3947,6 +4003,30 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
         storage_unit_byte_width,
         scanner_pg_ctx,
         pool);
+}
+#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY)
+#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION
+#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION must name the concrete in-memory helper"
+#endif
+
+[[nodiscard]] MatchResultCollection
+BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+    const pgseq_t* row_query_hdr,
+    const pgseq_t* target_hdr,
+    const sequence_size_t target_bp_size,
+    const Minimap2Params& params,
+    const bool chunked_scanner_forced)
+{
+    using S = compact_sequence_stdc_instance<
+        pgseq_t,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+    return process_inmemory_row_typed<S>(
+        row_query_hdr,
+        target_hdr,
+        target_bp_size,
+        params,
+        chunked_scanner_forced);
 }
 #else
 #ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION
