@@ -50,7 +50,7 @@ import bioseq.storage.metadata;
 import bioseq.table.types;
 import bioseq.table.scan_state;
 import bioseq.pg_utils;
-import bioseq.scheduler.dispatch_buffer;
+import bioseq.scheduler.dispatch_buffer_api;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.parallelism.mode;
 import bioseq.gpu.vulkan.runtime;
@@ -277,7 +277,7 @@ struct BioseqPlaceholderConsts {
  * alive) without racing the callback.
  */
 struct BioseqScanRuntime {
-	bioseq::scheduler::TupleDispatchBuffer buffer{kBioseqRuntimeBufferReserve};
+	bioseq::scheduler::DispatchBufferRuntime buffer{kBioseqRuntimeBufferReserve};
 	BioseqPlaceholderConsts                   placeholder_consts{};
 	List*                                     newtargetlist = nullptr;
 	PerScanAlignerState                       aligner_state{};
@@ -4631,21 +4631,21 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			 */
 			populate_symbol_count_placeholders(runtime.placeholder_consts,
 											   node->ss_currentRelation,
-											   next->entry->sequence_rowno);
+											   next->sequence_rowno);
 
 			/*
 			 * Re-install the buffered scan slot as the current scan
 			 * tuple so Var references (e.g. `a`, `c`) resolve off the
 			 * right row.
 			 */
-			econtext->ecxt_scantuple = next->entry->scan_slot_copy;
+			econtext->ecxt_scantuple = next->scan_slot_copy;
 
 			ProjectionInfo* proj = ExecBuildProjectionInfo(
 				runtime.newtargetlist,
 				econtext,
 				node->ps.ps_ResultTupleSlot,
 				&(node->ps),
-				next->entry->scan_slot_copy->tts_tupleDescriptor);
+				next->scan_slot_copy->tts_tupleDescriptor);
 
 			return ExecProject(proj);
 		}
@@ -5330,7 +5330,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 
 static void
 ExplainGpuBatchStats(
-	const bioseq::simd::active_target::GpuBatchExecutionStats& gpu,
+	const bioseq::scheduler::DispatchGpuBatchExecutionStats& gpu,
 	ExplainState* es)
 {
 	if (es->format == EXPLAIN_FORMAT_TEXT) {
