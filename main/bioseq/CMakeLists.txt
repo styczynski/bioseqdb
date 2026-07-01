@@ -303,7 +303,7 @@ list(REMOVE_DUPLICATES SRC_MOD_FILES)
 # dispatch wrapper at -O3. Keep this as a build knob, not a C++ ifdef:
 # runtime dispatch and algorithm selection are unchanged, and non-GCC
 # builds stay on the preset's normal -O3 path.
-set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O0" CACHE STRING
+set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O1" CACHE STRING
   "Optimization level for GCC 16.1 AWS typed dispatch wrapper TUs. \
 Allowed: O0, O1, O2, O3. O3 preserves the global preset behavior.")
 set_property(CACHE BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL PROPERTY STRINGS O0 O1 O2 O3)
