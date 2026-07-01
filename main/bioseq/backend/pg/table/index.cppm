@@ -1,5 +1,4 @@
 export module bioseq.table;
-export import :custom_scan;
 export import :index_scan;
 export import :utils;
 export import :access_identity;
