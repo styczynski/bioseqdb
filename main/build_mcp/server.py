@@ -154,6 +154,7 @@ HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 AWS_HEAVY_JOBS = "4"
 AWS_GCC_TYPED_DISPATCH_OPT_LEVEL = "O1"
+AWS_GCC_TYPED_DISPATCH_JOBS = "1"
 AWS_GCC161_CXX_FLAGS = (
     "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 "
     "-Wno-expose-global-module-tu-local -Wno-external-tu-local "
@@ -1043,10 +1044,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     active_build_dir,
                     "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL",
                 )
+                current_typed_dispatch_jobs = _cmake_cache_value(
+                    active_build_dir,
+                    "BIOSEQ_GCC_TYPED_DISPATCH_JOBS",
+                )
                 repair_args.append(f"-DCMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS}")
                 repair_args.append(
                     "-DBIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
                     f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+                repair_args.append(
+                    "-DBIOSEQ_GCC_TYPED_DISPATCH_JOBS="
+                    f"{AWS_GCC_TYPED_DISPATCH_JOBS}")
                 if current_cxx_flags != AWS_GCC161_CXX_FLAGS:
                     repair_reasons.append(
                         f"CMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS!r} "
@@ -1056,6 +1064,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
                         f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL} "
                         f"(was {current_typed_dispatch_opt or 'unset'})")
+                if current_typed_dispatch_jobs != AWS_GCC_TYPED_DISPATCH_JOBS:
+                    repair_reasons.append(
+                        "BIOSEQ_GCC_TYPED_DISPATCH_JOBS="
+                        f"{AWS_GCC_TYPED_DISPATCH_JOBS} "
+                        f"(was {current_typed_dispatch_jobs or 'unset'})")
             if repair_reasons:
                 log_handle.write("# AWS cache repair: setting "
                                  + "; ".join(repair_reasons) + ".\n")

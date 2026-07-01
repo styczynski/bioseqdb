@@ -313,6 +313,15 @@ if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[123]$")
     "'${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}'")
 endif()
 
+set(BIOSEQ_GCC_TYPED_DISPATCH_JOBS "1" CACHE STRING
+  "Ninja compile-pool width for GCC 16.1 AWS typed dispatch wrapper TUs. \
+0 = inherit the target compile pool.")
+if(NOT BIOSEQ_GCC_TYPED_DISPATCH_JOBS MATCHES "^[0-9]+$")
+  message(FATAL_ERROR
+    "BIOSEQ_GCC_TYPED_DISPATCH_JOBS must be a non-negative integer; got "
+    "'${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}'")
+endif()
+
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2.cpp
@@ -322,13 +331,21 @@ set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8.cpp)
-if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16"
-    AND NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
-  set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
-    PROPERTIES COMPILE_OPTIONS "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS
+      gcc_typed_dispatch_compile=${BIOSEQ_GCC_TYPED_DISPATCH_JOBS})
+    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
+  endif()
+  if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
+    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      PROPERTIES COMPILE_OPTIONS "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+  endif()
   message(STATUS
     "bioseq: GCC typed dispatch wrapper TUs use "
-    "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}; set "
+    "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
+    "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}; set "
     "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 to restore the global preset")
 endif()
 
