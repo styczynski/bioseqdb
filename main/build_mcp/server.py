@@ -1872,7 +1872,8 @@ REMOTE_OP_TIMEOUTS = {
     "git":    20 * 60,
     "ssh":    90 * 60,     # remote-ssh is synchronous; tolerate saturated compiles
     "up":    140 * 60,
-    "down":   30 * 60,
+    "down":  120 * 60,     # includes the automatic pre-destroy AMI snapshot
+    "snapshot": 120 * 60,
     "verify": 90 * 60,
     "wait":  140 * 60,
     "run":   200 * 60,     # provision (if needed) + git sync + full build/bench
@@ -1882,7 +1883,8 @@ REMOTE_OP_TIMEOUTS = {
 # to return inline; long ops get a short one and are polled by re-calling.
 REMOTE_OP_GRACE = {
     "status": 30.0, "output": 30.0, "logs": 30.0, "git": 30.0,
-    "up": 6.0, "down": 8.0, "verify": 8.0, "wait": 8.0, "run": 6.0,
+    "up": 6.0, "down": 8.0, "snapshot": 8.0,
+    "verify": 8.0, "wait": 8.0, "run": 6.0,
 }
 REMOTE_TERMINAL_STATUSES = {"completed", "failed", "killed_timeout", "aborted"}
 REMOTE_MANAGE_OPS = {"up", "down", "status", "logs", "verify", "wait", "output"}
@@ -2239,7 +2241,7 @@ def _remote_provision_status(deadline: float) -> str | None:
 
 # --------------------------- remote-run driver -----------------------------
 
-def _ensure_remote_box(branch: str, auto_provision: bool,
+def _ensure_remote_box(branch: str, auto_provision: bool, from_scratch: bool,
                        log_handle, deadline: float) -> None:
     """Make sure a build-ready box exists. Provision + wait if there is none
     (and auto_provision allows it). Raises on failure."""
@@ -2249,6 +2251,11 @@ def _ensure_remote_box(branch: str, auto_provision: bool,
         st = _remote_provision_status(deadline)
         log_handle.write(f"# existing box {outs.get('instance_id')} @ {ip} "
                          f"(PROVISION_STATUS={st or 'unknown'})\n")
+        if from_scratch:
+            log_handle.write(
+                "# from_scratch=true was requested, but a box already exists; "
+                "remote-run will not destroy it implicitly. Tear down only after "
+                "explicit user confirmation if a brand-new base-Ubuntu box is required.\n")
         log_handle.flush()
         if st in REMOTE_GOOD_STATUSES:
             return
@@ -2266,9 +2273,10 @@ def _ensure_remote_box(branch: str, auto_provision: bool,
 
     log_handle.write(f"# no box found — provisioning a new one (branch={branch})...\n")
     log_handle.flush()
-    rc = _remote_exec(_provisioner_cmd("up", "--branch", branch, "--wait",
-                                       "--timeout", "120"),
-                      log_handle, deadline)
+    argv = _provisioner_cmd("up", "--branch", branch, "--wait", "--timeout", "120")
+    if from_scratch:
+        argv.append("--from-scratch")
+    rc = _remote_exec(argv, log_handle, deadline)
     if rc != 0:
         raise RuntimeError(f"provisioner up failed (exit {rc}) — see log")
     if not _provisioner_outputs().get("public_ip"):
@@ -2284,8 +2292,9 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
     branch = payload.get("branch") or "main"
     do_sync = bool(payload.get("sync", True))
     auto_provision = bool(payload.get("auto_provision", True))
+    from_scratch = bool(payload.get("from_scratch", False))
 
-    _ensure_remote_box(branch, auto_provision, log_handle, deadline)
+    _ensure_remote_box(branch, auto_provision, from_scratch, log_handle, deadline)
 
     if do_sync:
         log_handle.write(f"\n# syncing box repo {REMOTE_REPO_PATH} to origin/{branch} "
@@ -2854,6 +2863,9 @@ def tool_remote_manage(arguments: dict) -> str:
             argv += ["--instance-type", str(arguments["instance_type"])]
         if arguments.get("ami"):
             argv += ["--ami", str(arguments["ami"])]
+        from_scratch = parse_bool("from_scratch", arguments.get("from_scratch", False))
+        if from_scratch:
+            argv += ["--from-scratch"]
         if arguments.get("volume_size"):
             argv += ["--volume-size", str(int(arguments["volume_size"]))]
         if parse_bool("no_verify", arguments.get("no_verify", False)):
@@ -2863,7 +2875,8 @@ def tool_remote_manage(arguments: dict) -> str:
         argv += ["--timeout", str(int(arguments.get("timeout", 120)))]
         if parse_bool("yes", arguments.get("yes", False)):
             argv += ["--yes"]
-        label = f"provisioner up (branch={branch or 'default'})"
+        label = (f"provisioner up (branch={branch or 'default'}, "
+                 f"from_scratch={from_scratch})")
     elif operation == "down":
         # provisioner down prompts via input() without --yes; the detached worker
         # cannot answer, so always pass --yes.
@@ -2875,7 +2888,7 @@ def tool_remote_manage(arguments: dict) -> str:
         region = arguments.get("region") or _provisioner_region()
         if region:
             argv += ["--region", str(region)]
-        label = "provisioner down (destroy the box and all its resources)"
+        label = "provisioner down (snapshot cache, then destroy the box and managed resources)"
     elif operation == "status":
         argv = _provisioner_cmd("status")
         if arguments.get("region"):
@@ -2898,6 +2911,25 @@ def tool_remote_manage(arguments: dict) -> str:
         label = "provisioner verify (cmake configure + build; classify failures)"
 
     return _start_or_poll_remote(operation, label, argv=argv)
+
+
+def tool_remote_snapshot(arguments: dict) -> str:
+    """remote-snapshot — create a reusable AMI cache from the current AWS box."""
+    argv = _provisioner_cmd("snapshot")
+    if arguments.get("region"):
+        argv += ["--region", str(arguments["region"])]
+    if arguments.get("name"):
+        argv += ["--name", str(arguments["name"])]
+    if arguments.get("description"):
+        argv += ["--description", str(arguments["description"])]
+    if arguments.get("timeout"):
+        argv += ["--timeout", str(int(arguments["timeout"]))]
+    if parse_bool("no_wait", arguments.get("no_wait", False)):
+        argv += ["--no-wait"]
+    if parse_bool("no_reboot", arguments.get("no_reboot", False)):
+        argv += ["--no-reboot"]
+    label = "provisioner snapshot (create reusable cached AMI from current root volume)"
+    return _start_or_poll_remote("snapshot", label, argv=argv)
 
 
 def tool_remote_ssh(command: str) -> str:
@@ -2946,6 +2978,7 @@ def tool_remote_run(arguments: dict) -> str:
     branch = arguments.get("branch") or _current_local_branch() or "main"
     sync = parse_bool("sync", arguments.get("sync", True))
     auto_provision = parse_bool("auto_provision", arguments.get("auto_provision", True))
+    from_scratch = parse_bool("from_scratch", arguments.get("from_scratch", False))
     preset = arguments.get("preset", REMOTE_BUILD_PRESET)
     if preset not in REMOTE_BUILD_PRESETS:
         return (f"Invalid preset '{preset}'. remote-run presets: "
@@ -2977,9 +3010,10 @@ def tool_remote_run(arguments: dict) -> str:
         payload = {"operation": "build", "mode": mode, "build_only": build_only,
                    "debug": debug, "branch": branch, "sync": sync,
                    "auto_provision": auto_provision,
+                   "from_scratch": from_scratch,
                    "bench_flags": bench_flags, "preset": preset}
         label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
-                 f"(branch={branch}, preset={preset})")
+                 f"(branch={branch}, preset={preset}, from_scratch={from_scratch})")
         if bench_flags:
             label += f" bench_flags={' '.join(bench_flags)}"
     elif operation == "inspect":
@@ -2992,8 +3026,10 @@ def tool_remote_run(arguments: dict) -> str:
                         if k in arguments}
         payload = {"operation": "inspect", "inspect_args": inspect_args,
                    "branch": branch, "sync": sync, "auto_provision": auto_provision,
+                   "from_scratch": from_scratch,
                    "preset": preset}
-        label = f"remote inspect '{function_name}' (branch={branch}, preset={preset})"
+        label = (f"remote inspect '{function_name}' "
+                 f"(branch={branch}, preset={preset}, from_scratch={from_scratch})")
     else:
         return ("Invalid 'operation' for remote-run. Use operation='build' (with a "
                 "'mode') or operation='inspect' (with a 'function_name').")
@@ -3336,7 +3372,7 @@ TOOL_DEFINITIONS = [
 ]
 
 # --------------------------- remote tools (AWS benchmark machine) -----------
-# Five tools that drive the disposable x86_64 Ubuntu benchmark box under
+# Tools that drive the disposable x86_64 Ubuntu benchmark box under
 # main/infra/ (OpenTofu + provisioner.py). See main/infra/README.md.
 _REMOTE_MUTEX_NOTE = (
     "\n\nMUTEX & POLLING: every remote tool EXCEPT remote-ssh shares ONE global "
@@ -3349,6 +3385,13 @@ _REMOTE_MUTEX_NOTE = (
     "build never silently launches a rebuild. The full output is always streamed to "
     "a log file whose path is returned (open it with Read). Use remote-ssh (which is "
     "NOT under the mutex) to inspect the box while a long op holds the slot."
+)
+_FROM_SCRATCH_WARNING = (
+    "DANGER: default false. In normal circumstances agents should NEVER set "
+    "from_scratch=true. It bypasses the cached AMI/snapshot path and starts a "
+    "new EC2 box from the base Ubuntu image, losing the startup/build-cache "
+    "benefit. Use true only when the USER has explicitly confirmed a clean "
+    "from-scratch rebuild."
 )
 _REMOTE_RUN_COMMON_PROPS = {
     "branch": {
@@ -3379,6 +3422,14 @@ _REMOTE_RUN_COMMON_PROPS = {
             "If no box is currently running, provision one (provisioner up --wait) "
             "before building. This launches a PAID EC2 instance. Set false to fail "
             "fast instead when no box exists."
+        ),
+    },
+    "from_scratch": {
+        "type": "boolean",
+        "default": False,
+        "description": (
+            _FROM_SCRATCH_WARNING + " When false, provisioner.py up automatically "
+            "uses the newest cached bioseq AMI in the target region if one exists."
         ),
     },
     "preset": {
@@ -3479,10 +3530,13 @@ TOOL_DEFINITIONS += [
             "Manage the AWS benchmark box — wraps `provisioner.py <operation>` for "
             "operation in up/down/status/logs/verify/wait/output:\n"
             "  up     — create/update the box (OpenTofu apply). Provisions a PAID "
-            "instance. Defaults: branch=your current local branch, region=the "
-            "existing stack's region, wait=true (block until on-box provisioning is "
-            "terminal). Refuses if a box is already running unless yes=true.\n"
-            "  down   — destroy the box and all its resources (always non-interactive).\n"
+            "instance. Defaults: uses the newest cached bioseq AMI/snapshot in the "
+            "target region when available, branch=your current local branch, "
+            "region=the existing stack's region, wait=true (block until on-box "
+            "provisioning is terminal). Refuses if a box is already running unless "
+            "yes=true. " + _FROM_SCRATCH_WARNING + "\n"
+            "  down   — create a cached AMI/snapshot of the current root volume, "
+            "then destroy the box and managed resources (always non-interactive).\n"
             "  status — same as remote-status.\n"
             "  logs   — tail /var/log/bioseq-provision.log (last `lines`).\n"
             "  verify — re-run verify.sh on the box (cmake configure + build; "
@@ -3505,7 +3559,17 @@ TOOL_DEFINITIONS += [
                 "instance_type": {"type": "string",
                                   "description": "[up] EC2 instance type (default m4.4xlarge = 16 vCPU/64 GiB)."},
                 "ami": {"type": "string",
-                        "description": "[up] override AMI id (default: latest Ubuntu 24.04 x86_64)."},
+                        "description": ("[up] override AMI id (default: newest cached "
+                                        "bioseq AMI if available, otherwise latest "
+                                        "Ubuntu 24.04 x86_64).")},
+                "from_scratch": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "[up] " + _FROM_SCRATCH_WARNING + " When false, `up` "
+                        "uses the newest cached bioseq AMI if one exists."
+                    ),
+                },
                 "volume_size": {"type": "integer", "minimum": 1,
                                 "description": "[up] root volume GiB (default 300)."},
                 "no_verify": {"type": "boolean", "default": False,
@@ -3548,13 +3612,69 @@ TOOL_DEFINITIONS += [
         },
     },
     {
+        "name": "remote-snapshot",
+        "description": (
+            "Create a reusable cached AWS AMI from the current benchmark box root "
+            "volume. This captures installed dependencies (clang/LLVM, GCC, CMake, "
+            "Ninja, PostgreSQL, vcpkg) plus the existing repo/build directory so "
+            "future remote provisioning can start from preexisting artifacts instead "
+            "of rebuilding from scratch. Prefer running this after expensive setup or "
+            "before teardown; `remote-manage` operation='down' already snapshots "
+            "automatically before destroying the EC2 instance. Normal `remote-run`/"
+            "`remote-manage up` calls then use the newest cached AMI by default. "
+            "Avoid from_scratch=true unless the USER explicitly confirmed a clean "
+            "base-image rebuild. By default AWS may reboot the instance briefly to "
+            "make the image filesystem-consistent; no EC2 instance is destroyed by "
+            "this tool." + _REMOTE_MUTEX_NOTE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region of the current stack (default: Terraform outputs/env).",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional AMI name (default bioseq-bench-aws-cache-<UTC timestamp>).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional AMI description.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 120,
+                    "description": "Wait timeout in minutes for AMI availability.",
+                },
+                "no_wait": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Return after create-image is requested instead of waiting for AMI availability.",
+                },
+                "no_reboot": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Ask AWS not to reboot the instance before imaging. Faster, "
+                        "but the filesystem is only crash-consistent; leave false for "
+                        "normal cache snapshots."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "remote-run",
         "description": (
             "Run a build/test/benchmark or an inspect on the AWS box — the remote "
             "twin of start_build + inspect. Ensures a ready box exists (provisioning "
-            "+ waiting if needed), git-syncs the box to the requested branch's latest "
-            "PUSHED commit (unless sync=false), then runs the operation on the box "
-            "using the box-side server.py with the aws-x64-linux preset.\n\n"
+            "+ waiting if needed, using the newest cached bioseq AMI/snapshot by "
+            "default), git-syncs the box to the requested branch's latest PUSHED "
+            "commit (unless sync=false), then runs the operation on the box using "
+            "the box-side server.py with the aws-x64-linux preset. " + _FROM_SCRATCH_WARNING + "\n\n"
             "Two operation shapes (oneOf):\n"
             "  operation='build' — runs one start_build mode (unit+integration, "
             "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
@@ -3945,6 +4065,8 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_remote_manage(args)
     elif name == "remote-ssh":
         text = tool_remote_ssh(args.get("command", ""))
+    elif name == "remote-snapshot":
+        text = tool_remote_snapshot(args)
     elif name == "remote-run":
         text = tool_remote_run(args)
     elif name == "remote-git":

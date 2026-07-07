@@ -7,6 +7,7 @@ bench-papers
 benchmark
 benchmarking-speedup
 bg-workers
+bioseq
 block-aligner
 bugfix-plan
 bugfix-prompt
@@ -22,6 +23,7 @@ code-style
 codegen
 columnar
 compile-errors
+design-prompt
 doc0294
 engineering-overview
 gpu
@@ -33,6 +35,7 @@ json-schema
 kmers
 kperf-profiler
 ksw2
+landing-page
 mcp
 memory-allocators
 memory-foonathan

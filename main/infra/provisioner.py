@@ -38,10 +38,17 @@ QUICK START
   # Tear it down when done (leave nothing running):
   ./provisioner.py down
 
+  # Save the current provisioned root volume/build tree as a reusable AMI cache:
+  ./provisioner.py snapshot
+
 COMMANDS
   up        init + apply (create/update the instance). --wait to block until the
-            on-box provisioning reaches a terminal status.
-  down      destroy everything this stack manages.
+            on-box provisioning reaches a terminal status. By default it uses
+            the newest bioseq cached AMI in the target region when one exists.
+  down      create a cached AMI from the current root volume, then destroy
+            everything this stack manages.
+  snapshot  create a cached AMI from the current instance root volume without
+            tearing the instance down.
   status    show Terraform outputs, the live EC2 state, a count of running
             benchmark instances (a cost guardrail), and the on-box
             PROVISION_STATUS marker.
@@ -55,6 +62,9 @@ COST / SAFETY
   * m4.4xlarge is an on-demand box and costs real money — run `down` when done.
   * `up` refuses (without --yes) if benchmark instances are already running, so
     you don't accidentally stack several boxes.
+  * `up --from-scratch` bypasses the cached AMI and starts from the current
+    Ubuntu base AMI. This is for explicitly user-confirmed clean rebuilds only;
+    normal agent/tool use should keep the default cached-image path.
   * `down` destroys against the region the stack was applied in (recorded by `up`)
     and then sweeps any benchmark instance still tagged-and-running in that region,
     so a region mismatch can never leave a paid box orphaned.
@@ -82,6 +92,14 @@ TF_DIR = HERE / "testing_infra"
 # var.region (NOT remembered in state across runs), so a region-less destroy would
 # target the default region and silently orphan everything that lives elsewhere.
 APPLY_STATE_FILE = TF_DIR / ".last-apply.json"
+
+CACHE_COMPONENT = "benchmark-machine-cache"
+CACHE_NAME_PREFIX = "bioseq-bench-aws-cache"
+CACHE_TAGS = {
+    "Project": "bioseq",
+    "Component": CACHE_COMPONENT,
+    "ManagedBy": "bioseq-provisioner",
+}
 
 # Terminal on-box statuses written to /opt/bioseq/PROVISION_STATUS.
 TERMINAL_STATUSES = {
@@ -303,6 +321,225 @@ def _aws_json_quiet(args: list[str], region: str) -> tuple[int, object | None, s
         return 1, None, f"invalid AWS JSON output: {exc}"
 
 
+def _cache_filters() -> list[str]:
+    return [
+        "Name=tag:Project,Values=bioseq",
+        f"Name=tag:Component,Values={CACHE_COMPONENT}",
+        "Name=tag:ManagedBy,Values=bioseq-provisioner",
+    ]
+
+
+def latest_cached_ami(region: str) -> dict | None:
+    """Return the newest available bioseq cache AMI in region, if any."""
+    rc, data, err = _aws_json_quiet(
+        ["ec2", "describe-images",
+         "--owners", "self",
+         "--filters", *_cache_filters(), "Name=state,Values=available"],
+        region,
+    )
+    if rc != 0:
+        if err and rc != 127:
+            print(c(f"warning: could not query cached AMIs in {region}: {err}", "yellow"),
+                  file=sys.stderr)
+        return None
+    images = data.get("Images") if isinstance(data, dict) else None
+    if not images:
+        return None
+    images = [img for img in images if isinstance(img, dict) and img.get("ImageId")]
+    if not images:
+        return None
+    images.sort(key=lambda img: img.get("CreationDate", ""))
+    return images[-1]
+
+
+def _cache_ami_summary(image: dict | None) -> str:
+    if not image:
+        return "(none)"
+    tags = {t.get("Key"): t.get("Value") for t in image.get("Tags", []) if isinstance(t, dict)}
+    source = tags.get("SourceInstanceId") or "unknown-source"
+    return (f"{image.get('ImageId')} created={image.get('CreationDate', 'unknown')} "
+            f"source={source} name={image.get('Name', 'unknown')}")
+
+
+def _resolve_up_ami(args, region: str) -> str | None:
+    """Select the AMI for `up`, preferring the latest cache unless forbidden."""
+    explicit_ami = getattr(args, "ami", None)
+    from_scratch = getattr(args, "from_scratch", False)
+    if explicit_ami and from_scratch:
+        die("--from-scratch cannot be combined with --ami")
+    if explicit_ami:
+        print(c(f"using explicitly requested AMI {explicit_ami}", "blue"))
+        return explicit_ami
+    if from_scratch:
+        print(c("from_scratch=true: bypassing cached AMIs and using the base Ubuntu AMI", "yellow"))
+        return None
+
+    image = latest_cached_ami(region)
+    if not image:
+        print(c(f"no cached bioseq AMI found in {region}; provisioning from base Ubuntu", "blue"))
+        return None
+
+    image_id = image["ImageId"]
+    print(c(f"using cached bioseq AMI {image_id}", "green"))
+    print(c(f"cache details: {_cache_ami_summary(image)}", "dim"))
+    return image_id
+
+
+def _image_tag_specs(name: str, instance_id: str) -> list[dict]:
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    base_tags = [
+        {"Key": k, "Value": v}
+        for k, v in CACHE_TAGS.items()
+    ] + [
+        {"Key": "Name", "Value": name},
+        {"Key": "SourceInstanceId", "Value": instance_id},
+        {"Key": "CreatedAt", "Value": created_at},
+        {"Key": "Purpose", "Value": "bioseq build cache root volume"},
+    ]
+    return [
+        {"ResourceType": "image", "Tags": base_tags},
+        {"ResourceType": "snapshot", "Tags": base_tags},
+    ]
+
+
+def _describe_image(region: str, image_id: str) -> dict | None:
+    rc, data, err = _aws_json_quiet(
+        ["ec2", "describe-images", "--image-ids", image_id],
+        region,
+    )
+    if rc != 0:
+        if err:
+            print(c(f"warning: could not describe AMI {image_id}: {err}", "yellow"),
+                  file=sys.stderr)
+        return None
+    images = data.get("Images") if isinstance(data, dict) else None
+    if not images:
+        return None
+    image = images[0]
+    return image if isinstance(image, dict) else None
+
+
+def _snapshot_progress(region: str, snapshot_ids: list[str]) -> str:
+    if not snapshot_ids:
+        return "snapshots=(none yet)"
+    rc, data, err = _aws_json_quiet(
+        ["ec2", "describe-snapshots", "--snapshot-ids", *snapshot_ids,
+         "--query", "Snapshots[].{id:SnapshotId,state:State,progress:Progress,size:VolumeSize}"],
+        region,
+    )
+    if rc != 0 or not isinstance(data, list):
+        return f"snapshots=unknown ({err or data})"
+    parts = []
+    for snap in data:
+        if isinstance(snap, dict):
+            parts.append(
+                f"{snap.get('id')}:{snap.get('state')}/{snap.get('progress')}/"
+                f"{snap.get('size')}GiB"
+            )
+    return "snapshots=" + ", ".join(parts)
+
+
+def wait_for_cached_ami(region: str, image_id: str, timeout_min: int) -> dict:
+    """Wait for AMI availability with progress logs for large root snapshots."""
+    deadline = time.time() + timeout_min * 60
+    last_line = None
+    while time.time() < deadline:
+        image = _describe_image(region, image_id)
+        state = image.get("State") if image else "unknown"
+        snapshot_ids = [
+            (((bdm.get("Ebs") or {}).get("SnapshotId")))
+            for bdm in (image or {}).get("BlockDeviceMappings", [])
+            if isinstance(bdm, dict)
+        ]
+        snapshot_ids = [snap for snap in snapshot_ids if snap]
+        line = f"AMI {image_id} state={state}; {_snapshot_progress(region, snapshot_ids)}"
+        if line != last_line:
+            print(c(line, "dim"), flush=True)
+            last_line = line
+        if state == "available":
+            return image or {"ImageId": image_id, "State": state}
+        if state in {"failed", "deregistered"}:
+            die(f"cached AMI {image_id} entered terminal state {state}")
+        time.sleep(30)
+    die(f"cached AMI {image_id} did not become available within {timeout_min} minutes")
+
+
+def create_cached_ami(args, *, wait_default: bool = True) -> dict | None:
+    """Create a reusable AMI from the current Terraform-managed instance.
+
+    The AMI is the launchable system image; AWS stores its root volume as EBS
+    snapshot(s). Keeping that AMI/snapshot after instance teardown is much
+    cheaper than keeping the EC2 instance running, and preserves the expensive
+    toolchain/vcpkg/CMake build tree.
+    """
+    outs = tofu_outputs()
+    region = (getattr(args, "region", None)
+              or outs.get("region")
+              or aws_region(args))
+    instance_id = outs.get("instance_id")
+    if not instance_id:
+        print(c("no Terraform-managed instance found; snapshot skipped.", "yellow"))
+        return None
+
+    rc, inst, err = _aws_json_quiet(
+        ["ec2", "describe-instances",
+         "--instance-ids", str(instance_id),
+         "--query", "Reservations[0].Instances[0].{state:State.Name,root:RootDeviceName,launch:LaunchTime}"],
+        region,
+    )
+    if rc != 0 or not isinstance(inst, dict):
+        die(f"could not inspect instance {instance_id} before snapshot: {err or inst}")
+    state = inst.get("state")
+    if state in {"shutting-down", "terminated"}:
+        print(c(f"instance {instance_id} is {state}; snapshot skipped.", "yellow"))
+        return None
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    name = getattr(args, "name", None) or f"{CACHE_NAME_PREFIX}-{timestamp}"
+    description = (getattr(args, "description", None)
+                   or f"bioseq benchmark cache from {instance_id} at {timestamp} UTC")
+    no_reboot = bool(getattr(args, "no_reboot", False))
+    wait = wait_default and not bool(getattr(args, "no_wait", False))
+    timeout_min = int(getattr(args, "timeout", 120))
+
+    print(c(f"creating cached AMI from {instance_id} in {region}", "blue"), flush=True)
+    if no_reboot:
+        print(c("warning: --no-reboot requested; filesystem consistency is only crash-consistent",
+                "yellow"), flush=True)
+    cmd = [
+        "ec2", "create-image",
+        "--instance-id", str(instance_id),
+        "--name", name,
+        "--description", description,
+        "--tag-specifications", json.dumps(_image_tag_specs(name, str(instance_id))),
+    ]
+    if no_reboot:
+        cmd.append("--no-reboot")
+    rc, data, err = _aws_json_quiet(cmd, region)
+    if rc != 0 or not isinstance(data, dict) or not data.get("ImageId"):
+        die(f"failed to create cached AMI: {err or data}")
+    image_id = data["ImageId"]
+    print(c(f"cached AMI requested: {image_id}", "green"), flush=True)
+
+    if wait:
+        print(c(f"waiting for cached AMI {image_id} to become available "
+                f"(timeout {timeout_min} min)...", "blue"), flush=True)
+        image = wait_for_cached_ami(region, image_id, timeout_min)
+        print(c(f"cached AMI ready: {image_id}", "green"), flush=True)
+    else:
+        image = _describe_image(region, image_id) or {"ImageId": image_id, "Name": name}
+
+    snapshots = [
+        (((bdm.get("Ebs") or {}).get("SnapshotId")))
+        for bdm in image.get("BlockDeviceMappings", [])
+        if isinstance(bdm, dict)
+    ]
+    snapshots = [snap for snap in snapshots if snap]
+    if snapshots:
+        print(c("snapshots:", "green"), ", ".join(snapshots))
+    return image
+
+
 def _cidr_allows_ip(cidr: str, ip: str) -> bool:
     try:
         return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
@@ -471,6 +708,8 @@ def cmd_up(args):
               "use `down` first if you want a clean machine).")
         die("aborted by guardrail")
 
+    args.ami = _resolve_up_ami(args, region)
+
     ssh_cidr = args.ssh_cidr
     if ssh_cidr is None:
         ip = detect_public_ip()
@@ -516,7 +755,6 @@ def cmd_down(args):
         ans = input("Destroy the benchmark instance and all its resources? [y/N] ").strip().lower()
         if ans not in ("y", "yes"):
             die("aborted")
-    ensure_init()
     # Terraform's AWS provider region comes from var.region, which is NOT recorded
     # in state across runs. A bare `destroy` configures the provider for the
     # DEFAULT region, fails to find resources that live elsewhere, drops them from
@@ -526,6 +764,11 @@ def cmd_down(args):
     region = (getattr(args, "region", None)
               or _load_apply_state().get("region")
               or aws_region(args))
+    args.region = region
+    if not getattr(args, "no_snapshot", False):
+        print(c("snapshotting current root volume before teardown...", "blue"))
+        create_cached_ami(args, wait_default=True)
+    ensure_init()
     print(c(f"destroying stack in region {region}", "blue"))
     run([tofu_bin(), "destroy", "-input=false", "-auto-approve",
          "-var", f"region={region}"], cwd=TF_DIR)
@@ -544,7 +787,8 @@ def cmd_status(args):
         print("no Terraform state / outputs — nothing provisioned.")
     else:
         print(c("Terraform outputs:", "bold"))
-        for k in ("instance_id", "public_ip", "public_dns", "region", "ssh_key_path"):
+        for k in ("instance_id", "public_ip", "public_dns", "region", "source_ami_id",
+                  "ssh_key_path"):
             if outs.get(k):
                 print(f"  {k:14} {outs[k]}")
     region = aws_region(args)
@@ -558,6 +802,8 @@ def cmd_status(args):
         st = remote_status()
         col = "green" if st in GOOD_STATUSES else ("yellow" if st else "dim")
         print(c(f"\nOn-box PROVISION_STATUS: {st or '(unreachable / still booting)'}", col))
+    image = latest_cached_ami(region)
+    print(c(f"\nLatest cached AMI in {region}: {_cache_ami_summary(image)}", "bold"))
 
 
 def cmd_ssh(args):
@@ -582,6 +828,12 @@ def cmd_verify(args):
 
 def cmd_output(args):
     print(json.dumps(tofu_outputs(), indent=2))
+
+
+def cmd_snapshot(args):
+    image = create_cached_ami(args, wait_default=True)
+    if image:
+        print(c(f"cached image available for future `up`: {_cache_ami_summary(image)}", "green"))
 
 
 def wait_for_provision(timeout_min: int):
@@ -624,7 +876,12 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--branch", default="main",
                     help="branch to clone (default main; use research/aws-machine for the unmerged toolchain support)")
     up.add_argument("--volume-size", dest="volume_size", type=int, help="root volume GiB (default 300)")
-    up.add_argument("--ami", help="override AMI id (default: latest Ubuntu 24.04 x86_64)")
+    up.add_argument("--ami",
+                    help=("override AMI id (default: newest cached bioseq AMI if "
+                          "available, otherwise latest Ubuntu 24.04 x86_64)"))
+    up.add_argument("--from-scratch", action="store_true",
+                    help=("bypass cached bioseq AMIs and provision from the base Ubuntu AMI; "
+                          "use only after explicit user confirmation"))
     up.add_argument("--ssh-cidr", dest="ssh_cidr", help="CIDR allowed to SSH (default: your detected /32)")
     up.add_argument("--no-verify", action="store_true", help="skip the on-box build verification")
     up.add_argument("--wait", action="store_true", help="block until on-box provisioning finishes")
@@ -632,11 +889,25 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--yes", action="store_true", help="skip the running-instance guardrail prompt")
     up.set_defaults(func=cmd_up)
 
-    down = sub.add_parser("down", help="destroy the instance and all resources")
+    down = sub.add_parser("down", help="snapshot, then destroy the instance and all managed resources")
     down.add_argument("--yes", action="store_true", help="do not prompt for confirmation")
     down.add_argument("--region",
                       help="region the stack was applied in (default: persisted from `up`, else outputs/env)")
+    down.add_argument("--no-snapshot", action="store_true",
+                      help="emergency escape hatch: destroy without first saving a cached AMI")
     down.set_defaults(func=cmd_down)
+
+    snap = sub.add_parser("snapshot", help="create a reusable cached AMI from the current root volume")
+    snap.add_argument("--region", help="region the stack was applied in (default: outputs/env)")
+    snap.add_argument("--name", help=f"AMI name (default {CACHE_NAME_PREFIX}-<UTC timestamp>)")
+    snap.add_argument("--description", help="AMI description")
+    snap.add_argument("--timeout", type=int, default=120,
+                      help="wait timeout in minutes for AMI availability (default 120)")
+    snap.add_argument("--no-wait", action="store_true",
+                      help="return after create-image is requested instead of waiting for AMI availability")
+    snap.add_argument("--no-reboot", action="store_true",
+                      help="ask AWS not to reboot the instance before imaging (faster but only crash-consistent)")
+    snap.set_defaults(func=cmd_snapshot)
 
     st = sub.add_parser("status", help="show outputs, live state, and on-box status")
     st.add_argument("--region", help="region to query (default: from outputs / env)")
