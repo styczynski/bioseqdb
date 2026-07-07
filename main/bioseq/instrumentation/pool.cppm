@@ -14,7 +14,7 @@ module;
 #include <new>
 #include <vector>
 
-export module bioseq_instr.pool;
+export module bioseq.instr.pool;
 
 export namespace bioseq::instr {
 

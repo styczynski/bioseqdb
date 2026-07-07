@@ -13,9 +13,9 @@ module;
 #include <cstdint>
 #include <new>
 
-export module bioseq_instr.sample;
+export module bioseq.instr.sample;
 
-import bioseq_instr.config;
+import bioseq.instr.config;
 
 export namespace bioseq::instr {
 

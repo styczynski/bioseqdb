@@ -19,9 +19,9 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq_io.compression.window_map;
+export module bioseq.io.compression.window_map;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 

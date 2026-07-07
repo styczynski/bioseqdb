@@ -5,7 +5,7 @@
  * This module implements the constexpr-dispatched stage pipeline described in
  * `TEMPLATED_MINIMAP_PORT_PIPELINE_API_V2_CONSTEXPR_DISPATCHED_STAGES_AND_METADATA__DOC0249.md`.
  * It is a parallel API layer that sits above the existing kernel functions in
- * `bioseq::simd::N_NEON` and provides:
+ * `bioseq::simd::active_target` and provides:
  *
  *   - Compile-time parameter packs (`ConstexprAlignerParams<W,K,L>` /
  *     `ConstexprAlignerFallbackParams<L>`).
@@ -45,7 +45,7 @@ General rule:
 
 For testing/benchmarking faster iteration you can use level 1, level 3 requires massive hour-long builds
 */
-#define PIPELINE_TEMPLATE_BRANCHING_LEVEL 1
+#define PIPELINE_TEMPLATE_BRANCHING_LEVEL 0
 
 // DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
 // on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
@@ -56,6 +56,22 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #if !defined(__OPTIMIZE__)
 # error "DOC0256 chain primitive requires -O1 or higher (see DOC0256 §R17). " \
         "Use -Og or -O1 -g for debug builds of pipe.cppm."
+#endif
+
+#ifndef BIOSEQ_PIPELINE_FORCE_INLINE
+#define BIOSEQ_PIPELINE_FORCE_INLINE 1
+#endif
+
+#if BIOSEQ_PIPELINE_FORCE_INLINE
+#define BIOSEQ_PIPELINE_INLINE_ATTR [[gnu::always_inline]]
+#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR [[gnu::always_inline, gnu::flatten]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard, gnu::always_inline, gnu::flatten]]
+#else
+#define BIOSEQ_PIPELINE_INLINE_ATTR
+#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard]]
 #endif
 
 #include <hwy/highway.h>
@@ -78,38 +94,43 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #include <vector>
 #include <boost/unordered/unordered_flat_set.hpp>
 
-export module bioseq_sequences.pipe;
+export module bioseq.sequences.pipe;
 
-import mlogging;
-import bioseq_common.templating;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_sequences.kmers.two_stacks;
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import alignment_hwy_lane_helpers;
-import alignment_hwy_ksw2_batched;
-import block_aligner_hwy;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.chaining.scalar;
-import bioseq_sequences.chaining.simd;
-import bioseq_sequences.chaining.rmq;
-import bioseq_sequences.minimap_port;
-import context;
-import bioseq_instr;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
-import bioseq_indexing.type;
-import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
-import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.memory_admission;
-import bioseq_parallelism.pipeline_ops;
+import bioseq.common.mlogging;
+import bioseq.common.templating;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.alignment.lane_helpers;
+import bioseq.alignment.ksw2_batched;
+import bioseq.alignment.block_aligner;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.chaining.scalar;
+import bioseq.sequences.chaining.simd;
+import bioseq.sequences.chaining.rmq;
+import bioseq.sequences.chaining.vulkan;
+import bioseq.sequences.minimap_port;
+import bioseq.common.context;
+import bioseq.instr;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
+import bioseq.storage.size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
+import bioseq.indexing.type;
+import bioseq.indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
+import bioseq.gpu.vulkan.runtime;           // Runtime::instance() for GPU sketch/seed paths
+import bioseq.sequences.kmers.vulkan;       // DOC0351 Phase C — Vulkan minimizer sketch + device span
+import bioseq.indexing.minimizer_vulkan;    // DOC0307 Phase B — GPU-resident index view + cache
+import bioseq.sequences.seeding.vulkan;     // DOC0307 Phase B — Vulkan seed-hit lookup
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.pipeline_ops;
 
 export {
 
@@ -123,6 +144,21 @@ using bioseq::indexing::MinimizerIndex;
 
 // DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
+
+[[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    const std::string detail = !runtime.usable()
+        ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
+        : runtime.features().software_device
+            ? fmt::format(
+                  "active Vulkan device '{}' is a CPU/software device "
+                  "(VkPhysicalDeviceType={}); explicit GPU execution requires a hardware Vulkan device",
+                  runtime.features().device_name.data(),
+                  runtime.features().device_type)
+            : "GPU path declined";
+    throw bioseq::gpu::vulkan::VulkanRuntimeError(
+        fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
+}
 
 // DOC0256 §2.1 — the chain primitive is load-bearing on relaxed
 // template-template parameter matching (P0522R0) and C++20 class-type
@@ -245,6 +281,37 @@ struct StageDescription;
 struct PipelineDescription;
 
 // =============================================================================
+// DOC0307 §5.2 — narrow minimizer-batch shape carrying an optional device span.
+// =============================================================================
+//
+// One additional stage-shape on top of the DOC0254 matrix. It borrows the host
+// minimizers from the arena slab and owns the optional GPU device minimizer
+// handle through `VulkanDeviceMinimizerSpan::owner`, so the all-Vulkan
+// sketch+seed path avoids a second query-minimizer upload. CPU minimizer
+// kernels keep using the existing `std::span<const MinimizerT>` path.
+template <class MinimizerT>
+struct MinimizerBatchView {
+    using value_type = MinimizerT;
+
+    std::span<const MinimizerT> host{};
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>> device{};
+
+    [[nodiscard]] const MinimizerT* data() const noexcept { return host.data(); }
+    [[nodiscard]] std::size_t size() const noexcept { return host.size(); }
+    [[nodiscard]] std::span<const MinimizerT> as_span() const noexcept { return host; }
+    [[nodiscard]] auto begin() const noexcept { return host.begin(); }
+    [[nodiscard]] auto end() const noexcept { return host.end(); }
+};
+
+template <class T>
+struct is_minimizer_batch_view : std::false_type {};
+template <class M>
+struct is_minimizer_batch_view<MinimizerBatchView<M>> : std::true_type {};
+template <class T>
+inline constexpr bool is_minimizer_batch_view_v =
+    is_minimizer_batch_view<std::remove_cvref_t<T>>::value;
+
+// =============================================================================
 // DOC0254 §7 — Concept-driven sink validation.
 // =============================================================================
 
@@ -282,9 +349,27 @@ concept PairBatchSink = requires (S& sink, std::span<E1> a, std::span<E2> b) {
  * (const-reference) target index.  SeedHitStage is the canonical consumer.
  */
 template <class S, class E, class IndexT>
-concept IndexedBatchSink = requires (S& sink, std::span<E> a, const IndexT& idx) {
-    { sink.on_batch_with_index(a, idx) } -> std::same_as<void>;
-    { sink.on_completed() }              -> std::same_as<void>;
+concept IndexedBatchSink = requires (S& sink, std::span<E> a, const IndexT& idx,
+                                     bioseq::indexing::GpuIndexCacheIdentity identity) {
+    { sink.on_batch_with_index(a, idx, identity) } -> std::same_as<void>;
+    { sink.on_completed() }                        -> std::same_as<void>;
+};
+
+/// DOC0307 §5.2 — minimizer-batch sink (MinimizerStage → IndexStage hand-off).
+template <class S, class MinimizerT>
+concept MinimizerBatchSink = requires (S& sink, MinimizerBatchView<MinimizerT> batch) {
+    { sink.on_minimizer_batch(batch) } -> std::same_as<void>;
+    { sink.on_completed() }            -> std::same_as<void>;
+};
+
+/// DOC0307 §5.2 — index-decorated minimizer-batch sink (IndexStage →
+/// SeedHitStage hand-off carrying the GPU index cache identity).
+template <class S, class MinimizerT, class IndexT>
+concept IndexedMinimizerBatchSink =
+requires (S& sink, MinimizerBatchView<MinimizerT> batch, const IndexT& idx,
+          bioseq::indexing::GpuIndexCacheIdentity identity) {
+    { sink.on_minimizer_batch_with_index(batch, idx, identity) } -> std::same_as<void>;
+    { sink.on_completed() }                                      -> std::same_as<void>;
 };
 
 // =============================================================================
@@ -355,13 +440,43 @@ public:
 
     template <class E, class IndexT>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_batch_with_index(std::span<E>  data,
-                                             const IndexT& index_ref) && {
+    EmittedToken<Sink> emit_batch_with_index(
+        std::span<E>  data,
+        const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) && {
         static_assert(IndexedBatchSink<Sink, E, IndexT>,
             "EmitToken::emit_batch_with_index: downstream sink does not "
-            "implement on_batch_with_index(std::span<E>, IndexT const&).");
+            "implement on_batch_with_index(std::span<E>, IndexT const&, identity).");
         DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
-        sink_ptr_->on_batch_with_index(data, index_ref);
+        sink_ptr_->on_batch_with_index(data, index_ref, identity);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+    // DOC0307 §5.2 — narrow minimizer-batch emit (carries optional device span).
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_minimizer_batch(MinimizerBatchView<MinimizerT> batch) && {
+        static_assert(MinimizerBatchSink<Sink, MinimizerT>,
+            "EmitToken::emit_minimizer_batch: downstream sink does not implement "
+            "on_minimizer_batch.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        sink_ptr_->on_minimizer_batch(batch);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+    template <class MinimizerT, class IndexT>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_minimizer_batch_with_index(
+        MinimizerBatchView<MinimizerT> batch,
+        const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) && {
+        static_assert(IndexedMinimizerBatchSink<Sink, MinimizerT, IndexT>,
+            "EmitToken::emit_minimizer_batch_with_index: downstream sink does not "
+            "implement on_minimizer_batch_with_index.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        sink_ptr_->on_minimizer_batch_with_index(batch, index_ref, identity);
         sink_ptr_ = nullptr;
         return EmittedToken<Sink>::make();
     }
@@ -491,9 +606,25 @@ struct Stage {
     }
 
     template <class B, class IndexT>
-    [[gnu::always_inline]] void on_batch_with_index(B&& batch, const IndexT& index_ref) {
+    [[gnu::always_inline]] void on_batch_with_index(
+        B&& batch, const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) {
         (void) self_.template process_with_index<Cep>(
-            std::forward<B>(batch), index_ref, EmitToken<Sink>{sink_});
+            std::forward<B>(batch), index_ref, identity, EmitToken<Sink>{sink_});
+    }
+
+    // DOC0307 §5.2 — forwarders for the narrow minimizer-batch shape.
+    template <class MinimizerT>
+    [[gnu::always_inline]] void on_minimizer_batch(MinimizerBatchView<MinimizerT> batch) {
+        (void) self_.template process<Cep>(batch, EmitToken<Sink>{sink_});
+    }
+
+    template <class MinimizerT, class IndexT>
+    [[gnu::always_inline]] void on_minimizer_batch_with_index(
+        MinimizerBatchView<MinimizerT> batch, const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) {
+        (void) self_.template process_with_index<Cep>(
+            batch, index_ref, identity, EmitToken<Sink>{sink_});
     }
 
     [[gnu::always_inline]] void on_completed() noexcept {
@@ -603,7 +734,7 @@ using kernel_t = typename algorithm_traits<AlgoEnumValue>::kernel_type;
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -617,7 +748,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ChainingParams&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -635,7 +766,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -649,7 +780,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ChainingParams&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -667,7 +798,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -681,13 +812,55 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ChainingParams&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
             return {
                 {"vectorised", "false"},
                 {"complexity", "O(n log n)"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+/// Vulkan tiled-DP chaining (DOC0304 Phase A) — `chain_anchors_vulkan` from
+/// `bioseq_sequences.chaining.vulkan`. G3SA-style tiled DP score generation on
+/// Vulkan + bioseq CPU `backtrack_chains`; selected Vulkan execution is
+/// mandatory and failures throw `VulkanRuntimeError`.
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP> {
+    struct kernel_type {
+        [[gnu::always_inline]] inline static void call(
+            std::span<const Anchor> anchors,
+            const ChainingParams&   params,
+            ArenaSlab<Chain>&       chains_out,
+            ArenaSlab<Anchor>&      reordered_anchors_out)
+        {
+            ::bioseq::chaining::chain_anchors_vulkan(
+                anchors, params, chains_out, reordered_anchors_out);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP);
+        }
+        static void populate_runtime_params(
+            const ChainingParams& params,
+            std::vector<NamedProperty>& props) noexcept
+        {
+            props.push_back({"phase", "A"});
+            props.push_back({"fallback", "none"});
+            props.push_back({"uses_max_chain_skip", "false"});
+            props.push_back({"vulkan_enabled", params.vulkan_enabled ? "true" : "false"});
+        }
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"accelerator", "vulkan"},
+                {"score_generation", "g3sa-tiled-dp"},
+                {"backtrack", "bioseq-cpu"},
+                {"uses_max_chain_skip", "false"},
                 {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
             };
         }
@@ -804,40 +977,50 @@ template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, cl
 // what the globalisation (`TargetIndex::add_position_offset`) and the scalar/SIMD
 // parity both rely on. Scalar collection over contiguous memory is cheap (no I/O;
 // alignment dominates the per-segment wall-clock), so this is correct AND fast.
+// DOC0345 Patch D — no default backend. The scalar sub-range body now lives in
+// `collect_minimizers_segment_scalar` (bioseq.sequences.kmers) so pipe and the
+// persisted builders share one (bug-carrying) sub-range contract. Under
+// `VulkanSegment` the GPU segment sketch is called and throws on any decline.
 template <class MinimizerT, class Seq, class Collector>
 [[gnu::always_inline]] inline void minimizer_dispatch_range(
-    Collector& c, Seq& seq, sequence_size_t lo_unit, sequence_size_t hi_unit,
-    std::size_t w, std::size_t k)
+    Collector& collector,
+    Seq& seq,
+    sequence_size_t lo_unit,
+    sequence_size_t hi_unit,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    MinimizerSketchBackend backend)
 {
-    if constexpr (requires { typename Seq::scanner_type; }) {
-        if constexpr (!Seq::scanner_type::supports_fragments()) {
-            // Contiguous: collect over the underlying range's sub-iterators.
-            auto& m = const_cast<std::remove_cvref_t<decltype(seq.underlying())>&>(seq.underlying());
-            auto b = m.begin();
-            auto e = m.begin();
-            std::advance(b, static_cast<typename std::iterator_traits<decltype(b)>::difference_type>(lo_unit));
-            std::advance(e, static_cast<typename std::iterator_traits<decltype(e)>::difference_type>(hi_unit));
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                c, m, b, e, w, k);
-        } else {
-            // Fragmented: stream the scalar view over the lazy sub-range.
-            auto b = seq.begin();
-            auto e = seq.begin();
-            b += lo_unit;
-            e += hi_unit;
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                c, seq, b, e, w, k);
-        }
-    } else {
-        // Raw compact_sequence_range (no lazy wrapper).
-        auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
-        auto b = m.begin();
-        auto e = m.begin();
-        std::advance(b, static_cast<typename std::iterator_traits<decltype(b)>::difference_type>(lo_unit));
-        std::advance(e, static_cast<typename std::iterator_traits<decltype(e)>::difference_type>(hi_unit));
-        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-            c, m, b, e, w, k);
+    if (backend == MinimizerSketchBackend::VulkanSegment) {
+        bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
+            collector,
+            seq,
+            static_cast<std::size_t>(lo_unit),
+            static_cast<std::size_t>(hi_unit),
+            window_size,
+            kmer_size);
+        return;
     }
+
+    collect_minimizers_segment_scalar<MinimizerT>(
+        collector,
+        seq,
+        lo_unit,
+        hi_unit,
+        window_size,
+        kmer_size);
+}
+
+// DOC0345 Patch D — derive the target-index sketch backend from the resolved
+// params. Vulkan only when all three high-level gates are on; otherwise scalar.
+[[nodiscard]] inline MinimizerSketchBackend
+target_index_sketch_backend_from_params(const Minimap2Params& params) noexcept
+{
+    return params.vulkan_enabled
+        && params.vulkan_gpu_index_build_enabled
+        && params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+            ? MinimizerSketchBackend::VulkanSegment
+            : MinimizerSketchBackend::Scalar;
 }
 
 // DOC0276 — segment GEOMETRY. The MinimapSketchData position field is 28 bits
@@ -850,6 +1033,15 @@ template <class MinimizerT, class Seq, class Collector>
 inline constexpr sequence_size_t kSegmentCoreMaxBp    = 200'000'000ull;  // core ceiling
 inline constexpr sequence_size_t kSegmentOverlapMaxBp =  30'000'000ull;  // per-side overlap ceiling
 inline constexpr sequence_size_t kSegmentMinBp        =  32'000'000ull;  // floor (keep batches useful)
+inline constexpr sequence_size_t kVulkanSegmentMinBp   =   1'000'000ull;  // floor when GPU sketch is selected
+// DOC0353 continuation: 76M/96M is the best measured consolidation point. The
+// earlier 100M/128M experiment made the inner sketch admission shrink and exposed
+// a multi-window correctness bug; 96M keeps the collected span below that failed
+// shape while cutting the 300M probe from ~44 GPU windows to ~6 when
+// memory admission accepts a one-window sketch.
+inline constexpr sequence_size_t kVulkanSegmentTargetBp = 76'000'000ull;  // target core before query-overlap clamping
+inline constexpr sequence_size_t kVulkanSegmentCollectedMaxBp =
+    96'000'000ull;
 static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
                   static_cast<sequence_size_t>(MinimapSketchData::pos_field_mask),
               "segment collected span (core + 2*overlap) must fit "
@@ -873,10 +1065,59 @@ static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
     return want < kSegmentMinBp ? kSegmentMinBp : want;
 }
 
-[[nodiscard]] inline sequence_size_t segment_bp_from_budget_divided(unsigned divisor) noexcept {
+[[nodiscard]] inline sequence_size_t segment_bp_from_budget_divided(
+        unsigned divisor,
+        sequence_size_t floor_bp = kSegmentMinBp) noexcept {
     const sequence_size_t base = segment_bp_from_budget();
     const sequence_size_t divided = divisor <= 1 ? base : base / divisor;
-    return divided < kSegmentMinBp ? kSegmentMinBp : divided;
+    return divided < floor_bp ? floor_bp : divided;
+}
+
+[[nodiscard]] inline sequence_size_t segment_overlap_bp(
+        sequence_size_t query_len) noexcept {
+    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
+    if (overlap_bp > kSegmentOverlapMaxBp) {
+        overlap_bp = kSegmentOverlapMaxBp;
+    }
+    return overlap_bp;
+}
+
+[[nodiscard]] inline sequence_size_t vulkan_segment_target_bp(
+        sequence_size_t query_len) noexcept {
+    const sequence_size_t overlap_bp = segment_overlap_bp(query_len);
+    const sequence_size_t expanded_overlap =
+        overlap_bp > kVulkanSegmentCollectedMaxBp / 2
+            ? kVulkanSegmentCollectedMaxBp
+            : overlap_bp * 2;
+    if (expanded_overlap + kVulkanSegmentMinBp
+        >= kVulkanSegmentCollectedMaxBp) {
+        return kVulkanSegmentMinBp;
+    }
+    const sequence_size_t room =
+        kVulkanSegmentCollectedMaxBp - expanded_overlap;
+    const sequence_size_t target = std::min(room, kVulkanSegmentTargetBp);
+    return target < kVulkanSegmentMinBp ? kVulkanSegmentMinBp : target;
+}
+
+[[nodiscard]] inline unsigned
+segment_geometry_divisor_for_backend(
+        MinimizerSketchBackend backend,
+        sequence_size_t query_len = 0) noexcept {
+    if (backend != MinimizerSketchBackend::VulkanSegment) {
+        return 1u;
+    }
+    const sequence_size_t base = segment_bp_from_budget();
+    const sequence_size_t target = vulkan_segment_target_bp(query_len);
+    const sequence_size_t divisor =
+        (base + target - sequence_size_t{1}) / target;
+    return static_cast<unsigned>(std::max<sequence_size_t>(1, divisor));
+}
+
+[[nodiscard]] inline sequence_size_t
+segment_core_floor_for_backend(MinimizerSketchBackend backend) noexcept {
+    return backend == MinimizerSketchBackend::VulkanSegment
+        ? kVulkanSegmentMinBp
+        : kSegmentMinBp;
 }
 
 // DOC0279 §11.3a — the segment geometry of `minimap_port_segmented`, extracted
@@ -892,14 +1133,18 @@ struct SegmentUnitRange {
     sequence_size_t core_hi_bp;    ///< core claim upper bound (bp, clamped to total_bp)
 };
 [[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
-        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu, unsigned divisor) {
+        sequence_size_t total_bp,
+        sequence_size_t query_len,
+        std::size_t lpu,
+        unsigned divisor,
+        sequence_size_t floor_bp) {
     std::vector<SegmentUnitRange> out;
     if (total_bp == 0 || lpu == 0) return out;
     const sequence_size_t total_units = (total_bp + lpu - 1) / lpu;
-    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
-    if (overlap_bp > kSegmentOverlapMaxBp) overlap_bp = kSegmentOverlapMaxBp;
+    const sequence_size_t overlap_bp = segment_overlap_bp(query_len);
     const sequence_size_t ovl_units = (overlap_bp + lpu - 1) / lpu;
-    sequence_size_t seg_units = segment_bp_from_budget_divided(divisor) / lpu;
+    sequence_size_t seg_units =
+        segment_bp_from_budget_divided(divisor, floor_bp) / lpu;
     if (seg_units == 0) seg_units = 1;
     for (sequence_size_t lo_u = 0; lo_u < total_units; lo_u += seg_units) {
         const sequence_size_t hi_u = std::min(lo_u + seg_units, total_units);
@@ -913,8 +1158,26 @@ struct SegmentUnitRange {
 }
 
 [[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
+        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu, unsigned divisor) {
+    return segment_unit_ranges(total_bp, query_len, lpu, divisor, kSegmentMinBp);
+}
+
+[[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
         sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu) {
     return segment_unit_ranges(total_bp, query_len, lpu, 1);
+}
+
+[[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges_for_backend(
+        sequence_size_t total_bp,
+        sequence_size_t query_len,
+        std::size_t lpu,
+        MinimizerSketchBackend backend) {
+    return segment_unit_ranges(
+        total_bp,
+        query_len,
+        lpu,
+        segment_geometry_divisor_for_backend(backend, query_len),
+        segment_core_floor_for_backend(backend));
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +1196,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
     struct kernel_type {
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -943,6 +1207,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::Scalar, W, K, MinimizerT>(
@@ -972,6 +1237,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
     struct kernel_type {
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -982,6 +1248,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::Simd, W, K, MinimizerT>(
@@ -1011,6 +1278,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
     struct kernel_type {
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -1021,6 +1289,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::TwoStack, W, K, MinimizerT>(
@@ -1039,6 +1308,81 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
             return {
                 {"vectorised", "true"},
                 {"two_stack",  "true"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+/// DOC0351 Phase C — Vulkan minimap-int minimizer extraction. Reads packed
+/// `compact_sequence_range` storage directly on the GPU. When this algorithm
+/// is selected, Vulkan execution is mandatory and failures throw.
+/// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
+/// sketch+seed path reuses it without a second upload (`may_emit_device_minimizers`).
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT> {
+    struct kernel_type {
+        static constexpr bool may_emit_device_minimizers = true;
+
+        template <class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Collector& collector, Range& range,
+            std::size_t window_size, std::size_t kmer_size)
+        {
+            if (!params.vulkan_enabled) {
+                throw_vulkan_declined("Vulkan minimizer sketch");
+            }
+            if (!bioseq::gpu::vulkan::collect_minimizers_vulkan<MinimizerT>(
+                    collector, range, window_size, kmer_size))
+            {
+                throw_vulkan_declined("Vulkan minimizer sketch");
+            }
+        }
+
+        template <std::size_t W, std::size_t K,
+                  class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Collector& collector, Range& range)
+        {
+            call<MinimizerT>(params, collector, range, W, K);
+        }
+
+        template <class MinimizerT, class Range>
+        [[nodiscard]] static std::optional<
+            bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT>>
+        call_result(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Range& range, std::size_t window_size, std::size_t kmer_size)
+        {
+            if (!params.vulkan_enabled) {
+                throw_vulkan_declined("Vulkan minimizer sketch");
+            }
+            auto result = bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+                range, window_size, kmer_size);
+            if (!result) {
+                throw_vulkan_declined("Vulkan minimizer sketch");
+            }
+            return result;
+        }
+
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT);
+        }
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            std::vector<NamedProperty>& props) noexcept
+        {
+            props.push_back({"accelerator", "vulkan"});
+            props.push_back({"vulkan_enabled", p.vulkan_enabled ? "true" : "false"});
+        }
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"hash", "minimap-int"},
+                {"alphabet_dispatch", "runtime-shader-key"},
                 {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
             };
         }
@@ -1419,6 +1763,10 @@ struct MinimizerStage
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
     int32_t runtime_w;
     int32_t runtime_k;
+    // DOC0307 §5.1 — runtime flags so the Vulkan kernel can gate on
+    // `vulkan_enabled` without touching Runtime when Vulkan is off. CPU kernels
+    // ignore it.
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
 
     // DOC0254 §5.4 / §8.4: the kernel writes directly into the per-query
     // arena slab via `sketch_collector_arena_adapter`, eliminating the
@@ -1436,6 +1784,38 @@ struct MinimizerStage
             ? static_cast<std::size_t>(runtime_k)
             : Cep::kmer_len;
 
+        // DOC0307 §5.1 — device-minimizer path: only the Vulkan kernel exposes
+        // `call_result`. When it returns a result, copy the host minimizers into
+        // the arena slab and forward the resident device span as stage-local
+        // metadata so SeedHitStage can skip a second query-minimizer upload.
+        if constexpr (requires { Kernel::may_emit_device_minimizers; }) {
+            if constexpr (Kernel::may_emit_device_minimizers) {
+                if (auto gpu_result =
+                        Kernel::template call_result<MinimizerT>(
+                            params, *query_seq_, window_size, kmer_size))
+                {
+                    auto device_slab = make_arena_slab<MinimizerT>();
+                    device_slab.reserve(gpu_result->host_minimizers.size());
+                    if (!gpu_result->host_minimizers.empty()) {
+                        std::memcpy(device_slab.data(),
+                                    gpu_result->host_minimizers.data(),
+                                    gpu_result->host_minimizers.size() * sizeof(MinimizerT));
+                    }
+                    device_slab.resize(gpu_result->host_minimizers.size());
+                    MinimizerBatchView<MinimizerT> batch{
+                        .host = device_slab.as_const_span(),
+                        .device = std::optional<
+                            bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>{
+                                gpu_result->device_span()},
+                    };
+                    // Host-result permit released now that the slab owns the
+                    // copy; `batch.device` retains the resident permit (§6.1).
+                    gpu_result->host_permit.reset();
+                    return std::move(token).emit_minimizer_batch(batch);
+                }
+            }
+        }
+
         auto sketches_slab = make_arena_slab<MinimizerT>();
         sketches_slab.reserve(detail::estimated_sketch_count(
             query_seq_->bp_size(), static_cast<int32_t>(window_size)));
@@ -1444,10 +1824,10 @@ struct MinimizerStage
 
         if constexpr (!Cep::generic_fallback) {
             Kernel::template call_constexpr<Cep::window_len, Cep::kmer_len, MinimizerT>(
-                collector, *query_seq_);
+                params, collector, *query_seq_);
         } else {
             Kernel::template call<MinimizerT>(
-                collector, *query_seq_, window_size, kmer_size);
+                params, collector, *query_seq_, window_size, kmer_size);
         }
 
         return std::move(token).emit_batch(std::span<const MinimizerT>{
@@ -1486,14 +1866,24 @@ struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downst
     static constexpr std::string_view stage_name = "IndexStage";
 
     const IndexT* index_;
+    bioseq::indexing::GpuIndexCacheIdentity identity_{};
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& sketches, EmitToken<Sink>&& token) {
-        using ElemT = std::remove_const_t<
-            typename std::remove_cvref_t<B>::value_type>;
-        return std::move(token).emit_batch_with_index(
-            std::span<const ElemT>{sketches.data(), sketches.size()}, *index_);
+        // DOC0307 §5.2 / DOC0351 — whole in-memory targets keep pointer
+        // identity (`{}`); segmented recompute/assembly passes a nonzero
+        // identity so a reused stack index object cannot alias another segment
+        // in the GPU resident cache.
+        if constexpr (is_minimizer_batch_view_v<B>) {
+            return std::move(token).emit_minimizer_batch_with_index(
+                std::forward<B>(sketches), *index_, identity_);
+        } else {
+            using ElemT = std::remove_const_t<
+                typename std::remove_cvref_t<B>::value_type>;
+            return std::move(token).emit_batch_with_index(
+                std::span<const ElemT>{sketches.data(), sketches.size()}, *index_, identity_);
+        }
     }
 
     template <is_constexpr_aligner_params Cep>
@@ -1520,11 +1910,35 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
 
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
     sequence_size_t                               query_len;
+    // DOC0307 §5.2 — batch/segment-wave-scoped GPU index cache. The outer
+    // wave creates one cache, passes `&cache` here, and clears it at wave end.
+    // Null on single-shot paths (then the GPU seed path uploads uncached).
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr;
+
+    // DOC0307 §5.2 — host/device accessors for both the std::span CPU shape and
+    // the MinimizerBatchView device shape.
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static std::span<const MinimizerT>
+    sketch_span_of(const std::span<const MinimizerT>& s) noexcept { return s; }
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static std::span<const MinimizerT>
+    sketch_span_of(const MinimizerBatchView<MinimizerT>& b) noexcept { return b.host; }
+
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
+    device_span_of(const std::span<const MinimizerT>&) noexcept { return std::nullopt; }
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
+    device_span_of(const MinimizerBatchView<MinimizerT>& b) noexcept { return b.device; }
 
     template <is_constexpr_aligner_params Cep, class B, class IndexT, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process_with_index(
-        B&& sketches, const IndexT& target_index_ref, EmitToken<Sink>&& token)
+        B&& sketches, const IndexT& target_index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
+        EmitToken<Sink>&& token)
     {
         const int32_t kmer_size = Cep::generic_fallback
             ? params.kmer_size
@@ -1533,18 +1947,64 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         using MinimizerT = std::remove_const_t<
             typename std::remove_cvref_t<B>::value_type>;
 
+        auto sketch_span = sketch_span_of<MinimizerT>(sketches);
+        auto device_span = device_span_of<MinimizerT>(sketches);
+
         // Pre-size the slab from the tight per-query estimate
         // (DOC0249 §21.4 `estimated_anchor_count`); growth past the estimate
         // doubles the slab inside the same Arena::Chain scope.
         auto anchors_slab = make_arena_slab<Anchor>();
         anchors_slab.reserve(detail::estimated_anchor_count(
-            sketches.size(),
+            sketch_span.size(),
             static_cast<std::size_t>(query_len),
             static_cast<std::size_t>(target_index_ref.target_length()),
             kmer_size));
 
+        // DOC0307 §5.2 — run the selected GPU seed-hit lookup before the CPU
+        // path. If it declines, the selected Vulkan pipeline fails loudly.
+        // Only the concrete MinimizerHashmapFragmentIndex carries the GPU view.
+        if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+            bool seed_gpu_declined = false;
+            if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
+                          bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+                auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+                if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+                    auto key = bioseq::indexing::make_gpu_index_cache_key(
+                        target_index_ref, gpu_index_identity);
+                    auto resident_index = gpu_index_cache == nullptr
+                        ? nullptr
+                        : gpu_index_cache->get_or_upload(
+                              runtime, target_index_ref, key,
+                              params.vulkan_index_cache_enabled);
+                    if (bioseq::gpu::vulkan::collect_seed_hits_vulkan<MinimizerT>(
+                            sketch_span,
+                            device_span,
+                            target_index_ref,
+                            resident_index,
+                            params.vulkan_enabled,
+                            query_len,
+                            params.max_occ,
+                            kmer_size,
+                            anchors_slab,
+                            params.vulkan_fused_frontend_enabled))
+                    {
+                        return std::move(token).emit_batch(
+                            std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
+                    }
+                    seed_gpu_declined = true;
+                } else {
+                    seed_gpu_declined = true;
+                }
+            } else {
+                seed_gpu_declined = true;
+            }
+            if (seed_gpu_declined) {
+                throw_vulkan_declined("Vulkan seed lookup");
+            }
+        }
+
         collect_seed_hits<MinimizerT>(
-            std::span<const MinimizerT>{sketches.data(), sketches.size()},
+            sketch_span,
             target_index_ref,
             query_len, params.max_occ, kmer_size,
             anchors_slab);
@@ -1597,20 +2057,29 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
     static constexpr std::string_view stage_name = "ChainStage";
 
     ChainingParams cp;
+    sequence_size_t query_len = 0;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& anchors_in, EmitToken<Sink>&& token) {
+        ChainingParams active_cp = cp;
+        active_cp.query_len = query_len;
         const std::span<const Anchor> anchors_span{
             anchors_in.data(), anchors_in.size()};
 
         auto chains_slab    = make_arena_slab<Chain>();
         auto reordered_slab = make_arena_slab<Anchor>();
-        chains_slab.reserve(detail::estimated_chain_count(
-            anchors_in.size(), cp.min_seed_count));
-        reordered_slab.reserve(anchors_in.size());
+        if (active_cp.coordinate_only) {
+            chains_slab.reserve(1);
+            reordered_slab.reserve(std::min<std::size_t>(
+                anchors_in.size(), 65'536u));
+        } else {
+            chains_slab.reserve(detail::estimated_chain_count(
+                anchors_in.size(), active_cp.min_seed_count));
+            reordered_slab.reserve(anchors_in.size());
+        }
 
-        Kernel::call(anchors_span, cp, chains_slab, reordered_slab);
+        Kernel::call(anchors_span, active_cp, chains_slab, reordered_slab);
 
         return std::move(token).emit_batch_pair(
             std::span<Chain> {chains_slab.data(),    chains_slab.size()},
@@ -1629,6 +2098,11 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         algo.parameters.push_back({"max_chain_iter",  std::to_string(cp.max_chain_iter)});
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
+        // Let the selected kernel append its own runtime params (e.g. the
+        // Vulkan backend's phase / vulkan_enabled markers) so the
+        // EXPLAIN metadata is not dead code. No-op for the scalar/SIMD/RMQ
+        // kernels (DOC0304 §7.2).
+        Kernel::populate_runtime_params(cp, algo.parameters);
         algo.computed_properties = Kernel::template static_properties<Cep>();
         desc.algorithm = std::move(algo);
         // Chain stage's two arena slabs are sized from the runtime
@@ -1775,11 +2249,11 @@ struct SecondaryFilterStage : StageBase<SecondaryFilterStage, AlignRegion> {
 /**
  * @brief Stage 7: estimate divergence (conditional).
  */
-template <class MinimizerT>
-struct DivergenceStage : StageBase<DivergenceStage<MinimizerT>, AlignRegion> {
+template <class MinimizerT, class QueryMinimizers = std::vector<MinimizerT>>
+struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>, AlignRegion> {
     static constexpr std::string_view stage_name = "DivergenceStage";
 
-    const std::vector<MinimizerT>* query_minimizers_;
+    const QueryMinimizers* query_minimizers_;
     sequence_size_t query_len;
     sequence_size_t target_len;
     int32_t runtime_kmer_size;
@@ -1926,7 +2400,7 @@ struct SinkStage {
     sequence_size_t        query_len  = 0;
     sequence_size_t        target_len = 0;
 
-    [[gnu::always_inline]] void on_batch(std::span<AlignRegion> regions) {
+    [[gnu::always_inline]] inline void on_batch(std::span<AlignRegion> regions) {
         dst_->results.reserve(dst_->results.size() + regions.size());
         // `region_slot` is move-consumed into the converted MatchResult; the
         // slot is left in a valid-but-moved-from state and reclaimed by
@@ -1937,7 +2411,7 @@ struct SinkStage {
         }
     }
 
-    [[gnu::always_inline]] void on_completed() noexcept { /* no-op */ }
+    [[gnu::always_inline]] inline void on_completed() noexcept { /* no-op */ }
 };
 
 // =============================================================================
@@ -2009,26 +2483,29 @@ template <is_constexpr_aligner_params Cep,
           supports_compact_sequence_range TR,
           class MinimizerT, class IndexT,
           class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+              typename compact_sequence_range<QR>::traits::storage_unit>,
+          class QueryMinimizers = std::vector<MinimizerT>>
 [[nodiscard, gnu::always_inline]] inline auto make_minimap_pipeline(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
+    const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
     const ScoringMatrix<QR>&          scoring_matrix,
     MatchResultCollection&            output_collection,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     sequence_size_t                   query_len,
-    sequence_size_t                   target_len)
+    sequence_size_t                   target_len,
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {})
 {
     auto tail = make_pipeline<Cep>(
-        IndexStage<IndexT>{ {}, &target_index },
-        SeedHitStage{ {}, params, query_len },
-        ChainStage<kernel_t<CA>>{ {}, params.to_chaining_params() },
+        IndexStage<IndexT>{ {}, &target_index, gpu_index_identity },
+        SeedHitStage{ {}, params, query_len, gpu_index_cache },
+        ChainStage<kernel_t<CA>>{ {}, params.to_chaining_params(), query_len },
         RegionStage{ {}, query_len },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
-        DivergenceStage<MinimizerT>{
+        DivergenceStage<MinimizerT, QueryMinimizers>{
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
         AlignStage<kernel_t<BAA>, QR, TR, Scanner>{
@@ -2041,7 +2518,7 @@ template <is_constexpr_aligner_params Cep,
 
     if constexpr (EP == EntryPoint::FromSequence) {
         MinimizerStage<MinimizerT, kernel_t<MA>, QR, Scanner> head{
-            {}, &query_seq, params.window_size, params.kmer_size };
+            {}, &query_seq, params.window_size, params.kmer_size, params };
         return head.template attach<Cep>(std::move(tail));
     } else {
         return tail;
@@ -2060,6 +2537,98 @@ template <is_constexpr_aligner_params Cep,
  * iteration's pipeline is built.  Per-query results are appended to
  * `out_per_query` in input order.
  */
+// DOC0310 §16 — the Phase C frontend's GPU target-index build replaces the CPU
+// `MinimizerHashmapFragmentIndex` build for this exact (minimizer, chaining)
+// leaf. Runtime-gated; both flags plus the matching algorithm selectors must be
+// set. The runtime device check is done at the call site.
+[[nodiscard]] inline bool phase_c_index_build_active(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+{
+    return params.vulkan_enabled
+        && params.vulkan_fused_frontend_enabled
+        && params.vulkan_gpu_index_build_enabled
+        && params.minimizer_algorithm ==
+               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+        && params.chaining_algorithm ==
+               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP;
+}
+
+[[nodiscard]] inline bool phase_c_coordinate_only_active(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+{
+    return params.vulkan_enabled
+        && params.vulkan_seed_hits_enabled
+        && params.vulkan_fused_frontend_enabled
+        && params.minimizer_algorithm ==
+               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+        && params.chaining_algorithm ==
+               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP
+        && !params.do_cigar
+        && !params.compute_divergence
+        && !params.compute_mapq
+        && params.max_occ >= 0;
+}
+
+struct PhaseCQueryGateStorage {
+    static constexpr unsigned gate_bits = 26u;
+
+    std::vector<std::uint32_t> words{};
+    std::uint32_t mask = 0u;
+
+    void ensure_allocated() {
+        if (!words.empty()) return;
+        const std::uint64_t bit_count = std::uint64_t{1} << gate_bits;
+        mask = static_cast<std::uint32_t>(bit_count - 1u);
+        words.assign(static_cast<std::size_t>(bit_count / 32u), 0u);
+    }
+
+    template <class MinimizerT>
+    void add(std::span<const MinimizerT> minimizers) {
+        ensure_allocated();
+        for (const MinimizerT& minimizer : minimizers) {
+            const std::uint64_t bit = minimizer.kmer() & mask;
+            words[static_cast<std::size_t>(bit >> 5u)] |=
+                std::uint32_t{1} << (bit & 31u);
+        }
+    }
+
+    [[nodiscard]] bioseq::gpu::vulkan::VulkanSketchQueryGate
+    vulkan_gate() const noexcept
+    {
+        return bioseq::gpu::vulkan::VulkanSketchQueryGate{
+            std::span<const std::uint32_t>{words.data(), words.size()},
+            mask};
+    }
+};
+
+[[nodiscard]] inline MatchResult phase_c_coordinate_to_match_result(
+    const bioseq::gpu::vulkan::GpuCoordinateOnlyResultWire& coord,
+    sequence_size_t query_len,
+    sequence_size_t target_len)
+{
+    return MatchResult{
+        .query_len = query_len,
+        .query_start = coord.query_start,
+        .query_end = coord.query_end,
+        .is_reverse = coord.is_reverse != 0u,
+        .target_len = target_len,
+        .target_start = coord.target_start,
+        .target_end = coord.target_end,
+        .num_matches = coord.match_length,
+        .block_length = coord.block_length,
+        .mapq = 0,
+        .chain_score = coord.chain_score,
+        .dp_score = 0,
+        .dp_max_score = 0,
+        .seed_count = coord.seed_count,
+        .secondary_chain_score = 0,
+        .divergence = -1.0f,
+        .is_primary = true,
+        .has_cigar = false,
+        .cigar = {},
+    };
+}
+
 // DOC0271 Phase 1 §5.3 — the deferred-align parallel pipeline template
 // (`pipeline_run_impl_batch_deferred_align`) and its supporting types
 // (`PerQueryAlignState`, `AlignCollectStage`, `align_regions_batched_cross_query`)
@@ -2084,7 +2653,10 @@ template <is_constexpr_aligner_params Cep,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>&           target_seq,
     std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
     const IndexT&                               target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    bioseq::indexing::GpuMinimizerIndexCache* external_gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     std::optional<context::context>                 owned_context;
     std::optional<context::installed_context_scope> install;
@@ -2104,12 +2676,87 @@ template <is_constexpr_aligner_params Cep,
     const sequence_size_t target_len = target_seq.bp_size();
     const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
 
+    // DOC0307 §4.4/§5.2 — one GPU index cache for the whole batch wave, shared
+    // across queries that look up the same target index. When a Vulkan seed
+    // path is selected, runtime/device failure is reported before scalar work
+    // can masquerade as a GPU row.
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache> owned_gpu_index_cache;
+    if (external_gpu_index_cache == nullptr
+        && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
+            ? gpu_rt.features().device_local_bytes / 2u
+            : (std::uint64_t{512} << 20);
+        if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
+        if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
+        owned_gpu_index_cache.emplace(limit);
+    }
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
+        external_gpu_index_cache != nullptr
+            ? external_gpu_index_cache
+            : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
+
+    // DOC0310 §12/§16 — build the target minimizer index on the GPU and inject
+    // it into the wave cache under the key the SeedHitStage will compute, so the
+    // CPU `MinimizerHashmapFragmentIndex` build (skipped upstream in
+    // `minimap2_port` for this leaf) is never paid. If the device build declines
+    // this selected GPU path fails loudly.
+    PhaseCQueryGateStorage phase_c_query_gate;
+    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
+        if (phase_c_coordinate_only_active(params)) {
+            for (const auto& query_minimizers : query_minimizers_per_query) {
+                phase_c_query_gate.add(std::span<const MinimizerT>{
+                    query_minimizers.data(), query_minimizers.size()});
+            }
+        }
+    }
+
+    const IndexT* effective_index_ptr = &target_index;
+    if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
+                  bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+        if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
+            && allow_gpu_target_index_build && target_index.table_empty()
+            && target_len > 0) {
+            auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+            bool injected = false;
+            if (bioseq::gpu::vulkan::hardware_device_available(gpu_rt)) {
+                auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
+                    target_seq,
+                    static_cast<std::size_t>(params.window_size),
+                    static_cast<std::size_t>(params.kmer_size),
+                    phase_c_query_gate.vulkan_gate());
+                if (built) {
+                    auto key = bioseq::indexing::make_gpu_index_cache_key(
+                        target_index, gpu_index_identity);
+                    auto resident = bioseq::indexing::adopt_gpu_built_index(
+                        gpu_rt, std::move(*built), key);
+                    if (resident) {
+                        resident->target_len = target_len;
+                        gpu_index_cache_ptr->insert_built(key, resident);
+                        injected = true;
+                        bioseq_log<ERR>("[phase_c] GPU index injected: slot_mask={} pos={} target_len={}",
+                                        resident->slot_mask, resident->position_count, target_len);
+                    }
+                } else {
+                    bioseq_log<ERR>("[phase_c] build_gpu_index_on_device declined (nullopt) for target_len={}", target_len);
+                }
+            } else {
+                bioseq_log<ERR>("[phase_c] runtime not usable for GPU index build");
+            }
+            if (!injected) {
+                throw_vulkan_declined("Phase C GPU target-index build");
+            }
+        }
+    }
+    const IndexT& effective_index = *effective_index_ptr;
+
     // Empty proto for the FromSequence path's unused minimizers argument.
     static const std::vector<MinimizerT> empty_minimizers_proto{};
 
     auto run_one_query =
         [target_len, &query_seqs, &query_minimizers_per_query, &target_seq,
-         &target_index, &scoring_matrix, &params](std::size_t qi) {
+         &effective_index, &scoring_matrix, &params, gpu_index_cache_ptr,
+         gpu_index_identity](std::size_t qi) {
         const auto&   query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
@@ -2128,9 +2775,11 @@ template <is_constexpr_aligner_params Cep,
             return out;
         }
 
-        auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
-            query_seq, target_seq, mins_for_this_query, target_index,
-            scoring_matrix, out, params, query_len, target_len);
+        auto pipeline =
+            make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT, Scanner>(
+            query_seq, target_seq, mins_for_this_query, effective_index,
+            scoring_matrix, out, params, query_len, target_len,
+            gpu_index_cache_ptr, gpu_index_identity);
 
         if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
             pipeline.on_batch(std::span<const MinimizerT>{
@@ -2171,6 +2820,10 @@ template <is_constexpr_aligner_params Cep,
         }
     }
 
+    // DOC0307 §4.4 — release the wave's resident GPU index handles.
+    if (owned_gpu_index_cache) {
+        owned_gpu_index_cache->clear();
+    }
     return out_per_query;
 }
 
@@ -2196,22 +2849,207 @@ template <is_constexpr_aligner_params Cep,
           supports_compact_sequence_range TR,
           class MinimizerT, class IndexT,
           class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+              typename compact_sequence_range<QR>::traits::storage_unit>,
+          class QueryMinimizers = std::vector<MinimizerT>>
 [[nodiscard, gnu::always_inline]] inline MatchResultCollection pipeline_run_impl(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
+    const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>* one_query = &query_seq;
-    const std::vector<MinimizerT>*    one_mins  = &query_minimizers;
-    auto results = pipeline_run_impl_batch<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT, Scanner>(
-        std::span<const bioseq::storage::lazy_compact_sequence<QR, Scanner>>{one_query, 1},
-        target_seq,
-        std::span<const std::vector<MinimizerT>>{one_mins, 1},
-        target_index, params);
-    return std::move(results.front());
+    std::optional<context::context>                 owned_context;
+    std::optional<context::installed_context_scope> install;
+    if (context::current_or_null() == nullptr) {
+        owned_context.emplace();
+        install.emplace(*owned_context);
+    }
+    auto outer_chain_scope = context::current().push<context::Arena::Chain>();
+
+    const sequence_size_t target_len = target_seq.bp_size();
+    const sequence_size_t query_len = query_seq.bp_size();
+    const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
+
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache> owned_gpu_index_cache;
+    if (gpu_index_cache == nullptr
+        && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
+            ? gpu_rt.features().device_local_bytes / 2u
+            : (std::uint64_t{512} << 20);
+        if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
+        if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
+        owned_gpu_index_cache.emplace(limit);
+    }
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
+        gpu_index_cache != nullptr
+            ? gpu_index_cache
+            : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
+
+    PhaseCQueryGateStorage phase_c_query_gate;
+    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
+        if (phase_c_coordinate_only_active(params)) {
+            phase_c_query_gate.add(std::span<const MinimizerT>{
+                query_minimizers.data(), query_minimizers.size()});
+        }
+    }
+
+    const IndexT* effective_index_ptr = &target_index;
+    if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
+                  bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+        if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
+            && allow_gpu_target_index_build && target_index.table_empty()
+            && target_len > 0) {
+            auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+            bool injected = false;
+            if (bioseq::gpu::vulkan::hardware_device_available(gpu_rt)) {
+                auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
+                    target_seq,
+                    static_cast<std::size_t>(params.window_size),
+                    static_cast<std::size_t>(params.kmer_size),
+                    phase_c_query_gate.vulkan_gate());
+                if (built) {
+                    auto key = bioseq::indexing::make_gpu_index_cache_key(
+                        target_index, gpu_index_identity);
+                    auto resident = bioseq::indexing::adopt_gpu_built_index(
+                        gpu_rt, std::move(*built), key);
+                    if (resident) {
+                        resident->target_len = target_len;
+                        gpu_index_cache_ptr->insert_built(key, resident);
+                        injected = true;
+                        bioseq_log<ERR>("[phase_c] GPU index injected: slot_mask={} pos={} target_len={}",
+                                        resident->slot_mask, resident->position_count, target_len);
+                    }
+                } else {
+                    bioseq_log<ERR>("[phase_c] build_gpu_index_on_device declined (nullopt) for target_len={}", target_len);
+                }
+            } else {
+                bioseq_log<ERR>("[phase_c] runtime not usable for GPU index build");
+            }
+            if (!injected) {
+                throw_vulkan_declined("Phase C GPU target-index build");
+            }
+        }
+    }
+    const IndexT& effective_index = *effective_index_ptr;
+
+    MatchResultCollection out;
+    out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
+    if (query_len == 0 || target_len == 0) {
+        return out;
+    }
+
+    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers
+                  && std::same_as<std::remove_cvref_t<IndexT>,
+                         bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+        // The resident seed-to-coordinate kernel is only profitable once the
+        // target index is genuinely resident/GPU-built. Using it on the current
+        // VulkanSegment host-materialised sparse segment indexes repeats
+        // submit/readback orchestration per segment and is slower than the
+        // normal Vulkan seed+chain path (DOC0353 2026-06-25).
+        if (phase_c_coordinate_only_active(params)
+            && allow_gpu_target_index_build
+            && effective_index.table_empty()) {
+            auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+            if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+                throw_vulkan_declined("Phase C resident seed-to-coordinate");
+            }
+            auto key = bioseq::indexing::make_gpu_index_cache_key(
+                effective_index, gpu_index_identity);
+            auto resident_index = gpu_index_cache_ptr == nullptr
+                ? nullptr
+                : gpu_index_cache_ptr->get_or_upload(
+                      runtime, effective_index, key,
+                      params.vulkan_index_cache_enabled);
+            if (!resident_index) {
+                throw_vulkan_declined("Phase C resident seed-to-coordinate index");
+            }
+
+            std::span<const MinimizerT> sketch_span{
+                query_minimizers.data(), query_minimizers.size()};
+            std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
+                device_span{};
+            if constexpr (is_minimizer_batch_view_v<QueryMinimizers>) {
+                device_span = query_minimizers.device;
+            }
+            const bioseq::gpu::vulkan::Buffer* device_words =
+                (device_span && device_span->words() != nullptr
+                 && device_span->count() == sketch_span.size())
+                    ? device_span->words()
+                    : nullptr;
+            bioseq::gpu::vulkan::PhaseCSeedInputs inputs{
+                .host_minimizer_bytes = device_words != nullptr
+                    ? std::span<const std::byte>{}
+                    : std::as_bytes(sketch_span),
+                .device_minimizer_words = device_words,
+                .slots = &resident_index->slots,
+                .positions = &resident_index->positions,
+                .target_len = resident_index->target_len,
+                .slot_mask = resident_index->slot_mask,
+                .position_count = resident_index->position_count,
+                .minimizer_count = static_cast<std::uint32_t>(sketch_span.size()),
+                .minimizer_word_kind =
+                    static_cast<std::uint32_t>(
+                        bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::word_kind),
+                .minimizer_words32_per_record =
+                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+                .hash_shift =
+                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::hash_shift,
+                .pos_bits =
+                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::pos_bits,
+                .bucket_count = resident_index->bucket_count,
+                .target_position_offset = resident_index->target_position_offset,
+            };
+
+            auto cp = params.to_chaining_params();
+            std::int32_t max_dist_x = cp.max_gap;
+            std::int32_t max_dist_y = cp.max_gap;
+            if (max_dist_x < cp.bandwidth) max_dist_x = cp.bandwidth;
+            if (max_dist_y < cp.bandwidth) max_dist_y = cp.bandwidth;
+            const auto chain_key =
+                bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
+            const auto coord = runtime.run_phase_c_seed_to_coordinate_roundtrip(
+                inputs,
+                query_len,
+                target_len,
+                static_cast<std::uint32_t>(params.kmer_size),
+                params.max_occ,
+                chain_key,
+                max_dist_x,
+                max_dist_y,
+                cp.bandwidth,
+                std::min<std::int32_t>(cp.max_chain_iter, 3000),
+                cp.gap_penalty,
+                cp.skip_penalty,
+                cp.max_chain_skip,
+                cp.min_chain_score,
+                cp.min_seed_count,
+                16u);
+            if (coord.valid != 0u) {
+                out.results.push_back(
+                    phase_c_coordinate_to_match_result(coord, query_len, target_len));
+            }
+            return out;
+        }
+    }
+
+    auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
+    auto pipeline =
+        make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT, Scanner, QueryMinimizers>(
+        query_seq, target_seq, query_minimizers, effective_index,
+        scoring_matrix, out, params, query_len, target_len,
+        gpu_index_cache_ptr, gpu_index_identity);
+
+    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
+        pipeline.on_batch(query_minimizers);
+    } else {
+        pipeline.on_batch(std::span<const std::byte>{});
+    }
+    pipeline.on_completed();
+    return out;
 }
 
 // =============================================================================
@@ -2494,7 +3332,8 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmTyp
     using value_list = value_sequence<target_t,
         target_t::SCALAR_MM2,
         target_t::SIMD_MM2,
-        target_t::RMQ>;
+        target_t::RMQ,
+        target_t::VULKAN_TILED_DP>;
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
@@ -2529,10 +3368,18 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
     using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::SCALAR;
+#if defined(__APPLE__)
+    using value_list = value_sequence<target_t,
+        target_t::SCALAR,
+        target_t::SIMD_MINIMAP2_SLOW,
+        target_t::TWO_STACK_NTHASH,
+        target_t::VULKAN_MINIMAP_INT>;
+#else
     using value_list = value_sequence<target_t,
         target_t::SCALAR,
         target_t::SIMD_MINIMAP2_SLOW,
         target_t::TWO_STACK_NTHASH>;
+#endif
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
@@ -2732,12 +3579,17 @@ struct pipeline_run_leaf {
         ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
         "pipeline_run_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
-    [[nodiscard, gnu::always_inline]] static MatchResultCollection call(
+    template <class QueryMinimizers>
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static MatchResultCollection call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
         const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
-        const std::vector<MinimizerT>&    query_minimizers,
-        const IndexT&                     target_index)
+        const QueryMinimizers&            query_minimizers,
+        const IndexT&                     target_index,
+        bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache,
+        bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
+        bool allow_gpu_target_index_build)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
         #if PIPELINE_TEMPLATE_BRANCHING_LEVEL == 0
@@ -2753,12 +3605,14 @@ struct pipeline_run_leaf {
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(K))
         {
-            return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner>(
-                query_seq, target_seq, query_minimizers, target_index, params);
+            return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner, QueryMinimizers>(
+                query_seq, target_seq, query_minimizers, target_index, params,
+                gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
         }
         #endif
-        return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner>(
-            query_seq, target_seq, query_minimizers, target_index, params);
+        return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner, QueryMinimizers>(
+            query_seq, target_seq, query_minimizers, target_index, params,
+            gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
     }
 };
 
@@ -2802,7 +3656,8 @@ template <is_constexpr_aligner_params Cep,
 
     auto describe_lazy_q = bioseq::storage::make_lazy_in_memory(query_seq);
     auto describe_lazy_t = bioseq::storage::make_lazy_in_memory(target_seq);
-    auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
+    auto pipeline =
+        make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, MinimizerHashmapFragmentIndex>(
         describe_lazy_q, describe_lazy_t, empty_minimizers, empty_index, sm, ignored_out,
         params, query_len, target_len);
     return describe_with_params<Cep>(pipeline);
@@ -2827,7 +3682,8 @@ struct describe_leaf {
         ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
         "describe_leaf: CA must be ChainingAlgorithmType (from ca_step).");
 
-    [[nodiscard, gnu::always_inline]] static PipelineDescription call(
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static PipelineDescription call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         const compact_sequence_range<QR>& q,
         const compact_sequence_range<TR>& t,
@@ -2889,14 +3745,18 @@ template <EntryPoint EP,
           supports_compact_sequence_range TR,
           class MinimizerT, class IndexT,
           class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+              typename compact_sequence_range<QR>::traits::storage_unit>,
+          class QueryMinimizers = std::vector<MinimizerT>>
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection dispatch_pipeline(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
+    const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     using Traits = detail::pipeline_run_traits<EP, QR, TR, MinimizerT, IndexT, Scanner>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order so the L step (per-K) can
@@ -2911,7 +3771,8 @@ MatchResultCollection dispatch_pipeline(
         detail::guarded_step<detail::ma_step,
             /*active=*/(EP != EntryPoint::WithPrebuiltMinimizers)>
     >::template run<>(
-        params, query_seq, target_seq, query_minimizers, target_index);
+        params, query_seq, target_seq, query_minimizers, target_index,
+        gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
 // =============================================================================
@@ -2924,7 +3785,7 @@ MatchResultCollection dispatch_pipeline(
 
 template <supports_compact_sequence_range QR,
           supports_compact_sequence_range TR>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     const compact_sequence_range<QR>& query_seq_proto,
@@ -2952,8 +3813,8 @@ PipelineDescription describe_pipeline_for(
 // 9.7 Public entry points (DOC0249 §9.7) — relocated from minimap_port.cppm so
 // they can delegate to `pipe::dispatch_pipeline` without forming a circular
 // import.  Live in `bioseq::simd::HWY_NAMESPACE` so callers' fully-qualified
-// names (`bioseq::simd::N_NEON::minimap_port(...)`,
-// `bioseq::simd::N_NEON::minimap2_port_with_index(...)`) are unchanged.
+// names (`bioseq::simd::active_target::minimap_port(...)`,
+// `bioseq::simd::active_target::minimap2_port_with_index(...)`) are unchanged.
 // =============================================================================
 
 namespace bioseq::simd::HWY_NAMESPACE {
@@ -2982,15 +3843,45 @@ template <class MinimizerT,
     const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     const std::vector<MinimizerT>& query_minimizers,
     const IndexT& prebuilt_target_index,
-    const Minimap2Params& params = Minimap2Params{})
+    const Minimap2Params& params = Minimap2Params{},
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("minimap2_port_with_index");
     auto _scope = bioseq::instr::region(_desc);
     return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
         ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
-        QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
-            query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+            QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
+            query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
+            gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
+}
+
+template <class MinimizerT,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          ::bioseq::indexing::MinimizerIndex IndexT,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index(
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    const ::bioseq::simd::HWY_NAMESPACE::pipe::MinimizerBatchView<MinimizerT>& query_minimizers,
+    const IndexT& prebuilt_target_index,
+    const Minimap2Params& params = Minimap2Params{},
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
+    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false)
+{
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap2_port_with_index");
+    auto _scope = bioseq::instr::region(_desc);
+    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
+        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
+            QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
+            query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
+            gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
 /**
@@ -3017,9 +3908,18 @@ template <class MinimizerT,
     auto _scope = bioseq::instr::region(_desc);
     const sequence_size_t target_len = target_seq.bp_size();
     MinimizerHashmapFragmentIndex target_index;
-    target_index.build(target_minimizers, target_len);
+    // DOC0310 §16 — for the Phase C leaf with the GPU index build active, leave
+    // the CPU index empty; `pipeline_run_impl_batch` must build it on the
+    // device. This is the line that removes the XXL_HIFI
+    // `target_index_build` bottleneck from the GPU row.
+    const bool phase_c_gpu_index =
+        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
+    if (!phase_c_gpu_index) {
+        target_index.build(target_minimizers, target_len);
+    }
     return minimap2_port_with_index<MinimizerT, QueryRange, TargetRange, MinimizerHashmapFragmentIndex, Scanner>(
-        query_seq, target_seq, query_minimizers, target_index, params);
+        query_seq, target_seq, query_minimizers, target_index, params,
+        nullptr, {}, phase_c_gpu_index);
 }
 
 namespace pipe_entry_detail {
@@ -3049,15 +3949,16 @@ struct sketch_leaf {
         ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
         "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
-    [[gnu::always_inline]] static void call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static void call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         Collector& collector, Range& range,
         const std::size_t& window_len, const std::size_t& kmer_len)
     {
         using Kernel = typename ::bioseq::simd::HWY_NAMESPACE::pipe::
             algorithm_traits<MA>::kernel_type;
         Kernel::template call<MinimizerT>(
-            collector, range, window_len, kmer_len);
+            params, collector, range, window_len, kmer_len);
     }
 };
 
@@ -3071,7 +3972,8 @@ struct sketch_traits {
 /// `params.minimizer_algorithm`.  The chain pins MA at compile time and the
 /// leaf dispatches via the trait's kernel.
 template <class MinimizerT, class Collector, class Range>
-[[gnu::always_inline, gnu::flatten]] void sketch_one(
+BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
+void sketch_one(
     Collector& collector, Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
@@ -3089,7 +3991,8 @@ template <class MinimizerT, class Collector, class Range>
 /// boilerplate repeated for the target and query passes in the legacy
 /// `minimap_port_with_repr` body.
 template <class MinimizerT, class Range>
-[[gnu::always_inline]] void sketch_into_collector(
+BIOSEQ_PIPELINE_INLINE_ATTR
+void sketch_into_collector(
     sketch_collector_t<MinimizerT>& collector,
     Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
@@ -3138,10 +4041,18 @@ template <class MinimizerT,
     const std::size_t window_len = static_cast<std::size_t>(params.window_size);
     const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
 
-    sketch_collector_t<MinimizerT> target_collector;
-    sketch_into_collector<MinimizerT>(
-        target_collector, target_seq, window_len, kmer_len, params);
-    const auto target_minimizers = std::move(target_collector).extract_sketches_data();
+    // DOC0310 §16 — skip the host target sketch for the Phase C GPU-index leaf;
+    // the device index build sketches the target itself. If that selected GPU
+    // path cannot run, the pipeline throws instead of rebuilding on CPU.
+    std::vector<MinimizerT> target_minimizers;
+    const bool phase_c_gpu_index =
+        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
+    if (!phase_c_gpu_index) {
+        sketch_collector_t<MinimizerT> target_collector;
+        sketch_into_collector<MinimizerT>(
+            target_collector, target_seq, window_len, kmer_len, params);
+        target_minimizers = std::move(target_collector).extract_sketches_data();
+    }
 
     sketch_collector_t<MinimizerT> query_collector;
     sketch_into_collector<MinimizerT>(
@@ -3172,7 +4083,8 @@ struct minimap_port_repr_leaf {
     static_assert(std::is_same_v<decltype(K), std::size_t>,
         "minimap_port_repr_leaf: K must be std::size_t (from kmer_size_step).");
 
-    [[gnu::always_inline]] static MatchResultCollection call(
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static MatchResultCollection call(
         const Minimap2Params& params,
         bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  q,
         bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& t)
@@ -3210,7 +4122,7 @@ template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QueryRange>::traits::storage_unit>>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection minimap_port(
     bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
     bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
@@ -3420,6 +4332,71 @@ private:
     std::map<std::size_t, PendingFragmentBuild<MinimizerT>> pending_{};
 };
 
+// =============================================================================
+// DOC0307 §5.3 — query sketch for persistent-index bucket selection.
+// =============================================================================
+//
+// Holds the query minimizers produced for persistent-index bucket filtering,
+// keeping the optional GPU host-result permit and device span alive for the
+// caller's lifetime. The host vector feeds the existing assembly/filter helpers
+// unchanged; the Vulkan branch sketches the query on the GPU so the segmented
+// path's seed lookup consumes byte-identical minimizers.
+template <class MinimizerT>
+struct BudgetedSketchVector {
+    std::vector<MinimizerT> minimizers;
+    std::optional<bioseq::parallelism::MemoryPermit> permit;
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>> device;
+
+    [[nodiscard]] std::span<const MinimizerT> as_span() const noexcept {
+        return minimizers;
+    }
+};
+
+template <class MinimizerT, class QuerySeq>
+[[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
+    QuerySeq& query_seq, const Minimap2Params& params, std::size_t w, std::size_t k)
+{
+    if (params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
+    {
+        if (!params.vulkan_enabled) {
+            pipe::throw_vulkan_declined("Vulkan query minimizer sketch");
+        }
+        if (auto gpu_sketch =
+                bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+                    query_seq,
+                    w,
+                    k))
+        {
+            return BudgetedSketchVector<MinimizerT>{
+                .minimizers = std::move(gpu_sketch->host_minimizers),
+                .permit = std::move(gpu_sketch->host_permit),
+                .device = gpu_sketch->device_span(),
+            };
+        }
+        pipe::throw_vulkan_declined("Vulkan query minimizer sketch");
+    }
+
+    sketch_collector_t<MinimizerT> query_collector;
+    query_collector.reserve(query_seq.bp_size() / std::max<std::size_t>(w, 1) + 64);
+    // DOC0345 Patch D — query sketch is explicitly Scalar; it must never inherit
+    // the target Vulkan backend. (When minimizer_algorithm==VULKAN_MINIMAP_INT the
+    // caller routes the query through the GPU whole-sequence path before reaching here.)
+    pipe::minimizer_dispatch_range<MinimizerT>(
+        query_collector,
+        query_seq,
+        0,
+        (query_seq.bp_size() + QuerySeq::traits::letters_per_unit - 1)
+            / QuerySeq::traits::letters_per_unit,
+        w,
+        k,
+        MinimizerSketchBackend::Scalar);
+    return BudgetedSketchVector<MinimizerT>{
+        .minimizers = std::move(query_collector).extract_sketches_data(),
+        .permit = std::nullopt,
+        .device = std::nullopt,
+    };
+}
+
 template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
@@ -3444,39 +4421,218 @@ template <supports_compact_sequence_range QueryRange,
         return MatchResultCollection{};
     }
 
+    // DOC0345 Patch D — resolve the target-index sketch backend once; every
+    // target `minimizer_dispatch_range` call below passes it explicitly so no
+    // target seam can silently fall back to scalar.
+    const MinimizerSketchBackend target_sketch_backend =
+        pipe::target_index_sketch_backend_from_params(params);
+
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache> segmented_gpu_index_cache;
+    if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
+            ? gpu_rt.features().device_local_bytes / 2u
+            : (std::uint64_t{512} << 20);
+        if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
+        if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
+        segmented_gpu_index_cache.emplace(limit);
+    }
+    bioseq::indexing::GpuMinimizerIndexCache* segmented_gpu_index_cache_ptr =
+        segmented_gpu_index_cache ? &*segmented_gpu_index_cache : nullptr;
+    auto segment_gpu_identity = [](std::size_t segment_index) noexcept {
+        return bioseq::indexing::GpuIndexCacheIdentity{
+            .assembly_identity = 0x9e3779b97f4a7c15ULL
+                ^ (static_cast<std::uint64_t>(segment_index) + 1u),
+        };
+    };
+
     // (1) Sketch the query ONCE as MinimapSketchData (query < 2^28 bp; its
     //     positions fit the 28-bit field). Same kmer hashing as the target, so
-    //     `collect_seed_hits` matches identically.
-    constexpr std::size_t q_lpu =
-        compact_sequence_range<QueryRange>::traits::letters_per_unit;
-    const sequence_size_t q_units = (query_len + q_lpu - 1) / q_lpu;
-    sketch_collector_t<MinimizerT> query_collector;
-    query_collector.reserve(query_len / std::max<std::size_t>(w, 1) + 64);
-    pipe::minimizer_dispatch_range<MinimizerT>(query_collector, query_seq, 0, q_units, w, k);
-    const std::vector<MinimizerT> query_minimizers =
-        std::move(query_collector).extract_sketches_data();
+    //     `collect_seed_hits` matches identically. DOC0307 §5.3 — the helper
+    //     sketches on the GPU when VULKAN_MINIMAP_INT is selected (byte-identical
+    //     minimizers) and otherwise uses the scalar CPU sketch.
+    auto query_sketch =
+        sketch_query_for_index_selection<MinimizerT>(query_seq, params, w, k);
+    const pipe::MinimizerBatchView<MinimizerT> query_minimizers{
+        .host = std::span<const MinimizerT>{
+            query_sketch.minimizers.data(), query_sketch.minimizers.size()},
+        .device = query_sketch.device,
+    };
     boost::unordered_flat_set<std::uint64_t> query_kmer_filter;
     query_kmer_filter.reserve(query_minimizers.size());
     for (const MinimizerT& minimizer : query_minimizers) {
         query_kmer_filter.insert(minimizer.kmer());
     }
+    struct QueryKmerGate {
+        std::vector<std::uint32_t> words;
+        std::uint64_t mask = 0u;
+        bool exact = false;
+
+        void build(
+            const boost::unordered_flat_set<std::uint64_t>& filter,
+            std::size_t /*kmer_size*/) {
+            const unsigned gate_bits = 26u;
+            exact = false;
+            if (filter.empty()) {
+                words.clear();
+                mask = 0u;
+                return;
+            }
+            const std::uint64_t bit_count = std::uint64_t{1} << gate_bits;
+            mask = bit_count - 1u;
+            words.assign(static_cast<std::size_t>(bit_count / 32u), 0u);
+            for (const std::uint64_t kmer : filter) {
+                const std::uint64_t bit = kmer & mask;
+                words[static_cast<std::size_t>(bit >> 5u)] |=
+                    std::uint32_t{1} << (bit & 31u);
+            }
+        }
+
+        [[nodiscard, gnu::always_inline]] bool maybe_contains(
+            std::uint64_t kmer) const noexcept
+        {
+            if (words.empty()) return true;
+            const std::uint64_t bit = kmer & mask;
+            return (words[static_cast<std::size_t>(bit >> 5u)]
+                    & (std::uint32_t{1} << (bit & 31u))) != 0u;
+        }
+
+        [[nodiscard, gnu::always_inline]] bool accepts_exactly(
+            std::uint64_t /*kmer*/) const noexcept
+        {
+            return false;
+        }
+
+        [[nodiscard]] bioseq::gpu::vulkan::VulkanSketchQueryGate
+        vulkan_gate() const noexcept
+        {
+            return bioseq::gpu::vulkan::VulkanSketchQueryGate{
+                std::span<const std::uint32_t>{words.data(), words.size()},
+                static_cast<std::uint32_t>(mask)};
+        }
+    };
+    QueryKmerGate query_kmer_gate;
+    if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
+        query_kmer_gate.build(query_kmer_filter, k);
+    }
+    using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
+    auto build_query_filtered_segment_index =
+        [&query_kmer_filter, &query_kmer_gate, target_len](
+                std::span<const MinimizerT> minimizers,
+                MinimizerHashmapFragmentIndex& index,
+                std::vector<FilteredMinimizerPair>& filtered_pairs,
+                bool already_query_filtered = false) -> std::size_t {
+        filtered_pairs.clear();
+        const std::size_t filter_size = query_kmer_filter.size();
+        const std::size_t reserve_base =
+            filter_size > (std::numeric_limits<std::size_t>::max)() - 64u
+                ? filter_size
+                : filter_size + 64u;
+        const std::size_t reserve_hint = std::min(minimizers.size(), reserve_base);
+        if (filtered_pairs.capacity() < reserve_hint) {
+            filtered_pairs.reserve(reserve_hint);
+        }
+        for (const MinimizerT& minimizer : minimizers) {
+            const std::uint64_t kmer = minimizer.kmer();
+            if (already_query_filtered
+                || query_kmer_gate.accepts_exactly(kmer)
+                || (query_kmer_gate.maybe_contains(kmer)
+                    && query_kmer_filter.find(kmer) != query_kmer_filter.end())) {
+                filtered_pairs.emplace_back(kmer, minimizer.pos_strand_encoded());
+            }
+        }
+        index.build_from_pairs(
+            std::span<FilteredMinimizerPair>{
+                filtered_pairs.data(), filtered_pairs.size()},
+            target_len);
+        return filtered_pairs.size();
+    };
+    using QueryKmerFilter = decltype(query_kmer_filter);
+    struct QueryFilteredSketchCollector {
+        const QueryKmerFilter* filter = nullptr;
+        const QueryKmerGate* gate = nullptr;
+        std::vector<MinimizerT> sketches;
+
+        void reserve(std::size_t expected_count) {
+            const std::size_t filtered_hint = filter == nullptr
+                ? expected_count
+                : std::min<std::size_t>(expected_count, filter->size() + 64u);
+            sketches.reserve(filtered_hint);
+        }
+        void clear() { sketches.clear(); }
+        [[gnu::always_inline]] void collect(MinimizerT&& sketch) {
+            if (filter == nullptr) {
+                sketches.push_back(std::move(sketch));
+                return;
+            }
+            const std::uint64_t kmer = sketch.kmer();
+            if ((gate == nullptr || gate->maybe_contains(kmer))
+                && filter->find(kmer) != filter->end()) {
+                sketches.push_back(std::move(sketch));
+            }
+        }
+        [[gnu::always_inline]] void collect(const MinimizerT& sketch) {
+            if (filter == nullptr) {
+                sketches.push_back(sketch);
+                return;
+            }
+            const std::uint64_t kmer = sketch.kmer();
+            if ((gate == nullptr || gate->maybe_contains(kmer))
+                && filter->find(kmer) != filter->end()) {
+                sketches.push_back(sketch);
+            }
+        }
+        [[nodiscard]] const std::vector<MinimizerT>& extract_sketches_data() const & {
+            return sketches;
+        }
+    };
+    struct QueryFilteredPairCollector {
+        const QueryKmerFilter* filter = nullptr;
+        const QueryKmerGate* gate = nullptr;
+        std::uint64_t position_offset = 0u;
+        std::vector<FilteredMinimizerPair> pairs;
+
+        void reserve(std::size_t expected_count) {
+            const std::size_t filtered_hint = filter == nullptr
+                ? expected_count
+                : std::min<std::size_t>(expected_count, filter->size() + 64u);
+            pairs.reserve(filtered_hint);
+        }
+        void clear() { pairs.clear(); }
+        [[gnu::always_inline]] void collect(MinimizerT&& sketch) {
+            collect(static_cast<const MinimizerT&>(sketch));
+        }
+        [[gnu::always_inline]] void collect(const MinimizerT& sketch) {
+            const std::uint64_t kmer = sketch.kmer();
+            if (filter == nullptr
+                || ((gate == nullptr || gate->maybe_contains(kmer))
+                    && filter->find(kmer) != filter->end())) {
+                const std::uint64_t encoded =
+                    ((position_offset + sketch.last_pos()) << 1u)
+                    | static_cast<std::uint64_t>(sketch.strand());
+                pairs.emplace_back(kmer, encoded);
+            }
+        }
+    };
 
     // (2) Segment the target. Overlap >= longest target match span so a match
     //     starting in a segment core is fully indexed within that segment.
     constexpr std::size_t lpu =
         compact_sequence_range<TargetRange>::traits::letters_per_unit;
-    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
-    if (overlap_bp > pipe::kSegmentOverlapMaxBp) {
-        overlap_bp = pipe::kSegmentOverlapMaxBp;
-    }
+    const sequence_size_t overlap_bp = pipe::segment_overlap_bp(query_len);
 
     auto run_serial_segmented =
         [target_len, query_len, lpu, w, k, &target_seq, &query_seq,
-         &query_minimizers, &params, fragment_index_out]() -> MatchResultCollection {
+         &query_minimizers, &query_kmer_filter, &query_kmer_gate, &params, fragment_index_out,
+         target_sketch_backend, segmented_gpu_index_cache_ptr,
+         &segment_gpu_identity, &build_query_filtered_segment_index]() -> MatchResultCollection {
         std::vector<MatchResult> merged;
         sketch_collector_t<MinimizerT> seg_collector;
         MinimizerHashmapFragmentIndex seg_index;
-        const auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu);
+        std::vector<FilteredMinimizerPair> filtered_pairs;
+        const auto ranges =
+            pipe::segment_unit_ranges_for_backend(
+                target_len, query_len, lpu, target_sketch_backend);
         constexpr std::size_t frag_units = Scanner::fragment_storage_units;
         const sequence_size_t frag_bp =
             static_cast<sequence_size_t>(frag_units) * lpu;
@@ -3493,13 +4649,17 @@ template <supports_compact_sequence_range QueryRange,
             if (fragment_index_out != nullptr) {
                 FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
                     *fragment_index_out, target_len, frag_bp};
-                for (const pipe::SegmentUnitRange& range : ranges) {
+                for (std::size_t segment_index = 0;
+                     segment_index < ranges.size();
+                     ++segment_index) {
+                    const pipe::SegmentUnitRange& range = ranges[segment_index];
                     seg_collector.clear();
                     seg_collector.reserve(
                         (range.ce_u - range.cs_u) * lpu
                             / std::max<std::size_t>(w, 1) + 64);
                     pipe::minimizer_dispatch_range<MinimizerT>(
-                        seg_collector, target_seq, range.cs_u, range.ce_u, w, k);
+                        seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                        target_sketch_backend);
                     const std::vector<MinimizerT>& seg_minimizers =
                         seg_collector.extract_sketches_data();
 
@@ -3514,11 +4674,17 @@ template <supports_compact_sequence_range QueryRange,
                         emissions.data(), emissions.size()));
                     acc.flush_ready(range.core_hi_bp);
 
-                    seg_index.build(seg_minimizers, target_len);
+                    build_query_filtered_segment_index(
+                        std::span<const MinimizerT>{
+                            seg_minimizers.data(), seg_minimizers.size()},
+                        seg_index,
+                        filtered_pairs);
                     seg_index.add_position_offset(range.cs_u * lpu);
 
                     MatchResultCollection seg_res = minimap2_port_with_index(
-                        query_seq, target_seq, query_minimizers, seg_index, params);
+                        query_seq, target_seq, query_minimizers, seg_index, params,
+                        segmented_gpu_index_cache_ptr,
+                        segment_gpu_identity(segment_index));
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp
                             && result.target_start < range.core_hi_bp) {
@@ -3531,31 +4697,79 @@ template <supports_compact_sequence_range QueryRange,
             }
         }
 
-        for (const pipe::SegmentUnitRange& range : ranges) {
-            seg_collector.clear();
-            seg_collector.reserve(
-                (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-            pipe::minimizer_dispatch_range<MinimizerT>(
-                seg_collector, target_seq, range.cs_u, range.ce_u, w, k);
-            const std::vector<MinimizerT>& seg_minimizers =
-                seg_collector.extract_sketches_data();
+        QueryFilteredPairCollector filtered_pair_collector{
+            &query_kmer_filter, &query_kmer_gate};
+        for (std::size_t segment_index = 0;
+             segment_index < ranges.size();
+             ++segment_index) {
+            const pipe::SegmentUnitRange& range = ranges[segment_index];
+            bioseq::indexing::GpuIndexCacheIdentity gpu_identity =
+                segment_gpu_identity(segment_index);
+            std::size_t seg_result_count = 0;
+            if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
+                filtered_pair_collector.position_offset = range.cs_u * lpu;
+                filtered_pair_collector.clear();
+                filtered_pair_collector.reserve(
+                    (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+                bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
+                    filtered_pair_collector,
+                    target_seq,
+                    static_cast<std::size_t>(range.cs_u),
+                    static_cast<std::size_t>(range.ce_u),
+                    w,
+                    k,
+                    query_kmer_gate.vulkan_gate());
+                // Safe with the approximate device gate because the collector
+                // still exact-confirms each emitted kmer against query_kmer_filter.
+                seg_index.build_from_pairs(
+                    std::span<FilteredMinimizerPair>{
+                        filtered_pair_collector.pairs.data(),
+                        filtered_pair_collector.pairs.size()},
+                    target_len);
 
-            seg_index.build(seg_minimizers, target_len);
-            seg_index.add_position_offset(range.cs_u * lpu);
+                MatchResultCollection seg_res = minimap2_port_with_index(
+                    query_seq, target_seq, query_minimizers, seg_index, params,
+                    segmented_gpu_index_cache_ptr,
+                    gpu_identity);
+                seg_result_count = seg_res.results.size();
+                for (auto& result : seg_res.results) {
+                    if (result.target_start >= range.core_lo_bp
+                        && result.target_start < range.core_hi_bp) {
+                        merged.push_back(std::move(result));
+                    }
+                }
+            } else {
+                seg_collector.clear();
+                seg_collector.reserve(
+                    (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+                pipe::minimizer_dispatch_range<MinimizerT>(
+                    seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                    target_sketch_backend);
+                const std::vector<MinimizerT>& seg_minimizers =
+                    seg_collector.extract_sketches_data();
+                build_query_filtered_segment_index(
+                    std::span<const MinimizerT>{seg_minimizers.data(), seg_minimizers.size()},
+                    seg_index,
+                    filtered_pairs);
+                seg_index.add_position_offset(range.cs_u * lpu);
 
-            MatchResultCollection seg_res = minimap2_port_with_index(
-                query_seq, target_seq, query_minimizers, seg_index, params);
-            for (auto& result : seg_res.results) {
-                if (result.target_start >= range.core_lo_bp
-                    && result.target_start < range.core_hi_bp) {
-                    merged.push_back(std::move(result));
+                MatchResultCollection seg_res = minimap2_port_with_index(
+                    query_seq, target_seq, query_minimizers, seg_index, params,
+                    segmented_gpu_index_cache_ptr,
+                    gpu_identity);
+                seg_result_count = seg_res.results.size();
+                for (auto& result : seg_res.results) {
+                    if (result.target_start >= range.core_lo_bp
+                        && result.target_start < range.core_hi_bp) {
+                        merged.push_back(std::move(result));
+                    }
                 }
             }
             bioseq_log_lazy<DBG>([&] {
                 bioseq_log_progress<DBG>("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
                                 "(merged {}) | footprint={}MB avail={}MB",
                         range.core_lo_bp, range.core_hi_bp,
-                        merged.size(), seg_res.results.size(), merged.size(),
+                        merged.size(), seg_result_count, merged.size(),
                         bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                         bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
             });
@@ -3563,9 +4777,145 @@ template <supports_compact_sequence_range QueryRange,
         return MatchResultCollection{std::move(merged)};
     };
 
+    auto run_vulkan_segment_coordinate_batch = [&]() -> MatchResultCollection {
+        auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+        if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+            pipe::throw_vulkan_declined("VulkanSegment resident coordinate batch");
+        }
+        const auto ranges =
+            pipe::segment_unit_ranges_for_backend(
+                target_len, query_len, lpu, target_sketch_backend);
+        std::span<const MinimizerT> sketch_span{
+            query_minimizers.data(), query_minimizers.size()};
+        const bioseq::gpu::vulkan::Buffer* device_words =
+            (query_minimizers.device && query_minimizers.device->words() != nullptr
+             && query_minimizers.device->count() == sketch_span.size())
+                ? query_minimizers.device->words()
+                : nullptr;
+
+        std::vector<std::shared_ptr<bioseq::indexing::GpuResidentMinimizerIndex>>
+            residents;
+        std::vector<bioseq::gpu::vulkan::PhaseCSeedCoordinateJob> jobs;
+        std::vector<std::size_t> job_segment_indices;
+        residents.reserve(ranges.size());
+        jobs.reserve(ranges.size());
+        job_segment_indices.reserve(ranges.size());
+
+        for (std::size_t segment_index = 0;
+             segment_index < ranges.size();
+             ++segment_index) {
+            const pipe::SegmentUnitRange& range = ranges[segment_index];
+            auto built = bioseq::gpu::vulkan::build_gpu_segment_index_on_device<MinimizerT>(
+                target_seq,
+                static_cast<std::size_t>(range.cs_u),
+                static_cast<std::size_t>(range.ce_u),
+                w,
+                k,
+                query_kmer_gate.vulkan_gate());
+            if (!built) {
+                pipe::throw_vulkan_declined("VulkanSegment GPU resident index build");
+            }
+            if (!built->valid || built->position_count == 0u || built->occupied_slots == 0u) {
+                continue;
+            }
+
+            auto identity = segment_gpu_identity(segment_index);
+            bioseq::indexing::GpuMinimizerIndexCacheKey key{
+                .source_id = 0u,
+                .caller_identity = identity.assembly_identity,
+                .target_len = built->target_len,
+                .table_size = built->occupied_slots,
+                .position_count = built->position_count,
+            };
+            auto resident = bioseq::indexing::adopt_gpu_built_index(
+                runtime, std::move(*built), key);
+            if (!resident) {
+                pipe::throw_vulkan_declined("VulkanSegment GPU resident index adoption");
+            }
+            resident->target_position_offset = range.cs_u * lpu;
+            residents.push_back(resident);
+            jobs.push_back(bioseq::gpu::vulkan::PhaseCSeedCoordinateJob{
+                .slots = &resident->slots,
+                .positions = &resident->positions,
+                .target_len = resident->target_len,
+                .slot_mask = resident->slot_mask,
+                .position_count = resident->position_count,
+                .bucket_count = resident->bucket_count,
+                .target_position_offset = resident->target_position_offset,
+            });
+            job_segment_indices.push_back(segment_index);
+        }
+        if (jobs.empty()) {
+            return MatchResultCollection{};
+        }
+
+        auto cp = params.to_chaining_params();
+        std::int32_t max_dist_x = cp.max_gap;
+        std::int32_t max_dist_y = cp.max_gap;
+        if (max_dist_x < cp.bandwidth) max_dist_x = cp.bandwidth;
+        if (max_dist_y < cp.bandwidth) max_dist_y = cp.bandwidth;
+        const auto chain_key =
+            bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
+        bioseq::gpu::vulkan::PhaseCSeedQueryInputs query_inputs{
+            .host_minimizer_bytes = device_words != nullptr
+                ? std::span<const std::byte>{}
+                : std::as_bytes(sketch_span),
+            .device_minimizer_words = device_words,
+            .minimizer_count = static_cast<std::uint32_t>(sketch_span.size()),
+            .minimizer_word_kind =
+                static_cast<std::uint32_t>(
+                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::word_kind),
+            .minimizer_words32_per_record =
+                bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+            .hash_shift =
+                bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::hash_shift,
+            .pos_bits =
+                bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::pos_bits,
+        };
+        const auto coords = runtime.run_phase_c_seed_to_coordinate_batch_roundtrip(
+            query_inputs,
+            std::span<const bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>{
+                jobs.data(), jobs.size()},
+            query_len,
+            static_cast<std::uint32_t>(params.kmer_size),
+            params.max_occ,
+            chain_key,
+            max_dist_x,
+            max_dist_y,
+            cp.bandwidth,
+            std::min<std::int32_t>(cp.max_chain_iter, 3000),
+            cp.gap_penalty,
+            cp.skip_penalty,
+            cp.max_chain_skip,
+            cp.min_chain_score,
+            cp.min_seed_count,
+            16u);
+
+        std::vector<MatchResult> merged;
+        merged.reserve(coords.size());
+        for (std::size_t job_index = 0; job_index < coords.size(); ++job_index) {
+            const auto& coord = coords[job_index];
+            if (coord.valid == 0u) continue;
+            const pipe::SegmentUnitRange& range = ranges[job_segment_indices[job_index]];
+            if (coord.target_start >= range.core_lo_bp
+                && coord.target_start < range.core_hi_bp) {
+                merged.push_back(
+                    pipe::phase_c_coordinate_to_match_result(coord, query_len, target_len));
+            }
+        }
+        return MatchResultCollection{std::move(merged)};
+    };
+
+    if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment
+        && pipe::phase_c_coordinate_only_active(params)
+        && fragment_index_out == nullptr) {
+        return run_vulkan_segment_coordinate_batch();
+    }
+
     auto& pool = bioseq::parallelism::GlobalPool::instance();
     if (!bioseq::parallelism::task_parallel(pool.mode())
         || pool.max_concurrency() <= 1
+        || target_sketch_backend == MinimizerSketchBackend::VulkanSegment
         || !bioseq::storage::lazy_is_worker_shareable(query_seq)
         || !bioseq::storage::lazy_is_worker_shareable(target_seq)) {
         return run_serial_segmented();
@@ -3734,7 +5084,9 @@ template <supports_compact_sequence_range QueryRange,
 
             auto process_segment_serial =
                 [&ranges, &target_seq, &query_seq, &query_minimizers, &params,
-                 &acc, &merged, target_len, frag_bp, w, k, lpu](
+                 &acc, &merged, target_len, frag_bp, w, k, lpu,
+                 target_sketch_backend, segmented_gpu_index_cache_ptr,
+                 &segment_gpu_identity](
                         std::size_t segment_index) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
@@ -3743,7 +5095,8 @@ template <supports_compact_sequence_range QueryRange,
                     (range.ce_u - range.cs_u) * lpu
                         / std::max<std::size_t>(w, 1) + 64);
                 pipe::minimizer_dispatch_range<MinimizerT>(
-                    collector, target_seq, range.cs_u, range.ce_u, w, k);
+                    collector, target_seq, range.cs_u, range.ce_u, w, k,
+                    target_sketch_backend);
                 const std::vector<MinimizerT>& minimizers =
                     collector.extract_sketches_data();
                 auto emissions = collect_fragment_emissions_for_segment(
@@ -3759,7 +5112,9 @@ template <supports_compact_sequence_range QueryRange,
                 index.build(minimizers, target_len);
                 index.add_position_offset(range.cs_u * lpu);
                 MatchResultCollection seg_res = minimap2_port_with_index(
-                    query_seq, target_seq, query_minimizers, index, params);
+                    query_seq, target_seq, query_minimizers, index, params,
+                    segmented_gpu_index_cache_ptr,
+                    segment_gpu_identity(segment_index));
                 for (auto& result : seg_res.results) {
                     if (result.target_start >= range.core_lo_bp
                         && result.target_start < range.core_hi_bp) {
@@ -3802,7 +5157,9 @@ template <supports_compact_sequence_range QueryRange,
                     bioseq::parallelism::range_body{
                         [&ranges, &wave_seg_out, &wave_frag_out,
                          &target_seq, &query_seq, &query_minimizers, &params,
-                         current_wave_lo, target_len, frag_bp, w, k, lpu](
+                         current_wave_lo, target_len, frag_bp, w, k, lpu,
+                         target_sketch_backend, segmented_gpu_index_cache_ptr,
+                         &segment_gpu_identity](
                                 std::size_t lo, std::size_t hi) {
                         sketch_collector_t<MinimizerT> collector;
                         MinimizerHashmapFragmentIndex index;
@@ -3817,7 +5174,8 @@ template <supports_compact_sequence_range QueryRange,
                                 (range.ce_u - range.cs_u) * lpu
                                     / std::max<std::size_t>(w, 1) + 64);
                             pipe::minimizer_dispatch_range<MinimizerT>(
-                                collector, target_seq, range.cs_u, range.ce_u, w, k);
+                                collector, target_seq, range.cs_u, range.ce_u, w, k,
+                                target_sketch_backend);
                             const std::vector<MinimizerT>& minimizers =
                                 collector.extract_sketches_data();
                             wave_frag_out[rel] =
@@ -3835,7 +5193,9 @@ template <supports_compact_sequence_range QueryRange,
                                 target_seq,
                                 query_minimizers,
                                 index,
-                                params);
+                                params,
+                                segmented_gpu_index_cache_ptr,
+                                segment_gpu_identity(segment_index));
                         }
                     }});
 
@@ -3860,43 +5220,15 @@ template <supports_compact_sequence_range QueryRange,
         }
     }
 
-    using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
     std::vector<std::size_t> segment_minimizer_counts(ranges.size());
     std::vector<std::size_t> segment_filtered_counts(ranges.size());
-
-    auto build_query_filtered_segment_index =
-        [&query_kmer_filter, target_len](
-                std::span<const MinimizerT> minimizers,
-                MinimizerHashmapFragmentIndex& index,
-                std::vector<FilteredMinimizerPair>& filtered_pairs) -> std::size_t {
-        filtered_pairs.clear();
-        const std::size_t filter_size = query_kmer_filter.size();
-        const std::size_t reserve_base =
-            filter_size > (std::numeric_limits<std::size_t>::max)() - 64u
-                ? filter_size
-                : filter_size + 64u;
-        const std::size_t reserve_hint = std::min(minimizers.size(), reserve_base);
-        if (filtered_pairs.capacity() < reserve_hint) {
-            filtered_pairs.reserve(reserve_hint);
-        }
-        for (const MinimizerT& minimizer : minimizers) {
-            const std::uint64_t kmer = minimizer.kmer();
-            if (query_kmer_filter.find(kmer) != query_kmer_filter.end()) {
-                filtered_pairs.emplace_back(kmer, minimizer.pos_strand_encoded());
-            }
-        }
-        index.build_from_pairs(
-            std::span<FilteredMinimizerPair>{
-                filtered_pairs.data(), filtered_pairs.size()},
-            target_len);
-        return filtered_pairs.size();
-    };
 
     auto process_segment_serial =
         [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
          &segment_minimizer_counts, &segment_filtered_counts,
          &build_query_filtered_segment_index, &params, target_len,
-         w, k, lpu](std::size_t segment_index) {
+         w, k, lpu, target_sketch_backend, segmented_gpu_index_cache_ptr,
+         &segment_gpu_identity](std::size_t segment_index) {
         sketch_collector_t<MinimizerT> collector;
         MinimizerHashmapFragmentIndex index;
         std::vector<FilteredMinimizerPair> filtered_pairs;
@@ -3904,7 +5236,8 @@ template <supports_compact_sequence_range QueryRange,
         collector.reserve(
             (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
         pipe::minimizer_dispatch_range<MinimizerT>(
-            collector, target_seq, range.cs_u, range.ce_u, w, k);
+            collector, target_seq, range.cs_u, range.ce_u, w, k,
+            target_sketch_backend);
         const std::vector<MinimizerT>& minimizers =
             collector.extract_sketches_data();
         segment_minimizer_counts[segment_index] = minimizers.size();
@@ -3915,7 +5248,9 @@ template <supports_compact_sequence_range QueryRange,
                 filtered_pairs);
         index.add_position_offset(range.cs_u * lpu);
         seg_out[segment_index] = minimap2_port_with_index(
-            query_seq, target_seq, query_minimizers, index, params);
+            query_seq, target_seq, query_minimizers, index, params,
+            segmented_gpu_index_cache_ptr,
+            segment_gpu_identity(segment_index));
         bioseq_log_lazy<DBG>([&] {
             bioseq_log_progress<DBG>("[minimap_port_segmented] adaptive serial segment core [{},{}) "
                             "produced {} results | footprint={}MB avail={}MB",
@@ -3980,7 +5315,8 @@ template <supports_compact_sequence_range QueryRange,
                 [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
                  &segment_minimizer_counts, &segment_filtered_counts,
                  &build_query_filtered_segment_index, &params, target_len,
-                 w, k, lpu](std::size_t lo, std::size_t hi) {
+                 w, k, lpu, target_sketch_backend, segmented_gpu_index_cache_ptr,
+                 &segment_gpu_identity](std::size_t lo, std::size_t hi) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
                 std::vector<FilteredMinimizerPair> filtered_pairs;
@@ -3990,7 +5326,8 @@ template <supports_compact_sequence_range QueryRange,
                     collector.reserve(
                         (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
                     pipe::minimizer_dispatch_range<MinimizerT>(
-                        collector, target_seq, range.cs_u, range.ce_u, w, k);
+                        collector, target_seq, range.cs_u, range.ce_u, w, k,
+                        target_sketch_backend);
                     const std::vector<MinimizerT>& minimizers =
                         collector.extract_sketches_data();
                     segment_minimizer_counts[segment_index] = minimizers.size();
@@ -4002,7 +5339,9 @@ template <supports_compact_sequence_range QueryRange,
                             filtered_pairs);
                     index.add_position_offset(range.cs_u * lpu);
                     seg_out[segment_index] = minimap2_port_with_index(
-                        query_seq, target_seq, query_minimizers, index, params);
+                        query_seq, target_seq, query_minimizers, index, params,
+                        segmented_gpu_index_cache_ptr,
+                        segment_gpu_identity(segment_index));
                 }
             }});
         wave_lo = wave_hi;

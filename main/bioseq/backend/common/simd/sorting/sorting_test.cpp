@@ -8,8 +8,7 @@
 #include <random>
 #include <vector>
 
-import bioseq_simd.sorting;
-import testing;
+import bioseq.simd.sorting;
 
 extern "C" void bioseq_sort_pair_run_u128_keys(
     hwy::uint128_t* keys,

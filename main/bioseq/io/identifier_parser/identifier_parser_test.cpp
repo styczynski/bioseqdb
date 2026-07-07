@@ -17,11 +17,11 @@
 
 #include <unistd.h>
 
-import mlogging;
-import bioseq_io.options;
-import bioseq_io.public_api;
-import bioseq_io.identifier_formats;
-import bioseq_io.identifier_parser;
+import bioseq.common.mlogging;
+import bioseq.io.options;
+import bioseq.io.public_api;
+import bioseq.io.identifier_formats;
+import bioseq.io.identifier_parser;
 
 using namespace bioseq::io::idparse;
 

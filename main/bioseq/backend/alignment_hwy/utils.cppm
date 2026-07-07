@@ -19,9 +19,9 @@ module;
 #include <array>
 #include <climits>
 
-export module alignment_hwy_utils;
+export module bioseq.alignment.utils;
 
-import bioseq_sequences;
+import bioseq.sequences;
 
 export {
 

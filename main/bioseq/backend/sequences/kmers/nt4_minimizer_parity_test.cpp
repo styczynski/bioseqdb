@@ -16,14 +16,13 @@
 #include <string>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers;
-import bioseq_sequences.kmers.mm_sketch_baseline;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers;
+import bioseq.sequences.kmers.mm_sketch_baseline;
 
 using namespace seq::literals;
 

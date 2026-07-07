@@ -21,10 +21,10 @@ module;
 #include <string>
 #include <string_view>
 
-export module bioseq_io.identifier_formats;
+export module bioseq.io.identifier_formats;
 
-import mlogging;               // fmt::format
-import bioseq_io.file_utils;   // bioseq::io::detail::to_ascii_lower (shared ASCII fold)
+import bioseq.common.mlogging;               // fmt::format
+import bioseq.io.file_utils;   // bioseq::io::detail::to_ascii_lower (shared ASCII fold)
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 

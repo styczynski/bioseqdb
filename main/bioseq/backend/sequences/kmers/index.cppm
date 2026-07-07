@@ -11,16 +11,17 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_sequences.kmers;
+export module bioseq.sequences.kmers;
 
-import mlogging;
-import context;
-import sequan_compat;            // DOC0286 §10.2 — seq::dna4 for the nt4 (2-bit) hasher
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers.hashers;
-import algo.circular_append_buffer;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.context;
+import bioseq.common.sequan_compat;            // DOC0286 §10.2 — seq::dna4 for the nt4 (2-bit) hasher
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers.hashers;
+import bioseq.common.circular_append_buffer;
+import bioseq.instr;
+import bioseq.storage.size;                     // DOC0345 Patch A — bioseq::storage::sequence_size_t
 
 // // remove
 // import sequan_compat;
@@ -670,7 +671,6 @@ inline void collect_minimizers_view(
 	// First kmers. Walk the prefix in INIT mode (until the first window
 	// is fully populated), then the rest in non-INIT mode.
 	handler(std::bool_constant<true>{});
-	assert(pos == w+k);
 	handler(std::bool_constant<false>{});
 
 	if (!current_min.is_max()) {
@@ -684,6 +684,114 @@ inline void collect_minimizers_view(
 	// (mach_absolute_time fast-path), so the chrono reads were a pure
 	// duplicate. Removed per proposal-2 §N1.)
 }
+
+// ===== DOC0345 Patch A: shared minimizer backend API (no-PG, alphabet-generic) =====
+// Inserted inside the already-open `export { ... namespace bioseq::simd::HWY_NAMESPACE`
+// block; the enclosing `export {` exports these, so no extra `export namespace` wrapper.
+
+enum class MinimizerSketchBackend : std::uint8_t {
+    Scalar = 0,
+    VulkanSegment = 1,
+};
+
+[[nodiscard]] inline constexpr const char*
+minimizer_sketch_backend_name(MinimizerSketchBackend backend) noexcept {
+    switch (backend) {
+    case MinimizerSketchBackend::Scalar:
+        return "scalar";
+    case MinimizerSketchBackend::VulkanSegment:
+        return "vulkan_segment";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline constexpr bool
+minimizer_sketch_backend_is_vulkan(MinimizerSketchBackend backend) noexcept {
+    return backend == MinimizerSketchBackend::VulkanSegment;
+}
+
+using minimizer_sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
+
+template <class MinimizerT, class Seq, class Collector>
+[[gnu::always_inline]] inline void collect_minimizers_segment_scalar(
+    Collector& collector,
+    Seq& seq,
+    bioseq::storage::sequence_size_t lo_unit,
+    bioseq::storage::sequence_size_t hi_unit,
+    std::size_t window_size,
+    std::size_t kmer_size)
+{
+    if constexpr (requires { typename Seq::scanner_type; }) {
+        if constexpr (!Seq::scanner_type::supports_fragments()) {
+            auto& underlying =
+                const_cast<std::remove_cvref_t<decltype(seq.underlying())>&>(
+                    seq.underlying());
+            auto begin_iter = underlying.begin();
+            auto end_iter = underlying.begin();
+            std::advance(
+                begin_iter,
+                static_cast<
+                    typename std::iterator_traits<decltype(begin_iter)>::difference_type>(
+                    lo_unit));
+            std::advance(
+                end_iter,
+                static_cast<
+                    typename std::iterator_traits<decltype(end_iter)>::difference_type>(
+                    hi_unit));
+            collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+                collector, underlying, begin_iter, end_iter, window_size, kmer_size);
+        } else {
+            auto begin_iter = seq.begin();
+            auto end_iter = seq.begin();
+            begin_iter += lo_unit;
+            end_iter += hi_unit;
+            collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+                collector, seq, begin_iter, end_iter, window_size, kmer_size);
+        }
+    } else {
+        auto& range = const_cast<std::remove_cvref_t<Seq>&>(seq);
+        auto begin_iter = range.begin();
+        auto end_iter = range.begin();
+        std::advance(
+            begin_iter,
+            static_cast<
+                typename std::iterator_traits<decltype(begin_iter)>::difference_type>(
+                lo_unit));
+        std::advance(
+            end_iter,
+            static_cast<
+                typename std::iterator_traits<decltype(end_iter)>::difference_type>(
+                hi_unit));
+        collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+            collector, range, begin_iter, end_iter, window_size, kmer_size);
+    }
+}
+
+template <class Seq>
+inline constexpr std::size_t letters_per_unit_v =
+    std::remove_cvref_t<Seq>::traits::letters_per_unit;
+
+template <class Seq>
+[[nodiscard]] inline bioseq::storage::sequence_size_t unit_count_for_bp(
+    bioseq::storage::sequence_size_t bp) noexcept
+{
+    constexpr bioseq::storage::sequence_size_t lpu =
+        static_cast<bioseq::storage::sequence_size_t>(letters_per_unit_v<Seq>);
+    return (bp + lpu - 1) / lpu;
+}
+
+template <class MinimizerT>
+inline constexpr bioseq::storage::sequence_size_t
+minimizer_pos_field_mask_v =
+    static_cast<bioseq::storage::sequence_size_t>(MinimizerT::pos_field_mask);
+
+template <class MinimizerT>
+[[nodiscard]] inline bool collected_span_fits_minimizer_pos_field(
+    bioseq::storage::sequence_size_t collected_bp) noexcept
+{
+    return collected_bp <= minimizer_pos_field_mask_v<MinimizerT>;
+}
+// ===== end DOC0345 Patch A =====
 
 // Backward-compatible scalar entry point: the original `collect_minimizers`
 // signature over a concrete compact_sequence_range. Forwards to the generalised

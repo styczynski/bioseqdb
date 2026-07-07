@@ -71,8 +71,8 @@ module;
 
 export module bench_framework;
 
-import mlogging;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.instr;
 
 // ---------------------------------------------------------------------------
 //  Public surface
@@ -687,6 +687,11 @@ struct BenchmarkConfig {
     bool fast = false;
     ConcurrencyOpts concurrency{};
     bool by_regions = false;
+    /// Tag labels for `--filter tags=...` selection. REQUIRED in the config
+    /// JSON (may be an empty array). Order preserved as declared; duplicates
+    /// allowed but meaningless. A benchmark with an empty `tags` list can
+    /// never be selected by a `tags=` filter (only by `benchmark=` / no filter).
+    std::vector<std::string> tags{};
     /// (test_case_name, iterations) pairs declared in `matrix.for`.
     std::vector<std::pair<std::string, std::size_t>> for_each{};
     /// algorithm_name -> param_name -> declared values list (one cross-product axis).
@@ -755,6 +760,16 @@ struct Cell {
     Cell& operator=(Cell&&) = delete;
 };
 
+/// Per-case (per matrix.over key) debug progress. Populated once, single-
+/// threaded, before batches are enqueued; thereafter only the atomics mutate,
+/// concurrently across TBB workers (the map structure is read-only). Present
+/// only when --debug is active (empty otherwise).
+struct CaseDebugProgress {
+    std::atomic<std::size_t> remaining_cells{0};  // cells not yet finished
+    std::atomic<bool>        started{false};       // CASE_STARTED already emitted?
+    std::atomic<bool>        emitted{false};       // CASE_RESULTS already emitted? (exactly-once)
+};
+
 /// Pinned (move + copy deleted) — `simdjson::dom::element` views handed to
 /// the user reference `parser`, and any move would invalidate them. The
 /// owning slot is `std::unique_ptr<BenchmarkExecutionState>` inside
@@ -770,6 +785,11 @@ struct BenchmarkExecutionState {
     std::vector<TestCaseSpec>           test_cases{};
     std::vector<ExecutionTuple>         execution_tuples{};
     std::vector<std::unique_ptr<Cell>>  cells{};
+    /// Per-case (per matrix.over key) debug progress for `--debug`. Keyed by
+    /// ExecutionTuple::algorithm_name (== case name). std::map keeps stable
+    /// references; populated before the parallel run, read-only structure
+    /// after (only the per-node atomics mutate). Empty unless --debug is on.
+    std::map<std::string, CaseDebugProgress> case_debug_progress{};
 
     // V16: `serial_mu` deleted — the scheduler enforces
     // `concurrency.concurrency: false` by admitting at most one batch
@@ -780,6 +800,22 @@ struct BenchmarkExecutionState {
     BenchmarkExecutionState(const BenchmarkExecutionState&) = delete;
     BenchmarkExecutionState& operator=(BenchmarkExecutionState&&) = delete;
     BenchmarkExecutionState& operator=(const BenchmarkExecutionState&) = delete;
+};
+
+/// One axis of the `--filter` selector. Each axis may be set at most once.
+enum class FilterDimension : std::uint8_t { Tags, Benchmark, Cases };
+
+/// Whole-run filter assembled from every `--filter key=v,v` occurrence.
+/// An absent (nullopt) axis means "do not constrain on this axis". A present
+/// axis is a non-empty OR-set. `empty()` is true iff no axis is constrained.
+struct FilterSpec {
+    std::optional<std::vector<std::string>> tags{};
+    std::optional<std::vector<std::string>> benchmark{};   // benchmark KEYS (singular CLI spelling)
+    std::optional<std::vector<std::string>> cases{};       // matrix.over keys
+
+    [[nodiscard]] bool empty() const noexcept {
+        return !tags && !benchmark && !cases;
+    }
 };
 
 struct ParsedCli {
@@ -799,12 +835,21 @@ struct ParsedCli {
     /// (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §10.4.1). Manual `Ctrl-R` and the
     /// V14 selection-debounce-reparse path remain functional.
     bool                       ui_test_mode = false;
+    /// `--debug`: stream a crash-resilient `report_debug_<N>.jsonl` event
+    /// log alongside the normal report. Requires a non-empty `filter`.
+    bool                       debug = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
     /// V12: `--memory-buffer N` (0..50, default 40). Determines how
     /// much headroom to leave above peak system usage when computing
     /// the dynamic memory cap. See `MemoryBudget::cap_for`.
     double                     memory_buffer_pct = 40.0;
+    /// Subset selection assembled from every `--filter key=v,v` occurrence.
+    FilterSpec                 filter{};
+    /// Hard launch errors found while parsing (e.g. duplicate dimension,
+    /// malformed value). Each becomes a `ValidationDiag` Error in run_impl
+    /// with code carried as the first ':'-separated token.
+    std::vector<std::string>   cli_errors{};
 };
 
 /// Identity card for one report. Captured once in `run_impl` and
@@ -936,6 +981,7 @@ struct ProgressState;
 struct ValidationDiag;
 class  MemoryBudget;
 class  BatchScheduler;
+class  DebugReportSink;
 
 }  // namespace detail
 
@@ -984,6 +1030,12 @@ struct BenchmarkContext {
     /// `MemoryBudget` — callers that need budget metadata go through
     /// the scheduler instead of duplicating the pointer here.
     detail::BatchScheduler*                         scheduler = nullptr;
+    /// Case allow-list from `--filter cases=...`. nullptr == run all cases.
+    /// Points at run_impl's `case_allow_list` (outlives every closure).
+    const std::set<std::string>*                    filter_cases = nullptr;
+    /// Crash-resilient JSONL event sink for `--debug`. nullptr == no debug
+    /// stream. Points at run_impl's `DebugReportSink` (outlives every closure).
+    detail::DebugReportSink*                        debug_sink = nullptr;
 };
 
 // ----------------- ConfigValue::from_simdjson -----------------
@@ -1617,11 +1669,11 @@ private:
                 // inner body lives in the std::list node. Erasing the
                 // node from notify_batch_finished only destroys the
                 // inner body (which has already returned by then).
-                auto& running_ref = running_batches_.back();
-                const auto running_id = running_ref.scheduler_id;
-                arena_.enqueue([this, &running_ref, running_id] {
+                auto* running_ptr = std::addressof(running_batches_.back());
+                const auto running_id = running_ptr->scheduler_id;
+                arena_.enqueue([this, running_ptr, running_id] {
                     ScopedSchedulerFinish finish_guard{this, running_id};
-                    running_ref.body();
+                    running_ptr->body();
                 }, tg_);
             } else {
                 // Update idle clock for the rejected batch. While
@@ -1653,6 +1705,7 @@ private:
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kMaxIdleWaitingTime).count();
         auto pending_iter = pending_.begin();
+        bool aborted_any = false;
         while (pending_iter != pending_.end()) {
             if (pending_iter->last_idle_start_ns != 0
                 && (now_ns - pending_iter->last_idle_start_ns) > budget_ns) {
@@ -1667,10 +1720,12 @@ private:
                     outstanding_per_benchmark_.erase(outstanding_it);
                 }
                 ++total_finished_;
+                aborted_any = true;
             } else {
                 ++pending_iter;
             }
         }
+        if (aborted_any) cv_.notify_all();
     }
 
     /// Forward declaration: defined out-of-line below the
@@ -1928,7 +1983,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       "title": "BenchmarkBlock",
       "description": "Definition of one benchmark. Lives under a free-form key at the top level (e.g. 'bench_perf'). Multiple benchmark blocks may share one config file; each is invoked by a separate create_benchmark<...>(...) call referencing the matching key.",
       "type": "object",
-      "required": ["matrix"],
+      "required": ["matrix", "tags"],
       "additionalProperties": false,
       "properties": {
         "description": {
@@ -1940,6 +1995,12 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "default": false,
           "description": "If true, this benchmark runs only when the binary is invoked with --fast. If false (default), it runs unless --fast is passed."
         },
+        "tags": {
+          "type": "array",
+          "description": "Tag labels used by `--filter tags=a,b`. Required; may be empty. Each tag is a non-empty string. A benchmark matches a `tags=` filter iff its tag set intersects the filter's tag set.",
+          "items": { "type": "string", "minLength": 1 },
+          "examples": [ ["gpu", "e2e"], [] ]
+        },
         "concurrency": { "$ref": "#/definitions/concurrency" },
         "matrix": { "$ref": "#/definitions/matrix" }
       },
@@ -1947,6 +2008,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         {
           "description": "Compare aligner runtimes",
           "fast": false,
+          "tags": ["aligner", "grid"],
           "concurrency": { "bench_lock": false, "concurrency": true },
           "matrix": {
             "for": { "SMALL": 1000 },
@@ -3285,6 +3347,28 @@ parse_compare_and_tolerance(
     if (benchmark_obj["fast"].get(fast_flag) == simdjson::SUCCESS) {
         benchmark.fast = fast_flag;
     }
+
+    // tags: required array of non-empty strings (schema already enforced the
+    // shape; this is the structural walk). An empty array is legal.
+    simdjson::dom::array tags_array;
+    if (benchmark_obj["tags"].get(tags_array) == simdjson::SUCCESS) {
+        for (auto entry : tags_array) {
+            std::string_view tag_text;
+            if (entry.get(tag_text) != simdjson::SUCCESS) {
+                bioseq_log<ERR>("[bench_framework] benchmark '{}' tag entry is not a string",
+                                benchmark.benchmark_key);
+                parse_ok = false;
+                continue;
+            }
+            benchmark.tags.emplace_back(tag_text);
+        }
+    } else {
+        // Schema makes this unreachable, but fail loudly if a caller bypassed it.
+        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing required 'tags' array",
+                        benchmark.benchmark_key);
+        parse_ok = false;
+    }
+
     simdjson::dom::object concurrency_obj;
     if (benchmark_obj["concurrency"].get(concurrency_obj) == simdjson::SUCCESS) {
         bool bench_lock_flag = false;
@@ -5061,214 +5145,10 @@ inline void cleanup_with_retry(BenchmarkContext& context,
     progress_clear_retry_failure(context, batch, RetryKind::Cleanup);
 }
 
-// ----------------- run_unit driver -----------------
-
-template<typename Input, typename Output>
-inline void run_typed_benchmark(
-    BenchmarkExecutionState& state,
-    BenchmarkContext& context,
-    const std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>& on_estimate_resources,
-    const std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>& on_input,
-    const std::function<Output(std::string_view, const ParamMap&, const Input&)>& on_run,
-    const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)>& on_evaluate,
-    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup)
-{
-    using bioseq::instr::installed_profiler_scope;
-    using bioseq::instr::ProfilerBlock;
-
-    const std::string                 data_dir = context.data_dir;
-    const auto counter_handles = resolve_counter_handles(state.config.metrics);
-    const bool by_regions = state.config.by_regions;
-
-    // Pre-built batch list: one batch per (test_case, group). Items
-    // inside a batch run sequentially against one cached Input.
-    auto batches = build_work_batches(state);
-    if (batches.empty()) return;
-
-    auto* scheduler = context.scheduler;
-    DEBUG_ASSERT(scheduler != nullptr,
-        "BenchmarkContext::scheduler must be set by run_impl");
-
-    /// Heap-owned cache of per-batch input/constraint slots. The bodies
-    /// enqueued into the scheduler reference the slots by index;
-    /// lifetime extends through `wait_for_benchmark` (called below)
-    /// which blocks until every body has finished.
-    struct GroupSlot {
-        std::optional<Input> input{};
-        RunConstraints       constraints{};
-    };
-    auto group_slots = std::make_unique<std::vector<GroupSlot>>(batches.size());
-    auto batches_ptr = std::make_unique<std::vector<WorkBatch>>(std::move(batches));
-
-    /// Run exactly one iteration of one cell against `input`. Hot path.
-    auto run_one_iteration = [&context, &state, by_regions, &counter_handles,
-                                &on_run, &on_evaluate](Cell& cell,
-                                                          const Input& input) {
-        const auto& tuple = *cell.tuple;
-
-        ProfilerBlock<profiler_args_t> profiler_block{};
-        installed_profiler_scope<profiler_args_t> profiler_scope{profiler_block};
-
-        const auto counters_before = snapshot_counters(counter_handles);
-
-        const auto t_begin_ns = bioseq::instr::clock::now_ns();
-        const Output output = on_run(tuple.algorithm_name, tuple.params, input);
-        const auto t_end_ns = bioseq::instr::clock::now_ns();
-        const auto iteration_wall_clock_ns = static_cast<double>(t_end_ns - t_begin_ns);
-
-        const auto counters_after = snapshot_counters(counter_handles);
-
-        const auto evaluation_metrics =
-            on_evaluate(tuple.algorithm_name, tuple.params, input, output);
-
-        append_iteration_samples(cell, by_regions, profiler_block,
-                                  iteration_wall_clock_ns, state.config.metrics,
-                                  counters_before, counters_after, evaluation_metrics);
-
-        progress_tick_iteration(context, cell);
-    };
-
-    /// Run every iteration of one item. V16: NO LOCKS — bench-lock and
-    /// serial-concurrency exclusion are enforced by the scheduler's
-    /// admission predicates, so the body never blocks on a process-
-    /// global mutex. This is what restores cross-batch parallelism
-    /// (the V12 cross_bench_mu writer-lock was the dominant
-    /// bottleneck on bench_v10 — see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §0.2).
-    auto run_item_iterations = [run_one_iteration](
-        const WorkBatchItem& item, const Input& input)
-    {
-        for (std::size_t iter = 0; iter < item.cell->iterations; ++iter) {
-            run_one_iteration(*item.cell, input);
-        }
-    };
-
-    /// V16 batch body — no memory acquire/release, no cross_bench_mu.
-    /// Called from TBB worker after the scheduler has admitted the
-    /// batch. The reservation lives entirely scheduler-side.
-    auto run_one_batch_unblocked = [&context, &state, &on_estimate_resources,
-                                       &on_input, &on_cleanup,
-                                       &data_dir, &group_slots,
-                                       run_item_iterations](WorkBatch& batch)
-    {
-        const auto& spec = state.test_cases[batch.test_case_index];
-        auto& slot = (*group_slots)[batch.batch_index];
-        const auto location_str = runtime_location(
-            state.config.config_path, state.config.benchmark_key,
-            spec.name, batch.group_index);
-
-        // 1. Estimate resources (still needed: on_input wants
-        //    `slot.constraints`). The scheduler already reserved the
-        //    same numbers — re-evaluating here is cheap.
-        slot.constraints = on_estimate_resources(
-            data_dir, spec.name, spec.data);
-
-        // 2. on_input with retries. Permanent failure aborts the
-        //    batch (scheduler releases on body return).
-        auto built_input = build_input_with_retry<Input>(
-            context, batch,
-            [&] { return on_input(data_dir, spec.name, spec.data,
-                                   slot.constraints); });
-        if (!built_input.has_value()) {
-            auto reason = fmt::format(
-                "batch '{}' (group {}) gave up after {} attempts at on_input — "
-                "see UI for last error / trace",
-                spec.name, batch.group_index, kMaxTaskInputHandlerErrorCount);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
-                "input_handler_failed_permanently", location_str, reason);
-            progress_mark_batch_aborted(context, batch, reason);
-            return;
-        }
-        slot.input = std::move(built_input);
-
-        // 3. Iterate items × iterations. Lock-free; scheduler enforced
-        //    exclusion.
-        progress_mark_test_case_start(context, batch);
-        for (auto& item : batch.items) {
-            progress_update_label(context, batch, item, state.config.benchmark_key);
-            run_item_iterations(item, *slot.input);
-            progress_tick_item_done(context, batch);
-        }
-
-        // 4. Cleanup with retries — warning on permanent failure.
-        if (on_cleanup) {
-            cleanup_with_retry(context, batch, spec.name, location_str,
-                [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
-        }
-        slot.input.reset();
-        progress_mark_group_done(context, batch);
-    };
-
-    // V16 enqueue path — replaces the V12 `tbb::parallel_for_each`
-    // batch loop. Each batch is enqueued into the scheduler with its
-    // pre-computed memory + lock requirements; bodies are dispatched
-    // by the scheduler when admissible.
-    const auto sys_at_enqueue = snapshot_system_memory();
-    const auto cap_at_enqueue = MemoryBudget::cap_for(
-        sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
-
-    for (auto& batch : *batches_ptr) {
-        const auto& spec = state.test_cases[batch.test_case_index];
-        const auto constraints = on_estimate_resources(
-            data_dir, spec.name, spec.data);
-        const std::size_t total_required =
-            constraints.base_memory + constraints.extra_memory;
-        const auto location_str = runtime_location(
-            state.config.config_path, state.config.benchmark_key,
-            spec.name, batch.group_index);
-
-        // G1.d  Hard error: combined requirements exceed total system RAM.
-        if (total_required >= sys_at_enqueue.total_bytes) {
-            auto reason = fmt::format(
-                "batch '{}' (group {}) requires {} B (base+extra) but the host "
-                "has only {} B total RAM",
-                spec.name, batch.group_index,
-                total_required, sys_at_enqueue.total_bytes);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
-                "memory_budget_not_satisfiable", location_str, reason);
-            progress_mark_batch_aborted(context, batch, reason);
-            continue;       // do not enqueue
-        }
-        // G1.c  Warning: combined requirements exceed buffered cap.
-        if (total_required >= cap_at_enqueue) {
-            emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
-                "memory_budget_oversized", location_str,
-                "batch '{}' (group {}) requires {} B but buffered cap is {} B "
-                "(host total {} B, buffer {:.0f}%)",
-                spec.name, batch.group_index,
-                total_required, cap_at_enqueue,
-                sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
-            // Still enqueue — scheduler will admit once peers free up.
-        }
-
-        ScheduledBatch sb{};
-        sb.benchmark_index    = context.benchmark_index;
-        sb.bench_lock         = state.config.concurrency.bench_lock;
-        sb.concurrency_serial = !state.config.concurrency.concurrency;
-        sb.base_bytes         = constraints.base_memory;
-        sb.extra_bytes        = constraints.extra_memory;
-        sb.group_for_ui       = progress_group_for(
-            context, batch.test_case_index, batch.group_index);
-        sb.location_str       = location_str;
-        sb.test_case_name     = spec.name;
-        sb.test_case_index    = batch.test_case_index;
-        sb.group_index        = batch.group_index;
-        sb.context            = &context;
-        sb.body = [&run_one_batch_unblocked, &batch] {
-            run_one_batch_unblocked(batch);
-        };
-        scheduler->enqueue_batch(std::move(sb));
-    }
-
-    // Block until every batch under this benchmark_index has finished
-    // or aborted. Required to keep `state`, `*group_slots`, and the
-    // captured references alive through every enqueued body's
-    // execution. See main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.6.
-    scheduler->wait_for_benchmark(context.benchmark_index);
-
-    // After wait_for_benchmark returns, all bodies have finished.
-    // batches_ptr / group_slots are still owned by `run_typed_benchmark`'s
-    // stack, so unique_ptr destructors run on the way out.
-}
+// `run_typed_benchmark` was relocated below (just before write_report) so its
+// per-case `--debug` hooks can call DebugReportSink, whose CASE_RESULTS
+// serializer reuses emit_execution_tuple_record + the aggregation helpers
+// defined further down. See the run_unit driver section there.
 
 // ----------------- Sample aggregation (V17) -----------------
 
@@ -5451,6 +5331,27 @@ kAggregatedStatsRegistry{ {
         if (std::isfinite(value)) finite.push_back(value);
     }
     return finite;
+}
+
+[[nodiscard]] inline bool has_any_finite_sample(
+    const std::vector<double>& samples) noexcept
+{
+    return std::any_of(samples.begin(), samples.end(),
+        [](double value) { return std::isfinite(value); });
+}
+
+/// A benchmark can mark an execution cell as "not measured" by returning only
+/// non-finite evaluation metrics. Wall-clock still exists because the framework
+/// times `on_run`, but regression rules must not compare a deliberate skip's
+/// microsecond-scale bookkeeping time against real historical GPU work.
+[[nodiscard]] inline bool region_has_nonfinite_evaluation_sentinel(
+    const std::map<std::string, std::vector<double>>& region_metrics) noexcept
+{
+    for (const auto& [metric_name, samples] : region_metrics) {
+        if (metric_name == "wall_clock_ns" || samples.empty()) continue;
+        if (!has_any_finite_sample(samples)) return true;
+    }
+    return false;
 }
 
 /// Read the requested aggregate from a *raw sample vector*. Non-
@@ -5798,6 +5699,24 @@ using MergedSamplesByPair =
     return merged;
 }
 
+/// Merge only the cells belonging to `case_name` (== ExecutionTuple::
+/// algorithm_name) into a (tuple,test_case)->SampleMap index. Used by the
+/// `--debug` sink to serialize one completed case. Safe because the case's
+/// cells are all finished and immutable when this runs (§4.5).
+[[nodiscard]] inline MergedSamplesByPair merge_case_samples(
+    const BenchmarkExecutionState& state, std::string_view case_name) {
+    std::map<std::pair<const ExecutionTuple*, std::string>,
+             std::vector<const Cell*>> by_pair;
+    for (const auto& cell_ptr : state.cells)
+        if (cell_ptr->tuple->algorithm_name == case_name)
+            by_pair[{cell_ptr->tuple, cell_ptr->test_case->name}].push_back(cell_ptr.get());
+    MergedSamplesByPair merged;
+    for (auto& [pair_key, cells_for_pair] : by_pair)
+        merged[pair_key] = merge_group_samples(
+            std::span<const Cell* const>(cells_for_pair.data(), cells_for_pair.size()));
+    return merged;
+}
+
 /// Look up `region_name -> metric_name -> samples` inside a merged
 /// view. Returns nullptr when any link in the chain is missing.
 [[nodiscard]] inline const std::vector<double>* fetch_merged_samples(
@@ -5916,6 +5835,17 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
     return !output.empty();
 }
 
+/// Wall-clock Unix epoch in milliseconds. The single wall-clock-epoch helper
+/// in the framework: the debug event log uses it directly (ms granularity for
+/// sub-second ordering within a run), and `capture_run_meta` sources its
+/// epoch-seconds `meta.timestamp` from it (`/ 1000`). (`bioseq::instr::clock::
+/// now_ns` is a *monotonic* steady clock, unsuitable for wall-clock event
+/// timestamps, so it is not reused here.)
+[[nodiscard]] inline std::int64_t now_unix_millis() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 /// Capture this run's identity in a single struct. Called once from
 /// `run_impl`; the resulting `ReportMeta` is forwarded to both the
 /// report writer (for the `meta` block) and the regression evaluator
@@ -5926,9 +5856,10 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
     meta.commit = git_head_commit();
     meta.dirty  = git_working_tree_dirty();
     meta.fast   = fast_filter;
+    // Epoch seconds, sourced from the single wall-clock helper (dedup).
+    meta.timestamp = now_unix_millis() / 1000;
+    // Keep a `time_point` for the ISO-8601 `created` string (gmtime_r needs it).
     const auto now = std::chrono::system_clock::now();
-    meta.timestamp = std::chrono::duration_cast<std::chrono::seconds>(
-        now.time_since_epoch()).count();
     const std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm tm_buf{};
     ::gmtime_r(&now_time_t, &tm_buf);
@@ -6120,6 +6051,22 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
         return {};
     }
     return std::string{commit_text};
+}
+
+/// Pull the `meta.fast` flag from a parsed report. Missing metadata means an
+/// older report predates the flag; callers decide whether that is comparable.
+[[nodiscard]] inline std::optional<bool> fast_from_report(
+    simdjson::dom::element report_root) noexcept
+{
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return std::nullopt;
+    const auto meta_obj = try_get_object(*root_obj, "meta");
+    if (!meta_obj.has_value()) return std::nullopt;
+    bool fast = false;
+    if ((*meta_obj).at_key("fast").get(fast) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return fast;
 }
 
 /// Read a JSON `number` field as a double, falling back to
@@ -6645,6 +6592,7 @@ struct HistoricalReportCache {
 [[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
     const RegressionRulesByConfig& regression_rules_by_config,
     const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const ReportMeta&              current_meta,
     std::size_t                    current_index,
     HistoricalReportCache&         history_cache,
     std::vector<ValidationDiag>&   diagnostics_out) noexcept
@@ -6708,13 +6656,23 @@ struct HistoricalReportCache {
 
                             const auto region_it = merged_samples.find(region_name);
                             if (region_it == merged_samples.end()) continue;
+                            const bool not_measured_cell =
+                                region_has_nonfinite_evaluation_sentinel(region_it->second);
+
                             const auto metric_it = region_it->second.find(rule.metric);
                             if (metric_it == region_it->second.end()
                                 || metric_it->second.empty()) continue;
 
                             // Cell has data → counts toward matched_count
-                            // regardless of baseline presence.
+                            // regardless of baseline presence. All-non-finite
+                            // current samples mean "not measured" (for example,
+                            // explicit Vulkan rows on a software ICD), so the
+                            // regression rule is satisfied for this cell.
                             ++matched_count;
+                            if (not_measured_cell
+                                || !has_any_finite_sample(metric_it->second)) {
+                                continue;
+                            }
                             const double now_value =
                                 aggregate_samples(rule.aggregate, metric_it->second);
 
@@ -6735,6 +6693,24 @@ struct HistoricalReportCache {
                             auto* baseline_report = fetch_report(current_index - 1);
                             std::optional<AggregatedSamples> baseline_aggregate;
                             if (baseline_report != nullptr) {
+                                const auto baseline_fast = fast_from_report(baseline_report->root);
+                                if (baseline_fast.has_value()
+                                    && *baseline_fast != current_meta.fast) {
+                                    diagnostics_out.push_back({
+                                        ValidationDiag::Severity::Warning,
+                                        "regression_baseline_mode_mismatch",
+                                        rule_location,
+                                        fmt::format("report_{}.json has meta.fast={} but current run has meta.fast={}; no comparable baseline for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
+                                                    current_index - 1,
+                                                    *baseline_fast ? "true" : "false",
+                                                    current_meta.fast ? "true" : "false",
+                                                    state->config.benchmark_key,
+                                                    tuple.algorithm_name,
+                                                    test_case_name, region_name,
+                                                    rule.metric)
+                                    });
+                                    continue;
+                                }
                                 baseline_aggregate = aggregated_from_report(
                                     baseline_report->root,
                                     state->config.benchmark_key,
@@ -6742,7 +6718,7 @@ struct HistoricalReportCache {
                                     test_case_name, region_name, rule.metric);
                             }
                             if (!baseline_aggregate.has_value()
-                                || baseline_aggregate->samples_count == 0) {
+                                || !has_finite_samples(*baseline_aggregate)) {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_baseline_missing",
@@ -6781,13 +6757,18 @@ struct HistoricalReportCache {
                                 if (hist_report == nullptr) {
                                     history_gap = true; break;
                                 }
+                                const auto hist_fast = fast_from_report(hist_report->root);
+                                if (hist_fast.has_value()
+                                    && *hist_fast != current_meta.fast) {
+                                    history_gap = true; break;
+                                }
                                 auto hist_aggregate = aggregated_from_report(
                                     hist_report->root,
                                     state->config.benchmark_key,
                                     tuple.algorithm_name, tuple.params,
                                     test_case_name, region_name, rule.metric);
                                 if (!hist_aggregate.has_value()
-                                    || hist_aggregate->samples_count == 0) {
+                                    || !has_finite_samples(*hist_aggregate)) {
                                     history_gap = true; break;
                                 }
                                 const double hist_value =
@@ -7097,6 +7078,437 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
     }
 }
 
+/// Emit the per-test-case object from a group-merged sample map: every region
+/// (or just "all_regions" when by_regions=false) and the per-metric
+/// AggregatedSamples object inside it. Empty sample vectors are pruned (the
+/// schema requires `samples_count >= 1`). Lifted out of `write_report`'s local
+/// lambda so the report writer and the `--debug` CASE_RESULTS sink emit
+/// byte-identical per-test-case blocks (one copy, no duplicated emit logic).
+inline void emit_test_case_block(simdjson::builder::string_builder& region_block_builder,
+                                 const SampleMap& merged) {
+    emit_object_with_body(region_block_builder, [&merged](auto& region_outer) {
+        emit_range_with_commas(region_outer, merged,
+            [](auto& region_builder, const auto& region_kv) {
+                emit_kv_with_body(region_builder,
+                    std::string_view{region_kv.first},
+                    [&region_kv](auto& metrics_builder) {
+                        emit_object_with_body(metrics_builder, [&region_kv](auto& metric_outer) {
+                            bool first_metric = true;
+                            for (const auto& metric_kv : region_kv.second) {
+                                if (metric_kv.second.empty()) continue;
+                                if (!first_metric) metric_outer.append_comma();
+                                first_metric = false;
+                                emit_kv_with_body(metric_outer,
+                                    std::string_view{metric_kv.first},
+                                    [&metric_kv](auto& aggregate_builder) {
+                                        emit_aggregated_samples(
+                                            aggregate_builder, metric_kv.second);
+                                    });
+                            }
+                        });
+                    });
+            });
+    });
+}
+
+/// Emit one execution_tuple_record: `{ "tuple": {...}, "test_cases": {...} }`.
+/// `merged` is the (tuple,test_case)->SampleMap index. Lifted out of
+/// `write_report`'s local lambda (merged-index parameterised) so the report
+/// writer and the `--debug` CASE_RESULTS sink share one serializer.
+inline void emit_execution_tuple_record(simdjson::builder::string_builder& builder,
+                                        const BenchmarkExecutionState& state,
+                                        const ExecutionTuple& tuple,
+                                        const MergedSamplesByPair& merged) {
+    emit_object_with_body(builder, [&state, &tuple, &merged](auto& outer) {
+        emit_kv_with_body(outer, "tuple", [&tuple](auto& tuple_b) {
+            emit_object_with_body(tuple_b, [&tuple](auto& alg_b) {
+                emit_key(alg_b, std::string_view{tuple.algorithm_name});
+                emit_param_object(alg_b, tuple.params);
+            });
+        });
+        outer.append_comma();
+        emit_kv_with_body(outer, "test_cases", [&state, &tuple, &merged](auto& cases_b) {
+            emit_object_with_body(cases_b, [&state, &tuple, &merged](auto& cases_inner) {
+                bool first_tc_in_tuple = true;
+                for (const auto& [test_case_name, _iter] : state.config.for_each) {
+                    const auto pair_it = merged.find({&tuple, test_case_name});
+                    if (pair_it == merged.end()) continue;
+                    // Skip if every group produced no samples (e.g.
+                    // matrix.for declared zero iterations).
+                    if (pair_it->second.empty()) continue;
+                    if (!first_tc_in_tuple) cases_inner.append_comma();
+                    first_tc_in_tuple = false;
+                    emit_kv_with_body(cases_inner,
+                        std::string_view{test_case_name},
+                        [&pair_it](auto& inner_b) {
+                            emit_test_case_block(inner_b, pair_it->second);
+                        });
+                }
+            });
+        });
+    });
+}
+
+// ----------------- --debug JSONL event sink -----------------
+
+/// Append-only, crash-resilient JSONL event sink for `--debug`. One instance
+/// per run, owned by run_impl; a non-owning pointer is threaded through
+/// BenchmarkContext::debug_sink. Every emit_* builds one line with the existing
+/// simdjson string_builder helpers and appends it under `mu_` + flush, so a
+/// process crash preserves all already-emitted events. `timestamp` is Unix
+/// epoch milliseconds (sub-second ordering within a run).
+class DebugReportSink {
+public:
+    explicit DebugReportSink(std::filesystem::path path) : path_(std::move(path)) {
+        if (path_.has_parent_path())
+            std::filesystem::create_directories(path_.parent_path());
+        out_.open(path_, std::ios::app | std::ios::binary);
+        if (!out_) bioseq_log<ERR>("[bench_framework] --debug: cannot open '{}'", path_.string());
+    }
+    [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+    void emit_benchmark_started(std::string_view benchmark) {
+        simdjson::builder::string_builder b;
+        emit_object_with_body(b, [&benchmark](auto& o){
+            emit_kv_string(o, "event", "BENCHMARK_STARTED"); o.append_comma();
+            emit_key(o, "timestamp"); o.append(now_unix_millis()); o.append_comma();
+            emit_kv_string(o, "benchmark_name", benchmark);
+        });
+        write_line_(b);
+    }
+
+    void emit_case_started(std::string_view benchmark, std::string_view case_name) {
+        simdjson::builder::string_builder b;
+        emit_object_with_body(b, [&benchmark, &case_name](auto& o){
+            emit_kv_string(o, "event", "CASE_STARTED"); o.append_comma();
+            emit_key(o, "timestamp"); o.append(now_unix_millis()); o.append_comma();
+            emit_kv_string(o, "benchmark_name", benchmark); o.append_comma();
+            emit_kv_string(o, "case_name", case_name);
+        });
+        write_line_(b);
+    }
+
+    void emit_case_results(std::string_view benchmark, std::string_view case_name,
+                           const BenchmarkExecutionState& state) {
+        const auto merged = merge_case_samples(state, case_name);   // §4.5 (immutable cells)
+        simdjson::builder::string_builder b;
+        emit_object_with_body(b, [&benchmark, &case_name, &state, &merged](auto& o){
+            emit_kv_string(o, "event", "CASE_RESULTS"); o.append_comma();
+            emit_key(o, "timestamp"); o.append(now_unix_millis()); o.append_comma();
+            emit_kv_string(o, "benchmark_name", benchmark); o.append_comma();
+            emit_kv_string(o, "case_name", case_name); o.append_comma();
+            emit_kv_with_body(o, "results", [&state, &case_name, &merged](auto& rb){
+                emit_object_with_body(rb, [&state, &case_name, &merged](auto& ri){
+                    emit_kv_with_body(ri, "execution_tuples", [&state, &case_name, &merged](auto& arr){
+                        arr.start_array();
+                        bool first = true;
+                        for (const auto& tuple : state.execution_tuples) {
+                            if (tuple.algorithm_name != case_name) continue;
+                            if (!first) arr.append_comma();
+                            first = false;
+                            emit_execution_tuple_record(arr, state, tuple, merged);
+                        }
+                        arr.end_array();
+                    });
+                });
+            });
+        });
+        write_line_(b);
+    }
+
+    void emit_execution_finished(std::string_view results_path) {
+        simdjson::builder::string_builder b;
+        emit_object_with_body(b, [&results_path](auto& o){
+            emit_kv_string(o, "event", "EXECUTION_FINISHED"); o.append_comma();
+            emit_key(o, "timestamp"); o.append(now_unix_millis()); o.append_comma();
+            emit_kv_string_or_null(o, "results_path", results_path);  // null if empty
+        });
+        write_line_(b);
+    }
+
+private:
+    void write_line_(simdjson::builder::string_builder& b) {
+        std::string_view payload;
+        if (b.view().get(payload) != simdjson::SUCCESS) {
+            bioseq_log<ERR>("[bench_framework] --debug: string_builder allocation failure");
+            return;
+        }
+        std::lock_guard<std::mutex> guard(mu_);
+        if (!out_) return;
+        out_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+        out_.put('\n');
+        out_.flush();                 // push to OS: survives a process crash (not power loss)
+    }
+
+    std::filesystem::path path_;
+    std::ofstream          out_;
+    std::mutex             mu_;
+};
+
+/// Decrement one cell's case counter; on the 0-transition claim the single
+/// CASE_RESULTS emit. Reaching 0 here means every cell of the case ran its
+/// item loop (so the case necessarily `started`). Safe under concurrency: the
+/// acq_rel fetch_sub gives the to-zero thread a happens-after over every
+/// sibling cell write, so merge_case_samples sees a fully-written, immutable
+/// cell set.
+inline void debug_finish_cell(BenchmarkContext& context,
+                              BenchmarkExecutionState& state,
+                              const std::string& case_name) {
+    auto& cp = state.case_debug_progress.at(case_name);
+    if (cp.remaining_cells.fetch_sub(1, std::memory_order_acq_rel) == 1
+        && !cp.emitted.exchange(true, std::memory_order_acq_rel))
+        context.debug_sink->emit_case_results(state.config.benchmark_key, case_name, state);
+}
+
+// ----------------- run_unit driver -----------------
+//
+// Defined here (after DebugReportSink / debug_finish_cell) rather than next to
+// the other run-machinery so the per-case `--debug` hooks below can call the
+// sink: the sink's CASE_RESULTS serializer reuses emit_execution_tuple_record
+// + the aggregation helpers, all of which are defined above this point.
+
+template<typename Input, typename Output>
+inline void run_typed_benchmark(
+    BenchmarkExecutionState& state,
+    BenchmarkContext& context,
+    const std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>& on_estimate_resources,
+    const std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>& on_input,
+    const std::function<Output(std::string_view, const ParamMap&, const Input&)>& on_run,
+    const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)>& on_evaluate,
+    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup)
+{
+    using bioseq::instr::installed_profiler_scope;
+    using bioseq::instr::ProfilerBlock;
+
+    const std::string                 data_dir = context.data_dir;
+    const auto counter_handles = resolve_counter_handles(state.config.metrics);
+    const bool by_regions = state.config.by_regions;
+
+    // Pre-built batch list: one batch per (test_case, group). Items
+    // inside a batch run sequentially against one cached Input.
+    auto batches = build_work_batches(state);
+    if (batches.empty()) return;
+
+    // --debug: count cells per case (algorithm name). The map is fully shaped
+    // here (single-threaded, before enqueue); thereafter only the per-node
+    // atomics mutate, so concurrent reads of nodes + atomic updates are safe.
+    if (context.debug_sink != nullptr) {
+        for (const auto& cell_ptr : state.cells)
+            state.case_debug_progress[cell_ptr->tuple->algorithm_name]
+                .remaining_cells.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    auto* scheduler = context.scheduler;
+    DEBUG_ASSERT(scheduler != nullptr,
+        "BenchmarkContext::scheduler must be set by run_impl");
+
+    /// Heap-owned cache of per-batch input/constraint slots. The bodies
+    /// enqueued into the scheduler reference the slots by index;
+    /// lifetime extends through `wait_for_benchmark` (called below)
+    /// which blocks until every body has finished.
+    struct GroupSlot {
+        std::optional<Input> input{};
+        RunConstraints       constraints{};
+    };
+    auto group_slots = std::make_unique<std::vector<GroupSlot>>(batches.size());
+    auto batches_ptr = std::make_unique<std::vector<WorkBatch>>(std::move(batches));
+
+    /// Run exactly one iteration of one cell against `input`. Hot path.
+    auto run_one_iteration = [&context, &state, by_regions, &counter_handles,
+                                &on_run, &on_evaluate](Cell& cell,
+                                                          const Input& input) {
+        const auto& tuple = *cell.tuple;
+
+        ProfilerBlock<profiler_args_t> profiler_block{};
+        installed_profiler_scope<profiler_args_t> profiler_scope{profiler_block};
+
+        const auto counters_before = snapshot_counters(counter_handles);
+
+        const auto t_begin_ns = bioseq::instr::clock::now_ns();
+        const Output output = on_run(tuple.algorithm_name, tuple.params, input);
+        const auto t_end_ns = bioseq::instr::clock::now_ns();
+        const auto iteration_wall_clock_ns = static_cast<double>(t_end_ns - t_begin_ns);
+
+        const auto counters_after = snapshot_counters(counter_handles);
+
+        const auto evaluation_metrics =
+            on_evaluate(tuple.algorithm_name, tuple.params, input, output);
+
+        append_iteration_samples(cell, by_regions, profiler_block,
+                                  iteration_wall_clock_ns, state.config.metrics,
+                                  counters_before, counters_after, evaluation_metrics);
+
+        progress_tick_iteration(context, cell);
+    };
+
+    /// Run every iteration of one item. V16: NO LOCKS — bench-lock and
+    /// serial-concurrency exclusion are enforced by the scheduler's
+    /// admission predicates, so the body never blocks on a process-
+    /// global mutex. This is what restores cross-batch parallelism
+    /// (the V12 cross_bench_mu writer-lock was the dominant
+    /// bottleneck on bench_v10 — see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §0.2).
+    auto run_item_iterations = [run_one_iteration](
+        const WorkBatchItem& item, const Input& input)
+    {
+        for (std::size_t iter = 0; iter < item.cell->iterations; ++iter) {
+            run_one_iteration(*item.cell, input);
+        }
+    };
+
+    /// V16 batch body — no memory acquire/release, no cross_bench_mu.
+    /// Called from TBB worker after the scheduler has admitted the
+    /// batch. The reservation lives entirely scheduler-side.
+    auto run_one_batch_unblocked = [&context, &state, &on_estimate_resources,
+                                       &on_input, &on_cleanup,
+                                       &data_dir, &group_slots,
+                                       run_item_iterations](WorkBatch& batch)
+    {
+        const auto& spec = state.test_cases[batch.test_case_index];
+        auto& slot = (*group_slots)[batch.batch_index];
+        const auto location_str = runtime_location(
+            state.config.config_path, state.config.benchmark_key,
+            spec.name, batch.group_index);
+
+        // 1. Estimate resources (still needed: on_input wants
+        //    `slot.constraints`). The scheduler already reserved the
+        //    same numbers — re-evaluating here is cheap.
+        slot.constraints = on_estimate_resources(
+            data_dir, spec.name, spec.data);
+
+        // 2. on_input with retries. Permanent failure aborts the
+        //    batch (scheduler releases on body return).
+        auto built_input = build_input_with_retry<Input>(
+            context, batch,
+            [&] { return on_input(data_dir, spec.name, spec.data,
+                                   slot.constraints); });
+        if (!built_input.has_value()) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) gave up after {} attempts at on_input — "
+                "see UI for last error / trace",
+                spec.name, batch.group_index, kMaxTaskInputHandlerErrorCount);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "input_handler_failed_permanently", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            return;
+        }
+        slot.input = std::move(built_input);
+
+        // 3. Iterate items × iterations. Lock-free; scheduler enforced
+        //    exclusion.
+        progress_mark_test_case_start(context, batch);
+        for (auto& item : batch.items) {
+            progress_update_label(context, batch, item, state.config.benchmark_key);
+            // --debug CASE_STARTED: first time any cell of this case begins.
+            if (context.debug_sink != nullptr) {
+                auto& cp = state.case_debug_progress.at(item.cell->tuple->algorithm_name);
+                if (!cp.started.exchange(true, std::memory_order_relaxed))
+                    context.debug_sink->emit_case_started(state.config.benchmark_key,
+                                                          item.cell->tuple->algorithm_name);
+            }
+            run_item_iterations(item, *slot.input);
+            progress_tick_item_done(context, batch);
+            // --debug: incremental CASE_RESULTS on the case counter's 0-transition.
+            if (context.debug_sink != nullptr)
+                debug_finish_cell(context, state, item.cell->tuple->algorithm_name);
+        }
+
+        // 4. Cleanup with retries — warning on permanent failure.
+        if (on_cleanup) {
+            cleanup_with_retry(context, batch, spec.name, location_str,
+                [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
+        }
+        slot.input.reset();
+        progress_mark_group_done(context, batch);
+    };
+
+    // V16 enqueue path — replaces the V12 `tbb::parallel_for_each`
+    // batch loop. Each batch is enqueued into the scheduler with its
+    // pre-computed memory + lock requirements; bodies are dispatched
+    // by the scheduler when admissible.
+    const auto sys_at_enqueue = snapshot_system_memory();
+    const auto cap_at_enqueue = MemoryBudget::cap_for(
+        sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
+
+    for (auto& batch : *batches_ptr) {
+        const auto& spec = state.test_cases[batch.test_case_index];
+        const auto constraints = on_estimate_resources(
+            data_dir, spec.name, spec.data);
+        const std::size_t total_required =
+            constraints.base_memory + constraints.extra_memory;
+        const auto location_str = runtime_location(
+            state.config.config_path, state.config.benchmark_key,
+            spec.name, batch.group_index);
+
+        // G1.d  Hard error: combined requirements exceed total system RAM.
+        if (total_required >= sys_at_enqueue.total_bytes) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) requires {} B (base+extra) but the host "
+                "has only {} B total RAM",
+                spec.name, batch.group_index,
+                total_required, sys_at_enqueue.total_bytes);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "memory_budget_not_satisfiable", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            continue;       // do not enqueue
+        }
+        // G1.c  Warning: combined requirements exceed buffered cap.
+        if (total_required >= cap_at_enqueue) {
+            emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
+                "memory_budget_oversized", location_str,
+                "batch '{}' (group {}) requires {} B but buffered cap is {} B "
+                "(host total {} B, buffer {:.0f}%)",
+                spec.name, batch.group_index,
+                total_required, cap_at_enqueue,
+                sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
+            // Still enqueue — scheduler will admit once peers free up.
+        }
+
+        ScheduledBatch sb{};
+        sb.benchmark_index    = context.benchmark_index;
+        sb.bench_lock         = state.config.concurrency.bench_lock;
+        sb.concurrency_serial = !state.config.concurrency.concurrency;
+        sb.base_bytes         = constraints.base_memory;
+        sb.extra_bytes        = constraints.extra_memory;
+        sb.group_for_ui       = progress_group_for(
+            context, batch.test_case_index, batch.group_index);
+        sb.location_str       = location_str;
+        sb.test_case_name     = spec.name;
+        sb.test_case_index    = batch.test_case_index;
+        sb.group_index        = batch.group_index;
+        sb.context            = &context;
+        sb.body = [&run_one_batch_unblocked, &batch] {
+            run_one_batch_unblocked(batch);
+        };
+        scheduler->enqueue_batch(std::move(sb));
+    }
+
+    // Block until every batch under this benchmark_index has finished
+    // or aborted. Required to keep `state`, `*group_slots`, and the
+    // captured references alive through every enqueued body's
+    // execution. See main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.6.
+    scheduler->wait_for_benchmark(context.benchmark_index);
+
+    // --debug end-of-benchmark sweep: flush any started-but-unemitted case
+    // (counter never hit 0 because some of its batches aborted / were skipped /
+    // idle-timed-out). Single-threaded here — all bodies have joined, so no
+    // concurrent emit races this sweep. The `emitted` exchange dedups vs the
+    // incremental path (a fully-completed case was already claimed there). A
+    // case that never started (started==false) is skipped: no work ⇒ no result.
+    if (context.debug_sink != nullptr) {
+        for (auto& [case_name, cp] : state.case_debug_progress) {
+            if (cp.started.load(std::memory_order_relaxed)
+                && !cp.emitted.exchange(true, std::memory_order_acq_rel))
+                context.debug_sink->emit_case_results(state.config.benchmark_key,
+                                                      case_name, state);
+        }
+    }
+
+    // After wait_for_benchmark returns, all bodies have finished.
+    // batches_ptr / group_slots are still owned by `run_typed_benchmark`'s
+    // stack, so unique_ptr destructors run on the way out.
+}
+
 /// Serialise the per-benchmark execution state map plus the global
 /// violations / regressions / sanity-warnings lists into the supplied
 /// `output_path`. Returns the resolved path on success, empty string
@@ -7239,76 +7651,9 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
             .first->second;
     };
 
-    /// Emit the per-test-case object from a group-merged sample map:
-    /// every region (or just "all_regions" when by_regions=false) and
-    /// the per-metric AggregatedSamples object inside it. V17 swapped
-    /// the per-iteration array out for the fixed-shape aggregate.
-    /// Empty sample vectors are pruned: the schema requires
-    /// `samples_count >= 1`, and a metric that observed zero values
-    /// is genuinely absent from the cell rather than present with a
-    /// zeroed aggregate. The pre-V17 writer also dropped empty
-    /// arrays, so this preserves the on-disk semantics.
-    auto emit_test_case_block = [&](auto& region_block_builder,
-                                      const SampleMap& merged) {
-        emit_object_with_body(region_block_builder, [&](auto& region_outer) {
-            emit_range_with_commas(region_outer, merged,
-                [](auto& region_builder, const auto& region_kv) {
-                    emit_kv_with_body(region_builder,
-                        std::string_view{region_kv.first},
-                        [&](auto& metrics_builder) {
-                            emit_object_with_body(metrics_builder, [&](auto& metric_outer) {
-                                bool first_metric = true;
-                                for (const auto& metric_kv : region_kv.second) {
-                                    if (metric_kv.second.empty()) continue;
-                                    if (!first_metric) metric_outer.append_comma();
-                                    first_metric = false;
-                                    emit_kv_with_body(metric_outer,
-                                        std::string_view{metric_kv.first},
-                                        [&](auto& aggregate_builder) {
-                                            emit_aggregated_samples(
-                                                aggregate_builder, metric_kv.second);
-                                        });
-                                }
-                            });
-                        });
-                });
-        });
-    };
-
-    /// Emit one execution tuple's `{ "tuple": {...}, "test_cases": {...} }`.
-    auto emit_one_execution_tuple = [&](auto& b,
-                                          const BenchmarkExecutionState& state,
-                                          const ExecutionTuple& tuple) {
-        emit_object_with_body(b, [&](auto& outer) {
-            emit_kv_with_body(outer, "tuple", [&](auto& tuple_b) {
-                emit_object_with_body(tuple_b, [&](auto& alg_b) {
-                    emit_key(alg_b, std::string_view{tuple.algorithm_name});
-                    emit_param_object(alg_b, tuple.params);
-                });
-            });
-            outer.append_comma();
-            emit_kv_with_body(outer, "test_cases", [&](auto& cases_b) {
-                emit_object_with_body(cases_b, [&](auto& cases_inner) {
-                    const auto& merged_index = merged_for_writer(state);
-                    bool first_tc_in_tuple = true;
-                    for (const auto& [test_case_name, _iter] : state.config.for_each) {
-                        const auto pair_it = merged_index.find({&tuple, test_case_name});
-                        if (pair_it == merged_index.end()) continue;
-                        // Skip if every group produced no samples (e.g.
-                        // matrix.for declared zero iterations).
-                        if (pair_it->second.empty()) continue;
-                        if (!first_tc_in_tuple) cases_inner.append_comma();
-                        first_tc_in_tuple = false;
-                        emit_kv_with_body(cases_inner,
-                            std::string_view{test_case_name},
-                            [&](auto& inner_b) {
-                                emit_test_case_block(inner_b, pair_it->second);
-                            });
-                    }
-                });
-            });
-        });
-    };
+    // `emit_test_case_block` and `emit_one_execution_tuple` were lifted to the
+    // free functions `emit_test_case_block` / `emit_execution_tuple_record`
+    // above (shared with the --debug CASE_RESULTS sink — one serializer).
 
     /// Emit one benchmark's full sub-object (title / description / location /
     /// test_case_descriptions / execution_tuples).
@@ -7338,7 +7683,8 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
                     tuples_b.start_array();
                     emit_range_with_commas(tuples_b, state.execution_tuples,
                         [&](auto& tuple_b, const ExecutionTuple& exec_tuple) {
-                            emit_one_execution_tuple(tuple_b, state, exec_tuple);
+                            emit_execution_tuple_record(tuple_b, state, exec_tuple,
+                                                        merged_for_writer(state));
                         });
                     tuples_b.end_array();
                 });
@@ -8727,6 +9073,58 @@ inline void render_summary(
 
 // ----------------- CLI parsing -----------------
 
+/// Parse one `key=v1,v2,...` spec into `filter`. Records human-readable
+/// "<code>:<message>" strings into `errors` on any problem. Empty values,
+/// empty items, unknown keys, and repeated dimensions are all errors.
+inline void parse_one_filter_into(std::string_view spec,
+                                  FilterSpec& filter,
+                                  std::vector<std::string>& errors) noexcept {
+    const auto eq = spec.find('=');
+    if (eq == std::string_view::npos || eq == 0) {
+        errors.emplace_back(fmt::format(
+            "filter_malformed:--filter '{}' is not of the form key=value", spec));
+        return;
+    }
+    const std::string_view key = spec.substr(0, eq);
+    const std::string_view rhs = spec.substr(eq + 1);
+    if (rhs.empty()) {
+        errors.emplace_back(fmt::format(
+            "filter_malformed:--filter '{}' has an empty value list", spec));
+        return;
+    }
+    // Split rhs on ',', rejecting empty items (e.g. "a,,b" or "a,").
+    std::vector<std::string> values;
+    std::size_t start = 0;
+    while (start <= rhs.size()) {
+        const auto comma = rhs.find(',', start);
+        const auto end = (comma == std::string_view::npos) ? rhs.size() : comma;
+        const std::string_view item = rhs.substr(start, end - start);
+        if (item.empty()) {
+            errors.emplace_back(fmt::format(
+                "filter_malformed:--filter '{}' has an empty item", spec));
+            return;
+        }
+        values.emplace_back(item);
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+    }
+    // Bind to the right axis; reject a second use of the same axis.
+    auto bind = [&values, &errors](std::optional<std::vector<std::string>>& slot,
+                                   std::string_view dim_name) {
+        if (slot.has_value()) {
+            errors.emplace_back(fmt::format(
+                "filter_duplicate_dimension:--filter {} given more than once", dim_name));
+            return;
+        }
+        slot = std::move(values);
+    };
+    if      (key == "tags")      bind(filter.tags,      "tags");
+    else if (key == "benchmark") bind(filter.benchmark, "benchmark");
+    else if (key == "cases")     bind(filter.cases,     "cases");
+    else errors.emplace_back(fmt::format(
+        "filter_unknown_key:--filter key '{}' must be tags|benchmark|cases", key));
+}
+
 /// Parse the framework CLI flags out of `argv`. Unknown flags are
 /// silently ignored (the user may layer their own flag parsing on top by
 /// inspecting argv before calling `run`). Runs first inside `run_impl` so a
@@ -8780,6 +9178,15 @@ inline void render_summary(
                 parsed.memory_buffer_pct = static_cast<double>(pct);
             }
             ++i;
+        } else if (arg == "--debug") {
+            parsed.debug = true;
+        } else if (arg == "--filter" && (i + 1) < argc) {
+            const std::string_view spec{argv[i + 1]};
+            ++i;
+            parse_one_filter_into(spec, parsed.filter, parsed.cli_errors);
+        } else if (arg == "--filter") {
+            parsed.cli_errors.emplace_back(
+                "filter_malformed:--filter requires an argument like tags=a,b");
         }
     }
     return parsed;
@@ -9285,6 +9692,47 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
 // ----------------- run_impl -----------------
 
+/// Lightweight (tags, over-keys) view of one benchmark block, used by the
+/// `--filter` pre-pass to select benchmarks before the parallel run.
+struct BenchmarkFilterMetadata {
+    std::string              benchmark_key;
+    std::vector<std::string> tags;        // <key>.tags
+    std::vector<std::string> case_names;  // keys of <key>.matrix.over
+    bool                     parsed_ok = false;  // false => treat as no tags/no cases
+};
+
+/// Best-effort extraction of (tags, over-keys) for one benchmark block.
+/// Never fails the run — on any parse problem returns parsed_ok=false and the
+/// closure's full parse will surface the real schema error later. Reads
+/// exactly the two fields `parse_benchmark_block` walks (`tags`, `matrix.over`
+/// keys); keep the two field reads in sync if the config layout ever changes.
+[[nodiscard]] inline BenchmarkFilterMetadata extract_filter_metadata(
+    const std::string& config_path, const std::string& benchmark_key) noexcept {
+    BenchmarkFilterMetadata meta;
+    meta.benchmark_key = benchmark_key;
+    const std::string body = slurp_file(std::filesystem::path{config_path});
+    if (body.empty()) return meta;
+    simdjson::dom::parser parser;
+    simdjson::dom::element root;
+    if (parser.parse(body).get(root) != simdjson::SUCCESS) return meta;
+    simdjson::dom::object bench_obj;
+    if (root[benchmark_key].get(bench_obj) != simdjson::SUCCESS) return meta;
+    simdjson::dom::array tags_array;
+    if (bench_obj["tags"].get(tags_array) == simdjson::SUCCESS) {
+        for (auto t : tags_array) {
+            std::string_view sv;
+            if (t.get(sv) == simdjson::SUCCESS) meta.tags.emplace_back(sv);
+        }
+    }
+    simdjson::dom::object matrix_obj, over_obj;
+    if (bench_obj["matrix"].get(matrix_obj) == simdjson::SUCCESS
+        && matrix_obj["over"].get(over_obj) == simdjson::SUCCESS) {
+        for (auto kv : over_obj) meta.case_names.emplace_back(kv.key);
+    }
+    meta.parsed_ok = true;
+    return meta;
+}
+
 /// Top-level orchestrator. Owns: CLI parsing, TBB arena setup, scheduler,
 /// the ProgressState lifetime, the violations + reports maps,
 /// and the final report write + violations print. Returns 0 if every rule
@@ -9307,8 +9755,25 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         if (cli.threads_override.has_value()) {
             bioseq_log<WRN>("[bench_framework] --ui ignores --threads (no benchmarks run)");
         }
+        if (!cli.filter.empty()) {
+            bioseq_log<WRN>("[bench_framework] --ui ignores --filter (no benchmarks run)");
+        }
+        if (cli.debug) {
+            bioseq_log<WRN>("[bench_framework] --ui ignores --debug (no benchmarks run)");
+        }
         return ui_mode_main(report_dir, cli);
     }
+
+    // Determine the index for this run up front (non-UI path only). Reads
+    // existing report_<N>.json files; writes report_<max + 1>.json. First run
+    // on a clean dir → 1. Hoisted here (from the late report-write site) so the
+    // `--debug` file name report_debug_<N>.jsonl matches the eventual
+    // report_<N>.json. `max_existing_report_index` is a read-only noexcept
+    // reader and nothing writes report_<N>.json before the write site below,
+    // so the hoist is behaviour-preserving.
+    const std::filesystem::path report_dir_path{report_dir};
+    const std::size_t current_index =
+        max_existing_report_index(report_dir_path).value_or(0) + 1;
 
     bioseq_log<INF>("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
                  report_dir, data_dir, benchmarks.size());
@@ -9359,6 +9824,132 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     std::map<std::string, std::unique_ptr<BenchmarkExecutionState>> reports;
     RegressionRulesByConfig regression_rules_by_config;
 
+    // ---- --filter / --debug pre-pass: validate, select, prune. ----
+    // Runs single-threaded before progress/scheduler are wired, so a
+    // filtered-out benchmark never appears on the dashboard or in the report.
+    const FilterSpec& f = cli.filter;
+    std::vector<ValidationDiag> filter_diags;
+
+    // (1) CLI-level launch errors — ALWAYS checked, even with no filter.
+    for (const auto& raw : cli.cli_errors) {
+        const auto colon = raw.find(':');
+        filter_diags.push_back({ ValidationDiag::Severity::Error,
+            std::string{raw.substr(0, colon)}, "cli:--filter",
+            std::string{raw.substr(colon + 1)} });
+    }
+    // --debug requires a non-empty filter (§4.2).
+    if (cli.debug && f.empty()) {
+        filter_diags.push_back({ ValidationDiag::Severity::Error,
+            "debug_requires_filter", "cli:--debug",
+            "--debug needs a non-empty --filter: it is for targeted runs, not for "
+            "instrumenting an entire benchmark sweep. Add e.g. --filter benchmark=<key>." });
+    }
+
+    // The case allow-list handed to every closure (nullopt == "all cases").
+    std::optional<std::set<std::string>> case_allow_list;
+    if (f.cases) case_allow_list.emplace(f.cases->begin(), f.cases->end());
+
+    // (2) Selection + warnings — ONLY when a filter is present. `runnable`
+    // defaults to keep-everything so the no-filter path does NO config
+    // re-parse and NO pruning (zero overhead on the default run).
+    std::vector<char> runnable(selected.size(), 1);
+    if (!f.empty()) {
+        std::vector<BenchmarkFilterMetadata> meta;
+        meta.reserve(selected.size());
+        for (const auto& erased : selected)
+            meta.push_back(extract_filter_metadata(erased.config_path, erased.benchmark_key));
+
+        // keep[i] = passes tag+benchmark filter.
+        std::vector<char> keep(selected.size(), 1);
+        for (std::size_t i = 0; i < selected.size(); ++i) {
+            if (f.tags) {
+                const auto& bt = meta[i].tags;
+                const bool hit = std::any_of(f.tags->begin(), f.tags->end(),
+                    [&bt](const std::string& t){ return std::find(bt.begin(), bt.end(), t) != bt.end(); });
+                if (!hit) keep[i] = 0;
+            }
+            if (f.benchmark) {
+                const bool hit = std::find(f.benchmark->begin(), f.benchmark->end(),
+                                           selected[i].benchmark_key) != f.benchmark->end();
+                if (!hit) keep[i] = 0;
+            }
+        }
+        // runnable[i] = keep[i] AND has >=1 case after the cases filter.
+        for (std::size_t i = 0; i < selected.size(); ++i) {
+            if (!keep[i]) { runnable[i] = 0; continue; }
+            if (!f.cases) { runnable[i] = 1; continue; }
+            runnable[i] = std::any_of(meta[i].case_names.begin(), meta[i].case_names.end(),
+                [&f](const std::string& c){ return std::find(f.cases->begin(), f.cases->end(), c) != f.cases->end(); });
+        }
+
+        // Warnings: unknown tag / benchmark (UNIVERSE scope).
+        if (f.tags) for (const auto& t : *f.tags) {
+            const bool known = std::any_of(meta.begin(), meta.end(), [&t](const auto& m){
+                return std::find(m.tags.begin(), m.tags.end(), t) != m.tags.end(); });
+            if (!known) filter_diags.push_back({ ValidationDiag::Severity::Warning,
+                "filter_unknown_tag", "cli:--filter tags",
+                fmt::format("tag '{}' is declared by no benchmark", t) });
+        }
+        if (f.benchmark) for (const auto& k : *f.benchmark) {
+            const bool known = std::any_of(selected.begin(), selected.end(),
+                [&k](const auto& e){ return e.benchmark_key == k; });
+            if (!known) filter_diags.push_back({ ValidationDiag::Severity::Warning,
+                "filter_unknown_benchmark", "cli:--filter benchmark",
+                fmt::format("benchmark key '{}' matches no registered benchmark", k) });
+        }
+        // Warning: unknown case (KEPT-subset scope, per the prompt).
+        if (f.cases) for (const auto& c : *f.cases) {
+            bool known = false;
+            for (std::size_t i = 0; i < selected.size() && !known; ++i)
+                if (keep[i]) known = std::find(meta[i].case_names.begin(),
+                                               meta[i].case_names.end(), c) != meta[i].case_names.end();
+            if (!known) filter_diags.push_back({ ValidationDiag::Severity::Warning,
+                "filter_unknown_case", "cli:--filter cases",
+                fmt::format("case '{}' is an over-key of no tag/benchmark-selected benchmark", c) });
+        }
+
+        // Hard error: nothing left to run.
+        if (std::count(runnable.begin(), runnable.end(), 1) == 0)
+            filter_diags.push_back({ ValidationDiag::Severity::Error,
+                "filter_selected_nothing", "cli:--filter",
+                "the supplied --filter matched no runnable (benchmark, case) combination" });
+    }
+
+    // (3) Drain + abort. Compute had_error BEFORE the move (a moved-from
+    //     vector is empty, so checking it post-drain would always pass).
+    const bool filter_had_error = std::any_of(filter_diags.begin(), filter_diags.end(),
+        [](const auto& d){ return d.severity == ValidationDiag::Severity::Error; });
+    {
+        std::lock_guard<std::mutex> guard(diagnostics_mu);
+        for (auto& d : filter_diags) diagnostics.push_back(std::move(d));
+    }
+    if (filter_had_error) {
+        report_diagnostics(std::span<const ValidationDiag>{diagnostics}, "filter");
+        return 1;     // early exit BEFORE spawning progress thread / scheduler work
+    }
+
+    // (4) Prune `selected` to the runnable set (no-op when no filter).
+    if (!f.empty()) {
+        std::vector<ErasedBenchmark> pruned;
+        for (std::size_t i = 0; i < selected.size(); ++i)
+            if (runnable[i]) pruned.push_back(std::move(selected[i]));
+        selected = std::move(pruned);
+    }
+
+    // ---- Construct the --debug sink (only when requested), before the
+    //      progress thread. A non-owning pointer is threaded into each
+    //      BenchmarkContext (§3.7). ----
+    std::unique_ptr<DebugReportSink> debug_sink;
+    DebugReportSink* debug_sink_ptr = nullptr;
+    if (cli.debug) {
+        const auto debug_path =
+            report_dir_path / fmt::format("report_debug_{}.jsonl", current_index);
+        debug_sink = std::make_unique<DebugReportSink>(debug_path);
+        if (debug_sink->ok()) debug_sink_ptr = debug_sink.get();
+        bioseq_log<INF>("[bench_framework] --debug: streaming events to {}",
+                        debug_path.string());
+    }
+
     // Process-wide memory budget shared by every benchmark closure.
     // V12: budget recomputed dynamically from hwinfo on every check;
     // the only knob is the safety buffer percentage.
@@ -9398,31 +9989,78 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
     std::thread progress_thread{[&progress] { render_progress_loop(progress); }};
 
-    bench_arena.execute([&] {
-        oneapi::tbb::parallel_for_each(
-            selected.begin(), selected.end(),
-            [&](ErasedBenchmark& erased) {
-                const std::size_t benchmark_index = static_cast<std::size_t>(
-                    &erased - selected.data());
-                BenchmarkContext context;
-                context.data_dir                  = data_dir;
-                context.report_dir                = report_dir;
-                context.fast_filter               = cli.fast_filter;
-                context.progress                  = &progress;
-                context.benchmark_index           = benchmark_index;
-                context.violations_mu             = &violations_mu;
-                context.violations                = &violations;
-                context.reports_mu                = &reports_mu;
-                context.reports                   = &reports;
-                context.diagnostics_mu            = &diagnostics_mu;
-                context.diagnostics               = &diagnostics;
-                context.regression_rules_mu       = &regression_rules_mu;
-                context.regression_rules_by_config = &regression_rules_by_config;
-                context.scheduler                  = &scheduler;
+    std::vector<std::size_t> benchmark_indices;
+    benchmark_indices.reserve(selected.size());
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+        benchmark_indices.push_back(index);
+    }
+    const unsigned max_driver_concurrency =
+        thread_count > 1 ? std::max(1u, thread_count / 2u) : 1u;
+    const unsigned driver_concurrency = std::max(
+        1u,
+        std::min<unsigned>(
+            static_cast<unsigned>(benchmark_indices.size()),
+            max_driver_concurrency));
+    oneapi::tbb::task_arena driver_arena(static_cast<int>(driver_concurrency));
+    driver_arena.execute(
+        [&benchmark_indices,
+         &selected,
+         &data_dir,
+         &report_dir,
+         &cli,
+         &progress,
+         &violations_mu,
+         &violations,
+         &reports_mu,
+         &reports,
+         &diagnostics_mu,
+         &diagnostics,
+         &regression_rules_mu,
+         &regression_rules_by_config,
+         &scheduler,
+         &case_allow_list,
+         &debug_sink_ptr] {
+            oneapi::tbb::parallel_for_each(
+                benchmark_indices.begin(),
+                benchmark_indices.end(),
+                [&selected,
+                 &data_dir,
+                 &report_dir,
+                 &cli,
+                 &progress,
+                 &violations_mu,
+                 &violations,
+                 &reports_mu,
+                 &reports,
+                 &diagnostics_mu,
+                 &diagnostics,
+                 &regression_rules_mu,
+                 &regression_rules_by_config,
+                 &scheduler,
+                 &case_allow_list,
+                 &debug_sink_ptr](std::size_t benchmark_index) {
+                    ErasedBenchmark& erased = selected[benchmark_index];
+                    BenchmarkContext context;
+                    context.data_dir                  = data_dir;
+                    context.report_dir                = report_dir;
+                    context.fast_filter               = cli.fast_filter;
+                    context.progress                  = &progress;
+                    context.benchmark_index           = benchmark_index;
+                    context.violations_mu             = &violations_mu;
+                    context.violations                = &violations;
+                    context.reports_mu                = &reports_mu;
+                    context.reports                   = &reports;
+                    context.diagnostics_mu            = &diagnostics_mu;
+                    context.diagnostics               = &diagnostics;
+                    context.regression_rules_mu       = &regression_rules_mu;
+                    context.regression_rules_by_config = &regression_rules_by_config;
+                    context.scheduler                  = &scheduler;
+                    context.filter_cases = case_allow_list ? &*case_allow_list : nullptr;
+                    context.debug_sink   = debug_sink_ptr;
 
-                erased.execute(context);
-            });
-    });
+                    erased.execute(context);
+                });
+        });
 
     // Defence-in-depth: every closure already drains its own batches
     // via `wait_for_benchmark` before returning. Should be a no-op,
@@ -9450,11 +10088,8 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     const bool diagnostics_had_errors = report_diagnostics(
         std::span<const ValidationDiag>{diagnostics}, "configuration");
 
-    // Determine the index for this run. Reads existing report_<N>.json
-    // files; writes report_<max + 1>.json. First run on a clean dir → 1.
-    const std::filesystem::path report_dir_path{report_dir};
-    const std::size_t current_index =
-        max_existing_report_index(report_dir_path).value_or(0) + 1;
+    // `report_dir_path` / `current_index` were computed up front (hoisted so
+    // the --debug file name report_debug_<N>.jsonl matches report_<N>.json).
     bioseq_log<INF>("[bench_framework] writing run as report_{}.json", current_index);
 
     // Single shared parser-cache for every consumer that wants to walk
@@ -9469,7 +10104,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     std::vector<ValidationDiag> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
         regression_rules_by_config, reports,
-        current_index, history_cache, regression_eval_diagnostics);
+        run_meta, current_index, history_cache, regression_eval_diagnostics);
     const bool regression_eval_had_errors = report_diagnostics(
         std::span<const ValidationDiag>{regression_eval_diagnostics},
         "regression");
@@ -9487,6 +10122,12 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                                            violations, regressions, sanity_warnings);
     if (!report_path.empty()) {
         bioseq_log<INF>("[bench_framework] wrote {}", report_path);
+    }
+
+    // --debug: final event. `report_path` is the absolute report path, or ""
+    // (→ JSON null) if the write failed. Last line of the jsonl stream.
+    if (debug_sink_ptr != nullptr) {
+        debug_sink_ptr->emit_execution_finished(report_path);
     }
 
     // Sanity-check our own report against the output schema. Failures here
@@ -9622,7 +10263,25 @@ template<typename Input, typename Output>
 
         bool expansion_ok = true;
         state.execution_tuples = detail::expand_matrix(state.config, expansion_ok);
-        if (!expansion_ok || state.execution_tuples.empty()) {
+        if (!expansion_ok) {
+            bioseq_log<ERR>("[bench_framework] benchmark '{}' matrix expansion failed",
+                 erased_benchmark_key);
+            return;
+        }
+        // Apply `--filter cases=`: keep only allow-listed over-keys (algorithm names).
+        if (context.filter_cases != nullptr) {
+            std::erase_if(state.execution_tuples,
+                [&context](const detail::ExecutionTuple& t){
+                    return !context.filter_cases->contains(t.algorithm_name);
+                });
+            if (state.execution_tuples.empty()) {
+                // Benign: the pre-pass already proved >=1 case matches, but a
+                // config edited between pre-pass and parse could differ. Skip.
+                bioseq_log<INF>("[bench_framework] '{}' has no cases matching --filter cases=; skipping",
+                                erased_benchmark_key);
+                return;
+            }
+        } else if (state.execution_tuples.empty()) {
             bioseq_log<ERR>("[bench_framework] benchmark '{}' produced no execution tuples",
                  erased_benchmark_key);
             return;
@@ -9693,6 +10352,12 @@ template<typename Input, typename Output>
         // body just hands off to `run_typed_benchmark`, which enqueues
         // batches into the scheduler and blocks via
         // `wait_for_benchmark` before returning.
+
+        // --debug: BENCHMARK_STARTED — emitted single-threaded before any
+        // CASE_* event for this benchmark (only when it actually has cells).
+        if (context.debug_sink != nullptr && !state.cells.empty()) {
+            context.debug_sink->emit_benchmark_started(erased_benchmark_key);
+        }
 
         detail::run_typed_benchmark<Input, Output>(state, context,
                                                     captured_on_estimate,

@@ -10,11 +10,11 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq_parallelism.pipeline_ops;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.memory_admission;
+export module bioseq.parallelism.pipeline_ops;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::parallelism {
 

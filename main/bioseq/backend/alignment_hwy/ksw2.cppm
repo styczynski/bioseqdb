@@ -37,16 +37,16 @@ module;
 #include <algorithm>
 #include <type_traits>
 
-export module alignment_hwy;
+export module bioseq.alignment;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_cigar;
-import alignment_hwy_utils;
-import context;
-import bioseq_storage_scanner;   // DOC0263 — sequence_scanner_none default
-import bioseq_storage_lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.cigar;
+import bioseq.alignment.utils;
+import bioseq.common.context;
+import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
+import bioseq.storage.lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
 
 export {
 

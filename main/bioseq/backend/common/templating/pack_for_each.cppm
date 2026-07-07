@@ -19,7 +19,7 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.templating.pack_for_each;
+export module bioseq.common.templating.pack_for_each;
 
 export namespace bioseq::common::templating {
 

@@ -13,19 +13,21 @@
 #include "common_tests.h"
 #include "common.h"
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.pipe;
-import bioseq_storage_lazy;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.minimap_port;
-import bioseq_indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.pipe;
+import bioseq.storage.lazy;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.chaining.vulkan;
+import bioseq.sequences.minimap_port;
+import bioseq.indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.indexing.minimizer_vulkan;    // GpuIndexCacheIdentity
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.gpu.vulkan.runtime;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -217,7 +219,7 @@ TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch
 
     SECTION("ChainingAlgorithmType — every enum value routes correctly") {
         using Reg = algorithm_enum_values<CA>;
-        for (CA v : {CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ}) {
+        for (CA v : {CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ, CA::VULKAN_TILED_DP}) {
             CA captured = static_cast<CA>(0xFF);
             doc0256_test_helpers::value_capture_callable<CA> cb{&captured};
             const CA result = enum_dispatch_pack<CA, CA, Reg::default_value>(
@@ -443,8 +445,8 @@ TEST_CASE("DOC0256 — dispatch_chain pins NTTPs in chain order",
     constexpr std::array<BAA, 3> baas = {
         BAA::KSW2, BAA::BLOCK_ALIGNER, BAA::KSW2_BATCHED,
     };
-    constexpr std::array<CA, 3> cas = {
-        CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ,
+    constexpr std::array<CA, 4> cas = {
+        CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ, CA::VULKAN_TILED_DP,
     };
     constexpr std::array<MA, 3> mas = {
         MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH,
@@ -625,7 +627,8 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
+                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx,
+                nullptr, ::bioseq::indexing::GpuIndexCacheIdentity{}, false);
         REQUIRE(result.size() == 0u);
     }
     SECTION("(W=5, K=15) — selects the fallback Cep") {
@@ -650,7 +653,8 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
+                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx,
+                nullptr, ::bioseq::indexing::GpuIndexCacheIdentity{}, false);
         REQUIRE(result.size() == 0u);
     }
 }
@@ -755,6 +759,111 @@ TEST_CASE("DOC0256 — dispatch_chain rejects rvalue args at compile time",
     // rvalue ref is rejected.
     static_assert(!doc0256_test_helpers::chain_accepts_v<BAA&&, CA&&, MA&&>);
     SUCCEED();
+}
+
+// ============================================================================
+// DOC0307 §13 (tests 11/13) — VULKAN_MINIMAP_INT end-to-end pipe parity.
+// ============================================================================
+//
+// The full Vulkan front-end (GPU minimizers + GPU seed-hit lookup) must produce
+// the same primary match coordinates as the scalar CPU path. When a Vulkan
+// algorithm is selected, disabling Vulkan is an error; fallback selection must
+// happen before entering the pipe.
+namespace doc0307_e2e {
+
+using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+using range_t  = compact_sequence_range<dna4_u64>;
+
+[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
+    std::vector<seq::dna4> v(n);
+    std::uint64_t s = seed;
+    for (std::size_t i = 0; i < n; ++i) {
+        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+        seq::dna4 c;
+        c.assign_rank(static_cast<decltype(c.to_rank())>((s >> 33) & 0x3));
+        v[i] = c;
+    }
+    return v;
+}
+
+[[nodiscard]] MatchResultCollection run(
+    std::vector<seq::dna4> qd, std::vector<seq::dna4> td,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    range_t q_range(qd);
+    range_t t_range(td);
+    auto lazy_q = bioseq::storage::make_lazy_in_memory(q_range);
+    auto lazy_t = bioseq::storage::make_lazy_in_memory(t_range);
+    return ::bioseq::simd::HWY_NAMESPACE::minimap_port(lazy_q, lazy_t, params);
+}
+
+/// Coordinate-only canonicalisation (test 11 compares match coordinates; CIGAR
+/// / mapq tie-breaks are allowed to differ when equal-ref_bits anchors reorder).
+[[nodiscard]] std::vector<std::string> coords(const MatchResultCollection& c) {
+    std::vector<std::string> out;
+    for (const auto& m : c.results) {
+        out.push_back(fmt::format("qs={} qe={} rev={} ts={} te={}",
+                                  m.query_start, m.query_end, m.is_reverse,
+                                  m.target_start, m.target_end));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+}  // namespace doc0307_e2e
+
+TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
+          "[vulkan][phase-b][pipe]") {
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+
+    auto target = doc0307_e2e::make_dna4(4000, 0xC0FFEEu);
+    // Query = a forward sub-region of the target (a guaranteed match).
+    std::vector<seq::dna4> query(target.begin() + 500, target.begin() + 1300);
+
+    Minimap2Params cpu;
+    cpu.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    cpu.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+    cpu.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    const auto cpu_res = doc0307_e2e::run(query, target, cpu);
+
+    Minimap2Params gpu = cpu;
+    gpu.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    gpu.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    gpu.vulkan_enabled = true;
+    gpu.vulkan_seed_hits_enabled = true;
+    if (!::bioseq::chaining::vulkan_chaining_supported()) {
+        REQUIRE_THROWS_AS(
+            doc0307_e2e::run(query, target, gpu),
+            bioseq::gpu::vulkan::VulkanRuntimeError);
+        return;
+    }
+    const auto gpu_res = doc0307_e2e::run(query, target, gpu);
+
+    REQUIRE_FALSE(cpu_res.results.empty());
+    REQUIRE_FALSE(gpu_res.results.empty());
+    REQUIRE(doc0307_e2e::coords(cpu_res) == doc0307_e2e::coords(gpu_res));
+}
+
+TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
+          "[vulkan][phase-b][pipe]") {
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+
+    auto target = doc0307_e2e::make_dna4(3000, 0x1234567u);
+    std::vector<seq::dna4> query(target.begin() + 200, target.begin() + 900);
+
+    Minimap2Params disabled;
+    disabled.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    disabled.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    disabled.vulkan_enabled = false;
+
+    REQUIRE_THROWS_AS(
+        doc0307_e2e::run(query, target, disabled),
+        bioseq::gpu::vulkan::VulkanRuntimeError);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE::pipe

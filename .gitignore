@@ -13,3 +13,6 @@ paradedb-experiments/target/
 **/vcpkg_installed/
 
 **/.claude/scheduled_tasks.lock
+.mcp.json
+.codex/config.toml
+.claude/settings.local.json

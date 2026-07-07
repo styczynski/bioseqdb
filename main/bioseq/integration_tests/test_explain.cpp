@@ -12,7 +12,7 @@
 //     plan tree references "BioseqScan" as the custom plan provider.
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -32,7 +32,7 @@ std::string explain_target_sql() {
 TEST_CASE("EXPLAIN names the custom scan on a USING bioseq table",
           "[explain][custom_scan]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     const auto plan = explain_text<false>(ctx, explain_target_sql());
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
@@ -41,7 +41,7 @@ TEST_CASE("EXPLAIN names the custom scan on a USING bioseq table",
 TEST_CASE("EXPLAIN's Bioseq Projected Columns property lists exactly the SELECTed attrs",
           "[explain][projection]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     const auto plan = explain_text<false>(ctx, explain_target_sql());
     const auto value = find_explain_property(plan, "Bioseq Projected Columns");
@@ -56,7 +56,7 @@ namespace {
 void check_explain_keeps_custom_scan(std::string_view guc,
                                      std::string_view value) {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     guc_scope set(ctx, guc, value);
     const auto plan = explain_text<false>(ctx, explain_target_sql());
@@ -92,7 +92,7 @@ TEST_CASE("EXPLAIN: BioseqScan persists with enable_column_cache=off",
 TEST_CASE("EXPLAIN ANALYZE on mmsearch query reports the BioseqScan rows",
           "[explain][analyze]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     const auto plan = explain_text<true>(
         ctx,
@@ -106,7 +106,7 @@ TEST_CASE("EXPLAIN ANALYZE on mmsearch query reports the BioseqScan rows",
 TEST_CASE("EXPLAIN FORMAT JSON returns valid-looking JSON",
           "[explain][json]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     const std::string json = explain_json(ctx, explain_target_sql());
 

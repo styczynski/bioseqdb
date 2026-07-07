@@ -4,7 +4,7 @@
 // one int64 chunk. Also pins the table-wide-never-UPDATE_ON_INSERT runtime guard.
 #include "common_tests_integration.h"
 #include <string>
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -15,7 +15,7 @@ TEST_CASE("DOC0279 CHUNKED_PER_TABLE test index streams every row + persists the
     REQUIRE(query_scalar(ctx,
         "SELECT to_regprocedure('bioseq.update_index(regclass,text)') IS NOT NULL") == "t");
 
-    seed_small_columnar(ctx, "doc0279_tt");   // 3 rows
+    seed_small_bioseq_column(ctx, "doc0279_tt");   // 3 rows
     exec_sql(ctx, "SELECT bioseq.update_index('doc0279_tt'::regclass, 'test_table_rowcount');");
 
     // The per-table shard exists and holds the row count (one int64 LE chunk; count<256 => byte 0).

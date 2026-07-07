@@ -23,9 +23,21 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.templating.runtime_dispatch;
+export module bioseq.common.templating.runtime_dispatch;
 
-import bioseq_common.templating.value_sequence;
+import bioseq.common.templating.value_sequence;
+
+#ifndef BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE
+#define BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE 1
+#endif
+
+#if BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE
+#define BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR [[gnu::always_inline]]
+#define BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
+#else
+#define BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+#define BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR [[nodiscard]]
+#endif
 
 export namespace bioseq::common::templating {
 
@@ -36,7 +48,7 @@ namespace detail_runtime_dispatch {
 
 template <class IndexT, class HandlerFn, class Probe,
           class Head, class... Tail>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 constexpr void dispatch_recursive_pack_impl(
     HandlerFn& handler, Probe& probe, IndexT cursor)
 {
@@ -54,7 +66,7 @@ constexpr void dispatch_recursive_pack_impl(
 
 template <class IndexT, class R, class Probe,
           class Head, class... Tail>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 constexpr std::optional<R> find_first_match_in_pack_impl(
     Probe& probe, IndexT cursor)
 {
@@ -72,9 +84,9 @@ constexpr std::optional<R> find_first_match_in_pack_impl(
 } // namespace detail_runtime_dispatch
 
 template <class IndexT, class TypeList, class HandlerFn, class Probe>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 constexpr void dispatch_recursive_pack(HandlerFn&& handler, Probe&& probe) {
-    [&]<class... Types>(type_list<Types...>) [[gnu::always_inline]] {
+    [&]<class... Types>(type_list<Types...>) BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR {
         if constexpr (sizeof...(Types) > 0) {
             detail_runtime_dispatch::dispatch_recursive_pack_impl<
                 IndexT, std::remove_reference_t<HandlerFn>,
@@ -87,10 +99,10 @@ constexpr void dispatch_recursive_pack(HandlerFn&& handler, Probe&& probe) {
 }
 
 template <class IndexT, class R, class TypeList, class Probe>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 constexpr std::optional<R> find_first_match_in_pack(Probe&& probe) {
     return [&]<class... Types>(type_list<Types...>)
-        [[gnu::always_inline]] -> std::optional<R> {
+        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR -> std::optional<R> {
             if constexpr (sizeof...(Types) > 0) {
                 return detail_runtime_dispatch::find_first_match_in_pack_impl<
                     IndexT, R, std::remove_reference_t<Probe>, Types...>(
@@ -105,7 +117,7 @@ namespace detail_runtime_dispatch {
 
 template <class R, class T, T DefaultValue, T V_head, T... V_rest,
           class F, class... Args>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 R enum_dispatch_search(T rt, F& f, Args&&... args)
 {
     if (rt == V_head) {
@@ -123,7 +135,7 @@ R enum_dispatch_search(T rt, F& f, Args&&... args)
 
 template <class T, T DefaultValue, T V_head, T... V_rest,
           class F, class... Args>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 void enum_dispatch_search_void(T rt, F& f, Args&&... args)
 {
     if (rt == V_head) {
@@ -139,7 +151,7 @@ void enum_dispatch_search_void(T rt, F& f, Args&&... args)
 }
 
 template <class R, class T, T V_head, T... V_rest, class F, class... Args>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 R value_dispatch_smallest_ge_search(T rt, F& f, Args&&... args)
 {
     if (V_head >= rt) {
@@ -158,7 +170,7 @@ R value_dispatch_smallest_ge_search(T rt, F& f, Args&&... args)
 } // namespace detail_runtime_dispatch
 
 template <class R, class T, T DefaultValue, T... Vs, class F, class... Args>
-[[nodiscard, gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR
 R enum_dispatch_pack(value_sequence<T, Vs...>,
                      T rt, F&& f, Args&&... args)
 {
@@ -170,7 +182,7 @@ R enum_dispatch_pack(value_sequence<T, Vs...>,
 }
 
 template <class T, T DefaultValue, T... Vs, class F, class... Args>
-[[gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 void enum_dispatch_pack_void(value_sequence<T, Vs...>,
                              T rt, F&& f, Args&&... args)
 {
@@ -182,7 +194,7 @@ void enum_dispatch_pack_void(value_sequence<T, Vs...>,
 }
 
 template <class R, class T, T... Vs, class F, class... Args>
-[[nodiscard, gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR
 R value_dispatch_smallest_ge(value_sequence<T, Vs...>,
                              T rt, F&& f, Args&&... args)
 {
@@ -193,7 +205,7 @@ R value_dispatch_smallest_ge(value_sequence<T, Vs...>,
 }
 
 template <class R, class T, T DefaultValue, T... Vs, class F, class... Args>
-[[nodiscard, gnu::always_inline]]
+BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR
 R value_dispatch_exact_with_default(value_sequence<T, Vs...>,
                                     T rt, F&& f, Args&&... args)
 {

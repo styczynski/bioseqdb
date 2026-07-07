@@ -17,10 +17,10 @@ module;
 #include <string_view>
 #include <unordered_map>
 
-export module bioseq_instr.gauge;
+export module bioseq.instr.gauge;
 
-import bioseq_instr.config;
-import bioseq_instr.descriptor;
+import bioseq.instr.config;
+import bioseq.instr.descriptor;
 
 export namespace bioseq::instr {
 

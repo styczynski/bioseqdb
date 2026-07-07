@@ -8,9 +8,9 @@
  * `import bioseq_simd.sorting.uint64;` when they only need the u64
  * helpers.
  */
-export module bioseq_simd.sorting.uint64;
+export module bioseq.simd.sorting.uint64;
 
-import bioseq_simd.sorting;
+import bioseq.simd.sorting;
 
 export namespace bioseq::simd::sorting::uint64 {
 

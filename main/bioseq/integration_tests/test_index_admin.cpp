@@ -24,7 +24,7 @@
 // bioseq.index_table_row_count() libpq wrapper (index_table_row_count()).
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -85,10 +85,10 @@ TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq t
 TEST_CASE("update_index('minimizers_per_fragment') builds the per-fragment index",
           "[index_admin][update][backfill]") {
     auto ctx = fresh_context({kTable});
-    // seed_small_columnar sets bioseq.update_index_on_insert = on, so the two
+    // seed_small_bioseq_column sets bioseq.update_index_on_insert = on, so the two
     // default UPDATE_ON_INSERT indexes (minimizers_per_fragment, symbol_counts)
     // are populated incrementally at INSERT time.
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", kTable) > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", kTable) > 0);
@@ -105,7 +105,7 @@ TEST_CASE("update_index('minimizers_per_fragment') builds the per-fragment index
 TEST_CASE("update_index rejects an unknown index name",
           "[index_admin][update][error]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     REQUIRE(sql_fails(
         ctx,
@@ -116,7 +116,7 @@ TEST_CASE("update_index rejects an unknown index name",
 TEST_CASE("update_index accepts text and explicit regclass for the table arg",
           "[index_admin][update][regclass]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     // Quoted text form — PG implicitly casts text -> regclass via regclassin.
     REQUIRE(query_scalar_int(
@@ -161,7 +161,7 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
 TEST_CASE("set_index_policy toggles update_policy and supports per-sequence on-insert",
           "[index_admin][policy]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     // Helper: read the current update_policy of one index from list_metadata.
     auto policy_of = [&](std::string_view index_name) {
@@ -226,7 +226,7 @@ TEST_CASE("UPDATE_ON_INSERT can build minimizers_per_sequence without per-fragme
 TEST_CASE("update_index('minimizers_per_fragment') is idempotent at the content level",
           "[index_admin][update][idempotent]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     // Run the rebuild twice; the per-fragment chunk row count must be stable
     // (the rebuild clears the index then repopulates from identical input).

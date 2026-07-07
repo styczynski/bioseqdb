@@ -14,9 +14,9 @@ module;
 #include <cstdint>
 #include <concepts>
 #include <vector>
-export module bioseq_indexing.minimizer_index;
-import bioseq_sequences.kmers;     // MinimapSketchData (POD), via the HWY_NAMESPACE using below
-import bioseq_storage_size;        // sequence_size_t
+export module bioseq.indexing.minimizer_index;
+import bioseq.sequences.kmers;     // MinimapSketchData (POD), via the HWY_NAMESPACE using below
+import bioseq.storage.size;        // sequence_size_t
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {

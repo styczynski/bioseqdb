@@ -31,19 +31,19 @@ module;
 #include <limits>
 #include <utility>
 
-export module alignment_hwy_ksw2_batched;
+export module bioseq.alignment.ksw2_batched;
 
-import mlogging;
-import bioseq_sequences;
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import alignment_hwy_lane_helpers;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.minimap_port;
-import context;
-import bioseq_storage_scanner;   // DOC0263 — sequence_scanner_none default
-import bioseq_storage_lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
+import bioseq.common.mlogging;
+import bioseq.sequences;
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.alignment.lane_helpers;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.minimap_port;
+import bioseq.common.context;
+import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
+import bioseq.storage.lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
 
 export {
 
@@ -178,7 +178,7 @@ bucket_fills_by_geometry(
 
     struct ByBucketThenOrder {
         std::int32_t default_bw;
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const FillDescriptor& a, const FillDescriptor& b) const noexcept
         {
             const FillBucketKey ka = bucket_key_for(a, default_bw);
@@ -422,7 +422,7 @@ inline void stitch_cigars_into_regions(
     ::bioseq::chaining::ArenaSlab<FillDescriptor>&  fills)
 {
     struct ChainOrder {
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const FillDescriptor& a, const FillDescriptor& b) const noexcept
         {
             if (a.region_idx != b.region_idx) return a.region_idx < b.region_idx;

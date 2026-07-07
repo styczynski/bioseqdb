@@ -1,0 +1,75 @@
+// Copyright 2020 Google LLC
+
+struct Particle
+{
+	float2 pos;
+	float2 vel;
+	float4 gradientPos;
+};
+// Previous particles storage buffer
+RWStructuredBuffer<Particle> particlesIn : register(u0);
+// Current particles storage buffer
+RWStructuredBuffer<Particle> particlesOut : register(u1);
+
+struct UBO
+{
+	float deltaT;
+	float destX;
+	float destY;
+	int particleCount;
+};
+cbuffer ubo : register(b2) { UBO ubo; }
+
+float2 attraction(float2 pos, float2 attractPos)
+{
+    float2 delta = attractPos - pos;
+	const float damp = 0.5;
+    float dDampedDot = dot(delta, delta) + damp;
+    float invDist = 1.0f / sqrt(dDampedDot);
+    float invDistCubed = invDist*invDist*invDist;
+    return delta * invDistCubed * 0.0035;
+}
+
+float2 repulsion(float2 pos, float2 attractPos)
+{
+	float2 delta = attractPos - pos;
+	float targetDistance = sqrt(dot(delta, delta));
+	return delta * (1.0 / (targetDistance * targetDistance * targetDistance)) * -0.000035;
+}
+
+[numthreads(256, 1, 1)]
+void main(uint3 GlobalInvocationID : SV_DispatchThreadID)
+{
+    // Current SSBO index
+    uint index = GlobalInvocationID.x;
+	// Don't try to write beyond particle count
+    if (index >= ubo.particleCount)
+		return;
+
+    // Read position and velocity from previous frame
+    float2 vVel = particlesIn[index].vel.xy;
+    float2 vPos = particlesIn[index].pos.xy;
+    float4 gPos = particlesIn[index].gradientPos;
+
+    float2 destPos = float2(ubo.destX, ubo.destY);
+
+    float2 delta = destPos - vPos;
+    float targetDistance = sqrt(dot(delta, delta));
+    vVel += repulsion(vPos, destPos.xy) * 0.05;
+
+    // Move by velocity
+    vPos += vVel * ubo.deltaT;
+
+    // collide with boundary
+    if ((vPos.x < -1.0) || (vPos.x > 1.0) || (vPos.y < -1.0) || (vPos.y > 1.0))
+    	vVel = (-vVel * 0.1) + attraction(vPos, destPos) * 12;
+    else
+    	particlesIn[index].pos.xy = vPos;
+
+    // Write back
+    particlesOut[index].vel.xy = vVel;
+	particlesOut[index].gradientPos.x = gPos.x + 0.02 * ubo.deltaT;
+	if (particlesOut[index].gradientPos.x > 1.0)
+		particlesOut[index].gradientPos.x -= 1.0;
+}
+

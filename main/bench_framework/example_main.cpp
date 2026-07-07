@@ -37,8 +37,8 @@
 #include <thread>
 #include <vector>
 
-import mlogging;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.instr;
 import bench_framework;
 
 #ifndef BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_REPORT_DIR

@@ -17,10 +17,10 @@ module;
 #include <limits>
 #include <new>
 
-export module bioseq_instr.aggregate;
+export module bioseq.instr.aggregate;
 
-import bioseq_instr.config;
-import bioseq_instr.descriptor;
+import bioseq.instr.config;
+import bioseq.instr.descriptor;
 
 export namespace bioseq::instr {
 
@@ -37,7 +37,7 @@ struct Histogram16 {
     std::array<std::uint64_t, 32> buckets{};
 
     [[gnu::always_inline]]
-    void add(std::uint64_t value) noexcept {
+    inline void add(std::uint64_t value) noexcept {
         if (value == 0) {
             ++buckets[0];
             return;
@@ -144,7 +144,7 @@ struct RegionAggregateTable {
     }
 
     [[nodiscard, gnu::always_inline]]
-    RegionAggregate* try_get(std::uint32_t id) noexcept {
+    inline RegionAggregate* try_get(std::uint32_t id) noexcept {
         if (id == 0) return nullptr;
         const auto raw_id = id - 1;
         const auto block_idx = raw_id / BlockSize;
@@ -192,7 +192,7 @@ struct LoopAggregateTable {
     }
 
     [[nodiscard, gnu::always_inline]]
-    LoopAggregate* try_get(std::uint32_t id) noexcept {
+    inline LoopAggregate* try_get(std::uint32_t id) noexcept {
         if (id == 0) return nullptr;
         const auto raw_id = id - 1;
         const auto block_idx = raw_id / BlockSize;

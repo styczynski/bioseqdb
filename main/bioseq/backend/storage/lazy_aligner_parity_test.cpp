@@ -18,15 +18,14 @@
 #include <cstdint>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import alignment_hwy;            // HwyKsw2Aligner, KswZ2Params, KswAlignResult
-import alignment_hwy_utils;      // ScoringMatrix
-import context;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.alignment;            // HwyKsw2Aligner, KswZ2Params, KswAlignResult
+import bioseq.alignment.utils;      // ScoringMatrix
+import bioseq.common.context;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
 
 using namespace seq::literals;
 

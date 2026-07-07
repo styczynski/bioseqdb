@@ -9,14 +9,14 @@ module;
 #include <string>
 #include <functional>
 
-export module bioseq_sequences.kmers.hashers.base;
+export module bioseq.sequences.kmers.hashers.base;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import algo.circular_append_buffer;
-import bioseq_simd.utils;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.common.circular_append_buffer;
+import bioseq.simd.utils;
 
 export {
 

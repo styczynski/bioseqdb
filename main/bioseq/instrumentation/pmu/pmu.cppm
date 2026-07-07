@@ -21,11 +21,11 @@ module;
 
 #include <cstdint>
 
-export module bioseq_instr.pmu;
+export module bioseq.instr.pmu;
 
-import bioseq_instr.pmu.macos;
-import bioseq_instr.pmu.linux;
-import bioseq_instr.pmu.stub;
+import bioseq.instr.pmu.macos;
+import bioseq.instr.pmu.linux_backend_mod;
+import bioseq.instr.pmu.stub;
 
 export namespace bioseq::instr::pmu {
 

@@ -31,9 +31,9 @@ module;
 // NO_POSTGRES=1; its lone hard-error guard therefore uses bioseq_log<DBG> + abort
 // instead of `bioseq_log<ERR, PG>( …)` (the guard is defensive / has no callers, so
 // the change is invisible to Phase A).
-export module bioseq_storage_size;
+export module bioseq.storage.size;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::storage {
 

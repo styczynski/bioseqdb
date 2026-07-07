@@ -36,9 +36,9 @@ module;
 #include <string_view>
 #include <utility>
 
-export module bioseq_io.sinks;
+export module bioseq.io.sinks;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io {
 

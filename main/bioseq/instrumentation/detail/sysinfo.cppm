@@ -33,7 +33,7 @@ module;
 #  include <psapi.h>
 #endif
 
-export module bioseq_instr.detail.sysinfo;
+export module bioseq.instr.detail.sysinfo;
 
 export namespace bioseq::instr::detail::sysinfo {
 

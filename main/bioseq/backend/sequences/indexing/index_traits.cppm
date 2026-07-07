@@ -6,14 +6,16 @@
  * storage, need storage to read index_type". NO_POSTGRES.
  */
 module;
+#include <hwy/highway.h>  // DOC0345 Patch H — HWY_NAMESPACE macro names MinimizerSketchBackend
 #include <concepts>
 #include <string_view>
-export module bioseq_indexing.traits;
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_storage_lazy;     // lazy_compact_sequence<R,Scanner>
-import bioseq_storage_size;     // sequence_size_t
-import bioseq_storage_scanner;  // is_valid_sequence_scanner<Scanner>
+export module bioseq.indexing.traits;
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.storage.lazy;     // lazy_compact_sequence<R,Scanner>
+import bioseq.storage.size;     // sequence_size_t
+import bioseq.storage.scanner;  // is_valid_sequence_scanner<Scanner>
+import bioseq.sequences.kmers;  // DOC0345 Patch H — MinimizerSketchBackend
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -50,6 +52,19 @@ concept index_provides_build_fragmented =
     { T::build(s, seq) }   -> std::same_as<void>;
     { T::rebuild(s, seq) } -> std::same_as<void>;
 };
+// DOC0345 Patch H — stronger optional check: the index exposes the explicit
+// 3-arg backend build/rebuild. The registry uses the scalar (2-arg) overload for
+// conformance and the explicit backend overload for PG-selected builds.
+template <class T, class R, class Scanner>
+concept index_provides_backend_build_fragmented =
+    bioseq::storage::is_valid_sequence_scanner<Scanner> &&
+    requires (
+        typename T::storage_type& storage,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        { T::build(storage, seq, backend) } -> std::same_as<void>;
+        { T::rebuild(storage, seq, backend) } -> std::same_as<void>;
+    };
 template <class T, class R, class Scanner>
 concept index_provides_build_inline = index_provides_build_fragmented<T, R, Scanner>;  // same shape
 template <class T>

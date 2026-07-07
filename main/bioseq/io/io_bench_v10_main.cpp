@@ -38,14 +38,14 @@
 
 #include <unistd.h>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_io.public_api;
-import bioseq_io.options;
-import bioseq_io.writer;
-import bioseq_io.identifier_formats;   // DOC0295 §12.1 — header-parser overhead bench
-import bioseq_io.identifier_parser;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.io.public_api;
+import bioseq.io.options;
+import bioseq.io.writer;
+import bioseq.io.identifier_formats;   // DOC0295 §12.1 — header-parser overhead bench
+import bioseq.io.identifier_parser;
 import bench_framework;
 
 #ifndef BIOSEQ_IO_REPORT_DIR

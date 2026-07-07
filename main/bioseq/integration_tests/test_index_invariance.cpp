@@ -23,7 +23,7 @@
 
 #include <string>
 
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

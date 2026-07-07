@@ -71,7 +71,7 @@ module;
 
 module bench_framework;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 extern "C" {
     extern char** environ;

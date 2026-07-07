@@ -1,0 +1,54 @@
+name: Generate Amalgamated Header
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  amalgamate:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for all branches
+    
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    
+    - name: Install cpp-amalgamate
+      run: cargo install cpp-amalgamate
+
+    - name: Generate amalgamated header
+      run: cpp-amalgamate src/cppgres.hpp > cppgres.hpp.new
+     
+    - name: Configure Git
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+  
+    - name: Switch to amalgamated branch
+      run: |
+        git checkout -b amalgamated origin/amalgamated
+
+    - name: Commit changes
+      run: |
+        mv cppgres.hpp.new cppgres.hpp
+        git add cppgres.hpp
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update amalgamated header ($(date -u))"
+          git push origin amalgamated
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

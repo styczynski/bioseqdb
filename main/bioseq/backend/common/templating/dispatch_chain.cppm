@@ -25,10 +25,20 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.templating.dispatch_chain;
+export module bioseq.common.templating.dispatch_chain;
 
-import bioseq_common.templating.value_sequence;
-import bioseq_common.templating.runtime_dispatch;
+import bioseq.common.templating.value_sequence;
+import bioseq.common.templating.runtime_dispatch;
+
+#ifndef BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE
+#define BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE 1
+#endif
+
+#if BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE
+#define BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR [[gnu::always_inline]]
+#else
+#define BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+#endif
 
 export namespace bioseq::common::templating {
 
@@ -46,7 +56,8 @@ template <class R, template <auto...> class Leaf, class Params>
 struct dispatch_chain<R, Leaf, Params> {
     template <auto... Pinned, class... Args>
         requires detail_dispatch_chain::chain_args_are_references<Args...>
-    [[gnu::always_inline]] static R run(const Params& params, Args&&... args) {
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    static R run(const Params& params, Args&&... args) {
         return Leaf<Pinned...>::call(params, std::forward<Args>(args)...);
     }
 };
@@ -57,7 +68,8 @@ struct dispatch_chain<R, Leaf, Params, Head, Tail...> {
     template <auto... Pinned>
     struct continuation {
         template <auto V, class... Args>
-        [[gnu::always_inline]] R run(const Params& params, Args&&... args) const {
+        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+        R run(const Params& params, Args&&... args) const {
             return dispatch_chain<R, Leaf, Params, Tail...>
                 ::template run<Pinned..., V>(params, std::forward<Args>(args)...);
         }
@@ -65,7 +77,8 @@ struct dispatch_chain<R, Leaf, Params, Head, Tail...> {
 
     template <auto... Pinned, class... Args>
         requires detail_dispatch_chain::chain_args_are_references<Args...>
-    [[gnu::always_inline]] static R run(const Params& params, Args&&... args) {
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    static R run(const Params& params, Args&&... args) {
         if constexpr (Head::template active_v<Pinned...>) {
             return Head::template dispatch<R, Params, Pinned...>(
                 params, continuation<Pinned...>{}, std::forward<Args>(args)...);
@@ -89,7 +102,8 @@ struct enum_step {
     struct adapter {
         Continuation continuation;
         template <target_t V, class... A>
-        [[gnu::always_inline]] R operator()(
+        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+        R operator()(
             std::integral_constant<target_t, V>,
             const Params& params, A&&... forwarded_args) const
         {
@@ -100,7 +114,8 @@ struct enum_step {
 
     template <class R, class Params, auto... Pinned,
               class Continuation, class... Args>
-    [[gnu::always_inline]] static R dispatch(
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    static R dispatch(
         const Params& params, Continuation continuation, Args&&... args)
     {
         adapter<R, Params, Continuation> step_adapter{continuation};
@@ -131,7 +146,8 @@ struct bucket_step {
     struct adapter {
         Continuation continuation;
         template <std::size_t V, class... A>
-        [[gnu::always_inline]] R operator()(
+        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+        R operator()(
             std::integral_constant<std::size_t, V>,
             const Params& params, A&&... forwarded_args) const
         {
@@ -142,7 +158,8 @@ struct bucket_step {
 
     template <class R, class Params, auto... Pinned,
               class Continuation, class... Args>
-    [[gnu::always_inline]] static R dispatch(
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    static R dispatch(
         const Params& params, Continuation continuation, Args&&... args)
     {
         adapter<R, Params, Continuation> step_adapter{continuation};
@@ -178,7 +195,8 @@ struct bucket_step_pinned {
     struct adapter {
         Continuation continuation;
         template <std::size_t V, class... A>
-        [[gnu::always_inline]] R operator()(
+        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+        R operator()(
             std::integral_constant<std::size_t, V>,
             const Params& params, A&&... forwarded_args) const
         {
@@ -189,7 +207,8 @@ struct bucket_step_pinned {
 
     template <class R, class Params, auto... Pinned,
               class Continuation, class... Args>
-    [[gnu::always_inline]] static R dispatch(
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    static R dispatch(
         const Params& params, Continuation continuation, Args&&... args)
     {
         adapter<R, Params, Continuation> step_adapter{continuation};
@@ -210,7 +229,8 @@ struct guarded_step {
 
     template <class R, class Params, auto... Pinned,
               class Continuation, class... Args>
-    [[gnu::always_inline]] static R dispatch(
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    static R dispatch(
         const Params& params, Continuation continuation, Args&&... args)
     {
         return Inner::template dispatch<R, Params, Pinned...>(

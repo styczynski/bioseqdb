@@ -26,9 +26,9 @@ module;
 #include <string>
 #include <type_traits>
 
-export module bioseq_io.compression.aligned_byte_buffer;
+export module bioseq.io.compression.aligned_byte_buffer;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 

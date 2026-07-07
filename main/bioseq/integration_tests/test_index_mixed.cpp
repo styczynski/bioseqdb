@@ -6,7 +6,7 @@
 #include <set>
 #include <string>
 #include <tuple>
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -46,7 +46,7 @@ TEST_CASE("DOC0279 mixed indexed + unindexed rows in one scan",
     // (a) index_table_row_count reflects only the indexed rows.
     auto rowno_of = [&](int pk) {
         return query_scalar_int(ctx, fmt::format(
-            "SELECT bioseq.columnar_row_number('doc0279_mx'::regclass, ctid) FROM doc0279_mx WHERE pk={}", pk));
+            "SELECT bioseq.column_row_number('doc0279_mx'::regclass, ctid) FROM doc0279_mx WHERE pk={}", pk));
     };
     REQUIRE(index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_mx", rowno_of(1)) >= 1);
     REQUIRE(index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_mx", rowno_of(2)) >= 1);

@@ -13,8 +13,8 @@ module;
 #include <optional>
 #include <utility>
 
-export module bioseq_parallelism.memory_admission;
-import bioseq_instr;
+export module bioseq.parallelism.memory_admission;
+import bioseq.instr;
 
 export namespace bioseq::parallelism {
 
@@ -31,6 +31,18 @@ inline constexpr std::uint64_t kMinimizerIndexPeakBytesPerBp = 6;
         return max_value;
     }
     return lhs * rhs;
+}
+
+/// Saturating 64-bit add. Clamps at UINT64_MAX instead of wrapping so byte/size
+/// estimators (e.g. `PhaseCMemoryEstimate::total`, DOC0310 §22) never overflow
+/// into a small admitted value. The single shared definition lives here beside
+/// `saturating_mul`; do not add a local copy.
+[[nodiscard]] inline std::uint64_t saturating_add(std::uint64_t lhs, std::uint64_t rhs) noexcept {
+    constexpr std::uint64_t max_value = (std::numeric_limits<std::uint64_t>::max)();
+    if (lhs > max_value - rhs) {
+        return max_value;
+    }
+    return lhs + rhs;
 }
 
 [[nodiscard]] inline std::uint64_t minimizer_index_peak_bytes_for_bp(std::uint64_t bp) noexcept {

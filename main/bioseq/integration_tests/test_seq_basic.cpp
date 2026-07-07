@@ -19,7 +19,7 @@
 // heap table to keep the assertions tight on the type itself.
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -92,6 +92,39 @@ TEST_CASE("ORDER BY bioseq.seq follows the documented lexicographic order",
         ctx, fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable));
     // Expected lexicographic order: AAAA, AC, ACGT, ACTA, GGGG -> pk 5,3,1,2,4.
     REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+}
+
+TEST_CASE("BioseqBatchSortScan uses stdc_compare when Vulkan sorting is disabled",
+          "[seq][basic][order_by][sort_scan]") {
+    auto ctx = fresh_context({kTable});
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string(kTable),
+            .typmod = {.alphabet = "dna4", .width = 64},
+            .seq_columns = 1,
+        },
+        {
+            seq_row{.pk = 1, .sequences = {"ACGT"}},
+            seq_row{.pk = 2, .sequences = {"ACTA"}},
+            seq_row{.pk = 3, .sequences = {"AC"}},
+            seq_row{.pk = 4, .sequences = {"GGGG"}},
+            seq_row{.pk = 5, .sequences = {"AAAA"}},
+        });
+
+    exec_sql(ctx, "SET bioseq.enable_sequence_sort_scan = on;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+
+    const std::string sql = fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable);
+    const auto pks = query_int_column(ctx, sql);
+    REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+
+    const auto plan = explain_text<true>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchSortScan)"));
+    REQUIRE(plan_contains(plan, "Bioseq Sort Accelerator: stdc_compare"));
+    REQUIRE(plan_contains(plan, "Bioseq GPU Sort Dispatches: 0"));
+    REQUIRE(plan_contains(plan, "Bioseq GPU Global Compare Dispatches: 0"));
+    REQUIRE(plan_contains(plan, "Bioseq GPU Dense Scatter Dispatches: 0"));
 }
 
 TEMPLATE_TEST_CASE_SIG(

@@ -13,7 +13,7 @@ module;
 #include <concepts>
 #include <type_traits>
 
-export module bioseq_instr.config;
+export module bioseq.instr.config;
 
 export namespace bioseq::instr {
 

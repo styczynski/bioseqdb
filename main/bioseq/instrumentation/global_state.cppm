@@ -23,10 +23,10 @@ module;
 
 #include <atomic>
 
-export module bioseq_instr.global_state;
+export module bioseq.instr.global_state;
 
-import bioseq_instr.config;
-import bioseq_instr.thread_state;
+import bioseq.instr.config;
+import bioseq.instr.thread_state;
 
 export namespace bioseq::instr {
 

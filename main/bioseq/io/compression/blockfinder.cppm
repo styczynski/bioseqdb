@@ -25,12 +25,12 @@ module;
 #include <limits>
 #include <utility>
 
-export module bioseq_io.compression.blockfinder;
+export module bioseq.io.compression.blockfinder;
 
-import mlogging;
-import bioseq_io.compression.bit_reader;
-import bioseq_io.compression.dynamic_huffman_skip_lut;
-import bioseq_io.compression.precode_validate;
+import bioseq.common.mlogging;
+import bioseq.io.compression.bit_reader;
+import bioseq.io.compression.dynamic_huffman_skip_lut;
+import bioseq.io.compression.precode_validate;
 
 export namespace bioseq::io::compression {
 

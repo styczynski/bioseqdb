@@ -23,12 +23,12 @@ module;
 #include <algorithm>
 #include <limits>
 
-export module bioseq_sequences.chaining.scalar;
+export module bioseq.sequences.chaining.scalar;
 
-import mlogging;
-import bioseq_sequences.chaining.utils;
-import context;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.sequences.chaining.utils;
+import bioseq.common.context;
+import bioseq.instr;
 
 export {
 namespace bioseq::chaining {

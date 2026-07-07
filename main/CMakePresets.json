@@ -89,6 +89,54 @@
         }
       },
       {
+        "name": "aws-x64-linux",
+        "displayName": "AWS x86_64 Linux benchmark box (clang-22 + libc++)",
+        "description": "Linux/x86_64 analogue of bench-opt for the disposable AWS reference machine provisioned by main/infra. Selects the AWS_MACHINE_X64 toolchain block in CMakeLists.txt via the environment and builds bioseq with clang-22 + libc++ (required for import std / C++ modules). vcpkg dependencies use the checked-in x64-linux-libcxx overlay triplet so C++ static archives link against the same libc++ ABI as bioseq. -O3 + NDEBUG, DWARF off, mirroring bench-opt.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+          "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
+          "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports",
+          "VCPKG_TARGET_ARCHITECTURE": "x64",
+          "BIOSEQ_HEAVY_JOBS": "4"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161",
+        "displayName": "AWS x86_64 Linux benchmark box (GCC 16.1 + libstdc++)",
+        "description": "GCC 16.1+ build tree for the AWS x86_64 box. Uses the stock x64-linux vcpkg triplet and libstdc++ std-module metadata from the official GCC 16.1+ install under /opt.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64_GCC16"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "VCPKG_TARGET_TRIPLET": "x64-linux",
+          "VCPKG_TARGET_ARCHITECTURE": "x64",
+          "BIOSEQ_HEAVY_JOBS": "4",
+          "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL": "O1",
+          "BIOSEQ_GCC_TYPED_DISPATCH_JOBS": "1",
+          "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE": "OFF"
+        }
+      },
+      {
         "name": "prod",
         "displayName": "Default release config",
          "description": "Default build using Ninja generator",

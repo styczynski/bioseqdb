@@ -33,7 +33,7 @@ module;
 
 export module bench.tool_minimap2.instr_shim;
 
-import bioseq_instr;
+import bioseq.instr;
 
 namespace bench::tool_minimap2_instr_shim {
 

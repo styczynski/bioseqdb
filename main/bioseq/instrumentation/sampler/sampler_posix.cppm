@@ -16,7 +16,7 @@ module;
 #  include <signal.h>
 #endif
 
-export module bioseq_instr.sampler.posix;
+export module bioseq.instr.sampler.posix;
 
 export namespace bioseq::instr::sampler::posix_backend {
 

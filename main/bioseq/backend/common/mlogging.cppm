@@ -25,6 +25,7 @@ module;
 
 
 //#define FMT_HEADER_ONLY
+#define FMT_ATTACH_TO_GLOBAL_MODULE
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -39,9 +40,9 @@ module;
 #include <utility>
 #include <vector>
 
-// For generic serialization
-#include <rfl/json.hpp>
-#include <rfl.hpp>
+// For generic enum logging.
+#include <rfl/thirdparty/enchantum/bitflags.hpp>
+#include <rfl/thirdparty/enchantum/enchantum.hpp>
 
 // FMT LOGIC
 #define FMT_MODULE
@@ -124,6 +125,10 @@ module;
 #    include <io.h>
 #  endif
 #endif
+#if defined(__APPLE__)
+#  include <AvailabilityMacros.h>
+#  include <pthread.h>
+#endif
 #ifdef _WIN32
 #  if defined(__GLIBCXX__)
 #    include <ext/stdio_filebuf.h>
@@ -167,7 +172,9 @@ module;
 
 #include "common.h"
 
-export module mlogging;
+export module bioseq.common.mlogging;
+
+import bioseq.common.hashing;
 
 // fmt logic
 
@@ -205,10 +212,15 @@ extern "C++" {
 #include "fmt/ostream.h"
 #include "fmt/printf.h"
 #include "fmt/ranges.h"
+// fmt/std.h only applies FMT_EXPORT to formatter specializations. Those
+// specializations are attached to the exported formatter primary already, and
+// GCC rejects spelling them as unbraced `export template ...` declarations.
+#undef FMT_EXPORT
+#define FMT_EXPORT
 #include "fmt/std.h"
+#undef FMT_EXPORT
+#define FMT_EXPORT export
 #include "fmt/xchar.h"
-
-#include "src/format.cc"
 
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE
 }
@@ -906,10 +918,8 @@ inline bool fmtlogT<_>::checkLogLevel(LogLevel logLevel) noexcept {
 }
 
 
-namespace {
-void fmtlogEmptyFun(void*) {
+inline void fmtlogEmptyFun(void*) {
 }
-} // namespace
 
 template<int ___ = 0>
 class fmtlogDetailT
@@ -1160,7 +1170,7 @@ public:
     uint32_t tid = static_cast<uint32_t>(::GetCurrentThreadId());
 #else
     // XXX: Deprecated on new MACOSX
-    #if __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
+    #if defined(__APPLE__) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
     uint64_t tid64;
     pthread_threadid_np(NULL, &tid64);
     uint32_t tid = static_cast<uint32_t>(tid64);
@@ -1509,6 +1519,27 @@ void fmtlogT<_>::stopPollingThread() noexcept {
 template class fmtlogT<0>;
 
 
+namespace bioseq_fmt_detail {
+
+template<enchantum::Enum T>
+std::string enum_to_string(T value)
+{
+  if constexpr (enchantum::is_bitflag<T>) {
+    auto name = enchantum::to_string_bitflag(value);
+    if (!name.empty()) {
+      return name;
+    }
+  } else {
+    auto name = enchantum::to_string(value);
+    if (!name.empty()) {
+      return std::string{name.data(), name.size()};
+    }
+  }
+  return std::to_string(+enchantum::to_underlying(value));
+}
+
+} // namespace bioseq_fmt_detail
+
 
 export {
 namespace fmt {
@@ -1519,16 +1550,13 @@ namespace fmt {
 // };
 
 template<typename T>
-requires (
-  //default_serializer_format<T>::value && 
-  requires (const T& value) {
-     { rfl::enum_to_string(value) } -> std::convertible_to<std::string>;
-  }
-)
+requires enchantum::Enum<T>
 struct formatter<T>: formatter<std::string> {
     template <typename FormatContext>
     auto format(const T& value, FormatContext& ctx) const {
-      return formatter<std::string>::format(rfl::enum_to_string(value), ctx);
+      return formatter<std::string>::format(
+          bioseq_fmt_detail::enum_to_string(value),
+          ctx);
     }
 };
 
@@ -1692,34 +1720,15 @@ inline std::unordered_map<
 inline std::mutex postgres_sink_mutex;
 inline BioseqPostgresLoggingSink postgres_sink;
 
-[[nodiscard, gnu::always_inline]]
-inline std::uint64_t fnv1a_64(std::string_view s) noexcept
-{
-  std::uint64_t h = 14695981039346656037ull;
-  for (char c : s) {
-    h ^= static_cast<std::uint8_t>(c);
-    h *= 1099511628211ull;
-  }
-  return h;
-}
-
-[[nodiscard, gnu::always_inline]]
-inline std::uint64_t hash_combine_64(
-    std::uint64_t seed,
-    std::uint64_t value) noexcept
-{
-  return seed ^ (value + 0x9e3779b97f4a7c15ull +
-                 (seed << 6) + (seed >> 2));
-}
-
 inline std::size_t LogSiteKeyHash::operator()(
     const LogSiteKey& key) const noexcept
 {
-  std::uint64_t h = fnv1a_64(key.file);
-  h = hash_combine_64(h, fnv1a_64(key.format));
-  h = hash_combine_64(h, key.line);
-  h = hash_combine_64(h, key.column);
-  h = hash_combine_64(h, key.level);
+  std::uint64_t h = bioseq::common::fnv1a_64(key.file);
+  h = bioseq::common::hash_combine_64(
+      h, bioseq::common::fnv1a_64(key.format));
+  h = bioseq::common::hash_combine_64(h, key.line);
+  h = bioseq::common::hash_combine_64(h, key.column);
+  h = bioseq::common::hash_combine_64(h, key.level);
   return static_cast<std::size_t>(h);
 }
 
@@ -2266,7 +2275,7 @@ public:
     return *this;
   }
 
-  [[gnu::always_inline]] ~BioseqReport()
+  [[gnu::always_inline]] inline ~BioseqReport()
   {
     if (!enabled_) {
       return;

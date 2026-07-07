@@ -51,9 +51,9 @@ module;
 #include <functional>
 #include <vector>
 
-export module context;
+export module bioseq.common.context;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 using namespace memory::literals;
 

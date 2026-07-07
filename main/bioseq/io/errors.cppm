@@ -6,9 +6,9 @@ module;
 #include <utility>
 #include <concepts>
 
-export module bioseq_io.errors;
+export module bioseq.io.errors;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io {
 

@@ -9,18 +9,18 @@ module;
 #include <ranges>
 #include <type_traits>
 
-export module bioseq_sequences.kmers.two_stacks;
+export module bioseq.sequences.kmers.two_stacks;
 
-import mlogging;
-import context;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers;
-import bioseq_simd.utils;            // for_each_index<W>
-import bioseq_simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
-import algo.circular_append_buffer;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.context;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers;
+import bioseq.simd.utils;            // for_each_index<W>
+import bioseq.simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
+import bioseq.common.circular_append_buffer;
+import bioseq.instr;
 
 export {
 
@@ -143,7 +143,7 @@ struct sequence_simd_iteration_state {
     /// member function instead of a 705-instruction standalone closure.
     template<bool IsFull, typename OffsetsArray>
     [[gnu::always_inline]] [[gnu::flatten]] HWY_INLINE
-    inline void step_one_bp_vec_stream(
+    void step_one_bp_vec_stream(
         d_t          d,
         OffsetsArray const& offsets_in,
         mask_t       live_mask,

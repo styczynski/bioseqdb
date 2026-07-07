@@ -61,20 +61,20 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_io.compression.chunk_fetcher;
+export module bioseq.io.compression.chunk_fetcher;
 
-import mlogging;
-import bioseq_io.simd_kernels;
-import bioseq_io.compression.aligned_byte_buffer;
-import bioseq_io.compression.bit_reader;
-import bioseq_io.compression.blockfinder;
-import bioseq_io.compression.chunk;
-import bioseq_io.compression.deflate;
-import bioseq_io.compression.gzip_format;
-import bioseq_io.compression.huffman;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
+import bioseq.common.mlogging;
+import bioseq.io.simd_kernels;
+import bioseq.io.compression.aligned_byte_buffer;
+import bioseq.io.compression.bit_reader;
+import bioseq.io.compression.blockfinder;
+import bioseq.io.compression.chunk;
+import bioseq.io.compression.deflate;
+import bioseq.io.compression.gzip_format;
+import bioseq.io.compression.huffman;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
 
 export namespace bioseq::io::compression {
 

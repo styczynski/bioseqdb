@@ -21,7 +21,7 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.templating.pack_search;
+export module bioseq.common.templating.pack_search;
 
 export namespace bioseq::common::templating {
 
@@ -110,6 +110,21 @@ inline constexpr bool unique_types_in_tuple_v =
     detail_pack_search::unique_types_in_tuple_impl<Tuple>(
         std::make_index_sequence<std::tuple_size_v<Tuple>>{});
 
+// All-distinct check over a value pack — the value-side twin of
+// unique_types_in_tuple_v. Reuses index_of_value_pack: a key is a duplicate iff
+// its first-occurrence index does not equal its own position.
+template <auto... Vs>
+[[nodiscard]] consteval bool unique_values_pack() noexcept {
+    if constexpr (sizeof...(Vs) <= 1u) {
+        return true;
+    } else {
+        std::size_t pos = 0;
+        bool ok = true;
+        (((index_of_value_pack<Vs, Vs...>() == pos++) ? true : (ok = false)), ...);
+        return ok;
+    }
+}
+
 static_assert(contains_type_pack<int, char, short, int, long>());
 static_assert(!contains_type_pack<int, char, short, long>());
 static_assert(index_of_type_pack<int, char, short, int, long>() == 2u);
@@ -117,5 +132,7 @@ static_assert(contains_value_pack<3u, 1u, 2u, 3u>());
 static_assert(index_of_value_pack<3u, 1u, 2u, 3u>() == 2u);
 static_assert(unique_types_in_tuple_v<std::tuple<int, char, short>>);
 static_assert(!unique_types_in_tuple_v<std::tuple<int, char, int>>);
+static_assert(unique_values_pack<1u, 2u, 3u>());
+static_assert(!unique_values_pack<1u, 2u, 1u>());
 
 } // namespace

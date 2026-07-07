@@ -37,10 +37,10 @@ module;
 #include <cstdint>
 #include <cstring>
 
-export module bioseq_io.simd_kernels;
+export module bioseq.io.simd_kernels;
 
-import mlogging;
-import sequan_compat;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
 
 export {
 

@@ -32,7 +32,7 @@ UNIQUE (storage_id, stripe_id, chunk_id, start_row_number);
 
 REVOKE SELECT ON bioseq.row_mask FROM PUBLIC;
 
-COMMENT ON TABLE row_mask IS 'Columnar chunk mask metadata';
+COMMENT ON TABLE row_mask IS 'BioseqColumn chunk mask metadata';
 -- ROW MASK END
 
 CREATE SEQUENCE IF NOT EXISTS storageid_seq MINVALUE 10000000000 NO CYCLE;
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS stripe (
     CONSTRAINT stripe_first_row_number_idx UNIQUE (storage_id, first_row_number)
 ) WITH (user_catalog_table = true);
 
-COMMENT ON TABLE stripe IS 'Columnar per stripe metadata';
+COMMENT ON TABLE stripe IS 'BioseqColumn per stripe metadata';
 
 CREATE TABLE IF NOT EXISTS chunk_group (
     storage_id bigint NOT NULL,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS chunk_group (
     PRIMARY KEY (storage_id, stripe_num, chunk_group_num)
 );
 
-COMMENT ON TABLE chunk_group IS 'Columnar chunk group metadata';
+COMMENT ON TABLE chunk_group IS 'BioseqColumn chunk group metadata';
 
 CREATE TABLE IF NOT EXISTS chunk (
     storage_id bigint NOT NULL,
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS chunk (
     PRIMARY KEY (storage_id, stripe_num, attr_num, chunk_group_num)
 ) WITH (user_catalog_table = true);
 
-COMMENT ON TABLE chunk IS 'Columnar per chunk metadata';
+COMMENT ON TABLE chunk IS 'BioseqColumn per chunk metadata';
 
 DO $proc$
 BEGIN
@@ -205,11 +205,11 @@ GRANT SELECT ON ALL tables IN SCHEMA bioseq TO PUBLIC ;
 DO $$
 DECLARE
   max_row_count bigint;
-  -- this should be equal to bioseq_storage.h/COLUMNAR_FIRST_ROW_NUMBER
-  COLUMNAR_FIRST_ROW_NUMBER constant bigint := 1;
+  -- this should be equal to bioseq_storage.h/BIOSEQ_COLUMN_FIRST_ROW_NUMBER
+  BIOSEQ_COLUMN_FIRST_ROW_NUMBER constant bigint := 1;
 BEGIN
   SELECT MAX(row_count) INTO max_row_count FROM bioseq.stripe;
-  UPDATE bioseq.stripe SET first_row_number = COLUMNAR_FIRST_ROW_NUMBER +
+  UPDATE bioseq.stripe SET first_row_number = BIOSEQ_COLUMN_FIRST_ROW_NUMBER +
                                                 (stripe_num - 1) * max_row_count;
 END;
 $$;
@@ -409,7 +409,7 @@ COMMENT ON TABLE bioseq.seq_sub_table IS
 
 -- DOC0260 §6.1 / DOC0268 Appendix — partial index over the ACTIVE (is_full =
 -- FALSE) shard of each (database, tablespace, relfilenode, column, bucket).
--- This accelerates LookupActiveSubTableShard. It is intentionally NOT a UNIQUE
+-- This accelerates SubTableManager::lookup_active_shard. It is intentionally NOT a UNIQUE
 -- index: is_full is a mutable predicate column, and a UNIQUE partial index on a
 -- flipped predicate column trips false "duplicate key" violations during shard
 -- rollover (PostgreSQL's uniqueness check sees the just-updated/deleted old
@@ -418,7 +418,7 @@ COMMENT ON TABLE bioseq.seq_sub_table IS
 -- marked full and a fresh active shard is created in lockstep). The
 -- "one active shard per (parent, column, bucket)" invariant is enforced
 -- instead by the per-bucket transactional advisory lock taken in
--- allocate_new_shard_and_open (§7.3) plus the LookupActiveSubTableShard
+-- allocate_new_shard_and_open (§7.3) plus the SubTableManager::lookup_active_shard
 -- recheck under that lock — exactly the serialization the spec already mandates
 -- for concurrent shard creation.
 CREATE INDEX IF NOT EXISTS seq_sub_table_active_shard_idx
@@ -737,7 +737,7 @@ CREATE VIEW bioseq.storage WITH (security_barrier) AS
     FROM pg_class c, pg_am am
     WHERE c.relam = am.oid AND am.amname = 'bioseq'
       AND pg_has_role(c.relowner, 'USAGE');
-COMMENT ON VIEW bioseq.storage IS 'Columnar relation ID to storage ID mapping.';
+COMMENT ON VIEW bioseq.storage IS 'BioseqColumn relation ID to storage ID mapping.';
 GRANT SELECT ON bioseq.storage TO PUBLIC;
 
 CREATE VIEW bioseq.options WITH (security_barrier) AS
@@ -747,7 +747,7 @@ CREATE VIEW bioseq.options WITH (security_barrier) AS
     WHERE o.regclass = c.oid
       AND pg_has_role(c.relowner, 'USAGE');
 COMMENT ON VIEW bioseq.options
-  IS 'Columnar options for tables on which the current user has ownership privileges.';
+  IS 'BioseqColumn options for tables on which the current user has ownership privileges.';
 GRANT SELECT ON bioseq.options TO PUBLIC;
 
 CREATE VIEW bioseq.stripe WITH (security_barrier) AS
@@ -756,7 +756,7 @@ CREATE VIEW bioseq.stripe WITH (security_barrier) AS
     FROM bioseq_internal.stripe stripe, bioseq.storage storage
     WHERE stripe.storage_id = storage.storage_id;
 COMMENT ON VIEW bioseq.stripe
-  IS 'Columnar stripe information for tables on which the current user has ownership privileges.';
+  IS 'BioseqColumn stripe information for tables on which the current user has ownership privileges.';
 GRANT SELECT ON bioseq.stripe TO PUBLIC;
 
 CREATE VIEW bioseq.chunk_group WITH (security_barrier) AS
@@ -764,7 +764,7 @@ CREATE VIEW bioseq.chunk_group WITH (security_barrier) AS
     FROM bioseq_internal.chunk_group cg, bioseq.storage storage
     WHERE cg.storage_id = storage.storage_id;
 COMMENT ON VIEW bioseq.chunk_group
-  IS 'Columnar chunk group information for tables on which the current user has ownership privileges.';
+  IS 'BioseqColumn chunk group information for tables on which the current user has ownership privileges.';
 GRANT SELECT ON bioseq.chunk_group TO PUBLIC;
 
 CREATE VIEW bioseq.chunk WITH (security_barrier) AS
@@ -775,7 +775,7 @@ CREATE VIEW bioseq.chunk WITH (security_barrier) AS
     FROM bioseq_internal.chunk chunk, bioseq.storage storage
     WHERE chunk.storage_id = storage.storage_id;
 COMMENT ON VIEW bioseq.chunk
-  IS 'Columnar chunk information for tables on which the current user has ownership privileges.';
+  IS 'BioseqColumn chunk information for tables on which the current user has ownership privileges.';
 GRANT SELECT ON bioseq.chunk TO PUBLIC;
 
 -- bioseq--11.1-8--11.1-9.sql
@@ -1387,7 +1387,11 @@ CREATE TYPE bioseq_aligner_options AS (
     block_min_size            integer,
     block_max_size            integer,
     chaining_algorithm        integer,
-    base_alignment_algorithm  integer
+    base_alignment_algorithm  integer,
+    minimizer_algorithm        integer,
+    vulkan_enabled             boolean,
+    vulkan_seed_hits_enabled   boolean,
+    vulkan_index_cache_enabled boolean
 );
 
 CREATE OR REPLACE FUNCTION aligner_options(
@@ -1421,7 +1425,11 @@ CREATE OR REPLACE FUNCTION aligner_options(
     block_min_size            integer  DEFAULT NULL,
     block_max_size            integer  DEFAULT NULL,
     chaining_algorithm        integer  DEFAULT NULL,
-    base_alignment_algorithm  integer  DEFAULT NULL
+    base_alignment_algorithm  integer  DEFAULT NULL,
+    minimizer_algorithm        integer  DEFAULT NULL,
+    vulkan_enabled             boolean  DEFAULT NULL,
+    vulkan_seed_hits_enabled   boolean  DEFAULT NULL,
+    vulkan_index_cache_enabled boolean  DEFAULT NULL
 ) RETURNS bioseq_aligner_options AS $$
     SELECT ROW(
         kmer_size, window_size, max_gap, max_gap_ref, bandwidth, bandwidth_long,
@@ -1430,12 +1438,13 @@ CREATE OR REPLACE FUNCTION aligner_options(
         best_n, match_score, mismatch_pen, gap_open1, gap_ext1, gap_open2,
         gap_ext2, sc_ambi, zdrop, end_bonus, max_occ, mid_occ,
         block_min_size, block_max_size,
-        chaining_algorithm, base_alignment_algorithm
+        chaining_algorithm, base_alignment_algorithm, minimizer_algorithm,
+        vulkan_enabled, vulkan_seed_hits_enabled, vulkan_index_cache_enabled
     )::bioseq_aligner_options
 $$ LANGUAGE SQL IMMUTABLE;
 
 -- Overload of mmsearch that accepts an aligner_options payload. The third
--- argument is read by ColumnarScan_BeginCustomScan (see
+-- argument is read by BioseqColumnScan_BeginCustomScan (see
 -- apply_aligner_options_override in columnar_customscan.cppm) and overlays
 -- the non-NULL fields on top of the bioseq.aligner.* GUC snapshot. The
 -- function itself is still a tautology at the scalar level.
@@ -1635,6 +1644,27 @@ CREATE OR REPLACE FUNCTION bioseq.scheduler_stats()
     AS 'MODULE_PATHNAME', 'bioseq_scheduler_stats'
     LANGUAGE C VOLATILE;
 
+-- GPU cache warm-up: pre-builds all static shader .metallib/.metalar files in the
+-- backend-local cache directory, installing the archive interposer env. Returns a
+-- per-variant status transcript; "RESULT: ok variants=N failed=0" on success.
+CREATE OR REPLACE FUNCTION bioseq.gpu_warmup_shader_cache()
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'bioseq_gpu_warmup_shader_cache'
+    LANGUAGE C VOLATILE;
+
+CREATE OR REPLACE FUNCTION bioseq.vulkan_runtime_status(
+    OUT available boolean,
+    OUT device_name text,
+    OUT max_workgroup_count_x integer,
+    OUT scalar_block_layout boolean,
+    OUT initialization_error text,
+    OUT device_local_bytes bigint,
+    OUT software_device boolean
+)
+    RETURNS record
+    AS 'MODULE_PATHNAME', 'bioseq_vulkan_runtime_status'
+    LANGUAGE C STABLE PARALLEL SAFE;
+
 -- DOC0279 §12.2 — admin/test SQL surface for the new chunked index storage.
 CREATE OR REPLACE FUNCTION bioseq.set_index_policy(rel regclass, name text, policy text) RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_set_index_policy' LANGUAGE C VOLATILE STRICT;
@@ -1646,8 +1676,8 @@ CREATE OR REPLACE FUNCTION bioseq.index_table_row_count(rel regclass, name text)
     AS 'MODULE_PATHNAME', 'bioseq_index_table_row_count' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name text, query_key bigint) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
-CREATE OR REPLACE FUNCTION bioseq.columnar_row_number(rel regclass, ctid tid) RETURNS bigint
-    AS 'MODULE_PATHNAME', 'bioseq_columnar_row_number' LANGUAGE C VOLATILE STRICT;
+CREATE OR REPLACE FUNCTION bioseq.column_row_number(rel regclass, ctid tid) RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_column_row_number' LANGUAGE C VOLATILE STRICT;
 
 -- DOC0279 §12.2/§16.2 — TEST-ONLY controlled-corruption hooks. They resolve the
 -- dynamic seqidx_* shard for (rel, name) internally and write / delete a single

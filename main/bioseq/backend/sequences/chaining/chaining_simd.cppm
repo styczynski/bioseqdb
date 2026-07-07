@@ -45,13 +45,13 @@ module;
 #include <limits>
 #include <algorithm>
 
-export module bioseq_sequences.chaining.simd;
+export module bioseq.sequences.chaining.simd;
 
-import mlogging;
-import bioseq_sequences.chaining.utils;
-import bioseq_simd.utils;
-import context;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.sequences.chaining.utils;
+import bioseq.simd.utils;
+import bioseq.common.context;
+import bioseq.instr;
 
 export {
 

@@ -48,33 +48,33 @@ module;
 #include <span>
 #include <string>
 
-export module bioseq_sequences.minimap_port;
+export module bioseq.sequences.minimap_port;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_sequences.kmers.two_stacks;
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import block_aligner_hwy;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.chaining.scalar;
-import bioseq_sequences.chaining.simd;
-import bioseq_sequences.chaining.rmq;
-import bioseq_sequences.radix_sort;
-import context;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
-import bioseq_instr;
-import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
-import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
-import bioseq_parallelism.mode;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.pipeline_ops;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.alignment.block_aligner;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.chaining.scalar;
+import bioseq.sequences.chaining.simd;
+import bioseq.sequences.chaining.rmq;
+import bioseq.common.radix_sort;
+import bioseq.common.context;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
+import bioseq.storage.size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
+import bioseq.instr;
+import bioseq.indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.pipeline_ops;
 
 export {
 
@@ -114,9 +114,12 @@ using bioseq::indexing::MinimizerIndex;
 /// inside minimap2_port_with_index so the hot loop stays branchless.
 /// Values MUST match the ordinal used in the GUC enum (columnar.cppm).
 enum class ChainingAlgorithmType : uint8_t {
-    SCALAR_MM2 = 0,
-    SIMD_MM2   = 1,
-    RMQ        = 2,
+    SCALAR_MM2      = 0,
+    SIMD_MM2        = 1,
+    RMQ             = 2,
+    /// G3SA-style tiled DP score generation on Vulkan (DOC0304 Phase A).
+    /// Requires a usable Vulkan runtime when selected by the pipeline.
+    VULKAN_TILED_DP = 3,
 };
 
 /// Base-level alignment algorithm — KSW2 dual-affine DP (minimap2 default)
@@ -160,13 +163,18 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// RESEARCH/ENGINEERING_REPORT_V2.md for the full evolution
     /// history (was TWO_STACK_NTHASH_V3 in the iteration log).
     TWO_STACK_NTHASH = 2,
+    /// Vulkan minimap-int minimizer path. DOC0351 routes the active GPU sketch
+    /// through fused tiled Phase C for every supported alphabet. Requires a
+    /// usable Vulkan runtime when selected by the pipeline.
+    VULKAN_MINIMAP_INT = 3,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
     switch (mode) {
-        case ChainingAlgorithmType::SCALAR_MM2: return "Minimap2 Scalar";
-        case ChainingAlgorithmType::SIMD_MM2:   return "Minimap2 SIMD";
-        case ChainingAlgorithmType::RMQ:        return "Minimap2 RMQ";
+        case ChainingAlgorithmType::SCALAR_MM2:      return "Minimap2 Scalar";
+        case ChainingAlgorithmType::SIMD_MM2:        return "Minimap2 SIMD";
+        case ChainingAlgorithmType::RMQ:             return "Minimap2 RMQ";
+        case ChainingAlgorithmType::VULKAN_TILED_DP: return "Vulkan tiled DP";
     }
     return "unknown";
 }
@@ -185,6 +193,7 @@ enum class MinimizerAlgorithmType : uint8_t {
         case MinimizerAlgorithmType::SCALAR:             return "Scalar Minimizers";
         case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW: return "SIMD Minimap2 (slow reference)";
         case MinimizerAlgorithmType::TWO_STACK_NTHASH:   return "Two-Stack nthash SIMD Minimizers";
+        case MinimizerAlgorithmType::VULKAN_MINIMAP_INT: return "Vulkan minimap-int minimizers";
     }
     return "unknown";
 }
@@ -307,6 +316,36 @@ struct Minimap2Params {
     /// already saturates the bucket fill for VERY_LONG inputs.
     bool                          cross_query_batched       = false;
 
+    /// Enable Vulkan execution for Vulkan-backed algorithms. If a Vulkan
+    /// algorithm is selected while this is false, the pipeline raises an error;
+    /// algorithm fallback must be chosen before entering the pipeline.
+    bool                          vulkan_enabled            = true;
+
+    /// DOC0307 Phase B — enable the Vulkan seed-hit lookup when Vulkan is on.
+    /// Runtime routing only (never a template parameter). When true, selected
+    /// seed-hit GPU execution is mandatory; when false, the CPU seed path is
+    /// selected before entering the GPU backend.
+    bool                          vulkan_seed_hits_enabled  = false;
+    /// DOC0307 Phase B — cache GPU-resident minimizer index uploads while their
+    /// memory permit is held (batch/wave scoped). Runtime routing only.
+    bool                          vulkan_index_cache_enabled = true;
+
+    /// DOC0310 Phase C — resident two-submit Vulkan frontend (parallel ordered
+    /// sketch + GPU seed count/emit + device anchor sort). Runtime routing only;
+    /// unsupported GPU/runtime shapes are hard errors once this path is selected.
+    bool                          vulkan_fused_frontend_enabled = false;
+    /// DOC0310 Phase C — build the target minimizer index entirely on the GPU
+    /// (parallel sketch → device radix sort → race-free slot table) instead of
+    /// the CPU `MinimizerHashmapFragmentIndex` build + slot upload.
+    bool                          vulkan_gpu_index_build_enabled = false;
+    /// DOC0310 Phase C — optional GPU base-alignment extension under the block
+    /// aligner. Disabled by default; never gates the Phase C performance path.
+    bool                          vulkan_extend_enabled = false;
+    /// DOC0310 Phase C — ordered-sketch tile size (base pairs per tile).
+    uint32_t                      vulkan_phase_c_tile_bp = 2048;
+    /// DOC0310 Phase C — device radix sort digit width (bits per pass).
+    uint32_t                      vulkan_phase_c_radix_bits = 8;
+
     /// Build ChainingParams from this Minimap2Params.
     ///
     /// Extracts only the chaining-relevant subset and precomputes derived values.
@@ -326,9 +365,16 @@ struct Minimap2Params {
         switch (chaining_algorithm) {
             case ChainingAlgorithmType::SIMD_MM2:   cp.chaining_mode = ChainingMode::SIMD_DP; break;
             case ChainingAlgorithmType::RMQ:        cp.chaining_mode = ChainingMode::RMQ;     break;
+            // VULKAN_TILED_DP maps to SCALAR_DP only because ChainingMode has no
+            // Vulkan value and is not the dispatch selector; ChainStage selects
+            // the kernel from chaining_algorithm.
+            case ChainingAlgorithmType::VULKAN_TILED_DP:
+                                                    cp.chaining_mode = ChainingMode::SCALAR_DP; break;
             case ChainingAlgorithmType::SCALAR_MM2:
             default:                                cp.chaining_mode = ChainingMode::SCALAR_DP; break;
         }
+        cp.vulkan_enabled = vulkan_enabled;
+        cp.coordinate_only = !do_cigar && !compute_divergence && !compute_mapq;
         cp.prepare();
         return cp;
     }
@@ -600,7 +646,7 @@ void collect_seed_hits(
     /// even on a bare `[](const Anchor&){...}` extractor.
     struct AnchorRefBitsKey {
         [[nodiscard, gnu::always_inline]]
-        std::uint64_t operator()(const Anchor& anchor) const noexcept {
+        inline std::uint64_t operator()(const Anchor& anchor) const noexcept {
             return anchor.ref_bits();
         }
     };
@@ -763,7 +809,7 @@ void generate_regions(
     /// functor for DOC0249 R4 compliance (no capture-all lambdas in the
     /// pipeline module tree).
     struct ChainScoreDescending {
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const Chain& left, const Chain& right) const noexcept
         {
             return left.score > right.score;
@@ -1694,7 +1740,7 @@ void estimate_divergence_from_seeds(
         const std::uint32_t* mini_pos_count;
         sequence_size_t      query_len;
         [[nodiscard, gnu::always_inline]]
-        bool operator()(std::int64_t pos) const noexcept {
+        inline bool operator()(std::int64_t pos) const noexcept {
             if (pos < 0 || static_cast<sequence_size_t>(pos) > query_len) return false;
             const std::size_t p = static_cast<std::size_t>(pos);
             return mini_pos_count[p + 1] > mini_pos_count[p];
@@ -1704,7 +1750,7 @@ void estimate_divergence_from_seeds(
         const std::uint32_t* mini_pos_count;
         sequence_size_t      query_len;
         [[nodiscard, gnu::always_inline]]
-        int32_t operator()(std::int64_t a, std::int64_t b) const noexcept {
+        inline int32_t operator()(std::int64_t a, std::int64_t b) const noexcept {
             if (a < 0) a = 0;
             if (static_cast<sequence_size_t>(b) > query_len) b = static_cast<std::int64_t>(query_len);
             if (a > b) return 0;
@@ -1745,7 +1791,7 @@ void estimate_divergence_from_seeds(
             bool          region_is_reverse;
 
             [[nodiscard, gnu::always_inline]]
-            std::int64_t operator()(int32_t s) const noexcept {
+            inline std::int64_t operator()(int32_t s) const noexcept {
                 const Anchor& chain_anchor = region_is_reverse
                     ? anchors_base[anchor_begin + seed_count - 1 - s]
                     : anchors_base[anchor_begin + s];

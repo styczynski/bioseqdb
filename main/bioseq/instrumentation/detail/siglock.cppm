@@ -13,21 +13,21 @@ module;
 
 #include <csignal>
 
-export module bioseq_instr.detail.siglock;
+export module bioseq.instr.detail.siglock;
 
 export namespace bioseq::instr::detail {
 
 class Siglock {
 public:
-    [[gnu::always_inline]] void lock() noexcept   { ++depth_; }
-    [[gnu::always_inline]] void unlock() noexcept { --depth_; }
+    [[gnu::always_inline]] inline void lock() noexcept   { ++depth_; }
+    [[gnu::always_inline]] inline void unlock() noexcept { --depth_; }
     [[nodiscard, gnu::always_inline]]
-    bool is_held() const noexcept { return depth_ > 0; }
+    inline bool is_held() const noexcept { return depth_ > 0; }
 
     struct Guard {
         Siglock& lock;
-        [[gnu::always_inline]] explicit Guard(Siglock& l) noexcept : lock(l) { lock.lock(); }
-        [[gnu::always_inline]] ~Guard() noexcept { lock.unlock(); }
+        [[gnu::always_inline]] inline explicit Guard(Siglock& l) noexcept : lock(l) { lock.lock(); }
+        [[gnu::always_inline]] inline ~Guard() noexcept { lock.unlock(); }
         Guard(const Guard&) = delete;
         Guard& operator=(const Guard&) = delete;
     };

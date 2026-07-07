@@ -20,26 +20,30 @@
 
 #include <simdjson.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.minimap_port;
-import bioseq_sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
-import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.minimap_port;
+import bioseq.sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
+import bioseq.storage.lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
+import bioseq.instr;
+import bioseq.parallelism.memory_admission;
 import bench_framework;
 import bench.tool_minimap2;
-import bioseq_sequences.generation;
+import bioseq.sequences.generation;
+import bioseq.gpu.vulkan.runtime;
 
 #ifndef BIOSEQ_BENCH_REPORT_DIR
 #error "BIOSEQ_BENCH_REPORT_DIR must be defined by the build system"
@@ -62,9 +66,8 @@ using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-using bioseq::sequences::generation::HWY_NAMESPACE::GeneratedBenchSequencePair;
-using bioseq::sequences::generation::HWY_NAMESPACE::GeneratorParams;
-using bioseq::sequences::generation::HWY_NAMESPACE::generate_test_sequences;
+namespace gen = bioseq::sequences::generation;
+using bench_generator_t = gen::alphabet_sequence_generator<seq::dna4, std::uint32_t>;
 
 constexpr std::int32_t kPositionTolerance = 10;
 
@@ -74,7 +77,7 @@ struct AlignerInput {
     /// refs even though they don't mutate. `mutable` lets concurrent
     /// `on_run` calls access them through their declared signatures
     /// without forcing a `const_cast` at every call site.
-    mutable std::vector<GeneratedBenchSequencePair<seq::dna4, std::uint32_t>> pairs;
+    mutable std::vector<typename bench_generator_t::query_target_pair> pairs;
     /// Pre-decoded ACGT strings in lock-step with `pairs`. Populated
     /// once in `build_input` so the per-iteration timing window of
     /// `run_aligner` does not include the O(bp_size) compact-to-ACGT
@@ -94,6 +97,7 @@ struct AlignerOutput {
     std::size_t correct_pairs          = 0;
     std::size_t total_pairs            = 0;
     double      sum_abs_position_offset = 0.0;
+    bool        vulkan_hardware_unavailable = false;
 };
 
 /// Pull a numeric field out of a simdjson element with a fallback.
@@ -132,10 +136,9 @@ struct AlignerOutput {
 /// We size off the data already in the JSON blob, before any sequence
 /// generation. The cached `AlignerInput` keeps every generated pair in compact
 /// dna4/u32 storage and also keeps pre-decoded ACGT strings for the minimap2
-/// reference path. `generate_test_sequences()` now packs each target from the
-/// single unpacked reference without making a second full-reference temporary,
-/// so the transient generation peak is the unpacked reference plus one compact
-/// target/query pair, not `8 * total_bp`.
+/// reference path. DOC0335 generation now shares the compact target across
+/// pairs and fills packed storage directly, so generation no longer carries a
+/// per-pair full-reference copy.
 [[nodiscard]] RunConstraints estimate_aligner_resources(
     std::string_view /*data_dir*/,
     std::string_view /*test_case_name*/,
@@ -164,14 +167,28 @@ struct AlignerOutput {
     const std::size_t cached_input_bytes = fragment_count * cached_per_pair;
 
     // One unpacked dna4 reference is live while the compact pairs are produced.
-    // Add a modest scratch allowance for DP/anchor vectors used by the timed
-    // alignment call without letting the estimate dominate scheduling.
-    const std::size_t generation_peak_extra = reference_length;
-    const std::size_t aligner_scratch_extra =
+    // Add DP/anchor scratch plus the possible resident target-index footprint.
+    // Phase-C GPU builds hold a target index resident for the duration of the
+    // timed run; omitting it let XXL_HIFI co-schedule two 500 Mbp GPU rows and
+    // trip the fail-closed Vulkan admission gate before dispatch.
+    const std::uint64_t generation_peak_extra = reference_length;
+    const std::uint64_t aligner_scratch_extra =
         fragment_count * (fragment_length_mean / 2 + 1024);
+    const std::uint64_t target_index_extra =
+        bioseq::parallelism::minimizer_index_peak_bytes_for_bp(reference_length);
+    const std::uint64_t extra_memory =
+        bioseq::parallelism::saturating_add(
+            bioseq::parallelism::saturating_add(
+                generation_peak_extra,
+                aligner_scratch_extra),
+            target_index_extra);
     return {
         .base_memory  = cached_input_bytes,
-        .extra_memory = generation_peak_extra + aligner_scratch_extra,
+        .extra_memory = static_cast<std::size_t>(
+            std::min<std::uint64_t>(
+                extra_memory,
+                static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::size_t>::max)()))),
     };
 }
 
@@ -185,7 +202,7 @@ struct AlignerOutput {
                                         std::string_view test_case_name,
                                         simdjson::dom::element data,
                                         const RunConstraints& /*constraints*/) {
-    GeneratorParams params{};
+    gen::generator_params params{};
     params.reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length",
                         static_cast<std::int64_t>(params.reference_length)));
@@ -213,7 +230,7 @@ struct AlignerOutput {
         read_int_field(data, "seed", static_cast<std::int64_t>(params.seed)));
 
     AlignerInput input;
-    input.pairs = generate_test_sequences<seq::dna4, std::uint32_t>(params);
+    input.pairs = bench_generator_t(params).generate_sequences_pairs(params.fragment_count);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
 
@@ -231,7 +248,7 @@ struct AlignerOutput {
         input.queries_acgt.push_back(
             bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.query));
         input.targets_acgt.push_back(
-            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.target));
+            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(*pair.target));
     }
 
     bioseq_log<DBG>("[bench_v10] build_input '{}' produced {} pairs (k_override={})",
@@ -245,8 +262,36 @@ struct AlignerOutput {
 /// REPR_STORAGE test cases via the test-case name passed via the input.
 struct AlgorithmDispatch {
     bool is_minimap2_reference = false;
+    bool explicit_vulkan = false;
     Minimap2Params params{};
 };
+
+[[nodiscard]] bool is_explicit_vulkan_hardware_available(std::string_view algo) {
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+        return true;
+    }
+
+    static std::atomic_bool logged_unavailable{false};
+    if (!logged_unavailable.exchange(true, std::memory_order_relaxed)) {
+        if (runtime.usable()) {
+            bioseq_log<WRN>(
+                "[bench_v10] explicit Vulkan benchmark rows are not measured on this host "
+                "(first algo='{}'): active Vulkan device '{}' is a CPU/software device "
+                "(VkPhysicalDeviceType={}); hardware Vulkan is required for GPU timing/parity",
+                algo,
+                runtime.features().device_name.data(),
+                runtime.features().device_type);
+        } else {
+            bioseq_log<WRN>(
+                "[bench_v10] explicit Vulkan benchmark rows are not measured on this host "
+                "(first algo='{}'): Vulkan runtime is unavailable: {}",
+                algo,
+                runtime.initialization_error());
+        }
+    }
+    return false;
+}
 
 [[nodiscard]] AlgorithmDispatch dispatch_algorithm(std::string_view algo,
                                                     std::int32_t kmer_override) {
@@ -272,6 +317,16 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    } else if (algo == "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash") {
+        // DOC0304 Phase A: G3SA-style Vulkan tiled-DP chaining. Explicit GPU
+        // selection fails loudly when no hardware Vulkan device exists. Identical
+        // minimizer (two-stack nthash) + base aligner (KSW2) to
+        // bioseq_ksw2_simd_dp_two_stack_nthash, so the only varied dimension is
+        // the chaining backend: SIMD_MM2 vs VULKAN_TILED_DP.
+        dispatch.params.chaining_algorithm       = ChainingAlgorithmType::VULKAN_TILED_DP;
+        dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+        dispatch.explicit_vulkan = true;
     } else if (algo == "bioseq_ksw2_batched_simd_dp_two_stack_nthash") {
         // DOC0254 §11.9: KSW2_BATCHED selected via runtime params.
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
@@ -289,6 +344,47 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    } else if (algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
+        // Vulkan minimap-int minimizers + Vulkan tiled-DP chaining + block
+        // aligner. The minimizer sketch is always the fused tiled Phase-C path
+        // after DOC0351; this row keeps the older seed/index frontend settings
+        // for comparison. The only varied
+        // dimensions versus bioseq_block_simd_dp_two_stack_nthash (SIMD
+        // minimizers + SIMD chaining + block aligner) are the seeding (GPU
+        // sketch + GPU seed-hit lookup) and the chaining backend; the base
+        // aligner stays block (no G3SA extension kernel in Phase B, §0/§10).
+        // All GPU stages fail loudly when no hardware Vulkan device exists.
+        dispatch.params.chaining_algorithm        = ChainingAlgorithmType::VULKAN_TILED_DP;
+        dispatch.params.base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        dispatch.params.minimizer_algorithm       = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+        dispatch.params.vulkan_enabled            = true;
+        dispatch.params.vulkan_seed_hits_enabled  = true;
+        dispatch.params.vulkan_index_cache_enabled = true;
+        // Keep the resident two-submit seed/index frontend OFF for the legacy
+        // comparison row. This no longer selects a Phase-B minimizer sketch.
+        dispatch.params.vulkan_fused_frontend_enabled  = false;
+        dispatch.params.vulkan_gpu_index_build_enabled = false;
+        dispatch.explicit_vulkan = true;
+    } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {
+        // DOC0310 Phase C — the resident two-submit Vulkan frontend: parallel
+        // ordered tile sketch + GPU target-index build (device radix sort +
+        // race-free slot table) + GPU seed count/emit + device anchor sort +
+        // Vulkan tiled-DP chaining + block aligner. Same aligner as the fastest
+        // CPU row (block aligner); the varied dimensions are the GPU frontend and
+        // the GPU index build. It fails loudly when no hardware Vulkan device
+        // exists. This row is compared against
+        // `bioseq_block_simd_dp_two_stack_nthash` (SIMD minimizers + SIMD
+        // chaining + block aligner) and `minimap2_dp`.
+        dispatch.params.chaining_algorithm        = ChainingAlgorithmType::VULKAN_TILED_DP;
+        dispatch.params.base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        dispatch.params.minimizer_algorithm       = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+        dispatch.params.vulkan_enabled            = true;
+        dispatch.params.vulkan_seed_hits_enabled  = true;
+        dispatch.params.vulkan_index_cache_enabled = true;
+        dispatch.params.vulkan_fused_frontend_enabled  = true;
+        dispatch.params.vulkan_gpu_index_build_enabled = true;
+        dispatch.params.vulkan_extend_enabled          = false;
+        dispatch.explicit_vulkan = true;
     } else if (algo == "bioseq_ksw2_rmq_scalar_mm") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::RMQ;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
@@ -309,6 +405,10 @@ struct AlgorithmDispatch {
 
     AlignerOutput output;
     output.total_pairs = input.pairs.size();
+    if (dispatch.explicit_vulkan && !is_explicit_vulkan_hardware_available(algo)) {
+        output.vulkan_hardware_unavailable = true;
+        return output;
+    }
     for (std::size_t pair_index = 0; pair_index < input.pairs.size(); ++pair_index) {
         auto& pair = input.pairs[pair_index];     // pairs are `mutable` in AlignerInput; see field comment
         MatchResultCollection results;
@@ -331,10 +431,22 @@ struct AlgorithmDispatch {
                 // DOC0263 — minimap_port now takes lazy_compact_sequence&; wrap the
                 // in-memory ranges in the zero-overhead no-fragment lazy wrapper.
                 auto bench_lazy_query  = bioseq::storage::make_lazy_in_memory(pair.query);
-                auto bench_lazy_target = bioseq::storage::make_lazy_in_memory(pair.target);
+                auto bench_lazy_target = bioseq::storage::make_lazy_in_memory(*pair.target);
                 results = bioseq::simd::HWY_NAMESPACE::minimap_port(
                     bench_lazy_query, bench_lazy_target, dispatch.params);
             }
+        } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& exception) {
+            bioseq_log<ERR>("[bench_v10] selected Vulkan aligner failed (algo='{}', pair_index={}, "
+                 "query_len={}, target_len={}, k={}): {}",
+                 algo, pair_index,
+                 input.queries_acgt[pair_index].size(),
+                 input.targets_acgt[pair_index].size(),
+                 dispatch.params.kmer_size,
+                 exception.what());
+            if (dispatch.explicit_vulkan) {
+                throw;
+            }
+            continue;
         } catch (const std::exception& exception) {
             bioseq_log<ERR>("[bench_v10] aligner threw exception (algo='{}', pair_index={}, "
                  "query_len={}, target_len={}, k={}): {}",
@@ -378,6 +490,13 @@ struct AlgorithmDispatch {
     const AlignerOutput& output)
 {
     std::map<std::string, double> metrics;
+    if (output.vulkan_hardware_unavailable) {
+        const double not_measured = std::numeric_limits<double>::quiet_NaN();
+        metrics.emplace("match_count", not_measured);
+        metrics.emplace("primary_correct_fraction", not_measured);
+        metrics.emplace("mean_position_offset_bp", not_measured);
+        return metrics;
+    }
     metrics.emplace("match_count", static_cast<double>(output.total_results));
     const double pairs_d = static_cast<double>(output.total_pairs);
     metrics.emplace("primary_correct_fraction",

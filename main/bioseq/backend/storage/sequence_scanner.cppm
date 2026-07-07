@@ -38,11 +38,11 @@ module;
 #include <string_view>
 #include <type_traits>
 
-export module bioseq_storage_scanner;
+export module bioseq.storage.scanner;
 
-import mlogging;
-import bioseq_storage_size;
-import bioseq_sequences;
+import bioseq.common.mlogging;
+import bioseq.storage.size;
+import bioseq.sequences;
 
 static_assert(__cplusplus >= 202302L, "DOC0263 requires C++23-or-later");
 

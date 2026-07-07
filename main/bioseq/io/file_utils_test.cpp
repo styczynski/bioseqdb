@@ -12,9 +12,9 @@
 
 #include <string_view>
 
-import mlogging;
-import bioseq_io.options;
-import bioseq_io.file_utils;
+import bioseq.common.mlogging;
+import bioseq.io.options;
+import bioseq.io.file_utils;
 
 namespace {
 

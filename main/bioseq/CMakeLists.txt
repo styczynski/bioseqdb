@@ -7,8 +7,19 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
-file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
-file(GLOB_RECURSE SRC_MOD_FILES
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
+set(BIOSEQ_GPU_ARCHIVE_BUILDER_SRC
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_builder.cpp)
+set(BIOSEQ_GPU_METAL_ARCHIVE_SRC
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive.cpp)
+# Both builder files are compiled into bioseq_gpu_archive_builder, not the extension.
+# Old probe files are excluded if still present on disk.
+list(REMOVE_ITEM SRC_FILES
+  ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
+  ${BIOSEQ_GPU_METAL_ARCHIVE_SRC}
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe_helper.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe.cpp)
+file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
@@ -30,6 +41,36 @@ find_package(TBB REQUIRED tbb)
 find_package(lfreist-hwinfo REQUIRED)
 find_package(HWY 1.3.0 REQUIRED NO_MODULE)
 find_package(Boost 1.90.0 REQUIRED COMPONENTS program_options regex serialization iterator integer)
+find_package(spirv_cross_core CONFIG REQUIRED)
+find_package(spirv_cross_glsl CONFIG REQUIRED)
+find_package(spirv_cross_msl CONFIG REQUIRED)
+find_package(VulkanUtilityLibraries CONFIG REQUIRED)
+
+# DOC0304 Phase A — Vulkan/MoltenVK + glslang for the G3SA tiled-DP chaining
+# backend. CMake's FindVulkan only materialises Vulkan::glslang when the glslang
+# component is requested, so it is listed explicitly. DXC is intentionally NOT
+# required: the Phase A shader is GLSL compiled through glslang, and hard-
+# requiring DXC would break otherwise-valid MoltenVK / non-Windows configs.
+find_package(Vulkan REQUIRED COMPONENTS glslang)
+
+if(NOT TARGET Vulkan::glslang)
+  message(FATAL_ERROR
+    "vulkan-sdk-components must provide Vulkan::glslang; rerun vcpkg install vulkan-sdk-components")
+endif()
+
+set(BIOSEQ_GLSLANG_STATIC_LIBS
+  ${Vulkan_glslang_LIBRARY}
+  ${Vulkan_glslang-spirv_LIBRARY}
+  ${Vulkan_glslang-osdependent_LIBRARY}
+  ${Vulkan_glslang-machineindependent_LIBRARY}
+  ${Vulkan_glslang-genericcodegen_LIBRARY})
+
+foreach(_bioseq_glslang_lib IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
+  if(NOT _bioseq_glslang_lib OR _bioseq_glslang_lib MATCHES "-NOTFOUND$")
+    message(FATAL_ERROR
+      "vulkan-sdk-components did not expose a required static glslang library; rerun vcpkg install vulkan-sdk-components")
+  endif()
+endforeach()
 
 # === bench target wiring lives in main/bench/bench_v10.cmake ===
 # (Old AddCommonTargetX block deleted as part of the V10 migration.
@@ -52,114 +93,18 @@ find_package(Boost 1.90.0 REQUIRED COMPONENTS program_options regex serializatio
 # per-target module on top of the shared lib.
 # ============================================================================
 
-set(BIOSEQ_NOPG_MODULES
-  # backend/alignment_hwy/* (Highway-bound SIMD aligners)
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils.cppm
-  # backend/common/*  (testing.cppm excluded — Catch2 dependency)
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/algo_tracer.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/circular_append_buffer.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/fragment_cache.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/sequan_compat.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/utils.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/vector_stream.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_uint_64.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_uint_128.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_kv_32_32.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_kv_64_64.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/sorting/radix_sort.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/dispatch_chain.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_for_each.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_search.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/runtime_dispatch.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/template_str.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/templating.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm
-  # backend/config/config.cppm is Domain P (imports pg_utils, uses PG macros);
-  # it stays in postgresql_bioseq's own module set.
-  # backend/storage/* — the PG-free bucket math + seq_locator POD
-  # (DOC0260 §12.1) plus, since DOC0263 §2.2, the standalone sequence_size
-  # module and the new lazy-fragmented-sequence machinery (scanner concept +
-  # lazy_compact_sequence wrapper). All are NO_POSTGRES-safe.
-  # sequence_storage_manager.cppm stays in postgresql_bioseq's own set (it uses
-  # the PG catalog / palloc).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/bucket_math.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_size.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_scanner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence.cppm
-  # backend/sequences/*
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/cigar.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/sequences.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_rmq.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_scalar.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_utils.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/mm_sketch_baseline.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/base.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/lexic.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/minimap_int.cppm
-  # DOC0264 §10.1 — sample-sequence generator moved from main/bench/
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/generation/sequence_generator.cppm
-  # DOC0279 — the NO_POSTGRES indexing concept/algorithm modules (§4 table).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/sequence_index_type.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/index_chunked_storage.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/index_traits.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/supported_indexes.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence_index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_index.cppm
-  # backend/pipeline/*
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/memory_admission.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concepts.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pool.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pipeline_ops.cppm
-  # instrumentation/*
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/access.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/aggregate.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/arena.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/config.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/counter.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/descriptor.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/arch.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/do_not_optimize.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/siglock.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/spinlock.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/sysinfo.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/gauge.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/global_state.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/histogram.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/loop.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/mod.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_linux.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_macos.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_stub.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pool.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/region.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sample.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler_posix.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler_stub.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/thread_state.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/trace.cppm
-)
+# DOC0322 Option A — Domain-N membership is now STRUCTURAL: everything under
+# backend/** (and instrumentation/**) EXCEPT the Domain-P column-store set relocated
+# under backend/pg/** is Domain N. Replaces the previously hand-maintained explicit
+# list (and the sorted_pair_runs_pg/index_residency_pg manual appends below).
+# testing.cppm stays per-target (Catch2), so it is excluded here.
+file(GLOB_RECURSE BIOSEQ_NOPG_MODULES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
+list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/backend/pg/")
+list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/common/testing\.cppm$")
 
 # DOC0286 §12.1 Edit 1 — the IO reader (FASTA/FASTQ + gzip) + the new
 # file_utils.cppm are NO_POSTGRES and are now consumed by the pg extension
@@ -172,8 +117,20 @@ file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
+set(BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/tbb_partition_link_shim.cpp)
+
 set(BIOSEQ_NOPG_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+endif()
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
 
 add_library(bioseq_modules_nopg OBJECT)
@@ -226,15 +183,21 @@ target_compile_definitions(bioseq_modules_nopg PUBLIC
 target_include_directories(bioseq_modules_nopg PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../config"
   "${CMAKE_CURRENT_LIST_DIR}/include2"
-  "${CMAKE_CURRENT_LIST_DIR}/include"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/hwy_contrib"
   "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
+  ${Vulkan_INCLUDE_DIR}
   ${Boost_INCLUDE_DIRS}
   ${HWY_INCLUDE_DIRS})
+
+if(EXISTS "/opt/homebrew/include/MoltenVK/mvk_private_api.h")
+  target_include_directories(bioseq_modules_nopg PUBLIC "/opt/homebrew/include/MoltenVK")
+elseif(EXISTS "/usr/local/include/MoltenVK/mvk_private_api.h")
+  target_include_directories(bioseq_modules_nopg PUBLIC "/usr/local/include/MoltenVK")
+endif()
 
 target_link_libraries(bioseq_modules_nopg PUBLIC
   safestring_static
@@ -247,11 +210,29 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   TBB::tbb
   ${Boost_LIBRARIES})
 
+target_link_libraries(bioseq_modules_nopg PRIVATE
+  spirv-cross-msl
+  Vulkan::LayerSettings)
+
 target_sources(bioseq_modules_nopg
   PRIVATE ${BIOSEQ_NOPG_SOURCES}
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_MODULES})
+
+if(APPLE)
+  add_executable(bioseq_gpu_archive_builder
+    ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
+    ${BIOSEQ_GPU_METAL_ARCHIVE_SRC})
+  target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
+  target_include_directories(bioseq_gpu_archive_builder PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/backend")
+  if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
+    install(TARGETS bioseq_gpu_archive_builder
+      RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
+      COMPONENT ${PROJECT_NAME})
+  endif()
+endif()
 
 # ============================================================================
 # Tests/integration-tests module file lists. testing.cppm is per-target
@@ -323,10 +304,117 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 #     or under NO_POSTGRES, it falls back to BIOSEQ_LOG_FILE or
 #     /tmp/bioseq_loglog.log.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
-list(APPEND SRC_MOD_FILES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/sorted_pair_runs_pg.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/index_residency_pg.cppm)
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
+
+# GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
+# dispatch wrapper at -O3. Keep this as a build knob, not a C++ ifdef:
+# runtime dispatch and algorithm selection are unchanged, and non-GCC
+# builds stay on the preset's normal -O3 path.
+set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O1" CACHE STRING
+  "Optimization level for GCC 16.1 AWS typed dispatch wrapper TUs. \
+Allowed: O0, O1, O2, O3. O3 preserves the global preset behavior.")
+set_property(CACHE BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL PROPERTY STRINGS O0 O1 O2 O3)
+if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[0123]$")
+  message(FATAL_ERROR
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL must be one of O0, O1, O2, O3; got "
+    "'${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}'")
+endif()
+
+set(BIOSEQ_GCC_TYPED_DISPATCH_JOBS "1" CACHE STRING
+  "Ninja compile-pool width for GCC 16.1 AWS typed dispatch wrapper TUs. \
+0 = inherit the target compile pool.")
+if(NOT BIOSEQ_GCC_TYPED_DISPATCH_JOBS MATCHES "^[0-9]+$")
+  message(FATAL_ERROR
+    "BIOSEQ_GCC_TYPED_DISPATCH_JOBS must be a non-negative integer; got "
+    "'${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}'")
+endif()
+
+set(BIOSEQ_GCC_TEMPLATE_FORCE_INLINE "ON" CACHE BOOL
+  "Keep forced always_inline/flatten attributes in template dispatch modules \
+for the GCC 16.1 AWS preset. OFF preserves algorithm selection but lets GCC \
+avoid constructing very large inlining graphs while compiling typed dispatch.")
+
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked_segmented.cpp)
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
+    target_compile_definitions(bioseq_modules_nopg PRIVATE
+      BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
+      BIOSEQ_PIPELINE_FORCE_INLINE=0)
+  endif()
+  if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS
+      gcc_typed_dispatch_compile=${BIOSEQ_GCC_TYPED_DISPATCH_JOBS})
+    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
+  endif()
+  if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
+    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      PROPERTIES COMPILE_OPTIONS "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+  endif()
+  message(STATUS
+    "bioseq: GCC typed dispatch wrapper TUs use "
+    "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
+    "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}, template force-inline="
+    "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 and "
+    "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
+endif()
 
 # Per-target module set for the aligner (and its tests_exec sibling): just
 # testing.cppm; every other Domain N module is delivered via
@@ -348,7 +436,6 @@ AddCommonTargetX(
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
     "${CMAKE_CURRENT_LIST_DIR}/include2"
-    "${CMAKE_CURRENT_LIST_DIR}/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -370,6 +457,10 @@ AddCommonTargetX(
     libassert::assert
     foonathan_memory
     TBB::tbb
+    Vulkan::Vulkan
+    Vulkan::glslang
+    spirv-cross-msl
+    Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -399,7 +490,6 @@ AddCommonTargetX(
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
     "${CMAKE_CURRENT_LIST_DIR}/include2"
-    "${CMAKE_CURRENT_LIST_DIR}/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -413,6 +503,9 @@ AddCommonTargetX(
     libassert::assert
     foonathan_memory
     TBB::tbb
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
+    spirv-cross-msl
+    Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -429,6 +522,10 @@ AddCommonTargetX(
   HWY 1.3.0
 )
 
+if(TARGET bioseq_gpu_archive_builder)
+  add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
+endif()
+
 # DOC0270 — disable LTO on the Postgres extension. The default IPO=TRUE set
 # by AddPostgreSQLExtension.cmake doubles the per-build wall-clock for the
 # heavy dispatch_buffer.cppm template fan-out: clang first instantiates the
@@ -442,7 +539,12 @@ AddCommonTargetX(
 # that drove the test execs to opt out; keeping the postgresql_bioseq
 # linkage non-LTO matches that posture.
 set_target_properties(postgresql_bioseq PROPERTIES
-  INTERPROCEDURAL_OPTIMIZATION FALSE)
+  INTERPROCEDURAL_OPTIMIZATION FALSE
+  # DOC0341 — the PostgreSQL extension must NOT link-load libvulkan in the
+  # postmaster, because the macOS loader stack maps Metal/IOAccelerator before
+  # backend fork. Keep the vcpkg rpath only so Runtime::init() can later
+  # dlopen("@rpath/libvulkan...") inside the selected-GPU backend process.
+  INSTALL_RPATH "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib;${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/lib")
 
 # Throttle the per-target heavy module compiles on low-RAM hosts. The
 # postgresql_bioseq target owns the Domain P module fan-out — the modules

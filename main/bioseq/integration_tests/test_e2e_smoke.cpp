@@ -9,7 +9,7 @@
  *        mis-mapped dna5 result can never pass). The dna5 path exercises the nt4
  *        normalization (N resets, T valid) end-to-end through the SQL surface.
  */
-#include "common_simd.h"                   // HWY_NAMESPACE (generator)
+#include "common_simd.h"
 #include "common_tests.h"
 #include "common.h"
 
@@ -23,16 +23,16 @@
 #include <string>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.generation;
-import integration_tests.common;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.generation;
+import bioseq.integration_tests.common;
 
 namespace {
 
 namespace it = bioseq_int_tests;
-namespace gen = bioseq::sequences::generation::HWY_NAMESPACE;
+namespace gen = bioseq::sequences::generation;
 
 constexpr long long kPositionToleranceBp = 50;
 
@@ -86,7 +86,7 @@ void write_fasta(const std::string& path, std::string_view header,
 template <sequence_alphabet A>
 void run_smoke(const std::string& alpha_name, const std::string& seq_type,
                const std::string& table) {
-    gen::GeneratorParams gp{};
+    gen::generator_params gp{};
     gp.reference_length       = 300'000;
     gp.fragment_count         = 4;            // several loci (TESTING-03)
     gp.fragment_length_mean   = 5'000;        // long N-free runs (dna5 ref is ~1% N)
@@ -97,9 +97,10 @@ void run_smoke(const std::string& alpha_name, const std::string& seq_type,
     gp.reverse_complement_rate = 0.0;         // forward-only -> deterministic positions
     gp.seed                   = 20260286;
 
-    auto pairs = gen::generate_test_sequences<A, std::uint64_t>(gp);
+    auto pairs = gen::alphabet_sequence_generator<A, std::uint64_t>(gp)
+                     .generate_sequences_pairs(gp.fragment_count);
     ASSERT(pairs.size() == gp.fragment_count, "generator under-produced", pairs.size());
-    const std::string target_bases = pairs.front().target.to_string();
+    const std::string target_bases = pairs.front().target->to_string();
     if (alpha_name == "dna5") {
         // The dna5 generator must actually produce N (else the nt4 path is untested).
         ASSERT(target_bases.find('N') != std::string::npos,

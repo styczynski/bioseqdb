@@ -5,7 +5,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq_io.options;
+export module bioseq.io.options;
 
 export namespace bioseq::io {
 

@@ -11,10 +11,9 @@
 #include <tuple>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
 
 namespace {
 

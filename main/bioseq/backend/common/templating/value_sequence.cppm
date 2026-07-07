@@ -13,7 +13,7 @@ module;
 
 #include <cstddef>
 
-export module bioseq_common.templating.value_sequence;
+export module bioseq.common.templating.value_sequence;
 
 export namespace bioseq::common::templating {
 

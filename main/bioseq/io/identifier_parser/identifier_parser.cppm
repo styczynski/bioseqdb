@@ -13,7 +13,6 @@ module;
 
 #include "common.h"            // fmt (DOC0145)
 
-#include <boost/container/flat_map.hpp>
 #include <boost/container/small_vector.hpp>
 
 #include <algorithm>
@@ -29,12 +28,12 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_io.identifier_parser;
+export module bioseq.io.identifier_parser;
 
-import mlogging;
-import bioseq_io.simd_kernels;      // scan_for_each_delim4 (one SIMD pass per header)
-import bioseq_io.file_utils;        // bioseq::io::detail::to_ascii_lower (shared ASCII fold)
-import bioseq_io.identifier_formats;
+import bioseq.common.mlogging;
+import bioseq.io.simd_kernels;      // scan_for_each_delim4 (one SIMD pass per header)
+import bioseq.io.file_utils;        // bioseq::io::detail::to_ascii_lower (shared ASCII fold)
+import bioseq.io.identifier_formats;
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
@@ -67,14 +66,22 @@ struct column_descriptor {
 
 /// Routes the parser produces -> destination "slots". A slot is a dense index
 /// into the PG-side coercion table. One field may route to MANY slots (D5).
-/// `std::less<>` makes `key_routes` transparently findable by `string_view`, so
-/// the per-record emit path never allocates a `std::string` to look a route up.
+/// Route counts are tiny and resolved once per load, so vector-backed route
+/// lists avoid exposing Boost flat_map internals through this module BMI.
+struct identifier_key_route {
+    std::string key;
+    std::vector<dest_slot_t> slots;
+};
+
+struct identifier_pos_route {
+    std::uint32_t position;
+    std::vector<dest_slot_t> slots;
+};
+
 struct identifier_routing {
-    boost::container::flat_map<std::string,
-        boost::container::small_vector<dest_slot_t, 2>, std::less<>> key_routes;
-    boost::container::flat_map<std::uint32_t,
-        boost::container::small_vector<dest_slot_t, 2>> pos_routes;
-    boost::container::small_vector<dest_slot_t, 2> identifier_slots;
+    std::vector<identifier_key_route> key_routes;
+    std::vector<identifier_pos_route> pos_routes;
+    std::vector<dest_slot_t> identifier_slots;
     std::size_t dest_count     = 0;     // number of distinct slots
     bool        strip_metadata = false; // D7: strip [k=v]/k=v from identifier
 };
@@ -507,6 +514,22 @@ bracket_tags(string_view header, const header_lexer& lex) {
 // Route emitter — the §6 `Emit` that consults the routing table and writes.
 // ---------------------------------------------------------------------
 
+[[nodiscard]] inline const std::vector<dest_slot_t>* find_key_slots(
+        const identifier_routing& routing, string_view key) noexcept {
+    for (const auto& route : routing.key_routes) {
+        if (string_view{route.key} == key) return &route.slots;
+    }
+    return nullptr;
+}
+
+[[nodiscard]] inline const std::vector<dest_slot_t>* find_pos_slots(
+        const identifier_routing& routing, std::uint32_t position) noexcept {
+    for (const auto& route : routing.pos_routes) {
+        if (route.position == position) return &route.slots;
+    }
+    return nullptr;
+}
+
 struct route_emitter {
     const identifier_routing& routing;
     identifier_writer_ref     writer;
@@ -519,9 +542,9 @@ struct route_emitter {
     }
     /// Route by an already-normalised key (fixed-format `norm_key` or a literal).
     void keyed(string_view norm_key, string_view value) const {
-        const auto it = routing.key_routes.find(norm_key);
-        if (it != routing.key_routes.end())
-            for (dest_slot_t s : it->second) write_or_null(s, value);
+        if (const auto* slots = find_key_slots(routing, norm_key)) {
+            for (dest_slot_t s : *slots) write_or_null(s, value);
+        }
     }
     /// Route by a raw header key (AUTO / bracket tags): normalise then route.
     void keyed_raw(string_view raw_key, string_view value) {
@@ -533,9 +556,9 @@ struct route_emitter {
         }
     }
     void positional(std::uint32_t idx, string_view value) const {
-        const auto it = routing.pos_routes.find(idx);
-        if (it != routing.pos_routes.end())
-            for (dest_slot_t s : it->second) write_or_null(s, value);
+        if (const auto* slots = find_pos_slots(routing, idx)) {
+            for (dest_slot_t s : *slots) write_or_null(s, value);
+        }
     }
     void identifier(string_view value) const {
         for (dest_slot_t s : routing.identifier_slots) write_or_null(s, value);
@@ -995,23 +1018,41 @@ resolve_identifier_mapping(
         col_to_slot[i] = s;
         return s;
     };
-    auto slot_under = [](auto& routes, const auto& key, dest_slot_t s) -> bool {
-        const auto it = routes.find(key);
-        if (it == routes.end()) return false;
-        for (dest_slot_t existing : it->second) if (existing == s) return true;
-        return false;
+    auto contains_slot = [](const std::vector<dest_slot_t>& slots,
+                            dest_slot_t s) -> bool {
+        return std::find(slots.begin(), slots.end(), s) != slots.end();
     };
     auto add_key_route = [&](std::string key, dest_slot_t s) {
-        if (!slot_under(routing.key_routes, key, s)) {
-            routing.key_routes[std::move(key)].push_back(s);
-            any_keyed_or_pos = true;
+        for (identifier_key_route& route : routing.key_routes) {
+            if (route.key == key) {
+                if (!contains_slot(route.slots, s)) {
+                    route.slots.push_back(s);
+                    any_keyed_or_pos = true;
+                }
+                return;
+            }
         }
+        routing.key_routes.push_back(identifier_key_route{
+            .key = std::move(key),
+            .slots = std::vector<dest_slot_t>{s},
+        });
+        any_keyed_or_pos = true;
     };
     auto add_pos_route = [&](std::uint32_t p, dest_slot_t s) {
-        if (!slot_under(routing.pos_routes, p, s)) {
-            routing.pos_routes[p].push_back(s);
-            any_keyed_or_pos = true;
+        for (identifier_pos_route& route : routing.pos_routes) {
+            if (route.position == p) {
+                if (!contains_slot(route.slots, s)) {
+                    route.slots.push_back(s);
+                    any_keyed_or_pos = true;
+                }
+                return;
+            }
         }
+        routing.pos_routes.push_back(identifier_pos_route{
+            .position = p,
+            .slots = std::vector<dest_slot_t>{s},
+        });
+        any_keyed_or_pos = true;
     };
     auto find_column = [&](std::string_view raw_name) -> std::size_t {
         for (std::size_t i = 0; i < ncols; ++i)

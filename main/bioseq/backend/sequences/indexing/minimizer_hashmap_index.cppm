@@ -16,35 +16,42 @@ module;
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 #include <utility>
-#include <boost/unordered/unordered_flat_map.hpp>
-export module bioseq_indexing.minimizer_hashmap;
-import mlogging;                                     // bioseq_log_progress<DBG>(enable_logging)
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_indexing.traits;
-import bioseq_indexing.minimizer_index;
-import bioseq_sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData
-import bioseq_sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
-import bioseq_storage_lazy;                          // lazy_compact_sequence, make_lazy_in_memory
-import bioseq_storage_size;                          // sequence_size_t
-import bioseq_sequences.radix_sort;                  // bioseq::sorting::radix_sort
-import bioseq_instr;                                 // instrumentation region scoping
-import bioseq_parallelism.mode;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.memory_admission;
-import bioseq_parallelism.pipeline_ops;
+export module bioseq.indexing.minimizer_hashmap;
+import bioseq.common.mlogging;                                     // bioseq_log_progress<DBG>(enable_logging)
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_index;
+import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
+import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
+import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
+import bioseq.storage.lazy;                          // lazy_compact_sequence, make_lazy_in_memory
+import bioseq.storage.size;                          // sequence_size_t
+import bioseq.common.radix_sort;                  // bioseq::sorting::radix_sort
+import bioseq.instr;                                 // instrumentation region scoping
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.pipeline_ops;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
+
+namespace bioseq::indexing::detail {
+struct MinimizerHashmapFragmentIndexTable;
+}
 
 export namespace bioseq::indexing {
 using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
+using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;   // DOC0345 Patch F
 using bioseq::storage::sequence_size_t;
 using bioseq::storage::lazy_compact_sequence;
 
@@ -52,9 +59,23 @@ using bioseq::storage::lazy_compact_sequence;
 
 // (1) the lookup structure — the old TargetIndex, renamed & relocated, storage-free
 struct MinimizerHashmapFragmentIndex {
-    boost::unordered_flat_map<std::uint64_t, std::uint64_t> table;
+private:
+    std::unique_ptr<detail::MinimizerHashmapFragmentIndexTable> table_;
+
+    void clear_table();
+    void reserve_table(std::size_t bucket_count);
+    void emplace_table(std::uint64_t hash, std::uint64_t packed);
+
+public:
     std::vector<std::uint64_t> positions;        // (last_pos<<1)|strand, full uint64
     sequence_size_t target_len = 0;
+
+    MinimizerHashmapFragmentIndex();
+    ~MinimizerHashmapFragmentIndex();
+    MinimizerHashmapFragmentIndex(const MinimizerHashmapFragmentIndex& other);
+    MinimizerHashmapFragmentIndex& operator=(const MinimizerHashmapFragmentIndex& other);
+    MinimizerHashmapFragmentIndex(MinimizerHashmapFragmentIndex&& other) noexcept;
+    MinimizerHashmapFragmentIndex& operator=(MinimizerHashmapFragmentIndex&& other) noexcept;
 
     static constexpr std::uint32_t kSerializeMagic   = 0xB1000001u;   // unchanged wire format
     static constexpr std::uint32_t kSerializeVersion = 2u;
@@ -80,6 +101,22 @@ struct MinimizerHashmapFragmentIndex {
     static_assert(std::endian::native == std::endian::little, "wire format requires little-endian host");
     static_assert(sizeof(std::size_t) >= 8, "wire format requires 64-bit size_t");
 
+    [[nodiscard]] std::size_t table_size() const noexcept;
+    [[nodiscard]] bool table_empty() const noexcept;
+    void for_each_table_entry_erased(
+        void* ctx,
+        void (*emit)(void* ctx, std::uint64_t hash, std::uint64_t packed)) const;
+
+    template <class F>
+    void for_each_table_entry(F&& emit) const {
+        using Fn = std::remove_reference_t<F>;
+        for_each_table_entry_erased(
+            &emit,
+            [](void* ctx, std::uint64_t hash, std::uint64_t packed) {
+                (*static_cast<Fn*>(ctx))(hash, packed);
+            });
+    }
+
     template <class MinimizerT>
     void build(const std::vector<MinimizerT>& target_minimizers,
                sequence_size_t target_length) {
@@ -87,7 +124,7 @@ struct MinimizerHashmapFragmentIndex {
             bioseq::instr::register_region_static("target_index_build");
         auto _scope = bioseq::instr::region(_desc);
         target_len = target_length;
-        table.clear();
+        clear_table();
         positions.clear();
 
         const std::size_t total = target_minimizers.size();
@@ -96,7 +133,7 @@ struct MinimizerHashmapFragmentIndex {
         }
         struct KmerKey {
             [[nodiscard, gnu::always_inline]]
-            std::uint64_t operator()(const MinimizerT& m) const noexcept { return m.kmer(); }
+            inline std::uint64_t operator()(const MinimizerT& m) const noexcept { return m.kmer(); }
         };
         static thread_local std::vector<MinimizerT> sorted_scratch;
         sorted_scratch.assign(target_minimizers.begin(), target_minimizers.end());
@@ -104,7 +141,7 @@ struct MinimizerHashmapFragmentIndex {
             sorted_scratch.data(), sorted_scratch.data() + total, KmerKey{});
 
         positions.resize(total);
-        table.reserve(total / 2 + 16);
+        reserve_table(total / 2 + 16);
         std::size_t i = 0;
         while (i < total) {
             const std::uint64_t kmer = sorted_scratch[i].kmer();
@@ -113,7 +150,7 @@ struct MinimizerHashmapFragmentIndex {
                 positions[j] = sorted_scratch[j].pos_strand_encoded();
                 ++j;
             }
-            table.emplace(kmer,
+            emplace_table(kmer,
                 (static_cast<std::uint64_t>(static_cast<std::uint32_t>(i)) << 32)
                 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(j - i)));
             i = j;
@@ -123,123 +160,26 @@ struct MinimizerHashmapFragmentIndex {
     /// NEW (§9.4): radix-bin over pre-extracted globalised (kmer, encoded_pos) pairs.
     /// `pairs` is MUTABLE and radix-sorted IN PLACE (caller-owned scratch; no copy).
     void build_from_pairs(std::span<std::pair<std::uint64_t,std::uint64_t>> pairs,
-                          sequence_size_t target_length) {
-        target_len = target_length; table.clear(); positions.clear();
-        const std::size_t n = pairs.size(); if (n == 0) return;
-        if (n > UINT32_MAX) index_corruption_panic("build_from_pairs: >UINT32_MAX positions (pos_offset is u32)");
-        bioseq::sorting::radix_sort(pairs.data(), pairs.data() + n,
-            [](const auto& p) noexcept { return p.first; });
-        positions.resize(n); table.reserve(n / 2 + 16);
-        std::size_t i = 0;
-        while (i < n) {
-            const std::uint64_t kmer = pairs[i].first; std::size_t j = i;
-            while (j < n && pairs[j].first == kmer) { positions[j] = pairs[j].second; ++j; }
-            if (j - i > UINT32_MAX) index_corruption_panic("build_from_pairs: kmer count > u32 (packed count field)");
-            table.emplace(kmer, ((std::uint64_t)(std::uint32_t)i << 32) | (std::uint32_t)(j - i));
-            i = j;
-        }
-    }
+                          sequence_size_t target_length);
 
-    [[nodiscard]] std::span<const std::uint64_t> lookup(std::uint64_t kmer_hash) const {
-        auto iter = table.find(kmer_hash);
-        if (iter == table.end()) {
-            return {};
-        }
-        const std::uint64_t packed = iter->second;
-        const std::uint32_t off    = static_cast<std::uint32_t>(packed >> 32);
-        const std::uint32_t count  = static_cast<std::uint32_t>(packed);
-        return std::span<const std::uint64_t>(positions.data() + off, count);
-    }
+    [[nodiscard]] std::span<const std::uint64_t> lookup(std::uint64_t kmer_hash) const;
 
-    void add_position_offset(sequence_size_t offset) {
-        if (offset == 0) return;
-        for (std::uint64_t& encoded : positions) {
-            const std::uint64_t pos    = (encoded >> 1) + static_cast<std::uint64_t>(offset);
-            const std::uint64_t strand = encoded & 1ULL;
-            encoded = (pos << 1) | strand;
-        }
-    }
+    void add_position_offset(sequence_size_t offset);
 
     [[nodiscard]] sequence_size_t target_length() const { return target_len; }
 
-    [[nodiscard]] std::size_t serialize_binary_size() const {
-        return kSerializeHeaderBytes
-             + kSerializeBucketBytes * table.size()
-             + 8 * positions.size();
-    }
+    [[nodiscard]] std::size_t serialize_binary_size() const;
 
-    void serialize_to_binary(char* output) const {
-        const std::uint32_t bucket_count    = static_cast<std::uint32_t>(table.size());
-        const std::uint64_t total_positions = static_cast<std::uint64_t>(positions.size());
-        const SerializedHeader header{
-            kSerializeMagic, kSerializeVersion, target_len, bucket_count, 0u, total_positions,
-        };
-        std::memcpy(output, &header, sizeof(header));
-        char* bucket_cursor   = output + kSerializeHeaderBytes;
-        char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
-        for (const auto& kv : table) {
-            const std::uint64_t packed   = kv.second;
-            const std::uint32_t pos_off  = static_cast<std::uint32_t>(packed >> 32);
-            const std::uint32_t pos_cnt  = static_cast<std::uint32_t>(packed);
-            const SerializedBucket bucket{ kv.first, pos_off, pos_cnt };
-            std::memcpy(bucket_cursor, &bucket, sizeof(bucket));
-            bucket_cursor += kSerializeBucketBytes;
-        }
-        if (total_positions > 0) {
-            std::memcpy(position_cursor, positions.data(), total_positions * 8);
-        }
-    }
+    void serialize_to_binary(char* output) const;
 
     [[nodiscard]] static MinimizerHashmapFragmentIndex deserialize_from_binary(
-        const char* input, std::size_t input_size)
-    {
-        if (input_size < kSerializeHeaderBytes) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: truncated blob");
-        }
-        SerializedHeader header{};
-        std::memcpy(&header, input, sizeof(header));
-        if (header.magic != kSerializeMagic) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: magic mismatch");
-        }
-        if (header.version != kSerializeVersion) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: version mismatch");
-        }
-        const std::size_t expected_size =
-            kSerializeHeaderBytes
-          + kSerializeBucketBytes * header.bucket_count
-          + 8 * header.total_positions;
-        if (input_size != expected_size) {
-            index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: size mismatch");
-        }
-        MinimizerHashmapFragmentIndex idx;
-        idx.target_len = header.target_len;
-        idx.table.reserve(header.bucket_count);
-        const char* bucket_cursor   = input + kSerializeHeaderBytes;
-        const char* position_cursor = bucket_cursor + kSerializeBucketBytes * header.bucket_count;
-        idx.positions.resize(header.total_positions);
-        if (header.total_positions > 0) {
-            std::memcpy(idx.positions.data(), position_cursor, header.total_positions * 8);
-        }
-        for (std::uint32_t b = 0; b < header.bucket_count; ++b) {
-            SerializedBucket bucket{};
-            std::memcpy(&bucket, bucket_cursor, sizeof(bucket));
-            bucket_cursor += kSerializeBucketBytes;
-            if (static_cast<std::uint64_t>(bucket.pos_offset) + bucket.pos_count > header.total_positions) {
-                index_corruption_panic("MinimizerHashmapFragmentIndex deserialize: bucket range exceeds total_positions");
-            }
-            const std::uint64_t packed =
-                (static_cast<std::uint64_t>(bucket.pos_offset) << 32)
-                | static_cast<std::uint64_t>(bucket.pos_count);
-            idx.table.emplace(bucket.hash, packed);
-        }
-        return idx;
-    }
+        const char* input, std::size_t input_size);
 };
 static_assert(MinimizerIndex<MinimizerHashmapFragmentIndex>,
               "MinimizerHashmapFragmentIndex must model MinimizerIndex");
 
 inline void index_corruption_panic(std::string_view msg) {
-    bioseq_log_progress<DBG>("[bioseq index corruption] {}", msg);
+    bioseq_log_progress<ERR>("[bioseq index corruption] {}", msg);
     std::abort();
 }
 
@@ -306,6 +246,103 @@ void wire_for_each_bucket(const char* blob, std::size_t blob_bytes,
     }
 }
 
+// DOC0345 Patch F — GPU batched mpf helpers. A GPU window covers as many whole
+// fragments as fit both the run buffer and the 28-bit position field (with halo).
+[[nodiscard]] inline std::size_t gpu_mpf_fragments_per_batch(
+    std::size_t nfrag,
+    std::size_t frag_bp,
+    std::size_t halo_bp,
+    std::size_t run_buffer_bytes) noexcept
+{
+    constexpr std::size_t max_bp =
+        static_cast<std::size_t>(MinimapSketchData::pos_field_mask);
+    if (nfrag == 0u || frag_bp == 0u) {
+        return 1u;
+    }
+    constexpr std::size_t gpu_segment_local_size = 128u;
+    constexpr std::size_t gpu_segment_max_workgroups = 65535u;
+    constexpr std::size_t gpu_segment_bytes_per_bp = 96u;
+    const std::size_t by_memory = std::max<std::size_t>(
+        1u,
+        run_buffer_bytes
+            / std::max<std::size_t>(
+                1u,
+                frag_bp * gpu_segment_bytes_per_bp));
+    const std::size_t by_pos =
+        halo_bp >= max_bp
+            ? 1u
+            : std::max<std::size_t>(1u, (max_bp - halo_bp) / frag_bp);
+    const std::size_t max_dispatch_bp = gpu_segment_local_size * gpu_segment_max_workgroups;
+    const std::size_t by_dispatch =
+        halo_bp >= max_dispatch_bp
+            ? 1u
+            : std::max<std::size_t>(1u, (max_dispatch_bp - halo_bp) / frag_bp);
+    return std::min({nfrag, by_memory, by_pos, by_dispatch});
+}
+
+// Serialize already (kmer, encoded_pos)-sorted pairs (from the GPU sorted-pair
+// seam: fused GPU minimizer emit + host pair sort) into the existing mpf
+// per-fragment blob format (header + bucket directory + positions). CPU-only
+// persistence -- no minimizer collection or sort HERE.
+inline void serialize_sorted_pairs_to_fragment_blob(
+    std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted_pairs,
+    sequence_size_t target_len,
+    std::vector<char>& out_blob)
+{
+    using Header = MinimizerHashmapFragmentIndex::SerializedHeader;
+    using Bucket = MinimizerHashmapFragmentIndex::SerializedBucket;
+
+    std::vector<Bucket> buckets;
+    std::vector<std::uint64_t> positions;
+    buckets.reserve(sorted_pairs.size() / 2u + 1u);
+    positions.reserve(sorted_pairs.size());
+
+    std::size_t index = 0;
+    while (index < sorted_pairs.size()) {
+        const std::uint64_t kmer = sorted_pairs[index].first;
+        const std::uint32_t offset =
+            static_cast<std::uint32_t>(positions.size());
+        std::uint32_t count = 0;
+        while (index < sorted_pairs.size() && sorted_pairs[index].first == kmer) {
+            positions.push_back(sorted_pairs[index].second);
+            ++count;
+            ++index;
+            if (count == UINT32_MAX) {
+                index_corruption_panic(
+                    "minimizers_per_fragment GPU blob: kmer count exceeds u32");
+            }
+        }
+        buckets.push_back(Bucket{kmer, offset, count});
+    }
+
+    const Header header{
+        MinimizerHashmapFragmentIndex::kSerializeMagic,
+        MinimizerHashmapFragmentIndex::kSerializeVersion,
+        static_cast<std::uint64_t>(target_len),
+        static_cast<std::uint32_t>(buckets.size()),
+        0u,
+        static_cast<std::uint64_t>(positions.size()),
+    };
+    const std::size_t bytes =
+        sizeof(Header)
+        + buckets.size() * sizeof(Bucket)
+        + positions.size() * sizeof(std::uint64_t);
+    out_blob.resize(bytes);
+    char* cursor = out_blob.data();
+    std::memcpy(cursor, &header, sizeof(header));
+    cursor += sizeof(header);
+    if (!buckets.empty()) {
+        std::memcpy(cursor, buckets.data(), buckets.size() * sizeof(Bucket));
+        cursor += buckets.size() * sizeof(Bucket);
+    }
+    if (!positions.empty()) {
+        std::memcpy(
+            cursor,
+            positions.data(),
+            positions.size() * sizeof(std::uint64_t));
+    }
+}
+
 // (2) the storage-bound CHUNKED_PER_FRAGMENT index template
 template <class S>
 struct MinimizersPerFragmentIndex {
@@ -315,7 +352,10 @@ struct MinimizersPerFragmentIndex {
     using storage_type = S;
 
     template <class R, class Scanner>
-    static void build(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+    static void build(
+        S& storage,
+        lazy_compact_sequence<R, Scanner>& seq,
+        MinimizerSketchBackend backend) {
         using traits = typename lazy_compact_sequence<R, Scanner>::traits;
         constexpr std::size_t w = 10, k = 15;                                  // pinned, == sidecar today
         constexpr std::size_t lpu        = traits::letters_per_unit;
@@ -330,6 +370,128 @@ struct MinimizersPerFragmentIndex {
             index_corruption_panic("minimizers_per_fragment build: scanner unit-span != ceil(total_bp/lpu) (fragment geometry)");
 
         const std::size_t size_u = (std::size_t)((total_bp + lpu - 1) / lpu);   // total units
+
+        // DOC0345 Patch F — GPU path: batch whole fragments through the GPU
+        // sorted-pair seam (fused GPU minimizer emit + host pair sort), scatter
+        // each global position into its fragment, and serialize the existing
+        // per-fragment blob format. No CPU minimizer COLLECT. Exits before the
+        // scalar per-fragment path below.
+        if (backend == MinimizerSketchBackend::VulkanSegment) {
+            const std::size_t fragments_per_batch = gpu_mpf_fragments_per_batch(
+                nfrag,
+                frag_bp,
+                2u * W,
+                storage.run_buffer_bytes());
+            std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> per_fragment;
+            std::vector<char> blob;
+            per_fragment.resize(fragments_per_batch);
+
+            auto write_fragment_blob =
+                [&storage](std::size_t fragment_no, const std::vector<char>& fragment_blob) {
+                const std::size_t bytes = fragment_blob.size();
+                storage.resize(static_cast<index_sub_key_t>(fragment_no), bytes);
+                storage.template write_to_each<char>(
+                    static_cast<index_sub_key_t>(fragment_no),
+                    [&fragment_blob, bytes](
+                        std::size_t chunk_no,
+                        char* buffer,
+                        std::size_t capacity_units) {
+                    DEBUG_ASSERT(
+                        chunk_no == 0 && capacity_units >= bytes,
+                        "one fragment index fits one chunk");
+                    if (bytes != 0u) {
+                        std::memcpy(buffer, fragment_blob.data(), bytes);
+                    }
+                    return chunk_no;
+                });
+            };
+
+            for (std::size_t batch_lo_frag = 0;
+                 batch_lo_frag < nfrag;
+                 batch_lo_frag += fragments_per_batch) {
+                const std::size_t batch_hi_frag =
+                    std::min(nfrag, batch_lo_frag + fragments_per_batch);
+                const sequence_size_t core_lo =
+                    static_cast<sequence_size_t>(batch_lo_frag) * frag_bp;
+                const sequence_size_t core_hi = std::min(
+                    static_cast<sequence_size_t>(batch_hi_frag) * frag_bp,
+                    total_bp);
+                const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
+                const sequence_size_t coll_hi = std::min(
+                    core_hi + static_cast<sequence_size_t>(W),
+                    total_bp);
+                const std::size_t lo_unit =
+                    static_cast<std::size_t>(coll_lo / lpu);
+                const std::size_t hi_unit = std::min(
+                    static_cast<std::size_t>((coll_hi + lpu - 1) / lpu),
+                    size_u);
+                const sequence_size_t emit_base =
+                    static_cast<sequence_size_t>(lo_unit) * lpu;
+
+                std::vector<std::pair<std::uint64_t, std::uint64_t>> batch_pairs =
+                    bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                        seq,
+                        lo_unit,
+                        hi_unit,
+                        emit_base,
+                        core_lo,
+                        core_hi,
+                        w,
+                        k);
+
+                for (auto& fragment_pairs : per_fragment) {
+                    fragment_pairs.clear();
+                }
+                for (const auto& pair : batch_pairs) {
+                    const sequence_size_t global_pos =
+                        static_cast<sequence_size_t>(pair.second >> 1);
+                    const std::size_t fragment_no =
+                        static_cast<std::size_t>(global_pos / frag_bp);
+                    if (fragment_no < batch_lo_frag || fragment_no >= batch_hi_frag) {
+                        continue;
+                    }
+                    const sequence_size_t fragment_core_lo =
+                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
+                    const std::uint64_t local_encoded =
+                        (static_cast<std::uint64_t>(global_pos - fragment_core_lo) << 1)
+                        | (pair.second & 1ull);
+                    per_fragment[fragment_no - batch_lo_frag].emplace_back(
+                        pair.first,
+                        local_encoded);
+                }
+
+                for (std::size_t fragment_no = batch_lo_frag;
+                     fragment_no < batch_hi_frag;
+                     ++fragment_no) {
+                    const sequence_size_t fragment_core_lo =
+                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
+                    const sequence_size_t fragment_core_hi = std::min(
+                        fragment_core_lo + static_cast<sequence_size_t>(frag_bp),
+                        total_bp);
+                    std::span<const std::pair<std::uint64_t, std::uint64_t>> fragment_pairs{
+                        per_fragment[fragment_no - batch_lo_frag].data(),
+                        per_fragment[fragment_no - batch_lo_frag].size()};
+                    serialize_sorted_pairs_to_fragment_blob(
+                        fragment_pairs,
+                        fragment_core_hi - fragment_core_lo,
+                        blob);
+                    write_fragment_blob(fragment_no, blob);
+                }
+            }
+
+            const std::int64_t manifest = static_cast<std::int64_t>(nfrag);
+            storage.resize(DIRECTORY_SUB_KEY, sizeof(std::int64_t));
+            storage.template write_to_each<std::int64_t>(
+                DIRECTORY_SUB_KEY,
+                [manifest](
+                    std::size_t chunk_no,
+                    std::int64_t* manifest_buffer,
+                    std::size_t) {
+                manifest_buffer[0] = manifest;
+                return chunk_no;
+            });
+            return;
+        }
 
         auto build_fragment_blob =
             [&seq, total_bp, size_u](std::size_t fragment_no,
@@ -440,10 +602,26 @@ struct MinimizersPerFragmentIndex {
           storage.resize(DIRECTORY_SUB_KEY, sizeof(std::int64_t));
           storage.template write_to_each<std::int64_t>(DIRECTORY_SUB_KEY, [manifest](std::size_t chunk_no, std::int64_t* manifest_buf, std::size_t){ manifest_buf[0]=manifest; return chunk_no; }); }
     }
+
+    // DOC0345 Patch F — scalar-default overload delegates to the explicit backend.
+    template <class R, class Scanner>
+    static void build(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+        build(storage, seq, MinimizerSketchBackend::Scalar);
+    }
+
+    template <class R, class Scanner>
+    static void rebuild(
+        S& storage,
+        lazy_compact_sequence<R, Scanner>& seq,
+        MinimizerSketchBackend backend)
+    {
+        storage.clear_entity();
+        build(storage, seq, backend);
+    }
+
     template <class R, class Scanner>
     static void rebuild(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
-        storage.clear_entity();                         // drop THIS sequence's chunks, then rebuild
-        build(storage, seq);
+        rebuild(storage, seq, MinimizerSketchBackend::Scalar);
     }
 
     /// query-time: materialise the single pipeline IndexT for one target SEGMENT.
@@ -476,6 +654,57 @@ struct MinimizersPerFragmentIndex {
             storage.index_error("minimizers_per_fragment: missing trailing fragment chunk");
         MinimizerHashmapFragmentIndex merged;
         merged.build_from_pairs(pairs, total_bp);   // FULL target length
+        return merged;
+    }
+
+    /// Query-filtered segment assembly for GPU seed lookup. Only query kmers
+    /// can be probed by the seed stage, so persisted MPF does not need to
+    /// materialise unrelated buckets before uploading the segment index.
+    static MinimizerHashmapFragmentIndex assemble_segment_for_query(
+            S& storage,
+            std::span<const MinimapSketchData> query_minimizers,
+            std::size_t frag_lo, std::size_t frag_hi, sequence_size_t frag_bp,
+            sequence_size_t total_bp, sequence_size_t clip_lo_bp, sequence_size_t clip_hi_bp,
+            MinimizerAssemblyScratch& scratch) {
+        scratch.clear_query();
+        auto& pairs = scratch.pairs;
+        auto& qkmers = scratch.query_kmers;
+        qkmers.reserve(query_minimizers.size());
+        for (const MinimapSketchData& qm : query_minimizers) {
+            qkmers.push_back(qm.kmer());
+        }
+        std::sort(qkmers.begin(), qkmers.end());
+        qkmers.erase(std::unique(qkmers.begin(), qkmers.end()), qkmers.end());
+
+        clip_hi_bp = std::min(clip_hi_bp, total_bp);
+        if (clip_lo_bp > clip_hi_bp) {
+            clip_lo_bp = clip_hi_bp;
+        }
+
+        const std::size_t expected_nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
+        if (storage.number_of_chunks(DIRECTORY_SUB_KEY) != 1) storage.index_error("minimizers_per_fragment: missing manifest");
+        const auto* manifest_p = storage.template read_chunk<std::int64_t>(DIRECTORY_SUB_KEY, 0);
+        if (*manifest_p != (std::int64_t)expected_nfrag) storage.index_error("minimizers_per_fragment: manifest nfrag mismatch");
+        if (frag_hi > expected_nfrag) storage.index_error("minimizers_per_fragment: requested fragment past manifest nfrag");
+        index_sub_key_t expected_f = (index_sub_key_t)frag_lo;
+        storage.read_chunks_in_range((index_sub_key_t)frag_lo, (index_sub_key_t)frag_hi,
+                [&](index_sub_key_t f, const char* blob, std::size_t blob_bytes){
+            if (f != expected_f) storage.index_error("minimizers_per_fragment: missing or duplicate fragment chunk");
+            ++expected_f;
+            const sequence_size_t off = (sequence_size_t)f * frag_bp;
+            storage.validate_minimizer_blob_or_error(blob, blob_bytes);
+            wire_for_each_entry(blob, blob_bytes,
+                [&](std::uint64_t kmer, std::uint64_t local_encoded){
+                    if (!std::binary_search(qkmers.begin(), qkmers.end(), kmer)) return;
+                    const sequence_size_t gpos = (sequence_size_t)(local_encoded >> 1) + off;
+                    if (gpos < clip_lo_bp || gpos >= clip_hi_bp) return;
+                    pairs.emplace_back(kmer, ((std::uint64_t)gpos << 1) | (local_encoded & 1ULL));
+                });
+        });
+        if (expected_f != (index_sub_key_t)frag_hi)
+            storage.index_error("minimizers_per_fragment: missing trailing fragment chunk");
+        MinimizerHashmapFragmentIndex merged;
+        merged.build_from_pairs(pairs, total_bp);
         return merged;
     }
 };

@@ -13,7 +13,7 @@
 //      path which writes stubs into the parent — see test_phase_c_mmsearch.cpp).
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

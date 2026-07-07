@@ -1,5 +1,19 @@
 {
   "params": {
+    "bioseq_block_vulkan_phase_c_frontend_just_index": {
+      "pipeline_mode": {
+        "type": "string",
+        "default": "single",
+        "enum": ["single", "parallel", "task_parallel"],
+        "description": "scheduler mode; single suffices for just_index timing"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_sequence",
+        "enum": ["minimizers_per_fragment", "minimizers_per_sequence"],
+        "description": "active read minimizer index selected before the timed Vulkan query"
+      }
+    },
     "bioseq_no_index": {
       "pipeline_mode": {
         "type": "string",
@@ -58,6 +72,7 @@
     }
   },
   "bench_e2e": {
+    "tags": ["e2e", "per_sequence", "no_index", "gpu"],
     "description": "DOC0296 focused per-sequence no-index task_parallel 2Gbp dna4 measurement",
     "fast": false,
     "concurrency": {"bench_lock": true, "concurrency": false},
@@ -69,6 +84,9 @@
           "minimizer_index": ["minimizers_per_sequence"],
           "recompute_async_persist": ["on"],
           "mps_pair_sort_impl": ["std_sort"]
+        },
+        "bioseq_block_vulkan_phase_c_frontend_just_index": {
+          "minimizer_index": ["minimizers_per_sequence"]
         }
       },
       "by_regions": true,

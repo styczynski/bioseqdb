@@ -21,6 +21,9 @@
     },
     "tbb",
     "zlib",
-    "lfreist-hwinfo"
+    "lfreist-hwinfo",
+    "spirv-cross",
+    "vulkan-utility-libraries",
+    "vulkan-sdk-components"
   ]
 }

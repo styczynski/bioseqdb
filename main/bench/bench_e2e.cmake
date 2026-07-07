@@ -32,7 +32,7 @@ AddCommonTargetX(
   COMMENT "BioSeq end-to-end SQL (bioseq.load + mmsearch) benchmark"
   VERSION ${INSTALL_VERSION} COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
-    "${BIOSEQ_DIR}/../config" "${BIOSEQ_DIR}/include2" "${BIOSEQ_DIR}/include"
+    "${BIOSEQ_DIR}/../config" "${BIOSEQ_DIR}/include2"
     "${BIOSEQ_DIR}/backend"
     "${BIOSEQ_DIR}/../vendor/fmtlog" "${BIOSEQ_DIR}/../vendor/fmt"
     "${BIOSEQ_DIR}/../vendor/seqan3/include"
@@ -44,6 +44,10 @@ AddCommonTargetX(
     PostgreSQL::PostgreSQL                     # libpq — the SQL client (NEW vs bench_v10)
     sqlgen::sqlgen                             # sqlgen PostgresV2Connection (find_package imported target)
     Catch2::Catch2                             # common.cppm `export import testing` (ASSERT macro)
+    Vulkan::Vulkan                             # Vulkan loader (bioseq_modules_nopg uses vulkan/shader_compiler)
+    Vulkan::glslang                            # GLSL→SPIR-V compiler (shader_compiler.cppm)
+    spirv-cross-msl                            # SPIR-V → MSL cross-compiler (MoltenVK path)
+    Vulkan::LayerSettings                      # validation-layer settings (Vulkan::Vulkan companion)
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -56,9 +60,9 @@ AddCommonTargetX(
   HWY 1.3.0)
 
 target_compile_definitions(bioseq_bench_e2e PRIVATE
-  "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bioseq_bench_e2e_doc0301_async_mps_build\""
+  "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bioseq_bench_e2e_batch_gpu_proof\""
   "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
-  "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_doc0296_per_sequence_no_index_focus.json\""
+  "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_batch_gpu_proof.json\""
   "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")   # default: PATH 'minimap2'
 
 if(APPLE)

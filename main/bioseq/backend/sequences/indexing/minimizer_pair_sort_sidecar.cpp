@@ -4,7 +4,7 @@
 
 #include <cstddef>
 
-import bioseq_simd.sorting;
+import bioseq.simd.sorting;
 
 extern "C" void bioseq_sort_pair_run_u128_keys(
         hwy::uint128_t* keys,

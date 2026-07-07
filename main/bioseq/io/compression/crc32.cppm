@@ -22,9 +22,9 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq_io.compression.crc32;
+export module bioseq.io.compression.crc32;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 

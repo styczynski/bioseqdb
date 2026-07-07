@@ -53,13 +53,13 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_storage_lazy;
+export module bioseq.storage.lazy;
 
-import mlogging;
-import bioseq_storage_scanner;
-import bioseq_storage_size;
-import bioseq_common.fragment_cache;
-import bioseq_sequences;
+import bioseq.common.mlogging;
+import bioseq.storage.scanner;
+import bioseq.storage.size;
+import bioseq.common.fragment_cache;
+import bioseq.sequences;
 
 static_assert(__cplusplus >= 202302L, "DOC0263 requires C++23-or-later");
 

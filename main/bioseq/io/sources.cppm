@@ -19,10 +19,10 @@ module;
 #include <string_view>
 #include <utility>
 
-export module bioseq_io.sources;
+export module bioseq.io.sources;
 
-import mlogging;
-import bioseq_io.options;
+import bioseq.common.mlogging;
+import bioseq.io.options;
 
 export namespace bioseq::io {
 

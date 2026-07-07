@@ -16,7 +16,7 @@ module;
 #include <array>
 #include <cstdint>
 
-export module bioseq_io.compression.dynamic_huffman_skip_lut;
+export module bioseq.io.compression.dynamic_huffman_skip_lut;
 
 export namespace bioseq::io::compression {
 

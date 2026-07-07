@@ -28,10 +28,10 @@ module;
 #include <algorithm>
 #include <limits>
 
-export module bioseq_sequences.chaining.utils;
+export module bioseq.sequences.chaining.utils;
 
-import mlogging;
-import context;
+import bioseq.common.mlogging;
+import bioseq.common.context;
 
 export {
 namespace bioseq::chaining {
@@ -318,6 +318,19 @@ struct ChainingParams {
 
     ChainingMode chaining_mode = ChainingMode::SIMD_DP;
 
+    /// Enable Vulkan execution for the VULKAN_TILED_DP chaining backend. When
+    /// false and the Vulkan backend is selected, the backend raises an error.
+    /// Algorithm fallback must be selected before entering the pipeline.
+    bool    vulkan_enabled    = true;
+
+    /// True when downstream stages only need a mapped coordinate/strand result,
+    /// not the full secondary list or base-alignment metadata. The scalar/SIMD
+    /// chaining backends ignore this hint; the Vulkan backend uses it to keep the
+    /// selected GPU coordinate path from spending CPU time backtracking every
+    /// chain when SQL did not request CIGAR, divergence, or MAPQ.
+    bool    coordinate_only    = false;
+    std::uint64_t query_len    = 0;
+
     /// Derived penalty values. Call prepare() after setting scale values.
     float   gap_penalty       = 0.0f;   ///< chain_gap_scale * 0.01 * kmer_size
     float   skip_penalty      = 0.0f;   ///< chain_skip_scale * 0.01 * kmer_size
@@ -528,7 +541,7 @@ inline void backtrack_chains(
         int64_t anchor_index;
     };
     struct ScoreAscending {
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const ScoredAnchorIndex& left,
             const ScoredAnchorIndex& right) const noexcept
         {

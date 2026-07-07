@@ -17,10 +17,10 @@ module;
 #include <array>
 #include <cstdint>
 
-export module bioseq_instr.thread_state;
+export module bioseq.instr.thread_state;
 
-import bioseq_instr.config;
-import bioseq_instr.aggregate;
+import bioseq.instr.config;
+import bioseq.instr.aggregate;
 
 export namespace bioseq::instr {
 
@@ -97,3 +97,10 @@ struct [[nodiscard]] installed_profiler_scope {
 };
 
 }  // namespace bioseq::instr
+
+template bioseq::instr::ProfilerBlock<bioseq::instr::context_args_no_profiling>*
+    bioseq::instr::tls_profiler<bioseq::instr::context_args_no_profiling>;
+template bioseq::instr::ProfilerBlock<bioseq::instr::context_args_profiling_full>*
+    bioseq::instr::tls_profiler<bioseq::instr::context_args_profiling_full>;
+template bioseq::instr::ProfilerBlock<bioseq::instr::context_args_profiling_timing_only>*
+    bioseq::instr::tls_profiler<bioseq::instr::context_args_profiling_timing_only>;

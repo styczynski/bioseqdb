@@ -30,18 +30,18 @@ module;
 #include <tuple>
 #include <string>
 
-export module block_aligner_hwy;
+export module bioseq.alignment.block_aligner;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_simd.utils;
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import context;
-import bioseq_storage_scanner;   // DOC0263 — sequence_scanner_none default
-import bioseq_storage_lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.simd.utils;
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.common.context;
+import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
+import bioseq.storage.lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
 
 export {
 

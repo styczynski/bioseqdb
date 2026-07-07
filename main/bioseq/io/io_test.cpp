@@ -30,13 +30,13 @@
 
 #include <kseq++/seqio.hpp>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_io.public_api;
-import bioseq_io.options;
-import bioseq_io.sources;
-import bioseq_io.compression.parallel_gzip_source;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.io.public_api;
+import bioseq.io.options;
+import bioseq.io.sources;
+import bioseq.io.compression.parallel_gzip_source;
 
 namespace {
 

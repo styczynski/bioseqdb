@@ -434,8 +434,6 @@ extern "C" {
 
 // OLD COMPAT
 
-#define ColumnarProcessUtility_compat(a, b, c, d, e, f, g, h) \
-	ColumnarProcessUtility(a, b, c, d, e, f, g, h)
 #define PrevProcessUtilityHook_compat(a, b, c, d, e, f, g, h) \
 	PrevProcessUtilityHook(a, b, c, d, e, f, g, h)
 #define GetOldestNonRemovableTransactionId_compat(a, b) \
@@ -1091,3 +1089,9 @@ getStxstattarget_compat(HeapTuple tup)
 // standard algorithms without qualification.
 #undef Min
 #undef Max
+
+// Postgres maps stdio names to pg_* variants on some platforms. Leaving those
+// macros active in C++ translation units rewrites libc++ internals such as
+// std::vsnprintf into std::pg_vsnprintf.
+#undef snprintf
+#undef vsnprintf

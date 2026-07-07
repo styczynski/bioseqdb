@@ -1,3 +1,7 @@
 [mcp_servers.bioseq-build]
-args = ["/Users/piotr.styczynski/Code/bioseqdb/main/build_mcp/server.py"]
+args = ["main/build_mcp/server.py"]
 command = "python3"
+cwd = "/Users/styczynski/Code/bioseqdb"
+
+[mcp_servers.bioseq-build.tools.doc_read]
+approval_mode = "approve"

@@ -8,7 +8,7 @@
 #include <set>
 #include <string>
 #include <tuple>
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -49,7 +49,7 @@ TEST_CASE("DOC0279 INSERT hook builds a multi-fragment index + both on-insert in
                    "'{}'::bioseq.seq('dna4',32));", tgt, qry);
 
     const long long rn = query_scalar_int(ctx,
-        "SELECT bioseq.columnar_row_number('doc0279_ih'::regclass, ctid) FROM doc0279_ih LIMIT 1");
+        "SELECT bioseq.column_row_number('doc0279_ih'::regclass, ctid) FROM doc0279_ih LIMIT 1");
     // /D11: one sub_key per fragment, NOT just the first. ceil(200000/32768) = 7.
     REQUIRE(index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_ih", rn) >= 7);
     // BOTH default on-insert indexes materialise from the single insert.

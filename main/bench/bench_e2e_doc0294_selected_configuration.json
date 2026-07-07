@@ -80,6 +80,7 @@
   },
 
   "bench_e2e": {
+    "tags": ["e2e", "selected"],
     "description": "DOC0294 selected e2e SQL timing matrix: dna4 2 Gbp only, bioseq scheduler modes plus parallel minimap2.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },

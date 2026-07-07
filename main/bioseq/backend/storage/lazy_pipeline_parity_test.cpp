@@ -22,14 +22,13 @@
 #include <string>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.minimap_port;   // MatchResult / MatchResultCollection
-import bioseq_sequences.pipe;           // minimap_port entry
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.minimap_port;   // MatchResult / MatchResultCollection
+import bioseq.sequences.pipe;           // minimap_port entry
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
 
 using namespace seq::literals;
 

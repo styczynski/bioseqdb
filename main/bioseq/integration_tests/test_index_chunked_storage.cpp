@@ -5,7 +5,7 @@
 #include "common_tests_integration.h"
 #include <set>
 #include <tuple>
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -33,13 +33,13 @@ inline std::set<std::tuple<long long, long long, long long>> mmsearch_set(
 TEST_CASE("DOC0279 per-fragment storage is created on insert with the right query_keys",
           "[indexing][per-fragment]") {
     auto ctx = fresh_context({"doc0279_cs_seed"});
-    seed_small_columnar(ctx, "doc0279_cs_seed");   // 3 dna4/32 rows, update_index_on_insert=on
+    seed_small_bioseq_column(ctx, "doc0279_cs_seed");   // 3 dna4/32 rows, update_index_on_insert=on
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "doc0279_cs_seed") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "doc0279_cs_seed") == 3);
 
     // Exact-rowno chunk placement: every indexed columnar rowno has >=1 sub_key.
     auto rownos = query_int_column(ctx,
-        "SELECT bioseq.columnar_row_number('doc0279_cs_seed'::regclass, ctid) "
+        "SELECT bioseq.column_row_number('doc0279_cs_seed'::regclass, ctid) "
         "FROM doc0279_cs_seed ORDER BY 1");
     REQUIRE(rownos.size() == 3);
     for (long long rn : rownos)
@@ -76,7 +76,7 @@ TEST_CASE("DOC0279 forced-scanner GUC disables stored assembly but results stay 
 
 TEST_CASE("DOC0279 index rows do not survive a ROLLBACK", "[indexing][per-fragment]") {
     auto ctx = fresh_context({"doc0279_cs_rb"});
-    seed_small_columnar(ctx, "doc0279_cs_rb");
+    seed_small_bioseq_column(ctx, "doc0279_cs_rb");
     const long long before = index_table_row_count(ctx, "minimizers_per_fragment", "doc0279_cs_rb");
     exec_sql(ctx, "BEGIN;");
     exec_sql(ctx, "INSERT INTO doc0279_cs_rb VALUES (99, 'GGGGCCCCAAAATTTT'::bioseq.seq('dna4',32));");
@@ -93,7 +93,7 @@ TEST_CASE("DOC0279 missing manifest forces recompute; reserved sentinels are ign
     exec_sqlf(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(ctx, "SELECT bioseq.update_index('doc0279_cs_cor'::regclass, 'minimizers_per_fragment');");
     const long long rn = query_scalar_int(ctx,
-        "SELECT bioseq.columnar_row_number('doc0279_cs_cor'::regclass, ctid) FROM doc0279_cs_cor LIMIT 1");
+        "SELECT bioseq.column_row_number('doc0279_cs_cor'::regclass, ctid) FROM doc0279_cs_cor LIMIT 1");
 
     // A reserved-band tuple (sub_key in the TEMP_RUN reserved range) must NOT be counted as a data fragment.
     const long long distinct_before = index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_cs_cor", rn);

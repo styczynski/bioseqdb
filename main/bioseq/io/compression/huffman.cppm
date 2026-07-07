@@ -23,10 +23,10 @@ module;
 #include <cstdint>
 #include <span>
 
-export module bioseq_io.compression.huffman;
+export module bioseq.io.compression.huffman;
 
-import mlogging;
-import bioseq_io.compression.bit_reader;
+import bioseq.common.mlogging;
+import bioseq.io.compression.bit_reader;
 
 export namespace bioseq::io::compression {
 

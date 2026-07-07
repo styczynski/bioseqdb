@@ -9,7 +9,7 @@ module;
 
 #include <cstdint>
 
-export module bioseq_instr.detail.do_not_optimize;
+export module bioseq.instr.detail.do_not_optimize;
 
 export namespace bioseq::instr::detail {
 

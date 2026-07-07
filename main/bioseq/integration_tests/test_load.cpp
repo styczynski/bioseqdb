@@ -20,8 +20,8 @@
 #include <utility>
 #include <vector>
 
-import mlogging;
-import integration_tests.common;
+import bioseq.common.mlogging;
+import bioseq.integration_tests.common;
 
 namespace {
 

@@ -6,6 +6,7 @@ module;
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <iterator>
 #include <list>
@@ -27,11 +28,11 @@ module;
 #include <boost/iterator/iterator_adaptor.hpp>
 
 
-export module bioseq_sequences:sequences;
+export module bioseq.sequences:sequences;
 
-import mlogging;
-import sequan_compat;
-import bioseq_common.templating;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.common.templating;
 
 export {
 
@@ -863,8 +864,9 @@ struct compact_sequence_range_base {
 
     using derived_range_t = derived_t;
 
-    template<size_t N> static constexpr bool has_valid_padding = true;
-    template<> static constexpr bool has_valid_padding<1> = (derived_range_t::padding() == 0);
+    template<size_t N>
+    static constexpr bool has_valid_padding =
+        (N == 1) ? (derived_range_t::padding() == 0) : true;
 
     template<typename I>
     struct is_valid_derived_iter {
@@ -889,17 +891,15 @@ struct compact_sequence_range_base {
 
     template<IteratorMode M>
     struct iterator_traits {
-        using dereference_t = void;
-    };
-
-    template<>
-    struct iterator_traits<BP> {
-        using dereference_t = traits::storage_unit;
-    };
-
-    template<>
-    struct iterator_traits<SYMBOL> {
-        using dereference_t = traits::alphabet_type;
+        using dereference_t = std::conditional_t<
+            M == BP,
+            typename traits::storage_unit,
+            std::conditional_t<
+                M == SYMBOL,
+                typename traits::alphabet_type,
+                void
+            >
+        >;
     };
 
     template<
@@ -963,20 +963,19 @@ struct compact_sequence_range_base {
         }
 
         template<IteratorMode M>
-        typename iterator_traits<M>::dereference_t _dereference() const;
-
-
-        template<> inline iterator_traits<BP>::dereference_t _dereference<BP>() const {
-            if constexpr (traits::letters_per_unit == 1) {
-                return *this->base();
+        typename iterator_traits<M>::dereference_t _dereference() const {
+            if constexpr (M == BP) {
+                if constexpr (traits::letters_per_unit == 1) {
+                    return *this->base();
+                } else {
+                    return _current_unit & traits::char_mask;
+                }
+            } else if constexpr (M == SYMBOL) {
+                typename traits::alphabet_type alph;
+                return alph.assign_rank(_dereference<BP>());
             } else {
-                return _current_unit & traits::char_mask;
+                static_assert(M == BP || M == SYMBOL, "Unsupported iterator mode");
             }
-        }
-
-        template<> inline iterator_traits<SYMBOL>::dereference_t _dereference<SYMBOL>() const {
-            typename traits::alphabet_type alph;
-            return alph.assign_rank(_dereference<BP>());
         }
 
         auto dereference() const {
@@ -1612,8 +1611,8 @@ public:
         return 0;
     }
 
-    explicit constexpr compact_sequence_range<R>(R&& base_range): _data(std::move(base_range)) {};
-    explicit constexpr compact_sequence_range<R>(R& base_range): _data(base_range) {};
+    explicit constexpr compact_sequence_range(R&& base_range): _data(std::move(base_range)) {};
+    explicit constexpr compact_sequence_range(R& base_range): _data(base_range) {};
 
     class iterator_impl : public boost::iterator_adaptor<
         iterator_impl,
@@ -1634,7 +1633,8 @@ public:
         friend class boost::iterator_core_access;
         friend class compact_sequence_range<R>;
 
-        template <typename R2> friend class compact_sequence_range<R2>::iterator_impl;
+        template <typename>
+        friend struct compact_sequence_range;
 
         iterator_impl() = default;
 
@@ -1754,7 +1754,7 @@ public:
     static constexpr std::pair<base_container, size_t> _convert(R&& input_seq) {
         const size_t f_len = input_seq.size() / traits::letters_per_unit + (input_seq.size() % traits::letters_per_unit != 0);
         base_container data(f_len);
-        typename traits::storage_unit buf;
+        typename traits::storage_unit buf = 0;
         size_t bit_count = traits::letters_per_unit;
         size_t write_pos = 0;
         for(const auto& letter : input_seq) {
@@ -2675,4 +2675,3 @@ struct formatter<compact_sequence_range<R>>: formatter<std::string> {
 };
 
 static_assert(fmt::has_formatter<compact_sequence_range<std::vector<seq::dna4>>, char>());
-

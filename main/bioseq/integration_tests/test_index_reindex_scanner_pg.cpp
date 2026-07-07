@@ -6,7 +6,7 @@
 #include "common_tests_integration.h"
 #include <set>
 #include <tuple>
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 
@@ -38,7 +38,7 @@ TEST_CASE("DOC0279 update_index reindexes stub-backed rows via scanner_pg (query
     // (a) query_key == rowno: every resolved columnar rowno has its full fragment count
     // (~7 for a 200 kbp target), filed under that rowno.
     auto rownos = query_int_column(ctx,
-        "SELECT bioseq.columnar_row_number('doc0279_rx'::regclass, ctid) FROM doc0279_rx ORDER BY 1");
+        "SELECT bioseq.column_row_number('doc0279_rx'::regclass, ctid) FROM doc0279_rx ORDER BY 1");
     REQUIRE(rownos.size() == 3);
     for (long long rn : rownos)
         REQUIRE(index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_rx", rn) >= 7);
