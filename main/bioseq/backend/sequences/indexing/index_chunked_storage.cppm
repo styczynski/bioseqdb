@@ -31,6 +31,38 @@ concept index_chunk_writer_fn = requires (F&& fn, std::size_t chunk_no, T* buf, 
     { fn(chunk_no, buf, capacity_units) } -> std::same_as<std::size_t>;
 };
 
+struct index_chunk_range_probe {
+    void operator()(index_sub_key_t, const char*, std::size_t) const noexcept {}
+};
+
+struct index_sub_key_probe {
+    void operator()(index_sub_key_t) const noexcept {}
+};
+
+template <class T>
+struct index_chunk_writer_probe {
+    std::size_t operator()(std::size_t, T*, std::size_t) const noexcept {
+        return std::size_t{0};
+    }
+};
+
+struct index_merge_batch_probe {
+    void operator()(std::span<const std::uint64_t>) const noexcept {}
+};
+
+struct index_merge_runs_probe {
+    template <class Positions>
+    void operator()(std::uint64_t, Positions&& positions) const {
+        (void)positions.total_count();
+        positions.for_each_batch(index_merge_batch_probe{});
+    }
+};
+
+struct index_sequence_loader_probe {
+    template <class LazySequence>
+    void operator()(LazySequence&, std::size_t, std::size_t) const noexcept {}
+};
+
 // primary: nothing satisfies it until specialised per SequenceIndexType
 template <class T, SequenceIndexType index_type>
 constexpr inline bool is_index_chunked_storage_for_v = false;
@@ -47,14 +79,13 @@ constexpr inline bool is_index_chunked_storage_for_v<T, SequenceIndexType::CHUNK
         { s.resize(sub_key, bytes)                } -> std::same_as<void>;
         { s.resize_chunks(sub_key, std::span<const std::size_t>{}) } -> std::same_as<void>;
         { s.prefetch_chunk(sub_key, chunk_no)     } -> std::same_as<void>;
-        { s.read_chunks_in_range(sub_key, sub_key,
-              [](index_sub_key_t, const char*, std::size_t){}) } -> std::same_as<void>;
-        { cs.for_each_sub_key([](index_sub_key_t){})  } -> std::same_as<void>;
+        { s.read_chunks_in_range(sub_key, sub_key, index_chunk_range_probe{}) } -> std::same_as<void>;
+        { cs.for_each_sub_key(index_sub_key_probe{}) } -> std::same_as<void>;
         { s.template write_to_each<std::int64_t>(
-              sub_key, [](std::size_t, std::int64_t*, std::size_t){ return std::size_t{0}; }) }
+              sub_key, index_chunk_writer_probe<std::int64_t>{}) }
             -> std::same_as<void>;
         { s.template write_to_each<char>(
-              sub_key, [](std::size_t, char*, std::size_t){ return std::size_t{0}; }) }
+              sub_key, index_chunk_writer_probe<char>{}) }
             -> std::same_as<void>;
         { s.clear_entity()                        } -> std::same_as<void>;
         { s.clear(std::string_view{})             } -> std::same_as<void>;
@@ -65,10 +96,7 @@ constexpr inline bool is_index_chunked_storage_for_v<T, SequenceIndexType::CHUNK
               std::vector<std::pair<std::uint64_t,std::uint64_t>>{},
               std::uint64_t{},
               bioseq::parallelism::MemoryPermit{}) } -> std::convertible_to<std::size_t>;
-        { s.merge_runs([](std::uint64_t, auto&& positions){
-              (void)positions.total_count();
-              positions.for_each_batch([](std::span<const std::uint64_t>){});
-          }) } -> std::same_as<void>;
+        { s.merge_runs(index_merge_runs_probe{}) } -> std::same_as<void>;
         { s.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
         { s.release_runs_noexcept() } noexcept -> std::same_as<void>;
         { s.release_runs()                        } -> std::same_as<void>;
@@ -84,7 +112,7 @@ constexpr inline bool is_index_chunked_storage_for_v<T, SequenceIndexType::INLIN
         { s.template read_chunk<std::int64_t>()   } -> std::same_as<const std::int64_t*>;
         { s.resize(bytes)                         } -> std::same_as<void>;
         { s.template write_to_each<std::int64_t>(
-              [](std::size_t, std::int64_t*, std::size_t){ return std::size_t{0}; }) }
+              index_chunk_writer_probe<std::int64_t>{}) }
             -> std::same_as<void>;
         { s.prefetch_chunk()                      } -> std::same_as<void>;
         { s.clear_entity()                        } -> std::same_as<void>;
@@ -101,12 +129,12 @@ constexpr inline bool is_index_chunked_storage_for_v<T, SequenceIndexType::CHUNK
         { s.resize(bytes)                         } -> std::same_as<void>;
         { s.prefetch_chunk(chunk_no)              } -> std::same_as<void>;
         { s.template write_to_each<std::int64_t>(
-              [](std::size_t, std::int64_t*, std::size_t){ return std::size_t{0}; }) }
+              index_chunk_writer_probe<std::int64_t>{}) }
             -> std::same_as<void>;
         { s.template write_to<std::int64_t>(
-              chunk_no, [](std::size_t, std::int64_t*, std::size_t){ return std::size_t{0}; }) }
+              chunk_no, index_chunk_writer_probe<std::int64_t>{}) }
             -> std::same_as<void>;
-        { s.for_each_sequence([](auto& /*lazy_seq*/, std::size_t /*rowno*/, std::size_t /*total*/){}) }
+        { s.for_each_sequence(index_sequence_loader_probe{}) }
             -> std::same_as<void>;
         { s.clear(std::string_view{})             } -> std::same_as<void>;
     };
@@ -133,10 +161,7 @@ concept is_external_sort_spill_storage =
               std::vector<std::pair<std::uint64_t,std::uint64_t>>{},
               std::uint64_t{},
               bioseq::parallelism::MemoryPermit{}) } -> std::convertible_to<std::size_t>;
-        { s.merge_runs([](std::uint64_t, auto&& positions){
-              (void)positions.total_count();
-              positions.for_each_batch([](std::span<const std::uint64_t>){});
-          }) } -> std::same_as<void>;
+        { s.merge_runs(index_merge_runs_probe{}) } -> std::same_as<void>;
         { s.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
         { s.release_runs_noexcept() } noexcept -> std::same_as<void>;
         { s.release_runs()     } -> std::same_as<void>;

@@ -25,6 +25,7 @@ module;
 
 
 //#define FMT_HEADER_ONLY
+#define FMT_ATTACH_TO_GLOBAL_MODULE
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -39,9 +40,9 @@ module;
 #include <utility>
 #include <vector>
 
-// For generic serialization
-#include <rfl/json.hpp>
-#include <rfl.hpp>
+// For generic enum logging.
+#include <rfl/thirdparty/enchantum/bitflags.hpp>
+#include <rfl/thirdparty/enchantum/enchantum.hpp>
 
 // FMT LOGIC
 #define FMT_MODULE
@@ -123,6 +124,10 @@ module;
 #  else
 #    include <io.h>
 #  endif
+#endif
+#if defined(__APPLE__)
+#  include <AvailabilityMacros.h>
+#  include <pthread.h>
 #endif
 #ifdef _WIN32
 #  if defined(__GLIBCXX__)
@@ -207,10 +212,15 @@ extern "C++" {
 #include "fmt/ostream.h"
 #include "fmt/printf.h"
 #include "fmt/ranges.h"
+// fmt/std.h only applies FMT_EXPORT to formatter specializations. Those
+// specializations are attached to the exported formatter primary already, and
+// GCC rejects spelling them as unbraced `export template ...` declarations.
+#undef FMT_EXPORT
+#define FMT_EXPORT
 #include "fmt/std.h"
+#undef FMT_EXPORT
+#define FMT_EXPORT export
 #include "fmt/xchar.h"
-
-#include "src/format.cc"
 
 #ifdef FMT_ATTACH_TO_GLOBAL_MODULE
 }
@@ -908,10 +918,8 @@ inline bool fmtlogT<_>::checkLogLevel(LogLevel logLevel) noexcept {
 }
 
 
-namespace {
-void fmtlogEmptyFun(void*) {
+inline void fmtlogEmptyFun(void*) {
 }
-} // namespace
 
 template<int ___ = 0>
 class fmtlogDetailT
@@ -1162,7 +1170,7 @@ public:
     uint32_t tid = static_cast<uint32_t>(::GetCurrentThreadId());
 #else
     // XXX: Deprecated on new MACOSX
-    #if __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
+    #if defined(__APPLE__) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
     uint64_t tid64;
     pthread_threadid_np(NULL, &tid64);
     uint32_t tid = static_cast<uint32_t>(tid64);
@@ -1511,6 +1519,27 @@ void fmtlogT<_>::stopPollingThread() noexcept {
 template class fmtlogT<0>;
 
 
+namespace bioseq_fmt_detail {
+
+template<enchantum::Enum T>
+std::string enum_to_string(T value)
+{
+  if constexpr (enchantum::is_bitflag<T>) {
+    auto name = enchantum::to_string_bitflag(value);
+    if (!name.empty()) {
+      return name;
+    }
+  } else {
+    auto name = enchantum::to_string(value);
+    if (!name.empty()) {
+      return std::string{name.data(), name.size()};
+    }
+  }
+  return std::to_string(+enchantum::to_underlying(value));
+}
+
+} // namespace bioseq_fmt_detail
+
 
 export {
 namespace fmt {
@@ -1521,16 +1550,13 @@ namespace fmt {
 // };
 
 template<typename T>
-requires (
-  //default_serializer_format<T>::value && 
-  requires (const T& value) {
-     { rfl::enum_to_string(value) } -> std::convertible_to<std::string>;
-  }
-)
+requires enchantum::Enum<T>
 struct formatter<T>: formatter<std::string> {
     template <typename FormatContext>
     auto format(const T& value, FormatContext& ctx) const {
-      return formatter<std::string>::format(rfl::enum_to_string(value), ctx);
+      return formatter<std::string>::format(
+          bioseq_fmt_detail::enum_to_string(value),
+          ctx);
     }
 };
 
@@ -2249,7 +2275,7 @@ public:
     return *this;
   }
 
-  [[gnu::always_inline]] ~BioseqReport()
+  [[gnu::always_inline]] inline ~BioseqReport()
   {
     if (!enabled_) {
       return;

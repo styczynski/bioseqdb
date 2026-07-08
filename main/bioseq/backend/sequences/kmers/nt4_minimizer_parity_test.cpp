@@ -23,7 +23,6 @@ import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.mm_sketch_baseline;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

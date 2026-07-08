@@ -5,7 +5,7 @@
  * Test 6: `collect_seed_hits_vulkan` emits anchors with the same `ref_bits()`
  * ordering and the same anchor multiset as the CPU `collect_seed_hits` for
  * forward/reverse hits and target positions above 2^32. Skips cleanly when no
- * usable Vulkan device exists.
+ * hardware Vulkan device exists.
  */
 #include "common_simd.h"   // provides the HWY_NAMESPACE macro for collect_seed_hits
 #include "common_tests.h"
@@ -28,7 +28,6 @@ import bioseq.indexing.minimizer_vulkan;
 import bioseq.sequences.seeding.vulkan;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.size;
-import bioseq.common.testing;
 
 namespace {
 
@@ -89,7 +88,10 @@ anchor_tuples(const ch::ArenaSlab<Anchor>& slab) {
 TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)",
           "[vulkan][seeding][phase-b]") {
     auto& runtime = vk::Runtime::instance();
-    if (!runtime.usable()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vk::hardware_device_available(runtime)) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
 
     const auto idx = build_target();
     const auto query = build_query();
@@ -139,7 +141,10 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
 TEST_CASE("vulkan seeding: empty result when no query minimizer hits the target",
           "[vulkan][seeding][phase-b]") {
     auto& runtime = vk::Runtime::instance();
-    if (!runtime.usable()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!vk::hardware_device_available(runtime)) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
 
     const auto idx = build_target();
     std::vector<MinimapSketchData> query{MinimapSketchData{0xABCULL, 1u, 0u}};

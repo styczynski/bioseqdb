@@ -4618,12 +4618,12 @@ static CustomExecMethods VectorAggNodeExecMethods = {
 	.ExecCustomScan = ExecVectorAgg,
 	.EndCustomScan = EndVectorAgg,
 
-	.ExplainCustomScan = ExplainAggNode,
-
 	.EstimateDSMCustomScan = BioseqColumnAggNode_EstimateDSM,
 	.InitializeDSMCustomScan = BioseqColumnAggNode_InitializeDSM,
 	.ReInitializeDSMCustomScan = BioseqColumnAggNode_ReinitializeDSM,
-	.InitializeWorkerCustomScan = BioseqColumnAggNode_InitializeWorker
+	.InitializeWorkerCustomScan = BioseqColumnAggNode_InitializeWorker,
+
+	.ExplainCustomScan = ExplainAggNode
 };
 
 

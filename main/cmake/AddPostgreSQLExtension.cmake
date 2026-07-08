@@ -6,6 +6,9 @@ set(SUPPORTED_TARGET_TYPES
 
 # Allow forcing PostgreSQL version
 set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version major")
+option(BIOSEQ_ENABLE_PGINDENT_FORMAT_TARGETS
+  "Create explicit pgindent format targets for PostgreSQL extension sources."
+  OFF)
 
 # Find packages go here.
 #
@@ -16,6 +19,9 @@ set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version
 # Find module already discovers Postgres via pg_config and honours
 # PostgreSQL_ROOT / hints below for non-system install locations
 # (e.g. Postgres.app, Homebrew's postgresql@N).
+if(DEFINED VCPKG_TARGET_TRIPLET)
+  find_package(OpenSSL REQUIRED)
+endif()
 find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
 # Helper command to add extensions
@@ -319,14 +325,14 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       COMPONENT ${EXTENSION_COMPONENT}
     )
 
-    # Setup auto-format
-    if(PostgreSQL_INDENT)
+    # Formatting is intentionally opt-in. pgindent may need local typedefs
+    # configuration, and build targets must not mutate or reformat sources.
+    if(BIOSEQ_ENABLE_PGINDENT_FORMAT_TARGETS AND PostgreSQL_INDENT)
       add_custom_target("format_${EXTENSION_NAME}"
         COMMAND ${PostgreSQL_INDENT} ${EXTENSION_SOURCES}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "Formatting ${EXTENSION_NAME} sources"
       )
-      add_dependencies(${LIBRARY_NAME} "format_${EXTENSION_NAME}")
     endif()
   endif()
 

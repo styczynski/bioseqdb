@@ -6,7 +6,6 @@
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
-import bioseq.common.testing;
 
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.lexic;

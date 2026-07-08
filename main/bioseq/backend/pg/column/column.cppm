@@ -25,7 +25,8 @@ extern "C" {
 export module bioseq.column;
 
 import bioseq.common.mlogging;
-import bioseq.table;
+import bioseq.table;                      // bioseq_tableam_init, bioseq_customscan_init
+import bioseq.table.am_cache;             // bioseq_am_cache_invalidate
 import bioseq.config;
 import bioseq.pg_utils;
 import bioseq.storage.manager;
@@ -65,7 +66,8 @@ bioseq_init()
 	// DOC0322 §7.5 — the customscan init call moved out of bioseq_tableam_init
 	// to here so :access_method no longer imports :custom_scan (the bioseq_table
 	// partition graph stays a DAG). bioseq_customscan_init is exported from
-	// :custom_scan, re-exported by bioseq_table (imported above).
+	// :custom_scan and imported directly here so the bioseq.table aggregate
+	// does not need to re-export the heavy custom scan partition on GCC.
 	bioseq_customscan_init();
 	bioseq_planner_init();
 	/* Outer custom scan that sorts sequences for `ORDER BY <bioseq.seq>`,

@@ -72,10 +72,9 @@ template <class MinimizerT>
     std::uint64_t total = 0;
     for (const MinimizerT& minimizer : query_minimizers) {
         std::uint32_t add = 0;
-        if (auto it = target_index.table.find(minimizer.kmer());
-            it != target_index.table.end())
-        {
-            const auto count = static_cast<std::uint32_t>(it->second);
+        const auto hits = target_index.lookup(minimizer.kmer());
+        if (!hits.empty()) {
+            const auto count = static_cast<std::uint32_t>(hits.size());
             if (count <= max_occ_u) add = count;
         }
         total = bioseq::gpu::vulkan::sat_add(total, static_cast<std::uint64_t>(add));
@@ -100,10 +99,9 @@ template <class MinimizerT>
     std::uint64_t total = 0;
     for (std::size_t i = 0; i < query_minimizers.size(); ++i) {
         std::uint32_t add = 0;
-        if (auto it = target_index.table.find(query_minimizers[i].kmer());
-            it != target_index.table.end())
-        {
-            const auto count = static_cast<std::uint32_t>(it->second);
+        const auto hits = target_index.lookup(query_minimizers[i].kmer());
+        if (!hits.empty()) {
+            const auto count = static_cast<std::uint32_t>(hits.size());
             if (count <= max_occ_u) add = count;
         }
         total = bioseq::gpu::vulkan::sat_add(total, static_cast<std::uint64_t>(add));
@@ -204,7 +202,7 @@ template <class MinimizerT>
     if (!resident_index) return false;
     if (query_minimizers.size() > std::numeric_limits<std::uint32_t>::max()) return false;
     auto& runtime = Runtime::instance();
-    if (!runtime.usable()) return false;
+    if (!hardware_device_available(runtime)) return false;
 
     const Buffer* fused_device_words =
         (device_minimizers && device_minimizers->words() != nullptr &&

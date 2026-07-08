@@ -57,8 +57,6 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-#include <boost/container/flat_map.hpp>  // DOC0260 R14 — seq_caches::entries
-
 export module bioseq.storage.manager:sequence_storage_manager;
 
 import bioseq.common.mlogging;
@@ -195,14 +193,63 @@ struct seq_caches {
         sequence_size_t pending_total_payload_delta = 0;
     };
 
-    // DOC0260 R14 — boost::container::flat_map (a sorted vector) rather than
-    // std::map: no per-node allocation, deterministic sorted iteration order
-    // for close_all, cache-friendly for the typical <50-entry working set, and
-    // safe to default-construct in a palloc-backed POD. The hot paths only do
-    // find / operator[] / clear, and never hold an `entry&` across an insert
-    // into `entries`, so flat_map's reference-invalidation-on-insert is a
-    // non-issue here.
-    boost::container::flat_map<std::uint64_t, entry> entries{};
+    struct entry_map {
+        using value_type = std::pair<std::uint64_t, entry>;
+        using storage_type = std::vector<value_type>;
+        using iterator = storage_type::iterator;
+        using const_iterator = storage_type::const_iterator;
+
+        [[nodiscard]] iterator begin() noexcept { return entries_.begin(); }
+        [[nodiscard]] iterator end() noexcept { return entries_.end(); }
+        [[nodiscard]] const_iterator begin() const noexcept { return entries_.begin(); }
+        [[nodiscard]] const_iterator end() const noexcept { return entries_.end(); }
+        [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+        void clear() noexcept { entries_.clear(); }
+
+        [[nodiscard]] iterator find(std::uint64_t key) noexcept {
+            auto it = lower_bound(key);
+            return it != entries_.end() && it->first == key ? it : entries_.end();
+        }
+
+        [[nodiscard]] const_iterator find(std::uint64_t key) const noexcept {
+            auto it = lower_bound(key);
+            return it != entries_.end() && it->first == key ? it : entries_.end();
+        }
+
+        entry& operator[](std::uint64_t key) {
+            auto it = lower_bound(key);
+            if (it == entries_.end() || it->first != key) {
+                it = entries_.emplace(it, key, entry{});
+            }
+            return it->second;
+        }
+
+    private:
+        struct less_by_key {
+            [[nodiscard]] constexpr bool operator()(const value_type& lhs,
+                                                   std::uint64_t rhs) const noexcept {
+                return lhs.first < rhs;
+            }
+        };
+
+        [[nodiscard]] iterator lower_bound(std::uint64_t key) noexcept {
+            return std::lower_bound(
+                entries_.begin(), entries_.end(), key, less_by_key{});
+        }
+
+        [[nodiscard]] const_iterator lower_bound(std::uint64_t key) const noexcept {
+            return std::lower_bound(
+                entries_.begin(), entries_.end(), key, less_by_key{});
+        }
+
+        storage_type entries_{};
+    };
+
+    // DOC0260 R14 — sorted-vector map rather than std::map: no per-node
+    // allocation, deterministic sorted iteration order for close_all, and
+    // cache-friendly for the typical <50-entry working set. The hot paths only
+    // do find / operator[] / clear, and never hold an `entry&` across an insert.
+    entry_map entries{};
     LOCKMODE lock_mode = AccessShareLock;
 
     enum class Side { Read, Write };
@@ -681,7 +728,7 @@ void flush_seq_cache_write_states(seq_caches* caches,
 // Shard open / create / lookup helpers.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
                      seq_caches* cache,
                      std::int16_t column_attno, std::int16_t bucket_idx,
@@ -738,7 +785,7 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
     return rel;
 }
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                             std::int16_t column_attno, TupleDesc parent_tupdesc,
                             std::int16_t bucket_idx, std::int32_t starting_shard_idx,
@@ -877,7 +924,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 column_attno, bucket_idx, row.shard_idx);
 }
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                      std::int16_t column_attno, TupleDesc parent_tupdesc,
                      std::int16_t bucket_idx,

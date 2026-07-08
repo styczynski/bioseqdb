@@ -16,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-import bioseq.common.testing;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;

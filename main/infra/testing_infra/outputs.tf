@@ -18,6 +18,11 @@ output "region" {
   value       = var.region
 }
 
+output "source_ami_id" {
+  description = "AMI used to launch the benchmark machine (cached bioseq AMI when provisioner.py selected one, otherwise Ubuntu/base override)."
+  value       = local.ami_id
+}
+
 output "ssh_key_path" {
   description = "Local path to the generated private key."
   value       = abspath(local_sensitive_file.ssh_private_key.filename)

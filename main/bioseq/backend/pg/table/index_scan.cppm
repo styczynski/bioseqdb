@@ -701,11 +701,11 @@ bioseq_index_exec_methods() noexcept
         .BeginCustomScan = BioseqIndexScan_BeginCustomScan,
         .ExecCustomScan = BioseqIndexScan_ExecCustomScan,
         .EndCustomScan = BioseqIndexScan_EndCustomScan,
-        .ExplainCustomScan = BioseqIndexScan_ExplainCustomScan,
         .EstimateDSMCustomScan = BioseqIndexScan_EstimateDSMCustomScan,
         .InitializeDSMCustomScan = BioseqIndexScan_InitializeDSMCustomScan,
         .ReInitializeDSMCustomScan = BioseqIndexScan_ReinitializeDSMCustomScan,
         .InitializeWorkerCustomScan = BioseqIndexScan_InitializeWorkerCustomScan,
+        .ExplainCustomScan = BioseqIndexScan_ExplainCustomScan,
     };
     return methods;
 }

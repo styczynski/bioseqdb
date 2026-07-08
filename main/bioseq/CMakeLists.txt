@@ -117,8 +117,20 @@ file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
+set(BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/tbb_partition_link_shim.cpp)
+
 set(BIOSEQ_NOPG_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+endif()
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
 
 add_library(bioseq_modules_nopg OBJECT)
@@ -208,16 +220,18 @@ target_sources(bioseq_modules_nopg
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_MODULES})
 
-add_executable(bioseq_gpu_archive_builder
-  ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
-  ${BIOSEQ_GPU_METAL_ARCHIVE_SRC})
-target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
-target_include_directories(bioseq_gpu_archive_builder PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/backend")
-if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
-  install(TARGETS bioseq_gpu_archive_builder
-    RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
-    COMPONENT ${PROJECT_NAME})
+if(APPLE)
+  add_executable(bioseq_gpu_archive_builder
+    ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
+    ${BIOSEQ_GPU_METAL_ARCHIVE_SRC})
+  target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
+  target_include_directories(bioseq_gpu_archive_builder PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/backend")
+  if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
+    install(TARGETS bioseq_gpu_archive_builder
+      RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
+      COMPONENT ${PROJECT_NAME})
+  endif()
 endif()
 
 # ============================================================================
@@ -291,6 +305,116 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 #     /tmp/bioseq_loglog.log.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
+
+# GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
+# dispatch wrapper at -O3. Keep this as a build knob, not a C++ ifdef:
+# runtime dispatch and algorithm selection are unchanged, and non-GCC
+# builds stay on the preset's normal -O3 path.
+set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O1" CACHE STRING
+  "Optimization level for GCC 16.1 AWS typed dispatch wrapper TUs. \
+Allowed: O0, O1, O2, O3. O3 preserves the global preset behavior.")
+set_property(CACHE BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL PROPERTY STRINGS O0 O1 O2 O3)
+if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[0123]$")
+  message(FATAL_ERROR
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL must be one of O0, O1, O2, O3; got "
+    "'${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}'")
+endif()
+
+set(BIOSEQ_GCC_TYPED_DISPATCH_JOBS "1" CACHE STRING
+  "Ninja compile-pool width for GCC 16.1 AWS typed dispatch wrapper TUs. \
+0 = inherit the target compile pool.")
+if(NOT BIOSEQ_GCC_TYPED_DISPATCH_JOBS MATCHES "^[0-9]+$")
+  message(FATAL_ERROR
+    "BIOSEQ_GCC_TYPED_DISPATCH_JOBS must be a non-negative integer; got "
+    "'${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}'")
+endif()
+
+set(BIOSEQ_GCC_TEMPLATE_FORCE_INLINE "ON" CACHE BOOL
+  "Keep forced always_inline/flatten attributes in template dispatch modules \
+for the GCC 16.1 AWS preset. OFF preserves algorithm selection but lets GCC \
+avoid constructing very large inlining graphs while compiling typed dispatch.")
+
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_chunked_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_scanner_pg.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_standard.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_segmented.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked_segmented.cpp)
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
+    target_compile_definitions(bioseq_modules_nopg PRIVATE
+      BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
+      BIOSEQ_PIPELINE_FORCE_INLINE=0)
+  endif()
+  if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS
+      gcc_typed_dispatch_compile=${BIOSEQ_GCC_TYPED_DISPATCH_JOBS})
+    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
+  endif()
+  if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
+    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      PROPERTIES COMPILE_OPTIONS "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+  endif()
+  message(STATUS
+    "bioseq: GCC typed dispatch wrapper TUs use "
+    "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
+    "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}, template force-inline="
+    "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
+    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 and "
+    "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
+endif()
 
 # Per-target module set for the aligner (and its tests_exec sibling): just
 # testing.cppm; every other Domain N module is delivered via
@@ -398,7 +522,9 @@ AddCommonTargetX(
   HWY 1.3.0
 )
 
-add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
+if(TARGET bioseq_gpu_archive_builder)
+  add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
+endif()
 
 # DOC0270 — disable LTO on the Postgres extension. The default IPO=TRUE set
 # by AddPostgreSQLExtension.cmake doubles the per-build wall-clock for the

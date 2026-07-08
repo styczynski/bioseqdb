@@ -15,7 +15,6 @@ import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 
@@ -83,7 +82,7 @@ TEST_CASE("DOC0258: round-trip cstring -> compact_sequence_stdc -> ascii",
 
             std::string decoded;
             hdr->convert_to([&]<class S>(const compact_sequence_range<S>& seq) {
-                decoded = ::bioseq::simd::N_NEON::decode_sequence_simd<S>(seq);
+                decoded = ::bioseq::simd::active_target::decode_sequence_simd<S>(seq);
             });
             REQUIRE(decoded == input);
         }
@@ -102,11 +101,57 @@ TEST_CASE("DOC0258: round-trip cstring -> compact_sequence_stdc -> ascii",
             REQUIRE(hdr->alphabet_code == 1u);
             std::string decoded;
             hdr->convert_to([&]<class S>(const compact_sequence_range<S>& seq) {
-                decoded = ::bioseq::simd::N_NEON::decode_sequence_simd<S>(seq);
+                decoded = ::bioseq::simd::active_target::decode_sequence_simd<S>(seq);
             });
             REQUIRE(decoded == with_n);
         }
     }
+}
+
+TEST_CASE("dna4 uint64 multiline SIMD encoder handles sentinel chunks",
+          "[simd][doc0258]") {
+    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_t = compact_sequence_range<config_t>;
+
+    static constexpr char kBases[] = "ACGT";
+    std::string body;
+    body.reserve(997);
+    for (std::size_t i = 0; i < 997; ++i) {
+        body.push_back(kBases[((i * 5u) + (i / 7u) + 3u) & 3u]);
+    }
+
+    std::string wrapped;
+    for (std::size_t i = 0; i < body.size(); i += 60) {
+        const std::size_t n = std::min<std::size_t>(60, body.size() - i);
+        wrapped.append(body.data() + i, n);
+        wrapped.push_back('\n');
+    }
+    const std::string input = wrapped + ">next\nACGT\n";
+
+    std::vector<std::uint64_t> packed;
+    packed.reserve((body.size() + 31u) / 32u);
+    encode_state<std::uint64_t, 2, 32> state{};
+    state.output_storage = &packed;
+    state.reset();
+
+    std::size_t newline_count = 0;
+    const std::size_t consumed =
+        encode_body_chunk_dna4_simd_multiline_until_byte<
+            std::uint8_t{'>'}, std::uint64_t, 2, 32>(
+                state,
+                reinterpret_cast<const std::uint8_t*>(input.data()),
+                input.size(),
+                &newline_count);
+    REQUIRE(consumed == wrapped.size());
+    REQUIRE(newline_count == (body.size() + 59u) / 60u);
+
+    const auto [n_words, padding] =
+        finalize_encode_state<std::uint64_t, 2, 32>(state);
+    REQUIRE(n_words == packed.size());
+
+    auto seq = range_t::from_packed(std::move(packed), padding);
+    REQUIRE(seq.bp_size() == body.size());
+    REQUIRE(decode_sequence_simd<config_t>(seq) == body);
 }
 
 TEST_CASE("DOC0258: send_to / convert_from(recv) round-trip preserves bytes",

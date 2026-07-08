@@ -541,7 +541,7 @@ inline void backtrack_chains(
         int64_t anchor_index;
     };
     struct ScoreAscending {
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const ScoredAnchorIndex& left,
             const ScoredAnchorIndex& right) const noexcept
         {

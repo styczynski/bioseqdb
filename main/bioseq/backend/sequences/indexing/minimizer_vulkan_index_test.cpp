@@ -19,7 +19,6 @@ import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_vulkan;
 import bioseq.gpu.vulkan.runtime;
-import bioseq.common.testing;
 
 namespace {
 
@@ -59,8 +58,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
     const auto idx = build_demo_index();
     const auto upload = idx_ns::build_gpu_minimizer_upload(idx);
 
-    for (const auto& kv : idx.table) {
-        const std::uint64_t kmer = kv.first;
+    idx.for_each_table_entry([&](std::uint64_t kmer, std::uint64_t) {
         const auto cpu_hits = idx.lookup(kmer);  // span of encoded positions
         const std::uint32_t slot_idx = host_find_slot(upload, kmer);
         ASSERT(slot_idx != 0xffffffffu,
@@ -74,7 +72,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
             ASSERT(upload.positions[slot.pos_offset + j] == cpu_hits[j],
                    fmt::format("kmer {} position {} mismatch", kmer, j), j);
         }
-    }
+    });
     // A kmer not in the index must miss.
     ASSERT(host_find_slot(upload, 0xDEADBEEFULL) == 0xffffffffu,
            "absent kmer unexpectedly found in slot table", 0);
@@ -122,7 +120,10 @@ TEST_CASE("vulkan index: distinct assembly identities do not share a cache key",
 TEST_CASE("vulkan index: resident upload + cache reuse (device path)",
           "[vulkan][index][phase-b]") {
     auto& runtime = ::bioseq::gpu::vulkan::Runtime::instance();
-    if (!runtime.usable()) { SUCCEED("no usable Vulkan device; skipped"); return; }
+    if (!::bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
 
     auto idx = build_demo_index();
     idx_ns::GpuMinimizerIndexCache cache{std::uint64_t{64} << 20};

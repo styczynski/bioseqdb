@@ -20,7 +20,6 @@
 #include <utility>
 #include <vector>
 
-import bioseq.common.testing;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
@@ -148,7 +147,7 @@ TEST_CASE("DOC0279 §9 — MinimizerHashmapFragmentIndex serialize/deserialize r
 
     REQUIRE(round.target_length() == idx.target_length());
     REQUIRE(round.positions.size() == idx.positions.size());
-    REQUIRE(round.table.size() == idx.table.size());
+    REQUIRE(round.table_size() == idx.table_size());
 
     // Per-kmer position sets must survive the wire round-trip exactly.
     std::vector<std::uint64_t> kmers;

@@ -24,7 +24,7 @@ module;
 export module bioseq.instr.pmu;
 
 import bioseq.instr.pmu.macos;
-import bioseq.instr.pmu.linux;
+import bioseq.instr.pmu.linux_backend_mod;
 import bioseq.instr.pmu.stub;
 
 export namespace bioseq::instr::pmu {

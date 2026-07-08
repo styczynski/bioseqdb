@@ -25,7 +25,7 @@ Architecture:
     - Per-run logs live in /tmp/bioseq_build_mcp_<mode>_<timestamp>.log.
     - Builds are detached via start_new_session=True so they survive Claude
       Code session restarts (a 25-min bench is too long to lose to a closed
-      window). The worker self-enforces a 35-min hard timeout.
+      window). The worker self-enforces a configurable hard timeout.
 
 The MCP protocol is implemented from scratch (initialize, tools/list,
 tools/call) — it's ~30 lines of JSON-RPC, so pulling in the official `mcp`
@@ -45,6 +45,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -137,7 +138,7 @@ def _safe_parallel_jobs() -> int:
     each peak around ~3-4 GB RSS at -O3 + thin-LTO. The previous hardcoded
     -j 32 launched dozens of them at once; on a 16 GB box that swap-thrashed
     to a near-total stall (a cold postgresql_bioseq build completed only 2
-    build edges in the full 35-min hard-timeout window). Budgeting ~3 GB per
+    build edges in the historical 35-min hard-timeout window). Budgeting ~3 GB per
     concurrent heavy compile keeps cold builds making forward progress without
     paging. On this 8-core / 16 GB machine this yields -j 5."""
     cpus = os.cpu_count() or 4
@@ -149,8 +150,66 @@ def _safe_parallel_jobs() -> int:
 
 
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
-HARD_TIMEOUT_MIN = 90.0
+HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
+AWS_HEAVY_JOBS = "4"
+AWS_GCC_TYPED_DISPATCH_OPT_LEVEL = "O1"
+AWS_GCC_TYPED_DISPATCH_JOBS = "1"
+AWS_GCC161_CXX_FLAGS = (
+    "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 "
+    "-Wno-expose-global-module-tu-local -Wno-external-tu-local "
+    "-Wno-template-names-tu-local -Wno-global-module -Wno-template-body"
+)
+AWS_LIBCXX_VCPKG_TRIPLET = "x64-linux-libcxx"
+AWS_LEGACY_VCPKG_TRIPLET = "x64-linux"
+AWS_LIBCXX_OVERLAY_TRIPLETS = PROJECT_ROOT / "cmake" / "triplets"
+AWS_LIBCXX_OVERLAY_PORTS = PROJECT_ROOT / "cmake" / "ports"
+AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS = (
+    "OPENSSL*",
+    "_OPENSSL*",
+    "OpenSSL*",
+    "PostgreSQL*",
+    "FIND_PACKAGE_MESSAGE_DETAILS_OpenSSL",
+    "FIND_PACKAGE_MESSAGE_DETAILS_PostgreSQL",
+)
+
+
+def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return None
+    prefix = f"{key}:"
+    try:
+        with cache.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(prefix):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    try:
+        return needle in cache.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
+    log_handle.write(f"# AWS cache repair: clearing CMake configure cache ({reason}).\n")
+    log_handle.flush()
+    for path in (build_dir / "CMakeCache.txt", build_dir / "CMakeFiles"):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError as e:
+            raise RuntimeError(f"failed to remove stale CMake cache path {path}: {e}") from e
 
 # Prompt template injected into every `subagent` call.
 # Placeholders replaced at call time via str.replace (not f-string so the JSON
@@ -334,7 +393,7 @@ class ModeDefinition:
 MODES: Dict[str, ModeDefinition] = {
     "unit+integration": ModeDefinition(
         lock_group="tests",
-        expected_duration_min=22.0,
+        expected_duration_min=120.0,
         build_only_expected_duration_min=10.0,
         label="Unit/integration tests",
         docs="Run all bioseq unit and integration tests",
@@ -619,7 +678,89 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
                 pass
 
 
-def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> None:
+def _is_aws_preset(preset: str) -> bool:
+    return preset.startswith("aws-x64-linux")
+
+
+def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
+    cmake = shutil.which("cmake") or "cmake"
+    cmd = [cmake, "--install", str(active_build_dir), "--component", "bioseq"]
+    if _is_aws_preset(active_preset):
+        return ["sudo", "-n", *cmd]
+    return cmd
+
+
+def _prepare_aws_postgresql_test_database(active_preset: str, log_handle,
+                                          deadline: float) -> None:
+    """Make the AWS PostgreSQL instance match integration-test defaults."""
+    if not _is_aws_preset(active_preset):
+        return
+
+    log_handle.write(
+        "\n# Preparing AWS PostgreSQL test auth/database "
+        "(postgres/postgres, database bioseq) ...\n")
+    log_handle.flush()
+
+    psql = shutil.which("psql") or "psql"
+    rc = _stream_subprocess(
+        ["sudo", "-n", "-u", "postgres", psql,
+         "-v", "ON_ERROR_STOP=1",
+         "--dbname", "postgres",
+         "--command", "ALTER ROLE postgres WITH LOGIN PASSWORD 'postgres';"],
+        log_handle,
+        deadline,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"PostgreSQL test role setup exited with code {rc}")
+
+    create_db_script = (
+        "set -euo pipefail\n"
+        "if ! psql -Atq --dbname=postgres "
+        "--command \"SELECT 1 FROM pg_database WHERE datname = 'bioseq';\" "
+        "| grep -qx 1; then\n"
+        "  createdb --owner=postgres bioseq\n"
+        "fi\n"
+    )
+    rc = _stream_subprocess(
+        ["sudo", "-n", "-u", "postgres", "bash", "-lc", create_db_script],
+        log_handle,
+        deadline,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"PostgreSQL test database setup exited with code {rc}")
+
+
+def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
+    pretty = " ".join(restart_cmd)
+    log_handle.write(f"\n+ {pretty}\n")
+    log_handle.flush()
+    sys.stderr.write(f"\n+ {pretty}\n")
+    sys.stderr.flush()
+    try:
+        result = subprocess.run(
+            restart_cmd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            timeout=90,
+        )
+        log_handle.flush()
+        if result.returncode != 0:
+            msg = (
+                f"PostgreSQL restart exited {result.returncode}; refusing to "
+                "run with a potentially stale bioseq.dylib")
+            _log(f"ERROR: {msg}")
+            raise RuntimeError(msg)
+        _log("PostgreSQL restarted — new dylib is now live")
+    except subprocess.TimeoutExpired as exc:
+        msg = "PostgreSQL restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
+        _log(f"ERROR: {msg}")
+        raise RuntimeError(msg) from exc
+
+
+def _restart_postgresql(active_build_dir: Path, active_preset: str,
+                        log_handle, deadline: float) -> None:
     """Restart the PostgreSQL postmaster after installing a new extension dylib.
 
     On macOS, fork()d backend processes inherit the postmaster's dyld image
@@ -629,6 +770,16 @@ def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> 
     postmaster restart evicts the stale mapping; the first CREATE EXTENSION
     after restart loads the freshly installed dylib.
     """
+    if sys.platform != "darwin" and _is_aws_preset(active_preset):
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            _log("Restarting PostgreSQL via systemd service to evict stale dylib cache ...")
+            _run_postgresql_restart_cmd(
+                ["sudo", "-n", systemctl, "restart", "postgresql"],
+                log_handle,
+            )
+            return
+
     cmake_cache = active_build_dir / "CMakeCache.txt"
     pg_config: str | None = None
     if cmake_cache.exists():
@@ -685,6 +836,13 @@ def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> 
     # Rosetta and dyld interact badly with arm64-only extension dylibs.
     if sys.platform == "darwin":
         restart_cmd = ["arch", "-arm64", pg_ctl, "-D", data_dir, "restart"]
+    elif _is_aws_preset(active_preset):
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            restart_cmd = ["sudo", "-n", systemctl, "restart", "postgresql"]
+        else:
+            restart_cmd = ["sudo", "-n", "-u", "postgres",
+                           pg_ctl, "-D", data_dir, "restart"]
     else:
         restart_cmd = [pg_ctl, "-D", data_dir, "restart"]
 
@@ -696,31 +854,64 @@ def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> 
     # then calls proc.wait() which returns as soon as pg_ctl itself exits
     # (after the postmaster signals readiness), regardless of what the
     # postmaster does with the file handle afterwards.
-    pretty = " ".join(restart_cmd)
-    log_handle.write(f"\n+ {pretty}\n")
-    log_handle.flush()
-    sys.stderr.write(f"\n+ {pretty}\n")
-    sys.stderr.flush()
-    try:
-        result = subprocess.run(
-            restart_cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            timeout=90,
-        )
-        log_handle.flush()
-        if result.returncode != 0:
-            msg = (
-                f"pg_ctl restart exited {result.returncode}; refusing to run "
-                "with a potentially stale bioseq.dylib")
-            _log(f"ERROR: {msg}")
-            raise RuntimeError(msg)
-        else:
-            _log("PostgreSQL restarted — new dylib is now live")
-    except subprocess.TimeoutExpired as exc:
-        msg = "pg_ctl restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
-        _log(f"ERROR: {msg}")
-        raise RuntimeError(msg) from exc
+    _run_postgresql_restart_cmd(restart_cmd, log_handle)
+
+
+def _pg_config_from_cache(active_build_dir: Path) -> str:
+    cmake_cache = active_build_dir / "CMakeCache.txt"
+    if cmake_cache.exists():
+        for line in cmake_cache.read_text(errors="replace").splitlines():
+            if line.startswith("PostgreSQL_CONFIG:FILEPATH="):
+                return line.split("=", 1)[1].strip()
+    raise RuntimeError("PostgreSQL_CONFIG not in CMakeCache.txt")
+
+
+def _postgresql_e2e_restart_shell_command(active_build_dir: Path,
+                                          active_preset: str) -> str:
+    """Build the shell command passed to bioseq_bench_e2e.
+
+    The benchmark executes BIOSEQ_E2E_PG_RESTART_CMD with std::system() before
+    every just_index timed sample. Redirect pg_ctl output to a file: the
+    benchmark itself is run under the MCP worker's stdout/stderr pipe, and a
+    restarted postmaster can otherwise inherit that pipe and keep it open.
+    """
+    pg_config = _pg_config_from_cache(active_build_dir)
+    res = subprocess.run([pg_config, "--bindir"],
+                         capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"pg_config --bindir exited {res.returncode}: {res.stderr.strip()}")
+    pg_bindir = res.stdout.strip()
+    pg_ctl = os.path.join(pg_bindir, "pg_ctl")
+    psql = os.path.join(pg_bindir, "psql")
+    if not os.path.isfile(pg_ctl):
+        raise RuntimeError(f"pg_ctl not found at {pg_ctl}")
+    if not os.path.isfile(psql):
+        raise RuntimeError(f"psql not found at {psql}")
+
+    res = subprocess.run([psql, "-t", "-c", "SHOW data_directory;", "postgres"],
+                         capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"psql SHOW data_directory exited {res.returncode}: {res.stderr.strip()}")
+    data_dir = res.stdout.strip()
+    if not data_dir or not os.path.isdir(data_dir):
+        raise RuntimeError(f"data_directory '{data_dir}' is not a directory")
+
+    if sys.platform == "darwin":
+        argv = ["arch", "-arm64", pg_ctl, "-D", data_dir, "restart", "-m", "fast", "-w"]
+    elif _is_aws_preset(active_preset) and shutil.which("systemctl"):
+        argv = ["sudo", "-n", shutil.which("systemctl"), "restart", "postgresql"]
+    elif _is_aws_preset(active_preset):
+        argv = ["sudo", "-n", "-u", "postgres", pg_ctl, "-D", data_dir,
+                "restart", "-m", "fast", "-w"]
+    else:
+        argv = [pg_ctl, "-D", data_dir, "restart", "-m", "fast", "-w"]
+
+    return (
+        " ".join(shlex.quote(x) for x in argv)
+        + " > /tmp/bioseq_e2e_pg_restart.log 2>&1"
+    )
 
 
 # --------------------------- build worker ----------------------------------
@@ -798,6 +989,16 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     env = os.environ.copy()
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
+    if active_preset == "aws-x64-linux":
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
+    elif active_preset == "aws-x64-linux-gcc161":
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
+    if _is_aws_preset(active_preset):
+        env.setdefault("BIOSEQ_TEST_PGUSER", "postgres")
+        env.setdefault("BIOSEQ_TEST_PGPASSWORD", "postgres")
+        env.setdefault("BIOSEQ_TEST_PGHOST", "localhost")
+        env.setdefault("BIOSEQ_TEST_PGDATABASE", "bioseq")
+        env.setdefault("BIOSEQ_TEST_PGPORT", "5432")
 
     try:
         _update_entry(mode, step="configuring", build_only=build_only,
@@ -824,6 +1025,119 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 "skipping redundant `cmake --preset` to avoid a full C++-module "
                 "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
             log_handle.flush()
+
+        if active_preset.startswith("aws-x64-linux"):
+            if (
+                active_preset == "aws-x64-linux"
+                and _cmake_cache_contains(
+                    active_build_dir,
+                    f"/vcpkg_installed/{AWS_LEGACY_VCPKG_TRIPLET}/",
+                )
+            ):
+                _clear_cmake_configure_cache(
+                    active_build_dir,
+                    log_handle,
+                    f"legacy {AWS_LEGACY_VCPKG_TRIPLET} package paths remain "
+                    f"after switching to {AWS_LIBCXX_VCPKG_TRIPLET}",
+                )
+            current_generator = _cmake_cache_value(active_build_dir, "CMAKE_GENERATOR")
+            if current_generator and current_generator != "Ninja":
+                _clear_cmake_configure_cache(
+                    active_build_dir,
+                    log_handle,
+                    f"unexpected generator {current_generator!r}; AWS presets require Ninja",
+                )
+            current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
+            repair_args = [
+                f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
+            ]
+            repair_unset_args = []
+            repair_reasons = []
+            if current_heavy_jobs != AWS_HEAVY_JOBS:
+                repair_reasons.append(
+                    f"BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
+                    f"(was {current_heavy_jobs or 'unset'})")
+            if active_preset == "aws-x64-linux":
+                current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
+                current_overlay = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_TRIPLETS")
+                current_overlay_ports = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_PORTS")
+                current_openssl_details = (
+                    _cmake_cache_value(active_build_dir, "FIND_PACKAGE_MESSAGE_DETAILS_OpenSSL")
+                    or "")
+                overlay_str = str(AWS_LIBCXX_OVERLAY_TRIPLETS)
+                overlay_ports_str = str(AWS_LIBCXX_OVERLAY_PORTS)
+                repair_args += [
+                    f"-DVCPKG_TARGET_TRIPLET={AWS_LIBCXX_VCPKG_TRIPLET}",
+                    f"-DVCPKG_OVERLAY_TRIPLETS={overlay_str}",
+                    f"-DVCPKG_OVERLAY_PORTS={overlay_ports_str}",
+                ]
+                if current_triplet != AWS_LIBCXX_VCPKG_TRIPLET:
+                    repair_reasons.append(
+                        f"VCPKG_TARGET_TRIPLET={AWS_LIBCXX_VCPKG_TRIPLET} "
+                        f"(was {current_triplet or 'unset'})")
+                    repair_unset_args.extend(
+                        f"-U{pattern}" for pattern in AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS)
+                if current_overlay != overlay_str:
+                    repair_reasons.append(
+                        f"VCPKG_OVERLAY_TRIPLETS={overlay_str} "
+                        f"(was {current_overlay or 'unset'})")
+                if current_overlay_ports != overlay_ports_str:
+                    repair_reasons.append(
+                        f"VCPKG_OVERLAY_PORTS={overlay_ports_str} "
+                        f"(was {current_overlay_ports or 'unset'})")
+                if (
+                    f"/vcpkg_installed/{AWS_LEGACY_VCPKG_TRIPLET}/" in current_openssl_details
+                    and f"/vcpkg_installed/{AWS_LIBCXX_VCPKG_TRIPLET}/"
+                    not in current_openssl_details
+                ):
+                    repair_reasons.append(
+                        "clearing stale OpenSSL/PostgreSQL find-package cache "
+                        f"from {AWS_LEGACY_VCPKG_TRIPLET}")
+                    repair_unset_args.extend(
+                        f"-U{pattern}" for pattern in AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS)
+            elif active_preset == "aws-x64-linux-gcc161":
+                current_cxx_flags = _cmake_cache_value(active_build_dir, "CMAKE_CXX_FLAGS")
+                current_typed_dispatch_opt = _cmake_cache_value(
+                    active_build_dir,
+                    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL",
+                )
+                current_typed_dispatch_jobs = _cmake_cache_value(
+                    active_build_dir,
+                    "BIOSEQ_GCC_TYPED_DISPATCH_JOBS",
+                )
+                repair_args.append(f"-DCMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS}")
+                repair_args.append(
+                    "-DBIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
+                    f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+                repair_args.append(
+                    "-DBIOSEQ_GCC_TYPED_DISPATCH_JOBS="
+                    f"{AWS_GCC_TYPED_DISPATCH_JOBS}")
+                if current_cxx_flags != AWS_GCC161_CXX_FLAGS:
+                    repair_reasons.append(
+                        f"CMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS!r} "
+                        f"(was {current_cxx_flags or 'unset'})")
+                if current_typed_dispatch_opt != AWS_GCC_TYPED_DISPATCH_OPT_LEVEL:
+                    repair_reasons.append(
+                        "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
+                        f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL} "
+                        f"(was {current_typed_dispatch_opt or 'unset'})")
+                if current_typed_dispatch_jobs != AWS_GCC_TYPED_DISPATCH_JOBS:
+                    repair_reasons.append(
+                        "BIOSEQ_GCC_TYPED_DISPATCH_JOBS="
+                        f"{AWS_GCC_TYPED_DISPATCH_JOBS} "
+                        f"(was {current_typed_dispatch_jobs or 'unset'})")
+            if repair_reasons:
+                log_handle.write("# AWS cache repair: setting "
+                                 + "; ".join(repair_reasons) + ".\n")
+                log_handle.flush()
+                rc = _stream_subprocess(
+                    ["cmake", "--preset", active_preset,
+                     *dict.fromkeys(repair_unset_args), *repair_args],
+                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        f"AWS cache repair exited with code {rc}")
 
         _update_entry(mode, step="building", build_only=build_only,
                       debug=debug)
@@ -874,17 +1188,28 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if mode_details.install_extension:
                 _update_entry(mode, step="installing extension")
                 rc = _stream_subprocess(
-                    ["cmake", "--install", str(active_build_dir),
-                     "--component", "bioseq"],
+                    _cmake_install_cmd(active_build_dir, active_preset),
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
                 if rc != 0:
                     raise RuntimeError(
                         "extension install (cmake --install --component bioseq) "
                         f"exited with code {rc}")
-                _restart_postgresql(active_build_dir, log_handle, deadline)
+                _restart_postgresql(active_build_dir, active_preset,
+                                    log_handle, deadline)
+                _prepare_aws_postgresql_test_database(
+                    active_preset, log_handle, deadline)
 
             _update_entry(mode, step="running")
+            if mode == "bench-e2e":
+                env.setdefault(
+                    "BIOSEQ_E2E_PG_RESTART_CMD",
+                    _postgresql_e2e_restart_shell_command(active_build_dir, active_preset),
+                )
+                log_handle.write(
+                    "# BIOSEQ_E2E_PG_RESTART_CMD="
+                    f"{env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
+                log_handle.flush()
             for cmd in mode_details.commands:
                 # MODES.commands store binary BASENAMES; resolve against the
                 # active build's bin dir (DOC0270). Args after the first slot
@@ -1560,17 +1885,17 @@ def tool_subagent_status() -> str:
 # =========================================================================== #
 # remote operations — AWS benchmark machine (main/infra)
 # =========================================================================== #
-# Five tools — remote-status / remote-manage / remote-ssh / remote-run /
-# remote-git — drive the disposable x86_64 Ubuntu benchmark box defined under
+# Remote tools drive the disposable x86_64 Ubuntu benchmark box defined under
 # main/infra/ (OpenTofu + provisioner.py). See main/infra/README.md.
 #
-# MUTEX: every remote operation EXCEPT remote-ssh shares ONE global slot
+# MUTEX: mutating/long remote operations share ONE global slot
 # (REMOTE_STATE_FILE), so at most one remote operation runs at a time across all
 # Claude Code sessions. This is the same anti-footgun guard the local builds have,
 # widened to the remote: it stops an agent from firing `up` ten times and stacking
 # ten paid EC2 instances, or mutating the box's git tree while a remote build is
-# mid-flight. remote-ssh is deliberately OUTSIDE the mutex — it is the read-only
-# escape hatch you use to look around the box while a long remote-run holds the slot.
+# mid-flight. remote-ssh / remote-status-ps / remote-debug are deliberately
+# OUTSIDE the mutex — read-only escape hatches for diagnostics while a long
+# remote-run holds the slot.
 #
 # Long operations (provision, build) detach into a worker (`--run-remote <op_id>`)
 # and return immediately; you poll by re-calling any remote tool (a *running* slot
@@ -1592,6 +1917,10 @@ PROVISIONER = INFRA_DIR / "provisioner.py"
 # that by exporting BIOSEQ_BUILD_PRESET when we invoke the box-side server.py.
 REMOTE_REPO_PATH = "~/bioseqdb"
 REMOTE_BUILD_PRESET = "aws-x64-linux"
+REMOTE_BUILD_PRESETS = {
+    "aws-x64-linux",
+    "aws-x64-linux-gcc161",
+}
 
 REMOTE_STATE_FILE = Path("/tmp/bioseq_remote_mcp_state.json")
 REMOTE_LOCK_FILE = Path("/tmp/bioseq_remote_mcp.lock")
@@ -1607,10 +1936,11 @@ REMOTE_OP_TIMEOUTS = {
     "output":  6 * 60,
     "logs":    6 * 60,
     "git":    20 * 60,
-    "ssh":     5 * 60,     # remote-ssh is synchronous; this is its subprocess timeout
+    "ssh":    90 * 60,     # remote-ssh is synchronous; tolerate saturated compiles
     "up":    140 * 60,
-    "down":   30 * 60,
-    "verify": 60 * 60,
+    "down":  120 * 60,     # includes the automatic pre-destroy AMI snapshot
+    "snapshot": 120 * 60,
+    "verify": 90 * 60,
     "wait":  140 * 60,
     "run":   200 * 60,     # provision (if needed) + git sync + full build/bench
 }
@@ -1619,12 +1949,14 @@ REMOTE_OP_TIMEOUTS = {
 # to return inline; long ops get a short one and are polled by re-calling.
 REMOTE_OP_GRACE = {
     "status": 30.0, "output": 30.0, "logs": 30.0, "git": 30.0,
-    "up": 6.0, "down": 8.0, "verify": 8.0, "wait": 8.0, "run": 6.0,
+    "up": 6.0, "down": 8.0, "snapshot": 8.0,
+    "verify": 8.0, "wait": 8.0, "run": 6.0,
 }
 REMOTE_TERMINAL_STATUSES = {"completed", "failed", "killed_timeout", "aborted"}
 REMOTE_MANAGE_OPS = {"up", "down", "status", "logs", "verify", "wait", "output"}
 # How much of the captured log to inline in a tool response (full log via path).
 REMOTE_LOG_INLINE_CAP = 6000
+REMOTE_DEBUG_INLINE_CAP = 14000
 
 
 # --------------------------- remote state I/O ------------------------------
@@ -1708,7 +2040,17 @@ def _remote_ssh_argv(remote_command: str) -> list[str]:
     Workhorse for remote-ssh, remote-git, the logs/verify manage ops, and every
     box-side step of remote-run. (cmd_ssh/cmd_logs themselves os.execvp an
     interactive `ssh -t`, which we avoid here.)"""
-    return _provisioner_cmd("ssh", "bash -lc " + shlex.quote(remote_command))
+    # ssh.service itself is intentionally reniced by bootstrap so fresh SSH
+    # sessions stay reachable under memory-heavy compiles. Commands launched
+    # through those sessions should not inherit the same elevated priority,
+    # otherwise a remote build started over SSH competes with sshd at equal nice.
+    normal_priority_command = (
+        "renice -n 0 -p $$ >/dev/null 2>&1 || true; "
+        "ionice -c 2 -n 4 -p $$ >/dev/null 2>&1 || true; "
+        + remote_command
+    )
+    return _provisioner_cmd("ssh",
+                            "bash -lc " + shlex.quote(normal_priority_command))
 
 
 def _remote_exec(cmd: list[str], log_handle, deadline: float) -> int:
@@ -1743,6 +2085,200 @@ def _provisioner_region() -> str | None:
     return (_provisioner_outputs() or {}).get("region")
 
 
+def _capture_cmd(argv: list[str], *, cwd: Path | None = None,
+                 timeout: int = 20) -> tuple[int | None, str]:
+    try:
+        res = subprocess.run(
+            argv, cwd=str(cwd) if cwd else None, text=True,
+            capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout}s: {' '.join(argv)}"
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"failed to launch {' '.join(argv)}: {e}"
+    body = res.stdout or ""
+    if (res.stderr or "").strip():
+        body += ("\n----- stderr -----\n" + res.stderr)
+    return res.returncode, body.strip() or "(no output)"
+
+
+def _format_cmd_result(title: str, argv: list[str], *, cwd: Path | None = None,
+                       timeout: int = 20, cap: int = REMOTE_DEBUG_INLINE_CAP) -> str:
+    rc, body = _capture_cmd(argv, cwd=cwd, timeout=timeout)
+    if len(body) > cap:
+        body = "…(truncated)…\n" + body[-cap:]
+    return f"## {title}\nexit={rc}\n```\n{body}\n```"
+
+
+def _tail_path(path_text: str | None, lines: int, cap: int = REMOTE_DEBUG_INLINE_CAP) -> str:
+    if not path_text:
+        return "(no log path)"
+    path = Path(path_text)
+    try:
+        data = path.read_text(errors="replace")
+    except OSError as e:
+        return f"(cannot read {path}: {e})"
+    tail = "\n".join(data.splitlines()[-max(1, lines):])
+    if len(tail) > cap:
+        tail = "…(truncated)…\n" + tail[-cap:]
+    return tail or "(empty log)"
+
+
+def _json_dump_limited(obj: Any, cap: int = REMOTE_DEBUG_INLINE_CAP) -> str:
+    text = json.dumps(obj, indent=2, sort_keys=True, default=str)
+    if len(text) > cap:
+        text = text[:cap] + "\n…(truncated)…"
+    return text
+
+
+def _aws_json(args: list[str], *, region: str | None,
+              timeout: int = 20) -> tuple[int | None, Any | str]:
+    argv = ["aws", *args]
+    if region:
+        argv += ["--region", region]
+    argv += ["--output", "json"]
+    rc, body = _capture_cmd(argv, timeout=timeout)
+    if rc != 0:
+        return rc, body
+    try:
+        return rc, json.loads(body)
+    except json.JSONDecodeError:
+        return rc, body
+
+
+def _summarize_instance(data: Any) -> dict:
+    if not isinstance(data, dict):
+        return {"raw": data}
+    reservations = data.get("Reservations") or []
+    instances = []
+    for res in reservations:
+        instances.extend(res.get("Instances") or [])
+    if not instances:
+        return {"instances": []}
+    inst = instances[0]
+    return {
+        "instance_id": inst.get("InstanceId"),
+        "state": (inst.get("State") or {}).get("Name"),
+        "instance_type": inst.get("InstanceType"),
+        "launch_time": inst.get("LaunchTime"),
+        "public_ip": inst.get("PublicIpAddress"),
+        "private_ip": inst.get("PrivateIpAddress"),
+        "subnet_id": inst.get("SubnetId"),
+        "vpc_id": inst.get("VpcId"),
+        "cpu_options": inst.get("CpuOptions"),
+        "root_device_name": inst.get("RootDeviceName"),
+        "volumes": [
+            {
+                "device": b.get("DeviceName"),
+                "volume_id": ((b.get("Ebs") or {}).get("VolumeId")),
+                "delete_on_termination": ((b.get("Ebs") or {}).get("DeleteOnTermination")),
+            }
+            for b in inst.get("BlockDeviceMappings", [])
+        ],
+    }
+
+
+def _summarize_instance_status(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    statuses = data.get("InstanceStatuses") or []
+    if not statuses:
+        return {"instance_statuses": []}
+    st = statuses[0]
+    return {
+        "instance_id": st.get("InstanceId"),
+        "state": (st.get("InstanceState") or {}).get("Name"),
+        "system_status": st.get("SystemStatus"),
+        "instance_status": st.get("InstanceStatus"),
+        "events": st.get("Events"),
+    }
+
+
+def _summarize_cpu_datapoints(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    points = data.get("Datapoints") or []
+    points = sorted(points, key=lambda p: str(p.get("Timestamp")))[-20:]
+    return [
+        {
+            "timestamp": p.get("Timestamp"),
+            "avg": p.get("Average"),
+            "max": p.get("Maximum"),
+            "unit": p.get("Unit"),
+        }
+        for p in points
+    ]
+
+
+def _summarize_ssm_info(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    infos = data.get("InstanceInformationList") or []
+    if not infos:
+        return {"instance_information": []}
+    info = infos[0]
+    return {
+        "instance_id": info.get("InstanceId"),
+        "ping_status": info.get("PingStatus"),
+        "last_ping": info.get("LastPingDateTime"),
+        "agent_version": info.get("AgentVersion"),
+        "is_latest_version": info.get("IsLatestVersion"),
+        "platform": info.get("PlatformName"),
+        "platform_version": info.get("PlatformVersion"),
+        "private_ip": info.get("IPAddress"),
+        "computer_name": info.get("ComputerName"),
+    }
+
+
+def _ssm_read_only_probe(instance_id: str, region: str | None,
+                         timeout: int) -> tuple[int | None, Any | str]:
+    commands = [
+        "echo now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+        "cat /opt/bioseq/PROVISION_STATUS 2>/dev/null || true",
+        "git -C ~/bioseqdb rev-parse --short HEAD 2>/dev/null || true",
+        ("ps -eo pid,ppid,stat,pcpu,pmem,etime,args "
+         "| grep -E 'dispatch_processor\\.cppm|cmake --build .*/aws-x64-linux|"
+         "ninja .*postgresql_bioseq|clang\\+\\+|ld\\.lld' | grep -v grep | tail -40"),
+        "free -h | sed -n '1,2p'",
+        "df -h / /home /opt 2>/dev/null || true",
+    ]
+    rc, data = _aws_json(
+        ["ssm", "send-command",
+         "--instance-ids", instance_id,
+         "--document-name", "AWS-RunShellScript",
+         "--comment", "bioseq-build remote-debug read-only process probe",
+         "--parameters", json.dumps({"commands": commands}),
+         "--timeout-seconds", str(timeout)],
+        region=region,
+        timeout=timeout)
+    if rc != 0 or not isinstance(data, dict):
+        return rc, data
+    command_id = ((data.get("Command") or {}).get("CommandId"))
+    if not command_id:
+        return rc, data
+
+    deadline = time.time() + timeout
+    last: Any | str = data
+    while time.time() < deadline:
+        time.sleep(2)
+        rc, last = _aws_json(
+            ["ssm", "get-command-invocation",
+             "--command-id", command_id,
+             "--instance-id", instance_id],
+            region=region,
+            timeout=max(5, min(20, int(deadline - time.time()) or 5)))
+        if rc == 0 and isinstance(last, dict):
+            status = last.get("Status")
+            if status not in {"Pending", "InProgress", "Delayed"}:
+                return rc, {
+                    "command_id": command_id,
+                    "status": status,
+                    "response_code": last.get("ResponseCode"),
+                    "stdout": last.get("StandardOutputContent"),
+                    "stderr": last.get("StandardErrorContent"),
+                }
+    return None, {"command_id": command_id, "status": "timed_out_waiting"}
+
+
 def _current_local_branch() -> str | None:
     """The checked-out branch of the local repo, used as the default branch to
     clone/sync onto the box (so the box builds the same branch you are on)."""
@@ -1771,7 +2307,7 @@ def _remote_provision_status(deadline: float) -> str | None:
 
 # --------------------------- remote-run driver -----------------------------
 
-def _ensure_remote_box(branch: str, auto_provision: bool,
+def _ensure_remote_box(branch: str, auto_provision: bool, from_scratch: bool,
                        log_handle, deadline: float) -> None:
     """Make sure a build-ready box exists. Provision + wait if there is none
     (and auto_provision allows it). Raises on failure."""
@@ -1781,6 +2317,11 @@ def _ensure_remote_box(branch: str, auto_provision: bool,
         st = _remote_provision_status(deadline)
         log_handle.write(f"# existing box {outs.get('instance_id')} @ {ip} "
                          f"(PROVISION_STATUS={st or 'unknown'})\n")
+        if from_scratch:
+            log_handle.write(
+                "# from_scratch=true was requested, but a box already exists; "
+                "remote-run will not destroy it implicitly. Tear down only after "
+                "explicit user confirmation if a brand-new base-Ubuntu box is required.\n")
         log_handle.flush()
         if st in REMOTE_GOOD_STATUSES:
             return
@@ -1798,9 +2339,10 @@ def _ensure_remote_box(branch: str, auto_provision: bool,
 
     log_handle.write(f"# no box found — provisioning a new one (branch={branch})...\n")
     log_handle.flush()
-    rc = _remote_exec(_provisioner_cmd("up", "--branch", branch, "--wait",
-                                       "--timeout", "120"),
-                      log_handle, deadline)
+    argv = _provisioner_cmd("up", "--branch", branch, "--wait", "--timeout", "120")
+    if from_scratch:
+        argv.append("--from-scratch")
+    rc = _remote_exec(argv, log_handle, deadline)
     if rc != 0:
         raise RuntimeError(f"provisioner up failed (exit {rc}) — see log")
     if not _provisioner_outputs().get("public_ip"):
@@ -1816,8 +2358,9 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
     branch = payload.get("branch") or "main"
     do_sync = bool(payload.get("sync", True))
     auto_provision = bool(payload.get("auto_provision", True))
+    from_scratch = bool(payload.get("from_scratch", False))
 
-    _ensure_remote_box(branch, auto_provision, log_handle, deadline)
+    _ensure_remote_box(branch, auto_provision, from_scratch, log_handle, deadline)
 
     if do_sync:
         log_handle.write(f"\n# syncing box repo {REMOTE_REPO_PATH} to origin/{branch} "
@@ -1839,7 +2382,8 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
                 f"git sync of box to origin/{branch} failed (exit {rc}). Is the "
                 f"branch pushed to origin? Use remote-git / remote-ssh to inspect.")
 
-    env_prefix = f"BIOSEQ_BUILD_PRESET={shlex.quote(REMOTE_BUILD_PRESET)} "
+    active_preset = payload.get("preset", REMOTE_BUILD_PRESET)
+    env_prefix = f"BIOSEQ_BUILD_PRESET={shlex.quote(active_preset)} "
     server_dir = f"{REMOTE_REPO_PATH}/main/build_mcp"
     if operation == "build":
         mode = payload["mode"]
@@ -1879,6 +2423,11 @@ def _classify_remote_run(payload: dict, rc: int, log_path: Path) -> str | None:
     if rc == 0:
         return ("build_succeeded — the remote build completed with no errors. The "
                 "::NEON / dispatch.h x86_64 gap appears to be closed on this branch.")
+    if "selected Vulkan execution requires a hardware GPU" in text:
+        return ("expected_vulkan_software_device_rejection — selected Vulkan "
+                "execution refused the active software/CPU Vulkan ICD instead of "
+                "silently falling back to CPU. This is the expected policy on a "
+                "box without a trusted hardware Vulkan device.")
     err_lines = [ln for ln in text.splitlines()
                  if " error: " in ln or " fatal error: " in ln]
     our = [ln for ln in err_lines if "/main/bioseq/" in ln]
@@ -2139,6 +2688,224 @@ def tool_remote_status() -> str:
         argv=_provisioner_cmd("status"))
 
 
+def tool_remote_debug(arguments: dict) -> str:
+    """Read-only diagnostics for an active remote operation.
+
+    This intentionally does not use the remote mutex and does not mutate the box.
+    It is the fallback when an already-running remote build holds the mutex and
+    new SSH sessions are slow or timing out during a saturated compile.
+    """
+    log_lines = max(1, min(500, int(arguments.get("log_lines", 80))))
+    cloudwatch_minutes = max(5, min(360, int(arguments.get("cloudwatch_minutes", 120))))
+    include_ssh = parse_bool("include_ssh", arguments.get("include_ssh", False))
+    include_ssm = parse_bool("include_ssm", arguments.get("include_ssm", False))
+    ssh_timeout = max(5, min(120, int(arguments.get("ssh_timeout", 20))))
+    ssm_timeout = max(10, min(120, int(arguments.get("ssm_timeout", 30))))
+
+    state = _load_remote_state()
+    outputs = _provisioner_outputs()
+    instance_id = outputs.get("instance_id")
+    region = outputs.get("region") or _provisioner_region()
+    now = time.time()
+
+    parts: list[str] = [
+        "# Remote Debug",
+        "Read-only diagnostic snapshot. This tool does not acquire the remote "
+        "mutex, does not start/stop instances, and does not signal build processes.",
+        "",
+        "## MCP Remote Slot",
+        "```json\n" + _json_dump_limited({
+            "status": state.get("status"),
+            "step": state.get("step"),
+            "kind": state.get("kind"),
+            "label": state.get("label"),
+            "pid": state.get("pid"),
+            "worker_alive": _is_pid_alive(state.get("pid")),
+            "elapsed": _remote_elapsed(state.get("started_at", now)),
+            "timeout_sec": state.get("timeout_sec"),
+            "log_file": state.get("log_file"),
+            "exit_code": state.get("exit_code"),
+            "notes": state.get("notes"),
+            "classification": state.get("classification"),
+            "payload": state.get("payload"),
+        }) + "\n```",
+    ]
+
+    pid = state.get("pid")
+    if pid:
+        parts.append(_format_cmd_result(
+            "Local Worker Process",
+            ["ps", "-p", str(pid), "-o", "pid,ppid,stat,etime,pcpu,pmem,args"],
+            timeout=5))
+        parts.append(_format_cmd_result(
+            "Local Worker Children",
+            ["pgrep", "-P", str(pid), "-a"],
+            timeout=5))
+
+    parts += [
+        "## Remote Worker Log Tail",
+        f"`{state.get('log_file')}` last {log_lines} lines:",
+        "```\n" + _tail_path(state.get("log_file"), log_lines) + "\n```",
+        "## Terraform Outputs",
+        "```json\n" + _json_dump_limited(outputs) + "\n```",
+    ]
+
+    if instance_id:
+        rc, data = _aws_json(
+            ["ec2", "describe-instances", "--instance-ids", instance_id],
+            region=region)
+        parts.append(
+            "## EC2 Instance\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(_summarize_instance(data))}\n```")
+
+        rc, data = _aws_json(
+            ["ec2", "describe-instance-status", "--include-all-instances",
+             "--instance-ids", instance_id],
+            region=region)
+        parts.append(
+            "## EC2 Status Checks\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(_summarize_instance_status(data))}\n```")
+
+        end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+        start = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(now - cloudwatch_minutes * 60))
+        rc, data = _aws_json(
+            ["cloudwatch", "get-metric-statistics",
+             "--namespace", "AWS/EC2",
+             "--metric-name", "CPUUtilization",
+             "--dimensions", f"Name=InstanceId,Value={instance_id}",
+             "--start-time", start,
+             "--end-time", end,
+             "--period", "60",
+             "--statistics", "Average", "Maximum"],
+            region=region)
+        parts.append(
+            f"## CloudWatch CPU ({cloudwatch_minutes} min)\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(_summarize_cpu_datapoints(data))}\n```")
+
+        rc, data = _aws_json(
+            ["ssm", "describe-instance-information",
+             "--filters", f"Key=InstanceIds,Values={instance_id}"],
+            region=region)
+        ssm_summary = _summarize_ssm_info(data)
+        parts.append(
+            "## SSM Instance Status\n"
+            f"exit={rc}\n```json\n{_json_dump_limited(ssm_summary)}\n```")
+
+        if include_ssm:
+            ping_status = (ssm_summary or {}).get("ping_status") if isinstance(ssm_summary, dict) else None
+            if ping_status == "Online":
+                rc, data = _ssm_read_only_probe(instance_id, region, ssm_timeout)
+                parts.append(
+                    f"## Optional SSM Probe (timeout {ssm_timeout}s)\n"
+                    f"exit={rc}\n```json\n{_json_dump_limited(data)}\n```")
+            else:
+                parts.append(
+                    "## Optional SSM Probe\n"
+                    f"Skipped because SSM PingStatus is {ping_status!r}, not 'Online'.")
+    else:
+        parts.append("## AWS\nNo instance_id found in Terraform outputs.")
+
+    if include_ssh:
+        ssh_cmd = (
+            "echo now=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); "
+            "echo status=$(cat /opt/bioseq/PROVISION_STATUS 2>/dev/null || true); "
+            "git -C ~/bioseqdb rev-parse --short HEAD 2>/dev/null || true; "
+            "ps -eo pid,ppid,stat,pcpu,pmem,etime,args "
+            "| grep -E 'dispatch_processor\\.cppm|cmake --build .*/aws-x64-linux|"
+            "ninja .*postgresql_bioseq|clang\\+\\+|ld\\.lld' | grep -v grep | tail -40; "
+            "free -h | sed -n '1,2p'; "
+            "df -h / /home /opt 2>/dev/null")
+        parts.append(_format_cmd_result(
+            f"Optional SSH Probe (timeout {ssh_timeout}s)",
+            _remote_ssh_argv(ssh_cmd),
+            cwd=INFRA_DIR,
+            timeout=ssh_timeout,
+            cap=REMOTE_DEBUG_INLINE_CAP))
+
+    return "\n\n".join(parts)
+
+
+REMOTE_STATUS_PS_CMD = r"""
+echo "## date"
+date
+echo
+echo "## host/build identity"
+echo "host=$(hostname)"
+echo "provision_status=$(cat /opt/bioseq/PROVISION_STATUS 2>/dev/null || true)"
+echo "repo_commit=$(git -C ~/bioseqdb rev-parse --short HEAD 2>/dev/null || true)"
+echo
+echo "## load"
+uptime || true
+echo "nproc=$(nproc 2>/dev/null || true)"
+echo
+echo "## swap"
+swapon --show || true
+echo
+echo "## memory"
+free -h | sed -n '1,3p'
+echo
+echo "## vmstat"
+vmstat 1 3 2>/dev/null || true
+echo
+echo "## disk"
+df -h / ~/bioseqdb/main/build/aws-x64-linux 2>/dev/null || true
+echo
+echo "## build processes"
+ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args --cols 220 \
+  | { read -r header; echo "$header"; grep -E '[c]make|[n]inja|[c]lang(\+\+)?|[g]\+\+|[g]cc|[x]gcc|[c]c1(plus)?|[l]d\.lld|[c]ollect2|/opt/[g]cc-build|postgresql_[b]ioseq|[b]ioseq_(bench|io_bench|aligner)|dispatch_processor\.cppm' | tail -n 80 || true; } \
+  | awk '{ if (length($0) > 220) print substr($0, 1, 217) "..."; else print; }'
+echo
+echo "## postgres processes"
+ps -eo pid,ppid,stat,ni,pcpu,pmem,rss,vsz,etime,args --cols 220 \
+  | { read -r header; echo "$header"; grep -E '[p]ostgres(:| -D)' | tail -n 80 || true; } \
+  | awk '{ if (length($0) > 220) print substr($0, 1, 217) "..."; else print; }'
+echo
+echo "## pg_stat_activity"
+if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then
+  sudo -u postgres psql -XAt -d postgres -c "select coalesce(datname,'') || '|' || pid || '|' || state || '|' || coalesce(wait_event_type,'') || '|' || coalesce(wait_event,'') || '|' || coalesce(extract(epoch from now()-query_start)::int::text,'') || 's|' || left(regexp_replace(coalesce(query,''), E'[\\n\\r\\t]+', ' ', 'g'), 220) from pg_stat_activity order by query_start nulls last limit 30;" || true
+else
+  echo "(psql or postgres user unavailable)"
+fi
+echo
+echo "## postgres waiting locks"
+if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then
+  sudo -u postgres psql -XAt -d postgres -c "select pid || '|' || locktype || '|' || mode || '|' || granted || '|' || coalesce(relation::regclass::text,'') from pg_locks where not granted limit 30;" || true
+else
+  echo "(psql or postgres user unavailable)"
+fi
+"""
+
+
+def tool_remote_status_ps(arguments: dict) -> str:
+    """remote-status-ps — read-only SSH snapshot of build processes and resources.
+
+    This intentionally does not use the remote mutex. It is a narrower, cheaper
+    version of remote-debug for agents that only need the current on-box date,
+    swap, memory, disk, and cmake/ninja/clang/linker/bioseq process list.
+    """
+    timeout = max(5, min(REMOTE_OP_TIMEOUTS["ssh"],
+                         int(arguments.get("timeout", 300))))
+    try:
+        res = subprocess.run(_remote_ssh_argv(REMOTE_STATUS_PS_CMD),
+                             cwd=str(INFRA_DIR), text=True,
+                             capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return (f"remote-status-ps timed out after {timeout}s. "
+                "The box may be too saturated for a fresh SSH session; try "
+                "remote-debug without include_ssh for AWS/SSM-side diagnostics.")
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"remote-status-ps failed to launch: {e}"
+
+    body = res.stdout or ""
+    if (res.stderr or "").strip():
+        body += "\n----- stderr -----\n" + res.stderr
+    if not body.strip():
+        body = "(no output)"
+    return f"remote-status-ps exit={res.returncode}\n{body}"
+
+
 def tool_remote_manage(arguments: dict) -> str:
     """remote-manage — thin wrapper over provisioner.py up/down/status/logs/verify/
     wait/output, under the remote mutex."""
@@ -2162,6 +2929,9 @@ def tool_remote_manage(arguments: dict) -> str:
             argv += ["--instance-type", str(arguments["instance_type"])]
         if arguments.get("ami"):
             argv += ["--ami", str(arguments["ami"])]
+        from_scratch = parse_bool("from_scratch", arguments.get("from_scratch", False))
+        if from_scratch:
+            argv += ["--from-scratch"]
         if arguments.get("volume_size"):
             argv += ["--volume-size", str(int(arguments["volume_size"]))]
         if parse_bool("no_verify", arguments.get("no_verify", False)):
@@ -2171,7 +2941,8 @@ def tool_remote_manage(arguments: dict) -> str:
         argv += ["--timeout", str(int(arguments.get("timeout", 120)))]
         if parse_bool("yes", arguments.get("yes", False)):
             argv += ["--yes"]
-        label = f"provisioner up (branch={branch or 'default'})"
+        label = (f"provisioner up (branch={branch or 'default'}, "
+                 f"from_scratch={from_scratch})")
     elif operation == "down":
         # provisioner down prompts via input() without --yes; the detached worker
         # cannot answer, so always pass --yes.
@@ -2183,7 +2954,7 @@ def tool_remote_manage(arguments: dict) -> str:
         region = arguments.get("region") or _provisioner_region()
         if region:
             argv += ["--region", str(region)]
-        label = "provisioner down (destroy the box and all its resources)"
+        label = "provisioner down (snapshot cache, then destroy the box and managed resources)"
     elif operation == "status":
         argv = _provisioner_cmd("status")
         if arguments.get("region"):
@@ -2206,6 +2977,25 @@ def tool_remote_manage(arguments: dict) -> str:
         label = "provisioner verify (cmake configure + build; classify failures)"
 
     return _start_or_poll_remote(operation, label, argv=argv)
+
+
+def tool_remote_snapshot(arguments: dict) -> str:
+    """remote-snapshot — create a reusable AMI cache from the current AWS box."""
+    argv = _provisioner_cmd("snapshot")
+    if arguments.get("region"):
+        argv += ["--region", str(arguments["region"])]
+    if arguments.get("name"):
+        argv += ["--name", str(arguments["name"])]
+    if arguments.get("description"):
+        argv += ["--description", str(arguments["description"])]
+    if arguments.get("timeout"):
+        argv += ["--timeout", str(int(arguments["timeout"]))]
+    if parse_bool("no_wait", arguments.get("no_wait", False)):
+        argv += ["--no-wait"]
+    if parse_bool("no_reboot", arguments.get("no_reboot", False)):
+        argv += ["--no-reboot"]
+    label = "provisioner snapshot (create reusable cached AMI from current root volume)"
+    return _start_or_poll_remote("snapshot", label, argv=argv)
 
 
 def tool_remote_ssh(command: str) -> str:
@@ -2254,6 +3044,11 @@ def tool_remote_run(arguments: dict) -> str:
     branch = arguments.get("branch") or _current_local_branch() or "main"
     sync = parse_bool("sync", arguments.get("sync", True))
     auto_provision = parse_bool("auto_provision", arguments.get("auto_provision", True))
+    from_scratch = parse_bool("from_scratch", arguments.get("from_scratch", False))
+    preset = arguments.get("preset", REMOTE_BUILD_PRESET)
+    if preset not in REMOTE_BUILD_PRESETS:
+        return (f"Invalid preset '{preset}'. remote-run presets: "
+                f"{', '.join(sorted(REMOTE_BUILD_PRESETS))}.")
 
     if operation == "build":
         mode = arguments.get("mode")
@@ -2262,11 +3057,31 @@ def tool_remote_run(arguments: dict) -> str:
                     f"{', '.join(sorted(VALID_MODES))}.")
         build_only = parse_bool("build_only", arguments.get("build_only", False))
         debug = parse_bool("debug", arguments.get("debug", False))
+        bench_filter = arguments.get("filter")
+        debug_report = parse_bool("debug_report",
+                                  arguments.get("debug_report", False))
+        mode_details = MODES[mode]
+        if (bench_filter or debug_report) and not mode_details.is_bench_mode:
+            return (f"`filter`/`debug_report` are only valid for bench modes "
+                    f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
+        filter_args, ferr = _filter_to_cli_args(bench_filter)
+        if ferr is not None:
+            return f"Invalid filter: {ferr}"
+        if debug_report and not filter_args:
+            return ("`debug_report` requires a non-empty `filter` — debug is for "
+                    "targeted runs, not for instrumenting an entire benchmark sweep.")
+        bench_flags = list(filter_args)
+        if debug_report:
+            bench_flags.append("--debug")
         payload = {"operation": "build", "mode": mode, "build_only": build_only,
                    "debug": debug, "branch": branch, "sync": sync,
-                   "auto_provision": auto_provision}
+                   "auto_provision": auto_provision,
+                   "from_scratch": from_scratch,
+                   "bench_flags": bench_flags, "preset": preset}
         label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
-                 f"(branch={branch}, preset={REMOTE_BUILD_PRESET})")
+                 f"(branch={branch}, preset={preset}, from_scratch={from_scratch})")
+        if bench_flags:
+            label += f" bench_flags={' '.join(bench_flags)}"
     elif operation == "inspect":
         function_name = arguments.get("function_name")
         if not isinstance(function_name, str) or not function_name:
@@ -2276,8 +3091,11 @@ def tool_remote_run(arguments: dict) -> str:
                          "source_basename", "max_llc_bc_files", "llc_on_bc", "debug")
                         if k in arguments}
         payload = {"operation": "inspect", "inspect_args": inspect_args,
-                   "branch": branch, "sync": sync, "auto_provision": auto_provision}
-        label = f"remote inspect '{function_name}' (branch={branch})"
+                   "branch": branch, "sync": sync, "auto_provision": auto_provision,
+                   "from_scratch": from_scratch,
+                   "preset": preset}
+        label = (f"remote inspect '{function_name}' "
+                 f"(branch={branch}, preset={preset}, from_scratch={from_scratch})")
     else:
         return ("Invalid 'operation' for remote-run. Use operation='build' (with a "
                 "'mode') or operation='inspect' (with a 'function_name').")
@@ -2620,7 +3438,7 @@ TOOL_DEFINITIONS = [
 ]
 
 # --------------------------- remote tools (AWS benchmark machine) -----------
-# Five tools that drive the disposable x86_64 Ubuntu benchmark box under
+# Tools that drive the disposable x86_64 Ubuntu benchmark box under
 # main/infra/ (OpenTofu + provisioner.py). See main/infra/README.md.
 _REMOTE_MUTEX_NOTE = (
     "\n\nMUTEX & POLLING: every remote tool EXCEPT remote-ssh shares ONE global "
@@ -2633,6 +3451,13 @@ _REMOTE_MUTEX_NOTE = (
     "build never silently launches a rebuild. The full output is always streamed to "
     "a log file whose path is returned (open it with Read). Use remote-ssh (which is "
     "NOT under the mutex) to inspect the box while a long op holds the slot."
+)
+_FROM_SCRATCH_WARNING = (
+    "DANGER: default false. In normal circumstances agents should NEVER set "
+    "from_scratch=true. It bypasses the cached AMI/snapshot path and starts a "
+    "new EC2 box from the base Ubuntu image, losing the startup/build-cache "
+    "benefit. Use true only when the USER has explicitly confirmed a clean "
+    "from-scratch rebuild."
 )
 _REMOTE_RUN_COMMON_PROPS = {
     "branch": {
@@ -2665,6 +3490,24 @@ _REMOTE_RUN_COMMON_PROPS = {
             "fast instead when no box exists."
         ),
     },
+    "from_scratch": {
+        "type": "boolean",
+        "default": False,
+        "description": (
+            _FROM_SCRATCH_WARNING + " When false, provisioner.py up automatically "
+            "uses the newest cached bioseq AMI in the target region if one exists."
+        ),
+    },
+    "preset": {
+        "type": "string",
+        "enum": sorted(REMOTE_BUILD_PRESETS),
+        "default": REMOTE_BUILD_PRESET,
+        "description": (
+            "Remote CMake preset exported as BIOSEQ_BUILD_PRESET for the box-side "
+            "build worker. The default is the Clang/libc++ AWS preset; use "
+            "aws-x64-linux-gcc161 for the separate GCC 16.1 build tree."
+        ),
+    },
 }
 TOOL_DEFINITIONS += [
     {
@@ -2679,15 +3522,87 @@ TOOL_DEFINITIONS += [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "remote-debug",
+        "description": (
+            "Read-only diagnostics for the AWS benchmark box and the local remote "
+            "MCP worker. Unlike remote-status/remote-manage/remote-run, this tool "
+            "does NOT acquire the remote mutex and can be called while a long build "
+            "owns the slot. It reports local worker process state, the worker log "
+            "tail, Terraform outputs, EC2 instance/status-check data, and recent "
+            "CloudWatch CPU via AWS APIs. Set include_ssh=true to also attempt a "
+            "short bounded read-only SSH process probe; by default it avoids SSH so "
+            "it still works when SSH banner exchange is slow during saturated "
+            "compiles."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "log_lines": {
+                    "type": "integer", "minimum": 1, "maximum": 500, "default": 80,
+                    "description": "Number of local remote-worker log lines to include.",
+                },
+                "cloudwatch_minutes": {
+                    "type": "integer", "minimum": 5, "maximum": 360, "default": 120,
+                    "description": "Lookback window for AWS/EC2 CPUUtilization datapoints.",
+                },
+                "include_ssh": {
+                    "type": "boolean", "default": False,
+                    "description": "Also attempt a bounded read-only SSH ps/free/df probe.",
+                },
+                "include_ssm": {
+                    "type": "boolean", "default": False,
+                    "description": (
+                        "Also attempt a read-only AWS Systems Manager RunCommand "
+                        "ps/free/df probe when the SSM agent is Online."
+                    ),
+                },
+                "ssh_timeout": {
+                    "type": "integer", "minimum": 5, "maximum": 120, "default": 20,
+                    "description": "Subprocess timeout for the optional SSH probe.",
+                },
+                "ssm_timeout": {
+                    "type": "integer", "minimum": 10, "maximum": 120, "default": 30,
+                    "description": "Timeout for the optional SSM read-only probe.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "remote-status-ps",
+        "description": (
+            "Run a concise read-only SSH status snapshot on the AWS box without "
+            "acquiring the remote mutex. It prints date, host/provision status, "
+            "repo commit, load, `swapon --show`, `free -h`, root/build disk "
+            "usage, and the current cmake/ninja/clang/gcc/linker/bioseq process list. "
+            "Use it while a long remote-run owns the slot to inspect memory, CPU, "
+            "swap, and active build processes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timeout": {
+                    "type": "integer", "minimum": 5, "maximum": REMOTE_OP_TIMEOUTS["ssh"],
+                    "default": 300,
+                    "description": "Subprocess timeout in seconds for the SSH snapshot.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "remote-manage",
         "description": (
             "Manage the AWS benchmark box — wraps `provisioner.py <operation>` for "
             "operation in up/down/status/logs/verify/wait/output:\n"
             "  up     — create/update the box (OpenTofu apply). Provisions a PAID "
-            "instance. Defaults: branch=your current local branch, region=the "
-            "existing stack's region, wait=true (block until on-box provisioning is "
-            "terminal). Refuses if a box is already running unless yes=true.\n"
-            "  down   — destroy the box and all its resources (always non-interactive).\n"
+            "instance. Defaults: uses the newest cached bioseq AMI/snapshot in the "
+            "target region when available, branch=your current local branch, "
+            "region=the existing stack's region, wait=true (block until on-box "
+            "provisioning is terminal). Refuses if a box is already running unless "
+            "yes=true. " + _FROM_SCRATCH_WARNING + "\n"
+            "  down   — create a cached AMI/snapshot of the current root volume, "
+            "then destroy the box and managed resources (always non-interactive).\n"
             "  status — same as remote-status.\n"
             "  logs   — tail /var/log/bioseq-provision.log (last `lines`).\n"
             "  verify — re-run verify.sh on the box (cmake configure + build; "
@@ -2710,9 +3625,19 @@ TOOL_DEFINITIONS += [
                 "instance_type": {"type": "string",
                                   "description": "[up] EC2 instance type (default m4.4xlarge = 16 vCPU/64 GiB)."},
                 "ami": {"type": "string",
-                        "description": "[up] override AMI id (default: latest Ubuntu 24.04 x86_64)."},
+                        "description": ("[up] override AMI id (default: newest cached "
+                                        "bioseq AMI if available, otherwise latest "
+                                        "Ubuntu 24.04 x86_64).")},
+                "from_scratch": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "[up] " + _FROM_SCRATCH_WARNING + " When false, `up` "
+                        "uses the newest cached bioseq AMI if one exists."
+                    ),
+                },
                 "volume_size": {"type": "integer", "minimum": 1,
-                                "description": "[up] root volume GiB (default 150)."},
+                                "description": "[up] root volume GiB (default 300)."},
                 "no_verify": {"type": "boolean", "default": False,
                               "description": "[up] skip the on-box build verification."},
                 "wait": {"type": "boolean", "default": True,
@@ -2735,8 +3660,10 @@ TOOL_DEFINITIONS += [
             "NOT under the remote mutex — use it as the read-only escape hatch to "
             "inspect the box (e.g. `cat /opt/bioseq/PROVISION_STATUS`, `git -C "
             "~/bioseqdb log -1`, `nvidia-smi`, `free -h`) while a long remote-run "
-            "holds the slot. Synchronous and bounded (~5 min). For long-running work "
-            "use remote-run / remote-manage, not this."
+            "holds the slot. Synchronous and bounded by the configured remote SSH "
+            "timeout (currently long enough to tolerate saturated compiles). For "
+            "long-running work use remote-run / remote-manage, not this; for "
+            "non-SSH diagnostics use remote-debug."
         ),
         "inputSchema": {
             "type": "object",
@@ -2751,30 +3678,80 @@ TOOL_DEFINITIONS += [
         },
     },
     {
+        "name": "remote-snapshot",
+        "description": (
+            "Create a reusable cached AWS AMI from the current benchmark box root "
+            "volume. This captures installed dependencies (clang/LLVM, GCC, CMake, "
+            "Ninja, PostgreSQL, vcpkg) plus the existing repo/build directory so "
+            "future remote provisioning can start from preexisting artifacts instead "
+            "of rebuilding from scratch. Prefer running this after expensive setup or "
+            "before teardown; `remote-manage` operation='down' already snapshots "
+            "automatically before destroying the EC2 instance. Normal `remote-run`/"
+            "`remote-manage up` calls then use the newest cached AMI by default. "
+            "Avoid from_scratch=true unless the USER explicitly confirmed a clean "
+            "base-image rebuild. By default AWS may reboot the instance briefly to "
+            "make the image filesystem-consistent; no EC2 instance is destroyed by "
+            "this tool." + _REMOTE_MUTEX_NOTE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region of the current stack (default: Terraform outputs/env).",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional AMI name (default bioseq-bench-aws-cache-<UTC timestamp>).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional AMI description.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 120,
+                    "description": "Wait timeout in minutes for AMI availability.",
+                },
+                "no_wait": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Return after create-image is requested instead of waiting for AMI availability.",
+                },
+                "no_reboot": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Ask AWS not to reboot the instance before imaging. Faster, "
+                        "but the filesystem is only crash-consistent; leave false for "
+                        "normal cache snapshots."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "remote-run",
         "description": (
             "Run a build/test/benchmark or an inspect on the AWS box — the remote "
             "twin of start_build + inspect. Ensures a ready box exists (provisioning "
-            "+ waiting if needed), git-syncs the box to the requested branch's latest "
-            "PUSHED commit (unless sync=false), then runs the operation on the box "
-            "using the box-side server.py with the aws-x64-linux preset.\n\n"
+            "+ waiting if needed, using the newest cached bioseq AMI/snapshot by "
+            "default), git-syncs the box to the requested branch's latest PUSHED "
+            "commit (unless sync=false), then runs the operation on the box using "
+            "the box-side server.py with the aws-x64-linux preset. " + _FROM_SCRATCH_WARNING + "\n\n"
             "Two operation shapes (oneOf):\n"
             "  operation='build' — runs one start_build mode (unit+integration, "
-            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug "
-            "semantics as the local start_build tool.\n"
+            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
+            "filter/debug_report semantics as the local start_build tool.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
             "same parameters as the local inspect tool.\n\n"
             "IMPORTANT CAVEATS:\n"
-            "  - The box is x86_64. The build currently fails ON OUR OWN CODE at the "
-            "Highway ::NEON SIMD / macOS dispatch.h (which don't exist on x86_64) — "
-            "this is the EXPECTED outcome (exit non-zero, verdict "
-            "'expected_our_code_failure'); it proves the toolchain + all third-party "
-            "deps build. A 3rd-party/toolchain error would be the real failure.\n"
-            "  - build_only=true is the reliable path today (configure + compile to "
-            "the ::NEON gap). Test/bench modes additionally need a configured "
-            "PostgreSQL + bioseq DB on the box, which the base provisioning does not "
-            "set up; they will only run end-to-end once the ::NEON port lands and the "
-            "DB is prepared.\n"
+            "  - The box is x86_64 Linux. Build/test/bench modes expect the "
+            "provisioned PostgreSQL + bioseq DB to be ready on the box; failures in "
+            "our code should now be treated as real regressions, not as an expected "
+            "::NEON/macOS dispatch.h gap.\n"
             "  - remote inspect needs a successfully-built binary on the box, so it "
             "won't return useful disassembly until the build succeeds." + _REMOTE_MUTEX_NOTE
         ),
@@ -2806,6 +3783,47 @@ TOOL_DEFINITIONS += [
                             "description": ("Use the debug build tree (adds -g + "
                                             "-save-temps for inspect). Rarely needed "
                                             "on the box."),
+                        },
+                        "filter": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "description": (
+                                "Bench-only. Subset selection for bench/bench-fast/"
+                                "bench-io/bench-e2e, translated to the bench binary's "
+                                "repeatable --filter flag. Each present array is an "
+                                "OR-set; the three arrays AND together. Omit an array "
+                                "to leave that axis unconstrained. Values may not "
+                                "contain ',' or '='."
+                            ),
+                            "properties": {
+                                "tags": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                    "description": "Run only benchmarks whose `tags` intersect this set.",
+                                },
+                                "cases": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                    "description": "Within selected benchmarks, run only these matrix.over cases (algorithm names).",
+                                },
+                                "benchmarks": {
+                                    "type": "array",
+                                    "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1,
+                                    "description": "Run only these benchmark keys. (Maps to the bench CLI's singular `benchmark=`.)",
+                                },
+                            },
+                        },
+                        "debug_report": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Bench-only. Pass --debug to the bench binary and "
+                                "stream report_debug_<N>.jsonl next to report_<N>.json. "
+                                "Requires a non-empty filter."
+                            ),
                         },
                         **_REMOTE_RUN_COMMON_PROPS,
                     },
@@ -3105,10 +4123,16 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_subagent_status()
     elif name == "remote-status":
         text = tool_remote_status()
+    elif name == "remote-debug":
+        text = tool_remote_debug(args)
+    elif name == "remote-status-ps":
+        text = tool_remote_status_ps(args)
     elif name == "remote-manage":
         text = tool_remote_manage(args)
     elif name == "remote-ssh":
         text = tool_remote_ssh(args.get("command", ""))
+    elif name == "remote-snapshot":
+        text = tool_remote_snapshot(args)
     elif name == "remote-run":
         text = tool_remote_run(args)
     elif name == "remote-git":

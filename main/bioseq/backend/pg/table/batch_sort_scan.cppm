@@ -53,7 +53,7 @@ import bioseq.storage.lazy;             // lazy_compact_sequence, make_lazy_in_m
 import bioseq.storage.scanner;          // sequence_scanner_none
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
-import bioseq.sequences.simd;           // N_NEON::stdc_compare
+import bioseq.sequences.simd;           // active_target::stdc_compare
 import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
 import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
@@ -207,17 +207,19 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 
 	        if (!rt->spec.vulkan_enabled) {
 	            std::vector<std::size_t> stdc_order(row_count);
-	            std::iota(stdc_order.begin(), stdc_order.end(), std::size_t{0});
+	            auto* order_begin = stdc_order.data();
+	            auto* order_end = order_begin + stdc_order.size();
+	            std::iota(order_begin, order_end, std::size_t{0});
 	            const bool descending = rt->spec.descending;
 	            auto less = [&headers, descending](std::size_t i, std::size_t j) {
 	                const std::strong_ordering c =
-	                    bioseq::simd::N_NEON::stdc_compare(*headers[i], *headers[j]);
+	                    bioseq::simd::active_target::stdc_compare(*headers[i], *headers[j]);
 	                if (c != 0) return descending ? c > 0 : c < 0;
 	                return descending ? i > j : i < j;
 	            };
 	            const auto sort_start = std::chrono::steady_clock::now();
 	            bioseq::parallelism::GlobalPool::instance().parallel_sort(
-	                stdc_order.begin(), stdc_order.end(), less);
+	                order_begin, order_end, less);
 	            const auto sort_end = std::chrono::steady_clock::now();
 	            rt->sort_runtime_ns = static_cast<std::uint64_t>(
 	                std::chrono::duration_cast<std::chrono::nanoseconds>(

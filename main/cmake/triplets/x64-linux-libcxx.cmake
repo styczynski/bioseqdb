@@ -1,21 +1,8 @@
-# OPTIONAL / FUTURE triplet (NOT used by the aws-x64-linux preset by default).
+# AWS x86_64 Linux triplet for the clang-22 + libc++ preset. It forces clang +
+# libc++ for every vcpkg dependency so their C++ ABI matches bioseq's libc++
+# build.
 #
-# The default AWS build uses the stock `x64-linux` triplet (gcc/libstdc++) for
-# vcpkg dependencies, because that path reliably builds every port and the bioseq
-# build fails first at *compile* on the x86-only Highway ::NEON SIMD (the verify
-# target is compile-only), so the dep ABI never reaches a link. This triplet is
-# the path to a fully-LINKABLE build once the ::NEON port lands: it forces
-# clang + libc++ for the deps so their C++ ABI matches bioseq's libc++ build.
-#
-# KNOWN per-port clang issue to resolve before this works end-to-end:
-#   - oneTBB's `_tpause` (WAITPKG) intrinsic is `always_inline` but the enclosing
-#     `prolonged_pause` is built without the `waitpkg` target feature, so clang
-#     errors out (gcc does not). Add `-mwaitpkg` (TBB runtime-guards the actual
-#     TPAUSE, but it would SIGILL on pre-WAITPKG CPUs like m4 if the guard is
-#     bypassed) OR disable the path via the TBB build, e.g. append
-#     "-D__TBB_WAITPKG_INTRINSICS_PRESENT=0" to VCPKG_CXX_FLAGS below.
-#
-# It mirrors the built-in `x64-linux` triplet (static archives, dynamic glibc
+# This mirrors the built-in `x64-linux` triplet (static archives, dynamic glibc
 # CRT) but forces clang + libc++ 22 for every port build via a chainloaded
 # toolchain + `-stdlib=libc++`. This is REQUIRED for ABI compatibility: the
 # bioseq targets are compiled with clang-22 + libc++ (the only configuration in
@@ -33,7 +20,11 @@ set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 
 # Applied on top of each port's own flags by the vcpkg toolchain.
 set(VCPKG_C_FLAGS "")
-set(VCPKG_CXX_FLAGS "-stdlib=libc++")
+# oneTBB's `_tpause` (WAITPKG) intrinsic is `always_inline`, but clang errors if
+# it is compiled into a function without the waitpkg target feature. Disabling
+# that optional path is safer than adding `-mwaitpkg`, because the current AWS
+# m4 host does not advertise WAITPKG.
+set(VCPKG_CXX_FLAGS "-stdlib=libc++ -D__TBB_WAITPKG_INTRINSICS_PRESENT=0 -Wno-unused-command-line-argument")
 set(VCPKG_LINKER_FLAGS "-stdlib=libc++")
 
 # Pins the compiler to clang-22 for port builds (vcpkg uses its own bundled

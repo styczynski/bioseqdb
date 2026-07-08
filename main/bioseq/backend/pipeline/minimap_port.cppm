@@ -646,7 +646,7 @@ void collect_seed_hits(
     /// even on a bare `[](const Anchor&){...}` extractor.
     struct AnchorRefBitsKey {
         [[nodiscard, gnu::always_inline]]
-        std::uint64_t operator()(const Anchor& anchor) const noexcept {
+        inline std::uint64_t operator()(const Anchor& anchor) const noexcept {
             return anchor.ref_bits();
         }
     };
@@ -809,7 +809,7 @@ void generate_regions(
     /// functor for DOC0249 R4 compliance (no capture-all lambdas in the
     /// pipeline module tree).
     struct ChainScoreDescending {
-        [[nodiscard, gnu::always_inline]] bool operator()(
+        [[nodiscard, gnu::always_inline]] inline bool operator()(
             const Chain& left, const Chain& right) const noexcept
         {
             return left.score > right.score;
@@ -1740,7 +1740,7 @@ void estimate_divergence_from_seeds(
         const std::uint32_t* mini_pos_count;
         sequence_size_t      query_len;
         [[nodiscard, gnu::always_inline]]
-        bool operator()(std::int64_t pos) const noexcept {
+        inline bool operator()(std::int64_t pos) const noexcept {
             if (pos < 0 || static_cast<sequence_size_t>(pos) > query_len) return false;
             const std::size_t p = static_cast<std::size_t>(pos);
             return mini_pos_count[p + 1] > mini_pos_count[p];
@@ -1750,7 +1750,7 @@ void estimate_divergence_from_seeds(
         const std::uint32_t* mini_pos_count;
         sequence_size_t      query_len;
         [[nodiscard, gnu::always_inline]]
-        int32_t operator()(std::int64_t a, std::int64_t b) const noexcept {
+        inline int32_t operator()(std::int64_t a, std::int64_t b) const noexcept {
             if (a < 0) a = 0;
             if (static_cast<sequence_size_t>(b) > query_len) b = static_cast<std::int64_t>(query_len);
             if (a > b) return 0;
@@ -1791,7 +1791,7 @@ void estimate_divergence_from_seeds(
             bool          region_is_reverse;
 
             [[nodiscard, gnu::always_inline]]
-            std::int64_t operator()(int32_t s) const noexcept {
+            inline std::int64_t operator()(int32_t s) const noexcept {
                 const Anchor& chain_anchor = region_is_reverse
                     ? anchors_base[anchor_begin + seed_count - 1 - s]
                     : anchors_base[anchor_begin + s];

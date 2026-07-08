@@ -1089,3 +1089,9 @@ getStxstattarget_compat(HeapTuple tup)
 // standard algorithms without qualification.
 #undef Min
 #undef Max
+
+// Postgres maps stdio names to pg_* variants on some platforms. Leaving those
+// macros active in C++ translation units rewrites libc++ internals such as
+// std::vsnprintf into std::pg_vsnprintf.
+#undef snprintf
+#undef vsnprintf

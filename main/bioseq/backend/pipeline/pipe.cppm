@@ -5,7 +5,7 @@
  * This module implements the constexpr-dispatched stage pipeline described in
  * `TEMPLATED_MINIMAP_PORT_PIPELINE_API_V2_CONSTEXPR_DISPATCHED_STAGES_AND_METADATA__DOC0249.md`.
  * It is a parallel API layer that sits above the existing kernel functions in
- * `bioseq::simd::N_NEON` and provides:
+ * `bioseq::simd::active_target` and provides:
  *
  *   - Compile-time parameter packs (`ConstexprAlignerParams<W,K,L>` /
  *     `ConstexprAlignerFallbackParams<L>`).
@@ -56,6 +56,22 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #if !defined(__OPTIMIZE__)
 # error "DOC0256 chain primitive requires -O1 or higher (see DOC0256 §R17). " \
         "Use -Og or -O1 -g for debug builds of pipe.cppm."
+#endif
+
+#ifndef BIOSEQ_PIPELINE_FORCE_INLINE
+#define BIOSEQ_PIPELINE_FORCE_INLINE 1
+#endif
+
+#if BIOSEQ_PIPELINE_FORCE_INLINE
+#define BIOSEQ_PIPELINE_INLINE_ATTR [[gnu::always_inline]]
+#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR [[gnu::always_inline, gnu::flatten]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard, gnu::always_inline, gnu::flatten]]
+#else
+#define BIOSEQ_PIPELINE_INLINE_ATTR
+#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard]]
+#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard]]
 #endif
 
 #include <hwy/highway.h>
@@ -131,9 +147,15 @@ using bioseq::storage::sequence_size_t;
 
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-    const std::string detail = runtime.usable()
-        ? "GPU path declined"
-        : fmt::format("runtime unavailable: {}", runtime.initialization_error());
+    const std::string detail = !runtime.usable()
+        ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
+        : runtime.features().software_device
+            ? fmt::format(
+                  "active Vulkan device '{}' is a CPU/software device "
+                  "(VkPhysicalDeviceType={}); explicit GPU execution requires a hardware Vulkan device",
+                  runtime.features().device_name.data(),
+                  runtime.features().device_type)
+            : "GPU path declined";
     throw bioseq::gpu::vulkan::VulkanRuntimeError(
         fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
 }
@@ -712,7 +734,7 @@ using kernel_t = typename algorithm_traits<AlgoEnumValue>::kernel_type;
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -744,7 +766,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -776,7 +798,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -810,7 +832,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP> {
     struct kernel_type {
-        [[gnu::always_inline]] static void call(
+        [[gnu::always_inline]] inline static void call(
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
@@ -1946,7 +1968,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                           bioseq::indexing::MinimizerHashmapFragmentIndex>) {
                 auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-                if (runtime.usable()) {
+                if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                     auto key = bioseq::indexing::make_gpu_index_cache_key(
                         target_index_ref, gpu_index_identity);
                     auto resident_index = gpu_index_cache == nullptr
@@ -2378,7 +2400,7 @@ struct SinkStage {
     sequence_size_t        query_len  = 0;
     sequence_size_t        target_len = 0;
 
-    [[gnu::always_inline]] void on_batch(std::span<AlignRegion> regions) {
+    [[gnu::always_inline]] inline void on_batch(std::span<AlignRegion> regions) {
         dst_->results.reserve(dst_->results.size() + regions.size());
         // `region_slot` is move-consumed into the converted MatchResult; the
         // slot is left in a valid-but-moved-from state and reclaimed by
@@ -2389,7 +2411,7 @@ struct SinkStage {
         }
     }
 
-    [[gnu::always_inline]] void on_completed() noexcept { /* no-op */ }
+    [[gnu::always_inline]] inline void on_completed() noexcept { /* no-op */ }
 };
 
 // =============================================================================
@@ -2662,7 +2684,7 @@ template <is_constexpr_aligner_params Cep,
     if (external_gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
-        std::uint64_t limit = gpu_rt.usable()
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
@@ -2693,11 +2715,11 @@ template <is_constexpr_aligner_params Cep,
     if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                   bioseq::indexing::MinimizerHashmapFragmentIndex>) {
         if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
-            && allow_gpu_target_index_build && target_index.table.empty()
+            && allow_gpu_target_index_build && target_index.table_empty()
             && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
-            if (gpu_rt.usable()) {
+            if (bioseq::gpu::vulkan::hardware_device_available(gpu_rt)) {
                 auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
                     target_seq,
                     static_cast<std::size_t>(params.window_size),
@@ -2855,7 +2877,7 @@ template <is_constexpr_aligner_params Cep,
     if (gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
-        std::uint64_t limit = gpu_rt.usable()
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
@@ -2879,11 +2901,11 @@ template <is_constexpr_aligner_params Cep,
     if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                   bioseq::indexing::MinimizerHashmapFragmentIndex>) {
         if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
-            && allow_gpu_target_index_build && target_index.table.empty()
+            && allow_gpu_target_index_build && target_index.table_empty()
             && target_len > 0) {
             auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
             bool injected = false;
-            if (gpu_rt.usable()) {
+            if (bioseq::gpu::vulkan::hardware_device_available(gpu_rt)) {
                 auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
                     target_seq,
                     static_cast<std::size_t>(params.window_size),
@@ -2930,9 +2952,9 @@ template <is_constexpr_aligner_params Cep,
         // normal Vulkan seed+chain path (DOC0353 2026-06-25).
         if (phase_c_coordinate_only_active(params)
             && allow_gpu_target_index_build
-            && effective_index.table.empty()) {
+            && effective_index.table_empty()) {
             auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-            if (!runtime.usable()) {
+            if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                 throw_vulkan_declined("Phase C resident seed-to-coordinate");
             }
             auto key = bioseq::indexing::make_gpu_index_cache_key(
@@ -3346,11 +3368,18 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
     using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::SCALAR;
+#if defined(__APPLE__)
     using value_list = value_sequence<target_t,
         target_t::SCALAR,
         target_t::SIMD_MINIMAP2_SLOW,
         target_t::TWO_STACK_NTHASH,
         target_t::VULKAN_MINIMAP_INT>;
+#else
+    using value_list = value_sequence<target_t,
+        target_t::SCALAR,
+        target_t::SIMD_MINIMAP2_SLOW,
+        target_t::TWO_STACK_NTHASH>;
+#endif
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
@@ -3551,7 +3580,8 @@ struct pipeline_run_leaf {
         "pipeline_run_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
     template <class QueryMinimizers>
-    [[nodiscard, gnu::always_inline]] static MatchResultCollection call(
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static MatchResultCollection call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
         const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
@@ -3652,7 +3682,8 @@ struct describe_leaf {
         ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
         "describe_leaf: CA must be ChainingAlgorithmType (from ca_step).");
 
-    [[nodiscard, gnu::always_inline]] static PipelineDescription call(
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static PipelineDescription call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         const compact_sequence_range<QR>& q,
         const compact_sequence_range<TR>& t,
@@ -3716,7 +3747,7 @@ template <EntryPoint EP,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QR>::traits::storage_unit>,
           class QueryMinimizers = std::vector<MinimizerT>>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection dispatch_pipeline(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
@@ -3754,7 +3785,7 @@ MatchResultCollection dispatch_pipeline(
 
 template <supports_compact_sequence_range QR,
           supports_compact_sequence_range TR>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     const compact_sequence_range<QR>& query_seq_proto,
@@ -3782,8 +3813,8 @@ PipelineDescription describe_pipeline_for(
 // 9.7 Public entry points (DOC0249 §9.7) — relocated from minimap_port.cppm so
 // they can delegate to `pipe::dispatch_pipeline` without forming a circular
 // import.  Live in `bioseq::simd::HWY_NAMESPACE` so callers' fully-qualified
-// names (`bioseq::simd::N_NEON::minimap_port(...)`,
-// `bioseq::simd::N_NEON::minimap2_port_with_index(...)`) are unchanged.
+// names (`bioseq::simd::active_target::minimap_port(...)`,
+// `bioseq::simd::active_target::minimap2_port_with_index(...)`) are unchanged.
 // =============================================================================
 
 namespace bioseq::simd::HWY_NAMESPACE {
@@ -3918,7 +3949,8 @@ struct sketch_leaf {
         ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
         "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
-    [[gnu::always_inline]] static void call(
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static void call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         Collector& collector, Range& range,
         const std::size_t& window_len, const std::size_t& kmer_len)
@@ -3940,7 +3972,8 @@ struct sketch_traits {
 /// `params.minimizer_algorithm`.  The chain pins MA at compile time and the
 /// leaf dispatches via the trait's kernel.
 template <class MinimizerT, class Collector, class Range>
-[[gnu::always_inline, gnu::flatten]] void sketch_one(
+BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
+void sketch_one(
     Collector& collector, Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
@@ -3958,7 +3991,8 @@ template <class MinimizerT, class Collector, class Range>
 /// boilerplate repeated for the target and query passes in the legacy
 /// `minimap_port_with_repr` body.
 template <class MinimizerT, class Range>
-[[gnu::always_inline]] void sketch_into_collector(
+BIOSEQ_PIPELINE_INLINE_ATTR
+void sketch_into_collector(
     sketch_collector_t<MinimizerT>& collector,
     Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
@@ -4049,7 +4083,8 @@ struct minimap_port_repr_leaf {
     static_assert(std::is_same_v<decltype(K), std::size_t>,
         "minimap_port_repr_leaf: K must be std::size_t (from kmer_size_step).");
 
-    [[gnu::always_inline]] static MatchResultCollection call(
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static MatchResultCollection call(
         const Minimap2Params& params,
         bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  q,
         bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& t)
@@ -4087,7 +4122,7 @@ template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QueryRange>::traits::storage_unit>>
-[[nodiscard, gnu::always_inline, gnu::flatten]]
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection minimap_port(
     bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
     bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
@@ -4395,7 +4430,7 @@ template <supports_compact_sequence_range QueryRange,
     std::optional<bioseq::indexing::GpuMinimizerIndexCache> segmented_gpu_index_cache;
     if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
-        std::uint64_t limit = gpu_rt.usable()
+        std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
         if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
@@ -4744,7 +4779,7 @@ template <supports_compact_sequence_range QueryRange,
 
     auto run_vulkan_segment_coordinate_batch = [&]() -> MatchResultCollection {
         auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-        if (!runtime.usable()) {
+        if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
             pipe::throw_vulkan_declined("VulkanSegment resident coordinate batch");
         }
         const auto ranges =

@@ -47,7 +47,29 @@ export namespace bioseq::chaining {
 /// True when a usable Vulkan device exists for Phase A chaining. The GPU
 /// invariant / smoke tests skip cleanly when this is false.
 [[nodiscard]] inline bool vulkan_chaining_supported() {
-    return bioseq::gpu::vulkan::Runtime::instance().usable();
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    return runtime.usable() && !runtime.features().software_device;
+}
+
+/// Throws when the selected Vulkan chaining backend is not allowed to execute.
+/// This is intentionally not a fallback hook: explicit GPU selection must fail
+/// loudly instead of routing work through CPU kernels.
+inline void require_vulkan_chaining_supported() {
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    if (!runtime.usable()) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but runtime is unavailable: {}",
+            runtime.initialization_error()));
+    }
+    if (runtime.features().software_device) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but the detected Vulkan device '{}' is "
+            "a CPU/software device (VkPhysicalDeviceType={}); Linux software "
+            "Vulkan chaining is not trusted. Select a CPU chaining algorithm "
+            "explicitly or run on a supported hardware Vulkan device.",
+            runtime.features().device_name.data(),
+            runtime.features().device_type));
+    }
 }
 
 /// Pick the tile/local workgroup dimensions for the chaining pipeline from the
@@ -287,12 +309,8 @@ inline void run_chain_anchors_vulkan_impl(
             "Vulkan chaining selected but anchor count {} exceeds uint32_t", n64));
     }
 
+    require_vulkan_chaining_supported();
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
-    if (!runtime.usable()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-            "Vulkan chaining selected but runtime is unavailable: {}",
-            runtime.initialization_error()));
-    }
 
     int32_t max_dist_x = params.max_gap;
     int32_t max_dist_y = params.max_gap;

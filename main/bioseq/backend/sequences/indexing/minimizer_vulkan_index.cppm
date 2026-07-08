@@ -92,7 +92,7 @@ struct GpuMinimizerIndexCacheKeyHash {
         .source_id = reinterpret_cast<std::uintptr_t>(&idx),
         .caller_identity = 0u,
         .target_len = static_cast<std::uint64_t>(idx.target_len),
-        .table_size = static_cast<std::uint64_t>(idx.table.size()),
+        .table_size = static_cast<std::uint64_t>(idx.table_size()),
         .position_count = static_cast<std::uint64_t>(idx.positions.size()),
     };
 }
@@ -106,7 +106,7 @@ struct GpuMinimizerIndexCacheKeyHash {
         .source_id = 0u,
         .caller_identity = assembly_identity,
         .target_len = static_cast<std::uint64_t>(idx.target_len),
-        .table_size = static_cast<std::uint64_t>(idx.table.size()),
+        .table_size = static_cast<std::uint64_t>(idx.table_size()),
         .position_count = static_cast<std::uint64_t>(idx.positions.size()),
     };
 }
@@ -198,18 +198,17 @@ build_gpu_minimizer_upload(const MinimizerHashmapFragmentIndex& idx) {
     if (idx.positions.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw GpuIndexTooLarge{};
     }
-    const std::uint32_t capacity = gpu_slot_capacity(idx.table.size());
+    const std::uint32_t capacity = gpu_slot_capacity(idx.table_size());
     GpuMinimizerIndexUpload upload;
     upload.slots.resize(capacity);
     upload.positions = idx.positions;
     upload.target_len = idx.target_len;
-    upload.table_size = idx.table.size();
+    upload.table_size = idx.table_size();
     upload.slot_mask = capacity - 1u;
 
-    for (const auto& kv : idx.table) {
-        const std::uint64_t hash = kv.first;
-        const std::uint64_t off64 = kv.second >> 32;
-        const std::uint64_t cnt64 = kv.second & 0xffffffffULL;
+    idx.for_each_table_entry([&](std::uint64_t hash, std::uint64_t packed) {
+        const std::uint64_t off64 = packed >> 32;
+        const std::uint64_t cnt64 = packed & 0xffffffffULL;
         if (off64 > std::numeric_limits<std::uint32_t>::max() ||
             cnt64 > std::numeric_limits<std::uint32_t>::max() ||
             off64 + cnt64 > idx.positions.size()) {
@@ -228,7 +227,7 @@ build_gpu_minimizer_upload(const MinimizerHashmapFragmentIndex& idx) {
             }
             p = (p + 1u) & upload.slot_mask;
         }
-    }
+    });
     return upload;
 }
 
@@ -296,7 +295,7 @@ build_gpu_minimizer_upload_from_pairs(
 {
     using bioseq::parallelism::saturating_mul;
     const auto slot_bytes = saturating_mul(
-        gpu_slot_capacity(idx.table.size()), sizeof(GpuMinimizerSlot));
+        gpu_slot_capacity(idx.table_size()), sizeof(GpuMinimizerSlot));
     const auto pos_bytes = saturating_mul(idx.positions.size(), sizeof(std::uint64_t));
     return bioseq::gpu::vulkan::sat_add(slot_bytes, pos_bytes);
 }
@@ -308,7 +307,7 @@ build_gpu_minimizer_upload_from_pairs(
 {
     using bioseq::parallelism::saturating_mul;
     const auto slot_bytes = saturating_mul(
-        gpu_slot_capacity(idx.table.size()), sizeof(GpuMinimizerSlot));
+        gpu_slot_capacity(idx.table_size()), sizeof(GpuMinimizerSlot));
     const auto pos_bytes = saturating_mul(idx.positions.size(), sizeof(std::uint64_t));
     const auto staging_bytes = std::max(slot_bytes, pos_bytes);
     return bioseq::gpu::vulkan::sat_add(

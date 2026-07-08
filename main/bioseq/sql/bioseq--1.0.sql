@@ -1658,7 +1658,8 @@ CREATE OR REPLACE FUNCTION bioseq.vulkan_runtime_status(
     OUT max_workgroup_count_x integer,
     OUT scalar_block_layout boolean,
     OUT initialization_error text,
-    OUT device_local_bytes bigint
+    OUT device_local_bytes bigint,
+    OUT software_device boolean
 )
     RETURNS record
     AS 'MODULE_PATHNAME', 'bioseq_vulkan_runtime_status'

@@ -671,7 +671,6 @@ inline void collect_minimizers_view(
 	// First kmers. Walk the prefix in INIT mode (until the first window
 	// is fully populated), then the rest in non-INIT mode.
 	handler(std::bool_constant<true>{});
-	assert(pos == w+k);
 	handler(std::bool_constant<false>{});
 
 	if (!current_min.is_max()) {

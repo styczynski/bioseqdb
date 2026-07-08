@@ -49,7 +49,7 @@ struct [[nodiscard]] RegionScope {
     pmu::counters_t pmu_begin{};
 
     [[gnu::always_inline]]
-    explicit RegionScope(const RegionDescriptor* d) noexcept {
+    inline explicit RegionScope(const RegionDescriptor* d) noexcept {
         if constexpr (Args::enable_profiling) {
             if (!runtime_enabled() || d == nullptr || d->id == 0) return;
             auto* prof = tls_profiler<Args>;
@@ -66,7 +66,7 @@ struct [[nodiscard]] RegionScope {
         }
     }
 
-    [[gnu::always_inline]] ~RegionScope() noexcept {
+    [[gnu::always_inline]] inline ~RegionScope() noexcept {
         if constexpr (Args::enable_profiling) {
             if (r.skipped) return;
             const auto end_ns = clock::now_ns();

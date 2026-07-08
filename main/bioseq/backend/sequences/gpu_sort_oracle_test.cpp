@@ -10,12 +10,12 @@
 // comparator `compare_sequences_scalar` (ascending sequence, index-ascending
 // tiebreak), for BOTH directions.
 //
-//   * vulkan_enabled = true  exercises the GPU façade when a device is present
-//     (and transparently the CPU fallback when it is not — same assertion).
+//   * vulkan_enabled = true  exercises the GPU façade when a hardware device is
+//     present (and transparently the CPU fallback when it is not — same assertion).
 //   * vulkan_enabled = false exercises the CPU fallback explicitly.
 //
 // The two runs must produce the IDENTICAL permutation (§7.4: GPU≡CPU even on
-// duplicate sequences). When a usable Vulkan device is present we additionally
+// duplicate sequences). When a hardware Vulkan device is present we additionally
 // assert the device key/tiebreak dispatch counter advanced, proving the GPU
 // path actually executed (not a silent decline).
 
@@ -86,7 +86,7 @@ template <class Batch>
     std::vector<std::size_t> order(n);
     std::iota(order.begin(), order.end(), std::size_t{0});
     std::sort(order.begin(), order.end(), [&batch, descending](std::size_t i, std::size_t j) {
-        const std::strong_ordering c = bioseq::simd::N_NEON::compare_sequences_scalar(
+        const std::strong_ordering c = bioseq::simd::active_target::compare_sequences_scalar(
             batch[i].underlying(), batch[j].underlying());
         if (c != 0) return descending ? c > 0 : c < 0;
         return descending ? i > j : i < j;
@@ -181,7 +181,7 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
     auto batch = ob.span();
 
     auto& rt = vk::Runtime::instance();
-    const bool gpu_present = rt.usable();
+    const bool gpu_present = vk::hardware_device_available(rt);
 
     for (bool descending : {false, true}) {
         DYNAMIC_SECTION(label << " n=" << count << (descending ? " DESC" : " ASC")) {
@@ -233,7 +233,7 @@ void run_oversized_equal_key_case(const char* label) {
     auto batch = ob.span();
 
     auto& rt = vk::Runtime::instance();
-    const bool gpu_present = rt.usable();
+    const bool gpu_present = vk::hardware_device_available(rt);
     for (bool descending : {false, true}) {
         DYNAMIC_SECTION(label << " oversized equal-key run" << (descending ? " DESC" : " ASC")) {
             const std::vector<std::size_t> expected = oracle_order(ob, descending);
@@ -269,7 +269,8 @@ TEST_CASE("DOC0346 oracle — dna4 GPU sort permutation == compare_sequences_sca
 
     auto& rt = vk::Runtime::instance();
     bioseq_log<DBG>("[gpu.sort.test] device usable={} ({})",
-                    rt.usable(), rt.usable() ? "GPU path" : "CPU fallback path");
+                    vk::hardware_device_available(rt),
+                    vk::hardware_device_available(rt) ? "GPU path" : "CPU fallback path");
 
     for (std::size_t n : {std::size_t{0}, std::size_t{1}, std::size_t{2},
                           std::size_t{17}, std::size_t{256}, std::size_t{1000}}) {

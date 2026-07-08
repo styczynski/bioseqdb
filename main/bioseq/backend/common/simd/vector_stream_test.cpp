@@ -5,7 +5,6 @@
 import bioseq.simd.utils;
 import bioseq.simd.vector_stream;
 import bioseq.common.mlogging;
-import bioseq.common.testing;
 
 HWY_BEFORE_NAMESPACE();
 

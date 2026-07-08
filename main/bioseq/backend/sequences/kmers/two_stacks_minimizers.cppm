@@ -143,7 +143,7 @@ struct sequence_simd_iteration_state {
     /// member function instead of a 705-instruction standalone closure.
     template<bool IsFull, typename OffsetsArray>
     [[gnu::always_inline]] [[gnu::flatten]] HWY_INLINE
-    inline void step_one_bp_vec_stream(
+    void step_one_bp_vec_stream(
         d_t          d,
         OffsetsArray const& offsets_in,
         mask_t       live_mask,

@@ -42,7 +42,9 @@ module;
 #include <vector>
 
 #include <dlfcn.h>
+#if defined(__APPLE__)
 #include <dispatch/dispatch.h>
+#endif
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 
@@ -74,6 +76,8 @@ struct VulkanFeatureSet {
     bool shader_int64 = false;
     bool scalar_block_layout = false;
     bool timeline_semaphore = false;
+    bool software_device = false;
+    std::uint32_t device_type = 0;
     std::uint32_t max_workgroup_invocations = 0;
     std::uint32_t max_workgroup_count_x = 0;
     std::uint32_t max_shared_memory_bytes = 0;
@@ -925,6 +929,27 @@ private:
     std::atomic<std::uint64_t> alignment_extension_dispatch_count_{0};
     std::mutex mu_;
 };
+
+[[nodiscard]] inline bool hardware_device_available(const Runtime& runtime) noexcept {
+    return runtime.usable() && !runtime.features().software_device;
+}
+
+inline void require_hardware_device(const Runtime& runtime, const char* operation) {
+    if (!runtime.usable()) {
+        throw VulkanRuntimeError(fmt::format(
+            "{} selected but Vulkan runtime is unavailable: {}",
+            operation,
+            runtime.initialization_error()));
+    }
+    if (runtime.features().software_device) {
+        throw VulkanRuntimeError(fmt::format(
+            "{} selected but active Vulkan device '{}' is a CPU/software device "
+            "(VkPhysicalDeviceType={}); explicit GPU execution requires a hardware Vulkan device",
+            operation,
+            runtime.features().device_name.data(),
+            runtime.features().device_type));
+    }
+}
 
 [[nodiscard]] inline std::uint64_t sat_add(std::uint64_t a, std::uint64_t b) noexcept {
     constexpr std::uint64_t max_value = (std::numeric_limits<std::uint64_t>::max)();
@@ -2162,6 +2187,8 @@ void Runtime::init() {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physical_, &props);
+    features_.device_type = static_cast<std::uint32_t>(props.deviceType);
+    features_.software_device = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     features_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
     features_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
     features_.max_shared_memory_bytes = props.limits.maxComputeSharedMemorySize;
@@ -2273,10 +2300,10 @@ void Runtime::init() {
     init_error_.clear();
     bioseq_log<DBG>(
         "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
-        "maxSharedMem={}B, scalarBlockLayout={})",
+        "maxSharedMem={}B, scalarBlockLayout={}, softwareDevice={})",
         props.deviceName, features_.max_workgroup_invocations,
         features_.max_workgroup_count_x, features_.max_shared_memory_bytes,
-        features_.scalar_block_layout);
+        features_.scalar_block_layout, features_.software_device);
 }
 
 void Runtime::shutdown() noexcept {

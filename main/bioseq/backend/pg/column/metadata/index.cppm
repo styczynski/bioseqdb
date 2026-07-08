@@ -20,6 +20,7 @@ export import :options;
 export import :stripe;
 export import :row_mask;
 export import :seq_sub_table;
+export import :tuple_ops;
 export import :core;
 export import :write_state;
 export import :write_state_row_mask;

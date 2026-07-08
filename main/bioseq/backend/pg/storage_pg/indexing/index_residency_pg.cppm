@@ -414,7 +414,7 @@ void install_index_residency_callbacks() {
         static_cast<std::uint64_t>(index.serialize_binary_size());
     const std::uint64_t table_bytes =
         bioseq::parallelism::saturating_mul(
-            static_cast<std::uint64_t>(index.table.size()),
+            static_cast<std::uint64_t>(index.table_size()),
             32u);
     const std::uint64_t position_capacity_bytes =
         bioseq::parallelism::saturating_mul(

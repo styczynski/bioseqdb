@@ -57,7 +57,6 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.mm_sketch_baseline;  // NEW: verbatim mm_sketch port
-import bioseq.common.testing;
 
 using namespace seq::literals;
 

@@ -24,7 +24,6 @@ extern "C" {
 
 export module bioseq.storage.indexing_pg.sorted_runs;
 
-import bioseq.common.mlogging;
 import bioseq.pg_utils;
 import bioseq.parallelism.memory_admission;
 
@@ -87,7 +86,6 @@ struct SortedRunStoreStats {
 } // namespace bioseq::storage::indexing
 
 namespace bioseq::storage::indexing {
-namespace {
 
 struct SortedPairWire {
     std::uint64_t kmer = 0;
@@ -100,6 +98,19 @@ static_assert(offsetof(SortedPairWire, encoded) == 8);
 
 inline constexpr std::uint64_t kTargetPositionBatchBytes = std::uint64_t{8} << 20;
 inline constexpr std::uint64_t kMinPositionBatchBytes = std::uint64_t{32} << 10;
+
+enum class SortedRunError {
+    position_spill_create_failed,
+    position_spill_rewind_failed,
+    temp_file_create_failed,
+    admitted_run_without_permit,
+    run_rewind_failed,
+    merge_reader_admission_failed,
+    compacted_run_rewind_failed,
+    compact_temp_file_create_failed,
+};
+
+void report_sorted_run_error(SortedRunError error);
 
 template <class T>
 void release_vector_storage_noexcept(std::vector<T>& values) noexcept {
@@ -225,7 +236,7 @@ struct PositionAccumulator {
             if (spill == nullptr) {
                 spill = BufFileCreateTemp(false);
                 if (spill == nullptr) {
-                    bioseq_log<ERR, PG>( "bioseq sorted runs: position spill create failed");
+                    report_sorted_run_error(SortedRunError::position_spill_create_failed);
                 }
             }
             BufFileWrite(
@@ -245,7 +256,7 @@ struct PositionAccumulator {
         }
         if (spill != nullptr) {
             if (BufFileSeek(spill, 0, 0, SEEK_SET) != 0) {
-                bioseq_log<ERR, PG>( "bioseq sorted runs: failed to rewind position spill");
+                report_sorted_run_error(SortedRunError::position_spill_rewind_failed);
             }
             std::uint64_t remaining =
                 spilled_bytes / static_cast<std::uint64_t>(sizeof(std::uint64_t));
@@ -320,7 +331,6 @@ struct MergeHeadGreater {
     }
 };
 
-} // namespace
 } // namespace bioseq::storage::indexing
 
 export namespace bioseq::storage::indexing {
@@ -471,7 +481,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    const std::size_t run_index = memory_runs_.size() + file_runs_.size();
 	    BufFile* file = BufFileCreateTemp(false);
 	    if (file == nullptr) {
-	        bioseq_log<ERR, PG>( "bioseq sorted runs: BufFileCreateTemp returned null");
+	        report_sorted_run_error(SortedRunError::temp_file_create_failed);
 	    }
 	    file_runs_.push_back(BufFileRun{.file = file});
 	    BufFileRun& run = file_runs_.back();
@@ -505,7 +515,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    const std::size_t run_index = memory_runs_.size() + file_runs_.size();
 	    BufFile* file = BufFileCreateTemp(false);
     if (file == nullptr) {
-        bioseq_log<ERR, PG>( "bioseq sorted runs: BufFileCreateTemp returned null");
+        report_sorted_run_error(SortedRunError::temp_file_create_failed);
     }
 	    file_runs_.push_back(BufFileRun{.file = file});
 	    BufFileRun& run = file_runs_.back();
@@ -622,7 +632,7 @@ std::size_t SortedPairRunStore::spill_sorted_run_owned_admitted(
         std::uint64_t admitted_bytes,
         bioseq::parallelism::MemoryPermit permit) {
     if (!permit && admitted_bytes != 0) {
-        bioseq_log<ERR, PG>( "bioseq sorted runs: admitted run without permit");
+        report_sorted_run_error(SortedRunError::admitted_run_without_permit);
     }
     const std::size_t run_index = memory_runs_.size() + file_runs_.size();
     memory_run_bytes_ += admitted_bytes;
@@ -682,7 +692,7 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
 
     for (BufFileRun& run : file_runs_) {
         if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
-            bioseq_log<ERR, PG>( "bioseq sorted runs: failed to rewind BufFile");
+            report_sorted_run_error(SortedRunError::run_rewind_failed);
         }
         FileReader reader{};
         reader.file = run.file;
@@ -699,7 +709,7 @@ void SortedPairRunStore::open_file_readers_(MergeResources& resources) {
     while (!try_open_file_readers_(resources)) {
         resources.release_noexcept();
         if (file_runs_.size() <= 1) {
-            bioseq_log<ERR, PG>( "bioseq sorted runs: could not admit one merge reader");
+            report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
         }
         compact_file_runs_to_output_count_(
             std::max<std::size_t>(1, file_runs_.size() / 2));
@@ -716,7 +726,7 @@ void SortedPairRunStore::merge_sorted_file_runs_to_writer_(
     std::priority_queue<MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
     for (BufFileRun& run : runs) {
         if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
-            bioseq_log<ERR, PG>( "bioseq sorted runs: failed to rewind compacted BufFile");
+            report_sorted_run_error(SortedRunError::compacted_run_rewind_failed);
         }
         FileReader reader{};
         reader.file = run.file;
@@ -754,7 +764,7 @@ BufFileRun SortedPairRunStore::merge_file_run_group_to_new_buffile_(
         std::size_t hi) {
     BufFile* volatile out_file = BufFileCreateTemp(false);
     if (out_file == nullptr) {
-        bioseq_log<ERR, PG>( "bioseq sorted runs: compact BufFile create failed");
+        report_sorted_run_error(SortedRunError::compact_temp_file_create_failed);
     }
     MergeResources* volatile resources = new MergeResources();
     BufFileRun out{.file = out_file};

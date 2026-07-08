@@ -21,7 +21,6 @@
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
-import bioseq.common.testing;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.indexing.symbol_counts;
@@ -59,6 +58,10 @@ namespace {
 
 namespace gen = bioseq::sequences::generation;
 namespace gv = bioseq::gpu::vulkan;
+
+[[nodiscard]] bool hardware_vulkan_ready() {
+    return gv::hardware_device_available(gv::Runtime::instance());
+}
 
 template <sequence_alphabet A, typename U>
 void check_generator(std::string_view label, std::string_view valid_chars) {
@@ -222,12 +225,14 @@ TEST_CASE("generator: GPU == CPU bytes", "[generator][doc0335][gpu]") {
     gp.seed = 99;
     gp.use_vulkan = true;
     auto generator = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>(gp);
+    if (!hardware_vulkan_ready()) {
+        REQUIRE_THROWS_AS(generator.generate_sequences(1), gv::VulkanRuntimeError);
+        return;
+    }
     const auto before = gv::Runtime::instance().generate_units_dispatch_count();
     auto gpu_or_cpu = generator.generate_sequences(1);
     const auto after = gv::Runtime::instance().generate_units_dispatch_count();
-    if (gv::Runtime::instance().usable()) {
-        ASSERT(after > before, "usable Vulkan device but generate_units did not dispatch");
-    }
+    ASSERT(after > before, "hardware Vulkan device but generate_units did not dispatch");
     auto cpu = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>(gp)
                    .debug_generate_sequences_cpu_only(1);
     ASSERT(gpu_or_cpu.front().to_string() == cpu.front().to_string(),
@@ -254,8 +259,10 @@ TEST_CASE("generator shader compiles for 32/64-bit packed units", "[generator][d
 TEST_CASE("generator GPU smoke: generate_units dispatch requires Vulkan runtime",
           "[generator][doc0335][gpu][gpu-smoke]") {
     auto& runtime = gv::Runtime::instance();
-    ASSERT(runtime.usable(),
-           fmt::format("Vulkan runtime unavailable: {}", runtime.initialization_error()));
+    if (!gv::hardware_device_available(runtime)) {
+        SUCCEED("No hardware Vulkan device detected; generate_units smoke skipped");
+        return;
+    }
 
     constexpr std::uint32_t symbols = 1024u;
     constexpr std::uint32_t letters_per_unit = 32u;  // dna4 packed into uint64_t
@@ -583,17 +590,20 @@ TEST_CASE("generator: DOC0335 manual 2Gbp validation harness", "[.][generator][d
     {
         gen::generator_params gp_gpu = gp;
         gp_gpu.use_vulkan = true;
-        const auto before = gv::Runtime::instance().generate_units_dispatch_count();
-        auto gpu_or_cpu = generator_t(gp_gpu).generate_sequences(1).front();
-        const auto after = gv::Runtime::instance().generate_units_dispatch_count();
-        if (gv::Runtime::instance().usable()) {
-            ASSERT(after > before, "M9 usable Vulkan device but dispatch counter did not increase");
+        if (!hardware_vulkan_ready()) {
+            REQUIRE_THROWS_AS(generator_t(gp_gpu).generate_sequences(1), gv::VulkanRuntimeError);
+            manual_pass("M9", "selected GPU generation rejected without a hardware Vulkan device");
+        } else {
+            const auto before = gv::Runtime::instance().generate_units_dispatch_count();
+            auto gpu_or_cpu = generator_t(gp_gpu).generate_sequences(1).front();
+            const auto after = gv::Runtime::instance().generate_units_dispatch_count();
+            ASSERT(after > before, "M9 hardware Vulkan device but dispatch counter did not increase");
+            auto cpu = generator_t(gp_gpu).debug_generate_sequences_cpu_only(1).front();
+            ASSERT(gpu_or_cpu._data == cpu._data && gpu_or_cpu.padding() == cpu.padding(),
+                   "M9 GPU/CPU references differ");
+            manual_pass("M9", fmt::format("dispatch_delta={} gpu_hardware={}", after - before,
+                                          hardware_vulkan_ready()));
         }
-        auto cpu = generator_t(gp_gpu).debug_generate_sequences_cpu_only(1).front();
-        ASSERT(gpu_or_cpu._data == cpu._data && gpu_or_cpu.padding() == cpu.padding(),
-               "M9 GPU/CPU references differ");
-        manual_pass("M9", fmt::format("dispatch_delta={} gpu_usable={}", after - before,
-                                      gv::Runtime::instance().usable()));
     }
 
     gen::generator_params gp_m10{};
@@ -627,9 +637,13 @@ TEST_CASE("generator: DOC0335 manual 2Gbp validation harness", "[.][generator][d
 TEST_CASE("generator: GPU vs CPU generation throughput", "[.][generator][doc0335][gpubench]") {
     using gen_t = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>;
     auto& runtime = gv::Runtime::instance();
-    const bool usable = runtime.usable();
-    std::cout << fmt::format("[gpubench] gpu_usable={} alphabet=dna4 storage=u64 iters=min-of-3\n",
+    const bool usable = hardware_vulkan_ready();
+    std::cout << fmt::format("[gpubench] gpu_hardware={} alphabet=dna4 storage=u64 iters=min-of-3\n",
                              usable);
+    if (!usable) {
+        SUCCEED("No hardware Vulkan device detected; GPU generation bench skipped");
+        return;
+    }
 
     // Warm up: builds the generate_units pipeline + pages memory, so timings exclude one-time setup.
     {
@@ -661,9 +675,7 @@ TEST_CASE("generator: GPU vs CPU generation throughput", "[.][generator][doc0335
                        gpu_seq.front().padding() == cpu_seq.front().padding(),
                    fmt::format("gpubench GPU != CPU bytes at n={}", n));
         }
-        if (usable) {
-            ASSERT(after > before, fmt::format("gpubench no GPU dispatch at n={}", n));
-        }
+        ASSERT(after > before, fmt::format("gpubench no GPU dispatch at n={}", n));
 
         double gpu_ms = std::numeric_limits<double>::max();
         for (int it = 0; it < kIters; ++it) {

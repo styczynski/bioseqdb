@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <cstring>
 
-import bioseq.common.testing;
 import bioseq.storage.bucket_math;
 
 namespace {

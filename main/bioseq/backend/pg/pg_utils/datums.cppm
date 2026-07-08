@@ -326,15 +326,39 @@ struct pg_datum_conversion<T>
 template<>
 struct pg_datum_conversion<float>
 {
-	[[nodiscard]] [[gnu::always_inline]] static inline Datum from(float value) noexcept { return Float4GetDatum(value); }
-	[[nodiscard]] [[gnu::always_inline]] static inline float to(Datum value) noexcept { return DatumGetFloat4(value); }
+	[[nodiscard]] [[gnu::always_inline]] static inline Datum from(float value) noexcept
+	{
+		std::int32_t bits{};
+		std::memcpy(&bits, &value, sizeof(bits));
+		return Int32GetDatum(bits);
+	}
+
+	[[nodiscard]] [[gnu::always_inline]] static inline float to(Datum value) noexcept
+	{
+		const std::int32_t bits = DatumGetInt32(value);
+		float result{};
+		std::memcpy(&result, &bits, sizeof(result));
+		return result;
+	}
 };
 
 template<>
 struct pg_datum_conversion<double>
 {
-	[[nodiscard]] [[gnu::always_inline]] static inline Datum from(double value) noexcept { return Float8GetDatum(value); }
-	[[nodiscard]] [[gnu::always_inline]] static inline double to(Datum value) noexcept { return DatumGetFloat8(value); }
+	[[nodiscard]] [[gnu::always_inline]] static inline Datum from(double value) noexcept
+	{
+		std::int64_t bits{};
+		std::memcpy(&bits, &value, sizeof(bits));
+		return Int64GetDatum(bits);
+	}
+
+	[[nodiscard]] [[gnu::always_inline]] static inline double to(Datum value) noexcept
+	{
+		const std::int64_t bits = DatumGetInt64(value);
+		double result{};
+		std::memcpy(&result, &bits, sizeof(result));
+		return result;
+	}
 };
 
 struct pg_nullable_datum

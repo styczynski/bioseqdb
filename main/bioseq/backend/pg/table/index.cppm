@@ -1,11 +1,9 @@
 export module bioseq.table;
-export import :custom_scan;
-export import :index_scan;
-export import :utils;
-export import :access_identity;
-export import :access_common;
-export import :access_hooks;
-export import :access_method;
-export import bioseq.table.am_cache;
-export import bioseq.table.types;
-export import bioseq.table.scan_state;
+
+/*
+ * GCC 16.1 ICEs while compiling this aggregate when it re-exports heavy table
+ * partitions. Re-export only the small declaration partition that external
+ * modules need; implementation partitions stay behind their existing module
+ * boundaries.
+ */
+export import :api;

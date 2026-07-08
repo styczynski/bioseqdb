@@ -831,7 +831,7 @@ sketch_uploaded_window_result(
         return std::nullopt;
     }
     auto& runtime = Runtime::instance();
-    if (!runtime.usable()) {
+    if (!hardware_device_available(runtime)) {
         return std::nullopt;
     }
     const std::uint64_t max_minimizers =
@@ -972,7 +972,7 @@ build_gpu_index_from_upload_on_device(
         return std::nullopt;
     }
     auto& runtime = Runtime::instance();
-    if (!runtime.usable()) {
+    if (!hardware_device_available(runtime)) {
         return std::nullopt;
     }
 
@@ -1181,7 +1181,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     }
 
     auto& runtime = Runtime::instance();
-    if (!runtime.usable() || runtime.features().max_workgroup_count_x == 0u) {
+    if (!hardware_device_available(runtime) || runtime.features().max_workgroup_count_x == 0u) {
         return std::nullopt;
     }
 
@@ -1651,11 +1651,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
             }
 
             auto& runtime = Runtime::instance();
-            if (!runtime.usable()) {
-                throw VulkanRuntimeError{fmt::format(
-                    "Vulkan segment minimizer pair path selected but runtime is unusable: {}",
-                    runtime.initialization_error())};
-            }
+            require_hardware_device(runtime, "Vulkan segment minimizer pair path");
 
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
             std::vector<std::pair<std::uint64_t, std::uint64_t>> filtered;
@@ -1845,11 +1841,7 @@ void collect_minimizers_vulkan_segment_or_throw(
         }
 
         auto& runtime = Runtime::instance();
-        if (!runtime.usable()) {
-            throw VulkanRuntimeError{fmt::format(
-                "Vulkan segment minimizer sketch selected but runtime is unusable: {}",
-                runtime.initialization_error())};
-        }
+        require_hardware_device(runtime, "Vulkan segment minimizer sketch");
         const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
         const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);
         const std::uint64_t outer_base_bp =

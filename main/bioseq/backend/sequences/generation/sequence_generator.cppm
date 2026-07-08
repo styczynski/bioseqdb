@@ -443,6 +443,12 @@ struct indel_event_counts {
             message += ": ";
             message += runtime.initialization_error();
         }
+    } else if (runtime.features().software_device) {
+        message += fmt::format(
+            ": active Vulkan device '{}' is a CPU/software device "
+            "(VkPhysicalDeviceType={}); explicit GPU generation requires a hardware Vulkan device",
+            runtime.features().device_name.data(),
+            runtime.features().device_type);
     }
     throw bioseq::gpu::vulkan::VulkanRuntimeError(message);
 }

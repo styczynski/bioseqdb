@@ -32,7 +32,6 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
-import bioseq.common.testing;
 
 using namespace seq::literals;
 
