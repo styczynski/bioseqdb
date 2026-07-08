@@ -1,0 +1,5 @@
+{"event":"BENCHMARK_STARTED","timestamp":1783504145486,"benchmark_name":"bench_e2e"}
+{"event":"BENCHMARK_STARTED","timestamp":1783504284660,"benchmark_name":"bench_e2e"}
+{"event":"CASE_STARTED","timestamp":1783504612871,"benchmark_name":"bench_e2e","case_name":"bioseq_block_gpu_dp_gpu_seed_just_index"}
+{"event":"BENCHMARK_STARTED","timestamp":1783504764693,"benchmark_name":"bench_e2e"}
+{"event":"CASE_STARTED","timestamp":1783504781642,"benchmark_name":"bench_e2e","case_name":"bioseq_block_gpu_dp_gpu_seed_no_index"}
