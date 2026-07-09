@@ -857,6 +857,63 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
     _run_postgresql_restart_cmd(restart_cmd, log_handle)
 
 
+def _pg_config_from_cache(active_build_dir: Path) -> str:
+    cmake_cache = active_build_dir / "CMakeCache.txt"
+    if cmake_cache.exists():
+        for line in cmake_cache.read_text(errors="replace").splitlines():
+            if line.startswith("PostgreSQL_CONFIG:FILEPATH="):
+                return line.split("=", 1)[1].strip()
+    raise RuntimeError("PostgreSQL_CONFIG not in CMakeCache.txt")
+
+
+def _postgresql_e2e_restart_shell_command(active_build_dir: Path,
+                                          active_preset: str) -> str:
+    """Build the shell command passed to bioseq_bench_e2e.
+
+    The benchmark executes BIOSEQ_E2E_PG_RESTART_CMD with std::system() before
+    every just_index timed sample. Redirect pg_ctl output to a file: the
+    benchmark itself is run under the MCP worker's stdout/stderr pipe, and a
+    restarted postmaster can otherwise inherit that pipe and keep it open.
+    """
+    pg_config = _pg_config_from_cache(active_build_dir)
+    res = subprocess.run([pg_config, "--bindir"],
+                         capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"pg_config --bindir exited {res.returncode}: {res.stderr.strip()}")
+    pg_bindir = res.stdout.strip()
+    pg_ctl = os.path.join(pg_bindir, "pg_ctl")
+    psql = os.path.join(pg_bindir, "psql")
+    if not os.path.isfile(pg_ctl):
+        raise RuntimeError(f"pg_ctl not found at {pg_ctl}")
+    if not os.path.isfile(psql):
+        raise RuntimeError(f"psql not found at {psql}")
+
+    res = subprocess.run([psql, "-t", "-c", "SHOW data_directory;", "postgres"],
+                         capture_output=True, text=True, timeout=10)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"psql SHOW data_directory exited {res.returncode}: {res.stderr.strip()}")
+    data_dir = res.stdout.strip()
+    if not data_dir or not os.path.isdir(data_dir):
+        raise RuntimeError(f"data_directory '{data_dir}' is not a directory")
+
+    if sys.platform == "darwin":
+        argv = ["arch", "-arm64", pg_ctl, "-D", data_dir, "restart", "-m", "fast", "-w"]
+    elif _is_aws_preset(active_preset) and shutil.which("systemctl"):
+        argv = ["sudo", "-n", shutil.which("systemctl"), "restart", "postgresql"]
+    elif _is_aws_preset(active_preset):
+        argv = ["sudo", "-n", "-u", "postgres", pg_ctl, "-D", data_dir,
+                "restart", "-m", "fast", "-w"]
+    else:
+        argv = [pg_ctl, "-D", data_dir, "restart", "-m", "fast", "-w"]
+
+    return (
+        " ".join(shlex.quote(x) for x in argv)
+        + " > /tmp/bioseq_e2e_pg_restart.log 2>&1"
+    )
+
+
 # --------------------------- build worker ----------------------------------
 
 def _report_index(filename: str) -> int:
@@ -1144,6 +1201,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     active_preset, log_handle, deadline)
 
             _update_entry(mode, step="running")
+            if mode == "bench-e2e":
+                env.setdefault(
+                    "BIOSEQ_E2E_PG_RESTART_CMD",
+                    _postgresql_e2e_restart_shell_command(active_build_dir, active_preset),
+                )
+                log_handle.write(
+                    "# BIOSEQ_E2E_PG_RESTART_CMD="
+                    f"{env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
+                log_handle.flush()
             for cmd in mode_details.commands:
                 # MODES.commands store binary BASENAMES; resolve against the
                 # active build's bin dir (DOC0270). Args after the first slot

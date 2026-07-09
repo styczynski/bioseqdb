@@ -418,11 +418,7 @@ choose_deferred_minimizer_persist_index(
 
 [[nodiscard]] inline bool selected_vulkan_pipeline_trusted_on_this_platform()
         noexcept {
-#if defined(__APPLE__)
     return true;
-#else
-    return false;
-#endif
 }
 
 [[nodiscard]] inline Minimap2Params
@@ -2903,12 +2899,7 @@ template <class S>
             std::optional<std::vector<MinimapSketchData>> cached_query_minimizers;
             constexpr std::size_t kGpuBatchMinRows = 2;
 
-            constexpr bool kSelectedVulkanBatchCompiled =
-#if defined(__APPLE__)
-                true;
-#else
-                false;
-#endif
+            constexpr bool kSelectedVulkanBatchCompiled = true;
 
             if constexpr (!kSelectedVulkanBatchCompiled) {
                 if (selected_vulkan_execution(dispatch_params)
@@ -2917,7 +2908,6 @@ template <class S>
                     ++stats.gpu.vulkan_declines;
                     bioseq_log<DBG>("[bioseq] pg: selected Vulkan resident batch disabled on this platform; falling through to per-row pipeline");
                 }
-#if defined(__APPLE__)
             } else if (selected_vulkan_execution(dispatch_params)
                        && batch_size >= kGpuBatchMinRows
                        && !chunked_scanner_forced) {
@@ -3100,6 +3090,22 @@ template <class S>
 	                        }
 	                        const pgseq_t* target_hdr = target_hdrs[i];
 	                        if (target_hdr == nullptr) {
+	                            if (scanner_pg_ctx != nullptr
+	                                && scanner_pg_ctx->target_locators[i].has_value()) {
+	                                const auto& loc =
+	                                    *scanner_pg_ctx->target_locators[i];
+	                                throw bioseq::gpu::vulkan::VulkanRuntimeError(
+	                                    fmt::format(
+	                                        "selected Vulkan batch target row {} "
+	                                        "is only available as a PG locator "
+	                                        "({} bp); selected Vulkan requires a "
+	                                        "materialized target payload and "
+	                                        "cannot use scanner_pg/MaxAllocSize "
+	                                        "streaming",
+	                                        static_cast<int>(query_ids[i]),
+	                                        static_cast<unsigned long long>(
+	                                            loc.total_bp_size)));
+	                            }
 	                            continue;
 	                        }
 	                        if (target_hdr->alphabet_code != alphabet_code
@@ -3826,7 +3832,6 @@ template <class S>
                     raise_vulkan_pg_error(
                         "Vulkan batched resident coordinate", err);
                 }
-#endif
             }
 
             std::vector<std::uint8_t> parallel_done;

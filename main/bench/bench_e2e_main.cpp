@@ -129,6 +129,20 @@ constexpr std::string_view kMinimizersPerFragmentIndex =
 constexpr std::string_view kMinimizersPerSequenceIndex =
     bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
 
+enum class JustIndexSetupKind {
+    Simd,
+    Gpu,
+};
+
+struct E2eCliSelection {
+    bool saw_cases_filter = false;
+    bool simd_just_index = true;
+    bool gpu_just_index = true;
+    bool minimap2_just_index = true;
+};
+
+E2eCliSelection g_e2e_cli_selection{};
+
 struct E2eQueryTruth {
     std::int32_t id = 0;
     std::string bases;
@@ -145,6 +159,10 @@ struct E2eInput {
     std::string just_index_table;                // legacy alias for the per-sequence table
     std::string just_index_table_per_fragment;   // loaded + per-fragment indexed in on_input
     std::string just_index_table_per_sequence;   // loaded + per-sequence indexed in on_input
+    std::string just_index_table_simd_per_fragment;
+    std::string just_index_table_simd_per_sequence;
+    std::string just_index_table_gpu_per_fragment;
+    std::string just_index_table_gpu_per_sequence;
     std::string no_index_table;                  // empty; loaded inside the region
     std::string batch_pair_table;                // optional same-rel target/query proof table
     std::string target_fasta;                    // single-record, for bioseq.load
@@ -219,6 +237,7 @@ struct E2eOutput {
     std::uint64_t peak_bench_rss_kb = 0;
     std::uint64_t min_tmp_available_kb = 0;
     double peak_swap_used_mb = 0.0;
+    std::int64_t just_index_restart_performed = -1;
     std::int64_t audit_selected_minimizer_is_sequence = -1;
     std::int64_t audit_mpf_rows = -1;
     std::int64_t audit_mps_rows = -1;
@@ -253,6 +272,48 @@ struct E2eOutput {
     std::int64_t mps_build_index_memory_cap_mb = -1;
     std::int64_t mps_build_lazy_worker_shareable = -1;
 };
+
+void note_e2e_filtered_case(std::string_view name, E2eCliSelection& selection) {
+    if (name == "bioseq_just_index"
+        || name == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
+        selection.simd_just_index = true;
+    } else if (name == "bioseq_block_vulkan_phase_c_frontend_just_index"
+               || name == "bioseq_block_gpu_dp_gpu_seed_just_index") {
+        selection.gpu_just_index = true;
+    } else if (name == "minimap2_just_index") {
+        selection.minimap2_just_index = true;
+    }
+}
+
+void parse_e2e_cli_selection(int argc, char** argv) {
+    E2eCliSelection selection{};
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string_view{argv[i]} != "--filter") {
+            continue;
+        }
+        const std::string_view spec{argv[i + 1]};
+        constexpr std::string_view prefix = "cases=";
+        if (!spec.starts_with(prefix)) {
+            continue;
+        }
+        selection.saw_cases_filter = true;
+        selection.simd_just_index = false;
+        selection.gpu_just_index = false;
+        selection.minimap2_just_index = false;
+        std::string_view rest = spec.substr(prefix.size());
+        while (!rest.empty()) {
+            const std::size_t comma = rest.find(',');
+            const std::string_view item =
+                rest.substr(0, comma == std::string_view::npos ? rest.size() : comma);
+            note_e2e_filtered_case(item, selection);
+            if (comma == std::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(comma + 1);
+        }
+    }
+    g_e2e_cli_selection = selection;
+}
 
 void preflight_e2e_resources(it::connection_test_context& conn,
                              std::string_view size_label,
@@ -695,7 +756,9 @@ void parse_bioseq_batch_rows(
             std::llabs(target_start - in.queries[qid].truth_target_start));
         best_offset[qid] = std::min(best_offset[qid], offset);
         found[qid] = 1;
-        if (in.cigar_projection && row.size() >= 6
+        const bool coordinate_correct =
+            offset <= static_cast<double>(kPositionToleranceBp);
+        if (in.cigar_projection && coordinate_correct && row.size() >= 6
             && row[4].has_value() && row[5].has_value()
             && (row[4].value() == "t" || row[4].value() == "true")
             && is_valid_benchmark_cigar(row[5].value())) {
@@ -1051,12 +1114,26 @@ void capture_gpu_explain_metrics(
     }
 }
 
-// minimap2 PAF: tab-separated; col indices (0-based): 4 strand(+/-), 5 target name
-// (refN), 7 target start (per-record, forward strand), 8 target end. Primary = the
-// line with tag tp:A:P; absolute target start = record_index*minimap2_split_bp +
-// per_record_start. match_count counts PRIMARY alignments only (MEDIUM-04).
+// minimap2 PAF: tab-separated; col indices (0-based): 0 query name, 4 strand(+/-),
+// 5 target name (refN), 7 target start (per-record, forward strand), 8 target end.
+// Primary = the line with tag tp:A:P; absolute target start =
+// record_index*minimap2_split_bp + per_record_start. match_count counts PRIMARY
+// alignments only (MEDIUM-04).
 void parse_minimap2_paf(const std::string& paf, const E2eInput& in, E2eOutput& out) {
-    std::int64_t best_abs = -1; bool best_rev = false; std::int64_t best_span = -1;
+    struct BestHit {
+        std::int64_t abs_start = -1;
+        std::int64_t span = -1;
+        bool rev = false;
+    };
+    auto query_id = [](std::string_view qname) -> std::int64_t {
+        constexpr std::string_view prefix = "query";
+        if (!qname.starts_with(prefix)) {
+            return 0;
+        }
+        return parse_i64(qname.substr(prefix.size()));
+    };
+    std::vector<BestHit> primary_best(in.queries.size());
+    std::vector<BestHit> any_best(in.queries.size());
     std::int64_t primaries = 0;
     std::size_t pos = 0;
     while (pos < paf.size()) {
@@ -1069,26 +1146,50 @@ void parse_minimap2_paf(const std::string& paf, const E2eInput& in, E2eOutput& o
         for (std::size_t i = 0; i <= line.size(); ++i)
             if (i == line.size() || line[i] == '\t') { col.emplace_back(line.substr(cs, i - cs)); cs = i + 1; }
         if (col.size() < 9) continue;
+        const std::int64_t qid64 = query_id(col[0]);
+        if (qid64 < 0 || static_cast<std::size_t>(qid64) >= in.queries.size()) {
+            continue;
+        }
+        const auto qid = static_cast<std::size_t>(qid64);
         const std::string_view rname = col[5];                 // "refN"
         const std::int64_t rec_idx = (rname.size() > 3) ? parse_i64(rname.substr(3)) : 0;
         const std::int64_t rstart  = parse_i64(col[7]);
         const std::int64_t abs_start =
             rec_idx * static_cast<std::int64_t>(in.minimap2_split_bp) + rstart;
         const std::int64_t span = parse_i64(col[8]) - rstart;  // target end - start
+        const bool rev = (col[4] == "-");
         const bool is_primary = (line.find("tp:A:P") != std::string_view::npos);
         if (is_primary) ++primaries;
-        if (is_primary || span > best_span) {
-            best_span = span; best_abs = abs_start; best_rev = (col[4] == "-");
-            if (is_primary) best_span = std::numeric_limits<std::int64_t>::max();  // pin primary
+        if (span > any_best[qid].span) {
+            any_best[qid] = BestHit{abs_start, span, rev};
+        }
+        if (is_primary && span > primary_best[qid].span) {
+            primary_best[qid] = BestHit{abs_start, span, rev};
         }
     }
-    out.match_count   = primaries;                             // primary hits (MEDIUM-04)
-    out.found         = (best_abs >= 0);
-    out.target_start  = best_abs;
-    out.is_reverse    = best_rev;
-    out.abs_offset_bp = out.found
-        ? static_cast<double>(std::llabs(best_abs - in.truth_target_start))
-        : kNoMatchOffsetSentinel;
+
+    out.expected_match_count = static_cast<std::int64_t>(in.queries.size());
+    out.match_count = primaries;
+    out.correct_match_count = 0;
+    out.max_abs_offset_bp = 0.0;
+    for (std::size_t i = 0; i < in.queries.size(); ++i) {
+        const BestHit& best =
+            primary_best[i].abs_start >= 0 ? primary_best[i] : any_best[i];
+        if (i == 0) {
+            out.target_start = best.abs_start;
+            out.is_reverse = best.rev;
+        }
+        const double offset = best.abs_start >= 0
+            ? static_cast<double>(
+                std::llabs(best.abs_start - in.queries[i].truth_target_start))
+            : kNoMatchOffsetSentinel;
+        out.max_abs_offset_bp = std::max(out.max_abs_offset_bp, offset);
+        if (offset <= static_cast<double>(kPositionToleranceBp)) {
+            ++out.correct_match_count;
+        }
+    }
+    out.found = out.correct_match_count == out.expected_match_count;
+    out.abs_offset_bp = out.max_abs_offset_bp;
 }
 
 // HIGH-09/TESTING-04: the ground truth is known, so any miss or mis-map is ALWAYS
@@ -1096,23 +1197,50 @@ void parse_minimap2_paf(const std::string& paf, const E2eInput& in, E2eOutput& o
 // as a "win". Called AFTER the timed region.
 inline void require_mapped(std::string_view algo, const E2eInput& in,
                            const E2eOutput& out) {
-    if (out.found && out.abs_offset_bp <= static_cast<double>(kPositionToleranceBp))
+    const bool minimap2 = algo == "minimap2_no_index"
+        || algo == "minimap2_just_index";
+    const bool enough_rows =
+        out.expected_match_count > 0
+        && out.match_count >= out.expected_match_count;
+    const bool all_expected_correct =
+        out.expected_match_count > 0
+        && out.correct_match_count == out.expected_match_count;
+    const bool cigar_ok =
+        !in.cigar_projection
+        || minimap2
+        || out.correct_cigar_count == out.expected_match_count;
+    if (out.found
+        && enough_rows
+        && all_expected_correct
+        && cigar_ok
+        && out.abs_offset_bp <= static_cast<double>(kPositionToleranceBp)) {
         return;
+    }
     bioseq_log<ERR>("[bench_e2e] {} failed to map the query at {} bp (found={}, "
          "target_start={}, truth={}, offset={} bp > {} tol) — the timed result is "
-         "invalid; aborting", algo, in.target_bp, out.found, out.target_start,
-         in.truth_target_start, out.abs_offset_bp, kPositionToleranceBp);
+         "invalid; aborting (match_count={}, expected={}, correct={}, "
+         "correct_cigar={}, cigar_projection={})",
+         algo, in.target_bp, out.found, out.target_start,
+         in.truth_target_start, out.abs_offset_bp, kPositionToleranceBp,
+         out.match_count, out.expected_match_count, out.correct_match_count,
+         out.correct_cigar_count, in.cigar_projection);
     // fmtlog is async; the ERR above can be lost when std::abort() runs before
     // the background poll flushes it. Emit a synchronous copy so the failing
     // cell is always visible in the captured stderr.
     std::fprintf(stderr,
         "[bench_e2e] MAP-FAIL algo=%.*s target_bp=%llu found=%d target_start=%lld "
-        "truth=%lld offset_bp=%.1f tol=%lld — aborting\n",
+        "truth=%lld offset_bp=%.1f tol=%lld match_count=%lld expected=%lld "
+        "correct=%lld correct_cigar=%lld cigar_projection=%d — aborting\n",
         static_cast<int>(algo.size()), algo.data(),
         static_cast<unsigned long long>(in.target_bp), static_cast<int>(out.found),
         static_cast<long long>(out.target_start),
         static_cast<long long>(in.truth_target_start),
-        out.abs_offset_bp, static_cast<long long>(kPositionToleranceBp));
+        out.abs_offset_bp, static_cast<long long>(kPositionToleranceBp),
+        static_cast<long long>(out.match_count),
+        static_cast<long long>(out.expected_match_count),
+        static_cast<long long>(out.correct_match_count),
+        static_cast<long long>(out.correct_cigar_count),
+        static_cast<int>(in.cigar_projection));
     std::fflush(stderr);
     std::abort();
 }
@@ -1258,6 +1386,20 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
     it::exec_sqlf(c, "SET bioseq.aligner.window_size = {};", window_size);
 }
 
+void configure_bioseq_simd_session(
+    it::connection_test_context& connection,
+    int kmer_size,
+    int window_size)
+{
+    configure_bioseq_aligner_session(connection, kmer_size, window_size);
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan_enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan_seed_hits_enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan_index_cache_enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan_fused_frontend_enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan_extend_enabled = off;");
+}
+
 // DOC0345 Patch L — full Vulkan minimizer + GPU-index session config. Applied
 // BEFORE any persisted index build so the untimed just_index build runs on the
 // GPU (vulkan_minimap_int + vulkan_gpu_index_build_enabled), not CPU/SIMD.
@@ -1382,11 +1524,17 @@ void configure_bioseq_minimizer_policy(
 
 [[nodiscard]] const std::string& just_index_table_for(
         const E2eInput& in,
-        std::string_view minimizer_index) {
+        std::string_view minimizer_index,
+        JustIndexSetupKind setup_kind = JustIndexSetupKind::Simd) {
+    const bool use_gpu = setup_kind == JustIndexSetupKind::Gpu;
     if (minimizer_index == kMinimizersPerSequenceIndex) {
-        return in.just_index_table_per_sequence;
+        return use_gpu
+            ? in.just_index_table_gpu_per_sequence
+            : in.just_index_table_simd_per_sequence;
     }
-    return in.just_index_table_per_fragment;
+    return use_gpu
+        ? in.just_index_table_gpu_per_fragment
+        : in.just_index_table_simd_per_fragment;
 }
 
 [[nodiscard]] std::int64_t first_i64_or_minus_one(const it::rowset_t& rows) {
@@ -1477,7 +1625,12 @@ void capture_index_audit(
         "SELECT index_name, update_on_insert::int, is_active_read::int "
         "FROM bioseq_internal.index_policy "
         "WHERE user_relid='{}'::regclass "
+        "AND main_relfilenode=(SELECT relfilenode FROM pg_class WHERE oid='{}'::regclass) "
+        "AND column_attno=(SELECT attnum FROM pg_attribute "
+            "WHERE attrelid='{}'::regclass AND attname='seq') "
         "ORDER BY index_name;",
+        table,
+        table,
         table));
     for (const auto& row : policy_rows) {
         if (row.size() < 3 || !row[0].has_value()) {
@@ -1583,9 +1736,13 @@ void cleanup_e2e_input(std::string_view,
 
     if (in.conn != nullptr) {
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
-                      in.just_index_table_per_fragment);
+                      in.just_index_table_simd_per_fragment);
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
-                      in.just_index_table_per_sequence);
+                      in.just_index_table_simd_per_sequence);
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
+                      in.just_index_table_gpu_per_fragment);
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
+                      in.just_index_table_gpu_per_sequence);
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.no_index_table);
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.batch_pair_table);
     }
@@ -1714,10 +1871,16 @@ template <sequence_alphabet A>
     in.target_fasta_split  = fmt::format("{}/e2e_{}_target.split.fasta",  tmp, in.size_label);
     in.query_fasta         = fmt::format("{}/e2e_{}_query.fasta",         tmp, in.size_label);
     in.mmi_path            = fmt::format("{}/e2e_{}_target.mmi",          tmp, in.size_label);
-    in.just_index_table_per_fragment =
-        fmt::format("e2e_{}_just_mpf", in.size_label);
-    in.just_index_table_per_sequence =
-        fmt::format("e2e_{}_just_mps", in.size_label);
+    in.just_index_table_simd_per_fragment =
+        fmt::format("e2e_{}_just_simd_mpf", in.size_label);
+    in.just_index_table_simd_per_sequence =
+        fmt::format("e2e_{}_just_simd_mps", in.size_label);
+    in.just_index_table_gpu_per_fragment =
+        fmt::format("e2e_{}_just_gpu_mpf", in.size_label);
+    in.just_index_table_gpu_per_sequence =
+        fmt::format("e2e_{}_just_gpu_mps", in.size_label);
+    in.just_index_table_per_fragment = in.just_index_table_simd_per_fragment;
+    in.just_index_table_per_sequence = in.just_index_table_simd_per_sequence;
     in.just_index_table = in.just_index_table_per_sequence;
     in.no_index_table = fmt::format("e2e_{}_noidx", in.size_label);
     in.batch_pair_table = fmt::format("e2e_{}_batch_pair", in.size_label);
@@ -1779,14 +1942,16 @@ template <sequence_alphabet A>
 
     // (3) connect once; clean slate.
     in.conn = std::make_shared<it::connection_test_context>();
-    it::reset_extension(*in.conn, { std::string_view{in.just_index_table_per_fragment},
-                                    std::string_view{in.just_index_table_per_sequence},
+    it::reset_extension(*in.conn, { std::string_view{in.just_index_table_simd_per_fragment},
+                                    std::string_view{in.just_index_table_simd_per_sequence},
+                                    std::string_view{in.just_index_table_gpu_per_fragment},
+                                    std::string_view{in.just_index_table_gpu_per_sequence},
                                     std::string_view{in.no_index_table},
                                     std::string_view{in.batch_pair_table} });
     preflight_e2e_resources(*in.conn, in.size_label, in.target_bp);
 
     // (4) force the fastest bioseq combo for the whole session.
-    configure_bioseq_aligner_session(*in.conn, in.kmer_size, in.window_size);
+    configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
 
     const char* skip_index_setup_env =
         std::getenv("BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP");
@@ -1835,34 +2000,54 @@ template <sequence_alphabet A>
     const auto setup_just_index_table =
         [&in, &just_index_setup_pipeline_mode](
                 const std::string& table,
-                std::string_view index_name) {
+                std::string_view index_name,
+                JustIndexSetupKind setup_kind) {
             create_e2e_table(*in.conn, table, in.seq_type);
             configure_bioseq_scheduler_session(
                 *in.conn, just_index_setup_pipeline_mode);
-            // DOC0345 Patch L — Vulkan minimizer + GPU-index GUCs BEFORE the
-            // persisted build so the untimed just_index build runs the GPU
-            // minimizer extraction. (The spec's
-            // configure_bioseq_pair_sort_session(*in.conn, params) is
-            // intentionally omitted: ParamMap `params` is not in scope inside
-            // e2e_input_typed, and the per-window pair sort on the Vulkan path is
-            // host-side, not the CPU pair-sort GUC — see DOC0348.)
-            configure_bioseq_vulkan_index_session(
-                *in.conn,
-                in.kmer_size,
-                in.window_size);
-            it::exec_sql(
-                *in.conn,
-                "DO $$ BEGIN "
-                "PERFORM current_setting('bioseq.aligner.vulkan_enabled'); "
-                "IF current_setting('bioseq.aligner.minimizer_algorithm') "
-                "   <> 'vulkan_minimap_int' THEN "
-                "  RAISE EXCEPTION 'GPU just_index setup did not select Vulkan minimizers'; "
-                "END IF; "
-                "IF current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled') "
-                "   <> 'on' THEN "
-                "  RAISE EXCEPTION 'GPU just_index setup did not enable GPU index build'; "
-                "END IF; "
-                "END $$;");
+            if (setup_kind == JustIndexSetupKind::Gpu) {
+                // DOC0345 Patch L — Vulkan minimizer + GPU-index GUCs BEFORE the
+                // persisted build so the untimed GPU just_index build runs the GPU
+                // minimizer extraction.
+                configure_bioseq_vulkan_index_session(
+                    *in.conn,
+                    in.kmer_size,
+                    in.window_size);
+                it::exec_sql(
+                    *in.conn,
+                    "DO $$ BEGIN "
+                    "PERFORM current_setting('bioseq.aligner.vulkan_enabled'); "
+                    "IF current_setting('bioseq.aligner.minimizer_algorithm') "
+                    "   <> 'vulkan_minimap_int' THEN "
+                    "  RAISE EXCEPTION 'GPU just_index setup did not select Vulkan minimizers'; "
+                    "END IF; "
+                    "IF current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled') "
+                    "   <> 'on' THEN "
+                    "  RAISE EXCEPTION 'GPU just_index setup did not enable GPU index build'; "
+                    "END IF; "
+                    "END $$;");
+            } else {
+                configure_bioseq_simd_session(
+                    *in.conn,
+                    in.kmer_size,
+                    in.window_size);
+                it::exec_sql(
+                    *in.conn,
+                    "DO $$ BEGIN "
+                    "IF current_setting('bioseq.aligner.minimizer_algorithm') "
+                    "   <> 'two_stack_nthash' THEN "
+                    "  RAISE EXCEPTION 'SIMD just_index setup did not select two_stack_nthash'; "
+                    "END IF; "
+                    "IF current_setting('bioseq.aligner.chaining_algorithm') "
+                    "   <> 'simd_mm2' THEN "
+                    "  RAISE EXCEPTION 'SIMD just_index setup did not select simd_mm2'; "
+                    "END IF; "
+                    "IF current_setting('bioseq.aligner.vulkan_enabled') "
+                    "   <> 'off' THEN "
+                    "  RAISE EXCEPTION 'SIMD just_index setup left Vulkan enabled'; "
+                    "END IF; "
+                    "END $$;");
+            }
             configure_bioseq_minimizer_policy(*in.conn, table, index_name);
             it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = on;");
             it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
@@ -1879,11 +2064,17 @@ template <sequence_alphabet A>
                 table,
                 index_name);
             const auto audit_rows = it::query_rows(*in.conn, audit_sql);
-            if (audit_rows.empty()) {
+            const std::int64_t setup_rows =
+                audit_rows.empty() || audit_rows.front().size() < 4
+                    || !audit_rows.front()[3].has_value()
+                    ? -1
+                    : parse_i64(*audit_rows.front()[3]);
+            if (audit_rows.empty() || setup_rows <= 0) {
                 bioseq_log<ERR>(
-                    "[bench_e2e] missing GPU just_index setup audit for table={} index={}",
+                    "[bench_e2e] invalid just_index setup audit for table={} index={} rows={}",
                     table,
-                    index_name);
+                    index_name,
+                    setup_rows);
                 std::abort();
             }
         };
@@ -1891,18 +2082,43 @@ template <sequence_alphabet A>
     // (5) just_index tables: each indexed cell gets its own table and policy.
     // This avoids a per-sequence run accidentally succeeding through a residual
     // per-fragment index, and keeps the per-fragment cell valid too.
-    if (!skip_index_baseline_setup) {
+    if (!skip_index_baseline_setup
+        && (g_e2e_cli_selection.simd_just_index
+            || g_e2e_cli_selection.gpu_just_index)) {
         if (should_setup_just_index(kMinimizersPerFragmentIndex)) {
-            setup_just_index_table(
-                in.just_index_table_per_fragment, kMinimizersPerFragmentIndex);
+            if (g_e2e_cli_selection.simd_just_index) {
+                setup_just_index_table(
+                    in.just_index_table_simd_per_fragment,
+                    kMinimizersPerFragmentIndex,
+                    JustIndexSetupKind::Simd);
+            }
+            if (g_e2e_cli_selection.gpu_just_index) {
+                setup_just_index_table(
+                    in.just_index_table_gpu_per_fragment,
+                    kMinimizersPerFragmentIndex,
+                    JustIndexSetupKind::Gpu);
+            }
         }
         if (should_setup_just_index(kMinimizersPerSequenceIndex)) {
-            setup_just_index_table(
-                in.just_index_table_per_sequence, kMinimizersPerSequenceIndex);
+            if (g_e2e_cli_selection.simd_just_index) {
+                setup_just_index_table(
+                    in.just_index_table_simd_per_sequence,
+                    kMinimizersPerSequenceIndex,
+                    JustIndexSetupKind::Simd);
+            }
+            if (g_e2e_cli_selection.gpu_just_index) {
+                setup_just_index_table(
+                    in.just_index_table_gpu_per_sequence,
+                    kMinimizersPerSequenceIndex,
+                    JustIndexSetupKind::Gpu);
+            }
         }
     } else {
-        bioseq_log<DBG>("[bench_e2e] skipping persisted-index/minimap2 baseline setup "
-                "because BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP=1");
+        bioseq_log<DBG>("[bench_e2e] skipping bioseq persisted-index setup "
+                "(skip_index_baseline_setup={}, simd_just_index={}, gpu_just_index={})",
+                skip_index_baseline_setup,
+                g_e2e_cli_selection.simd_just_index,
+                g_e2e_cli_selection.gpu_just_index);
     }
 
     // (6) no_index table: create empty; reps load into it inside the region.
@@ -1922,12 +2138,16 @@ template <sequence_alphabet A>
     }
 
     // (7) minimap2 prebuilt .mmi for the just_index baseline (untimed).
-    if (!skip_index_baseline_setup && !skip_minimap2_baseline_setup) {
+    if (!skip_index_baseline_setup && !skip_minimap2_baseline_setup
+        && g_e2e_cli_selection.minimap2_just_index) {
         run_cmd(fmt::format("{} -k{} -w{} -d {} {}", BIOSEQ_E2E_MINIMAP2_BIN,
                             in.kmer_size, in.window_size, in.mmi_path, in.target_fasta_split));
     } else if (skip_minimap2_baseline_setup) {
         bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi baseline setup because "
                 "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP=1");
+    } else if (!g_e2e_cli_selection.minimap2_just_index) {
+        bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi setup because "
+                "minimap2_just_index is not selected");
     }
 
     bioseq_log<DBG>("[bench_e2e] input '{}' ready (truth_start={}, rev={})",
@@ -1955,15 +2175,23 @@ template <sequence_alphabet A>
 // the timed region. The restart command is environment-specific, so it is taken
 // from BIOSEQ_E2E_PG_RESTART_CMD (e.g. on macOS / Postgres.app:
 //   arch -arm64 .../pg_ctl -D '<datadir>' restart -m fast -w > /tmp/r.log 2>&1).
-// When the env var is unset the restart is skipped with a loud warning so the
-// harness stays portable and unrelated configs/runs are unaffected.
-// Returns true iff a restart actually happened.
+// When the env var is unset, abort before timing. Warm just_index timings are
+// not comparable to cold restarted reads.
+// Returns true after a restart has completed.
 bool restart_postgres_for_cold_just_index(const E2eInput& in) {
     const char* cmd = std::getenv("BIOSEQ_E2E_PG_RESTART_CMD");
     if (cmd == nullptr || *cmd == '\0') {
-        bioseq_log<WRN>("[bench_e2e] BIOSEQ_E2E_PG_RESTART_CMD is unset — skipping "
-            "the pre-just_index PostgreSQL restart; the index may still be "
-            "resident so this just_index timing is NOT guaranteed to be a cold read");
+        bioseq_log<ERR>("[bench_e2e] BIOSEQ_E2E_PG_RESTART_CMD is unset; refusing "
+            "to run just_index because the configured benchmark describes a cold "
+            "post-restart read. Set BIOSEQ_E2E_PG_RESTART_CMD to a command that "
+            "restarts PostgreSQL before every just_index measurement.");
+        std::fprintf(
+            stderr,
+            "[bench_e2e] JUST-INDEX-COLD-RESTART-MISSING: set "
+            "BIOSEQ_E2E_PG_RESTART_CMD to a PostgreSQL restart command; "
+            "warm just_index measurements are not allowed\n");
+        std::fflush(stderr);
+        std::abort();
         return false;
     }
     bioseq_log<INF>("[bench_e2e] restarting PostgreSQL before just_index measure "
@@ -1991,9 +2219,9 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
     }
-    // The fresh session lost the on_input aligner GUCs (block aligner + SIMD-mm2
-    // chaining + two-stack nthash minimizer) that the just_index paths assume.
-    configure_bioseq_aligner_session(*in.conn, in.kmer_size, in.window_size);
+    // The branch-specific just_index path will reapply its full SIMD/GPU GUC set;
+    // keep the fresh session on the non-Vulkan default until then.
+    configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
     bioseq_log<INF>("[bench_e2e] PostgreSQL restarted + session reconnected; the "
         "just_index read will assemble the index cold from storage");
     return true;
@@ -2167,10 +2395,13 @@ void verify_e2e_batch_pair_table(
         || algo == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
         // Restart PostgreSQL first so the prebuilt index (built untimed in
         // on_input) is assembled cold from storage rather than served warm.
-        restart_postgres_for_cold_just_index(in);
+        out.just_index_restart_performed =
+            restart_postgres_for_cold_just_index(in) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
-        const std::string& table = just_index_table_for(in, minimizer_index);
+        configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
+        const std::string& table =
+            just_index_table_for(in, minimizer_index, JustIndexSetupKind::Simd);
         configure_bioseq_minimizer_policy(
             *in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
@@ -2199,10 +2430,12 @@ void verify_e2e_batch_pair_table(
         // bioseq_block_vulkan_phase_c_frontend row.
         // Restart PostgreSQL first so the prebuilt index is assembled cold from
         // storage (GPU seeding/tiled-DP chaining + block aligner over a cold index).
-        restart_postgres_for_cold_just_index(in);
+        out.just_index_restart_performed =
+            restart_postgres_for_cold_just_index(in) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
-        const std::string& table = just_index_table_for(in, minimizer_index);
+        const std::string& table =
+            just_index_table_for(in, minimizer_index, JustIndexSetupKind::Gpu);
         configure_bioseq_minimizer_policy(*in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         configure_bioseq_vulkan_index_session(
@@ -2221,6 +2454,8 @@ void verify_e2e_batch_pair_table(
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
+        capture_gpu_explain_metrics(*in.conn, sql, out);
+        require_gpu_batch_proof(algo, in, out);
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
@@ -2232,6 +2467,7 @@ void verify_e2e_batch_pair_table(
             param_string(params, "recompute_async_persist", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
+        configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
         configure_bioseq_minimizer_policy(
             *in.conn,
@@ -2256,7 +2492,7 @@ void verify_e2e_batch_pair_table(
             // can observe stale columnar descriptor state. Use a fresh backend for
             // the measured read; connection setup remains inside the timed region.
             read_conn.emplace();
-            configure_bioseq_aligner_session(*read_conn, in.kmer_size, in.window_size);
+            configure_bioseq_simd_session(*read_conn, in.kmer_size, in.window_size);
             configure_bioseq_scheduler_session(*read_conn, pipeline_mode);
             configure_bioseq_pair_sort_session(*read_conn, params);
             configure_bioseq_minimizer_policy(
@@ -2366,11 +2602,11 @@ void verify_e2e_batch_pair_table(
             capture_mps_build_stats(*read_conn, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         if (read_conn.has_value()) {
             capture_gpu_explain_metrics(*read_conn, align_sql, out);
         }
         require_gpu_batch_proof(algo, in, out);
-        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
         if (recompute_async_persist) {
             capture_index_audit_after_async_persist(
@@ -2545,6 +2781,7 @@ void verify_e2e_batch_pair_table(
         {"peak_bench_rss_mb",       static_cast<double>(o.peak_bench_rss_kb) / 1024.0},
         {"min_tmp_available_gib",   static_cast<double>(o.min_tmp_available_kb) / (1024.0 * 1024.0)},
         {"peak_swap_used_mb",       o.peak_swap_used_mb},
+        {"just_index_restart_performed", static_cast<double>(o.just_index_restart_performed)},
         {"audit_selected_minimizer_is_sequence", static_cast<double>(o.audit_selected_minimizer_is_sequence)},
         {"audit_mpf_rows",          static_cast<double>(o.audit_mpf_rows)},
         {"audit_mps_rows",          static_cast<double>(o.audit_mps_rows)},
@@ -2816,6 +3053,7 @@ HWY_AFTER_NAMESPACE();    // close the Highway per-target namespace
 
 int main(int argc, char** argv) {
     log_configure(true); fmtlog::setLogLevel(fmtlog::INF);
+    parse_e2e_cli_selection(argc, argv);
     const char* cfg_override = std::getenv("BIOSEQ_E2E_CONFIG_OVERRIDE");
     const std::string cfg{cfg_override != nullptr && *cfg_override != '\0'
         ? cfg_override
@@ -2836,6 +3074,9 @@ int main(int argc, char** argv) {
         bioseq::bench_framework::create_benchmark<E2eInput, E2eOutput>(
             "End-to-end SQL bioseq.load + mmsearch vs minimap2 (2/4 Gbp dna4/dna5)",
             "bench_e2e", cfg, est, inp, run, evl, cln),
+        bioseq::bench_framework::create_benchmark<E2eInput, E2eOutput>(
+            "E2E resident GPU batch proof vs SIMD and minimap2",
+            "bench_e2e_gpu_batch_proof", cfg, est, inp, run, evl, cln),
         bioseq::bench_framework::create_benchmark<SortScanInput, SortScanOutput>(
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
             "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));
