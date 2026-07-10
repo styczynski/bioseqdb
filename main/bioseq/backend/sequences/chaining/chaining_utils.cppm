@@ -22,6 +22,7 @@ module;
 #include <bit>
 #include <new>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -206,11 +207,41 @@ struct ArenaSlab {
             "growth; only trivially-copyable element types are supported on "
             "this path.  Non-trivial types must size the slab once via "
             "reserve_for_placement_new() and never call reserve a second time.");
+        constexpr std::size_t max_elements =
+            (std::numeric_limits<std::size_t>::max)() / sizeof(E);
+        if (expected_capacity > max_elements) {
+            throw std::length_error{"ArenaSlab capacity exceeds addressable bytes"};
+        }
         if (cap_ >= expected_capacity) return;
         auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(expected_capacity);
         if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
         ptr_ = allocated_span.data();
         cap_ = expected_capacity;
+    }
+
+    /// Grow to at least @p required_capacity using an overflow-safe geometric
+    /// policy.  This is the append-loop form of reserve: arena allocations
+    /// cannot resize in place, so exact `old_size + batch_size` growth would
+    /// retain and recopy every superseded prefix until scope unwind.
+    void reserve_geometric(std::size_t required_capacity) {
+        static_assert(std::is_trivially_copyable_v<E>,
+            "ArenaSlab::reserve_geometric relocates live elements with memcpy");
+        if (cap_ >= required_capacity) return;
+
+        constexpr std::size_t max_capacity =
+            (std::numeric_limits<std::size_t>::max)() / sizeof(E);
+        if (required_capacity > max_capacity) {
+            throw std::length_error{"ArenaSlab capacity exceeds addressable bytes"};
+        }
+        std::size_t new_capacity = cap_ == 0 ? std::size_t{64} : cap_;
+        while (new_capacity < required_capacity) {
+            if (new_capacity > max_capacity / 2) {
+                new_capacity = required_capacity;
+                break;
+            }
+            new_capacity *= 2;
+        }
+        reserve(new_capacity);
     }
 
     /// Allocate exactly @p capacity uninitialised slots in the arena.
@@ -251,11 +282,12 @@ struct ArenaSlab {
             "growth; non-trivially-copyable element types must use the "
             "reserve_for_placement_new + construct_at_back pattern.");
         if (len_ == cap_) {
-            const std::size_t new_cap = cap_ ? cap_ * 2 : 64;
-            auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(new_cap);
-            if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
-            ptr_ = allocated_span.data();
-            cap_ = new_cap;
+            constexpr std::size_t max_elements =
+                (std::numeric_limits<std::size_t>::max)() / sizeof(E);
+            if (len_ == max_elements) {
+                throw std::length_error{"ArenaSlab size exceeds addressable bytes"};
+            }
+            reserve_geometric(len_ + 1);
         }
         ptr_[len_++] = std::move(element);
     }

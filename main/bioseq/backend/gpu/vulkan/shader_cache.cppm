@@ -421,6 +421,12 @@ kernel void bioseq_moltenvk_command_placeholder() {}
             || !scan.has_array_stride(key.max_span / 8u))) {
         return std::unexpected("SPIR-V generate_units layout mismatch");
     }
+    if (kind == ShaderKind::phase_c_persisted_directory_select
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3))) {
+        return std::unexpected(
+            "SPIR-V persisted directory selection layout mismatch");
+    }
     return {};
 }
 

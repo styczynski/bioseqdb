@@ -169,7 +169,7 @@ struct IndexBuildMpsDsmHeader {
     std::int32_t index_sketch_backend;  // DOC0345 Patch K — repurposed from `reserved` (keeps 72-byte size)
     bioseq::storage::seq_locator locator;
 };
-static_assert(sizeof(IndexBuildMpsDsmHeader) == 72);
+static_assert(sizeof(IndexBuildMpsDsmHeader) == 80);
 
 struct PersistFileChunkHeader {
     std::int64_t sub_key;
@@ -183,7 +183,7 @@ inline constexpr std::uint32_t kIndexPersistDsmVersion = 1;
 inline constexpr std::uint32_t kIndexPersistFileDsmMagic = 0xB1051D59u;
 inline constexpr std::uint32_t kIndexPersistFileDsmVersion = 1;
 inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
-inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 2;
+inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 3;
 
 struct PgMpsBuildStats {
     pg_atomic_uint64 generation;
@@ -626,7 +626,8 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     if (header.magic != kIndexBuildMpsDsmMagic
         || header.version != kIndexBuildMpsDsmVersion
         || header.index_name_len == 0
-        || header.locator.version != bioseq::storage::kLocatorVersion) {
+        || header.locator.version != bioseq::storage::kLocatorVersion
+        || header.locator.source_epoch == 0) {
         return std::nullopt;
     }
     const std::uint64_t name_offset = sizeof(IndexBuildMpsDsmHeader);
@@ -932,6 +933,7 @@ void ensure_persist_xact_callback_registered() {
     if (!bioseq_index_async_persist
         || target.index_name.empty()
         || locator.version != bioseq::storage::kLocatorVersion
+        || locator.source_epoch == 0
         || locator.num_fragments == 0
         || locator.total_bp_size == 0) {
         return false;

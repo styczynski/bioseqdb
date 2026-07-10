@@ -119,6 +119,23 @@ TEST_CASE("DOC0294 memory admission reserves and releases", "[parallelism][memor
         permit->shrink_to(256);
         REQUIRE(permit->bytes() == 128u);
         REQUIRE(admission.reserved_bytes() == 128u);
+
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto denied = admission.try_reserve(1024, &failure);
+        REQUIRE_FALSE(denied.has_value());
+        REQUIRE(
+            failure.reason
+            == bioseq::parallelism::MemoryAdmissionFailureReason::budget_exhausted);
+        REQUIRE(failure.requested_bytes == 1024u);
+        REQUIRE(failure.reserved_bytes == 128u);
+        REQUIRE(failure.allocatable_after_reservations_bytes <= 896u);
+        REQUIRE(failure.budget_ceiling_bytes >= failure.reserved_bytes);
+        REQUIRE(failure.allocatable_after_reservations_bytes
+                == failure.budget_ceiling_bytes - failure.reserved_bytes);
+        REQUIRE((failure.system_available_bytes <= failure.system_total_bytes
+                 || failure.system_total_bytes == 0u));
+        REQUIRE((failure.process_soft_cap_bytes <= failure.system_total_bytes
+                 || failure.system_total_bytes == 0u));
     }
     REQUIRE(admission.reserved_bytes() == 0u);
 

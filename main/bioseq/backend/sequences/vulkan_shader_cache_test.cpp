@@ -80,7 +80,7 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 34);
+    REQUIRE(keys.size() == 35);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         return gv::cache_file_stem(a) < gv::cache_file_stem(b);
@@ -98,6 +98,8 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         gv::ShaderKind::phase_c_coordinate_vote_reduce, 384u, 128u, 1u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::phase_c_coordinate_vote_reduce_batch, 384u, 128u, 1u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::phase_c_persisted_directory_select, 384u, 128u, 1u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u)));
     CHECK(contains_key(keys, gv::make_shader_key(
@@ -119,6 +121,18 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         gv::ShaderKind::chain_tiled_dp_u64, 384u, 256u, 0u)));
     CHECK_FALSE(gv::valid_shader_variant_key(gv::make_shader_key(
         gv::ShaderKind::generate_units, 384u, 256u, 128u)));
+}
+
+TEST_CASE("DOC0371 persisted directory selector shader compiles with exact bindings",
+          "[shader_cache][doc0371][persisted-directory]") {
+    const auto key = gv::make_shader_key(
+        gv::ShaderKind::phase_c_persisted_directory_select,
+        384u, 128u, 1u);
+    REQUIRE(gv::valid_shader_variant_key(key));
+    const auto spirv = gv::compile_shader_spirv(key.to_request());
+    REQUIRE_FALSE(spirv.empty());
+    const auto layout = gv::validate_spirv_layout(key, spirv);
+    REQUIRE(layout.has_value());
 }
 
 TEST_CASE("DOC0341 shader cache digest changes with variant ABI inputs",

@@ -39,6 +39,12 @@ extern "C" {
 #include "catalog/dependency.h"
 #include "catalog/namespace.h"
 #include "catalog/indexing.h"
+#include "catalog/pg_am_d.h"
+#include "catalog/pg_opclass_d.h"
+#include "catalog/pg_sequence.h"
+#include "catalog/pg_type_d.h"
+#include "commands/extension.h"
+#include "commands/sequence.h"
 #include "miscadmin.h"
 #include "fmgr.h"
 }
@@ -49,10 +55,12 @@ extern "C" {
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -63,9 +71,12 @@ import bioseq.common.mlogging;
 import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_storage_max_seq_sub_table_gbs GUC
 import bioseq.storage.metadata;
+import bioseq.storage.physical;
 import bioseq.table.io;
 import bioseq.types.pg_compact_sequence;
 import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.indexing.storage;
 import bioseq.common.sequan_compat;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
 import bioseq.storage.size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
 // DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
@@ -78,8 +89,737 @@ static_assert(__cplusplus >= 202302L,
 
 export namespace bioseq::storage {
 
+namespace internal_catalog_detail {
+
+[[nodiscard]] inline bool bioseq_extension_installed() {
+    return OidIsValid(get_extension_oid("bioseq", true));
+}
+
+[[nodiscard]] inline bool absence_is_benign(
+        const bool allow_missing_during_extension_teardown) {
+    return allow_missing_during_extension_teardown;
+}
+
+[[noreturn]] inline void missing_outside_teardown(
+        const std::string_view object_name) {
+    ereport(ERROR,
+        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+         errmsg("bioseq internal catalog %.*s is missing outside extension teardown",
+            static_cast<int>(object_name.size()), object_name.data())));
+    pg_unreachable();
+}
+
+} // namespace internal_catalog_detail
+
+inline constexpr std::int16_t kSequenceSourceStateUnpublished = 0;
+inline constexpr std::int16_t kSequenceSourceStateReady = 1;
+inline constexpr std::int16_t kSequenceSourceStateInvalid = 2;
+
+/// The source epoch state machine is deliberately one-way. In particular, a
+/// source invalidated by parent-row or fragment mutation can never be
+/// resurrected by manufacturing another publication token.
+[[nodiscard]] constexpr bool sequence_source_state_transition_allowed(
+        const std::int16_t current,
+        const std::int16_t requested) noexcept {
+    return (current == kSequenceSourceStateUnpublished
+            && (requested == kSequenceSourceStateReady
+                || requested == kSequenceSourceStateInvalid))
+        || (current == kSequenceSourceStateReady
+            && requested == kSequenceSourceStateInvalid);
+}
+
+static_assert(sequence_source_state_transition_allowed(
+    kSequenceSourceStateUnpublished, kSequenceSourceStateReady));
+static_assert(sequence_source_state_transition_allowed(
+    kSequenceSourceStateReady, kSequenceSourceStateInvalid));
+static_assert(!sequence_source_state_transition_allowed(
+    kSequenceSourceStateInvalid, kSequenceSourceStateReady));
+
+/// Exact PostgreSQL-owned identity record for one immutable sequence source.
+/// The checksum is the CRC-64/ECMA-182 of decoded logical symbols, calculated
+/// while the source is already streaming into fragment storage.
+struct SequenceSourceVersionRow {
+    std::uint64_t source_epoch = 0;
+    Oid user_relid = InvalidOid;
+    Oid database_oid = InvalidOid;
+    Oid tablespace_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    std::uint64_t main_storage_id = 0;
+    std::int16_t column_attno = 0;
+    seq_locator locator{};
+    Oid fragment_relid = InvalidOid;
+    std::uint64_t fragment_storage_id = 0;
+    std::uint8_t alphabet_code = 0;
+    std::uint8_t storage_unit_byte_width = 0;
+    std::uint16_t padding_letters = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::int16_t state = kSequenceSourceStateUnpublished;
+};
+
+namespace source_version_detail {
+
+enum Attribute : AttrNumber {
+    source_epoch = 1,
+    user_relid,
+    database_oid,
+    tablespace_oid,
+    main_relfilenode,
+    main_storage_id,
+    column_attno,
+    locator_version,
+    bucket_idx,
+    shard_idx,
+    fragment_relid,
+    fragment_storage_id,
+    first_sub_row_no,
+    num_fragments,
+    total_bp_size,
+    alphabet_code,
+    storage_unit_byte_width,
+    padding_letters,
+    source_content_checksum,
+    state,
+    attribute_count = state,
+};
+
+struct AttributeContract {
+    AttrNumber attno = InvalidAttrNumber;
+    std::string_view name{};
+    Oid type_oid = InvalidOid;
+};
+
+inline constexpr std::array<AttributeContract, attribute_count>
+kAttributeContracts{{
+    {source_epoch, "source_epoch", INT8OID},
+    {user_relid, "user_relid", OIDOID},
+    {database_oid, "database_oid", OIDOID},
+    {tablespace_oid, "tablespace_oid", OIDOID},
+    {main_relfilenode, "main_relfilenode", OIDOID},
+    {main_storage_id, "main_storage_id", INT8OID},
+    {column_attno, "column_attno", INT2OID},
+    {locator_version, "locator_version", INT2OID},
+    {bucket_idx, "bucket_idx", INT2OID},
+    {shard_idx, "shard_idx", INT4OID},
+    {fragment_relid, "fragment_relid", OIDOID},
+    {fragment_storage_id, "fragment_storage_id", INT8OID},
+    {first_sub_row_no, "first_sub_row_no", INT8OID},
+    {num_fragments, "num_fragments", INT8OID},
+    {total_bp_size, "total_bp_size", INT8OID},
+    {alphabet_code, "alphabet_code", INT2OID},
+    {storage_unit_byte_width, "storage_unit_byte_width", INT2OID},
+    {padding_letters, "padding_letters", INT4OID},
+    {source_content_checksum, "source_content_checksum", INT8OID},
+    {state, "state", INT2OID},
+}};
+
+[[nodiscard]] inline Oid internal_namespace_oid() {
+    return get_namespace_oid("bioseq_internal", true);
+}
+
+[[nodiscard]] inline Oid relation_oid() {
+    const Oid namespace_oid = internal_namespace_oid();
+    return OidIsValid(namespace_oid)
+        ? get_relname_relid("sequence_source_version", namespace_oid)
+        : InvalidOid;
+}
+
+[[nodiscard]] inline Oid primary_index_oid() {
+    const Oid namespace_oid = internal_namespace_oid();
+    return OidIsValid(namespace_oid)
+        ? get_relname_relid("sequence_source_version_pkey", namespace_oid)
+        : InvalidOid;
+}
+
+[[noreturn]] inline void source_catalog_error(std::string_view message) {
+    ereport(ERROR,
+        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+         errmsg("bioseq sequence source catalog: %.*s",
+            static_cast<int>(message.size()), message.data())));
+    pg_unreachable();
+}
+
+/// Validate the exact extension-owned source catalog and its one-column
+/// primary key before any fixed-ordinal tuple deformation. Besides making the
+/// timed lookup genuinely index-backed, this prevents a changed tuple
+/// descriptor from overflowing the fixed Datum/null arrays below.
+inline void validate_catalog_schema(Relation relation) {
+    if (relation == nullptr
+        || RelationGetRelid(relation) != relation_oid()
+        || RelationGetNamespace(relation) != internal_namespace_oid()
+        || relation->rd_rel->relkind != RELKIND_RELATION
+        || relation->rd_rel->relam != HEAP_TABLE_AM_OID) {
+        source_catalog_error("catalog relation identity or heap access method changed");
+    }
+    TupleDesc descriptor = RelationGetDescr(relation);
+    if (descriptor == nullptr
+        || descriptor->natts != static_cast<int>(kAttributeContracts.size())) {
+        source_catalog_error("catalog attribute count changed");
+    }
+    for (const AttributeContract& expected : kAttributeContracts) {
+        const Form_pg_attribute attribute = TupleDescAttr(
+            descriptor, expected.attno - 1);
+        const bool expected_not_null = expected.attno != fragment_relid;
+        if (attribute->attnum != expected.attno
+            || attribute->attisdropped
+            || attribute->attnotnull != expected_not_null
+            || attribute->atttypid != expected.type_oid
+            || std::string_view{NameStr(attribute->attname)} != expected.name) {
+            source_catalog_error("catalog attribute contract changed");
+        }
+    }
+}
+
+[[nodiscard]] inline Oid validate_catalog_contract(Relation relation) {
+    validate_catalog_schema(relation);
+
+    const Oid expected_primary = primary_index_oid();
+    if (!OidIsValid(expected_primary)) {
+        source_catalog_error("catalog primary index is missing");
+    }
+    List* indexes = RelationGetIndexList(relation);
+    Oid proven_primary = InvalidOid;
+    std::size_t primary_count = 0;
+    ListCell* cell = nullptr;
+    foreach (cell, indexes) {
+        const Oid index_oid = lfirst_oid(cell);
+        Relation index = index_open(index_oid, AccessShareLock);
+        const bool is_primary = index->rd_index != nullptr
+            && index->rd_index->indisprimary;
+        if (is_primary) {
+            ++primary_count;
+            const bool exact = index_oid == expected_primary
+                && index->rd_rel->relkind == RELKIND_INDEX
+                && index->rd_rel->relam == BTREE_AM_OID
+                && index->rd_index->indisunique
+                && index->rd_index->indimmediate
+                && index->rd_index->indisvalid
+                && index->rd_index->indisready
+                && index->rd_index->indislive
+                && index->rd_index->indnkeyatts == 1
+                && index->rd_index->indnatts == 1
+                && index->rd_index->indkey.values[0] == source_epoch
+                && RelationGetIndexExpressions(index) == NIL
+                && RelationGetIndexPredicate(index) == NIL
+                && get_index_column_opclass(index_oid, 1)
+                    == INT8_BTREE_OPS_OID
+                && index->rd_indcollation != nullptr
+                && !OidIsValid(index->rd_indcollation[0])
+                && index->rd_indoption != nullptr
+                && index->rd_indoption[0] == 0
+                && (index->rd_opcoptions == nullptr
+                    || index->rd_opcoptions[0] == nullptr);
+            if (exact) proven_primary = index_oid;
+        }
+        index_close(index, AccessShareLock);
+    }
+    list_free(indexes);
+    if (primary_count != 1 || proven_primary != expected_primary) {
+        source_catalog_error(
+            "catalog primary index is not the exact live unique immediate btree contract");
+    }
+    return proven_primary;
+}
+
+[[nodiscard]] inline std::uint64_t positive_bigint(Datum value) {
+    const std::int64_t signed_value = DatumGetInt64(value);
+    if (signed_value <= 0) {
+        source_catalog_error("positive BIGINT field is invalid");
+    }
+    return static_cast<std::uint64_t>(signed_value);
+}
+
+[[nodiscard]] inline std::uint64_t bigint_bits(Datum value) noexcept {
+    return std::bit_cast<std::uint64_t>(DatumGetInt64(value));
+}
+
+[[nodiscard]] inline SequenceSourceVersionRow deform(
+        HeapTuple tuple, TupleDesc descriptor) {
+    std::array<Datum, attribute_count> values{};
+    std::array<bool, attribute_count> nulls{};
+    heap_deform_tuple(tuple, descriptor, values.data(), nulls.data());
+    for (std::size_t index = 0; index < nulls.size(); ++index) {
+        if (nulls[index]
+            && index != static_cast<std::size_t>(fragment_relid - 1)) {
+            source_catalog_error("NOT NULL catalog row contains NULL");
+        }
+    }
+    SequenceSourceVersionRow row{};
+    row.source_epoch = positive_bigint(values[source_epoch - 1]);
+    row.user_relid = DatumGetObjectId(values[user_relid - 1]);
+    row.database_oid = DatumGetObjectId(values[database_oid - 1]);
+    row.tablespace_oid = DatumGetObjectId(values[tablespace_oid - 1]);
+    row.main_relfilenode = DatumGetObjectId(values[main_relfilenode - 1]);
+    row.main_storage_id = positive_bigint(values[main_storage_id - 1]);
+    row.column_attno = DatumGetInt16(values[column_attno - 1]);
+    const std::int16_t locator_version_value =
+        DatumGetInt16(values[locator_version - 1]);
+    const std::int16_t bucket_value = DatumGetInt16(values[bucket_idx - 1]);
+    if (locator_version_value != kLocatorVersion
+        || bucket_value < 0
+        || bucket_value > (std::numeric_limits<std::uint8_t>::max)()) {
+        source_catalog_error("locator version or bucket is outside its wire domain");
+    }
+    row.locator.version = static_cast<std::uint8_t>(locator_version_value);
+    row.locator.bucket_idx = static_cast<std::uint8_t>(bucket_value);
+    const std::int32_t shard_value = DatumGetInt32(values[shard_idx - 1]);
+    if (shard_value < 0) {
+        source_catalog_error("locator shard is outside its wire domain");
+    }
+    row.locator.shard_idx = static_cast<std::uint32_t>(shard_value);
+    row.fragment_relid = nulls[fragment_relid - 1]
+        ? InvalidOid
+        : DatumGetObjectId(values[fragment_relid - 1]);
+    const std::int64_t fragment_storage =
+        DatumGetInt64(values[fragment_storage_id - 1]);
+    if (fragment_storage < 0) {
+        source_catalog_error("fragment storage ID is negative");
+    }
+    row.fragment_storage_id = static_cast<std::uint64_t>(fragment_storage);
+    const std::int64_t first_row = DatumGetInt64(values[first_sub_row_no - 1]);
+    const std::int64_t fragments = DatumGetInt64(values[num_fragments - 1]);
+    const std::int64_t total_bp = DatumGetInt64(values[total_bp_size - 1]);
+    if (first_row < 0 || fragments < 0 || total_bp < 0
+        || static_cast<std::uint64_t>(fragments)
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+        source_catalog_error("locator geometry is outside its wire domain");
+    }
+    row.locator.first_sub_row_no = static_cast<std::uint64_t>(first_row);
+    row.locator.num_fragments = static_cast<std::uint32_t>(fragments);
+    row.locator.total_bp_size = static_cast<std::uint64_t>(total_bp);
+    row.locator.source_epoch = row.source_epoch;
+    const std::int16_t alphabet_value =
+        DatumGetInt16(values[alphabet_code - 1]);
+    const std::int16_t storage_width_value =
+        DatumGetInt16(values[storage_unit_byte_width - 1]);
+    if (alphabet_value < 0
+        || alphabet_value > (std::numeric_limits<std::uint8_t>::max)()
+        || storage_width_value <= 0 || storage_width_value > 0x0F) {
+        source_catalog_error("source alphabet or storage width is outside its wire domain");
+    }
+    row.alphabet_code = static_cast<std::uint8_t>(alphabet_value);
+    row.storage_unit_byte_width = static_cast<std::uint8_t>(storage_width_value);
+    const std::int32_t padding = DatumGetInt32(values[padding_letters - 1]);
+    if (padding < 0
+        || static_cast<std::uint32_t>(padding)
+            > (std::numeric_limits<std::uint16_t>::max)()) {
+        source_catalog_error("source padding is outside its wire domain");
+    }
+    row.padding_letters = static_cast<std::uint16_t>(padding);
+    row.source_content_checksum = bigint_bits(
+        values[source_content_checksum - 1]);
+    row.state = DatumGetInt16(values[state - 1]);
+    if (row.state != kSequenceSourceStateUnpublished
+        && row.state != kSequenceSourceStateReady
+        && row.state != kSequenceSourceStateInvalid) {
+        source_catalog_error("source state is outside its state-machine domain");
+    }
+    return row;
+}
+
+[[nodiscard]] inline HeapTuple form(
+        TupleDesc descriptor, const SequenceSourceVersionRow& row) {
+    std::array<Datum, attribute_count> values{};
+    std::array<bool, attribute_count> nulls{};
+    values[source_epoch - 1] = Int64GetDatum(
+        static_cast<std::int64_t>(row.source_epoch));
+    values[user_relid - 1] = ObjectIdGetDatum(row.user_relid);
+    values[database_oid - 1] = ObjectIdGetDatum(row.database_oid);
+    values[tablespace_oid - 1] = ObjectIdGetDatum(row.tablespace_oid);
+    values[main_relfilenode - 1] = ObjectIdGetDatum(row.main_relfilenode);
+    values[main_storage_id - 1] = Int64GetDatum(
+        static_cast<std::int64_t>(row.main_storage_id));
+    values[column_attno - 1] = Int16GetDatum(row.column_attno);
+    values[locator_version - 1] = Int16GetDatum(row.locator.version);
+    values[bucket_idx - 1] = Int16GetDatum(row.locator.bucket_idx);
+    values[shard_idx - 1] = Int32GetDatum(
+        static_cast<std::int32_t>(row.locator.shard_idx));
+    if (OidIsValid(row.fragment_relid)) {
+        values[fragment_relid - 1] = ObjectIdGetDatum(row.fragment_relid);
+    } else {
+        nulls[fragment_relid - 1] = true;
+    }
+    values[fragment_storage_id - 1] = Int64GetDatum(
+        static_cast<std::int64_t>(row.fragment_storage_id));
+    values[first_sub_row_no - 1] = Int64GetDatum(
+        static_cast<std::int64_t>(row.locator.first_sub_row_no));
+    values[num_fragments - 1] = Int64GetDatum(row.locator.num_fragments);
+    values[total_bp_size - 1] = Int64GetDatum(
+        static_cast<std::int64_t>(row.locator.total_bp_size));
+    values[alphabet_code - 1] = Int16GetDatum(row.alphabet_code);
+    values[storage_unit_byte_width - 1] = Int16GetDatum(
+        row.storage_unit_byte_width);
+    values[padding_letters - 1] = Int32GetDatum(row.padding_letters);
+    values[source_content_checksum - 1] = Int64GetDatum(
+        std::bit_cast<std::int64_t>(row.source_content_checksum));
+    values[state - 1] = Int16GetDatum(row.state);
+    return heap_form_tuple(descriptor, values.data(), nulls.data());
+}
+
+} // namespace source_version_detail
+
+class PendingSequenceSource;
+
+/// PostgreSQL catalog operations for immutable source epochs. Every lookup
+/// accepts the caller's snapshot; no backend-global or SnapshotSelf read is
+/// allowed in a reader proof.
+struct SequenceSourceVersionManager {
+    [[nodiscard]] static std::uint64_t allocate_epoch() {
+        const Oid namespace_oid =
+            source_version_detail::internal_namespace_oid();
+        const Oid sequence_oid = get_relname_relid(
+            "sequence_source_epoch_seq", namespace_oid);
+        if (!OidIsValid(sequence_oid)) {
+            source_version_detail::source_catalog_error(
+                "owned epoch sequence is missing");
+        }
+        Relation sequence_relation = relation_open(sequence_oid, AccessShareLock);
+        const bool shape_ok =
+            RelationGetNamespace(sequence_relation) == namespace_oid
+            && sequence_relation->rd_rel->relkind == RELKIND_SEQUENCE
+            && sequence_relation->rd_rel->relpersistence
+                == RELPERSISTENCE_PERMANENT;
+        relation_close(sequence_relation, AccessShareLock);
+        if (!shape_ok) {
+            source_version_detail::source_catalog_error(
+                "owned epoch sequence relation contract changed");
+        }
+        HeapTuple sequence_tuple = SearchSysCache1(
+            SEQRELID, ObjectIdGetDatum(sequence_oid));
+        if (!HeapTupleIsValid(sequence_tuple)) {
+            source_version_detail::source_catalog_error(
+                "owned epoch pg_sequence row is missing");
+        }
+        const Form_pg_sequence sequence =
+            reinterpret_cast<Form_pg_sequence>(GETSTRUCT(sequence_tuple));
+        const bool contract_ok = sequence->seqtypid == INT8OID
+            && sequence->seqincrement == 1
+            && sequence->seqmin == 1
+            && sequence->seqmax
+                == (std::numeric_limits<std::int64_t>::max)()
+            && sequence->seqstart == 1
+            && sequence->seqcache == 1
+            && !sequence->seqcycle;
+        ReleaseSysCache(sequence_tuple);
+        if (!contract_ok) {
+            source_version_detail::source_catalog_error(
+                "owned epoch sequence numeric contract changed");
+        }
+        const std::int64_t epoch = nextval_internal(sequence_oid, false);
+        if (epoch <= 0) {
+            source_version_detail::source_catalog_error(
+                "owned epoch sequence exhausted positive BIGINT");
+        }
+        return static_cast<std::uint64_t>(epoch);
+    }
+
+    static void insert_unpublished(const SequenceSourceVersionRow& input) {
+        if (input.source_epoch == 0
+            || input.source_epoch
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::int64_t>::max)())
+            || input.locator.source_epoch != input.source_epoch
+            || input.locator.version != kLocatorVersion
+            || input.locator._pad_2 != 0 || input.locator._pad_4 != 0
+            || input.locator.shard_idx
+                > static_cast<std::uint32_t>(
+                    (std::numeric_limits<std::int32_t>::max)())
+            || input.locator.first_sub_row_no
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::int64_t>::max)())
+            || input.locator.total_bp_size
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::int64_t>::max)())
+            || !OidIsValid(input.user_relid)
+            || input.database_oid != MyDatabaseId
+            || !OidIsValid(input.tablespace_oid)
+            || !OidIsValid(input.main_relfilenode)
+            || input.main_storage_id == 0
+            || input.main_storage_id
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::int64_t>::max)())
+            || input.column_attno <= 0
+            || input.storage_unit_byte_width == 0
+            || input.storage_unit_byte_width > 0x0Fu
+            || input.state != kSequenceSourceStateUnpublished
+            || (input.locator.num_fragments == 0
+                ? (OidIsValid(input.fragment_relid)
+                    || input.fragment_storage_id != 0
+                    || input.locator.first_sub_row_no != 0)
+                : (!OidIsValid(input.fragment_relid)
+                    || input.fragment_storage_id == 0
+                    || input.fragment_storage_id
+                        > static_cast<std::uint64_t>(
+                            (std::numeric_limits<std::int64_t>::max)())))) {
+            source_version_detail::source_catalog_error(
+                "unpublished source input is invalid");
+        }
+        Relation relation = table_open(
+            source_version_detail::relation_oid(), RowExclusiveLock);
+        source_version_detail::validate_catalog_schema(relation);
+        HeapTuple tuple = source_version_detail::form(
+            RelationGetDescr(relation), input);
+        CatalogTupleInsert(relation, tuple);
+        heap_freetuple(tuple);
+        table_close(relation, RowExclusiveLock);
+        CommandCounterIncrement();
+    }
+
+    [[nodiscard]] static std::optional<SequenceSourceVersionRow> lookup(
+            std::uint64_t epoch, Snapshot snapshot, bool require_ready = true,
+            bool* exact_primary_index_scan = nullptr) {
+        if (exact_primary_index_scan != nullptr) {
+            *exact_primary_index_scan = false;
+        }
+        if (epoch == 0
+            || epoch > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)())
+            || snapshot == nullptr) {
+            return std::nullopt;
+        }
+        Relation relation = table_open(
+            source_version_detail::relation_oid(), AccessShareLock);
+        const Oid proven_primary =
+            source_version_detail::validate_catalog_contract(relation);
+        ScanKeyData key;
+        ScanKeyInit(&key, source_version_detail::source_epoch,
+            BTEqualStrategyNumber, F_INT8EQ,
+            Int64GetDatum(static_cast<std::int64_t>(epoch)));
+        SysScanDesc scan = systable_beginscan(
+            relation, proven_primary, true,
+            snapshot, 1, &key);
+        HeapTuple tuple = systable_getnext(scan);
+        std::optional<SequenceSourceVersionRow> result;
+        if (HeapTupleIsValid(tuple)) {
+            SequenceSourceVersionRow row = source_version_detail::deform(
+                tuple, RelationGetDescr(relation));
+            if (!require_ready || row.state == kSequenceSourceStateReady) {
+                result = row;
+            }
+        }
+        systable_endscan(scan);
+        table_close(relation, AccessShareLock);
+        if (exact_primary_index_scan != nullptr) {
+            *exact_primary_index_scan = true;
+        }
+        return result;
+    }
+
+private:
+    static void set_state(std::uint64_t epoch, std::int16_t requested_state) {
+        if (epoch == 0
+            || epoch > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)())
+            || (requested_state != kSequenceSourceStateReady
+                && requested_state != kSequenceSourceStateInvalid)) {
+            source_version_detail::source_catalog_error(
+                "source state transition input is invalid");
+        }
+        Relation relation = table_open(
+            source_version_detail::relation_oid(), RowExclusiveLock);
+        const Oid proven_primary =
+            source_version_detail::validate_catalog_contract(relation);
+        ScanKeyData key;
+        ScanKeyInit(&key, source_version_detail::source_epoch,
+            BTEqualStrategyNumber, F_INT8EQ,
+            Int64GetDatum(static_cast<std::int64_t>(epoch)));
+        SysScanDesc scan = systable_beginscan(
+            relation, proven_primary, true,
+            SnapshotSelf, 1, &key);
+        HeapTuple old_tuple = systable_getnext(scan);
+        if (!HeapTupleIsValid(old_tuple)) {
+            systable_endscan(scan);
+            table_close(relation, RowExclusiveLock);
+            source_version_detail::source_catalog_error(
+                "source epoch row is missing during state transition");
+        }
+        const SequenceSourceVersionRow current =
+            source_version_detail::deform(old_tuple, RelationGetDescr(relation));
+        if (!sequence_source_state_transition_allowed(
+                current.state, requested_state)) {
+            systable_endscan(scan);
+            table_close(relation, RowExclusiveLock);
+            source_version_detail::source_catalog_error(
+                "source state transition violates the terminal state machine");
+        }
+        std::array<Datum, source_version_detail::attribute_count> values{};
+        std::array<bool, source_version_detail::attribute_count> nulls{};
+        std::array<bool, source_version_detail::attribute_count> replaces{};
+        values[source_version_detail::state - 1] =
+            Int16GetDatum(requested_state);
+        replaces[source_version_detail::state - 1] = true;
+        HeapTuple new_tuple = heap_modify_tuple(
+            old_tuple, RelationGetDescr(relation), values.data(),
+            nulls.data(), replaces.data());
+        CatalogTupleUpdate(relation, &old_tuple->t_self, new_tuple);
+        heap_freetuple(new_tuple);
+        systable_endscan(scan);
+        table_close(relation, RowExclusiveLock);
+        CommandCounterIncrement();
+    }
+
+    static void publish_ready(std::uint64_t epoch) {
+        set_state(epoch, kSequenceSourceStateReady);
+    }
+
+    friend class PendingSequenceSource;
+
+public:
+
+    static void invalidate_epoch(std::uint64_t epoch) {
+        if (epoch == 0) return;
+        const auto row = lookup(epoch, SnapshotSelf, /*require_ready=*/false);
+        if (!row || row->state == kSequenceSourceStateInvalid) return;
+        set_state(epoch, kSequenceSourceStateInvalid);
+    }
+
+    static void delete_for_main(
+            Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+            bool allow_missing_during_extension_teardown = false) {
+        const Oid relation_oid = source_version_detail::relation_oid();
+        if (!OidIsValid(relation_oid)) {
+            if (internal_catalog_detail::absence_is_benign(
+                    allow_missing_during_extension_teardown)) return;
+            internal_catalog_detail::missing_outside_teardown(
+                "bioseq_internal.sequence_source_version");
+        }
+        Relation relation = try_safe_relation_open(
+            relation_oid, RowExclusiveLock);
+        if (relation == nullptr) {
+            if (internal_catalog_detail::absence_is_benign(
+                    allow_missing_during_extension_teardown)) return;
+            internal_catalog_detail::missing_outside_teardown(
+                "bioseq_internal.sequence_source_version");
+        }
+        source_version_detail::validate_catalog_schema(relation);
+        ScanKeyData keys[3];
+        ScanKeyInit(&keys[0], source_version_detail::database_oid,
+            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
+        ScanKeyInit(&keys[1], source_version_detail::tablespace_oid,
+            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
+        ScanKeyInit(&keys[2], source_version_detail::main_relfilenode,
+            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
+        SysScanDesc scan = systable_beginscan(
+            relation, InvalidOid, false, SnapshotSelf, 3, keys);
+        HeapTuple tuple = nullptr;
+        while (HeapTupleIsValid(tuple = systable_getnext(scan))) {
+            CatalogTupleDelete(relation, &tuple->t_self);
+        }
+        systable_endscan(scan);
+        table_close(relation, RowExclusiveLock);
+        CommandCounterIncrement();
+    }
+
+    static void invalidate_for_fragment(
+            Oid fragment_relation_oid,
+            bool allow_missing_during_extension_teardown = false) {
+        if (!OidIsValid(fragment_relation_oid)) return;
+        const Oid catalog_oid = source_version_detail::relation_oid();
+        if (!OidIsValid(catalog_oid)) {
+            if (internal_catalog_detail::absence_is_benign(
+                    allow_missing_during_extension_teardown)) return;
+            internal_catalog_detail::missing_outside_teardown(
+                "bioseq_internal.sequence_source_version");
+        }
+        Relation relation = try_safe_relation_open(
+            catalog_oid, RowExclusiveLock);
+        if (relation == nullptr) {
+            if (internal_catalog_detail::absence_is_benign(
+                    allow_missing_during_extension_teardown)) return;
+            internal_catalog_detail::missing_outside_teardown(
+                "bioseq_internal.sequence_source_version");
+        }
+        source_version_detail::validate_catalog_schema(relation);
+        ScanKeyData key;
+        ScanKeyInit(&key, source_version_detail::fragment_relid,
+            BTEqualStrategyNumber, F_OIDEQ,
+            ObjectIdGetDatum(fragment_relation_oid));
+        // DROP/invalidation is not a timed path. A validated heap scan avoids
+        // trusting a missing, renamed, partial, or otherwise corrupted
+        // secondary index to decide whether READY epochs survive a drop.
+        SysScanDesc scan = systable_beginscan(
+            relation, InvalidOid, false,
+            SnapshotSelf, 1, &key);
+        HeapTuple tuple = nullptr;
+        while (HeapTupleIsValid(tuple = systable_getnext(scan))) {
+            const SequenceSourceVersionRow current =
+                source_version_detail::deform(tuple, RelationGetDescr(relation));
+            if (current.state == kSequenceSourceStateInvalid) continue;
+            std::array<Datum, source_version_detail::attribute_count> values{};
+            std::array<bool, source_version_detail::attribute_count> nulls{};
+            std::array<bool, source_version_detail::attribute_count> replaces{};
+            values[source_version_detail::state - 1] =
+                Int16GetDatum(kSequenceSourceStateInvalid);
+            replaces[source_version_detail::state - 1] = true;
+            HeapTuple updated = heap_modify_tuple(
+                tuple, RelationGetDescr(relation), values.data(),
+                nulls.data(), replaces.data());
+            CatalogTupleUpdate(relation, &tuple->t_self, updated);
+            heap_freetuple(updated);
+        }
+        systable_endscan(scan);
+        table_close(relation, RowExclusiveLock);
+        CommandCounterIncrement();
+    }
+};
+
+template<class, std::size_t, std::size_t>
+struct sequence_storage_manager;
+struct sequence_stream_writer;
+
+/// Move-only publication authority. Fragment/catalog creation returns this
+/// token in UNPUBLISHED state; only the caller that has appended the parent
+/// row may consume it to publish READY.
+class PendingSequenceSource {
+private:
+    seq_locator locator_{};
+    bool pending_ = false;
+
+    explicit PendingSequenceSource(seq_locator locator) noexcept
+        : locator_(locator), pending_(locator.source_epoch != 0) {}
+
+    template<class, std::size_t, std::size_t>
+    friend struct sequence_storage_manager;
+    friend struct sequence_stream_writer;
+
+public:
+    PendingSequenceSource() = delete;
+    PendingSequenceSource(const PendingSequenceSource&) = delete;
+    PendingSequenceSource& operator=(const PendingSequenceSource&) = delete;
+    PendingSequenceSource(PendingSequenceSource&& other) noexcept
+        : locator_(other.locator_), pending_(std::exchange(other.pending_, false)) {}
+    PendingSequenceSource& operator=(PendingSequenceSource&&) = delete;
+    ~PendingSequenceSource() = default;
+
+    [[nodiscard]] const seq_locator& locator() const noexcept { return locator_; }
+    [[nodiscard]] bool pending() const noexcept { return pending_; }
+
+    void publish_after_parent_row() {
+        if (!pending_) {
+            bioseq_log<ERR, PG>(
+                "bioseq sequence source catalog: publication token was reused");
+        }
+        SequenceSourceVersionManager::publish_ready(locator_.source_epoch);
+        pending_ = false;
+    }
+
+    /// Consume a speculative-insert authority whose parent row was rejected.
+    /// This is intentionally token-owned: the losing path cannot retain a raw
+    /// epoch and later manufacture READY publication authority.
+    void invalidate_without_parent_row() {
+        if (!pending_) {
+            bioseq_log<ERR, PG>(
+                "bioseq sequence source catalog: invalidation token was reused");
+        }
+        SequenceSourceVersionManager::invalidate_epoch(locator_.source_epoch);
+        pending_ = false;
+    }
+};
+
+static_assert(!std::is_move_assignable_v<PendingSequenceSource>,
+              "A pending source authority must never be overwritten by move assignment.");
+
 // ---------------------------------------------------------------------------
-// DOC0264 §5 — Phase C locator stub format. A 48-byte pgseq_t-shaped varlena
+// DOC0371 — Phase C v3 locator stub format. A 56-byte pgseq_t-shaped varlena
 // that lives in the main columnar relation in place of the full sequence
 // payload. Replaces the Phase A 40-byte v1 stub (no on-disk back-compat —
 // DOC0264 R0 / §1.1#10).
@@ -95,8 +835,8 @@ constexpr std::uint8_t kLocatorStubMarker = 0x80;
 
 constexpr std::size_t kLocatorStubVarlenaBytes =
     pgseq_t::header_bytes() + sizeof(seq_locator);
-static_assert(kLocatorStubVarlenaBytes == 48,
-              "DOC0264 §5: Phase C locator stub must be exactly 48 bytes.");
+static_assert(kLocatorStubVarlenaBytes == 56,
+              "DOC0371: Phase C v3 locator stub must be exactly 56 bytes.");
 
 [[nodiscard]] [[gnu::always_inline]]
 inline bool is_locator_stub(const pgseq_t* hdr) noexcept {
@@ -138,13 +878,19 @@ inline void encode_locator_into_stub(
     std::uint8_t logical_byte_width,
     std::uint16_t padding_letters,
     sequence_size_t total_bp_size,
-    const seq_locator& loc) noexcept
+    const seq_locator& loc)
 {
+    if (logical_byte_width == 0 || logical_byte_width > 0x0Fu
+        || loc.version != kLocatorVersion || loc.source_epoch == 0
+        || loc._pad_2 != 0 || loc._pad_4 != 0) {
+        bioseq_log<ERR, PG>(
+            "bioseq storage: locator stub input is outside the v3 wire domain");
+    }
     std::memset(dst, 0, kLocatorStubVarlenaBytes);
     SET_VARSIZE(dst, kLocatorStubVarlenaBytes);
     dst->alphabet_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
     dst->storage_unit_byte_width = static_cast<std::uint8_t>(
-        kLocatorStubMarker | (logical_byte_width & 0x0Fu));
+        kLocatorStubMarker | logical_byte_width);
     dst->padding_letters = padding_letters;
     constexpr sequence_size_t kBpSizeFieldMax =
         static_cast<sequence_size_t>(std::numeric_limits<pgseq_t::bp_size_t>::max());
@@ -324,14 +1070,15 @@ void flush_seq_cache_write_states(seq_caches* caches,
 /// buffer. Writes to ONE shard; a single sequence exceeding the sub-table cap
 /// raises ERROR (transaction rollback cleans the partial rows).
 struct sequence_stream_writer {
-    void begin(Oid db_oid, Oid spc_oid, RelFileNumber main_relfilenode,
+    void begin(Oid user_relid, Oid db_oid, Oid spc_oid,
+               RelFileNumber main_relfilenode, std::uint64_t main_storage_id,
                AttrNumber seq_attno, TupleDesc parent_td,
                std::uint8_t alphabet_code, std::uint8_t byte_width,
                sequence_size_t cap_bytes, seq_caches* caches);
     void append_packed_bytes(std::span<const std::uint8_t> bytes,
                              sequence_size_t bp_count);
-    [[nodiscard]] seq_locator finish(sequence_size_t total_bp,
-                                     std::uint16_t last_pad);
+    [[nodiscard]] PendingSequenceSource finish(sequence_size_t total_bp,
+                                               std::uint16_t last_pad);
     void abort();
 
 private:
@@ -339,9 +1086,11 @@ private:
     void write_fragment(const std::uint8_t* payload, std::size_t payload_bytes,
                         sequence_size_t bp, std::uint16_t pad);
 
+    Oid                 user_relid_ = InvalidOid;
     Oid                 db_oid_ = InvalidOid;
     Oid                 spc_oid_ = InvalidOid;
     RelFileNumber       main_relfilenode_{};
+    std::uint64_t       main_storage_id_ = 0;
     std::int16_t        column_attno_ = 0;
     TupleDesc           parent_td_ = nullptr;
     std::uint8_t        alphabet_code_ = 0;
@@ -363,6 +1112,8 @@ private:
     std::uint64_t       last_sub_row_no_  = std::numeric_limits<std::uint64_t>::max();
     std::uint32_t       num_fragments_ = 0;
     sequence_size_t     total_varlena_bytes_ = 0;
+    std::uint64_t       source_checksum_value_ = 0;
+    std::uint64_t       source_epoch_ = 0;
     bool                active_ = false;
 };
 
@@ -445,15 +1196,18 @@ struct sequence_storage_manager {
     // alphabet/width, and fills `data[]` + `bp_size` + `padding_letters`
     // for fragment `n` (last fragment uses `is_last_fragment=true`). The
     // per-fragment MemoryContext is reset between fragments to bound peak
-    // RSS. Returns a v2 locator pointing at the first fragment row.
+    // RSS. Returns an INVALID-to-READY publication token carrying the v3
+    // locator and its PostgreSQL-owned source epoch.
     //
     // `insert_payload_as_fragments` is the convenience wrapper that the
     // existing single-varlena code paths (TAM rewrite-to-stubs, CLUSTER)
     // use: it slices an already-materialised `pgseq_t*` into fragments
     // via `insert_sequence_streamed`.
     template<class FragmentProducer>
-    [[nodiscard]] static seq_locator
-    insert_sequence_streamed(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+    [[nodiscard]] static PendingSequenceSource
+    insert_sequence_streamed(Oid user_relid,
+                             std::uint64_t main_storage_id,
+                             Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                              std::int16_t column_attno,
                              TupleDesc parent_tupdesc,
                              std::uint8_t logical_alphabet_code,
@@ -464,8 +1218,10 @@ struct sequence_storage_manager {
                              seq_caches* cache,
                              FragmentProducer&& producer);
 
-    [[nodiscard]] static seq_locator
-    insert_payload_as_fragments(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+    [[nodiscard]] static PendingSequenceSource
+    insert_payload_as_fragments(Oid user_relid,
+                                std::uint64_t main_storage_id,
+                                Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 std::int16_t column_attno,
                                 TupleDesc parent_tupdesc,
                                 const pgseq_t* original_hdr,
@@ -499,7 +1255,9 @@ struct sequence_storage_manager {
 
     // Cascade on DROP TABLE / TRUNCATE / CLUSTER swap.
     static void
-    drop_sub_tables_for_main(Oid db_oid, Oid spc_oid, Oid main_relfilenode);
+    drop_sub_tables_for_main(
+        Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+        bool allow_missing_during_extension_teardown = false);
 };
 
 using bioseq_default_storage_manager =
@@ -512,6 +1270,13 @@ using bioseq_default_storage_manager =
 open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                            std::int16_t column_attno, const seq_locator& loc,
                            LOCKMODE lock_mode, seq_caches* cache);
+
+/// True only when `relid` is the sub-table relation of an installed
+/// seq_sub_table catalog row.  VACUUM and mutation guards use catalog
+/// registration rather than trusting the relation-name convention.
+[[nodiscard]] bool is_registered_sequence_fragment_relation(
+    Oid relid,
+    bool allow_missing_during_extension_teardown = false);
 
 // ---------------------------------------------------------------------------
 // §7.10 — Sidecar I/O. Per-shard heap relations co-sharded with sub-tables.
@@ -993,6 +1758,124 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 static_cast<std::int32_t>(loc.shard_idx));
 }
 
+namespace fragment_registry_detail {
+
+struct AttributeContract {
+    AttrNumber attno = InvalidAttrNumber;
+    std::string_view name{};
+    Oid type_oid = InvalidOid;
+};
+
+inline constexpr std::array<AttributeContract, 11> kAttributeContracts{{
+    {1, "database_oid", OIDOID},
+    {2, "tablespace_oid", OIDOID},
+    {3, "main_relfilenode", OIDOID},
+    {4, "column_attno", INT2OID},
+    {5, "bucket_idx", INT2OID},
+    {6, "shard_idx", INT4OID},
+    {7, "sub_table_relid", OIDOID},
+    {8, "sidecar_relid", OIDOID},
+    {9, "bytes_written", INT8OID},
+    {10, "is_full", BOOLOID},
+    {11, "total_payload_bytes", INT8OID},
+}};
+
+[[noreturn]] inline void contract_error(const std::string_view detail) {
+    ereport(ERROR,
+        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+         errmsg("bioseq fragment registry catalog contract changed"),
+         errdetail("%.*s", static_cast<int>(detail.size()), detail.data())));
+    pg_unreachable();
+}
+
+inline void validate_catalog(
+        Relation catalog,
+        const Oid expected_catalog_oid,
+        const Oid expected_namespace_oid) {
+    if (catalog == nullptr
+        || RelationGetRelid(catalog) != expected_catalog_oid
+        || RelationGetNamespace(catalog) != expected_namespace_oid
+        || catalog->rd_rel == nullptr
+        || catalog->rd_rel->relkind != RELKIND_RELATION
+        || catalog->rd_rel->relam != HEAP_TABLE_AM_OID
+        || catalog->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT) {
+        contract_error("relation identity, persistence, or heap access method changed");
+    }
+    TupleDesc descriptor = RelationGetDescr(catalog);
+    if (descriptor == nullptr
+        || descriptor->natts
+            != static_cast<int>(kAttributeContracts.size())) {
+        contract_error("attribute count changed");
+    }
+    for (const AttributeContract& expected : kAttributeContracts) {
+        const Form_pg_attribute attribute = TupleDescAttr(
+            descriptor, expected.attno - 1);
+        if (attribute->attnum != expected.attno
+            || attribute->attisdropped
+            || !attribute->attnotnull
+            || attribute->atttypid != expected.type_oid
+            || std::string_view{NameStr(attribute->attname)}
+                != expected.name) {
+            contract_error("fixed attribute ordinal, name, type, or NOT NULL contract changed");
+        }
+    }
+}
+
+[[nodiscard]] inline Relation open_catalog(
+        const bool allow_missing_during_extension_teardown) {
+    const Oid namespace_oid = get_namespace_oid("bioseq_internal", true);
+    if (!OidIsValid(namespace_oid)) {
+        if (internal_catalog_detail::absence_is_benign(
+                allow_missing_during_extension_teardown)) return nullptr;
+        internal_catalog_detail::missing_outside_teardown(
+            "bioseq_internal.seq_sub_table");
+    }
+    const Oid catalog_oid = get_relname_relid(
+        "seq_sub_table", namespace_oid);
+    if (!OidIsValid(catalog_oid)) {
+        if (internal_catalog_detail::absence_is_benign(
+                allow_missing_during_extension_teardown)) return nullptr;
+        internal_catalog_detail::missing_outside_teardown(
+            "bioseq_internal.seq_sub_table");
+    }
+    Relation catalog = try_safe_relation_open(catalog_oid, AccessShareLock);
+    if (catalog == nullptr) {
+        if (internal_catalog_detail::absence_is_benign(
+                allow_missing_during_extension_teardown)) return nullptr;
+        internal_catalog_detail::missing_outside_teardown(
+            "bioseq_internal.seq_sub_table");
+    }
+    validate_catalog(catalog, catalog_oid, namespace_oid);
+    return catalog;
+}
+
+} // namespace fragment_registry_detail
+
+bool is_registered_sequence_fragment_relation(
+        Oid relid,
+        const bool allow_missing_during_extension_teardown) {
+    if (!OidIsValid(relid)) {
+        return false;
+    }
+    Relation catalog = fragment_registry_detail::open_catalog(
+        allow_missing_during_extension_teardown);
+    if (catalog == nullptr) {
+        return false;
+    }
+    // The exact schema proof above pins sub_table_relid to ordinal 7. This is
+    // intentionally a heap scan: registration truth cannot depend on an
+    // optional or corrupted secondary index.
+    ScanKeyData key;
+    ScanKeyInit(&key, 7, BTEqualStrategyNumber, F_OIDEQ,
+        ObjectIdGetDatum(relid));
+    SysScanDesc scan = systable_beginscan(
+        catalog, InvalidOid, /*indexOK=*/false, SnapshotSelf, 1, &key);
+    const bool found = HeapTupleIsValid(systable_getnext(scan));
+    systable_endscan(scan);
+    table_close(catalog, AccessShareLock);
+    return found;
+}
+
 // ---------------------------------------------------------------------------
 // DOC0264 §8 — insert_sequence_streamed (write hot path).
 //
@@ -1035,12 +1918,35 @@ inline constexpr std::size_t kFragmentStorageUnits = kSequenceFragmentStorageUni
         : 0u;
 }
 
+/// Feed the exact logical symbol bytes used by the existing revision-3
+/// independent checksum oracle. Fragment-sized decoding keeps memory bounded
+/// while moving the O(N) work to insertion rather than a cold index read.
+inline void update_canonical_source_checksum(
+        bioseq::indexing::Crc64Ecma182& checksum,
+        const pgseq_t* fragment) {
+    if (fragment == nullptr || is_locator_stub(fragment)) {
+        source_version_detail::source_catalog_error(
+            "canonical checksum received a non-fragment value");
+    }
+    fragment->convert_to([&checksum]<class S>(
+            const compact_sequence_range<S>& range) {
+        const std::string decoded =
+            ::bioseq::simd::active_target::decode_sequence_simd<S>(range);
+        if (decoded.size() != range.bp_size()) {
+            source_version_detail::source_catalog_error(
+                "canonical checksum decoded length disagrees");
+        }
+        checksum.update(std::string_view{decoded});
+    });
+}
+
 }  // namespace detail
 
 template<class L, std::size_t M, std::size_t X>
 template<class FragmentProducer>
-seq_locator
+PendingSequenceSource
 sequence_storage_manager<L, M, X>::insert_sequence_streamed(
+    Oid user_relid, std::uint64_t main_storage_id,
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, TupleDesc parent_tupdesc,
     std::uint8_t logical_alphabet_code,
@@ -1051,6 +1957,10 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
     seq_caches* cache,
     FragmentProducer&& producer)
 {
+    if (!OidIsValid(user_relid) || main_storage_id == 0) {
+        bioseq_log<ERR, PG>(
+            "bioseq storage: source epoch requires parent relation/storage identity");
+    }
     if (cache == nullptr || cache->side != seq_caches::Side::Write) {
         bioseq_log<ERR, PG>( "bioseq storage: insert_sequence_streamed requires a write-side seq_caches");
     }
@@ -1096,6 +2006,40 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
 
     const std::int16_t bucket_idx =
         static_cast<std::int16_t>(bucket_index_for_size(total_bp_size));
+
+    const std::uint64_t source_epoch =
+        SequenceSourceVersionManager::allocate_epoch();
+    bioseq::indexing::Crc64Ecma182 source_checksum{};
+
+    if (num_fragments == 0) {
+        seq_locator empty_locator{};
+        empty_locator.version = kLocatorVersion;
+        empty_locator.bucket_idx = static_cast<std::uint8_t>(bucket_idx);
+        empty_locator.shard_idx = 0;
+        empty_locator.num_fragments = 0;
+        empty_locator.total_bp_size = 0;
+        empty_locator.first_sub_row_no = 0;
+        empty_locator.source_epoch = source_epoch;
+        SequenceSourceVersionManager::insert_unpublished(
+            SequenceSourceVersionRow{
+                .source_epoch = source_epoch,
+                .user_relid = user_relid,
+                .database_oid = db_oid,
+                .tablespace_oid = spc_oid,
+                .main_relfilenode = main_relfilenode,
+                .main_storage_id = main_storage_id,
+                .column_attno = column_attno,
+                .locator = empty_locator,
+                .fragment_relid = InvalidOid,
+                .fragment_storage_id = 0,
+                .alphabet_code = logical_alphabet_code,
+                .storage_unit_byte_width = logical_storage_unit_byte_width,
+                .padding_letters = last_fragment_padding_letters,
+                .source_content_checksum = source_checksum.checksum(),
+                .state = kSequenceSourceStateUnpublished,
+            });
+        return PendingSequenceSource{empty_locator};
+    }
 
     // DOC0264 §8.3 — per-sequence shard pre-allocation. If the active shard
     // cannot fit the WHOLE sequence's bytes, allocate a fresh shard up front.
@@ -1240,6 +2184,8 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                 fragment_no, static_cast<unsigned>(frag->padding_letters));
         }
 
+        detail::update_canonical_source_checksum(source_checksum, frag);
+
         Datum values[1] = { PointerGetDatum(frag) };
         bool  nulls[1]  = { false };
         const std::uint64_t row_no = BioseqColumnWriteRow(entry.write_state, values, nulls);
@@ -1278,12 +2224,36 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
     out._pad_4           = 0;
     out.total_bp_size    = total_bp_size;
     out.first_sub_row_no = first_sub_row_no;
-    return out;
+    out.source_epoch     = source_epoch;
+
+    const Oid fragment_relid = RelationGetRelid(shard);
+    const std::uint64_t fragment_storage_id =
+        BioseqColumnStorageGetStorageId(shard, false);
+    SequenceSourceVersionManager::insert_unpublished(
+        SequenceSourceVersionRow{
+            .source_epoch = source_epoch,
+            .user_relid = user_relid,
+            .database_oid = db_oid,
+            .tablespace_oid = spc_oid,
+            .main_relfilenode = main_relfilenode,
+            .main_storage_id = main_storage_id,
+            .column_attno = column_attno,
+            .locator = out,
+            .fragment_relid = fragment_relid,
+            .fragment_storage_id = fragment_storage_id,
+            .alphabet_code = logical_alphabet_code,
+            .storage_unit_byte_width = logical_storage_unit_byte_width,
+            .padding_letters = last_fragment_padding_letters,
+            .source_content_checksum = source_checksum.checksum(),
+            .state = kSequenceSourceStateUnpublished,
+        });
+    return PendingSequenceSource{out};
 }
 
 template<class L, std::size_t M, std::size_t X>
-seq_locator
+PendingSequenceSource
 sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
+    Oid user_relid, std::uint64_t main_storage_id,
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, TupleDesc parent_tupdesc,
     const pgseq_t* original_hdr,
@@ -1351,6 +2321,7 @@ sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
     };
 
     return insert_sequence_streamed(
+        user_relid, main_storage_id,
         db_oid, spc_oid, main_relfilenode, column_attno, parent_tupdesc,
         logical_alphabet_code, logical_byte_width,
         total_bp_size, last_fragment_padding, current_cap_bytes, cache,
@@ -1366,7 +2337,8 @@ sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
 // rollback cleans the partial fragment rows.
 // ---------------------------------------------------------------------------
 void sequence_stream_writer::begin(
-    Oid db_oid, Oid spc_oid, RelFileNumber main_relfilenode,
+    Oid user_relid, Oid db_oid, Oid spc_oid,
+    RelFileNumber main_relfilenode, std::uint64_t main_storage_id,
     AttrNumber seq_attno, TupleDesc parent_td,
     std::uint8_t alphabet_code, std::uint8_t byte_width,
     sequence_size_t cap_bytes, seq_caches* caches)
@@ -1374,7 +2346,13 @@ void sequence_stream_writer::begin(
     if (caches == nullptr || caches->side != seq_caches::Side::Write) {
         bioseq_log<ERR, PG>( "bioseq.load: sequence_stream_writer requires a write-side seq_caches");
     }
+    if (!OidIsValid(user_relid) || main_storage_id == 0) {
+        bioseq_log<ERR, PG>(
+            "bioseq.load: source epoch requires parent relation/storage identity");
+    }
+    user_relid_ = user_relid;
     db_oid_ = db_oid; spc_oid_ = spc_oid; main_relfilenode_ = main_relfilenode;
+    main_storage_id_ = main_storage_id;
     column_attno_ = static_cast<std::int16_t>(seq_attno);
     parent_td_ = parent_td;
     alphabet_code_ = alphabet_code; byte_width_ = byte_width;
@@ -1403,6 +2381,11 @@ void sequence_stream_writer::begin(
     last_sub_row_no_  = std::numeric_limits<std::uint64_t>::max();
     num_fragments_ = 0;
     total_varlena_bytes_ = 0;
+    source_checksum_value_ = 0;
+    source_epoch_ = SequenceSourceVersionManager::allocate_epoch();
+    bucket_idx_ = 0;
+    shard_idx_ = 0;
+    cache_key_ = 0;
     shard_ = nullptr;
     write_state_ = nullptr;
     active_ = true;
@@ -1474,6 +2457,10 @@ void sequence_stream_writer::write_fragment(
         if (payload_bytes > 0) {
             std::memcpy(frag->data, payload, payload_bytes);
         }
+        bioseq::indexing::Crc64Ecma182 checksum{
+            .value = source_checksum_value_};
+        detail::update_canonical_source_checksum(checksum, frag);
+        source_checksum_value_ = checksum.checksum();
     }
     Datum values[1] = { PointerGetDatum(frag) };
     bool  nulls[1]  = { false };
@@ -1513,8 +2500,8 @@ void sequence_stream_writer::append_packed_bytes(
     }
 }
 
-seq_locator sequence_stream_writer::finish(sequence_size_t total_bp,
-                                           std::uint16_t last_pad)
+PendingSequenceSource sequence_stream_writer::finish(
+    sequence_size_t total_bp, std::uint16_t last_pad)
 {
     if (!active_) {
         bioseq_log<ERR, PG>( "bioseq.load: finish() before begin()");
@@ -1548,8 +2535,32 @@ seq_locator sequence_stream_writer::finish(sequence_size_t total_bp,
     out._pad_4           = 0;
     out.total_bp_size    = total_bp;
     out.first_sub_row_no = first_sub_row_no_;
+    out.source_epoch     = source_epoch_;
+
+    const Oid fragment_relid = num_fragments_ == 0
+        ? InvalidOid : RelationGetRelid(shard_);
+    const std::uint64_t fragment_storage_id = num_fragments_ == 0
+        ? 0 : BioseqColumnStorageGetStorageId(shard_, false);
+    SequenceSourceVersionManager::insert_unpublished(
+        SequenceSourceVersionRow{
+            .source_epoch = source_epoch_,
+            .user_relid = user_relid_,
+            .database_oid = db_oid_,
+            .tablespace_oid = spc_oid_,
+            .main_relfilenode = static_cast<Oid>(main_relfilenode_),
+            .main_storage_id = main_storage_id_,
+            .column_attno = column_attno_,
+            .locator = out,
+            .fragment_relid = fragment_relid,
+            .fragment_storage_id = fragment_storage_id,
+            .alphabet_code = alphabet_code_,
+            .storage_unit_byte_width = byte_width_,
+            .padding_letters = last_pad,
+            .source_content_checksum = source_checksum_value_,
+            .state = kSequenceSourceStateUnpublished,
+        });
     active_ = false;
-    return out;
+    return PendingSequenceSource{out};
 }
 
 void sequence_stream_writer::abort() {
@@ -1557,6 +2568,7 @@ void sequence_stream_writer::abort() {
     // the in-flight buffer + state so a re-begin starts clean.
     buffer_.clear();
     active_ = false;
+    source_epoch_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1810,10 +2822,24 @@ sequence_storage_manager<L, M, X>::fetch_payload_bulk(
 template<class L, std::size_t M, std::size_t X>
 void
 sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
-    Oid db_oid, Oid spc_oid, Oid main_relfilenode)
+    Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+    const bool allow_missing_during_extension_teardown)
 {
+    // Keep the validated registry relation locked across the legacy manager
+    // calls below. Those calls historically return an empty set when the
+    // relation disappears; the guard makes that benign only for the explicit
+    // extension-teardown context and closes the validation-to-use race.
+    Relation registry_guard = fragment_registry_detail::open_catalog(
+        allow_missing_during_extension_teardown);
+    if (registry_guard == nullptr) {
+        return;
+    }
+    SequenceSourceVersionManager::delete_for_main(
+        db_oid, spc_oid, main_relfilenode,
+        allow_missing_during_extension_teardown);
     const auto rows = SubTableManager::list_shards_for_main(db_oid, spc_oid, main_relfilenode);
     if (rows.empty()) {
+        table_close(registry_guard, AccessShareLock);
         return;
     }
 
@@ -1864,6 +2890,7 @@ sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
     }
 
     SubTableManager::delete_shards_for_main(db_oid, spc_oid, main_relfilenode);
+    table_close(registry_guard, AccessShareLock);
 }
 
 // Explicit instantiation of the default alias so non-template TUs see the
@@ -2011,6 +3038,11 @@ void ReapOrphanSeqSubTables() {
     if (SPI_connect() != SPI_OK_CONNECT) {
         return;
     }
+    const char* invalidate_orphan_sources =
+        "UPDATE bioseq_internal.sequence_source_version v SET state = 2 "
+        "WHERE v.state = 1 AND v.num_fragments > 0 "
+        "AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = v.fragment_relid);";
+    SPI_execute(invalidate_orphan_sources, /*read_only=*/false, /*tcount=*/0);
     const char* del_orphan_rows =
         "DELETE FROM bioseq_internal.seq_sub_table s "
         "WHERE s.database_oid = $1 "

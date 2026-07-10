@@ -69,6 +69,7 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sketch_emit_words):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_seed_count):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_seed_emit):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_persisted_directory_select):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_histogram):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scan):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scatter):
@@ -172,6 +173,7 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::phase_c_prefix_scan_add:
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:
+        case ShaderKind::phase_c_persisted_directory_select:
         case ShaderKind::phase_c_index_mark_runs:
         case ShaderKind::phase_c_index_emit_buckets:
             return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
@@ -238,6 +240,8 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_count, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_emit, 384u, 128u, 1u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_persisted_directory_select, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_scan, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_scatter, 384u, 1u, 1u));

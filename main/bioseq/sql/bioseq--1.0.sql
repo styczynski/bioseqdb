@@ -436,6 +436,121 @@ REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA bioseq FROM PUBLIC;
 ALTER SCHEMA bioseq RENAME TO bioseq_internal;
 REVOKE ALL PRIVILEGES ON SCHEMA bioseq_internal FROM PUBLIC;
 
+-- Revision-3 minimizer generations use one extension-owned, permanent,
+-- database-wide allocator.  The C++ allocator validates this exact catalogue
+-- shape before every nextval() so a shadowed, cycling, cached, or narrower
+-- sequence cannot silently reuse an immutable generation identifier.
+CREATE SEQUENCE bioseq_internal.minimizer_generation_id_seq
+    AS bigint
+    INCREMENT 1
+    MINVALUE 1
+    MAXVALUE 9223372036854775807
+    START 1
+    CACHE 1
+    NO CYCLE;
+REVOKE ALL ON SEQUENCE
+    bioseq_internal.minimizer_generation_id_seq FROM PUBLIC;
+COMMENT ON SEQUENCE bioseq_internal.minimizer_generation_id_seq IS
+    'Extension-owned noncycling allocator for immutable revision-3 minimizer generation identifiers.';
+
+-- A sequence locator is a physical address, not a content version.  Persist
+-- one PostgreSQL-owned source epoch per immutable locator range so a cold
+-- revision-3 reader can attest the visible source with one indexed catalogue
+-- lookup instead of decoding a multi-Gbp sequence.  The checksum is a signed
+-- BIGINT bit-container for the canonical CRC-64 calculated while fragments are
+-- already streaming through the storage writer.
+CREATE SEQUENCE bioseq_internal.sequence_source_epoch_seq
+    AS bigint
+    INCREMENT 1
+    MINVALUE 1
+    MAXVALUE 9223372036854775807
+    START 1
+    CACHE 1
+    NO CYCLE;
+REVOKE ALL ON SEQUENCE
+    bioseq_internal.sequence_source_epoch_seq FROM PUBLIC;
+COMMENT ON SEQUENCE bioseq_internal.sequence_source_epoch_seq IS
+    'Extension-owned noncycling allocator for immutable sequence-source epochs.';
+
+CREATE TABLE bioseq_internal.sequence_source_version (
+    source_epoch               bigint   NOT NULL,
+    user_relid                 oid      NOT NULL,
+    database_oid               oid      NOT NULL,
+    tablespace_oid             oid      NOT NULL,
+    main_relfilenode           oid      NOT NULL,
+    main_storage_id            bigint   NOT NULL,
+    column_attno               int2     NOT NULL,
+    locator_version            int2     NOT NULL,
+    bucket_idx                 int2     NOT NULL,
+    shard_idx                  int4     NOT NULL,
+    fragment_relid             oid,
+    fragment_storage_id        bigint   NOT NULL,
+    first_sub_row_no           bigint   NOT NULL,
+    num_fragments              bigint   NOT NULL,
+    total_bp_size              bigint   NOT NULL,
+    alphabet_code              int2     NOT NULL,
+    storage_unit_byte_width    int2     NOT NULL,
+    padding_letters            int4     NOT NULL,
+    source_content_checksum    bigint   NOT NULL,
+    state                      int2     NOT NULL,
+    CONSTRAINT sequence_source_version_pkey
+        PRIMARY KEY (source_epoch),
+    CONSTRAINT sequence_source_version_source_epoch_check
+        CHECK (source_epoch > 0),
+    CONSTRAINT sequence_source_version_main_storage_id_check
+        CHECK (main_storage_id > 0),
+    CONSTRAINT sequence_source_version_column_attno_check
+        CHECK (column_attno > 0),
+    CONSTRAINT sequence_source_version_locator_version_check
+        CHECK (locator_version = 3),
+    CONSTRAINT sequence_source_version_bucket_idx_check
+        CHECK (bucket_idx BETWEEN 0 AND 255),
+    CONSTRAINT sequence_source_version_shard_idx_check
+        CHECK (shard_idx >= 0),
+    CONSTRAINT sequence_source_version_fragment_storage_id_check
+        CHECK (fragment_storage_id >= 0),
+    CONSTRAINT sequence_source_version_first_sub_row_no_check
+        CHECK (first_sub_row_no >= 0),
+    CONSTRAINT sequence_source_version_num_fragments_check
+        CHECK (num_fragments BETWEEN 0 AND 4294967295),
+    CONSTRAINT sequence_source_version_total_bp_size_check
+        CHECK (total_bp_size >= 0),
+    CONSTRAINT sequence_source_version_alphabet_code_check
+        CHECK (alphabet_code BETWEEN 0 AND 255),
+    CONSTRAINT sequence_source_version_storage_unit_byte_width_check
+        CHECK (storage_unit_byte_width BETWEEN 1 AND 15),
+    CONSTRAINT sequence_source_version_padding_letters_check
+        CHECK (padding_letters BETWEEN 0 AND 65535),
+    CONSTRAINT sequence_source_version_state_check
+        CHECK (state IN (0, 1, 2)),
+    CONSTRAINT sequence_source_version_fragment_shape_check
+        CHECK ((num_fragments = 0
+                AND fragment_relid IS NULL
+                AND fragment_storage_id = 0
+                AND first_sub_row_no = 0)
+               OR
+               (num_fragments > 0
+                AND fragment_relid IS NOT NULL
+                AND fragment_storage_id > 0))
+) USING heap;
+-- Non-empty immutable ranges may never be aliased by a second epoch. Empty
+-- sources carry NULL fragment_relid, so PostgreSQL's default NULLS DISTINCT
+-- uniqueness admits repeated empty sources without a partial/expression index.
+-- That matters because this internal relation uses CatalogTupleInsert, whose
+-- index-maintenance contract supports only ordinary, non-partial columns.
+CREATE UNIQUE INDEX sequence_source_version_locator_key
+    ON bioseq_internal.sequence_source_version
+        (fragment_relid, fragment_storage_id, first_sub_row_no);
+CREATE INDEX sequence_source_version_fragment_row_idx
+    ON bioseq_internal.sequence_source_version
+        (fragment_relid, first_sub_row_no);
+REVOKE ALL ON TABLE
+    bioseq_internal.sequence_source_version FROM PUBLIC;
+COMMENT ON TABLE bioseq_internal.sequence_source_version IS
+    'PostgreSQL-owned MVCC source epoch and insertion-time content checksum '
+    'for one immutable sequence locator range; state 0=UNPUBLISHED, '
+    '1=READY, 2=terminal INVALID.';
+
 -- create bioseq schema with public usage privileges
 
 CREATE SCHEMA bioseq;
@@ -478,6 +593,8 @@ GRANT EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)
 -- its rows in pg_dump so the extension's CREATE script re-creates a clean
 -- catalog (lazy sub-tables are created on-demand by the first INSERT).
 SELECT pg_extension_config_dump('bioseq_internal.seq_sub_table', 'WHERE FALSE');
+SELECT pg_extension_config_dump(
+    'bioseq_internal.sequence_source_version', 'WHERE FALSE');
 -- DOC0279 — the new index catalogs carry OIDs/relfilenodes that do not survive
 -- a dump/restore, so dump the table definition but no rows.
 SELECT pg_extension_config_dump('bioseq_internal.index_policy', 'WHERE FALSE');
@@ -692,6 +809,12 @@ BEGIN
                         'chunk_pkey',
                         'options',
                         'options_pkey',
+                        'minimizer_generation_id_seq',
+                        'sequence_source_epoch_seq',
+                        'sequence_source_version',
+                        'sequence_source_version_fragment_row_idx',
+                        'sequence_source_version_locator_key',
+                        'sequence_source_version_pkey',
                         'storageid_seq',
                         'stripe',
                         'stripe_first_row_number_idx',
@@ -1355,6 +1478,11 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq)
 -- enum ordinal (matching bioseq.aligner.chaining_algorithm's order:
 -- 0 = scalar_mm2, 1 = simd_mm2, 2 = rmq; and
 -- 0 = ksw2, 1 = block_aligner for base alignment).
+-- index_read_requirement is an exact per-call contract:
+-- 0 = allow current production policy,
+-- 1 = require_absent (never read persisted target minimizer payloads),
+-- 2 = require_compatible_persisted (force a revision-3 READY-compatible read
+--     or error; current legacy MPF/MPS layouts do not satisfy this contract).
 -- ============================================================================
 CREATE TYPE bioseq_aligner_options AS (
     kmer_size                 integer,
@@ -1391,7 +1519,8 @@ CREATE TYPE bioseq_aligner_options AS (
     minimizer_algorithm        integer,
     vulkan_enabled             boolean,
     vulkan_seed_hits_enabled   boolean,
-    vulkan_index_cache_enabled boolean
+    vulkan_index_cache_enabled boolean,
+    index_read_requirement      integer
 );
 
 CREATE OR REPLACE FUNCTION aligner_options(
@@ -1429,7 +1558,8 @@ CREATE OR REPLACE FUNCTION aligner_options(
     minimizer_algorithm        integer  DEFAULT NULL,
     vulkan_enabled             boolean  DEFAULT NULL,
     vulkan_seed_hits_enabled   boolean  DEFAULT NULL,
-    vulkan_index_cache_enabled boolean  DEFAULT NULL
+    vulkan_index_cache_enabled boolean  DEFAULT NULL,
+    index_read_requirement      integer  DEFAULT NULL
 ) RETURNS bioseq_aligner_options AS $$
     SELECT ROW(
         kmer_size, window_size, max_gap, max_gap_ref, bandwidth, bandwidth_long,
@@ -1439,7 +1569,8 @@ CREATE OR REPLACE FUNCTION aligner_options(
         gap_ext2, sc_ambi, zdrop, end_bonus, max_occ, mid_occ,
         block_min_size, block_max_size,
         chaining_algorithm, base_alignment_algorithm, minimizer_algorithm,
-        vulkan_enabled, vulkan_seed_hits_enabled, vulkan_index_cache_enabled
+        vulkan_enabled, vulkan_seed_hits_enabled, vulkan_index_cache_enabled,
+        index_read_requirement
     )::bioseq_aligner_options
 $$ LANGUAGE SQL IMMUTABLE;
 
@@ -1555,6 +1686,156 @@ CREATE OR REPLACE FUNCTION bioseq.last_index_merge_run_count()
     RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_last_index_merge_run_count'
     LANGUAGE C VOLATILE;
+
+-- DOC0371 §5.3 — immutable backend-local snapshot of the most recently
+-- finished alignment-owning executor root. One row per canonical stage.
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_execution_stats()
+RETURNS TABLE (
+    execution_id bigint,
+    backend_pid integer,
+    database_oid oid,
+    effective_cpu_workers integer,
+    gpu_device_uuid text,
+    gpu_driver text,
+    gpu_pipeline_cache_policy text,
+    gpu_pipeline_cache_seed_sha256 text,
+    gpu_pipeline_cache_seed_size bigint,
+    gpu_pipeline_cache_manifest_checksum text,
+    gpu_pipeline_cache_hit boolean,
+    scan_node_count integer,
+    nested_alignment_executor_count integer,
+    completed boolean,
+    partial boolean,
+    fully_drained boolean,
+    requested_backend text,
+    actual_backend text,
+    requested_target_index_source text,
+    actual_target_index_source text,
+    persisted_generation_id bigint,
+    persisted_source_identity text,
+    mixed_persisted_identity boolean,
+    stage text,
+    eligible_jobs bigint,
+    executed_host_io_jobs bigint,
+    executed_scalar_cpu_jobs bigint,
+    executed_simd_cpu_jobs bigint,
+    executed_vulkan_gpu_jobs bigint,
+    fallback_jobs bigint,
+    stage_host_wall_ns bigint,
+    stage_gpu_device_ns bigint,
+    target_rows bigint,
+    attempted_alignment_jobs bigint,
+    fully_attested_alignment_jobs bigint,
+    unattested_alignment_jobs bigint,
+    first_unattested_target_row bigint,
+    first_unattested_query_ordinal bigint,
+    cpu_prepared_index_builds bigint,
+    cpu_prepared_index_reuses bigint,
+    cpu_prepared_unique_keys bigint,
+    cpu_prepared_duplicate_build_attempts bigint,
+    cpu_prepared_key_set_checksum text,
+    cpu_prepared_build_set_checksum text,
+    operational_identity_conflict boolean,
+    persisted_index_rows bigint,
+    missing_persisted_index_rows bigint,
+    recomputed_target_index_rows bigint,
+    persisted_generation_read_sessions bigint,
+    persisted_relation_opens bigint,
+    persisted_index_scans bigint,
+    persisted_head_scans bigint,
+    persisted_head_rows_read bigint,
+    persisted_head_bytes_read bigint,
+    persisted_manifest_directory_scans bigint,
+    persisted_manifest_rows_read bigint,
+    persisted_manifest_bytes_read bigint,
+    persisted_directory_chunks_read bigint,
+    persisted_directory_bytes_read bigint,
+    persisted_metadata_repeated_reads bigint,
+    persisted_metadata_heap_rows_read bigint,
+    persisted_metadata_bytes_read bigint,
+    persisted_payload_heap_rows_read bigint,
+    persisted_payload_bytes_read bigint,
+    persisted_heap_rows_read bigint,
+    persisted_toast_values_read bigint,
+    persisted_detoast_bytes bigint,
+    persisted_explicit_copy_bytes bigint,
+    persisted_wanted_subkeys bigint,
+    persisted_read_subkeys bigint,
+    persisted_wanted_extents bigint,
+    persisted_wanted_chunks bigint,
+    persisted_skipped_rows bigint,
+    persisted_repeated_chunk_reads bigint,
+    persisted_extents_read bigint,
+    persisted_chunks_read bigint,
+    persisted_bytes_read bigint,
+    persisted_bulk_read_calls bigint,
+    persisted_planned_request_groups bigint,
+    persisted_executed_request_groups bigint,
+    persisted_range_scan_calls bigint,
+    persisted_skip_budget_rows bigint,
+    persisted_hash_build_calls bigint,
+    persisted_assembly_ns bigint,
+    pair_sort_calls bigint,
+    host_pair_materialization_calls bigint,
+    host_biological_hash_filter_calls bigint,
+    host_query_hash_readbacks bigint,
+    host_query_symbol_packing_calls bigint,
+    host_target_symbol_packing_calls bigint,
+    host_alignment_job_classification_calls bigint,
+    host_anchor_concatenation_calls bigint,
+    host_cigar_construction_calls bigint,
+    full_segment_hydrations bigint,
+    nthash_vector_batches bigint,
+    nthash_scalar_backend_branches bigint,
+    nthash_scalar_tail_symbols bigint,
+    nthash_masked_tail_lanes bigint,
+    simd_chain_vector_batches bigint,
+    simd_chain_backtrack_vector_batches bigint,
+    simd_chain_scalar_backend_branches bigint,
+    simd_chain_backtrack_scalar_branches bigint,
+    cpu_seed_positions_rejected_outside_collection bigint,
+    gpu_partition_select_dispatches bigint,
+    gpu_partition_anchor_merge_dispatches bigint,
+    gpu_index_build_candidates bigint,
+    gpu_index_build_canonical_emitted bigint,
+    gpu_index_build_overlap_duplicates_rejected bigint,
+    gpu_index_build_noncanonical_extras_rejected bigint,
+    gpu_index_build_surviving_extras bigint,
+    gpu_persisted_resident_uploads bigint,
+    gpu_persisted_resident_cache_hits bigint,
+    gpu_overlap_anchor_duplicates bigint,
+    gpu_seed_dispatches bigint,
+    gpu_chain_dispatches bigint,
+    gpu_chain_backtrack_dispatches bigint,
+    gpu_extend_dispatches bigint,
+    gpu_target_window_request_dispatches bigint,
+    gpu_target_window_logical_units_requested bigint,
+    host_target_window_requests_consumed bigint,
+    host_target_window_physical_units_read bigint,
+    host_target_window_remap_units_filled bigint,
+    host_target_window_packed_bytes_read bigint,
+    gpu_runtime_init_ns bigint,
+    gpu_pipeline_cache_loads bigint,
+    gpu_pipeline_cache_seed_bytes bigint,
+    gpu_pipeline_cache_load_ns bigint,
+    gpu_pipeline_creation_ns bigint,
+    gpu_submit_cpu_ns bigint,
+    gpu_wait_cpu_ns bigint,
+    gpu_ordinal_readback_cpu_ns bigint,
+    gpu_result_readback_cpu_ns bigint,
+    gpu_device_critical_path_ns bigint,
+    gpu_timestamp_query_failures bigint,
+    gpu_queue_submits bigint,
+    gpu_host_waits bigint,
+    gpu_buffer_creates bigint,
+    gpu_memory_allocations bigint,
+    gpu_pipeline_creates bigint,
+    backend_declines bigint,
+    backend_fallbacks bigint,
+    stats_saturated boolean
+)
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME', 'bioseq_last_alignment_execution_stats';
 
 -- DOC0299/DOC0300 — backend-local snapshot of the most recent
 -- minimizers_per_sequence sorted-run build in this backend. Query from the
@@ -1674,6 +1955,210 @@ CREATE OR REPLACE FUNCTION bioseq.drop_all_index_tables() RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_drop_all_index_tables' LANGUAGE C VOLATILE;
 CREATE OR REPLACE FUNCTION bioseq.index_table_row_count(rel regclass, name text) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_index_table_row_count' LANGUAGE C VOLATILE STRICT;
+
+-- Fail-closed, metadata-only evidence for a standard cold no-index cell. The
+-- implementation never scans a target tuple or opens a sequence fragment; an
+-- SPI/catalog failure is an ERROR rather than an absence result.
+CREATE OR REPLACE FUNCTION bioseq.inspect_cold_no_index_absence(
+    rel regclass,
+    name text,
+    OUT target_rows bigint,
+    OUT target_cardinality_metadata_only boolean,
+    OUT source_parent_rows_read bigint,
+    OUT source_fragment_rows_read bigint,
+    OUT source_decoded_bp bigint,
+    OUT physical_index_relations bigint,
+    OUT persisted_index_rows bigint,
+    OUT generation_objects bigint)
+RETURNS record
+    AS 'MODULE_PATHNAME', 'bioseq_inspect_cold_no_index_absence'
+    LANGUAGE C VOLATILE STRICT;
+-- DOC0371 setup/post-measurement audit only.  This function validates one
+-- complete READY revision-3 generation and its authoritative source row under
+-- one MVCC snapshot.  It does not read payload extents, activate ordinal 2, or
+-- mutate/cache an executable index.  SECURITY INVOKER plus the C-side table
+-- ownership check keeps physical locator and ABI evidence administrative.
+CREATE OR REPLACE FUNCTION bioseq.inspect_ready_minimizer_generation(
+    rel regclass,
+    index_name text,
+    query_key bigint)
+RETURNS TABLE (
+    generation_id bigint,
+    source_identity text,
+    compatibility_checksum text,
+    source_content_checksum text,
+    database_oid oid,
+    main_relfilenode oid,
+    column_attno smallint,
+    sequence_rowno bigint,
+    locator_version smallint,
+    bucket_idx smallint,
+    shard_idx integer,
+    num_fragments bigint,
+    total_bp_size bigint,
+    first_sub_row_no bigint,
+    padding_letters integer,
+    alphabet_code smallint,
+    storage_unit_byte_width smallint,
+    kmer_size smallint,
+    window_size smallint,
+    gpu_abi_version integer,
+    segment_geometry_version smallint,
+    position_segment_span_bp bigint,
+    position_segment_count integer)
+AS 'MODULE_PATHNAME', 'bioseq_inspect_ready_minimizer_generation'
+LANGUAGE C STABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE EXECUTE ON FUNCTION
+    bioseq.inspect_ready_minimizer_generation(regclass, text, bigint)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq.inspect_ready_minimizer_generation(regclass, text, bigint) IS
+    'DOC0371 administrative cold-benchmark proof: validate one source-bound '
+    'READY revision-3 minimizer generation without reading payload extents or '
+    'enabling the live ordinal-2 reader.';
+CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_build_fixture(
+    source_table regclass,
+    index_name text,
+    sequence_rowno bigint,
+    kmer_size smallint,
+    window_size smallint)
+RETURNS TABLE (
+    sidecar_table text,
+    generation_id bigint,
+    source_identity text,
+    source_content_checksum text,
+    compatibility_checksum text,
+    writer_rows bigint,
+    writer_batches bigint,
+    published_head_bytes bigint,
+    relation_opens bigint,
+    index_scans bigint,
+    head_scans bigint,
+    head_rows_read bigint,
+    head_bytes_read bigint,
+    manifest_directory_scans bigint,
+    manifest_rows_read bigint,
+    directory_chunks_read bigint,
+    metadata_heap_rows_read bigint,
+    metadata_bytes_read bigint,
+    planned_request_groups bigint,
+    executed_request_groups bigint,
+    source_num_fragments bigint,
+    source_total_bp bigint,
+    source_padding_letters bigint,
+    validated_control_bytes bigint,
+    validated_position_bytes bigint,
+    validated_control_checksum text,
+    validated_position_checksum text,
+    bulk_read_calls bigint,
+    range_scan_calls bigint,
+    payload_wanted_extents bigint,
+    payload_read_extents bigint,
+    payload_wanted_chunks bigint,
+    payload_delivered_chunks bigint,
+    payload_delivered_bytes bigint,
+    payload_heap_rows_read bigint,
+    payload_skipped_rows bigint)
+AS 'MODULE_PATHNAME', 'bioseq_internal_rev3_test_build_fixture'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.rev3_test_build_fixture(
+        regclass, text, bigint, smallint, smallint)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.rev3_test_build_fixture(
+        regclass, text, bigint, smallint, smallint) IS
+    'Integration-only live revision-3 writer/token/publisher/read-session fixture with authenticated control+position payload read; does not activate ordinal 2.';
+CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_remove_source_fragment(
+    source_table regclass,
+    index_name text,
+    sequence_rowno bigint,
+    fragment_ordinal integer)
+RETURNS void
+AS 'MODULE_PATHNAME', 'bioseq_internal_rev3_test_remove_source_fragment'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.rev3_test_remove_source_fragment(
+        regclass, text, bigint, integer)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.rev3_test_remove_source_fragment(
+        regclass, text, bigint, integer) IS
+    'Integration-only adversary that removes a non-first locator-referenced sequence fragment.';
+CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_copy_primary_index_shape(
+    target_table regclass,
+    donor_index regclass,
+    shape text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'bioseq_internal_rev3_test_copy_primary_index_shape'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.rev3_test_copy_primary_index_shape(regclass, regclass, text)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.rev3_test_copy_primary_index_shape(
+        regclass, regclass, text) IS
+    'Integration-only transactional pg_index predicate/expression corruption seam.';
+CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_rewrite_source_checksum(
+    target_table regclass,
+    query_key bigint,
+    xor_mask bigint)
+RETURNS void
+AS 'MODULE_PATHNAME', 'bioseq_internal_rev3_test_rewrite_source_checksum'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.rev3_test_rewrite_source_checksum(regclass, bigint, bigint)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.rev3_test_rewrite_source_checksum(
+        regclass, bigint, bigint) IS
+    'Integration-only self-consistent head/manifest source-checksum corruption seam.';
+CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_session_failure(
+    source_table regclass,
+    index_name text,
+    query_key bigint,
+    failure_mode text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'bioseq_internal_rev3_test_session_failure'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.rev3_test_session_failure(regclass, text, bigint, text)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.rev3_test_session_failure(
+        regclass, text, bigint, text) IS
+    'Integration-only read-session state, permit-denial, and cleanup seam.';
+
+-- Integration-only, backend-local proof for the lazy-load DROP EXTENSION
+-- path.  The counters are observational and monotonic; they do not participate
+-- in teardown classification and intentionally survive DROP/CREATE in a
+-- backend that has already loaded the library.
+CREATE OR REPLACE FUNCTION bioseq_internal.teardown_diagnostics(
+    OUT lock_fallback_classifications bigint,
+    OUT missing_relation_observations bigint)
+RETURNS record
+AS 'MODULE_PATHNAME', 'bioseq_internal_teardown_diagnostics'
+LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.teardown_diagnostics() FROM PUBLIC;
+COMMENT ON FUNCTION bioseq_internal.teardown_diagnostics() IS
+    'Integration-only backend-local counters proving lazy DROP EXTENSION lock classification and absence of stale relation revisits.';
+
+-- A revoked integration seam that constructs planner nodes in C and invokes
+-- the exact production BatchJoin ProjectionPath eligibility guard. Ordinary
+-- SQL cannot reliably keep an unrelated expression at the base projection.
+CREATE OR REPLACE FUNCTION bioseq_internal.batch_join_projection_guard_probe(
+    OUT accepts_exact_helper boolean,
+    OUT rejects_unrelated_phv boolean,
+    OUT rejects_volatile_mixed_expression boolean,
+    OUT preserves_wrapper_cost_owner boolean)
+RETURNS record
+AS 'MODULE_PATHNAME', 'bioseq_internal_batch_join_projection_guard_probe'
+LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.batch_join_projection_guard_probe() FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.batch_join_projection_guard_probe() IS
+    'Integration-only direct proof of the production BatchJoin base ProjectionPath guard and wrapper cost ownership.';
 CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name text, query_key bigint) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION bioseq.column_row_number(rel regclass, ctid tid) RETURNS bigint
@@ -1723,7 +2208,7 @@ COMMENT ON FUNCTION bioseq.create_sample_table(TEXT, INTEGER, BIGINT, TEXT, BIGI
     'Phase C; other alphabets are rejected. Bounded RSS regardless of '
     'sequence_bp_size — fragments stream through insert_sequence_streamed.';
 
--- bioseq.locator_inspect(seq) — returns the v2 locator fields for stub
+-- bioseq.locator_inspect(seq) — returns the v3 locator fields for stub
 -- values, or zeros/inline-padding for non-stub values. Used by the
 -- integration tests to verify per-fragment row counts, total_bp_size, etc.
 CREATE OR REPLACE FUNCTION bioseq.locator_inspect(seq bioseq.seq)
@@ -1734,6 +2219,7 @@ CREATE OR REPLACE FUNCTION bioseq.locator_inspect(seq bioseq.seq)
         num_fragments    BIGINT,
         total_bp_size    BIGINT,
         first_sub_row_no BIGINT,
+        source_epoch     BIGINT,
         total_padding    INT4)
     AS 'MODULE_PATHNAME', 'bioseq_locator_inspect'
     LANGUAGE C IMMUTABLE STRICT;
@@ -1772,7 +2258,7 @@ COMMENT ON FUNCTION bioseq.create_query_target_sample_table(
     'expected to find the query inside the target at exactly '
     '[truth_target_start, truth_target_end).';
 COMMENT ON FUNCTION bioseq.locator_inspect(bioseq.seq) IS
-    'DOC0264 Phase C: returns the v2 locator fields embedded in a bioseq.seq '
+    'DOC0371: returns the v3 locator fields embedded in a bioseq.seq '
     'stub value: (version, bucket_idx, shard_idx, num_fragments, '
     'total_bp_size, first_sub_row_no, total_padding). For inline (non-stub) '
     'values returns zeros for the locator-only fields and the inline '

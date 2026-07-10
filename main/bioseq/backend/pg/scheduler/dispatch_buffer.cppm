@@ -37,6 +37,7 @@ module;
 #include <hwy/highway.h>  // only for HWY_NAMESPACE when naming active-target scheduler types
 #include "common.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -66,6 +67,7 @@ import bioseq.scheduler.dispatch_processor;   // fixed-shape BatchProcessor, hea
 import bioseq.sequences;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.cigar;
+import bioseq.sequences.pipe;
 import bioseq.types.pg_compact_sequence;
 import bioseq.instr;
 import bioseq.storage.manager;                  // DOC0260 §9
@@ -78,8 +80,63 @@ export namespace bioseq::scheduler {
 
 constexpr size_t kDispatchBatchCapacity = 8192;
 
-// Fixed upper bound on a single batch. Matches the TupleDispatchBuffer
-// constructor hint; entries beyond this get truncated with a log line.
+[[nodiscard]] constexpr std::uint64_t extra_broadcast_query_ordinal(
+        const bool per_row_query_mode,
+        const std::size_t batch_size,
+        const std::size_t extra_query_index) noexcept {
+    return per_row_query_mode
+        ? static_cast<std::uint64_t>(batch_size)
+            + static_cast<std::uint64_t>(extra_query_index)
+        : static_cast<std::uint64_t>(extra_query_index) + 1;
+}
+static_assert(extra_broadcast_query_ordinal(false, 2, 0) == 1);
+static_assert(extra_broadcast_query_ordinal(true, 2, 0) == 2);
+static_assert(
+    std::uint64_t{1} != extra_broadcast_query_ordinal(true, 2, 0),
+    "per-row primary row 1 and the first extra broadcast query must differ");
+
+enum class CursorBoundary : std::uint8_t {
+    value,
+    exact_eof,
+    corrupt,
+};
+
+[[nodiscard]] constexpr CursorBoundary classify_output_cursor(
+        const std::int64_t position,
+        const std::size_t size) noexcept {
+    if (position < 0) return CursorBoundary::corrupt;
+    const auto unsigned_position = static_cast<std::uint64_t>(position);
+    if (unsigned_position == size) return CursorBoundary::exact_eof;
+    return unsigned_position < size
+        ? CursorBoundary::value
+        : CursorBoundary::corrupt;
+}
+
+[[nodiscard]] constexpr CursorBoundary classify_output_cursor(
+        const std::size_t position,
+        const std::size_t size) noexcept {
+    if (position == size) return CursorBoundary::exact_eof;
+    return position < size
+        ? CursorBoundary::value
+        : CursorBoundary::corrupt;
+}
+
+static_assert(classify_output_cursor(std::int64_t{0}, 1)
+    == CursorBoundary::value);
+static_assert(classify_output_cursor(std::int64_t{1}, 1)
+    == CursorBoundary::exact_eof);
+static_assert(classify_output_cursor(std::int64_t{-1}, 1)
+    == CursorBoundary::corrupt);
+static_assert(classify_output_cursor(std::int64_t{2}, 1)
+    == CursorBoundary::corrupt);
+static_assert(classify_output_cursor(std::size_t{0}, 0)
+    == CursorBoundary::exact_eof);
+static_assert(classify_output_cursor(std::size_t{2}, 1)
+    == CursorBoundary::corrupt);
+
+// Fixed upper bound on one physical dispatch. The custom scan rolls over at
+// this boundary, drains every result, clears the completed physical batch and
+// then resumes the same source scan. No source tuple may be truncated.
 class TupleDispatchBuffer {
 public:
     /*
@@ -259,7 +316,18 @@ public:
 
     struct NextOutput {
         BufferedScanEntry* entry;
+        std::uint64_t query_ordinal;
         const ::bioseq::simd::HWY_NAMESPACE::MatchResult* match;
+    };
+
+    struct JoinQueryRef {
+        std::uint64_t ordinal = 0;
+        TupleTableSlot* query_slot = nullptr;
+    };
+
+    struct JoinOutputCursor {
+        std::size_t query_index = 0;
+        std::size_t match_index = 0;
     };
 
 private:
@@ -276,12 +344,14 @@ private:
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params base_params{};
 
     /*
-     * Controls whether submit_scan will attempt an index_sidecar lookup.
-     * Captured at configure time so the submit_scan hot path doesn't touch
-     * the GUC. The caller (custom scan) is expected to keep this value in
-     * sync with bioseq.read_sequence_index.
+     * Effective per-scan persisted-payload read gate. `allow` preserves the
+     * captured bioseq.read_sequence_index value; the two explicit contracts
+     * override it. Payload probes happen later in the typed scanner path,
+     * never in submit_scan.
      */
     bool read_sequence_index_active = false;
+    bioseq::indexing::IndexReadRequirement index_read_requirement =
+        bioseq::indexing::IndexReadRequirement::allow;
 
     /*
      * The OID of the relation being scanned. Only used to key into
@@ -296,12 +366,41 @@ private:
      * Recomputed" percentage from runtime truth instead of the
      * plan-time estimate.
      */
-    ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats last_stats{};
+    ::bioseq::pipeline_stats::PipelineExecutionStats last_stats{};
 
     std::vector<BufferedScanEntry> buffered_entries;
     std::map<int32_t, std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>> match_map;
     std::vector<OutputCursor> output_cursors;
     int output_position = -1;
+
+    bool join_mode = false;
+    AttrNumber join_target_storage_seq_attno = InvalidAttrNumber;
+    AttrNumber join_target_slot_seq_resno = InvalidAttrNumber;
+    AttrNumber join_target_slot_rowno_resno = InvalidAttrNumber;
+    AttrNumber join_query_slot_seq_resno = InvalidAttrNumber;
+    std::vector<JoinQueryRef> join_queries{};
+    std::map<std::uint64_t,
+        std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>>
+        join_match_map{};
+    std::vector<JoinOutputCursor> join_output_cursors{};
+    std::size_t join_output_position = 0;
+    bool join_target_active = false;
+    bool join_target_prepared = false;
+    bool join_target_outcomes_recorded = false;
+	bool join_prepared_union_outcomes_recorded = false;
+	bool join_prepared_build_checksum_recorded = false;
+	::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget
+		join_cpu_prepared_target{};
+    std::array<const pgseq_t*, kDispatchBatchCapacity> join_target_hdrs{};
+    std::array<const pgseq_t*, kDispatchBatchCapacity> join_query_hdrs{};
+    std::array<int32_t, kDispatchBatchCapacity> join_query_ids{};
+    std::array<pgseq_t*, kDispatchBatchCapacity> join_query_detoast_copies{};
+    std::unique_ptr<
+        ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext>
+        join_scanner_pg_ctx{};
+    std::map<int32_t,
+        std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>>
+        join_result_scratch{};
 
     /*
      * Additional Const-only mmsearch quals that share the primary
@@ -359,18 +458,28 @@ public:
      * the first submit_scan.
      */
     void configure_params(const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+                          bioseq::indexing::IndexReadRequirement read_requirement,
                           bool read_sequence_index,
                           Oid scan_user_relid,
                           Oid scan_user_database_oid,
                           Oid scan_user_tablespace_oid,
                           Oid scan_user_main_relfilenode) {
         base_params                  = params;
-        read_sequence_index_active   = read_sequence_index;
+        index_read_requirement       = read_requirement;
+        read_sequence_index_active   =
+            read_requirement
+                    == bioseq::indexing::IndexReadRequirement::require_absent
+                ? false
+                : read_requirement
+                    == bioseq::indexing::IndexReadRequirement::
+                        require_compatible_persisted
+                ? true
+                : read_sequence_index;
         user_relid                   = scan_user_relid;
         user_main_database_oid       = scan_user_database_oid;
         user_main_tablespace_oid     = scan_user_tablespace_oid;
         user_main_relfilenode        = scan_user_main_relfilenode;
-        last_stats                   = ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats{};
+        last_stats                   = ::bioseq::pipeline_stats::PipelineExecutionStats{};
         /*
          * DOC0260 §9.4 — the payload arena is parented on CurrentMemoryContext
          * at BeginCustomScan time (the executor per-query context), so the
@@ -386,7 +495,7 @@ public:
     }
 
     [[nodiscard]] const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& base_aligner_params() const { return base_params; }
-    [[nodiscard]] const ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats& execution_stats() const { return last_stats; }
+    [[nodiscard]] const ::bioseq::pipeline_stats::PipelineExecutionStats& execution_stats() const { return last_stats; }
     [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
 
     /* DOC0260 §9.6 — per-scan storage-bucket EXPLAIN counters. */
@@ -495,6 +604,232 @@ public:
                 per_row_self_alignment,
                 static_cast<unsigned>(alphabet_code),
                 static_cast<unsigned>(storage_unit_byte_width));
+    }
+
+    /* Configure the narrow two-child BioseqBatchJoin seam. */
+    void configure_mmsearch_join(
+            const Oid target_relation_oid,
+            const AttrNumber target_storage_seq_attno,
+            const AttrNumber target_slot_seq_resno,
+            const AttrNumber target_slot_rowno_resno,
+            const AttrNumber query_slot_seq_resno,
+            std::string target_column_name,
+            const std::uint8_t alphabet_code,
+            const std::uint8_t storage_unit_byte_width) {
+        if (!OidIsValid(target_relation_oid)
+            || target_storage_seq_attno <= 0
+            || target_slot_seq_resno <= 0
+            || target_slot_rowno_resno <= 0
+            || query_slot_seq_resno <= 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("BioseqBatchJoin received invalid relation/attribute metadata")));
+        }
+        if (OidIsValid(user_relid) && user_relid != target_relation_oid) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("BioseqBatchJoin target relation disagrees with dispatch configuration")));
+        }
+        user_relid = target_relation_oid;
+        join_mode = true;
+        join_target_storage_seq_attno = target_storage_seq_attno;
+        join_target_slot_seq_resno = target_slot_seq_resno;
+        join_target_slot_rowno_resno = target_slot_rowno_resno;
+        join_query_slot_seq_resno = query_slot_seq_resno;
+        mmsearch_context = MmsearchContext{};
+        mmsearch_context.seq_attno = target_slot_seq_resno;
+        mmsearch_context.primary_key_attno = InvalidAttrNumber;
+        mmsearch_context.column_name = std::move(target_column_name);
+        mmsearch_context.alphabet_code = alphabet_code;
+        mmsearch_context.storage_unit_byte_width = storage_unit_byte_width;
+        mmsearch_context.raw_query_alphabet_code = alphabet_code;
+        mmsearch_context.raw_query_storage_unit_byte_width = storage_unit_byte_width;
+        mmsearch_context.active = true;
+        reset_join_runtime_for_rescan();
+    }
+
+    /* Pin/copy one locator-passthrough target for all query batches. */
+    void begin_join_target(TupleTableSlot* target_slot) {
+        if (!join_mode || target_slot == nullptr || !join_queries.empty()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("BioseqBatchJoin target lifecycle is invalid")));
+        }
+        bool sequence_is_null = true;
+        const Datum sequence_datum = slot_getattr(
+            target_slot, join_target_slot_seq_resno, &sequence_is_null);
+        if (sequence_is_null) {
+            ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("BioseqBatchJoin locator target sequence is NULL")));
+        }
+        auto target_sequence = bioseq::pg_utils::detoast_as<pgseq_t>(
+            bioseq::pg_utils::pg_datum::from_raw(sequence_datum));
+        const bool is_locator =
+            bioseq::storage::is_locator_stub(target_sequence.ptr);
+        target_sequence.free_if_copy();
+        if (!is_locator) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqBatchJoin target provider did not return a locator stub"),
+                 errdetail("locator passthrough is mandatory; materialized target values are not accepted by this executor")));
+        }
+        clear_slots();
+        submit_scan(target_slot);
+        if (buffered_entries.size() != 1) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("BioseqBatchJoin failed to retain exactly one target")));
+        }
+        bool rowno_is_null = true;
+        const Datum rowno_datum = slot_getattr(
+            target_slot, join_target_slot_rowno_resno, &rowno_is_null);
+        if (rowno_is_null) {
+            ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("BioseqBatchJoin hidden target row number is NULL")));
+        }
+        const std::int64_t rowno = DatumGetInt64(rowno_datum);
+        if (rowno < 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("BioseqBatchJoin hidden target row number is negative")));
+        }
+        buffered_entries.front().sequence_rowno = rowno;
+        join_target_active = true;
+        join_target_prepared = false;
+        join_target_outcomes_recorded = false;
+		join_prepared_union_outcomes_recorded = false;
+		join_prepared_build_checksum_recorded = false;
+		join_cpu_prepared_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+		join_cpu_prepared_target.target_rowno = rowno;
+    }
+
+    void prepare_join_target_queries(std::span<const JoinQueryRef> all_queries) {
+        if (!join_target_active || join_target_prepared) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("BioseqBatchJoin target preparation is out of order")));
+        }
+        if (base_params.vulkan_enabled) {
+            ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("Vulkan BioseqBatchJoin locator execution remains fail closed"),
+                 errdetail("CPU prepared-target construction is forbidden for a Vulkan-selected statement")));
+        }
+        std::vector<const pgseq_t*> query_headers;
+        std::vector<pgseq_t*> detoast_copies;
+        query_headers.reserve(all_queries.size());
+        detoast_copies.reserve(all_queries.size());
+        std::uint64_t previous_ordinal = 0;
+        bool first = true;
+        for (const JoinQueryRef& query : all_queries) {
+            if (query.query_slot == nullptr
+                || query.ordinal
+                    > static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)())
+                || (!first && query.ordinal <= previous_ordinal)) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("BioseqBatchJoin query references are invalid or unordered")));
+            }
+            bool query_is_null = true;
+            const Datum query_datum = slot_getattr(
+                query.query_slot, join_query_slot_seq_resno, &query_is_null);
+            if (query_is_null) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                     errmsg("BioseqBatchJoin query sequence is NULL")));
+            }
+			pgseq_t* query_header = reinterpret_cast<pgseq_t*>(
+				PG_DETOAST_DATUM(query_datum));
+			if (bioseq::storage::is_locator_stub(query_header)) {
+				if (reinterpret_cast<void*>(query_header)
+					!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
+					pfree(query_header);
+				}
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("BioseqBatchJoin query preparation received a locator stub")));
+			}
+			if (query_header->alphabet_code != mmsearch_context.alphabet_code
+				|| query_header->storage_unit_byte_width
+					!= mmsearch_context.storage_unit_byte_width) {
+				if (reinterpret_cast<void*>(query_header)
+					!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
+					pfree(query_header);
+				}
+				ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("BioseqBatchJoin query typmod changed during preparation")));
+			}
+			query_headers.push_back(query_header);
+			if (reinterpret_cast<void*>(query_header)
+				!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
+				detoast_copies.push_back(query_header);
+			}
+            previous_ordinal = query.ordinal;
+            first = false;
+        }
+		const BufferedScanEntry& target = buffered_entries.front();
+		const std::uint64_t target_bp_size = target.seq_loc.has_value()
+			? static_cast<std::uint64_t>(target.seq_loc->total_bp_size)
+			: (target.seq_hdr() == nullptr
+				? 0u : static_cast<std::uint64_t>(target.seq_hdr()->bp_size));
+		if (read_sequence_index_active) {
+			MemoryContext saved_context = CurrentMemoryContext;
+			PG_TRY();
+			{
+				processor.prepare_cpu_shared_query_unions(
+					mmsearch_context.alphabet_code,
+					mmsearch_context.storage_unit_byte_width,
+					target_bp_size,
+					query_headers,
+					base_params,
+					/*include_persisted_parameter_group=*/true,
+					join_cpu_prepared_target);
+			}
+			PG_CATCH();
+			{
+				MemoryContextSwitchTo(saved_context);
+				for (pgseq_t* copy : detoast_copies) {
+					pfree(copy);
+				}
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+		} else {
+			/* no_index must retain the requested all-SIMD nthash pipeline.
+			 * Persistent builders currently expose only Scalar/Vulkan target
+			 * sketch backends, so constructing a CPU prepared index here would be
+			 * a silent scalar fallback and a critical acceptance failure. */
+			join_cpu_prepared_target.target_bp_size = target_bp_size;
+			join_cpu_prepared_target.query_count = query_headers.size();
+			join_cpu_prepared_target.unions_ready = false;
+			bioseq_log<DBG>("[bioseq] pg: BatchJoin no_index prepared target disabled: ExactSimd target-sketch backend is unavailable");
+		}
+		for (pgseq_t* copy : detoast_copies) {
+			pfree(copy);
+		}
+        join_target_prepared = true;
+    }
+
+    void set_join_query_batch(std::span<const JoinQueryRef> queries) {
+        if (!join_target_prepared
+            || join_output_position != join_output_cursors.size()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("BioseqBatchJoin query batch lifecycle is invalid")));
+        }
+        join_output_cursors.clear();
+        join_match_map.clear();
+        if (queries.size() > kDispatchBatchCapacity) {
+            ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("BioseqBatchJoin query batch exceeds dispatch capacity")));
+        }
+        join_queries.assign(queries.begin(), queries.end());
+        join_output_position = 0;
     }
 
     /*
@@ -635,6 +970,13 @@ public:
         if (scan_slot == nullptr) {
             bioseq_log<DBG>("[bioseq] pg: submit_scan received null scan_slot; skipping");
             return;
+        }
+        if (buffered_entries.size() >= kDispatchBatchCapacity) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq dispatch buffer capacity invariant was violated"),
+                 errdetail("buffered=%zu capacity=%zu",
+                    buffered_entries.size(), kDispatchBatchCapacity)));
         }
 
         BufferedScanEntry entry{};
@@ -790,6 +1132,11 @@ public:
         buffered_entries.push_back(std::move(entry));
     }
 
+    /* True exactly when the current physical buffer must be dispatched. */
+    [[nodiscard]] bool ready_to_dispatch() const noexcept {
+        return buffered_entries.size() == kDispatchBatchCapacity;
+    }
+
     /*
      * DOC0260 §9.3 — per-bucket bulk hydration of one seq column. Groups the
      * buffered entries that captured a locator for `column_attno` by
@@ -835,9 +1182,7 @@ public:
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.storage_unit_byte_width));
         }
-        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
-            ? kDispatchBatchCapacity
-            : buffered_entries.size();
+        const size_t batch_size = buffered_entries.size();
         bool any = false;
         for (const size_t i : rows) {
             if (i >= batch_size) {
@@ -942,9 +1287,7 @@ public:
      * buffered slot's tts_values for `SELECT seq` resolution).
      */
     void hydrate_locators_by_bucket(std::span<const size_t> rows) {
-        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
-            ? kDispatchBatchCapacity
-            : buffered_entries.size();
+        const size_t batch_size = buffered_entries.size();
         bool any_locator = false;
         for (const size_t i : rows) {
             if (i >= batch_size) {
@@ -992,6 +1335,355 @@ public:
         bioseq::storage::destroy_seq_caches(cache);
     }
 
+    [[nodiscard]] bool run_join_query_batch_and_build_cursors() {
+        if (!join_mode || !join_target_prepared || !join_target_active) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("BioseqBatchJoin query batch ran before target preparation")));
+        }
+        if (join_queries.empty()) {
+            last_stats = ::bioseq::pipeline_stats::PipelineExecutionStats{};
+            join_output_cursors.clear();
+            join_output_position = 0;
+            return false;
+        }
+        if (join_queries.size() > kDispatchBatchCapacity
+            || buffered_entries.size() != 1) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("BioseqBatchJoin dispatch shape is invalid")));
+        }
+
+        bioseq::parallelism::pg::backend_sync();
+        last_stats = ::bioseq::pipeline_stats::PipelineExecutionStats{};
+        const std::size_t batch_size = join_queries.size();
+        join_target_hdrs.fill(nullptr);
+        join_query_hdrs.fill(nullptr);
+        join_query_ids.fill(0);
+        join_query_detoast_copies.fill(nullptr);
+        join_result_scratch.clear();
+        if (!join_scanner_pg_ctx) {
+            join_scanner_pg_ctx = std::make_unique<
+                ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+                    ScannerPgContext>();
+        }
+        *join_scanner_pg_ctx =
+            ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+                ScannerPgContext{};
+        bioseq::storage::seq_caches* scanner_pg_cache = nullptr;
+        auto ticket = bioseq::parallelism::pg::begin_batch(
+            static_cast<std::int64_t>(batch_size));
+		auto prepared_counter_totals = [this] {
+			std::array<std::uint64_t, 3> totals{};
+			for (const auto& group : join_cpu_prepared_target.groups) {
+				totals[0] += group.target_index_builds;
+				totals[1] += group.target_index_reuses;
+				totals[2] += group.duplicate_build_attempts;
+			}
+			return totals;
+		};
+		const auto prepared_before = prepared_counter_totals();
+        bool completed = false;
+        PG_TRY();
+        {
+            BufferedScanEntry& target = buffered_entries.front();
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                const JoinQueryRef& query = join_queries[i];
+                if (query.query_slot == nullptr
+                    || query.ordinal
+                        > static_cast<std::uint64_t>(
+                            (std::numeric_limits<std::int32_t>::max)())) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("BioseqBatchJoin query reference is invalid")));
+                }
+                bool query_is_null = true;
+                const Datum query_datum = slot_getattr(
+                    query.query_slot, join_query_slot_seq_resno, &query_is_null);
+                if (query_is_null) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                         errmsg("BioseqBatchJoin query sequence is NULL")));
+                }
+                pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
+                    PG_DETOAST_DATUM(query_datum));
+                if (bioseq::storage::is_locator_stub(query_hdr)) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("BioseqBatchJoin query child returned a locator stub"),
+                         errhint("The bounded query child must materialize its compact sequence before join dispatch.")));
+                }
+                if (query_hdr->alphabet_code != mmsearch_context.alphabet_code
+                    || query_hdr->storage_unit_byte_width
+                        != mmsearch_context.storage_unit_byte_width) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                         errmsg("BioseqBatchJoin query typmod changed after planning")));
+                }
+                if (reinterpret_cast<void*>(query_hdr)
+                    != reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
+                    join_query_detoast_copies[i] = query_hdr;
+                }
+                join_query_hdrs[i] = query_hdr;
+                join_target_hdrs[i] = target.seq_hdr();
+                join_query_ids[i] = static_cast<std::int32_t>(query.ordinal);
+            }
+
+            if (batch_payload_ctx == nullptr) {
+                batch_payload_ctx = AllocSetContextCreate(
+                    CurrentMemoryContext,
+                    "TupleDispatchBuffer join payload arena",
+                    ALLOCSET_DEFAULT_SIZES);
+            }
+            scanner_pg_cache = bioseq::storage::alloc_seq_caches(
+                batch_payload_ctx);
+            scanner_pg_cache->side = bioseq::storage::seq_caches::Side::Read;
+            scanner_pg_cache->lock_mode = AccessShareLock;
+            scanner_pg_cache->read_state_mctx = batch_payload_ctx;
+            scanner_pg_cache->main_database_oid = user_main_database_oid;
+            scanner_pg_cache->main_tablespace_oid = user_main_tablespace_oid;
+            scanner_pg_cache->main_relfilenode = user_main_relfilenode;
+
+            auto& scanner_pg_ctx = *join_scanner_pg_ctx;
+            scanner_pg_ctx.db_oid = user_main_database_oid;
+            scanner_pg_ctx.tablespace_oid = user_main_tablespace_oid;
+            scanner_pg_ctx.main_relfilenode = user_main_relfilenode;
+            scanner_pg_ctx.mmsearch_seq_attno =
+                static_cast<std::int16_t>(join_target_storage_seq_attno);
+            scanner_pg_ctx.caches = scanner_pg_cache;
+            scanner_pg_ctx.parent_mctx = batch_payload_ctx;
+            scanner_pg_ctx.user_relid = user_relid;
+            scanner_pg_ctx.index_read_requirement = index_read_requirement;
+            scanner_pg_ctx.read_index_active = read_sequence_index_active;
+            scanner_pg_ctx.index_async_persist_active =
+                bioseq_index_async_persist;
+            scanner_pg_ctx.recompute_async_persist_active =
+                bioseq_recompute_async_persist;
+            scanner_pg_ctx.active_index = std::string{
+                bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX};
+            if (OidIsValid(user_relid)) {
+                scanner_pg_ctx.active_index =
+                    bioseq::storage::indexing::resolve_active_read_index(
+                        user_relid,
+                        user_main_relfilenode,
+                        static_cast<std::int16_t>(
+                            join_target_storage_seq_attno));
+            }
+            scanner_pg_ctx.explicit_query_ordinals = true;
+            scanner_pg_ctx.shared_target_batch = true;
+            scanner_pg_ctx.record_target_operational_outcomes =
+                !join_target_outcomes_recorded;
+			scanner_pg_ctx.cpu_prepared_target =
+				join_cpu_prepared_target.unions_ready
+					? &join_cpu_prepared_target : nullptr;
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                scanner_pg_ctx.target_locators[i] = target.seq_loc;
+                scanner_pg_ctx.target_rownos[i] = target.sequence_rowno;
+                scanner_pg_ctx.query_ordinals[i] = join_queries[i].ordinal;
+            }
+
+            join_result_scratch = processor.process_sequences(
+                batch_size,
+                mmsearch_context.alphabet_code,
+                mmsearch_context.storage_unit_byte_width,
+                nullptr,
+                &join_query_hdrs,
+                join_target_hdrs,
+                join_query_ids,
+                base_params,
+                ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::primary,
+                0,
+                last_stats,
+                &scanner_pg_ctx);
+			const auto prepared_after = prepared_counter_totals();
+			if (prepared_after[0] < prepared_before[0]
+				|| prepared_after[1] < prepared_before[1]
+				|| prepared_after[2] < prepared_before[2]
+				|| join_cpu_prepared_target.physical_target_index_reads
+					!= prepared_after[0]) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqBatchJoin prepared-target counters are inconsistent")));
+			}
+			auto& operational = last_stats.operational;
+			operational.cpu_prepared_index_builds +=
+				prepared_after[0] - prepared_before[0];
+			operational.cpu_prepared_index_reuses +=
+				prepared_after[1] - prepared_before[1];
+			operational.cpu_prepared_duplicate_build_attempts +=
+				prepared_after[2] - prepared_before[2];
+			if (join_cpu_prepared_target.unions_ready
+				&& !join_cpu_prepared_target.groups.empty()
+				&& !join_prepared_union_outcomes_recorded) {
+				operational.cpu_prepared_unique_keys =
+					join_cpu_prepared_target.total_unique_keys;
+				operational.cpu_prepared_key_set_checksum =
+					join_cpu_prepared_target.key_set_checksum;
+				operational.cpu_prepared_key_set_checksum_present = true;
+				join_prepared_union_outcomes_recorded = true;
+			}
+			const bool every_group_built =
+				!join_cpu_prepared_target.groups.empty()
+				&& std::all_of(
+					join_cpu_prepared_target.groups.begin(),
+					join_cpu_prepared_target.groups.end(),
+					[](const auto& group) noexcept {
+						return group.target_index != nullptr
+							&& group.build_set_checksum_present
+							&& group.build_set_checksum
+								== group.key_set_checksum;
+					});
+			if (every_group_built
+				&& !join_prepared_build_checksum_recorded) {
+				operational.cpu_prepared_build_set_checksum =
+					join_cpu_prepared_target.key_set_checksum;
+				operational.cpu_prepared_build_set_checksum_present = true;
+				join_prepared_build_checksum_recorded = true;
+			}
+            scanner_pg_cache->close_all(/*commit=*/false);
+            bioseq::storage::destroy_seq_caches(scanner_pg_cache);
+            scanner_pg_cache = nullptr;
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                if (join_query_detoast_copies[i] != nullptr) {
+                    pfree(join_query_detoast_copies[i]);
+                    join_query_detoast_copies[i] = nullptr;
+                }
+            }
+
+            join_match_map.clear();
+            join_output_cursors.clear();
+            for (const auto& [result_key, matches] : join_result_scratch) {
+                (void)matches;
+                const bool known = std::any_of(
+                    join_queries.begin(), join_queries.end(),
+                    [result_key](const JoinQueryRef& query) noexcept {
+                        return query.ordinal
+                            == static_cast<std::uint64_t>(result_key);
+                    });
+                if (result_key < 0 || !known) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("BioseqBatchJoin processor returned an unknown query id"),
+                         errdetail("query_id=%d", result_key)));
+                }
+            }
+            for (std::size_t query_index = 0;
+                 query_index < join_queries.size(); ++query_index) {
+                const std::uint64_t ordinal = join_queries[query_index].ordinal;
+                auto found = join_result_scratch.find(
+                    static_cast<std::int32_t>(ordinal));
+                if (found == join_result_scratch.end()) {
+                    continue;
+                }
+                auto [inserted, did_insert] = join_match_map.emplace(
+                    ordinal, std::move(found->second));
+                if (!did_insert) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("BioseqBatchJoin produced duplicate query ordinals")));
+                }
+                for (std::size_t match_index = 0;
+                     match_index < inserted->second.size(); ++match_index) {
+                    const auto& match = inserted->second[match_index];
+                    if (base_params.do_cigar
+                        && (!match.has_cigar || match.cigar.empty())) {
+                        continue;
+                    }
+                    join_output_cursors.push_back(
+                        JoinOutputCursor{query_index, match_index});
+                }
+            }
+            join_output_position = 0;
+            join_result_scratch.clear();
+            join_target_outcomes_recorded = true;
+            completed = true;
+        }
+        PG_CATCH();
+        {
+            if (scanner_pg_cache != nullptr) {
+                scanner_pg_cache->close_all(/*commit=*/false);
+                bioseq::storage::destroy_seq_caches(scanner_pg_cache);
+                scanner_pg_cache = nullptr;
+            }
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                if (join_query_detoast_copies[i] != nullptr) {
+                    pfree(join_query_detoast_copies[i]);
+                    join_query_detoast_copies[i] = nullptr;
+                }
+            }
+            join_result_scratch.clear();
+            bioseq::parallelism::pg::end_batch(ticket, false);
+            PG_RE_THROW();
+        }
+        PG_END_TRY();
+        bioseq::parallelism::pg::end_batch(ticket, completed);
+        return true;
+    }
+
+    void finish_join_target() {
+        if (!join_mode) {
+            return;
+        }
+		std::uint64_t builds = 0;
+		std::uint64_t reuses = 0;
+		std::uint64_t duplicate_build_attempts = 0;
+		std::uint64_t built_groups = 0;
+		for (const auto& group : join_cpu_prepared_target.groups) {
+			builds += group.target_index_builds;
+			reuses += group.target_index_reuses;
+			duplicate_build_attempts += group.duplicate_build_attempts;
+			built_groups += group.target_index != nullptr ? 1u : 0u;
+		}
+		if (built_groups != 0
+			&& (builds != built_groups
+				|| builds != join_cpu_prepared_target.physical_target_index_reads
+				|| builds + reuses != join_cpu_prepared_target.query_count
+				|| duplicate_build_attempts != 0
+				|| !join_prepared_build_checksum_recorded)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin target-wide CPU preparation equation failed"),
+				 errdetail("builds=%llu built_groups=%llu reads=%llu reuses=%llu queries=%llu duplicate_build_attempts=%llu checksum_published=%s",
+					static_cast<unsigned long long>(builds),
+					static_cast<unsigned long long>(built_groups),
+					static_cast<unsigned long long>(
+						join_cpu_prepared_target.physical_target_index_reads),
+					static_cast<unsigned long long>(reuses),
+					static_cast<unsigned long long>(
+						join_cpu_prepared_target.query_count),
+					static_cast<unsigned long long>(duplicate_build_attempts),
+					join_prepared_build_checksum_recorded ? "true" : "false")));
+		}
+        join_queries.clear();
+        join_match_map.clear();
+        join_output_cursors.clear();
+        join_output_position = 0;
+        join_target_active = false;
+        join_target_prepared = false;
+        join_target_outcomes_recorded = false;
+		join_prepared_union_outcomes_recorded = false;
+		join_prepared_build_checksum_recorded = false;
+		join_cpu_prepared_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+        clear_slots();
+    }
+
+    void reset_join_runtime_for_rescan() {
+        join_queries.clear();
+        join_match_map.clear();
+        join_output_cursors.clear();
+        join_output_position = 0;
+        join_target_active = false;
+        join_target_prepared = false;
+        join_target_outcomes_recorded = false;
+		join_prepared_union_outcomes_recorded = false;
+		join_prepared_build_checksum_recorded = false;
+		join_cpu_prepared_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+        clear_slots();
+        last_stats = ::bioseq::pipeline_stats::PipelineExecutionStats{};
+    }
+
     /*
      * Batch-phase transition. Called when the access method returns
      * TupIsNull. Invokes BatchProcessor::process_sequences on the
@@ -1001,11 +1693,25 @@ public:
      * absent from the map). The query/target type dispatch happens
      * inside process_sequences via pgseq_t::dispatch_instance.
      */
-    void run_batch_and_build_cursors() {
+    [[nodiscard]] bool run_batch_and_build_cursors() {
         bioseq::parallelism::pg::backend_sync();
-        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
-            ? kDispatchBatchCapacity
-            : buffered_entries.size();
+        if (buffered_entries.size() > kDispatchBatchCapacity) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq attempted to dispatch an oversized tuple buffer"),
+                 errdetail("buffered=%zu capacity=%zu",
+                    buffered_entries.size(), kDispatchBatchCapacity)));
+        }
+        const size_t batch_size = buffered_entries.size();
+        /*
+         * DOC0371 \u00a75.2: this value is one completed dispatch-buffer delta.
+         * Waves and stacked extra queries below merge into it, but a later
+         * ReScan/batch must never replay an earlier delta into the statement
+         * collector.
+         */
+        last_stats = ::bioseq::pipeline_stats::PipelineExecutionStats{};
+        const bool executed_nonempty_buffer =
+            mmsearch_context.active && batch_size != 0;
         const std::int64_t scheduled_queries =
             static_cast<std::int64_t>(batch_size)
             * static_cast<std::int64_t>(1 + extra_query_varlenas.size());
@@ -1023,6 +1729,7 @@ public:
         }
         PG_END_TRY();
         bioseq::parallelism::pg::end_batch(ticket, completed);
+        return executed_nonempty_buffer;
     }
 
     void run_batch_and_build_cursors_impl() {
@@ -1036,13 +1743,7 @@ public:
         std::array<const pgseq_t*, kDispatchBatchCapacity> per_row_query_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
 
-        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
-            ? kDispatchBatchCapacity
-            : buffered_entries.size();
-        if (buffered_entries.size() > kDispatchBatchCapacity) {
-            bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer batch overflow {} > {}; tail truncated",
-                    buffered_entries.size(), kDispatchBatchCapacity);
-        }
+        const size_t batch_size = buffered_entries.size();
         if (!mmsearch_context.active || batch_size == 0) {
             match_map.clear();
             output_cursors.clear();
@@ -1185,8 +1886,6 @@ public:
                 per_row_mode(),
                 mmsearch_context.recompute_due_to_alphabet_mismatch);
 
-        last_stats = ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats{};
-
         // DOC0264 §9.2 / DOC0274 — wire scanner_pg into the dispatch loop.
         // Allocates a fresh seq_caches for scanner_pg's PG-backed reads.
         // Lives in batch_payload_ctx so palloc'd state survives the call.
@@ -1225,6 +1924,7 @@ public:
             scanner_pg_ctx.target_rownos[i] = buffered_entries[i].sequence_rowno;
         }
         scanner_pg_ctx.user_relid        = user_relid;
+        scanner_pg_ctx.index_read_requirement = index_read_requirement;
         scanner_pg_ctx.read_index_active = read_sequence_index_active
             && !mmsearch_context.recompute_due_to_alphabet_mismatch;
         scanner_pg_ctx.index_async_persist_active = bioseq_index_async_persist;
@@ -1237,6 +1937,10 @@ public:
         // the transient MPF/MPS index shape without reading stored chunks.
         scanner_pg_ctx.active_index =
             std::string{bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX};
+        // The active-policy catalog row selects the transient MPF/MPS shape
+        // even when payload reads are forbidden. Resolving policy metadata is
+        // not a persisted target-index payload probe and must not mutate the
+        // existing no-index algorithm contract.
         if (OidIsValid(user_relid)) {
             scanner_pg_ctx.active_index = bioseq::storage::indexing::resolve_active_read_index(
                 user_relid, user_main_relfilenode,
@@ -1252,6 +1956,8 @@ public:
             [&scanner_pg_ctx] {
             scanner_pg_ctx.target_locators.fill(std::nullopt);
             scanner_pg_ctx.target_rownos.fill(-1);
+            scanner_pg_ctx.target_index_sources.fill(
+                ::bioseq::pipeline_stats::TargetIndexSource::none);
         };
         auto install_scanner_wave =
             [this, &scanner_pg_ctx](std::span<const size_t> rows) {
@@ -1279,12 +1985,8 @@ public:
             return bytes;
         };
         auto merge_stats =
-            [this](const ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats& wave_stats) {
-            last_stats.targets_considered += wave_stats.targets_considered;
-            last_stats.targets_with_prebuilt_index += wave_stats.targets_with_prebuilt_index;
-            last_stats.targets_recomputed_minimizers += wave_stats.targets_recomputed_minimizers;
-            last_stats.last_effective_params = wave_stats.last_effective_params;
-            last_stats.gpu.merge(wave_stats.gpu);
+            [this](const ::bioseq::pipeline_stats::PipelineExecutionStats& wave_stats) {
+            last_stats.merge(wave_stats);
         };
 
         match_map.clear();
@@ -1312,7 +2014,7 @@ public:
             refresh_row_arrays(rows);
             install_scanner_wave(rows);
 
-            ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats wave_stats{};
+            ::bioseq::pipeline_stats::PipelineExecutionStats wave_stats{};
             std::map<int32_t, std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>> wave_match_map;
             if (per_row_mode()) {
                 wave_match_map = processor.process_sequences(
@@ -1323,6 +2025,8 @@ public:
                     &per_row_query_hdrs,
                     target_hdrs, query_ids,
                     base_params,
+                    ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::primary,
+                    0,
                     wave_stats,
                     scanner_pg_arg);
             } else {
@@ -1334,6 +2038,8 @@ public:
                     nullptr,
                     target_hdrs, query_ids,
                     base_params,
+                    ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::primary,
+                    0,
                     wave_stats,
                     scanner_pg_arg);
             }
@@ -1354,7 +2060,7 @@ public:
                 const pgseq_t* extra_hdr =
                     reinterpret_cast<const pgseq_t*>(
                         extra_bytes.data());
-                ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats discarded_stats{};
+                ::bioseq::pipeline_stats::PipelineExecutionStats extra_stats{};
                 auto extra_match_map =
                     processor.process_sequences(
                         batch_size,
@@ -1364,8 +2070,12 @@ public:
                         nullptr,
                         target_hdrs, query_ids,
                         base_params,
-                        discarded_stats,
+                        ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::extra_query,
+                        extra_broadcast_query_ordinal(
+                            per_row_mode(), batch_size, extra_idx),
+                        extra_stats,
                         scanner_pg_arg);
+                merge_stats(extra_stats);
                 bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer extra-query #{} wave [{}, {}) produced matches for {} entries",
                         extra_idx, wave.first, wave.second, extra_match_map.size());
                 for (auto it = wave_match_map.begin(); it != wave_match_map.end(); ) {
@@ -1448,29 +2158,80 @@ public:
     }
 
     /*
-     * Reading-phase iterator. Returns nullopt when the cursor is drained
-     * (signals EOF to the custom scan). Otherwise returns the entry and
-     * the matched MatchResult.
+     * Reading-phase iterator. nullopt means only genuine cursor exhaustion.
+     * A cursor whose entry or match no longer exists is internal corruption,
+     * not EOF, and therefore raises ERROR fail closed.
      */
     [[nodiscard]] std::optional<NextOutput> read_next_output() {
-        if (output_position < 0
-            || static_cast<size_t>(output_position) >= output_cursors.size()) {
+        if (join_mode) {
+            const CursorBoundary boundary = classify_output_cursor(
+                join_output_position, join_output_cursors.size());
+            if (boundary == CursorBoundary::exact_eof) {
+                return std::nullopt;
+            }
+            if (boundary == CursorBoundary::corrupt) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("BioseqBatchJoin output cursor position is corrupt"),
+                     errdetail("position=%zu size=%zu",
+                        join_output_position, join_output_cursors.size())));
+            }
+            const JoinOutputCursor cursor =
+                join_output_cursors[join_output_position++];
+            if (buffered_entries.size() != 1
+                || cursor.query_index >= join_queries.size()) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("BioseqBatchJoin output cursor references missing input")));
+            }
+            const std::uint64_t ordinal =
+                join_queries[cursor.query_index].ordinal;
+            auto found = join_match_map.find(ordinal);
+            if (found == join_match_map.end()
+                || cursor.match_index >= found->second.size()) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("BioseqBatchJoin output cursor references a missing match")));
+            }
+            return NextOutput{
+                &buffered_entries.front(),
+                ordinal,
+                &found->second[cursor.match_index],
+            };
+        }
+        const CursorBoundary boundary = classify_output_cursor(
+            static_cast<std::int64_t>(output_position), output_cursors.size());
+        if (boundary == CursorBoundary::exact_eof) {
             return std::nullopt;
+        }
+        if (boundary == CursorBoundary::corrupt) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq output cursor position is corrupt"),
+                 errdetail("position=%d size=%zu",
+                    output_position, output_cursors.size())));
         }
         const OutputCursor& cursor = output_cursors[output_position];
         output_position++;
         if (cursor.scan_entry_index >= buffered_entries.size()) {
-            bioseq_log<DBG>("[bioseq] pg: cursor references missing scan entry {}", cursor.scan_entry_index);
-            return std::nullopt;
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq output cursor references a missing scan entry"),
+                 errdetail("entry=%zu buffered=%zu",
+                    cursor.scan_entry_index, buffered_entries.size())));
         }
         BufferedScanEntry& entry = buffered_entries[cursor.scan_entry_index];
         auto hit = match_map.find(static_cast<int32_t>(cursor.scan_entry_index));
         if (hit == match_map.end() || cursor.match_index >= hit->second.size()) {
-            bioseq_log<DBG>("[bioseq] pg: cursor references missing match for entry index={}",
-                    cursor.scan_entry_index);
-            return std::nullopt;
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq output cursor references a missing alignment match"),
+                 errdetail("entry=%zu match=%zu available=%zu",
+                    cursor.scan_entry_index,
+                    cursor.match_index,
+                    hit == match_map.end() ? std::size_t{0} : hit->second.size())));
         }
-        return NextOutput{ &entry, &hit->second[cursor.match_index] };
+        return NextOutput{ &entry, 0, &hit->second[cursor.match_index] };
     }
 
     /*

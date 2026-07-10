@@ -49,6 +49,28 @@ inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_cigar_overflow = 2u;
+// DOC0371 persisted-index foundation. The directory is uploaded exactly as the
+// header-free revision-3 96-byte little-endian entry stream; the shader reads
+// these word offsets directly and returns only stable directory ordinals.
+inline constexpr std::uint32_t k_gpu_persisted_directory_entry_bytes = 96u;
+inline constexpr std::uint32_t k_gpu_persisted_directory_entry_words = 24u;
+
+/// Push constants for the one-workgroup query-minimizer -> directory-ordinal
+/// selector. Query hashes remain inside the device buffer throughout the run.
+struct GpuPersistedDirectorySelectionPush {
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32_per_record = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t directory_entry_count = 0;
+    std::uint32_t reserved_directory = 0;
+    std::uint32_t bitset_word_count = 0;
+    std::uint32_t reserved = 0;
+};
+static_assert(sizeof(GpuPersistedDirectorySelectionPush) == 32);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, minimizer_count) == 0);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, reserved_directory) == 20);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, reserved) == 28);
 
 [[nodiscard]] inline constexpr std::uint64_t gpu_alignment_cigar_ceil_div_u64(
     const std::uint64_t value,
