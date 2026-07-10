@@ -15511,6 +15511,35 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/protobufAny'
+x-bioseq-client-name: NCBI
+x-bioseq-integration:
+  - name: version
+    operationId: version
+    mode: single
+    expect:
+      status: 200
+      bodyContains:
+        - version
+  - name: accession-lookup
+    operationId: assembly_accessions_for_sequence_accession
+    mode: single
+    parameters:
+      - name: accession
+        in: path
+        value: NC_000001.11
+    expect:
+      status: 200
+      bodyContains:
+        - GCF_
+  - name: concurrent-version
+    operationId: version
+    mode: batch
+    count: 2
+    preDelayWithoutCredentialsMs: 1100
+    expect:
+      status: 200
+      bodyContains:
+        - version
 )bioseq_openapi";
 
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

@@ -40,6 +40,7 @@ module;
 export module bioseq.external.https;
 
 import bioseq.external.runtime;
+import bioseq.external.http_validation;
 
 namespace bioseq::external::detail {
 
@@ -56,6 +57,36 @@ namespace bioseq::external::detail {
     message.append(buffer);
     return message;
 }
+
+/** Collects a decoded response body while enforcing the caller's byte budget. */
+class bounded_body_writer final : public oatpp::data::stream::WriteCallback {
+public:
+    explicit bounded_body_writer(std::size_t maximum_bytes)
+        : maximum_bytes_(maximum_bytes) {}
+
+    /** Appends one decoded chunk or aborts before the configured limit is exceeded. */
+    oatpp::v_io_size write(
+        const void* data,
+        ::v_buff_size count,
+        oatpp::async::Action&) override {
+        if (count <= 0) return count;
+        const auto chunk_size = static_cast<std::size_t>(count);
+        if (chunk_size > maximum_bytes_ - body_.size()) {
+            throw std::length_error("HTTP response body exceeds configured byte limit");
+        }
+        body_.append(static_cast<const char*>(data), chunk_size);
+        return count;
+    }
+
+    /** Transfers the bounded body into the transport response without another copy. */
+    [[nodiscard]] std::string take() && noexcept {
+        return std::move(body_);
+    }
+
+private:
+    std::size_t maximum_bytes_{};
+    std::string body_;
+};
 
 class tls_stream final : public oatpp::base::Countable,
                          public oatpp::data::stream::IOStream {
@@ -384,6 +415,9 @@ struct transport_response {
     std::string body;
 };
 
+inline constexpr std::size_t default_maximum_response_body_bytes =
+    64U * 1024U * 1024U;
+
 /** Percent-encodes one OpenAPI path or query value through Oat++. */
 [[nodiscard]] inline std::string url_encode(std::string_view value) {
     ensure_oatpp_runtime();
@@ -399,6 +433,10 @@ public:
     /** Creates a reusable verified HTTPS transport for one host and port. */
     explicit https_client(std::string host, std::uint16_t port = 443)
         : host_(std::move(host)) {
+        if (!http_validation::valid_dns_host(host_) || port == 0) {
+            throw std::invalid_argument("HTTPS host or port is invalid");
+        }
+        if (host_.back() == '.') host_.pop_back();
         ensure_oatpp_runtime();
         state_ = std::make_shared<detail::https_state>(host_, port);
     }
@@ -406,14 +444,33 @@ public:
     /** Executes a synchronous GET through Oat++ with verified OpenSSL TLS. */
     [[nodiscard]] std::expected<transport_response, transport_error> get(
         std::string path,
-        const std::vector<http_header>& request_headers = {}) const {
+        const std::vector<http_header>& request_headers = {},
+        std::size_t maximum_response_body_bytes =
+            default_maximum_response_body_bytes) const {
         try {
-            if (path.empty() || path.front() != '/') {
-                path.insert(path.begin(), '/');
+            if (maximum_response_body_bytes == 0) {
+                return std::unexpected(transport_error{
+                    "HTTP response body byte limit must be positive", 0});
+            }
+            if (!http_validation::valid_request_target(path)) {
+                return std::unexpected(transport_error{
+                    "HTTP request target contains an invalid byte", 0});
+            }
+            // Oat++'s outgoing Request adds the origin-form leading slash.
+            const auto target_start = path.find_first_not_of('/');
+            if (target_start == std::string::npos) {
+                path.clear();
+            } else if (target_start != 0) {
+                path.erase(0, target_start);
             }
             oatpp::web::protocol::http::Headers headers;
             headers.put("User-Agent", "bioseq-external-api-client/1");
             for (const auto& header : request_headers) {
+                if (!http_validation::valid_header_name(header.name)
+                    || !http_validation::valid_header_value(header.value)) {
+                    return std::unexpected(transport_error{
+                        "HTTP header name or value is invalid", 0});
+                }
                 headers.put(header.name.c_str(), header.value.c_str());
             }
             auto exchange = state_->client->get(path, headers);
@@ -423,9 +480,9 @@ public:
                 }
                 return std::unexpected(transport_error{"Oat++ returned no HTTP response", 0});
             }
-            oatpp::String body;
+            detail::bounded_body_writer body(maximum_response_body_bytes);
             try {
-                body = exchange.response->readBodyToString();
+                exchange.response->transferBody(&body);
             } catch (...) {
                 if (exchange.connection) {
                     state_->client->invalidateConnection(exchange.connection);
@@ -434,7 +491,7 @@ public:
             }
             return transport_response{
                 .status_code = exchange.response->getStatusCode(),
-                .body = body ? std::string(body->data(), body->size()) : std::string{},
+                .body = std::move(body).take(),
             };
         } catch (const oatpp::web::client::RequestExecutor::RequestExecutionError& error) {
             return std::unexpected(transport_error{

@@ -78,7 +78,8 @@ target_sources(bioseq_external_codegen
     BASE_DIRS "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq"
     FILES
       "${CMAKE_CURRENT_SOURCE_DIR}/generator.cppm"
-      "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/backend/common/hashing.cppm")
+      "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/backend/common/hashing.cppm"
+      "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/external/http_validation.cppm")
 target_link_libraries(bioseq_external_codegen PRIVATE
   cppast
   yaml-cpp::yaml-cpp)

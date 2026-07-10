@@ -269,6 +269,7 @@ add_custom_command(
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
     "${CMAKE_CURRENT_SOURCE_DIR}/generated_client.cmake"
     "${BIOSEQ_EXTERNAL_GENERATED_ROOT}/generated_client.cmake"
+  COMMAND "${_bioseq_codegen_executable}" --self-test
   COMMAND "${_bioseq_codegen_executable}"
     --source-root "${_bioseq_external_source_root}"
     --output-root "${BIOSEQ_EXTERNAL_GENERATED_ROOT}"
@@ -327,6 +328,7 @@ target_sources(bioseq_external_https
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
     FILES
+      "${CMAKE_CURRENT_SOURCE_DIR}/http_validation.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/runtime.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/https.cppm")
 target_link_libraries(bioseq_external_https PUBLIC

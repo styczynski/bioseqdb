@@ -81,6 +81,7 @@ function(bioseq_register_generated_api_client)
         --reporter "console::out=-::colour-mode=ansi")
     set_tests_properties("${_test_name}" PROPERTIES
       LABELS "external;${_client_CLIENT_NAME};integration"
+      TIMEOUT 180
       WORKING_DIRECTORY "${_client_CLIENT_ROOT}")
   endif()
 endfunction()
