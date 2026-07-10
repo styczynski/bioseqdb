@@ -29,6 +29,7 @@ engineering-overview
 gpu
 gzip-io
 highway-simd
+http-client
 implementation
 io-reader
 json-schema
@@ -59,6 +60,7 @@ postgres-ux
 profiling
 refactor
 seal
+sequence-database
 setup
 sidecar
 simd-sort

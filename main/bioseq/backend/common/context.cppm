@@ -31,8 +31,6 @@
  */
 module;
 
-#include "common.h"
-
 #include <foonathan/memory/container.hpp>
 #include <foonathan/memory/memory_stack.hpp>
 #include <foonathan/memory/memory_pool.hpp>
@@ -49,6 +47,7 @@ module;
 #include <span>
 #include <type_traits>
 #include <functional>
+#include <utility>
 #include <vector>
 
 export module bioseq.common.context;
@@ -140,7 +139,11 @@ public:
     [[nodiscard]] detail::scratch_arena_t& scratch_arena() noexcept { return scratch_arena_; }
     [[nodiscard]] detail::chain_arena_t&   chain_arena()   noexcept { return chain_arena_;   }
     [[nodiscard]] detail::align_arena_t&   align_arena()   noexcept { return align_arena_;   }
-    [[nodiscard]] detail::result_arena_t&  result_arena()  noexcept { return result_arena_;  }
+    /// Result allocation is logically const: the context identity and arena
+    /// binding stay fixed while the arena services allocations.
+    [[nodiscard]] detail::result_arena_t& result_arena() const noexcept {
+        return result_arena_;
+    }
     [[nodiscard]] detail::hash_arena_t&    hash_arena()    noexcept { return hash_arena_;    }
 
     // -----------------------------------------------------------------
@@ -169,7 +172,7 @@ public:
     }
 
     template<typename T>
-    [[nodiscard]] result_vector<T> make_result_vector(std::size_t reserve_hint = 0) {
+    [[nodiscard]] result_vector<T> make_result_vector(std::size_t reserve_hint = 0) const {
         result_vector<T> v(result_arena_);
         if (reserve_hint) v.reserve(reserve_hint);
         return v;
@@ -356,7 +359,7 @@ private:
     detail::scratch_arena_t scratch_arena_;
     detail::chain_arena_t   chain_arena_;
     detail::align_arena_t   align_arena_;
-    detail::result_arena_t  result_arena_;
+    mutable detail::result_arena_t result_arena_;
     detail::hash_arena_t    hash_arena_;
 
     /// Per-arena heap-fallback trackers. `~context()` walks each and

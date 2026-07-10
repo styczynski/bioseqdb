@@ -119,6 +119,44 @@ list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
 set(BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/tbb_partition_link_shim.cpp)
+set(BIOSEQ_RUNTIME_CORE_MODULES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/hashing.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concepts.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pool.cppm)
+
+# The external API client needs Bioseq allocation and worker-pool contracts,
+# but not sequence/index/dispatch modules. Keep one canonical provider for this
+# small runtime closure and share it with the full Domain-N library.
+set(BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_NOPG_MODULES})
+list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
+
+add_library(bioseq_runtime_core STATIC)
+set_target_properties(bioseq_runtime_core PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_runtime_core PRIVATE NO_POSTGRES=1)
+target_include_directories(bioseq_runtime_core PUBLIC
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt")
+target_link_libraries(bioseq_runtime_core PUBLIC
+  fmt
+  reflectcpp::reflectcpp
+  foonathan_memory
+  TBB::tbb)
+target_sources(bioseq_runtime_core
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES ${BIOSEQ_RUNTIME_CORE_MODULES})
+
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 
 set(BIOSEQ_NOPG_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
@@ -127,7 +165,6 @@ set(BIOSEQ_NOPG_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
-list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 endif()
@@ -200,6 +237,7 @@ elseif(EXISTS "/usr/local/include/MoltenVK/mvk_private_api.h")
 endif()
 
 target_link_libraries(bioseq_modules_nopg PUBLIC
+  bioseq_runtime_core
   safestring_static
   fmt
   ZLIB::ZLIB
@@ -218,7 +256,7 @@ target_sources(bioseq_modules_nopg
   PRIVATE ${BIOSEQ_NOPG_SOURCES}
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES ${BIOSEQ_NOPG_MODULES})
+    FILES ${BIOSEQ_NOPG_OWNED_MODULES})
 
 if(APPLE)
   add_executable(bioseq_gpu_archive_builder
@@ -602,3 +640,15 @@ include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_v10.cmake")
 # DOC0286 Part 2 — end-to-end SQL bench target (bioseq_bench_e2e), drives
 # postgres over libpq (bioseq.load + mmsearch) vs minimap2.
 include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_e2e.cmake")
+
+# External API descriptors are build-time inputs. Keep their generated clients
+# outside BIOSEQ_NOPG_MODULES so changing an OpenAPI schema does not rebuild the
+# shared Domain-N module library. The dedicated build mode enables this option;
+# normal configurations must not require the host's code-generation toolchain.
+option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
+  "Configure generated external API clients and their integration tests" OFF)
+if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
+  set(BIOSEQ_EXTERNAL_GENERATED_ROOT
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/external")
+  add_subdirectory(external)
+endif()

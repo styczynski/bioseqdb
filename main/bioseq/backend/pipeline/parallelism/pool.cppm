@@ -5,7 +5,6 @@
  * This is intentionally the only module that includes oneTBB headers.
  */
 module;
-#include "common.h"
 
 #include <algorithm>
 #include <atomic>
@@ -29,7 +28,7 @@ export module bioseq.parallelism.pool;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.common.context;
-import bioseq.instr;
+import bioseq.instr.clock;
 
 namespace otbb = oneapi::tbb;
 
@@ -79,7 +78,7 @@ public:
     }
 
     void configure(const PoolConfig& config);
-    void ensure_configured();
+    void ensure_configured() const;
     void shutdown() noexcept;
     void shutdown_at_exit() noexcept;
     void restart(const PoolConfig& config);
@@ -109,7 +108,11 @@ public:
         return stats_;
     }
 
-    void parallel_for(std::size_t begin, std::size_t end, std::size_t grain, const range_body& body);
+    void parallel_for(
+        std::size_t begin,
+        std::size_t end,
+        std::size_t grain,
+        const range_body& body) const;
     void parallel_for_with_context(std::size_t begin, std::size_t end, std::size_t grain, const range_body& body);
 
     // DOC0346 — TBB parallel sort wrapped in the pool's arena (mirrors
@@ -182,11 +185,13 @@ void GlobalPool::configure(const PoolConfig& config) {
     configured_.store(true, std::memory_order_release);
 }
 
-void GlobalPool::ensure_configured() {
+void GlobalPool::ensure_configured() const {
     if (active()) {
         return;
     }
-    configure(PoolConfig{});
+    // GlobalPool has a private constructor, so every instance is the mutable
+    // process singleton even when execution is requested through a const view.
+    instance().configure(PoolConfig{});
 }
 
 void GlobalPool::teardown_locked(bool join) noexcept {
@@ -218,7 +223,7 @@ void GlobalPool::parallel_for(
         std::size_t begin,
         std::size_t end,
         std::size_t grain,
-        const range_body& body) {
+        const range_body& body) const {
     ensure_configured();
     if (end <= begin) {
         return;

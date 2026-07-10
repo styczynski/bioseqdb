@@ -11,7 +11,7 @@ For modes list see MODES dict.
 
 Concurrency rules:
     - At most one run per "lock group" at a time.
-    - "tests"  group covers unit+integration.
+    - "tests"  group covers unit+integration and external-api.
     - "bench"  group covers bench and bench-fast (they share the binary and
       the reporting/ output directory, so concurrent runs would race).
     - Different lock groups can run in parallel
@@ -102,6 +102,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 # so overriding the preset name is sufficient — no separate dir override needed.
 DEFAULT_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET", "bench-opt")
 DEBUG_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET_DEBUG", "bench-opt-debug")
+EXTERNAL_API_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
@@ -335,9 +337,8 @@ def _refresh_subagent(state: dict) -> dict:
 @dataclass
 class ModeDefinition:
     """
-    Two runs with the same lock group cannot run in parallel. bench and
-    bench-fast share the same binary + reporting/ directory, so they're
-    grouped together; unit+integration is its own group.
+    Two runs with the same lock group cannot run in parallel. All benchmark
+    modes share one group; unit+integration and external-api share tests.
     """
     lock_group: str
     """
@@ -357,7 +358,7 @@ class ModeDefinition:
     """
     Commands we want to run. First element of each command is the binary
     basename — resolved against the active build tree's `bioseq/` directory
-    at run time (see `bin_dir_for(debug)`). This lets the same MODE definition
+    at run time (see `bin_dir_for_mode(mode, debug)`). This lets each mode
     drive both the fast (build/bench-opt/) and the debug (build/bench-opt-debug/)
     binaries; the worker decides which by reading the run's `debug` flag.
     """
@@ -375,6 +376,10 @@ class ModeDefinition:
     stale, previously-installed extension. Requires 'postgresql_bioseq' to be in
     `targets` so the dylib exists at install time."""
     install_extension: bool = False
+    """Optional dedicated CMake preset instead of the server-wide preset."""
+    preset_override: Optional[str] = None
+    """Cache entries that must be set before this mode's targets exist."""
+    required_cache_variables: Optional[Dict[str, str]] = None
 
     @property
     def verb_is(self) -> str:
@@ -391,6 +396,21 @@ class ModeDefinition:
         return REPORTING_DIR / self.reporting_subdir_name
 
 MODES: Dict[str, ModeDefinition] = {
+    "external-api": ModeDefinition(
+        lock_group="tests",
+        expected_duration_min=8.0,
+        build_only_expected_duration_min=5.0,
+        label="External API integration tests",
+        docs="Build and run generated external API clients without sequence or PostgreSQL targets",
+        is_verb_plular=True,
+        targets=["bioseq_external_integration_tests_exec"],
+        commands=[
+            ["bioseq_external_integration_tests_exec",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+        ],
+        preset_override=EXTERNAL_API_BUILD_PRESET,
+        required_cache_variables={"BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON"},
+    ),
     "unit+integration": ModeDefinition(
         lock_group="tests",
         expected_duration_min=120.0,
@@ -471,6 +491,18 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
+
+
+def preset_for_mode(mode: str, debug: bool) -> str:
+    return MODES[mode].preset_override or preset_for(debug)
+
+
+def build_dir_for_mode(mode: str, debug: bool) -> Path:
+    return PROJECT_ROOT / "build" / preset_for_mode(mode, debug)
+
+
+def bin_dir_for_mode(mode: str, debug: bool) -> Path:
+    return build_dir_for_mode(mode, debug) / "bioseq"
 
 def get_modes_short_documentation() -> str:
     modes_list_str = ", ".join([f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min and ~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)" for mode in VALID_MODES])
@@ -945,10 +977,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     run, updating `step`/`status` as it goes. The hard timeout is enforced
     by `_stream_subprocess` against `started_at + HARD_TIMEOUT_SEC`.
 
-    `debug=True` routes the build into `build/bench-opt-debug/` using the
-    `bench-opt-debug` preset — the per-TU `.s`/`.bc` + DWARF artefacts the
-    `inspect` tool consumes. `debug=False` (default) uses the lean
-    `bench-opt` preset that DOC0270 split out for everyday builds.
+    Unless a mode declares `preset_override`, `debug=True` routes the build
+    into `build/bench-opt-debug/` for inspect artifacts and `debug=False`
+    uses the lean `bench-opt` tree. external-api overrides both with GCC 16.
 
     `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
     '--debug']) appended only to bench-mode commands (§5.4).
@@ -964,9 +995,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     log_path = Path(entry["log_file"])
     deadline = started_at + HARD_TIMEOUT_SEC
 
-    active_preset = preset_for(debug)
-    active_build_dir = build_dir_for(debug)
-    active_bin_dir = bin_dir_for(debug)
+    active_preset = preset_for_mode(mode, debug)
+    active_build_dir = build_dir_for_mode(mode, debug)
+    active_bin_dir = bin_dir_for_mode(mode, debug)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", buffering=1)
@@ -1012,9 +1043,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
         # when CMakeLists / cache / vcpkg manifest actually change, so a later
         # `cmake --build` still picks up genuine configuration changes.
+        required_cache = mode_details.required_cache_variables or {}
+        required_cache_args = [
+            f"-D{name}={value}" for name, value in required_cache.items()
+        ]
         if not (active_build_dir / "build.ninja").exists():
             rc = _stream_subprocess(
-                ["cmake", "--preset", active_preset],
+                ["cmake", "--preset", active_preset, *required_cache_args],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
             )
             if rc != 0:
@@ -1025,6 +1060,26 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 "skipping redundant `cmake --preset` to avoid a full C++-module "
                 "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
             log_handle.flush()
+
+        cache_repairs = {
+            name: value
+            for name, value in required_cache.items()
+            if _cmake_cache_value(active_build_dir, name) != value
+        }
+        if cache_repairs:
+            repair_description = ", ".join(
+                f"{name}={value}" for name, value in cache_repairs.items())
+            log_handle.write(
+                f"# mode cache enable: setting {repair_description}.\n")
+            log_handle.flush()
+            rc = _stream_subprocess(
+                ["cmake", "--preset", active_preset,
+                 *(f"-D{name}={value}" for name, value in cache_repairs.items())],
+                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    f"mode cache enable exited with code {rc}")
 
         if active_preset.startswith("aws-x64-linux"):
             if (
@@ -1428,8 +1483,8 @@ def tool_start_build(mode: str, build_only: bool = False,
             "report_file": None,
             "notes": None,
             "debug": debug,
-            "preset": preset_for(debug),
-            "build_dir": str(build_dir_for(debug)),
+            "preset": preset_for_mode(mode, debug),
+            "build_dir": str(build_dir_for_mode(mode, debug)),
             "bench_flags": bench_flags,
         }
         _save_state(state)
@@ -1437,7 +1492,7 @@ def tool_start_build(mode: str, build_only: bool = False,
              f"bench_flags={bench_flags} log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
-            f"(preset={preset_for(debug)})"
+            f"(preset={preset_for_mode(mode, debug)})"
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
             + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
@@ -1495,13 +1550,13 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "report_file": None,
             "notes": None,
             "debug": debug,
-            "preset": preset_for(debug),
-            "build_dir": str(build_dir_for(debug)),
+            "preset": preset_for_mode(mode, debug),
+            "build_dir": str(build_dir_for_mode(mode, debug)),
             "bench_flags": list(bench_flags or []),
         }
         _save_state(state)
         _log(f"--run-build-sync: running {mode} inline (pid={os.getpid()}, "
-             f"preset={preset_for(debug)}, build_only={build_only}, "
+             f"preset={preset_for_mode(mode, debug)}, build_only={build_only}, "
              f"bench_flags={bench_flags or []}, log={log_path})")
 
     return _run_build_worker(mode, build_only=build_only, debug=debug,
@@ -1609,9 +1664,10 @@ def tool_status(mode: str) -> str:
     status = entry.get("status")
     build_only: bool = entry.get("build_only", False)
     debug_used: bool = bool(entry.get("debug", False))
+    preset_used = entry.get("preset", preset_for_mode(mode, debug_used))
     preset_suffix = (
-        f" preset={entry.get('preset', preset_for(debug_used))}"
-        if debug_used else ""
+        f" preset={preset_used}"
+        if debug_used or preset_used != DEFAULT_BUILD_PRESET else ""
     )
 
     if status == "running":
@@ -3742,8 +3798,8 @@ TOOL_DEFINITIONS += [
             "commit (unless sync=false), then runs the operation on the box using "
             "the box-side server.py with the aws-x64-linux preset. " + _FROM_SCRATCH_WARNING + "\n\n"
             "Two operation shapes (oneOf):\n"
-            "  operation='build' — runs one start_build mode (unit+integration, "
-            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
+            "  operation='build' — runs one start_build mode (external-api, "
+            "unit+integration, bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
             "filter/debug_report semantics as the local start_build tool.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
             "same parameters as the local inspect tool.\n\n"
