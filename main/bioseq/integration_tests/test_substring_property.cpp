@@ -224,6 +224,20 @@ TEST_CASE("mmsearch(A, A) — full self-alignment over a single column "
     REQUIRE(is_exact_match_cigar(row[5].value(), full_len));
 }
 
+TEST_CASE("nested mmsearch qualifier fails closed instead of executing the SQL stub",
+          "[mmsearch][self_alignment][qualifier-shape][error]") {
+    auto ctx = fresh_context({kSubstringSelfTable});
+    seed_self_alignment_table(ctx, kSubstringSelfTable);
+
+    const auto err = sql_error(ctx, fmt::format(
+        "SELECT pk, bioseq.cigar(pk) FROM {} "
+        "WHERE NOT mmsearch(seq0, seq0);",
+        kSubstringSelfTable));
+    REQUIRE(err.sqlstate == "0A000");
+    REQUIRE(err.contains("nested mmsearch qualifier shape is unsupported"));
+    REQUIRE(err.contains("executing its SQL stub without alignment is forbidden"));
+}
+
 TEST_CASE("Self-alignment via different columns containing the same data",
           "[mmsearch][self_alignment][substring_property][cross_column]") {
     // Variant of the above: arg0 = seq0, arg1 = seq1, but the

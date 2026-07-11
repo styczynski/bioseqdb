@@ -2,8 +2,12 @@
 #include "common.h"
 
 #include <atomic>
+#include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 import bioseq.common.context;
@@ -12,6 +16,27 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.memory_admission;
+
+namespace {
+
+std::array<std::uint64_t, 4> materialization_probe_values{};
+std::atomic<std::size_t> materialization_probe_index{0u};
+
+[[nodiscard]] std::uint64_t deterministic_footprint_probe() noexcept {
+    const std::size_t index = materialization_probe_index.fetch_add(
+        1u, std::memory_order_relaxed);
+    return materialization_probe_values[
+        std::min(index, materialization_probe_values.size() - 1u)];
+}
+
+void set_materialization_probe(
+        std::uint64_t before,
+        std::uint64_t after) noexcept {
+    materialization_probe_values = {before, after, after, after};
+    materialization_probe_index.store(0u, std::memory_order_relaxed);
+}
+
+} // namespace
 
 TEST_CASE("DOC0294 pool lifecycle and range execution", "[parallelism][pool]") {
     auto& pool = bioseq::parallelism::GlobalPool::instance();
@@ -119,6 +144,23 @@ TEST_CASE("DOC0294 memory admission reserves and releases", "[parallelism][memor
         permit->shrink_to(256);
         REQUIRE(permit->bytes() == 128u);
         REQUIRE(admission.reserved_bytes() == 128u);
+
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto denied = admission.try_reserve(1024, &failure);
+        REQUIRE_FALSE(denied.has_value());
+        REQUIRE(
+            failure.reason
+            == bioseq::parallelism::MemoryAdmissionFailureReason::budget_exhausted);
+        REQUIRE(failure.requested_bytes == 1024u);
+        REQUIRE(failure.reserved_bytes == 128u);
+        REQUIRE(failure.allocatable_after_reservations_bytes <= 896u);
+        REQUIRE(failure.budget_ceiling_bytes >= failure.reserved_bytes);
+        REQUIRE(failure.allocatable_after_reservations_bytes
+                == failure.budget_ceiling_bytes - failure.reserved_bytes);
+        REQUIRE((failure.system_available_bytes <= failure.system_total_bytes
+                 || failure.system_total_bytes == 0u));
+        REQUIRE((failure.process_soft_cap_bytes <= failure.system_total_bytes
+                 || failure.system_total_bytes == 0u));
     }
     REQUIRE(admission.reserved_bytes() == 0u);
 
@@ -128,4 +170,174 @@ TEST_CASE("DOC0294 memory admission reserves and releases", "[parallelism][memor
     wave.permit.release();
     REQUIRE(admission.reserved_bytes() == 0u);
     admission.set_index_memory_cap_bytes(0);
+}
+
+TEST_CASE("memory materialization releases only on exact reflected ownership proof",
+          "[parallelism][memory][materialization]") {
+    using bioseq::parallelism::MemoryMaterializationEvidence;
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    admission.set_index_memory_cap_bytes(4096u);
+    REQUIRE(admission.reserved_bytes() == 0u);
+
+    const auto run = [&](std::uint64_t before,
+                         std::uint64_t after,
+                         MemoryMaterializationEvidence evidence) {
+        set_materialization_probe(before, after);
+        auto permit = admission.try_reserve(512u);
+        REQUIRE(permit.has_value());
+        const auto commit = admission.materialize(
+            *permit,
+            [evidence]() noexcept { return evidence; },
+            deterministic_footprint_probe);
+        return std::pair{std::move(*permit), commit};
+    };
+
+    const MemoryMaterializationEvidence exact{
+        .actual_allocation_bytes = 512u,
+        .fully_touched_bytes = 512u,
+        .host_visible = true,
+        .host_coherent = true,
+        .process_footprint_reflected = true,
+    };
+    {
+        auto [permit, commit] = run(1000u, 1512u, exact);
+        REQUIRE(commit.permit_released);
+        REQUIRE(commit.reflected_delta_bytes == 512u);
+        REQUIRE(permit.bytes() == 0u);
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+    {
+        auto [permit, commit] = run(2000u, 2511u, exact);
+        REQUIRE_FALSE(commit.permit_released);
+        REQUIRE(permit.bytes() == 512u);
+    }
+    REQUIRE(admission.reserved_bytes() == 0u);
+    {
+        auto evidence = exact;
+        evidence.process_footprint_reflected = false;
+        auto [permit, commit] = run(3000u, 3512u, evidence);
+        REQUIRE_FALSE(commit.permit_released);
+    }
+    {
+        auto evidence = exact;
+        evidence.host_coherent = false;
+        auto [permit, commit] = run(4000u, 4512u, evidence);
+        REQUIRE_FALSE(commit.permit_released);
+    }
+    {
+        auto evidence = exact;
+        evidence.actual_allocation_bytes = 513u;
+        evidence.fully_touched_bytes = 513u;
+        auto [permit, commit] = run(5000u, 5513u, evidence);
+        REQUIRE_FALSE(commit.permit_released);
+    }
+    {
+        auto evidence = exact;
+        evidence.fully_touched_bytes = 511u;
+        auto [permit, commit] = run(6000u, 6512u, evidence);
+        REQUIRE_FALSE(commit.permit_released);
+    }
+    {
+        auto [permit, commit] = run(7000u, 6999u, exact);
+        REQUIRE_FALSE(commit.permit_released);
+        REQUIRE(commit.reflected_delta_bytes == 0u);
+    }
+    REQUIRE(admission.reserved_bytes() == 0u);
+    admission.set_index_memory_cap_bytes(0u);
+}
+
+TEST_CASE("memory materialization grow transfer, throw safety, and serialization",
+          "[parallelism][memory][materialization]") {
+    using bioseq::parallelism::MemoryMaterializationEvidence;
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    admission.set_index_memory_cap_bytes(8192u);
+    REQUIRE(admission.reserved_bytes() == 0u);
+
+    set_materialization_probe(10'000u, 10'768u);
+    auto grown = admission.try_reserve(512u);
+    REQUIRE(grown.has_value());
+    const auto grown_commit = admission.materialize(
+        *grown,
+        [&]() {
+            REQUIRE(grown->grow_to(768u));
+            REQUIRE(admission.reserved_bytes() == 768u);
+            return MemoryMaterializationEvidence{
+                .actual_allocation_bytes = 768u,
+                .fully_touched_bytes = 768u,
+                .host_visible = true,
+                .host_coherent = true,
+                .process_footprint_reflected = true,
+            };
+        },
+        deterministic_footprint_probe);
+    REQUIRE(grown_commit.permit_released);
+    REQUIRE(grown->bytes() == 0u);
+    REQUIRE(admission.reserved_bytes() == 0u);
+
+    auto throwing = admission.try_reserve(256u);
+    REQUIRE(throwing.has_value());
+    REQUIRE_THROWS_AS(
+        admission.materialize(
+            *throwing,
+            []() -> MemoryMaterializationEvidence {
+                throw std::runtime_error("forced materialization failure");
+            },
+            deterministic_footprint_probe),
+        std::runtime_error);
+    REQUIRE(throwing->bytes() == 256u);
+    REQUIRE(admission.reserved_bytes() == 256u);
+    throwing->release();
+    REQUIRE(admission.reserved_bytes() == 0u);
+
+    std::atomic<unsigned> ready{0u};
+    std::atomic<bool> go{false};
+    std::atomic<unsigned> active{0u};
+    std::atomic<unsigned> max_active{0u};
+    std::atomic<bool> worker_failed{false};
+    auto worker = [&]() {
+        auto permit = admission.try_reserve(128u);
+        if (!permit) {
+            worker_failed.store(true, std::memory_order_release);
+            ready.fetch_add(1u, std::memory_order_release);
+            return;
+        }
+        ready.fetch_add(1u, std::memory_order_release);
+        while (!go.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        (void)admission.materialize(
+            *permit,
+            [&]() noexcept {
+                const unsigned now = active.fetch_add(
+                    1u, std::memory_order_acq_rel) + 1u;
+                unsigned observed = max_active.load(std::memory_order_relaxed);
+                while (observed < now
+                    && !max_active.compare_exchange_weak(
+                        observed, now, std::memory_order_relaxed)) {}
+                for (unsigned spin = 0; spin < 100'000u; ++spin) {
+                    std::atomic_signal_fence(std::memory_order_seq_cst);
+                }
+                active.fetch_sub(1u, std::memory_order_acq_rel);
+                return MemoryMaterializationEvidence{
+                    .actual_allocation_bytes = 128u,
+                    .fully_touched_bytes = 128u,
+                    .host_visible = true,
+                    .host_coherent = true,
+                    .process_footprint_reflected = false,
+                };
+            },
+            deterministic_footprint_probe);
+    };
+    std::thread first{worker};
+    std::thread second{worker};
+    while (ready.load(std::memory_order_acquire) != 2u) {
+        std::this_thread::yield();
+    }
+    go.store(true, std::memory_order_release);
+    first.join();
+    second.join();
+    REQUIRE_FALSE(worker_failed.load(std::memory_order_acquire));
+    REQUIRE(max_active.load(std::memory_order_relaxed) == 1u);
+    REQUIRE(admission.reserved_bytes() == 0u);
+    admission.set_index_memory_cap_bytes(0u);
 }

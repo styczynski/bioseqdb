@@ -147,6 +147,7 @@ import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
 import bioseq.indexing.type;
 import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.minimizer_vulkan;
@@ -189,7 +190,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w2(
@@ -201,7 +204,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w4(
@@ -213,7 +218,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w8(
@@ -225,7 +232,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w1(
@@ -237,7 +246,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w2(
@@ -249,7 +260,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w4(
@@ -261,7 +274,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w8(
@@ -273,7 +288,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>>
@@ -286,7 +303,9 @@ dispatch_process_sequences_typed(
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
     static_assert(
@@ -309,6 +328,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
                 case 2: return process_sequences_dna4_w2(
@@ -320,6 +341,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
                 case 4: return process_sequences_dna4_w4(
@@ -331,6 +354,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
                 case 8: return process_sequences_dna4_w8(
@@ -342,6 +367,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
             }
@@ -357,6 +384,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
                 case 2: return process_sequences_dna5_w2(
@@ -368,6 +397,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
                 case 4: return process_sequences_dna5_w4(
@@ -379,6 +410,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
                 case 8: return process_sequences_dna5_w8(
@@ -390,6 +423,8 @@ dispatch_process_sequences_typed(
         target_hdrs,
         query_ids,
         base_params,
+        invocation_role,
+        broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
             }
@@ -411,7 +446,9 @@ dispatch_process_sequences_typed(
     const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
-    BatchExecutionStats& stats,
+    BatchInvocationRole invocation_role,
+    std::uint64_t broadcast_query_ordinal,
+    ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
     std::map<int32_t, std::vector<MatchResult>> results;
@@ -435,7 +472,8 @@ dispatch_process_sequences_typed(
     auto run_pipeline_body =
         [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
          per_row_query_hdrs, &target_hdrs, &query_ids, &base_params,
-         &stats, scanner_pg_ctx, &results] {
+         invocation_role, broadcast_query_ordinal, &stats, scanner_pg_ctx,
+         &results] {
         results = dispatch_process_sequences_typed(
             batch_size,
             alphabet_code,
@@ -445,6 +483,8 @@ dispatch_process_sequences_typed(
             target_hdrs,
             query_ids,
             base_params,
+            invocation_role,
+            broadcast_query_ordinal,
             stats,
             scanner_pg_ctx);
     };
@@ -476,6 +516,265 @@ dispatch_process_sequences_typed(
     }
 
     return results;
+}
+
+BatchProcessor::CpuPreparedIndexGroup*
+BatchProcessor::CpuPreparedTarget::find_group(
+		const std::int32_t kmer_size,
+		const std::int32_t window_size,
+		const std::int32_t max_occ) noexcept {
+	for (CpuPreparedIndexGroup& group : groups) {
+		if (group.kmer_size == kmer_size
+			&& group.window_size == window_size
+			&& group.max_occ == max_occ) {
+			return &group;
+		}
+	}
+	return nullptr;
+}
+
+Minimap2Params BatchProcessor::effective_params_for_pair(
+		const Minimap2Params& base,
+		const std::size_t min_bp) noexcept {
+	const bool all_defaults = base.kmer_size == 15
+		&& base.window_size == 10
+		&& base.min_chain_score == 40
+		&& base.min_seed_count == 3;
+	if (!all_defaults) {
+		return base;
+	}
+	Minimap2Params scaled = base;
+	if (min_bp < 50) {
+		scaled.kmer_size = 8;
+		scaled.window_size = 3;
+		scaled.min_chain_score = 10;
+		scaled.min_seed_count = 1;
+	} else if (min_bp < 200) {
+		scaled.kmer_size = 10;
+		scaled.window_size = 5;
+		scaled.min_chain_score = 20;
+		scaled.min_seed_count = 2;
+	}
+	return scaled;
+}
+
+namespace {
+
+template <class Alphabet, std::size_t Width>
+void append_cpu_prepared_query_sketch(
+		const pgseq_t& header,
+		const std::int32_t kmer_size,
+		const std::int32_t window_size,
+		std::vector<MinimapSketchData>& destination) {
+	using sequence_t = compact_sequence_stdc_instance<
+		pgseq_t, Alphabet, Width>;
+	compact_sequence_range<sequence_t> query{header};
+	sketch_collector collector;
+	collect_minimizers<minimap_int_hasher, MinimapSketchData>(
+		collector,
+		query,
+		query.begin(),
+		query.end(),
+		static_cast<std::size_t>(window_size),
+		static_cast<std::size_t>(kmer_size));
+	auto sketches = std::move(collector).extract_sketches_data();
+	destination.insert(
+		destination.end(),
+		std::make_move_iterator(sketches.begin()),
+		std::make_move_iterator(sketches.end()));
+}
+
+void dispatch_append_cpu_prepared_query_sketch(
+		const std::uint8_t alphabet_code,
+		const std::uint8_t storage_unit_byte_width,
+		const pgseq_t& header,
+		const std::int32_t kmer_size,
+		const std::int32_t window_size,
+		std::vector<MinimapSketchData>& destination) {
+	static_assert(pgseq_supported_alphabets::alphabet_count == 2);
+	constexpr std::uint8_t dna4_code = static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<seq::dna4>());
+	constexpr std::uint8_t dna5_code = static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<seq::dna5>());
+#define BIOSEQ_APPEND_PREPARED(ALPHABET, WIDTH) \
+	append_cpu_prepared_query_sketch<ALPHABET, WIDTH>( \
+		header, kmer_size, window_size, destination)
+	if (alphabet_code == dna4_code) {
+		switch (storage_unit_byte_width) {
+			case 1: return BIOSEQ_APPEND_PREPARED(seq::dna4, 1);
+			case 2: return BIOSEQ_APPEND_PREPARED(seq::dna4, 2);
+			case 4: return BIOSEQ_APPEND_PREPARED(seq::dna4, 4);
+			case 8: return BIOSEQ_APPEND_PREPARED(seq::dna4, 8);
+			default: break;
+		}
+	} else if (alphabet_code == dna5_code) {
+		switch (storage_unit_byte_width) {
+			case 1: return BIOSEQ_APPEND_PREPARED(seq::dna5, 1);
+			case 2: return BIOSEQ_APPEND_PREPARED(seq::dna5, 2);
+			case 4: return BIOSEQ_APPEND_PREPARED(seq::dna5, 4);
+			case 8: return BIOSEQ_APPEND_PREPARED(seq::dna5, 8);
+			default: break;
+		}
+	}
+#undef BIOSEQ_APPEND_PREPARED
+	ereport(ERROR,
+		(errcode(ERRCODE_DATATYPE_MISMATCH),
+		 errmsg("BioseqBatchJoin CPU preparation received an unsupported typmod")));
+}
+
+} // namespace
+
+void BatchProcessor::prepare_cpu_shared_query_unions(
+		const std::uint8_t alphabet_code,
+		const std::uint8_t storage_unit_byte_width,
+		const std::uint64_t target_bp_size,
+		const std::span<const pgseq_t* const> query_headers,
+		const Minimap2Params& base_params,
+		const bool include_persisted_parameter_group,
+		CpuPreparedTarget& prepared_target) {
+	prepared_target.groups.clear();
+	prepared_target.target_bp_size = target_bp_size;
+	prepared_target.query_count = query_headers.size();
+	prepared_target.physical_target_index_reads = 0;
+	prepared_target.total_unique_keys = 0;
+	prepared_target.key_set_checksum = 1469598103934665603ull;
+	prepared_target.query_union_admission_bytes = 0;
+	prepared_target.query_union_permit.reset();
+	prepared_target.unions_ready = false;
+	if (base_params.vulkan_enabled) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("Vulkan BatchJoin cannot use CPU target preparation")));
+	}
+	for (const pgseq_t* query_header : query_headers) {
+		if (query_header == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("BioseqBatchJoin CPU preparation received a NULL query header")));
+		}
+		prepared_target.query_union_admission_bytes =
+			bioseq::parallelism::saturating_add(
+				prepared_target.query_union_admission_bytes,
+				bioseq::parallelism::saturating_mul(
+					static_cast<std::uint64_t>(query_header->bp_size),
+					static_cast<std::uint64_t>(sizeof(MinimapSketchData))));
+	}
+	prepared_target.query_union_admission_bytes =
+		bioseq::parallelism::saturating_add(
+			prepared_target.query_union_admission_bytes,
+			bioseq::parallelism::saturating_mul(
+				static_cast<std::uint64_t>(query_headers.size()),
+				static_cast<std::uint64_t>(sizeof(CpuPreparedIndexGroup))));
+	if (prepared_target.query_union_admission_bytes
+		== (std::numeric_limits<std::uint64_t>::max)()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+			 errmsg("BioseqBatchJoin query-union admission overflow")));
+	}
+	auto union_permit =
+		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+			prepared_target.query_union_admission_bytes);
+	if (!union_permit) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OUT_OF_MEMORY),
+			 errmsg("BioseqBatchJoin query-hash union cannot be admitted"),
+			 errdetail("required_bytes=%llu",
+				static_cast<unsigned long long>(
+					prepared_target.query_union_admission_bytes))));
+	}
+	prepared_target.query_union_permit.emplace(std::move(*union_permit));
+	auto ensure_group = [&prepared_target](
+			const std::int32_t k,
+			const std::int32_t w,
+			const std::int32_t max_occ) -> CpuPreparedIndexGroup& {
+		if (auto* existing = prepared_target.find_group(k, w, max_occ)) {
+			return *existing;
+		}
+		prepared_target.groups.push_back(CpuPreparedIndexGroup{
+			.kmer_size = k,
+			.window_size = w,
+			.max_occ = max_occ,
+		});
+		return prepared_target.groups.back();
+	};
+	for (const pgseq_t* query_header : query_headers) {
+		if (query_header == nullptr
+			|| query_header->alphabet_code != alphabet_code
+			|| query_header->storage_unit_byte_width
+				!= storage_unit_byte_width) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin query typmod changed during CPU preparation")));
+		}
+		const Minimap2Params effective = effective_params_for_pair(
+			base_params,
+			std::min<std::uint64_t>(target_bp_size, query_header->bp_size));
+		auto append_to = [&](CpuPreparedIndexGroup& group) {
+			dispatch_append_cpu_prepared_query_sketch(
+				alphabet_code,
+				storage_unit_byte_width,
+				*query_header,
+				group.kmer_size,
+				group.window_size,
+				group.query_hash_union);
+		};
+		if (include_persisted_parameter_group) {
+			append_to(ensure_group(15, 10, effective.max_occ));
+		} else {
+			append_to(ensure_group(
+				effective.kmer_size,
+				effective.window_size,
+				effective.max_occ));
+		}
+	}
+	for (CpuPreparedIndexGroup& group : prepared_target.groups) {
+		std::sort(
+			group.query_hash_union.begin(),
+			group.query_hash_union.end(),
+			[](const MinimapSketchData& lhs,
+			   const MinimapSketchData& rhs) noexcept {
+				return lhs.kmer() < rhs.kmer();
+			});
+		group.query_hash_union.erase(
+			std::unique(
+				group.query_hash_union.begin(),
+				group.query_hash_union.end(),
+				[](const MinimapSketchData& lhs,
+				   const MinimapSketchData& rhs) noexcept {
+					return lhs.kmer() == rhs.kmer();
+				}),
+			group.query_hash_union.end());
+		group.key_set_checksum =
+			bioseq::storage::indexing::query_minimizer_signature(
+				group.query_hash_union,
+				static_cast<std::uint32_t>(group.kmer_size),
+				static_cast<std::uint32_t>(group.window_size),
+				static_cast<std::uint32_t>(group.max_occ));
+		prepared_target.total_unique_keys =
+			bioseq::parallelism::saturating_add(
+				prepared_target.total_unique_keys,
+				static_cast<std::uint64_t>(group.query_hash_union.size()));
+		auto mix = [&prepared_target](const std::uint64_t value) noexcept {
+			prepared_target.key_set_checksum ^= value;
+			prepared_target.key_set_checksum *= 1099511628211ull;
+		};
+		mix(static_cast<std::uint64_t>(group.kmer_size));
+		mix(static_cast<std::uint64_t>(group.window_size));
+		mix(static_cast<std::uint64_t>(group.max_occ));
+		mix(static_cast<std::uint64_t>(group.query_hash_union.size()));
+		mix(group.key_set_checksum);
+	}
+	prepared_target.query_union_admission_bytes =
+		bioseq::parallelism::saturating_add(
+			bioseq::parallelism::saturating_mul(
+				prepared_target.total_unique_keys,
+				static_cast<std::uint64_t>(sizeof(MinimapSketchData))),
+			static_cast<std::uint64_t>(
+				prepared_target.groups.size()
+				* sizeof(CpuPreparedIndexGroup)));
+	prepared_target.query_union_permit->shrink_to(
+		prepared_target.query_union_admission_bytes);
+	prepared_target.unions_ready = true;
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

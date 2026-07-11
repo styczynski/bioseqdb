@@ -34,6 +34,7 @@ module;
 
 #include "common.h"
 
+#include <cstdlib>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
@@ -103,7 +104,7 @@ using bioseq::chaining::backtrack_chains;
 // DOC0279 §9 / §7.1 — the relocated minimizer index + its concept. Highway-
 // namespace consumers reference them cross-namespace (POD value type + concept).
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
-using bioseq::indexing::MinimizerIndex;
+using bioseq::indexing::MinimizerLookupIndex;
 
 // ============================================================================
 // Algorithm selection enums
@@ -506,7 +507,7 @@ struct AlignRegion {
  *                          place before returning (DOC0249 §13 follow-up:
  *                          output-side kernel-to-arena refactor).
  */
-template <class MinimizerT, MinimizerIndex IndexT>
+template <class MinimizerT, MinimizerLookupIndex IndexT>
 void collect_seed_hits(
     std::span<const MinimizerT> query_minimizers,
     const IndexT& target_index,
@@ -1111,8 +1112,12 @@ template<
     size_t target_end,
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params,
-    int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags)
+    int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags,
+    BlockAlignerExecutionProof* forbidden_block_proof = nullptr)
 {
+    if (forbidden_block_proof != nullptr) {
+        block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
+    }
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         const KswZ2Params z2_params{
             .gap_open   = static_cast<int8_t>(params.gap_open1),
@@ -1144,10 +1149,23 @@ template<
 }
 
 /**
- * @brief Dispatch to block aligner for single-affine gap alignment.
+ * @brief Project the native Block Aligner contract for one minimap phase.
  *
- * Uses the first gap penalty pair (gap_open1, gap_ext1) only.
- * Block aligner does not support dual-affine gaps.
+ * This is deliberately not a KSW2-compatible adapter. The reference Block
+ * Aligner has a single affine recurrence, adaptive block geometry, global
+ * mode, and its own two-confirmation X-drop mode. Consequently only the
+ * short affine pair and the Block tunables are projected from Minimap2Params:
+ *
+ *   - gap fill: reference Global mode, forward input;
+ *   - left extension: reference XDrop mode, reversed input;
+ *   - right extension: reference XDrop mode, forward input.
+ *
+ * Dormant KSW-only defaults in the shared parameter object (bandwidth,
+ * right-align, end-bonus, the second affine pair, and approximate-max) do not
+ * invalidate a native Block run and are not included in its proof identity.
+ * They are intentionally absent from this function's call surface, so a
+ * caller that claims those semantics gets a compile-time contract error
+ * instead of a KSW2 or scalar fallback.
  */
 template<
     bool is_reversed,
@@ -1164,23 +1182,48 @@ template<
     size_t target_end,
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params,
-    [[maybe_unused]] int align_bandwidth,
-    [[maybe_unused]] int end_bonus,
-    int zdrop,
-    KswFlags ksw_flags)
+    BlockAlignerPhase phase,
+    BlockAlignerExecutionProof* execution_proof)
 {
+    const bool is_extension = phase != BlockAlignerPhase::GapExtension;
+    const bool native_penalties_representable = params.gap_open1 > 0
+        && params.gap_ext1 > 0
+        && params.gap_open1 <= std::numeric_limits<int8_t>::max()
+        && params.gap_ext1 <= std::numeric_limits<int8_t>::max()
+        && params.gap_open1 + params.gap_ext1
+            <= -static_cast<int>(std::numeric_limits<int8_t>::min());
+    if (!native_penalties_representable
+        || (is_extension && params.zdrop < 0)) {
+        if (execution_proof != nullptr) {
+            execution_proof->add(
+                execution_proof->unsupported_contract_rejections);
+        }
+        bioseq_log<ERR>(
+            "Block Aligner native parameter projection rejected: q={}, e={}, "
+            "zdrop={}, phase={}",
+            params.gap_open1, params.gap_ext1, params.zdrop,
+            static_cast<unsigned>(phase));
+        std::abort();
+    }
     BlockAlignerParams ba_params{
         .gap_open   = static_cast<int8_t>(params.gap_open1),
         .gap_extend = static_cast<int8_t>(params.gap_ext1),
         .min_size   = params.block_min_size,
         .max_size   = params.block_max_size,
-        .x_drop     = ksw_flags.extz_only ? zdrop : -1,
-        .flags      = ksw_flags,
+        .x_drop     = is_extension ? params.zdrop : 0,
+        .mode       = is_extension
+            ? BlockAlignmentMode::XDrop
+            : BlockAlignmentMode::Global,
+        .input_order = phase == BlockAlignerPhase::LeftExtension
+            ? BlockInputOrder::Reversed
+            : BlockInputOrder::Forward,
+        .phase      = phase,
+        .trace      = params.do_cigar,
     };
     return HwyBlockAligner::align<is_reversed>(
         query_seq, target_seq,
         query_start, query_end, target_start, target_end,
-        scoring_matrix, ba_params);
+        scoring_matrix, ba_params, execution_proof);
 }
 
 // append_cigar is now in bioseq_cigar module.
@@ -1196,8 +1239,8 @@ template<
  *   3. Right extension: query/target from last seed to extended boundary
  *
  * Sequences are passed as compact_sequence_range references with sub-region
- * indices — no pre-encoding into uint8_t vectors is needed. The KSW2 core
- * kernel handles encoding of the specific regions it needs.
+ * indices — no pre-encoding into uint8_t vectors is needed. The selected
+ * base-alignment kernel encodes only the admitted sub-regions.
  *
  * @tparam base_alignment_algorithm  Compile-time selector between KSW2 and
  *                                   block aligner. Templated so the inner
@@ -1215,9 +1258,70 @@ template<
  * Inlines to the same instructions at -O3.
  *
  * `run<strand_reversed>` is templated on the strand because the alignment
- * kernels are themselves templated on the reverse-complement encoding bit
- * (left-extension still flips the CIGAR independently via `reverse_cigar`).
+ * kernels are themselves templated on the reverse-complement encoding bit.
+ * Native Block left extension additionally emits reversed compact input and
+ * reverses its traced operations back to source order.
  */
+struct BlockPhaseEligibility {
+    std::uint64_t left = 0;
+    std::uint64_t gap = 0;
+    std::uint64_t right = 0;
+};
+
+/// Derive the complete native-Block phase contract before dispatch from only
+/// immutable region geometry. These values are deliberately recorded outside
+/// the call branches they attest, so deleting or bypassing a phase cannot
+/// delete both the expectation and execution evidence.
+[[nodiscard]] inline BlockPhaseEligibility derive_block_phase_eligibility(
+        const AlignRegion& region,
+        std::span<const Anchor> anchors,
+        std::int32_t anchor_begin,
+        std::int64_t seed_ref_start,
+        std::int64_t seed_query_start,
+        std::int64_t seed_ref_end,
+        std::int64_t seed_query_end,
+        std::int64_t outer_ref_start,
+        std::int64_t outer_query_start,
+        std::int64_t outer_ref_end,
+        std::int64_t outer_query_end,
+        const Minimap2Params& params) noexcept {
+    BlockPhaseEligibility expected{
+        .left = seed_query_start > outer_query_start
+                && seed_ref_start > outer_ref_start ? 1u : 0u,
+        .gap = 0,
+        .right = seed_query_end < outer_query_end
+                 && seed_ref_end < outer_ref_end ? 1u : 0u,
+    };
+    if (region.seed_count <= 1) return expected;
+
+    std::int64_t qs = seed_query_start;
+    std::int64_t rs = seed_ref_start;
+    for (std::int32_t index = 1; index < region.seed_count; ++index) {
+        const Anchor& current = anchors[anchor_begin + index];
+        const std::int64_t qe =
+            static_cast<std::int64_t>(current.query_position) + 1;
+        const std::int64_t re =
+            static_cast<std::int64_t>(current.ref_position) + 1;
+        const bool is_last = index == region.seed_count - 1;
+        const std::int64_t gap_query = qe - qs;
+        const std::int64_t gap_ref = re - rs;
+        if (!is_last
+            && (gap_query < params.min_ksw_len
+                || gap_ref < params.min_ksw_len)) {
+            continue;
+        }
+        if (gap_query <= 0 || gap_ref <= 0) {
+            qs = qe;
+            rs = re;
+            continue;
+        }
+        ++expected.gap;
+        qs = qe;
+        rs = re;
+    }
+    return expected;
+}
+
 template <BaseAlignmentAlgorithmType base_alignment_algorithm,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
@@ -1243,7 +1347,8 @@ struct AlignOnePhase {
         std::int64_t            outer_query_start,
         std::int64_t            outer_ref_end,
         std::int64_t            outer_query_end,
-        std::int64_t            query_length) const
+        std::int64_t            query_length,
+        BlockAlignerExecutionProof* block_execution_proof) const
     {
         bool prior_phase_zdropped = false;
 
@@ -1251,15 +1356,31 @@ struct AlignOnePhase {
         std::int64_t final_ref_start = seed_ref_start;
         std::int64_t final_query_start = seed_query_start;
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-            const KswAlignResult left_result = ksw2_align_pair<strand_reversed>(
-                query_seq, target_seq,
-                static_cast<size_t>(outer_query_start),
-                static_cast<size_t>(seed_query_start),
-                static_cast<size_t>(outer_ref_start),
-                static_cast<size_t>(seed_ref_start),
-                scoring_matrix, params,
-                align_bandwidth, params.end_bonus, params.zdrop,
-                KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
+            KswAlignResult left_result;
+            if constexpr (base_alignment_algorithm
+                    == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+                left_result = block_aligner_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(outer_query_start),
+                    static_cast<size_t>(seed_query_start),
+                    static_cast<size_t>(outer_ref_start),
+                    static_cast<size_t>(seed_ref_start),
+                    scoring_matrix, params,
+                    BlockAlignerPhase::LeftExtension,
+                    block_execution_proof);
+            } else {
+                left_result = ksw2_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(outer_query_start),
+                    static_cast<size_t>(seed_query_start),
+                    static_cast<size_t>(outer_ref_start),
+                    static_cast<size_t>(seed_ref_start),
+                    scoring_matrix, params,
+                    align_bandwidth, params.end_bonus, params.zdrop,
+                    KswFlags{.right_align = true, .extz_only = true,
+                             .reverse_cigar = true},
+                    block_execution_proof);
+            }
             if (!left_result.cigar.empty()) {
                 append_cigar(region.cigar, left_result.cigar);
                 region.dp_score += left_result.max;
@@ -1309,8 +1430,8 @@ struct AlignOnePhase {
                         static_cast<size_t>(rs),
                         static_cast<size_t>(re),
                         scoring_matrix, params,
-                        align_bandwidth, -1, params.zdrop,
-                        KswFlags{.approx_max = true});
+                        BlockAlignerPhase::GapExtension,
+                        block_execution_proof);
                 } else {
                     fill_result = ksw2_align_pair<strand_reversed>(
                         query_seq, target_seq,
@@ -1320,7 +1441,8 @@ struct AlignOnePhase {
                         static_cast<size_t>(re),
                         scoring_matrix, params,
                         align_bandwidth, -1, params.zdrop,
-                        KswFlags{.approx_max = true});
+                        KswFlags{.approx_max = true},
+                        block_execution_proof);
                 }
                 if (!fill_result.cigar.empty()) {
                     append_cigar(region.cigar, fill_result.cigar);
@@ -1345,19 +1467,36 @@ struct AlignOnePhase {
         }
 
         // === 3. Right extension ===
-        if (!prior_phase_zdropped
+        if ((base_alignment_algorithm
+                == BaseAlignmentAlgorithmType::BLOCK_ALIGNER
+                || !prior_phase_zdropped)
             && seed_query_end < outer_query_end
             && seed_ref_end < outer_ref_end)
         {
-            const KswAlignResult right_result = ksw2_align_pair<strand_reversed>(
-                query_seq, target_seq,
-                static_cast<size_t>(seed_query_end),
-                static_cast<size_t>(outer_query_end),
-                static_cast<size_t>(seed_ref_end),
-                static_cast<size_t>(outer_ref_end),
-                scoring_matrix, params,
-                align_bandwidth, params.end_bonus, params.zdrop,
-                KswFlags{.extz_only = true});
+            KswAlignResult right_result;
+            if constexpr (base_alignment_algorithm
+                    == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+                right_result = block_aligner_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(seed_query_end),
+                    static_cast<size_t>(outer_query_end),
+                    static_cast<size_t>(seed_ref_end),
+                    static_cast<size_t>(outer_ref_end),
+                    scoring_matrix, params,
+                    BlockAlignerPhase::RightExtension,
+                    block_execution_proof);
+            } else {
+                right_result = ksw2_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(seed_query_end),
+                    static_cast<size_t>(outer_query_end),
+                    static_cast<size_t>(seed_ref_end),
+                    static_cast<size_t>(outer_ref_end),
+                    scoring_matrix, params,
+                    align_bandwidth, params.end_bonus, params.zdrop,
+                    KswFlags{.extz_only = true},
+                    block_execution_proof);
+            }
             if (!right_result.cigar.empty()) {
                 append_cigar(region.cigar, right_result.cigar);
                 region.dp_score += right_result.max;
@@ -1397,7 +1536,8 @@ void align_regions(
     const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     const ScoringMatrix<QueryRange>& scoring_matrix,
-    const Minimap2Params& params)
+    const Minimap2Params& params,
+    BlockAlignerExecutionProof* block_execution_proof = nullptr)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_align_skeleton");
@@ -1417,8 +1557,20 @@ void align_regions(
     const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange, Scanner> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
+    // Proof collection is opt-in, so the normal benchmark path allocates no
+    // diagnostic storage. When enabled, each worker writes one disjoint slot;
+    // the deterministic reduction below avoids atomics in the DP hot path.
+    std::vector<BlockAlignerExecutionProof> per_region_block_proofs;
+    if constexpr (base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+        if (block_execution_proof != nullptr) {
+            per_region_block_proofs.resize(regions.size());
+        }
+    }
+
     auto align_one_region_by_index =
-        [query_length, target_length, &regions, &anchors, &params, &aligner](
+        [query_length, target_length, &regions, &anchors, &params, &aligner,
+         &per_region_block_proofs](
                 std::size_t region_index) {
         AlignRegion& region = regions[region_index];
         if (region.seed_count <= 0) {
@@ -1503,6 +1655,33 @@ void align_regions(
         region.cigar.clear();
         region.dp_score = 0;
 
+        BlockAlignerExecutionProof* region_block_proof = nullptr;
+        if constexpr (base_alignment_algorithm
+                == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+            if (!per_region_block_proofs.empty()) {
+                region_block_proof = &per_region_block_proofs[region_index];
+                region_block_proof->add(
+                    region_block_proof->routed_region_scopes);
+                const BlockPhaseEligibility expected =
+                    derive_block_phase_eligibility(
+                        region, anchors, anchor_begin,
+                        seed_ref_start, seed_query_start,
+                        seed_ref_end, seed_query_end,
+                        outer_ref_start, outer_query_start,
+                        outer_ref_end, outer_query_end,
+                        params);
+                region_block_proof->add(
+                    region_block_proof->left_route_candidates,
+                    expected.left);
+                region_block_proof->add(
+                    region_block_proof->gap_route_candidates,
+                    expected.gap);
+                region_block_proof->add(
+                    region_block_proof->right_route_candidates,
+                    expected.right);
+            }
+        }
+
         // Per-region diagnostic logs were previously emitted on every region
         // boundary (left-extension skipped, gap-fill skipped, right-extension
         // skipped, "determine actions" entry). Each fmtlog enqueue + format
@@ -1523,7 +1702,7 @@ void align_regions(
                 seed_ref_end, seed_query_end,
                 outer_ref_start, outer_query_start,
                 outer_ref_end, outer_query_end,
-                query_length);
+                query_length, region_block_proof);
         } else {
             aligner.template run<false>(
                 region, anchors, anchor_begin,
@@ -1531,7 +1710,7 @@ void align_regions(
                 seed_ref_end, seed_query_end,
                 outer_ref_start, outer_query_start,
                 outer_ref_end, outer_query_end,
-                query_length);
+                query_length, region_block_proof);
         }
 
         // Compute dp_max_score from CIGAR (simplified mm_update_extra)
@@ -1616,6 +1795,37 @@ void align_regions(
                 }
             }
             align_one_region_by_index(region_index);
+        }
+    }
+
+    if constexpr (base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+        if (block_execution_proof != nullptr) {
+            *block_execution_proof = {};
+            for (const BlockAlignerExecutionProof& region_proof
+                    : per_region_block_proofs) {
+                block_execution_proof->combine(region_proof);
+            }
+            block_execution_proof->add(
+                block_execution_proof->align_region_invocations);
+            if (may_parallel) {
+                block_execution_proof->add(
+                    block_execution_proof->parallel_align_region_dispatches);
+            } else {
+                block_execution_proof->add(
+                    block_execution_proof->serial_align_region_dispatches);
+            }
+            if (!block_execution_proof->accepted()) {
+                bioseq_log<ERR>(
+                    "Block Aligner execution proof rejected: eligible={}, "
+                    "executed={}, ksw2={}, scalar_fallbacks={}",
+                    block_execution_proof->eligible_calls(),
+                    block_execution_proof->executed_calls(),
+                    block_execution_proof->forbidden_ksw2_calls,
+                    block_execution_proof
+                        ->forbidden_scalar_biological_fallbacks);
+                std::abort();
+            }
         }
     }
 
@@ -2018,6 +2228,280 @@ void compute_mapping_quality(
 
 // CIGAR_OP_CHAR and format_cigar are now in bioseq_cigar module.
 
+/// Positive execution evidence for Vulkan stages used by the historical
+/// partial-GPU benchmark rows. Counters are incremented only after a selected
+/// fail-loud Vulkan operation returns successfully; selector flags alone never
+/// populate this proof.
+struct PartialVulkanExecutionProof {
+    /// Role-neutral token emitted by a minimizer leaf. It must be consumed as
+    /// either query_sketch or target_sketch before a MatchResultCollection is
+    /// returned to callers.
+    std::uint64_t sketch_dispatches = 0;
+    std::uint64_t query_sketch_dispatches = 0;
+    std::uint64_t target_sketch_dispatches = 0;
+    std::uint64_t target_index_build_dispatches = 0;
+    std::uint64_t seed_lookup_dispatches = 0;
+    std::uint64_t chain_score_dispatches = 0;
+    // Operation-local seed-sort evidence. A selected mode flag never writes
+    // these counters; they are copied only from a completed runtime result.
+    std::uint64_t seed_bitonic_sort_dispatches = 0;
+    std::uint64_t seed_radix_sort_operations = 0;
+    std::uint64_t seed_radix_anchor_count = 0;
+    std::uint64_t seed_radix_passes = 0;
+    std::uint64_t seed_radix_histogram_dispatches = 0;
+    std::uint64_t seed_radix_scan_dispatches = 0;
+    std::uint64_t seed_radix_scatter_dispatches = 0;
+    std::uint64_t seed_host_sort_fallbacks = 0;
+    // Operation-originated legacy Phase-B index materialization evidence.
+    // Additive fields describe actual upload operations, never cache hits;
+    // max fields preserve the worst collision/load observation across them.
+    std::uint64_t gpu_index_materializations = 0;
+    std::uint64_t gpu_index_open_addressed_materializations = 0;
+    std::uint64_t gpu_index_sorted_dense_materializations = 0;
+    std::uint64_t gpu_index_unique_keys = 0;
+    std::uint64_t gpu_index_slot_capacity = 0;
+    std::uint64_t gpu_index_logical_resident_bytes = 0;
+    std::uint64_t gpu_index_actual_allocation_bytes = 0;
+    std::uint64_t gpu_index_fully_touched_bytes = 0;
+    std::uint64_t gpu_index_staging_bytes = 0;
+    std::uint64_t gpu_index_permit_releases = 0;
+    std::uint64_t gpu_index_process_footprint_reflections = 0;
+    std::uint64_t gpu_index_reflected_footprint_bytes = 0;
+    std::uint64_t gpu_index_max_load_ppm = 0;
+    std::uint64_t gpu_index_max_probe = 0;
+    std::uint64_t gpu_index_count_phase_admissions = 0;
+    std::uint64_t gpu_index_main_peak_admissions = 0;
+    std::uint64_t gpu_index_resident_transfers = 0;
+    std::uint64_t gpu_index_adoption_rereserve_attempts = 0;
+    std::uint64_t gpu_index_adoption_successes = 0;
+    std::uint64_t gpu_index_owned_resident_bytes = 0;
+    std::uint64_t gpu_index_gate_enabled = 0;
+    std::uint64_t gpu_index_gate_word_count = 0;
+    std::uint64_t gpu_index_gate_mask = 0;
+    std::uint64_t gpu_index_gate_set_bits = 0;
+    std::uint64_t gpu_index_gate_digest_lo = 0;
+    std::uint64_t gpu_index_gate_digest_hi = 0;
+    // Operation-originated Phase-C target-index kernel/shape evidence. These
+    // fields are attached to the one query that owns the shared target build,
+    // never to every query that subsequently consumes the resident index.
+    std::uint64_t gpu_index_gate_count_dispatches = 0;
+    std::uint64_t gpu_index_gated_emit_dispatches = 0;
+    std::uint64_t gpu_index_ungated_emit_dispatches = 0;
+    std::uint64_t gpu_index_retained_minimizer_count = 0;
+    std::uint64_t gpu_index_distinct_minimizer_count = 0;
+    // Owned-only last-seed retirement evidence. These counters are populated
+    // only after the completed seed operation has dropped its local resident
+    // handle and the operation-owned lifetime coordinator has actually
+    // released storage before chaining.
+    std::uint64_t post_seed_owned_gpu_cache_evictions = 0;
+    std::uint64_t post_seed_owned_gpu_resident_bytes_released = 0;
+    std::uint64_t post_seed_owned_cpu_index_releases = 0;
+    std::uint64_t post_seed_owned_cpu_position_bytes_released = 0;
+    bool saturated = false;
+
+    static constexpr void add(std::uint64_t& destination,
+                              std::uint64_t increment,
+                              bool& saturated_flag) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                            - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            saturated_flag = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    constexpr void combine(
+        const PartialVulkanExecutionProof& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        add(sketch_dispatches, other.sketch_dispatches, overflow);
+        add(query_sketch_dispatches, other.query_sketch_dispatches, overflow);
+        add(target_sketch_dispatches, other.target_sketch_dispatches, overflow);
+        add(target_index_build_dispatches,
+            other.target_index_build_dispatches, overflow);
+        add(seed_lookup_dispatches, other.seed_lookup_dispatches, overflow);
+        add(chain_score_dispatches, other.chain_score_dispatches, overflow);
+        add(seed_bitonic_sort_dispatches,
+            other.seed_bitonic_sort_dispatches, overflow);
+        add(seed_radix_sort_operations,
+            other.seed_radix_sort_operations, overflow);
+        add(seed_radix_anchor_count,
+            other.seed_radix_anchor_count, overflow);
+        add(seed_radix_passes, other.seed_radix_passes, overflow);
+        add(seed_radix_histogram_dispatches,
+            other.seed_radix_histogram_dispatches, overflow);
+        add(seed_radix_scan_dispatches,
+            other.seed_radix_scan_dispatches, overflow);
+        add(seed_radix_scatter_dispatches,
+            other.seed_radix_scatter_dispatches, overflow);
+        add(seed_host_sort_fallbacks,
+            other.seed_host_sort_fallbacks, overflow);
+        add(gpu_index_materializations,
+            other.gpu_index_materializations, overflow);
+        add(gpu_index_open_addressed_materializations,
+            other.gpu_index_open_addressed_materializations, overflow);
+        add(gpu_index_sorted_dense_materializations,
+            other.gpu_index_sorted_dense_materializations, overflow);
+        add(gpu_index_unique_keys, other.gpu_index_unique_keys, overflow);
+        add(gpu_index_slot_capacity, other.gpu_index_slot_capacity, overflow);
+        add(gpu_index_logical_resident_bytes,
+            other.gpu_index_logical_resident_bytes, overflow);
+        add(gpu_index_actual_allocation_bytes,
+            other.gpu_index_actual_allocation_bytes, overflow);
+        add(gpu_index_fully_touched_bytes,
+            other.gpu_index_fully_touched_bytes, overflow);
+        add(gpu_index_staging_bytes,
+            other.gpu_index_staging_bytes, overflow);
+        add(gpu_index_permit_releases,
+            other.gpu_index_permit_releases, overflow);
+        add(gpu_index_process_footprint_reflections,
+            other.gpu_index_process_footprint_reflections, overflow);
+        add(gpu_index_reflected_footprint_bytes,
+            other.gpu_index_reflected_footprint_bytes, overflow);
+        add(gpu_index_count_phase_admissions,
+            other.gpu_index_count_phase_admissions, overflow);
+        add(gpu_index_main_peak_admissions,
+            other.gpu_index_main_peak_admissions, overflow);
+        add(gpu_index_resident_transfers,
+            other.gpu_index_resident_transfers, overflow);
+        add(gpu_index_adoption_rereserve_attempts,
+            other.gpu_index_adoption_rereserve_attempts, overflow);
+        add(gpu_index_adoption_successes,
+            other.gpu_index_adoption_successes, overflow);
+        add(gpu_index_owned_resident_bytes,
+            other.gpu_index_owned_resident_bytes, overflow);
+        add(gpu_index_gate_enabled, other.gpu_index_gate_enabled, overflow);
+        add(gpu_index_gate_word_count,
+            other.gpu_index_gate_word_count, overflow);
+        add(gpu_index_gate_mask, other.gpu_index_gate_mask, overflow);
+        add(gpu_index_gate_set_bits,
+            other.gpu_index_gate_set_bits, overflow);
+        add(gpu_index_gate_digest_lo,
+            other.gpu_index_gate_digest_lo, overflow);
+        add(gpu_index_gate_digest_hi,
+            other.gpu_index_gate_digest_hi, overflow);
+        add(gpu_index_gate_count_dispatches,
+            other.gpu_index_gate_count_dispatches, overflow);
+        add(gpu_index_gated_emit_dispatches,
+            other.gpu_index_gated_emit_dispatches, overflow);
+        add(gpu_index_ungated_emit_dispatches,
+            other.gpu_index_ungated_emit_dispatches, overflow);
+        add(gpu_index_retained_minimizer_count,
+            other.gpu_index_retained_minimizer_count, overflow);
+        add(gpu_index_distinct_minimizer_count,
+            other.gpu_index_distinct_minimizer_count, overflow);
+        add(post_seed_owned_gpu_cache_evictions,
+            other.post_seed_owned_gpu_cache_evictions, overflow);
+        add(post_seed_owned_gpu_resident_bytes_released,
+            other.post_seed_owned_gpu_resident_bytes_released, overflow);
+        add(post_seed_owned_cpu_index_releases,
+            other.post_seed_owned_cpu_index_releases, overflow);
+        add(post_seed_owned_cpu_position_bytes_released,
+            other.post_seed_owned_cpu_position_bytes_released, overflow);
+        gpu_index_max_load_ppm = std::max(
+            gpu_index_max_load_ppm, other.gpu_index_max_load_ppm);
+        gpu_index_max_probe = std::max(
+            gpu_index_max_probe, other.gpu_index_max_probe);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool has_any_dispatch() const noexcept {
+        return saturated
+            || sketch_dispatches != 0
+            || query_sketch_dispatches != 0
+            || target_sketch_dispatches != 0
+            || target_index_build_dispatches != 0
+            || seed_lookup_dispatches != 0
+            || chain_score_dispatches != 0
+            || seed_bitonic_sort_dispatches != 0
+            || seed_radix_sort_operations != 0
+            || seed_radix_anchor_count != 0
+            || seed_radix_passes != 0
+            || seed_radix_histogram_dispatches != 0
+            || seed_radix_scan_dispatches != 0
+            || seed_radix_scatter_dispatches != 0
+            || seed_host_sort_fallbacks != 0
+            || gpu_index_gate_count_dispatches != 0
+            || gpu_index_gated_emit_dispatches != 0
+            || gpu_index_ungated_emit_dispatches != 0;
+    }
+
+    [[nodiscard]] constexpr bool exact_stage_mask_accepted(
+        bool expect_query_sketch,
+        bool expect_target_sketch,
+        bool expect_target_index_build,
+        bool expect_seed_lookup,
+        bool expect_chain_score) const noexcept {
+        const auto matches = [](std::uint64_t count, bool expected) noexcept {
+            return expected ? count > 0 : count == 0;
+        };
+        return !saturated
+            && sketch_dispatches == 0
+            && matches(query_sketch_dispatches, expect_query_sketch)
+            && matches(target_sketch_dispatches, expect_target_sketch)
+            && matches(target_index_build_dispatches,
+                       expect_target_index_build)
+            && matches(seed_lookup_dispatches, expect_seed_lookup)
+            && matches(chain_score_dispatches, expect_chain_score);
+    }
+
+    [[nodiscard]] constexpr bool exact_sketch_token_accepted() const noexcept {
+        return !saturated
+            && sketch_dispatches > 0
+            && query_sketch_dispatches == 0
+            && target_sketch_dispatches == 0
+            && target_index_build_dispatches == 0
+            && seed_lookup_dispatches == 0
+            && chain_score_dispatches == 0;
+    }
+
+    constexpr bool operator==(
+        const PartialVulkanExecutionProof&) const noexcept = default;
+};
+
+/// A batch constructs one Phase-C target index and shares it with every query.
+/// Query zero is the sole owner of the build/ownership proof so additive batch
+/// aggregation cannot turn one target build into N apparent builds.
+[[nodiscard]] constexpr bool phase_c_target_build_proof_owner_query(
+    std::size_t query_index) noexcept
+{
+    return query_index == 0u;
+}
+
+static_assert([] {
+    PartialVulkanExecutionProof proof{};
+    proof.chain_score_dispatches = 1;
+    return proof.exact_stage_mask_accepted(
+        false, false, false, false, true);
+}());
+static_assert([] {
+    PartialVulkanExecutionProof proof{};
+    proof.query_sketch_dispatches = 1;
+    proof.target_sketch_dispatches = 1;
+    proof.target_index_build_dispatches = 1;
+    proof.seed_lookup_dispatches = 1;
+    proof.chain_score_dispatches = 1;
+    return proof.exact_stage_mask_accepted(true, true, true, true, true)
+        && !proof.exact_stage_mask_accepted(true, true, false, true, true);
+}());
+static_assert([] {
+    PartialVulkanExecutionProof lhs{};
+    lhs.gpu_index_materializations = 1;
+    lhs.gpu_index_open_addressed_materializations = 1;
+    lhs.gpu_index_unique_keys = 3;
+    lhs.gpu_index_max_probe = 7;
+    PartialVulkanExecutionProof rhs{};
+    rhs.gpu_index_materializations = 1;
+    rhs.gpu_index_open_addressed_materializations = 1;
+    rhs.gpu_index_unique_keys = 5;
+    rhs.gpu_index_max_probe = 4;
+    lhs.combine(rhs);
+    return lhs.gpu_index_materializations == 2
+        && lhs.gpu_index_open_addressed_materializations == 2
+        && lhs.gpu_index_unique_keys == 8
+        && lhs.gpu_index_max_probe == 7;
+}());
+
 /**
  * @brief Owning container of alignment results with PAF output formatting.
  *
@@ -2027,10 +2511,130 @@ void compute_mapping_quality(
  */
 struct MatchResultCollection {
     std::vector<MatchResult> results;
+    TwoStackExecutionProof exact_simd_query_execution_proof{};
+    TwoStackExecutionProof exact_simd_target_execution_proof{};
+    SimdChainingExecutionProof simd_chaining_execution_proof{};
+    BlockAlignerExecutionProof block_aligner_execution_proof{};
+    PartialVulkanExecutionProof partial_vulkan_execution_proof{};
+    bool exact_simd_query_execution_proof_present = false;
+    bool exact_simd_target_execution_proof_present = false;
+    bool simd_chaining_execution_proof_present = false;
+    bool block_aligner_execution_proof_present = false;
 
     MatchResultCollection() = default;
     explicit MatchResultCollection(std::vector<MatchResult>&& results_vec)
         : results(std::move(results_vec)) {}
+
+    void record_exact_simd_query_execution_proof(
+            const TwoStackExecutionProof& proof) noexcept {
+        exact_simd_query_execution_proof.combine(proof);
+        exact_simd_query_execution_proof_present = true;
+    }
+
+    void record_exact_simd_target_execution_proof(
+            const TwoStackExecutionProof& proof) noexcept {
+        exact_simd_target_execution_proof.combine(proof);
+        exact_simd_target_execution_proof_present = true;
+    }
+
+    void record_simd_chaining_execution_proof(
+            const SimdChainingExecutionProof& proof) noexcept {
+        simd_chaining_execution_proof.combine(proof);
+        simd_chaining_execution_proof_present = true;
+    }
+
+    void record_block_aligner_execution_proof(
+            const BlockAlignerExecutionProof& proof) noexcept {
+        block_aligner_execution_proof.combine(proof);
+        block_aligner_execution_proof_present = true;
+    }
+
+    void record_partial_vulkan_execution_proof(
+            const PartialVulkanExecutionProof& proof) noexcept {
+        partial_vulkan_execution_proof.combine(proof);
+    }
+
+    void combine_execution_proof(
+            const MatchResultCollection& other) noexcept {
+        if (other.exact_simd_query_execution_proof_present) {
+            record_exact_simd_query_execution_proof(
+                other.exact_simd_query_execution_proof);
+        }
+        if (other.exact_simd_target_execution_proof_present) {
+            record_exact_simd_target_execution_proof(
+                other.exact_simd_target_execution_proof);
+        }
+        if (other.simd_chaining_execution_proof_present) {
+            record_simd_chaining_execution_proof(
+                other.simd_chaining_execution_proof);
+        }
+        if (other.block_aligner_execution_proof_present) {
+            record_block_aligner_execution_proof(
+                other.block_aligner_execution_proof);
+        }
+        partial_vulkan_execution_proof.combine(
+            other.partial_vulkan_execution_proof);
+    }
+
+    [[nodiscard]] bool exact_simd_query_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return exact_simd_query_execution_proof_present
+            && exact_simd_query_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool exact_simd_target_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return exact_simd_target_execution_proof_present
+            && exact_simd_target_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool simd_chaining_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return simd_chaining_execution_proof_present
+            && simd_chaining_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool all_simd_execution_accepted(
+            bool require_target_sketch,
+            bool require_nonempty_vector_work) const noexcept {
+        return exact_simd_query_execution_accepted(
+                require_nonempty_vector_work)
+            && (!require_target_sketch
+                || exact_simd_target_execution_accepted(
+                    require_nonempty_vector_work))
+            && simd_chaining_execution_accepted(
+                require_nonempty_vector_work)
+            && block_aligner_execution_accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool has_any_algorithm_execution_proof() const noexcept {
+        return exact_simd_query_execution_proof_present
+            || exact_simd_target_execution_proof_present
+            || simd_chaining_execution_proof_present
+            || block_aligner_execution_proof_present
+            || partial_vulkan_execution_proof.has_any_dispatch();
+    }
+
+    [[nodiscard]] bool block_aligner_execution_accepted(
+            bool require_nonempty_simd_work) const noexcept {
+        if (!block_aligner_execution_proof_present
+            || !block_aligner_execution_proof.accepted()) {
+            return false;
+        }
+        if (!require_nonempty_simd_work) {
+            return true;
+        }
+        const auto& proof = block_aligner_execution_proof;
+        return proof.executed_calls() > 0
+            && proof.nonempty_calls > 0
+            && proof.nonempty_calls_with_simd == proof.nonempty_calls
+            && proof.simd_dp_vector_batches > 0
+            && proof.simd_dp_cells > 0;
+    }
 
     [[nodiscard]] size_t size() const { return results.size(); }
     [[nodiscard]] bool empty() const { return results.empty(); }

@@ -8,7 +8,7 @@
 //   1. `bioseq_internal.seq_sub_table` catalog row count + sub_table_relid.
 //   2. `pg_relation_size(sub_table_relid)` to confirm fragment bytes were
 //      written (positive size proves data exists on disk).
-//   3. `bioseq.locator_inspect` on inline literals to prove the v2 layout
+//   3. `bioseq.locator_inspect` on inline literals to prove the locator layout
 //      is wired (the stub path is exercised by the hoe-fixture INSERT
 //      path which writes stubs into the parent — see test_phase_c_mmsearch.cpp).
 
@@ -64,26 +64,24 @@ TEST_CASE("DOC0264 — bioseq.create_sample_table alphabet other than dna4 is re
 }
 
 TEST_CASE("DOC0264 — empty sequence (num_fragments=0) creates a catalog row "
-          "with empty sub-table",
+          "without allocating an empty fragment relation",
           "[integration][phase-c][sample-table]") {
     auto ctx = fresh_context({kSampleTable});
     exec_sqlf(ctx,
               "SELECT bioseq.create_sample_table('{}', 1, 0, 'dna4', 42);",
               kSampleTable);
-    // Empty sequence: one catalog row, sub-table relation exists.
+    // Empty sequence: no physical fragment relation is needed.
     REQUIRE(query_scalar_int(ctx,
                 fmt::format("SELECT COUNT(*)::bigint FROM bioseq_internal.seq_sub_table s "
                             "  WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "
                             "                              WHERE relname = '{}');",
-                            kSampleTable)) == 1);
-    // No fragment rows written → pg_relation_size of the sub-table may
-    // still be 0 or one initial page. Verify only that the relation exists.
-    const long long sub_relid = query_scalar_int(ctx,
-        fmt::format("SELECT sub_table_relid FROM bioseq_internal.seq_sub_table s "
-                    "  WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "
-                    "                              WHERE relname = '{}') LIMIT 1;",
-                    kSampleTable));
-    REQUIRE(sub_relid > 0);
+                            kSampleTable)) == 0);
+    REQUIRE(query_scalar_int(ctx,
+                fmt::format("SELECT COUNT(*)::bigint "
+                    "FROM bioseq_internal.sequence_source_version v "
+                    "WHERE v.user_relid='{}'::regclass AND v.state=1 "
+                    "AND v.num_fragments=0 AND v.fragment_relid IS NULL "
+                    "AND v.fragment_storage_id=0;", kSampleTable)) == 1);
 }
 
 TEST_CASE("DOC0264 — locator_inspect on inline non-stub value returns inline fields",
