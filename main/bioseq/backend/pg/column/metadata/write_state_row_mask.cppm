@@ -219,11 +219,9 @@ RowMaskPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 							   bool commit)
 {
 	RowMaskStateCache.for_each([&](RowMaskWriteStateMapEntry* entry) {
-		if (entry->writeStateStack == nullptr)
-		{
-			return;
-		}
-
+		/* The drop marker outlives the final row-mask write frame.  Process it
+		 * first so an ERROR during DROP followed by transaction abort restores
+		 * the relation's backend-local visibility state. */
 		if (entry->dropped)
 		{
 			if (entry->dropSubXid == current_sub_xid)
@@ -234,6 +232,11 @@ RowMaskPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 					entry->dropped = false;
 				}
 			}
+			return;
+		}
+
+		if (entry->writeStateStack == nullptr)
+		{
 			return;
 		}
 
