@@ -107,9 +107,9 @@ TEST_CASE("DOC0260 §4 — every bucket index is addressable and < bucket_count"
     }
 }
 
-TEST_CASE("DOC0264 §5 — seq_locator v2 is a 32-byte standard-layout POD that round-trips through bytes",
+TEST_CASE("DOC0371 — seq_locator v3 is a 40-byte standard-layout POD that round-trips through bytes",
           "[storage][locator][unit]") {
-    static_assert(sizeof(seq_locator) == 32u);
+    static_assert(sizeof(seq_locator) == 40u);
     static_assert(std::is_standard_layout_v<seq_locator>);
 
     seq_locator loc{};
@@ -119,6 +119,7 @@ TEST_CASE("DOC0264 §5 — seq_locator v2 is a 32-byte standard-layout POD that 
     loc.num_fragments    = 0x12345678u;
     loc.total_bp_size    = 0x0123456789ABCDEFull;
     loc.first_sub_row_no = 0xFEDCBA9876543210ull;
+    loc.source_epoch     = 0x1020304050607080ull;
 
     // memcpy out and back — the encode/decode helpers in
     // sequence_storage_manager do exactly this into the pgseq_t stub data[].
@@ -134,9 +135,11 @@ TEST_CASE("DOC0264 §5 — seq_locator v2 is a 32-byte standard-layout POD that 
     REQUIRE(decoded.num_fragments    == loc.num_fragments);
     REQUIRE(decoded.total_bp_size    == loc.total_bp_size);
     REQUIRE(decoded.first_sub_row_no == loc.first_sub_row_no);
+    REQUIRE(decoded.source_epoch     == loc.source_epoch);
 
     // The fixed offsets the pg_compact_sequence stub reader depends on.
     REQUIRE(offsetof(seq_locator, num_fragments)    == 8u);
     REQUIRE(offsetof(seq_locator, total_bp_size)    == 16u);
     REQUIRE(offsetof(seq_locator, first_sub_row_no) == 24u);
+    REQUIRE(offsetof(seq_locator, source_epoch)     == 32u);
 }

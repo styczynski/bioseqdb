@@ -796,6 +796,11 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 				 MemoryContext cxt,
 				 uint64_t stripeFirstRowNumber, int rowCount)
 {
+	if (snapshot == nullptr)
+	{
+		bioseq_log<ERR, PG>(
+			"ReadChunkRowMask requires the caller's registered snapshot");
+	}
 	HeapTuple heapTuple = NULL;
 	ScanKeyData scanKey[3];
 
@@ -825,9 +830,9 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
 					BTLessEqualStrategyNumber, F_INT8LE, UInt64GetDatum(stripeFirstRowNumber + rowCount - 1));
 
-		scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
-													index,
-													SnapshotSelf, 3, scanKey);
+			scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
+												index,
+												snapshot, 3, scanKey);
 
 		int pos = 0;
 		while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
@@ -1229,17 +1234,14 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 	*chunkGroupDeletedRows = make_array<uint32_t>(chunkGroupCount);
 
 	/*
-	 * Since we have now updates of `chunk_group`, there could be multiple tuples
-	 * retrieved with changed only deleted_row count. We expect that last modified
-	 * version will be retrieved last so it we just update information based on tuple
-	 * chunk group index.
+	 * The caller's snapshot selects the one visible version of each chunk-group
+	 * row.  A tuple that is HOT-updated can still be exactly the version visible
+	 * to an older REPEATABLE READ snapshot; filtering it by the physical
+	 * HEAP_HOT_UPDATED flag would incorrectly hide pre-update source rows.
 	 */
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		if (HeapTupleHeaderIsHotUpdated(heapTuple->t_data))
-			continue;
-
 		Datum datumArray[Natts_bioseq_chunkgroup];
 		bool isNullArray[Natts_bioseq_chunkgroup];
 
@@ -2489,7 +2491,10 @@ export struct SubTableManager {
 		if (!OidIsValid(rel_oid)) {
 			return out;
 		}
-		Relation rel = safe_relation_open(rel_oid, AccessShareLock);
+		Relation rel = try_safe_relation_open(rel_oid, AccessShareLock);
+		if (rel == nullptr) {
+			return out;
+		}
 		TupleDesc td = RelationGetDescr(rel);
 
 		ScanKeyData keys[3];
@@ -2517,7 +2522,10 @@ export struct SubTableManager {
 		if (!OidIsValid(rel_oid)) {
 			return;
 		}
-		Relation rel = safe_relation_open(rel_oid, RowExclusiveLock);
+		Relation rel = try_safe_relation_open(rel_oid, RowExclusiveLock);
+		if (rel == nullptr) {
+			return;
+		}
 
 		ScanKeyData keys[3];
 		ScanKeyInit(&keys[0], anum_seq_sub_table::field<"database_oid">,

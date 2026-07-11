@@ -124,11 +124,10 @@ public:
 
 	// Static "post-lex" scramble — the seven-step integer mix from the
 	// minimap_int scalar_hash::next() body, applied to a precomputed lex
-	// kmer at emit time.
+	// kmer. Kept as the scalar reference/helper; the two-stack SIMD path uses
+	// `scramble_simd` below and carries the vector result with window state.
 	//
-	// Used by collectors that compute lex inline (cheap golden-ratio mix
-	// for window ordering) and apply the canonical minimap_int scramble
-	// only when a window minimum is emitted. The bit-pattern is identical
+	// The bit-pattern is identical
 	// to scalar_hash<input_t>::next's emit value because the body below is
 	// the literal copy of that body's scramble half (the lex-rolling half
 	// stays in the caller).
@@ -154,6 +153,42 @@ public:
 		key = ((key + (key << clamp(2))) + (key << clamp(4))) & kmer_mask;
 		key = key ^ (key >> clamp(28));
 		key = (key + (key << clamp(31))) & kmer_mask;
+		return key;
+	}
+
+	// Highway sibling of `scramble`: the exact same seven-step integer mix,
+	// applied to every canonical-kmer lane before two-stack window selection.
+	// Keeping this beside the scalar definition makes scalar/SIMD drift visible
+	// and removes the old per-emitted-minimizer scalar hash tail.
+	template<class D>
+	[[nodiscard, gnu::always_inline]] static HWY_INLINE hn::Vec<D> scramble_simd(
+		D d,
+		hn::Vec<D> key,
+		hn::Vec<D> mask)
+	{
+		using lane_t = hn::TFromD<D>;
+		constexpr size_t storage_max_shift = sizeof(lane_t) * 8 - 1;
+		constexpr auto clamp = [](size_t shift) constexpr -> size_t {
+			return shift > storage_max_shift ? storage_max_shift : shift;
+		};
+		key = hn::And(
+			hn::Add(hn::Not(key), hn::ShiftLeft<clamp(21)>(key)), mask);
+		key = hn::Xor(key, hn::ShiftRight<clamp(24)>(key));
+		key = hn::And(
+			hn::Add(
+				hn::Add(key, hn::ShiftLeft<clamp(3)>(key)),
+				hn::ShiftLeft<clamp(8)>(key)),
+			mask);
+		key = hn::Xor(key, hn::ShiftRight<clamp(14)>(key));
+		key = hn::And(
+			hn::Add(
+				hn::Add(key, hn::ShiftLeft<clamp(2)>(key)),
+				hn::ShiftLeft<clamp(4)>(key)),
+			mask);
+		key = hn::Xor(key, hn::ShiftRight<clamp(28)>(key));
+		key = hn::And(
+			hn::Add(key, hn::ShiftLeft<clamp(31)>(key)), mask);
+		(void)d;
 		return key;
 	}
 
