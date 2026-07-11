@@ -6,6 +6,8 @@ module;
 #include "common.h"
 
 #include <chrono>
+#include <concepts>
+#include <cstring>
 #include <new>
 #include <ranges>
 #include <type_traits>
@@ -404,6 +406,8 @@ struct sketch_collector_t {
 private:
     std::vector<MinimizerT> sketches;
 public:
+    using minimizer_type = MinimizerT;
+
     // Earlier we reserved 10 000 entries up front (~160 KB of system-heap
     // storage per collector). Two collectors are built per pair × 400 pairs
     // = ~128 MB of allocator traffic per bench section, of which only ~5 %
@@ -430,6 +434,36 @@ public:
 
     [[always_inline]] constexpr void collect(const MinimizerT& sketch) {
         sketches.push_back(sketch);
+    }
+
+    /// Append a stable SIMD-compressed batch without a scalar per-record
+    /// construction loop. The chronological minimizer kernel writes the raw
+    /// representation selected by `MinimizerRepr` directly, then commits the
+    /// compacted prefix in one bulk copy. `MinimizerRepr` is deliberately a
+    /// trivially-copyable, storage-sized wire value, so the byte copy starts
+    /// the same object representation that `from_raw_storage` would produce.
+    template<class M = MinimizerT>
+    [[nodiscard, always_inline]] bool append_raw_storage(
+        const typename M::storage_t* raw,
+        std::size_t count)
+        requires (
+            std::same_as<M, MinimizerT>
+            && requires { typename M::storage_t; }
+            && std::is_trivially_copyable_v<M>
+            && sizeof(M) == sizeof(typename M::storage_t))
+    {
+        const std::size_t old_size = sketches.size();
+        if (count > sketches.max_size() - old_size) {
+            return false;
+        }
+        sketches.resize(old_size + count);
+        if (count != 0) {
+            std::memcpy(
+                static_cast<void*>(sketches.data() + old_size),
+                static_cast<const void*>(raw),
+                count * sizeof(typename M::storage_t));
+        }
+        return true;
     }
 
     constexpr std::vector<MinimizerT> extract_sketches() const {
@@ -692,6 +726,8 @@ inline void collect_minimizers_view(
 enum class MinimizerSketchBackend : std::uint8_t {
     Scalar = 0,
     VulkanSegment = 1,
+    ExactSimd = 2,
+    PaperNtHashSimd = 3,
 };
 
 [[nodiscard]] inline constexpr const char*
@@ -701,6 +737,10 @@ minimizer_sketch_backend_name(MinimizerSketchBackend backend) noexcept {
         return "scalar";
     case MinimizerSketchBackend::VulkanSegment:
         return "vulkan_segment";
+    case MinimizerSketchBackend::ExactSimd:
+        return "exact_simd";
+    case MinimizerSketchBackend::PaperNtHashSimd:
+        return "paper_nthash_simd";
     }
     return "unknown";
 }

@@ -1770,6 +1770,10 @@ def tool_subagent(prompt: str, timeout_sec: int = 3600,
     the result.  At most one subagent runs at a time; a second call while one
     is running returns the current status instead of starting a duplicate.
     """
+
+    # DO NOT EDIT THIS!
+    return "Error: subagent is disabled for now. Use native subagents!"
+
     if not prompt or not prompt.strip():
         return "Error: prompt must be a non-empty string."
 

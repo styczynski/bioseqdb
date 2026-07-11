@@ -18,6 +18,7 @@ module;
 #include <algorithm>
 #include <cstring>
 #include <new>
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -53,6 +54,42 @@ import :access_hooks;
 namespace {
 constexpr int VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL = 50;   /* ms */
 constexpr int VACUUM_TRUNCATE_LOCK_TIMEOUT = 4500;       /* ms */
+
+struct PendingSpeculativeSources {
+    SubTransactionId subtransaction_id = InvalidSubTransactionId;
+    std::vector<bioseq::storage::PendingSequenceSource> sources;
+};
+
+// PostgreSQL severity levels are consecutive: ERROR, FATAL, PANIC.  Some
+// C++ module builds do not retain the PANIC preprocessor spelling after the
+// global module fragment, while ERROR remains available.  Bind the numeric
+// severity without relying on that non-exported macro.
+constexpr int kPostgresPanicLevel = ERROR + 2;
+
+using PendingSpeculativeKey = std::pair<Oid, std::uint64_t>;
+
+[[nodiscard]] auto& pending_speculative_sources() {
+    static std::map<PendingSpeculativeKey, PendingSpeculativeSources> pending;
+    return pending;
+}
+
+void require_no_pending_speculative_sources(
+        const char* phase,
+        const int error_level = ERROR) {
+    const auto& pending = pending_speculative_sources();
+    if (pending.empty()) return;
+
+    std::size_t source_count = 0;
+    for (const auto& [key, entry] : pending) {
+        (void)key;
+        source_count += entry.sources.size();
+    }
+    ereport(error_level,
+        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+         errmsg("bioseq speculative source publication authority was not consumed"),
+         errdetail("phase=%s speculative_rows=%zu pending_sources=%zu",
+             phase, pending.size(), source_count)));
+}
 }
 
 /*
@@ -1062,7 +1099,9 @@ rewrite_seq_columns_to_stubs(Relation relation,
                              const bioseq::storage::BioseqAmCache &amc,
                              Datum *detoasted_values,
                              std::vector<std::optional<bioseq::storage::seq_locator>>
-                                 &out_per_col_locator)
+                                 &out_per_col_locator,
+                             std::vector<std::optional<bioseq::storage::PendingSequenceSource>>
+                                 &out_pending_sources)
 {
 	TupleDesc td = slot->tts_tupleDescriptor;
 	Datum *values_for_write = static_cast<Datum *>(
@@ -1070,6 +1109,8 @@ rewrite_seq_columns_to_stubs(Relation relation,
 	std::memcpy(values_for_write, detoasted_values, sizeof(Datum) * td->natts);
 
 	out_per_col_locator.assign(amc.seq_attnos.size(), std::nullopt);
+	out_pending_sources.clear();
+	out_pending_sources.resize(amc.seq_attnos.size());
 	if (amc.seq_attnos.empty()) {
 		return values_for_write;
 	}
@@ -1094,6 +1135,8 @@ rewrite_seq_columns_to_stubs(Relation relation,
 	}
 	auto *caches = static_cast<bioseq::storage::seq_caches *>(writeState->seq_caches);
 	const auto cap_bytes = caches->cap_bytes_snapshot;
+	const std::uint64_t main_storage_id =
+		BioseqColumnStorageGetStorageId(relation, false);
 
 	for (std::size_t c = 0; c < amc.seq_attnos.size(); ++c) {
 		const std::int16_t attno = amc.seq_attnos[c];
@@ -1102,14 +1145,20 @@ rewrite_seq_columns_to_stubs(Relation relation,
 		if (slot->tts_isnull[idx]) continue;
 		auto *hdr = reinterpret_cast<pgseq_t *>(
 			DatumGetPointer(values_for_write[idx]));
-		if (bioseq::storage::is_locator_stub(hdr)) continue;
-		const auto loc =
+		if (bioseq::storage::is_locator_stub(hdr)) {
+			bioseq_log<ERR, PG>(
+				"bioseq storage: a locator stub cannot be shared by a second parent row");
+		}
+		auto pending =
 			bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
+				RelationGetRelid(relation), main_storage_id,
 				relation->rd_locator.dbOid,
 				relation->rd_locator.spcOid,
 				relation->rd_locator.relNumber,
 				attno, td, hdr, cap_bytes, caches);
+		const auto loc = pending.locator();
 		out_per_col_locator[c] = loc;
+		out_pending_sources[c].emplace(std::move(pending));
 		pgseq_t *stub = bioseq::storage::alloc_locator_stub_in(
 			BioseqColumnWritePerTupleContext(writeState),
 			static_cast<std::uint8_t>(hdr->alphabet_code),
@@ -1120,6 +1169,14 @@ rewrite_seq_columns_to_stubs(Relation relation,
 		values_for_write[idx] = PointerGetDatum(stub);
 	}
 	return values_for_write;
+}
+
+static void publish_sequence_sources_after_parent_row(
+		std::vector<std::optional<bioseq::storage::PendingSequenceSource>>& sources)
+{
+	for (auto& source : sources) {
+		if (source.has_value()) source->publish_after_parent_row();
+	}
 }
 
 static void
@@ -1156,12 +1213,15 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
+		std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
 		Datum *values_for_write = rewrite_seq_columns_to_stubs(
-			relation, slot, writeState, amc, detoasted_values, per_col_locator);
+			relation, slot, writeState, amc, detoasted_values,
+			per_col_locator, pending_sources);
 
 		uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState, values_for_write,
 		                                             slot->tts_isnull);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
+		publish_sequence_sources_after_parent_row(pending_sources);
 
 		/* DOC0279 §11.2 — build every UPDATE_ON_INSERT index (per SEQ column)
 		 * via the new chunked-storage drivers. detoasted_values carries the
@@ -1211,14 +1271,32 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
+		std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
 		Datum *values_for_write = rewrite_seq_columns_to_stubs(
-			relation, slot, writeState, amc, detoasted_values, per_col_locator);
+			relation, slot, writeState, amc, detoasted_values,
+			per_col_locator, pending_sources);
 
 		uint64_t storageId = LookupStorageId(relation->rd_locator);
 		uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState, values_for_write,
 		                                             slot->tts_isnull);
 		UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
+		PendingSpeculativeSources speculative{
+			.subtransaction_id = GetCurrentSubTransactionId(),
+		};
+		speculative.sources.reserve(pending_sources.size());
+		for (auto& source : pending_sources) {
+			if (source.has_value()) {
+				speculative.sources.push_back(std::move(*source));
+			}
+		}
+		const PendingSpeculativeKey key{
+			RelationGetRelid(relation), writtenRowNumber};
+		if (!pending_speculative_sources().emplace(
+				key, std::move(speculative)).second) {
+			bioseq_log<ERR, PG>(
+				"bioseq storage: duplicate speculative source publication key");
+		}
 	}
 	MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
 
@@ -1230,10 +1308,28 @@ static void
 bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 									uint32_t specToken, bool succeeded)
 {
+	(void)specToken;
 	uint64_t storageId = LookupStorageId(relation->rd_locator);
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64_t) storageId));
+	const std::uint64_t row_number = tid_to_row_number(slot->tts_tid);
+	const PendingSpeculativeKey key{RelationGetRelid(relation), row_number};
+	auto pending = pending_speculative_sources().find(key);
+	if (pending == pending_speculative_sources().end()) {
+		bioseq_log<ERR, PG>(
+			"bioseq storage: speculative source publication authority is missing");
+	}
+	if (succeeded) {
+		for (auto& source : pending->second.sources) {
+			source.publish_after_parent_row();
+		}
+	} else {
+		for (auto& source : pending->second.sources) {
+			source.invalidate_without_parent_row();
+		}
+	}
+	pending_speculative_sources().erase(pending);
 
 	bioseq_enable_page_cache = previousCacheEnabledState;
 }
@@ -1270,12 +1366,14 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 										   tupleSlot->tts_values, tupleSlot->tts_isnull);
 
 			std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
+			std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
 			Datum *values_for_write = rewrite_seq_columns_to_stubs(
 				relation, tupleSlot, writeState, amc,
-				detoasted_values, per_col_locator);
+				detoasted_values, per_col_locator, pending_sources);
 
 			uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState,
 				values_for_write, tupleSlot->tts_isnull);
+			publish_sequence_sources_after_parent_row(pending_sources);
 
 			bioseq::storage::indexing::index_build_on_insert_columns(
 				RelationGetRelid(relation), amc.seq_attnos, tupleSlot->tts_isnull,
@@ -1310,18 +1408,65 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 	pgstat_count_heap_insert(relation, ntuples);
 }
 
+/// Invalidate only the epoch(s) carried by the exact old parent row before its
+/// row mask changes. The catalog update is MVCC: an older registered snapshot
+/// continues to see the prior READY tuple, while a newer snapshot cannot admit
+/// the masked source.
+static void
+invalidate_sequence_source_epochs_for_row(Relation relation,
+                                           std::uint64_t row_number,
+                                           Snapshot snapshot)
+{
+	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
+	if (amc.seq_attnos.empty()) return;
+	Snapshot read_snapshot = snapshot != nullptr ? snapshot : GetTransactionSnapshot();
+	MemoryContext read_context = CreateBioseqColumnScanMemoryContext();
+	{
+		MemoryContextScope context_guard{read_context};
+		TupleDesc descriptor = RelationGetDescr(relation);
+		PBitmapset attributes = PBitmapset::full_range(descriptor->natts);
+		BioseqColumnReadState *read_state = init_bioseq_read_state(
+			relation, descriptor, attributes, NIL, read_context, read_snapshot,
+			/*randomAccess=*/true, nullptr);
+		Datum *values = static_cast<Datum *>(palloc0(
+			sizeof(Datum) * static_cast<std::size_t>(descriptor->natts)));
+		bool *nulls = static_cast<bool *>(palloc0(
+			sizeof(bool) * static_cast<std::size_t>(descriptor->natts)));
+		if (BioseqColumnReadRowByRowNumber(read_state, row_number, values, nulls)) {
+			for (const std::int16_t attno : amc.seq_attnos) {
+				const int index = attno - 1;
+				if (index < 0 || index >= descriptor->natts || nulls[index]) continue;
+				const auto *header = reinterpret_cast<const pgseq_t *>(
+					DatumGetPointer(values[index]));
+				if (!bioseq::storage::is_locator_stub(header)) continue;
+				const auto locator = bioseq::storage::decode_locator_from_stub(header);
+				bioseq::storage::SequenceSourceVersionManager::invalidate_epoch(
+					locator.source_epoch);
+			}
+		}
+		BioseqColumnEndRead(read_state);
+	}
+	MemoryContextDelete(read_context);
+}
+
 
 static TM_Result
 bioseq_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 					  Snapshot snapshot, Snapshot crosscheck, bool wait,
 					  TM_FailureData *tmfd, bool changingPart)
 {
+	if (bioseq::storage::is_registered_sequence_fragment_relation(
+			RelationGetRelid(relation))) {
+		bioseq_log<ERR, PG>(
+			"bioseq storage: registered sequence fragments are immutable; DELETE is forbidden");
+	}
 	uint64_t rowNumber = tid_to_row_number(*tid);
 	uint64_t storageId = LookupStorageId(relation->rd_locator);
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64_t) storageId));
 
+	invalidate_sequence_source_epochs_for_row(relation, rowNumber, snapshot);
 	if (!UpdateRowMask(relation->rd_locator, storageId,  snapshot, rowNumber))
 		return TM_Deleted;
 
@@ -1337,6 +1482,11 @@ bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					  bool wait, TM_FailureData *tmfd,
 					  LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 {
+	if (bioseq::storage::is_registered_sequence_fragment_relation(
+			RelationGetRelid(relation))) {
+		bioseq_log<ERR, PG>(
+			"bioseq storage: registered sequence fragments are immutable; UPDATE is forbidden");
+	}
 
 	
 	uint64_t rowNumber = tid_to_row_number(*otid);
@@ -1346,6 +1496,7 @@ bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64_t) storageId));
 
+	invalidate_sequence_source_epochs_for_row(relation, rowNumber, snapshot);
 	if (!UpdateRowMask(relation->rd_locator, storageId, snapshot, rowNumber))
 		return TM_Deleted;
 
@@ -1412,6 +1563,11 @@ bioseq_relation_set_new_filenode(Relation rel,
 								   TransactionId *freezeXid,
 								   MultiXactId *minmulti)
 {
+	if (bioseq::storage::is_registered_sequence_fragment_relation(
+			RelationGetRelid(rel))) {
+		bioseq_log<ERR, PG>(
+			"bioseq storage: destructive rewrite of a registered sequence fragment relation is forbidden");
+	}
 	if (persistence == RELPERSISTENCE_TEMP)
 	{
 		bioseq_log<ERR, PG>(
@@ -1455,6 +1611,11 @@ bioseq_relation_set_new_filenode(Relation rel,
 static void
 bioseq_relation_nontransactional_truncate(Relation rel)
 {
+	if (bioseq::storage::is_registered_sequence_fragment_relation(
+			RelationGetRelid(rel))) {
+		bioseq_log<ERR, PG>(
+			"bioseq storage: TRUNCATE of a registered sequence fragment relation is forbidden");
+	}
 	RelFileLocator relfilelocator = rel->rd_locator;
 
 	NonTransactionDropWriteState(relfilelocator.relNumber);
@@ -1601,11 +1762,14 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool *nulls = make_array<bool>(sourceDesc->natts);
 
 	const auto &source_amc = bioseq::storage::bioseq_am_cache_for(OldHeap);
+	const std::uint64_t new_main_storage_id =
+		BioseqColumnStorageGetStorageId(NewHeap, false);
 
 	*num_tuples = 0;
 
 	while (BioseqColumnReadNextRow(readState, values, nulls, NULL))
 	{
+		std::vector<bioseq::storage::PendingSequenceSource> pending_sources;
 		/* Hydrate any SEQ stub columns from OldHeap's sub-tables. */
 		for (std::int16_t attno : source_amc.seq_attnos) {
 			const int idx = attno - 1;
@@ -1635,11 +1799,13 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			const auto cap_bytes = write_caches != nullptr
 				? write_caches->cap_bytes_snapshot
 				: bioseq::storage::read_max_sub_table_cap_bytes();
-			const auto loc =
+			auto pending =
 				bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
+					RelationGetRelid(OldHeap), new_main_storage_id,
 					NewHeap->rd_locator.dbOid, NewHeap->rd_locator.spcOid,
 					NewHeap->rd_locator.relNumber,
 					attno, targetDesc, hdr, cap_bytes, write_caches);
+			const auto loc = pending.locator();
 			pgseq_t* stub = bioseq::storage::alloc_locator_stub_in(
 				BioseqColumnWritePerTupleContext(writeState),
 				static_cast<std::uint8_t>(hdr->alphabet_code),
@@ -1648,9 +1814,13 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				loc.total_bp_size,
 				loc);
 			values[idx] = PointerGetDatum(stub);
+			pending_sources.push_back(std::move(pending));
 		}
 
 		BioseqColumnWriteRow(writeState, values, nulls);
+		for (auto& source : pending_sources) {
+			source.publish_after_parent_row();
+		}
 		(*num_tuples)++;
 	}
 
@@ -2137,7 +2307,22 @@ TruncateBioseqColumn(Relation rel, int elevel)
 		return;
 	}
 
-	bool stripesTruncated = TruncateAndCombineBioseqColumnStripes(rel, elevel);
+	const bool locator_pinned_fragment =
+		bioseq::storage::is_registered_sequence_fragment_relation(
+			RelationGetRelid(rel));
+	// Sequence locators persist exact physical row numbers.  The ordinary
+	// columnar compactor rewrites surviving tuples at fresh row numbers, so it
+	// is never legal for a registered fragment relation.  Physical tail
+	// truncation below remains allowed because it preserves every live stripe,
+	// row number, and reserved-row-number watermark.
+	bool stripesTruncated = locator_pinned_fragment
+		? false
+		: TruncateAndCombineBioseqColumnStripes(rel, elevel);
+	if (locator_pinned_fragment) {
+		bioseq_log_pg(elevel,
+			"\"{}\": skipping row-moving compaction for locator-pinned sequence fragments",
+			RelationGetRelationName(rel));
+	}
 
 	/*
 	 * If we didn't truncate and combine tail stripes we could have
@@ -2758,7 +2943,12 @@ BioseqColumnXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_PARALLEL_COMMIT:
 		case XACT_EVENT_PREPARE:
 		{
-			/* nothing to do */
+			// PRE_COMMIT/PRE_PREPARE below must have proved this empty. A
+			// surviving move-only authority here is an internal invariant breach;
+			// never silently discard it after the transaction boundary.
+			require_no_pending_speculative_sources(
+				"commit/prepare after pre-commit validation",
+				kPostgresPanicLevel);
 			break;
 		}
 
@@ -2767,6 +2957,7 @@ BioseqColumnXactCallback(XactEvent event, void *arg)
 		{
 			DiscardWriteStateForAllRels(GetCurrentSubTransactionId(), 0);
 			CleanupReadStateCache(GetCurrentSubTransactionId());
+			pending_speculative_sources().clear();
 			break;
 		}
 
@@ -2774,6 +2965,7 @@ BioseqColumnXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_PARALLEL_PRE_COMMIT:
 		case XACT_EVENT_PRE_PREPARE:
 		{
+			require_no_pending_speculative_sources("pre-commit/pre-prepare");
 			FlushWriteStateForAllRels(GetCurrentSubTransactionId(), 0);
 			CleanupReadStateCache(GetCurrentSubTransactionId());
 			break;
@@ -2791,7 +2983,12 @@ BioseqColumnSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 		case SUBXACT_EVENT_START_SUB:
 		case SUBXACT_EVENT_COMMIT_SUB:
 		{
-			/* nothing to do */
+			for (auto& [key, pending] : pending_speculative_sources()) {
+				(void)key;
+				if (pending.subtransaction_id == mySubid) {
+					pending.subtransaction_id = parentSubid;
+				}
+			}
 			break;
 		}
 
@@ -2799,6 +2996,10 @@ BioseqColumnSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 		{
 			DiscardWriteStateForAllRels(mySubid, parentSubid);
 			CleanupReadStateCache(mySubid);
+			std::erase_if(pending_speculative_sources(),
+				[mySubid](const auto& entry) {
+					return entry.second.subtransaction_id == mySubid;
+				});
 			break;
 		}
 

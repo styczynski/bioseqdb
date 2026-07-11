@@ -14,6 +14,7 @@
 #include <array>
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -29,6 +30,7 @@ import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
 import bioseq.storage.scanner;   // DOC0345 §16 — sequence_scanner_test_chunked + SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT
 import bioseq.storage.lazy;      // DOC0345 §16 — lazy_compact_sequence
 import bioseq.storage.size;      // DOC0345 §16 — sequence_size_t
@@ -343,10 +345,251 @@ TEST_CASE("vulkan minimizer: oversized k declines before dispatch (no throw)",
     // guard for dna4 (step_bits=2).
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(DNA4_FIXTURE);
-    auto big_k = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, 10, 40);
+    vk::VulkanSketchDecline decline{};
+    auto big_k = vk::collect_minimizers_vulkan_result<MinimapSketchData>(
+        seq, 10, 40, &decline);
     ASSERT(!big_k.has_value(), "oversized k must decline (nullopt)", 0);
-    auto big_w = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, 300, 15);
+    REQUIRE(decline.reason == vk::VulkanSketchDeclineReason::kmer_size_unsupported);
+    REQUIRE(decline.kmer_size == 40u);
+    auto big_w = vk::collect_minimizers_vulkan_result<MinimapSketchData>(
+        seq, 300, 15, &decline);
     ASSERT(!big_w.has_value(), "oversized window must decline (nullopt)", 0);
+    REQUIRE(decline.reason == vk::VulkanSketchDeclineReason::window_size_unsupported);
+    REQUIRE(decline.window_size == 300u);
+}
+
+TEST_CASE("vulkan minimizer: typed decline preserves admission snapshot and strict message",
+          "[vulkan][seeding][phase-c][decline]") {
+    const vk::VulkanSketchDecline decline{
+        .reason = vk::VulkanSketchDeclineReason::memory_admission_denied,
+        .bp_size = 101u,
+        .padded_sequence_bytes = 32u,
+        .max_minimizers = 17u,
+        .query_gate_words = 3u,
+        .window_size = 10u,
+        .kmer_size = 15u,
+        .admission = {
+            .reason = bioseq::parallelism::MemoryAdmissionFailureReason::
+                budget_exhausted,
+            .requested_bytes = 701u,
+            .reserved_bytes = 211u,
+            .budget_ceiling_bytes = 503u,
+            .allocatable_after_reservations_bytes = 292u,
+            .process_footprint_bytes = 401u,
+            .system_available_bytes = 601u,
+            .system_total_bytes = 809u,
+            .process_soft_cap_bytes = 307u,
+        },
+    };
+    const std::string formatted = vk::format_vulkan_sketch_decline(decline);
+    REQUIRE(formatted.find("reason=memory_admission_denied") != std::string::npos);
+    REQUIRE(formatted.find("admission_reason=budget_exhausted") != std::string::npos);
+    REQUIRE(formatted.find("required_bytes=701") != std::string::npos);
+    REQUIRE(formatted.find("allocatable_after_reservations_bytes=292")
+            != std::string::npos);
+    REQUIRE(formatted.find("reserved_bytes=211") != std::string::npos);
+    REQUIRE(formatted.find("budget_ceiling_bytes=503") != std::string::npos);
+    REQUIRE(formatted.find("process_footprint_bytes=401") != std::string::npos);
+    REQUIRE(formatted.find("system_available_bytes=601") != std::string::npos);
+    REQUIRE(formatted.find("system_total_bytes=809") != std::string::npos);
+    REQUIRE(formatted.find("process_soft_cap_bytes=307") != std::string::npos);
+
+    bool caught = false;
+    try {
+        vk::throw_vulkan_strict_decline("typed target-index fixture", decline);
+    } catch (const vk::VulkanRuntimeError& error) {
+        caught = true;
+        const std::string message = error.what();
+        REQUIRE(message.find("typed target-index fixture selected")
+                != std::string::npos);
+        REQUIRE(message.find("reason=memory_admission_denied")
+                != std::string::npos);
+        REQUIRE(message.find("admission_reason=budget_exhausted")
+                != std::string::npos);
+        REQUIRE(message.find("system_total_bytes=809") != std::string::npos);
+    }
+    REQUIRE(caught);
+}
+
+TEST_CASE("vulkan minimizer: only reducible declines permit segment retry",
+          "[vulkan][seeding][phase-c][decline][segment]") {
+    STATIC_REQUIRE(vk::vulkan_sketch_decline_allows_segment_split(
+        vk::VulkanSketchDeclineReason::memory_admission_denied));
+    STATIC_REQUIRE(vk::vulkan_sketch_decline_allows_segment_split(
+        vk::VulkanSketchDeclineReason::output_capacity_overflow));
+    STATIC_REQUIRE(vk::vulkan_sketch_decline_allows_segment_split(
+        vk::VulkanSketchDeclineReason::sequence_size_exceeds_u32));
+    STATIC_REQUIRE_FALSE(vk::vulkan_sketch_decline_allows_segment_split(
+        vk::VulkanSketchDeclineReason::hardware_device_unavailable));
+    STATIC_REQUIRE_FALSE(vk::vulkan_sketch_decline_allows_segment_split(
+        vk::VulkanSketchDeclineReason::kmer_size_unsupported));
+    STATIC_REQUIRE_FALSE(vk::vulkan_sketch_decline_allows_segment_split(
+        vk::VulkanSketchDeclineReason::query_gate_exceeds_u32));
+}
+
+TEST_CASE("vulkan minimizer: target-index decline identity survives wrappers",
+          "[vulkan][seeding][phase-c][decline][target-index]") {
+    STATIC_REQUIRE(vk::vulkan_target_index_failure_decline_reason(
+        vk::GpuBuiltIndexFailureReason::output_capacity_overflow)
+        == vk::VulkanSketchDeclineReason::output_capacity_overflow);
+    STATIC_REQUIRE(vk::vulkan_target_index_failure_decline_reason(
+        vk::GpuBuiltIndexFailureReason::memory_plan_invalid)
+        == vk::VulkanSketchDeclineReason::memory_plan_invalid);
+    STATIC_REQUIRE(vk::vulkan_target_index_failure_decline_reason(
+        vk::GpuBuiltIndexFailureReason::device_buffer_allocation_failed)
+        == vk::VulkanSketchDeclineReason::device_allocation_failed);
+    STATIC_REQUIRE(vk::vulkan_target_index_failure_decline_reason(
+        vk::GpuBuiltIndexFailureReason::count_peak_memory_admission_denied)
+        == vk::VulkanSketchDeclineReason::memory_admission_denied);
+    STATIC_REQUIRE(vk::vulkan_target_index_failure_decline_reason(
+        vk::GpuBuiltIndexFailureReason::index_invariant_failed)
+        == vk::VulkanSketchDeclineReason::
+            target_index_build_invariant_failed);
+
+    using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    vk::VulkanSketchDecline decline{};
+    auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
+        sequence,
+        10u,
+        40u,
+        {},
+        &decline);
+    REQUIRE_FALSE(built.has_value());
+    REQUIRE(decline.reason
+            == vk::VulkanSketchDeclineReason::kmer_size_unsupported);
+    REQUIRE(decline.bp_size == sequence.bp_size());
+    REQUIRE(decline.window_size == 10u);
+    REQUIRE(decline.kmer_size == 40u);
+}
+
+TEST_CASE("vulkan minimizer: target-index count admission covers persistent arena high-water",
+          "[vulkan][seeding][phase-c][admission][arena]") {
+    if (!vulkan_ready()) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
+    auto& runtime = vk::Runtime::instance();
+    constexpr std::uint64_t high_water_request = std::uint64_t{16} << 20;
+    REQUIRE(runtime.phase_c_arena().ensure_capacity(
+        high_water_request, 0u, 0u));
+    const std::uint64_t high_water =
+        runtime.phase_c_arena().device_buffer().allocation_bytes;
+    REQUIRE(high_water >= high_water_request);
+    REQUIRE(runtime.phase_c_arena_allocation_requirement(1024u) >= high_water);
+
+    auto mutable_gate_words = std::make_shared<std::vector<std::uint32_t>>(
+        vk::kPhaseCQueryGateWordCount,
+        (std::numeric_limits<std::uint32_t>::max)());
+    const std::shared_ptr<const std::vector<std::uint32_t>> gate_words =
+        std::move(mutable_gate_words);
+    const auto gate_identity =
+        vk::canonical_vulkan_sketch_query_gate_identity(
+            std::span<const std::uint32_t>{*gate_words},
+            vk::kPhaseCQueryGateMask,
+            gate_words);
+    const vk::VulkanSketchQueryGate gate{
+        std::span<const std::uint32_t>{*gate_words},
+        vk::kPhaseCQueryGateMask,
+        gate_identity,
+        true};
+    using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    vk::VulkanSketchDecline decline{};
+    auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
+        sequence, 10u, 15u, gate, &decline);
+    INFO(vk::format_vulkan_sketch_decline(decline));
+    REQUIRE(built.has_value());
+    REQUIRE(built->valid);
+    REQUIRE(built->ownership.count_phase_admissions == 1u);
+    REQUIRE(built->ownership.main_peak_admissions == 1u);
+    REQUIRE(built->ownership.gate_count_dispatches == 1u);
+    REQUIRE(built->ownership.gated_emit_dispatches == 1u);
+    REQUIRE(built->ownership.ungated_emit_dispatches == 0u);
+    REQUIRE(built->ownership.retained_minimizer_count > 0u);
+    REQUIRE(built->ownership.distinct_minimizer_count > 0u);
+    REQUIRE(built->ownership.peak_observed_bytes
+            <= built->ownership.peak_admitted_bytes);
+}
+
+TEST_CASE("vulkan minimizer: truncated query gate fails before target-index dispatch",
+          "[vulkan][seeding][phase-c][gate]") {
+    if (!vulkan_ready()) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
+    using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    const std::array<std::uint32_t, 1> truncated_words{1u};
+    const vk::VulkanSketchQueryGate truncated_gate{
+        std::span<const std::uint32_t>{truncated_words}, 31u};
+    REQUIRE_THROWS_AS(
+        vk::build_gpu_index_on_device<MinimapSketchData>(
+            sequence, 10u, 15u, truncated_gate),
+        vk::VulkanRuntimeError);
+}
+
+TEST_CASE("vulkan minimizer: selected segment preserves typed strict cause",
+          "[vulkan][seeding][phase-c][decline][segment]") {
+    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_t = compact_sequence_range<config_t>;
+    using storage_unit = typename range_t::traits::storage_unit;
+    using scanner_t =
+        bioseq::storage::sequence_scanner_test_chunked<
+            storage_unit,
+            bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+    using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
+
+    range_t range(DNA4_FIXTURE);
+    lazy_t fragmented{scanner_t::from_range(range)};
+    sketch_collector_t<MinimapSketchData> collector;
+    bool caught = false;
+    try {
+        vk::collect_minimizers_vulkan_segment_or_throw<MinimapSketchData>(
+            collector,
+            fragmented,
+            0u,
+            static_cast<std::size_t>(fragmented.size()),
+            10u,
+            40u);
+    } catch (const vk::VulkanRuntimeError& error) {
+        caught = true;
+        const std::string message = error.what();
+        REQUIRE(message.find("Vulkan segment minimizer sketch selected")
+                != std::string::npos);
+        REQUIRE(message.find("reason=kmer_size_unsupported")
+                != std::string::npos);
+        REQUIRE(message.find("w=10 k=40") != std::string::npos);
+    }
+    REQUIRE(caught);
+}
+
+TEST_CASE("vulkan minimizer: explicit output overflow has typed identity",
+          "[vulkan][seeding][phase-c][decline][overflow]") {
+    if (!vulkan_ready()) {
+        SUCCEED("no hardware Vulkan device; output-overflow dispatch skipped");
+        return;
+    }
+    using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    const auto upload = vk::make_sequence_upload_view(sequence);
+    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(sequence)>();
+    bool capacity_overflowed = false;
+    vk::VulkanSketchDecline decline{};
+    auto result = vk::sketch_uploaded_window_result<MinimapSketchData>(
+        upload,
+        rank_lut,
+        10u,
+        15u,
+        1u,
+        &capacity_overflowed,
+        {},
+        &decline);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(capacity_overflowed);
+    REQUIRE(decline.reason
+            == vk::VulkanSketchDeclineReason::output_capacity_overflow);
+    REQUIRE(decline.max_minimizers == 1u);
 }
 
 TEST_CASE("vulkan minimizer: software device declines selected paths",

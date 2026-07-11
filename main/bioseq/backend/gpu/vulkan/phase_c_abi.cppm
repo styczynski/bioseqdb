@@ -40,6 +40,11 @@ inline constexpr std::uint32_t k_phase_c_sketch_local = 64u;
 inline constexpr std::uint32_t k_phase_c_sketch_tile_span_max = 384u;
 inline constexpr std::uint32_t k_phase_c_scan_block = 256u;
 inline constexpr std::uint32_t k_phase_c_slot_offset_align = 256u;
+// Conservative VkDeviceMemory allocation quantum used by the pure peak plan.
+// The runtime still verifies the allocator-reported byte total before dispatch;
+// this bound makes the admission plan account for per-buffer padding rather
+// than assuming requested range == allocation size.
+inline constexpr std::uint32_t k_phase_c_peak_allocation_align = 64u * 1024u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_max_len = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_cigar_traceback_tile_len = 128u;
 inline constexpr std::uint32_t k_gpu_alignment_simple_cigar_max_len = 16'384u;
@@ -49,6 +54,28 @@ inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_cigar_overflow = 2u;
+// DOC0371 persisted-index foundation. The directory is uploaded exactly as the
+// header-free revision-3 96-byte little-endian entry stream; the shader reads
+// these word offsets directly and returns only stable directory ordinals.
+inline constexpr std::uint32_t k_gpu_persisted_directory_entry_bytes = 96u;
+inline constexpr std::uint32_t k_gpu_persisted_directory_entry_words = 24u;
+
+/// Push constants for the one-workgroup query-minimizer -> directory-ordinal
+/// selector. Query hashes remain inside the device buffer throughout the run.
+struct GpuPersistedDirectorySelectionPush {
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32_per_record = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t directory_entry_count = 0;
+    std::uint32_t reserved_directory = 0;
+    std::uint32_t bitset_word_count = 0;
+    std::uint32_t reserved = 0;
+};
+static_assert(sizeof(GpuPersistedDirectorySelectionPush) == 32);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, minimizer_count) == 0);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, reserved_directory) == 20);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, reserved) == 28);
 
 [[nodiscard]] inline constexpr std::uint64_t gpu_alignment_cigar_ceil_div_u64(
     const std::uint64_t value,
@@ -119,6 +146,15 @@ struct PhaseCSketchMemoryPlan {
     std::uint64_t counter_bytes = 0;
     std::uint64_t arena_pair_value_bytes = 0;
     std::uint64_t arena_scaffold_bytes = 0;
+    std::uint64_t target_index_initial_key_bytes = 0;
+    std::uint64_t target_index_key_scratch_bytes = 0;
+    std::uint64_t target_index_value_scratch_bytes = 0;
+    std::uint64_t target_index_histogram_bytes = 0;
+    std::uint64_t target_index_flag_scan_bytes = 0;
+    std::uint64_t target_index_scan_block_bytes = 0;
+    std::uint64_t target_index_bucket_bytes = 0;
+    std::uint64_t target_index_sort_peak_bytes = 0;
+    std::uint64_t target_index_bucket_peak_bytes = 0;
     std::uint64_t standalone_device_bytes = 0;
     std::uint64_t resident_output_bytes = 0;
     std::uint64_t host_transient_bytes = 0;
@@ -354,11 +390,76 @@ struct PhaseCSketchMemoryPlan {
     arena = add_aligned(arena, plan.arena_pair_value_bytes);
     plan.arena_scaffold_bytes = arena;
 
-    plan.standalone_device_bytes = phase_c_saturating_add(
-        plan.output_word_bytes,
-        phase_c_saturating_add(plan.pair_key_bytes, plan.pair_value_bytes));
-    plan.resident_output_bytes = plan.standalone_device_bytes;
-    plan.host_transient_bytes = plan.seq_bytes;
+    if (use == PhaseCSketchUse::target_index_build) {
+        const auto allocation_bytes = [](std::uint64_t bytes) {
+            return phase_c_align_up(
+                std::max<std::uint64_t>(bytes, 1u),
+                k_phase_c_peak_allocation_align);
+        };
+        const std::uint64_t flag_bytes =
+            phase_c_saturating_mul(output_capacity, 4u);
+        const std::uint64_t scanned_offset =
+            phase_c_align_up(flag_bytes, k_phase_c_slot_offset_align);
+        plan.target_index_flag_scan_bytes =
+            phase_c_saturating_add(scanned_offset, flag_bytes);
+        plan.target_index_initial_key_bytes = std::max(
+            plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
+        // The non-result key ping-pong allocation is reused as the aligned
+        // flags/scanned allocation after the radix fence.
+        plan.target_index_key_scratch_bytes = std::max(
+            plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
+        plan.target_index_value_scratch_bytes = plan.pair_value_bytes;
+        const std::uint64_t sort_groups = std::min<std::uint64_t>(
+            phase_c_ceil_div_u32(output_capacity, 512u), max_workgroups);
+        plan.target_index_histogram_bytes = phase_c_saturating_mul(
+            phase_c_saturating_mul(sort_groups, 256u), 4u);
+        plan.target_index_scan_block_bytes = phase_c_saturating_mul(
+            phase_c_ceil_div_u32(output_capacity, k_phase_c_scan_block), 4u);
+        plan.target_index_bucket_bytes =
+            phase_c_saturating_mul(output_capacity, 16u);
+
+        std::uint64_t sort_peak = 0u;
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_initial_key_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.pair_value_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_key_scratch_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_value_scratch_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_histogram_bytes));
+        plan.target_index_sort_peak_bytes = sort_peak;
+
+        // After the radix fence the unused value allocation and histogram are
+        // released. The non-result key allocation becomes flags+scanned;
+        // buckets are allocated at exact distinct-key count D (bounded by C).
+        std::uint64_t bucket_peak = 0u;
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_initial_key_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_value_scratch_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_key_scratch_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_scan_block_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_bucket_bytes));
+        plan.target_index_bucket_peak_bytes = bucket_peak;
+        plan.standalone_device_bytes = std::max(sort_peak, bucket_peak);
+        plan.resident_output_bytes = phase_c_saturating_add(
+            allocation_bytes(plan.target_index_value_scratch_bytes),
+            allocation_bytes(plan.target_index_bucket_bytes));
+    } else {
+        plan.standalone_device_bytes = phase_c_saturating_add(
+            plan.output_word_bytes,
+            phase_c_saturating_add(plan.pair_key_bytes, plan.pair_value_bytes));
+        plan.resident_output_bytes = plan.standalone_device_bytes;
+    }
+    // `tiles` and the packed sequence both exist on the host while their arena
+    // copies are live.
+    plan.host_transient_bytes = phase_c_saturating_add(
+        plan.seq_bytes, plan.tile_bytes);
     plan.admission_bytes = phase_c_saturating_add(
         plan.arena_scaffold_bytes,
         phase_c_saturating_add(
