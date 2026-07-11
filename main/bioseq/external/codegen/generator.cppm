@@ -80,15 +80,22 @@ struct integration_parameter {
     integration_scalar value;
 };
 
+struct integration_header_expectation {
+    std::string name;
+    std::string value_contains;
+};
+
 struct integration_case {
     std::string name;
     std::string operation_id;
+    std::string accept;
     integration_mode mode{};
     std::size_t count{1};
     std::size_t pre_delay_without_credentials_ms{};
     long expected_status{200};
     std::vector<integration_parameter> parameters;
     std::vector<std::string> body_contains;
+    std::vector<integration_header_expectation> header_contains;
 };
 
 struct openapi_document {
@@ -483,6 +490,24 @@ void touch_stamp(const fs::path& path) {
     throw std::runtime_error("unsupported OpenAPI parameter type: " + std::string(value));
 }
 
+/// @brief Identifies request-header parameters reserved by OpenAPI itself.
+/// @param name Validated HTTP header name.
+/// @return True for Accept, Content-Type, or Authorization, ignoring ASCII case.
+[[nodiscard]] bool reserved_openapi_header_parameter(std::string_view name) noexcept {
+    const auto equals = [name](std::string_view expected) {
+        if (name.size() != expected.size()) return false;
+        for (std::size_t index = 0; index < name.size(); ++index) {
+            const auto fold = [](char character) {
+                return character >= 'A' && character <= 'Z'
+                    ? static_cast<char>(character - 'A' + 'a') : character;
+            };
+            if (fold(name[index]) != fold(expected[index])) return false;
+        }
+        return true;
+    };
+    return equals("accept") || equals("content-type") || equals("authorization");
+}
+
 /// @brief Resolves and lowers one OpenAPI parameter definition.
 /// @param document Root OpenAPI node.
 /// @param unresolved Parameter node or reference.
@@ -535,6 +560,10 @@ void append_parameters(
     }
     for (const auto& value : list) {
         auto parsed = parse_parameter(document, value);
+        if (parsed.location == parameter_location::header
+            && reserved_openapi_header_parameter(parsed.name)) {
+            continue;
+        }
         const auto duplicate = std::find_if(
             destination.begin(), destination.end(), [&parsed](const openapi_parameter& existing) {
                 return existing.name == parsed.name && existing.location == parsed.location;
@@ -822,7 +851,7 @@ void parse_integration_cases(const YAML::Node& document, openapi_document& resul
     for (const auto& node : cases) {
         validate_metadata_keys(
             node,
-            {"name", "operationId", "mode", "count",
+            {"name", "operationId", "accept", "mode", "count",
              "preDelayWithoutCredentialsMs", "parameters", "expect"},
             "integration case");
         if (!node["name"] || !node["operationId"] || !node["expect"]) {
@@ -841,6 +870,16 @@ void parse_integration_cases(const YAML::Node& document, openapi_document& resul
         if (operation == result.get_operations.end()) {
             throw std::runtime_error(
                 "integration case references unknown GET operation: " + parsed.operation_id);
+        }
+        if (node["accept"]) {
+            if (!node["accept"].IsScalar()) {
+                throw std::runtime_error("integration Accept override must be a scalar");
+            }
+            parsed.accept = node["accept"].as<std::string>();
+            if (parsed.accept.empty()
+                || !http_validation::valid_header_value(parsed.accept)) {
+                throw std::runtime_error("integration Accept override is invalid");
+            }
         }
 
         const std::string mode = node["mode"]
@@ -934,7 +973,8 @@ void parse_integration_cases(const YAML::Node& document, openapi_document& resul
 
         const YAML::Node expectation = node["expect"];
         validate_metadata_keys(
-            expectation, {"status", "bodyContains"}, "integration expectation");
+            expectation, {"status", "bodyContains", "headerContains"},
+            "integration expectation");
         if (expectation["status"]) {
             parsed.expected_status = static_cast<long>(parse_metadata_integer(
                 expectation["status"], 100, 599, "integration expected status"));
@@ -951,6 +991,36 @@ void parse_integration_cases(const YAML::Node& document, openapi_document& resul
             }
             parsed.body_contains.push_back(value);
         }
+        const YAML::Node header_markers = expectation["headerContains"];
+        if (header_markers && !header_markers.IsSequence()) {
+            throw std::runtime_error(
+                "integration headerContains must be a sequence");
+        }
+        if (header_markers) {
+            for (const auto& header_marker : header_markers) {
+                validate_metadata_keys(
+                    header_marker, {"name", "valueContains"},
+                    "integration header expectation");
+                if (!header_marker["name"] || !header_marker["valueContains"]
+                    || !header_marker["name"].IsScalar()
+                    || !header_marker["valueContains"].IsScalar()) {
+                    throw std::runtime_error(
+                        "integration header expectation requires name and valueContains");
+                }
+                integration_header_expectation parsed_header{
+                    .name = header_marker["name"].as<std::string>(),
+                    .value_contains = header_marker["valueContains"].as<std::string>(),
+                };
+                if (!http_validation::valid_header_name(parsed_header.name)
+                    || parsed_header.value_contains.empty()
+                    || !http_validation::valid_header_value(
+                        parsed_header.value_contains)) {
+                    throw std::runtime_error(
+                        "integration header expectation is invalid");
+                }
+                parsed.header_contains.push_back(std::move(parsed_header));
+            }
+        }
         result.integration_cases.push_back(std::move(parsed));
     }
 }
@@ -960,6 +1030,43 @@ struct parsed_https_server {
     std::uint16_t port{443};
     std::string base_path;
 };
+
+/// @brief Derives a stable identifier for a GET operation that omits operationId.
+/// @param path Validated OpenAPI path template.
+/// @return Lowercase `get_<path>` identifier with punctuation collapsed.
+[[nodiscard]] std::string synthesized_get_operation_id(std::string_view path) {
+    std::string result{"get"};
+    bool needs_separator = true;
+    for (char character : path) {
+        const bool alphanumeric = (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9');
+        if (!alphanumeric) {
+            needs_separator = true;
+            continue;
+        }
+        if (needs_separator) result.push_back('_');
+        result.push_back(character >= 'A' && character <= 'Z'
+            ? static_cast<char>(character - 'A' + 'a') : character);
+        needs_separator = false;
+    }
+    if (result == "get") result += "_root";
+    return result;
+}
+
+/// @brief Encodes an exact path into an identifier-safe stable suffix.
+/// @param path OpenAPI path that owns the synthesized identifier.
+/// @return Reversible lowercase hexadecimal spelling of every path byte.
+[[nodiscard]] std::string synthesized_path_suffix(std::string_view path) {
+    constexpr std::string_view digits = "0123456789abcdef";
+    std::string result{"_path_"};
+    result.reserve(result.size() + path.size() * 2);
+    for (const unsigned char byte : path) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0x0f]);
+    }
+    return result;
+}
 
 /// @brief Parses the fixed HTTPS server subset supported by the transport.
 /// @param server_url OpenAPI server URL.
@@ -1053,6 +1160,43 @@ struct parsed_https_server {
     result.port = server.port;
     result.base_path = std::move(server.base_path);
 
+    std::map<std::string, bool> explicit_operation_ids;
+    std::vector<std::pair<std::string, std::string>> synthesized_operations;
+    for (const auto& path_entry : document["paths"]) {
+        const YAML::Node operation = path_entry.second["get"];
+        if (!operation) continue;
+        if (operation["operationId"]) {
+            const std::string operation_id = operation["operationId"].as<std::string>();
+            if (operation_id.empty()) {
+                throw std::runtime_error(
+                    "GET operation has an empty operationId at "
+                    + path_entry.first.as<std::string>());
+            }
+            if (!explicit_operation_ids.emplace(operation_id, true).second) {
+                throw std::runtime_error("duplicate OpenAPI operationId: " + operation_id);
+            }
+        } else {
+            const std::string path = path_entry.first.as<std::string>();
+            const std::string base = synthesized_get_operation_id(path);
+            synthesized_operations.emplace_back(path, base);
+        }
+    }
+
+    std::ranges::sort(synthesized_operations, [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
+    std::map<std::string, std::string> synthesized_ids_by_path;
+    std::map<std::string, bool> reserved_operation_ids = explicit_operation_ids;
+    for (const auto& [path, base] : synthesized_operations) {
+        std::string operation_id = base + synthesized_path_suffix(path);
+        if (reserved_operation_ids.contains(operation_id)) {
+            throw std::runtime_error(
+                "duplicate explicit/synthesized OpenAPI operationId: " + operation_id);
+        }
+        reserved_operation_ids.emplace(operation_id, true);
+        synthesized_ids_by_path.emplace(path, std::move(operation_id));
+    }
+
     std::map<std::string, bool> operation_ids;
     for (const auto& path_entry : document["paths"]) {
         const std::string path = path_entry.first.as<std::string>();
@@ -1067,11 +1211,12 @@ struct parsed_https_server {
         const YAML::Node path_item = path_entry.second;
         if (!path_item["get"]) continue;
         const YAML::Node operation = path_item["get"];
-        if (!operation["operationId"]) {
-            throw std::runtime_error("GET operation lacks operationId at " + path);
-        }
         openapi_operation parsed;
-        parsed.operation_id = operation["operationId"].as<std::string>();
+        if (operation["operationId"]) {
+            parsed.operation_id = operation["operationId"].as<std::string>();
+        } else {
+            parsed.operation_id = synthesized_ids_by_path.at(path);
+        }
         parsed.path = path;
         parsed.accept = preferred_response_media_type(document, operation);
         if (auto api_key = effective_api_key_requirement(document, operation)) {
@@ -1219,11 +1364,6 @@ struct parsed_https_server {
 /// @return Generated module source.
 [[nodiscard]] std::string render_module(const generated_api& api) {
     const std::string namespace_suffix = identifier(api.client_name);
-    const auto has_operation = [&api](std::string_view operation_id) {
-        return std::ranges::any_of(api.document.get_operations, [operation_id](const auto& operation) {
-            return operation.operation_id == operation_id;
-        });
-    };
     std::size_t total_parameter_count = 0;
     for (const auto& operation : api.document.get_operations) {
         total_parameter_count += operation.parameters.size();
@@ -1263,6 +1403,7 @@ export enum class parameter_location : std::uint8_t { path, query, header };
 enum class parameter_kind : std::uint8_t { string, integer, number, boolean };
 
 export using parameter_scalar = std::variant<std::string_view, std::int64_t, double, bool>;
+export using response_header = bioseq::external::http_header;
 
 export struct parameter_value {
     std::string_view name;
@@ -1278,6 +1419,7 @@ export struct get_request {
     std::string_view operation_id;
     std::span<const parameter_value> parameters{};
     std::size_t maximum_response_body_bytes{default_maximum_response_body_bytes};
+    std::string_view accept{};
 };
 
 export struct credentials {
@@ -1292,6 +1434,7 @@ export struct client_error {
 export struct response {
     long status_code{};
     context::result_vector<char> body;
+    std::vector<response_header> headers;
 
     /// @brief Views arena-owned response bytes without copying them.
     [[nodiscard]] std::string_view body_view() const noexcept {
@@ -1408,6 +1551,21 @@ constexpr std::array<parameter_descriptor, )cpp" << total_parameter_count << R"c
 
 } // namespace detail
 
+/// @brief Tests whether a response contains a named header value fragment.
+/// @param headers Durable response headers.
+/// @param name Header name compared with HTTP ASCII case folding.
+/// @param value_contains Case-sensitive value fragment.
+/// @return True when one header satisfies both predicates.
+export [[nodiscard]] inline bool response_header_contains(
+    std::span<const response_header> headers,
+    std::string_view name,
+    std::string_view value_contains) noexcept {
+    return std::ranges::any_of(headers, [=](const response_header& header) {
+        return detail::ascii_iequals(header.name, name)
+            && header.value.find(value_contains) != std::string::npos;
+    });
+}
+
 export struct )cpp" << api.declared_type << R"cpp( {
     constexpr static std::string client_name = ")cpp" << cpp_escape(api.document.provider_name)
         << R"cpp(";
@@ -1431,7 +1589,21 @@ export struct )cpp" << api.declared_type << R"cpp( {
         std::span<const parameter_value> supplied = {},
         std::size_t maximum_response_body_bytes = default_response_body_limit) {
         auto transported = request_transport(
-            operation_id, supplied, maximum_response_body_bytes);
+            operation_id, supplied, {}, maximum_response_body_bytes);
+        if (!transported) {
+            return std::unexpected(std::move(transported.error()));
+        }
+        return materialize(std::move(*transported));
+    }
+
+    /// @brief Executes one generated GET with an explicit Accept override.
+    [[nodiscard]] std::expected<response, client_error> get_with_accept(
+        std::string_view operation_id,
+        std::span<const parameter_value> supplied,
+        std::string_view accept,
+        std::size_t maximum_response_body_bytes = default_response_body_limit) {
+        auto transported = request_transport(
+            operation_id, supplied, accept, maximum_response_body_bytes);
         if (!transported) {
             return std::unexpected(std::move(transported.error()));
         }
@@ -1452,6 +1624,7 @@ export struct )cpp" << api.declared_type << R"cpp( {
                             slots[index] = request_transport(
                                 requests[index].operation_id,
                                 requests[index].parameters,
+                                requests[index].accept,
                                 requests[index].maximum_response_body_bytes);
                         }
                     }});
@@ -1467,42 +1640,6 @@ export struct )cpp" << api.declared_type << R"cpp( {
         }
         return result;
     }
-)cpp";
-    if (has_operation("version")) {
-        out << R"cpp(
-
-    /// @brief Retrieves the service version document.
-    [[nodiscard]] std::expected<response, client_error> version() {
-        return get("version");
-    }
-)cpp";
-    }
-    if (has_operation("assembly_accessions_for_sequence_accession")) {
-        out << R"cpp(
-
-    /// @brief Retrieves assemblies associated with a sequence accession.
-    [[nodiscard]] std::expected<response, client_error>
-    assembly_accessions_for_sequence_accession(std::string_view accession) {
-        const std::array values{
-            parameter_value{"accession", parameter_location::path, accession},
-        };
-        return get("assembly_accessions_for_sequence_accession", values);
-    }
-)cpp";
-    }
-    if (has_operation("version")) {
-        out << R"cpp(
-
-    /// @brief Retrieves multiple version documents concurrently through get_batch().
-    [[nodiscard]] std::vector<std::expected<response, client_error>>
-    version_batch(std::size_t request_count) {
-        const std::vector<get_request> requests(
-            request_count, get_request{"version", {}});
-        return get_batch(requests);
-    }
-)cpp";
-    }
-    out << R"cpp(
 
 private:
     /// @brief Validates parameters and performs transport without touching the result arena.
@@ -1510,6 +1647,7 @@ private:
     request_transport(
         std::string_view operation_id,
         std::span<const parameter_value> supplied,
+        std::string_view accept,
         std::size_t maximum_response_body_bytes) const {
         using namespace detail;
         const operation_descriptor* operation = find_operation(operation_id);
@@ -1519,7 +1657,8 @@ private:
         std::string path = ")cpp" << cpp_escape(api.document.base_path) << R"cpp(";
         path += operation->path;
         std::vector<bioseq::external::http_header> headers;
-        headers.push_back({"Accept", std::string(operation->accept)});
+        headers.push_back({"Accept", std::string(
+            accept.empty() ? operation->accept : accept)});
         bool has_query = false;
         const auto descriptors = std::span{parameters}.subspan(
             operation->first_parameter, operation->parameter_count);
@@ -1574,11 +1713,7 @@ private:
                         if (!joined.empty()) joined += ',';
                         joined += value;
                     }
-                    if (ascii_iequals(descriptor.name, "Accept")) {
-                        headers.front().value = std::move(joined);
-                    } else {
-                        headers.push_back({std::string(descriptor.name), std::move(joined)});
-                    }
+                    headers.push_back({std::string(descriptor.name), std::move(joined)});
                 }
             }
         }
@@ -1650,7 +1785,11 @@ private:
             bytes.reserve(requested_capacity);
         }
         bytes.insert(bytes.end(), transported.body.begin(), transported.body.end());
-        return response{transported.status_code, std::move(bytes)};
+        return response{
+            transported.status_code,
+            std::move(bytes),
+            std::move(transported.headers),
+        };
     }
 
     const context::context& memory_context_;
@@ -1747,6 +1886,16 @@ TEST_CASE("generated external API client performs live requests",
     generated_api::)cpp" << api.declared_type << R"cpp( client(
         memory_context, pool, std::move(supplied_credentials));
     REQUIRE(client.client_name == ")cpp" << cpp_escape(api.document.provider_name) << R"cpp(");
+    const generated_api::get_request positional_request{
+        "__bioseq_compatibility_probe__", {}, 1U};
+    REQUIRE(positional_request.maximum_response_body_bytes == 1U);
+    REQUIRE(positional_request.accept.empty());
+    auto positional_response = client.get(
+        "__bioseq_compatibility_probe__", {}, 1U);
+    REQUIRE_FALSE(positional_response.has_value());
+    auto brace_response = client.get(
+        "__bioseq_compatibility_probe__", {}, {});
+    REQUIRE_FALSE(brace_response.has_value());
 )cpp";
     for (std::size_t case_index = 0;
          case_index < api.document.integration_cases.size(); ++case_index) {
@@ -1770,11 +1919,19 @@ TEST_CASE("generated external API client performs live requests",
             out << "    };\n";
         }
 
-        const std::string parameters = fixture.parameters.empty()
-            ? std::string{} : ", " + prefix + "_parameters";
+        const std::string parameter_expression = fixture.parameters.empty()
+            ? std::string{"{}"} : prefix + "_parameters";
+        const std::string accept_expression =
+            "std::string_view{\"" + cpp_escape(fixture.accept) + "\"}";
         if (fixture.mode == integration_mode::single) {
-            out << "    auto " << prefix << "_response = client.get(\""
-                << cpp_escape(fixture.operation_id) << "\"" << parameters << ");\n"
+            out << "    auto " << prefix << "_response = client."
+                << (fixture.accept.empty() ? "get" : "get_with_accept") << "(\""
+                << cpp_escape(fixture.operation_id) << "\", "
+                << parameter_expression;
+            if (!fixture.accept.empty()) {
+                out << ", " << accept_expression;
+            }
+            out << ");\n"
                 << "    INFO((" << prefix << "_response ? std::string("
                 << prefix << "_response->body_view()) : " << prefix
                 << "_response.error().message));\n"
@@ -1785,12 +1942,24 @@ TEST_CASE("generated external API client performs live requests",
                 out << "    REQUIRE(" << prefix << "_response->body_view().find(\""
                     << cpp_escape(marker) << "\") != std::string_view::npos);\n";
             }
+            for (const auto& header : fixture.header_contains) {
+                out << "    REQUIRE(generated_api::response_header_contains("
+                    << prefix << "_response->headers, \""
+                    << cpp_escape(header.name) << "\", \""
+                    << cpp_escape(header.value_contains) << "\"));\n";
+            }
         } else {
             out << "    const std::array " << prefix << "_requests{\n";
             for (std::size_t request_index = 0;
                  request_index < fixture.count; ++request_index) {
-                out << "        generated_api::get_request{\""
-                    << cpp_escape(fixture.operation_id) << "\"" << parameters << "},\n";
+                out << "        generated_api::get_request{\n"
+                    << "            .operation_id = \""
+                    << cpp_escape(fixture.operation_id) << "\",\n"
+                    << "            .parameters = " << parameter_expression;
+                if (!fixture.accept.empty()) {
+                    out << ",\n            .accept = " << accept_expression;
+                }
+                out << ",\n        },\n";
             }
             out << "    };\n"
                 << "    auto " << prefix << "_responses = client.get_batch("
@@ -1804,6 +1973,12 @@ TEST_CASE("generated external API client performs live requests",
             for (const auto& marker : fixture.body_contains) {
                 out << "        REQUIRE(item->body_view().find(\""
                     << cpp_escape(marker) << "\") != std::string_view::npos);\n";
+            }
+            for (const auto& header : fixture.header_contains) {
+                out << "        REQUIRE(generated_api::response_header_contains("
+                    << "item->headers, \"" << cpp_escape(header.name)
+                    << "\", \"" << cpp_escape(header.value_contains)
+                    << "\"));\n";
             }
             out << "    }\n";
         }
@@ -1838,6 +2013,70 @@ void run_generator_contract_self_tests() {
     require(server.host == "api.example.org", "explicit-port host parsing");
     require(server.port == 8443, "explicit-port value parsing");
     require(server.base_path == "/v1", "server path normalization");
+    require(
+        synthesized_get_operation_id("/uniprot/{identifier}.json")
+            == "get_uniprot_identifier_json",
+        "missing operationId synthesis");
+    require(
+        synthesized_get_operation_id("/uniprot/{identifiers}.json")
+            == "get_uniprot_identifiers_json",
+        "synthesized operationId uniqueness");
+    const auto collision_contract = parse_openapi(R"yaml(
+openapi: 3.0.0
+info: {title: Collision API}
+servers: [{url: 'https://api.example.org'}]
+paths:
+  /a-b:
+    get: {responses: {'200': {}}}
+  /a_b:
+    get: {responses: {'200': {}}}
+x-bioseq-client-name: Collision
+x-bioseq-integration:
+  - name: collision-suffix
+    operationId: get_a_b_path_2f612d62
+    expect: {status: 200, bodyContains: [ok]}
+)yaml");
+    require(
+        collision_contract.get_operations.size() == 2
+            && collision_contract.get_operations[0].operation_id
+                != collision_contract.get_operations[1].operation_id
+            && collision_contract.get_operations[0].operation_id.contains("_path_")
+            && collision_contract.get_operations[1].operation_id.contains("_path_"),
+        "collision-free synthesized operationId suffixes");
+    const auto stable_collision_id = std::ranges::find_if(
+        collision_contract.get_operations,
+        [](const openapi_operation& operation) {
+            return operation.path == std::string_view{"/a-b"};
+        });
+    require(
+        stable_collision_id != collision_contract.get_operations.end()
+            && stable_collision_id->operation_id
+                == synthesized_get_operation_id("/a-b")
+                    + synthesized_path_suffix("/a-b"),
+        "synthesized operationId depends only on its exact path");
+    const auto reordered_collision_contract = parse_openapi(R"yaml(
+openapi: 3.0.0
+info: {title: Collision API}
+servers: [{url: 'https://api.example.org'}]
+paths:
+  /a_b:
+    get: {responses: {'200': {}}}
+  /a-b:
+    get: {responses: {'200': {}}}
+x-bioseq-client-name: Collision
+x-bioseq-integration:
+  - name: collision-suffix
+    operationId: get_a_b_path_2f612d62
+    expect: {status: 200, bodyContains: [ok]}
+)yaml");
+    require(
+        reordered_collision_contract.get_operations.size()
+                == collision_contract.get_operations.size()
+            && reordered_collision_contract.get_operations[0].operation_id
+                == collision_contract.get_operations[0].operation_id
+            && reordered_collision_contract.get_operations[1].operation_id
+                == collision_contract.get_operations[1].operation_id,
+        "synthesized operationIds are independent of YAML path order");
     require_failure(
         [] { (void)parse_https_server("https://user@example.org/v1"); },
         "userinfo");
@@ -1865,7 +2104,7 @@ paths:
           schema: {type: array, items: {type: string}}
         - {name: enabled, in: query, schema: {type: boolean}}
         - {name: ratio, in: query, schema: {type: number}}
-        - {name: Accept, in: header, schema: {type: string}}
+        - {name: Accept, in: header, required: true, schema: {type: string}}
       responses:
         '200':
           content:
@@ -1877,6 +2116,7 @@ x-bioseq-client-name: Contract
 x-bioseq-integration:
   - name: typed-batch
     operationId: fetchItem
+    accept: application/json
     mode: batch
     count: 2
     parameters:
@@ -1885,21 +2125,27 @@ x-bioseq-integration:
       - {name: tag, in: query, value: second}
       - {name: enabled, in: query, value: true}
       - {name: ratio, in: query, value: 0.5}
-      - {name: Accept, in: header, value: application/json}
-    expect: {status: 200, bodyContains: [ok]}
+    expect:
+      status: 200
+      bodyContains: [ok]
+      headerContains:
+        - {name: Link, valueContains: 'rel="next"'}
 )yaml";
     const auto contract = parse_openapi(valid_openapi);
     require(contract.host == "api.example.org" && contract.port == 8443,
             "OpenAPI authority lowering");
     require(contract.get_operations.size() == 1
                 && contract.get_operations.front().accept
-                    == "application/vnd.example+json;version=2",
+                    == "application/vnd.example+json;version=2"
+                && contract.get_operations.front().parameters.size() == 4,
             "OpenAPI operation/media lowering");
     require(contract.get_operations.front().api_key_name == "X-Api-Key",
             "OpenAPI API-key lowering");
     require(contract.integration_cases.size() == 1
-                && contract.integration_cases.front().parameters.size() == 6
-                && contract.integration_cases.front().count == 2,
+                && contract.integration_cases.front().parameters.size() == 5
+                && contract.integration_cases.front().count == 2
+                && contract.integration_cases.front().accept == "application/json"
+                && contract.integration_cases.front().header_contains.size() == 1,
             "typed batch fixture lowering");
     const generated_api contract_api{
         .client_name = "contract",
@@ -1912,12 +2158,26 @@ x-bioseq-integration:
     require(render_test(contract_api).contains(
                 "std::numeric_limits<std::int64_t>::min()"),
             "typed fixture rendering");
+    require(render_module(contract_api).contains(
+                "accept.empty() ? operation->accept : accept"),
+            "explicit Accept precedence rendering");
+    require(render_module(contract_api).contains("get_with_accept"),
+            "unambiguous Accept entry point rendering");
+    require(render_test(contract_api).contains("response_header_contains"),
+            "response-header expectation rendering");
     YAML::Node invalid_metadata = YAML::Load(std::string(valid_openapi));
     invalid_metadata["x-bioseq-integration"][0]["unknown"] = true;
     const std::string invalid_metadata_spec = YAML::Dump(invalid_metadata);
     require_failure(
         [invalid_metadata_spec] { (void)parse_openapi(invalid_metadata_spec); },
         "unknown integration case key");
+    YAML::Node invalid_accept = YAML::Load(std::string(valid_openapi));
+    invalid_accept["x-bioseq-integration"][0]["accept"] =
+        "text/plain\r\nInjected: yes";
+    const std::string invalid_accept_spec = YAML::Dump(invalid_accept);
+    require_failure(
+        [invalid_accept_spec] { (void)parse_openapi(invalid_accept_spec); },
+        "integration Accept override is invalid");
 
     const YAML::Node plain_json = YAML::Load(R"yaml(
 operation:

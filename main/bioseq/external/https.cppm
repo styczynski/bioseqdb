@@ -242,7 +242,9 @@ public:
         , invalidator_(std::make_shared<tls_invalidator>())
         , context_(make_context()) {
         setProperty(PROPERTY_HOST, host_.c_str());
-        setProperty(PROPERTY_PORT, std::to_string(port_).c_str());
+        if (port_ != 443) {
+            setProperty(PROPERTY_PORT, std::to_string(port_).c_str());
+        }
     }
 
     tls_connection_provider(const tls_connection_provider&) = delete;
@@ -413,6 +415,7 @@ struct transport_error {
 struct transport_response {
     long status_code{};
     std::string body;
+    std::vector<http_header> headers;
 };
 
 inline constexpr std::size_t default_maximum_response_body_bytes =
@@ -489,9 +492,20 @@ public:
                 }
                 throw;
             }
+            std::vector<http_header> response_headers;
+            const auto& incoming_headers = exchange.response->getHeaders();
+            response_headers.reserve(
+                static_cast<std::size_t>(incoming_headers.getSize()));
+            for (const auto& [name, value] : incoming_headers.getAll()) {
+                response_headers.push_back(http_header{
+                    .name = name.std_str(),
+                    .value = value.std_str(),
+                });
+            }
             return transport_response{
                 .status_code = exchange.response->getStatusCode(),
                 .body = std::move(body).take(),
+                .headers = std::move(response_headers),
             };
         } catch (const oatpp::web::client::RequestExecutor::RequestExecutionError& error) {
             return std::unexpected(transport_error{
