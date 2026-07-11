@@ -72,8 +72,9 @@ using range_t  = compact_sequence_range<dna4_u64>;
     return v;
 }
 
+template<class Range>
 [[nodiscard]] std::vector<MinimapSketchData>
-whole_sequence_minimizers(range_t& range, std::size_t w, std::size_t k) {
+whole_sequence_minimizers(Range& range, std::size_t w, std::size_t k) {
     sketch_collector collector;
     collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
         collector, range, range.begin(), range.end(), w, k);
@@ -255,18 +256,34 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
     const auto total_bp = range.bp_size();
 
     FakeFragmentStorage<> storage;
+    FakeFragmentStorage<> exact_storage;
     storage.run_buffer_bytes_ = 4096;   // TINY -> forces multiple spilled runs
+    exact_storage.run_buffer_bytes_ = 4096;
     {
         lazy_compact_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
         bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(storage, lazy);
     }
+    {
+        lazy_compact_sequence<dna4_u64, chunked> lazy{
+            chunked::from_range(range)};
+        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(
+            exact_storage, lazy, MinimizerSketchBackend::ExactSimd);
+    }
     REQUIRE(storage.runs_.empty());   // build() calls release_runs() at the end
+    REQUIRE(exact_storage.runs_.empty());
 
     // Query = the whole sequence's own minimizers; max_occ wide-open.
     auto query = whole_sequence_minimizers(range, 10, 15);
     bioseq::indexing::MinimizerAssemblyScratch scratch;
     auto idx = bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::assemble_for_query(
         storage, std::span<const MinimapSketchData>(query), total_bp, /*max_occ*/ INT32_MAX, scratch);
+    bioseq::indexing::MinimizerAssemblyScratch exact_scratch;
+    auto exact_idx = bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::assemble_for_query(
+        exact_storage,
+        std::span<const MinimapSketchData>(query),
+        total_bp,
+        /*max_occ*/ INT32_MAX,
+        exact_scratch);
 
     REQUIRE(idx.target_length() == total_bp);
 
@@ -276,6 +293,35 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
     require_lookup_maps_equal(
         lookup_map(idx, kmers),
         baseline_for_query(query, kmers, (std::size_t)INT32_MAX));
+    require_lookup_maps_equal(
+        lookup_map(exact_idx, kmers),
+        lookup_map(idx, kmers));
+}
+
+TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
+          "[indexing][minimizer-sequence][exact-simd][dna5]") {
+    using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    using dna5_range = compact_sequence_range<dna5_u64>;
+    using chunked = sequence_scanner_test_chunked<std::uint64_t, 2>;
+    using MpsIndex =
+        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>;
+
+    std::vector<seq::dna5> data(257);
+    constexpr std::array<std::uint8_t, 4> acgt_ranks{0, 1, 2, 4};
+    for (std::size_t index = 0; index < data.size(); ++index) {
+        data[index].assign_rank(acgt_ranks[(index * 3u + index / 7u) % 4u]);
+    }
+    for (const std::size_t position : {41u, 42u, 43u, 127u, 211u}) {
+        data[position].assign_rank(3); // SeqAn dna5 N rank
+    }
+    dna5_range range(data);
+    lazy_compact_sequence<dna5_u64, chunked> lazy{
+        chunked::from_range(range)};
+    FakeFragmentStorage<> storage;
+
+    REQUIRE_NOTHROW(MpsIndex::build(
+        storage, lazy, MinimizerSketchBackend::ExactSimd));
+    REQUIRE(storage.runs_.empty());
 }
 
 TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer under a tiny max_occ",

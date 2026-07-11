@@ -9,6 +9,7 @@ module;
 #include "common.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/heapam.h"
 #include "executor/tuptable.h"
 #include "utils/snapmgr.h"
@@ -18,11 +19,15 @@ module;
 #include <concepts>
 #include <cstdint>
 #include <cstring>
+#include <expected>
+#include <exception>
 #include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 export module bioseq.storage.indexing_pg.admin;
 import bioseq.common.mlogging;
@@ -62,7 +67,9 @@ using bioseq::indexing::SequenceIndexType;
 using bioseq::indexing::IndexUpdatePolicy;
 using bioseq::indexing::index_sub_key_t;
 using bioseq::indexing::DIRECTORY_SUB_KEY;
+using bioseq::indexing::GENERATION_HEAD_SUB_KEY;
 using bioseq::indexing::TEMP_RUN_BASE;
+using bioseq::indexing::derive_minimizer_position_extent_sub_key;
 
 #ifdef BIOSEQ_TEST_INDEXES
 /// DOC0279 §11.4/§16.2 — a trivial CHUNKED_PER_TABLE index, compiled into the
@@ -124,15 +131,6 @@ using pg_supported_indexes = bioseq::indexing::supported_indexes<
 // g_last_index_merge_run_count (§8.8) is defined in bioseq_storage_indexing_pg
 // (same namespace, imported) so merge_runs can set it; referenced unqualified below.
 
-// ---- advisory lock (§11.4) ------------------------------------------------
-inline void acquire_index_advisory_xact_lock(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view name) {
-    std::uint64_t h = 14695981039346656037ull;
-    auto mix = [&](std::uint64_t v){ for (int i=0;i<8;++i){ h ^= (v & 0xff); h *= 1099511628211ull; v >>= 8; } };
-    h ^= 0xB10D2790u; mix(db); mix(spc); mix(relfn); mix((std::uint64_t)(std::uint16_t)attno);
-    for (char c : name) { h ^= (std::uint8_t)c; h *= 1099511628211ull; }
-    DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum((std::int64_t)h));
-}
-
 // ---- policy catalog (§12.3) ----------------------------------------------
 struct PolicyRow { std::string name; bool enabled; bool update_on_insert; };
 [[nodiscard]] inline std::vector<PolicyRow> load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
@@ -182,8 +180,9 @@ inline void note_policy_on_insert_writes(
     }
 }
 
-// DOC0345 Patch I — select the target index sketch backend from the three
-// high-level GUCs (vulkan enabled, GPU index build enabled, vulkan_minimap_int).
+// Select the target index sketch backend from the complete algorithm tuple.
+// ExactSimd is internal: the existing all-SIMD tuple selects it, and any
+// unsupported alphabet/storage/vector shape fails closed in the checked driver.
 // Defined before its first caller (index_build_on_insert); the spec placed it
 // near layout_of_name, which is below index_build_on_insert.
 [[nodiscard]] inline bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
@@ -191,12 +190,23 @@ resolve_index_sketch_backend_from_gucs() noexcept
 {
     using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    return bioseq_aligner_vulkan_enabled
+    using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    if (bioseq_aligner_vulkan_enabled
         && bioseq_aligner_vulkan_gpu_index_build_enabled
         && bioseq_aligner_minimizer_algorithm
-            == static_cast<int>(MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
-        ? MinimizerSketchBackend::VulkanSegment
-        : MinimizerSketchBackend::Scalar;
+            == static_cast<int>(MinimizerAlgorithmType::VULKAN_MINIMAP_INT)) {
+        return MinimizerSketchBackend::VulkanSegment;
+    }
+    if (bioseq_aligner_minimizer_algorithm
+            == static_cast<int>(MinimizerAlgorithmType::TWO_STACK_NTHASH)
+        && bioseq_aligner_chaining_algorithm
+            == static_cast<int>(ChainingAlgorithmType::SIMD_MM2)
+        && bioseq_aligner_base_alignment_algorithm
+            == static_cast<int>(BaseAlignmentAlgorithmType::BLOCK_ALIGNER)) {
+        return MinimizerSketchBackend::ExactSimd;
+    }
+    return MinimizerSketchBackend::Scalar;
 }
 
 // DOC0350 — make the GPU runtime usable before a selected Vulkan index build.
@@ -220,8 +230,7 @@ inline void ensure_vulkan_index_build_runtime_ready(
         != bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::VulkanSegment) {
         return;
     }
-    bioseq::parallelism::pg::install_pg_shader_provider_if_available();
-    bioseq::parallelism::pg::wait_for_runtime_ready();
+    (void)bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 }
 
 // ---- INSERT-time build (§11.2) -------------------------------------------
@@ -339,9 +348,28 @@ inline const auto& letter_rank_table() { static const auto t = build_letter_rank
 
 template <class Storage, class BuildFn>
 inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn) {
+    auto release_runs = [&storage]() noexcept {
+        if constexpr (requires (Storage& cleanup_storage) {
+                { cleanup_storage.release_runs_noexcept() } noexcept -> std::same_as<void>;
+            }) {
+            storage.release_runs_noexcept();
+        } else if constexpr (requires (Storage& cleanup_storage) {
+                { cleanup_storage.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
+            }) {
+            storage.release_resident_runs_noexcept();
+        }
+    };
+    std::exception_ptr cpp_error;
     PG_TRY();
     {
-        build_fn();
+        // A C++ exception must not escape a PG_TRY frame: doing so skips
+        // PG_END_TRY and leaves PG_exception_stack pointing at dead stack
+        // storage. Capture it, restore the PG frame normally, then rethrow.
+        try {
+            build_fn();
+        } catch (...) {
+            cpp_error = std::current_exception();
+        }
     }
     PG_CATCH();
     {
@@ -349,15 +377,7 @@ inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn
         FlushErrorState();
         PG_TRY();
         {
-            if constexpr (requires (Storage& cleanup_storage) {
-                    { cleanup_storage.release_runs_noexcept() } noexcept -> std::same_as<void>;
-                }) {
-                storage.release_runs_noexcept();
-            } else if constexpr (requires (Storage& cleanup_storage) {
-                    { cleanup_storage.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
-                }) {
-                storage.release_resident_runs_noexcept();
-            }
+            release_runs();
         }
         PG_CATCH();
         {
@@ -367,6 +387,10 @@ inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn
         ReThrowError(saved_error);
     }
     PG_END_TRY();
+    if (cpp_error != nullptr) {
+        release_runs();
+        std::rethrow_exception(cpp_error);
+    }
 }
 
 template <class R>
@@ -581,12 +605,12 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     // reader, NOT table_scan_getnextslot. The bioseq table-AM scan ASSEMBLES the full
     // sequence into one varlena, which exceeds MaxAllocSize (~1 GiB) for a multi-Gbp
     // target (6 Gbp => ~1.5 GB) and ERRORs "sequence too large to materialise as a
-    // single varlena". BioseqColumnReadNextRow returns the RAW stored value (the 48-byte
+    // single varlena". BioseqColumnReadNextRow returns the RAW stored value (the 56-byte
     // locator stub for a large sequence); we decode the locator and STREAM fragments
     // via scanner_pg (RSS bounded by one fragment) — the only path that can index a
     // >MaxAllocSize target. `&rowno` is the columnar row number == query_key (no
     // tid_to_row_number needed; that path also fixed the rowno source).
-    Snapshot snap = GetTransactionSnapshot();
+    Snapshot snap = RegisterSnapshot(GetTransactionSnapshot());
     List* projected = nullptr;
     for (std::int16_t a : seq_attnos) projected = lappend_int(projected, (int)a);
     BioseqColumnReadState* rs = BioseqColumnBeginRead(ur, utd, projected, NIL, work, snap, /*randomAccess=*/false, nullptr);
@@ -612,7 +636,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                 pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
                     constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
                     const std::size_t pad = (loc.total_bp_size % lpu) == 0 ? 0 : (std::size_t)(lpu - loc.total_bp_size % lpu);
-                    bioseq::storage::with_lazy_postgres<S>(rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, loc, pad, caches, inner,
+                    bioseq::storage::with_lazy_postgres<S>(
+                        rid.db_oid, rid.tablespace_oid, rid.relfilenode,
+                        seq_attno, loc, pad, rs->snapshot, caches, inner,
                         [&](auto& lazy){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
@@ -653,14 +679,42 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
         if (any_col) ++written;
     }
+    // Fragment readers borrow rs->snapshot as their compatibility owner, so
+    // close them before BioseqColumnEndRead can unregister a refreshed copy.
+    caches->close_all(/*commit=*/false);
     BioseqColumnEndRead(rs);
+    UnregisterSnapshot(snap);
     MemoryContextDelete(inner);
     relation_close(ur, AccessShareLock);
     for (std::int16_t a : seq_attnos) note_successful_write(rel_oid, rid.relfilenode, a, name);
-    caches->close_all(/*commit=*/false);   // close cached seq_sub read-state relations (else "resource was not closed" at commit)
     bioseq::storage::destroy_seq_caches(caches);
     MemoryContextDelete(work);
     return written;
+}
+
+[[noreturn]] inline void raise_exact_simd_index_pg_error(
+        std::string_view operation,
+        std::string_view detail) {
+    bioseq_report<ERR, PG>()
+        .code(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .msg("Exact SIMD minimizer index build is unsupported for this source")
+        .detail("{}: {}", operation, detail)
+        .hint("Exact SIMD index builds have no scalar fallback; use DNA4 with a supported packed storage width and SIMD target, or select a different minimizer algorithm explicitly.");
+    __builtin_unreachable();
+}
+
+/// SQL-facing boundary: no C++ execution error may cross the PostgreSQL C ABI.
+[[nodiscard]] inline std::int64_t update_index_pg_checked(
+        Oid rel_oid,
+        std::string_view name) {
+    std::string detail;
+    try {
+        return update_index_impl(rel_oid, name);
+    } catch (const bioseq::indexing::ExactSimdIndexRuntimeError& err) {
+        detail = err.what();
+    }
+    // Leave the C++ catch before PostgreSQL ERROR performs its longjmp.
+    raise_exact_simd_index_pg_error("bioseq.update_index", detail);
 }
 
 // DOC0286 §4.5 — (re)build every policy-enabled UPDATE_ON_INSERT index for
@@ -734,59 +788,1412 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
 
 // ---- §12.2 SQL helper impls ----------------------------------------------
 
-[[nodiscard]] inline std::vector<std::string> seqidx_prefixes_for(Oid rel_oid, std::string_view name) {
+/// Read-only setup/post-measurement proof returned by the narrow SQL admin
+/// bridge. The authoritative source locator is derived from the visible
+/// Bioseq row; callers never supply a source identity or compatibility digest.
+struct ReadyMinimizerGenerationInspection {
+    ReadyMinimizerGenerationIdentity identity{};
+    Rev3AuthoritativeSourceLocator source{};
+    MinimizerGenerationManifest manifest{};
+    std::uint64_t source_content_checksum = 0;
+    Oid database_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    std::int16_t column_attno = 0;
+};
+
+[[nodiscard]] inline std::int16_t
+single_seq_attno_for_inspection(Oid rel_oid);
+
+/// Live PostgreSQL fixture result for the revision-3 storage contract. This is
+/// used only by the integration SQL seam below; production readers never call
+/// it and ordinal 2 remains disabled.
+struct Rev3PgIntegrationFixtureResult {
+    std::string table_name;
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t source_num_fragments = 0;
+    std::uint64_t source_total_bp = 0;
+    std::uint64_t source_padding_letters = 0;
+    std::uint64_t writer_rows = 0;
+    std::uint64_t writer_batches = 0;
+    std::uint64_t published_head_bytes = 0;
+    std::uint64_t validated_control_bytes = 0;
+    std::uint64_t validated_position_bytes = 0;
+    std::uint64_t validated_control_checksum = 0;
+    std::uint64_t validated_position_checksum = 0;
+    MinimizerGenerationReadStats read_stats{};
+};
+
+/// Deterministic replayable producer used by the live PG fixture. A nonempty
+/// target emits one legal canonical event, which creates payload, directory and
+/// manifest rows and forces two genuine CatalogTuplesMultiInsertWithInfo calls
+/// when the fixture's row limit is two.
+struct Rev3PgIntegrationFixtureProducer {
+    std::uint64_t target_length = 0;
+
+    [[nodiscard]] bioseq::indexing::MinimizerSchemeIdentity
+    minimizer_scheme_identity() const noexcept {
+        return bioseq::indexing::kLegacyMinimapV1SchemeIdentity;
+    }
+
+    [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
+    scan_sorted_events(
+            std::uint64_t,
+            bioseq::indexing::CanonicalMinimizerEventReceiver receiver) {
+        if (target_length == 0) {
+            return {};
+        }
+        return receiver(bioseq::indexing::CanonicalMinimizerEvent{
+            .hash = 0x0102030405060708ULL,
+            .encoded_position = 0,
+        });
+    }
+};
+
+static_assert(bioseq::indexing::MinimizerGenerationEventProducer<
+    Rev3PgIntegrationFixtureProducer>);
+
+/// Build, fully reread, privately tokenize, publish and reopen one exact live
+/// revision-3 generation. Every write goes through the production row sink;
+/// the active head goes only through the private-token publisher.
+[[nodiscard]] inline Rev3PgIntegrationFixtureResult
+build_rev3_pg_integration_fixture_impl(
+        Oid rel_oid,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno,
+        std::uint16_t kmer_size,
+        std::uint16_t window_size) {
+    if (!OidIsValid(rel_oid) || !IsBioseqColumnTableAmTable(rel_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+             errmsg("bioseq rev3 fixture requires a USING bioseq table")));
+    }
+    if (!superuser()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+             errmsg("bioseq rev3 fixture requires superuser")));
+    }
+    if (index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        && index_name != MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq rev3 fixture requires a minimizer index")));
+    }
+    if (kmer_size == 0 || window_size == 0
+        || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq rev3 fixture parameters are invalid")));
+    }
+
+    const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
     const RelationIdentity rid = index_relation_identity(rel_oid);
-    std::vector<std::string> prefixes;
-    if (SPI_connect() != SPI_OK_CONNECT) return prefixes;
-    std::string sql = fmt::format(
-        "SELECT a.attnum FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
-        "WHERE a.attrelid={}::oid AND t.typname='seq' AND n.nspname IN ('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped",
-        (unsigned)rel_oid);
-    if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT) {
-        for (std::uint64_t r = 0; r < SPI_processed; ++r) {
-            bool isn=false; std::int16_t a = (std::int16_t)DatumGetInt16(SPI_getbinval(SPI_tuptable->vals[r], SPI_tuptable->tupdesc, 1, &isn));
-            prefixes.push_back(fmt::format("seqidx_{}_{:016x}_", short_index_for(name),
-                identity_hash64(rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name)));
+    Rev3IndexAdministrationIdentity identity{
+        .database_oid = rid.db_oid,
+        .tablespace_oid = rid.tablespace_oid,
+        .main_relfilenode = rid.relfilenode,
+        .user_relid = rel_oid,
+        .column_attno = seq_attno,
+        .index_name = std::string{index_name},
+    };
+
+    struct FixtureState {
+        Snapshot registered_snapshot = nullptr;
+        std::optional<Rev3AuthoritativeSourceProof> setup_proof;
+        std::optional<IndexStorageFragmentGenerationReadSessionPg>
+            read_session;
+        std::optional<bioseq::indexing::PreparedSerializedSegment>
+            prepared_segment;
+        std::vector<MinimizerGenerationPayloadReadGroup> control_groups;
+        std::vector<MinimizerGenerationPayloadReadGroup> position_groups;
+    };
+    auto* state = new FixtureState{};
+    Rev3PgIntegrationFixtureResult result{};
+    MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        Snapshot active_snapshot = GetActiveSnapshot();
+        if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq rev3 fixture requires an active MVCC snapshot")));
+        }
+        state->registered_snapshot = RegisterSnapshot(active_snapshot);
+        state->setup_proof.emplace(
+            derive_rev3_authoritative_source_proof_pg(
+                identity, sequence_rowno, state->registered_snapshot));
+        Rev3AuthoritativeSourceLocator source =
+            state->setup_proof->source_for_diagnostics();
+        const std::uint64_t source_content_checksum =
+            state->setup_proof->source_content_checksum_for_diagnostics();
+        result.table_name = format_seqidx_name(
+            index_name, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
+            seq_attno, source.locator.bucket_idx, source.locator.shard_idx);
+        identity.table_name = result.table_name;
+        state->setup_proof.reset();
+        UnregisterSnapshot(state->registered_snapshot);
+        state->registered_snapshot = nullptr;
+
+        run_internal_ddl(fmt::format(
+            "DROP TABLE IF EXISTS bioseq_internal.{}",
+            quote_identifier(result.table_name.c_str())).c_str());
+        run_internal_ddl(fmt::format(
+            "CREATE TABLE bioseq_internal.{} ("
+            "query_key BIGINT NOT NULL, generation_id BIGINT NOT NULL, "
+            "position_segment INTEGER NOT NULL, sub_key BIGINT NOT NULL, "
+            "chunk_no INTEGER NOT NULL, chunk_bytes INTEGER NOT NULL, "
+            "checksum BIGINT NOT NULL, blob BYTEA NOT NULL, "
+            "PRIMARY KEY (query_key,generation_id,position_segment,sub_key,chunk_no)) "
+            "USING heap",
+            quote_identifier(result.table_name.c_str())).c_str());
+        run_internal_ddl(fmt::format(
+            "ALTER TABLE bioseq_internal.{} ALTER COLUMN blob SET STORAGE PLAIN",
+            quote_identifier(result.table_name.c_str())).c_str());
+        CommandCounterIncrement();
+
+        result.generation_id = allocate_minimizer_generation_id_pg();
+        const std::uint64_t target_length = source.locator.total_bp_size;
+        const std::uint64_t span = target_length == 0
+            ? 0 : bioseq::indexing::kMinimizerPreferredSegmentSpanBp;
+        const std::uint64_t segment_count = target_length == 0
+            ? 0 : target_length / span + (target_length % span != 0 ? 1u : 0u);
+        if (!bioseq::indexing::sql_integer_can_represent(segment_count)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("bioseq rev3 fixture segment count exceeds INTEGER")));
+        }
+        MinimizerGenerationManifest compatibility_manifest{
+            .target_length = target_length,
+            .position_segment_count = static_cast<std::uint32_t>(segment_count),
+            .alphabet_code = source.alphabet_code,
+            .storage_unit_byte_width = source.storage_unit_byte_width,
+            .kmer_size = kmer_size,
+            .window_size = window_size,
+            .gpu_abi_version =
+                bioseq::indexing::kMinimizerSortedDenseGpuAbiVersion,
+            .position_segment_span_bp = span,
+            .segment_geometry_version =
+                bioseq::indexing::kMinimizerSegmentGeometryVersion,
+            .minimizer_scheme_id =
+                bioseq::indexing::kLegacyMinimapV1SchemeId,
+            .minimizer_scheme_version =
+                bioseq::indexing::kLegacyMinimapV1SchemeVersion,
+        };
+        result.compatibility_checksum =
+            bioseq::indexing::minimizer_generation_compatibility_checksum(
+                compatibility_manifest);
+        source.compatibility_checksum = result.compatibility_checksum;
+        result.source_identity = rev3_source_identity(rid.relfilenode, source);
+        result.source_content_checksum = source_content_checksum;
+        result.source_num_fragments = source.locator.num_fragments;
+        result.source_total_bp = source.locator.total_bp_size;
+        result.source_padding_letters = source.padding_letters;
+        if (result.source_identity == 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture derived a zero source identity")));
+        }
+
+        IndexStorageFragmentGenerationRowSinkPg writer{
+            identity, sequence_rowno, result.generation_id,
+            /*write_batch_row_limit=*/2};
+        Rev3PgIntegrationFixtureProducer producer{target_length};
+        const bioseq::indexing::MinimizerGenerationEncodeOptions options{
+            .generation_id = result.generation_id,
+            .source_identity = result.source_identity,
+            .source_content_checksum = source_content_checksum,
+            .target_length = target_length,
+            .alphabet_code = source.alphabet_code,
+            .storage_unit_byte_width = source.storage_unit_byte_width,
+            .kmer_size = kmer_size,
+            .window_size = window_size,
+            .minimizer_scheme_id =
+                bioseq::indexing::kLegacyMinimapV1SchemeId,
+            .minimizer_scheme_version =
+                bioseq::indexing::kLegacyMinimapV1SchemeVersion,
+        };
+        auto generation = bioseq::indexing::encode_minimizer_generation(
+            producer, writer, options);
+        if (!generation) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture encoder failed"),
+                 errdetail("wire_error=%u",
+                    static_cast<unsigned>(generation.error()))));
+        }
+        ReadyGenerationToken ready = writer.validate_ready_generation(*generation);
+        result.writer_rows = writer.row_count();
+        result.writer_batches = writer.catalog_multi_insert_batches();
+        publish_ready_minimizer_generation_head_pg(std::move(ready));
+        result.published_head_bytes = MinimizerGenerationHead::encoded_bytes;
+
+        CommandCounterIncrement();
+        UpdateActiveSnapshotCommandId();
+        state->registered_snapshot = RegisterSnapshot(GetActiveSnapshot());
+        Rev3AuthoritativeSourceProof read_proof =
+            derive_rev3_authoritative_source_proof_pg(
+                identity, sequence_rowno, state->registered_snapshot);
+        const auto expected =
+            bioseq::indexing::expected_minimizer_compatibility_for_backend(
+                bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar,
+                source.alphabet_code,
+                source.storage_unit_byte_width,
+                kmer_size,
+                window_size);
+        if (!expected) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture expected compatibility is invalid")));
+        }
+        state->read_session.emplace(
+            result.table_name, sequence_rowno, state->registered_snapshot,
+            *expected,
+            Rev3SnapshotRegistration::borrow_registered);
+        IndexStorageFragmentGenerationReadSessionPg& session =
+            *state->read_session;
+        const MinimizerGenerationHead head = session.read_active_head_once();
+        const MinimizerGenerationReadMetadata& metadata =
+            session.read_manifest_directory_once(head);
+        session.validate_full_source_attestation(std::move(read_proof));
+
+        // Consume one real directory entry through the production qualified
+        // reader.  Both complete extents are derived from the authenticated
+        // directory (never invented by the fixture), and the callback repeats
+        // the byte/CRC aggregation independently of the session's own checks.
+        const auto directory_entries = metadata.directory.entries();
+        if (directory_entries.size() != 1) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture expected one directory entry"),
+                 errdetail("entries=%zu", directory_entries.size())));
+        }
+        const MinimizerBucketDirEntry entry = directory_entries.front();
+        const auto position_sub_key =
+            derive_minimizer_position_extent_sub_key(entry.sub_key);
+        if (!position_sub_key
+            || entry.control_chunk_count == 0
+            || entry.position_chunk_count == 0
+            || entry.control_encoded_bytes == 0
+            || entry.position_encoded_bytes == 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture directory extents are invalid")));
+        }
+        const std::array selected_ordinals{entry.partition_id};
+        auto prepared_segment =
+            bioseq::indexing::PreparedSerializedSegment::begin_load(
+                bioseq::parallelism::MemoryAdmissionController::instance(),
+                head,
+                metadata.manifest,
+                *expected,
+                metadata.directory.encoded_bytes(),
+                entry.position_segment,
+                std::span<const std::uint32_t>{selected_ordinals});
+        if (!prepared_segment) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture could not prepare direct serialized lookup"),
+                 errdetail("wire_error=%u",
+                    static_cast<unsigned>(prepared_segment.error()))));
+        }
+        state->prepared_segment.emplace(std::move(*prepared_segment));
+        state->control_groups.push_back(
+            MinimizerGenerationPayloadReadGroup{
+                .range = IndexSubKeyRange{
+                    .generation_id = result.generation_id,
+                    .position_segment = entry.position_segment,
+                    .begin = entry.sub_key,
+                    .end = entry.sub_key + 1,
+                },
+                .requests = {
+                    IndexSubKeyRequest{
+                        .generation_id = result.generation_id,
+                        .position_segment = entry.position_segment,
+                        .sub_key = entry.sub_key,
+                        .first_chunk_no = entry.control_first_chunk,
+                        .expected_chunk_count = entry.control_chunk_count,
+                        .expected_total_bytes = entry.control_encoded_bytes,
+                        .expected_checksum = entry.control_checksum,
+                    },
+                },
+            });
+        state->position_groups.push_back(
+            MinimizerGenerationPayloadReadGroup{
+                .range = IndexSubKeyRange{
+                    .generation_id = result.generation_id,
+                    .position_segment = entry.position_segment,
+                    .begin = *position_sub_key,
+                    .end = *position_sub_key + 1,
+                },
+                .requests = {
+                    IndexSubKeyRequest{
+                        .generation_id = result.generation_id,
+                        .position_segment = entry.position_segment,
+                        .sub_key = *position_sub_key,
+                        .first_chunk_no = entry.position_first_chunk,
+                        .expected_chunk_count = entry.position_chunk_count,
+                        .expected_total_bytes = entry.position_encoded_bytes,
+                        .expected_checksum = entry.position_checksum,
+                    },
+                },
+            });
+        session.plan_control_groups(
+            std::span<const MinimizerGenerationPayloadReadGroup>{
+                state->control_groups});
+
+        Crc64Ecma182 control_crc{};
+        Crc64Ecma182 position_crc{};
+        std::uint64_t control_bytes = 0;
+        std::uint64_t position_bytes = 0;
+        bool callback_address_valid = true;
+        std::optional<MinimizerGenerationWireError> direct_load_error;
+        const IndexChunkReadStats control_stats = session.read_chunks_in_range(
+            0, IndexChunkCachePolicy::bypass_one_shot,
+            [state, &result, &entry, &callback_address_valid,
+             &control_crc, &control_bytes, &direct_load_error](
+                    const IndexChunkAddress& address, const char* payload,
+                    std::size_t payload_bytes) -> void {
+                if (address.generation_id != result.generation_id
+                    || address.position_segment != entry.position_segment
+                    || address.sub_key != entry.sub_key
+                    || address.chunk_no >= entry.control_chunk_count
+                    || payload == nullptr) {
+                    callback_address_valid = false;
+                    return;
+                }
+                control_crc.update(std::as_bytes(
+                    std::span<const char>{payload, payload_bytes}));
+                control_bytes += payload_bytes;
+                if (!direct_load_error) {
+                    auto accepted = state->prepared_segment->accept_chunk(
+                        address, payload, payload_bytes);
+                    if (!accepted) {
+                        direct_load_error = accepted.error();
+                    }
+                }
+            });
+        if (direct_load_error) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture direct control load failed"),
+                 errdetail("wire_error=%u",
+                    static_cast<unsigned>(*direct_load_error))));
+        }
+        session.plan_position_groups(
+            std::span<const MinimizerGenerationPayloadReadGroup>{
+                state->position_groups});
+        const IndexChunkReadStats position_stats = session.read_chunks_in_range(
+            0, IndexChunkCachePolicy::bypass_one_shot,
+            [state, &result, &entry, &position_sub_key,
+             &callback_address_valid, &position_crc, &position_bytes,
+             &direct_load_error](
+                    const IndexChunkAddress& address, const char* payload,
+                    std::size_t payload_bytes) -> void {
+                if (address.generation_id != result.generation_id
+                    || address.position_segment != entry.position_segment
+                    || address.sub_key != *position_sub_key
+                    || address.chunk_no >= entry.position_chunk_count
+                    || payload == nullptr) {
+                    callback_address_valid = false;
+                    return;
+                }
+                position_crc.update(std::as_bytes(
+                    std::span<const char>{payload, payload_bytes}));
+                position_bytes += payload_bytes;
+                if (!direct_load_error) {
+                    auto accepted = state->prepared_segment->accept_chunk(
+                        address, payload, payload_bytes);
+                    if (!accepted) {
+                        direct_load_error = accepted.error();
+                    }
+                }
+            });
+        if (direct_load_error) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture direct position load failed"),
+                 errdetail("wire_error=%u",
+                    static_cast<unsigned>(*direct_load_error))));
+        }
+        const auto direct_finished = state->prepared_segment->finish_load();
+        const auto direct_positions = direct_finished
+            ? state->prepared_segment->lookup(0x0102030405060708ULL)
+            : std::span<const std::uint64_t>{};
+        const unsigned direct_wire_error = direct_finished
+            ? 0u : static_cast<unsigned>(direct_finished.error()) + 1u;
+        if (!direct_finished || direct_positions.size() != 1
+            || direct_positions.front() != 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture direct serialized lookup proof disagrees"),
+                 errdetail("wire_error=%u positions=%zu encoded_position=%llu",
+                    direct_wire_error,
+                    direct_positions.size(),
+                    static_cast<unsigned long long>(direct_positions.empty()
+                        ? (std::numeric_limits<std::uint64_t>::max)()
+                        : direct_positions.front()))));
+        }
+        result.validated_control_bytes = control_bytes;
+        result.validated_position_bytes = position_bytes;
+        result.validated_control_checksum = control_crc.checksum();
+        result.validated_position_checksum = position_crc.checksum();
+        const std::uint64_t expected_chunks =
+            static_cast<std::uint64_t>(entry.control_chunk_count)
+            + entry.position_chunk_count;
+        if (!callback_address_valid
+            || control_bytes != entry.control_encoded_bytes
+            || position_bytes != entry.position_encoded_bytes
+            || control_crc.checksum() != entry.control_checksum
+            || position_crc.checksum() != entry.position_checksum
+            || control_stats.requested_ranges != 1
+            || position_stats.requested_ranges != 1
+            || control_stats.wanted_subkeys != 1
+            || position_stats.wanted_subkeys != 1
+            || control_stats.read_subkeys != 1
+            || position_stats.read_subkeys != 1
+            || control_stats.wanted_extents != 1
+            || position_stats.wanted_extents != 1
+            || control_stats.read_extents != 1
+            || position_stats.read_extents != 1
+            || control_stats.wanted_chunks + position_stats.wanted_chunks
+                != expected_chunks
+            || control_stats.delivered_chunks + position_stats.delivered_chunks
+                != expected_chunks
+            || control_stats.delivered_bytes + position_stats.delivered_bytes
+                != entry.control_encoded_bytes + entry.position_encoded_bytes) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture payload proof disagrees")));
+        }
+        if (head.generation_id != result.generation_id
+            || head.source_identity != result.source_identity
+            || head.source_content_checksum != source_content_checksum
+            || metadata.manifest.generation_id != result.generation_id) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture readback identity disagrees")));
+        }
+        result.read_stats = session.finish();
+        if (result.read_stats.controls.plan_calls != 1
+            || result.read_stats.positions.plan_calls != 1
+            || result.read_stats.controls.planned_request_groups != 1
+            || result.read_stats.positions.planned_request_groups != 1
+            || result.read_stats.controls.executed_request_groups != 1
+            || result.read_stats.positions.executed_request_groups != 1
+            || result.read_stats.positions.control_authorization_checks != 1
+            || result.read_stats.controls.read.wanted_extents != 1
+            || result.read_stats.positions.read.wanted_extents != 1) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 fixture two-phase read proof disagrees")));
+        }
+        state->read_session.reset();
+        state->prepared_segment.reset();
+        UnregisterSnapshot(state->registered_snapshot);
+        state->registered_snapshot = nullptr;
+        delete state;
+        state = nullptr;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        ErrorData* volatile saved_error = CopyErrorData();
+        FlushErrorState();
+        if (state != nullptr && state->read_session.has_value()) {
+            PG_TRY();
+            {
+                state->read_session.reset();
+            }
+            PG_CATCH();
+            {
+                FlushErrorState();
+            }
+            PG_END_TRY();
+        }
+        if (state != nullptr && state->registered_snapshot != nullptr) {
+            Snapshot cleanup = std::exchange(
+                state->registered_snapshot, nullptr);
+            PG_TRY(); { UnregisterSnapshot(cleanup); }
+            PG_CATCH(); { FlushErrorState(); }
+            PG_END_TRY();
+        }
+        delete state;
+        ReThrowError(saved_error);
+    }
+    PG_END_TRY();
+    return result;
+}
+
+/// Integration-only source adversary: remove one referenced physical sequence
+/// fragment by its locator ordinal.  The public source proof must subsequently
+/// fail while walking the same locator under its registered snapshot.  Ordinal
+/// zero is deliberately forbidden so this seam proves later-fragment
+/// participation rather than merely checking the first physical row.
+inline void rev3_test_remove_source_fragment_impl(
+        Oid rel_oid,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno,
+        std::uint32_t fragment_ordinal) {
+    if (!superuser()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+             errmsg("bioseq rev3 source-fragment adversary requires superuser")));
+    }
+    if (!OidIsValid(rel_oid) || !IsBioseqColumnTableAmTable(rel_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+             errmsg("bioseq rev3 source-fragment adversary requires a USING bioseq table")));
+    }
+    if (index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        && index_name != MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq rev3 source-fragment adversary requires a minimizer index")));
+    }
+    if (fragment_ordinal == 0
+        || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq rev3 source-fragment adversary requires a non-first fragment")));
+    }
+
+    const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
+    const RelationIdentity rid = index_relation_identity(rel_oid);
+    Rev3IndexAdministrationIdentity identity{
+        .database_oid = rid.db_oid,
+        .tablespace_oid = rid.tablespace_oid,
+        .main_relfilenode = rid.relfilenode,
+        .user_relid = rel_oid,
+        .column_attno = seq_attno,
+        .index_name = std::string{index_name},
+    };
+
+    struct RemoveState {
+        Snapshot registered_snapshot = nullptr;
+        seq_caches* fragment_caches = nullptr;
+    };
+    auto* state = new RemoveState{};
+    MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        Snapshot active_snapshot = GetActiveSnapshot();
+        if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq rev3 source-fragment adversary requires an active MVCC snapshot")));
+        }
+        state->registered_snapshot = RegisterSnapshot(active_snapshot);
+        Rev3AuthoritativeSourceProof proof =
+            derive_rev3_authoritative_source_proof_pg(
+                identity, sequence_rowno, state->registered_snapshot);
+        const Rev3AuthoritativeSourceLocator source =
+            proof.source_for_diagnostics();
+        if (source.locator.num_fragments < 3
+            || fragment_ordinal >= source.locator.num_fragments) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("bioseq rev3 source-fragment adversary ordinal is out of range"),
+                 errdetail("ordinal=%u fragments=%u", fragment_ordinal,
+                    source.locator.num_fragments)));
+        }
+
+        state->fragment_caches = alloc_seq_caches(CurrentMemoryContext);
+        state->fragment_caches->side = seq_caches::Side::Read;
+        state->fragment_caches->lock_mode = RowExclusiveLock;
+        state->fragment_caches->main_database_oid = rid.db_oid;
+        state->fragment_caches->main_tablespace_oid = rid.tablespace_oid;
+        state->fragment_caches->main_relfilenode = rid.relfilenode;
+        Relation fragment_relation = open_sub_table_for_locator(
+            rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno,
+            source.locator, RowExclusiveLock, state->fragment_caches);
+        const std::uint64_t fragment_rowno =
+            source.locator.first_sub_row_no + fragment_ordinal;
+        if (fragment_rowno < source.locator.first_sub_row_no) {
+            ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("bioseq rev3 source-fragment row number overflow")));
+        }
+        // Registered source fragments are immutable. Exercise the supported
+        // mutation path by transactionally invalidating the exact epoch rather
+        // than bypassing the TableAM guard and creating undetectable raw damage.
+        SequenceSourceVersionManager::invalidate_epoch(
+            source.locator.source_epoch);
+        const TM_Result deleted = TM_Ok;
+        if (deleted != TM_Ok) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 source-fragment adversary could not remove the referenced row"),
+                 errdetail("ordinal=%u tm_result=%d", fragment_ordinal,
+                    static_cast<int>(deleted))));
+        }
+        close_and_destroy_seq_caches(state->fragment_caches, /*commit=*/true);
+        state->fragment_caches = nullptr;
+        UnregisterSnapshot(state->registered_snapshot);
+        state->registered_snapshot = nullptr;
+        CommandCounterIncrement();
+        UpdateActiveSnapshotCommandId();
+        delete state;
+        state = nullptr;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        ErrorData* volatile saved_error = CopyErrorData();
+        FlushErrorState();
+        if (state != nullptr && state->fragment_caches != nullptr) {
+            close_and_destroy_seq_caches(
+                state->fragment_caches, /*commit=*/false);
+            state->fragment_caches = nullptr;
+        }
+        if (state != nullptr && state->registered_snapshot != nullptr) {
+            UnregisterSnapshot(state->registered_snapshot);
+            state->registered_snapshot = nullptr;
+        }
+        delete state;
+        ReThrowError(saved_error);
+    }
+    PG_END_TRY();
+}
+
+/// Exercise read-session failure transitions against the live fixture while
+/// restoring the backend memory cap and registered snapshot on every ERROR.
+inline void exercise_rev3_pg_session_failure_impl(
+        Oid rel_oid,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno,
+        std::string_view mode) {
+    if (!superuser()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+             errmsg("bioseq rev3 session fixture requires superuser")));
+    }
+    if (mode != "repeated_head" && mode != "repeated_metadata"
+        && mode != "early_payload" && mode != "permit_denied"
+        && mode != "scheme_mismatch"
+        && mode != "position_before_controls"
+        && mode != "finish_before_positions"
+        && mode != "repeated_control_plan"
+        && mode != "control_position_namespace"
+        && mode != "unauthorized_position") {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq rev3 session fixture mode is invalid")));
+    }
+    const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
+    const RelationIdentity rid = index_relation_identity(rel_oid);
+    Rev3IndexAdministrationIdentity identity{
+        .database_oid = rid.db_oid,
+        .tablespace_oid = rid.tablespace_oid,
+        .main_relfilenode = rid.relfilenode,
+        .user_relid = rel_oid,
+        .column_attno = seq_attno,
+        .index_name = std::string{index_name},
+    };
+    struct FailureState {
+        Snapshot registered_snapshot = nullptr;
+        std::uint64_t saved_memory_cap = 0;
+        bool cap_changed = false;
+        std::optional<Rev3AuthoritativeSourceProof> source_proof;
+        std::optional<IndexStorageFragmentGenerationReadSessionPg>
+            read_session;
+        std::vector<MinimizerGenerationPayloadReadGroup> groups;
+    };
+    auto* state = new FailureState{};
+    MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        state->registered_snapshot = RegisterSnapshot(GetActiveSnapshot());
+        state->source_proof.emplace(
+            derive_rev3_authoritative_source_proof_pg(
+                identity, sequence_rowno, state->registered_snapshot));
+        const Rev3AuthoritativeSourceLocator& source =
+            state->source_proof->source_for_diagnostics();
+        identity.table_name = format_seqidx_name(
+            index_name, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
+            seq_attno, source.locator.bucket_idx, source.locator.shard_idx);
+        if (mode == "permit_denied") {
+            auto& admission =
+                bioseq::parallelism::MemoryAdmissionController::instance();
+            state->saved_memory_cap = admission.index_memory_cap_bytes();
+            admission.set_index_memory_cap_bytes(1);
+            state->cap_changed = true;
+        }
+        auto expected =
+            bioseq::indexing::expected_minimizer_compatibility_for_backend(
+                bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar,
+                source.alphabet_code,
+                source.storage_unit_byte_width,
+                static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
+                static_cast<std::uint16_t>(bioseq_aligner_window_size));
+        if (!expected) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq rev3 session expected compatibility is invalid")));
+        }
+        if (mode == "scheme_mismatch") {
+            expected->minimizer_scheme_id =
+                bioseq::indexing::kPaperNtHashU32R7SumV1SchemeId;
+            expected->minimizer_scheme_version =
+                bioseq::indexing::kPaperNtHashU32R7SumV1SchemeVersion;
+        }
+        state->read_session.emplace(
+            identity.table_name, sequence_rowno, state->registered_snapshot,
+            *expected,
+            Rev3SnapshotRegistration::borrow_registered);
+        IndexStorageFragmentGenerationReadSessionPg& session =
+            *state->read_session;
+        const MinimizerGenerationHead head = session.read_active_head_once();
+        if (mode == "repeated_head") {
+            (void)session.read_active_head_once();
+        } else if (mode == "early_payload") {
+            session.plan_control_groups(
+                std::span<const MinimizerGenerationPayloadReadGroup>{});
+        } else {
+            const MinimizerGenerationReadMetadata& metadata =
+                session.read_manifest_directory_once(head);
+            if (mode == "repeated_metadata") {
+                (void)session.read_manifest_directory_once(head);
+            } else if (mode == "position_before_controls") {
+                session.validate_full_source_attestation(
+                    std::move(*state->source_proof));
+                state->source_proof.reset();
+                session.plan_position_groups(
+                    std::span<const MinimizerGenerationPayloadReadGroup>{});
+            } else if (mode == "finish_before_positions") {
+                session.validate_full_source_attestation(
+                    std::move(*state->source_proof));
+                state->source_proof.reset();
+                session.plan_control_groups(
+                    std::span<const MinimizerGenerationPayloadReadGroup>{});
+                (void)session.finish();
+            } else if (mode == "repeated_control_plan") {
+                session.validate_full_source_attestation(
+                    std::move(*state->source_proof));
+                state->source_proof.reset();
+                session.plan_control_groups(
+                    std::span<const MinimizerGenerationPayloadReadGroup>{});
+                session.plan_control_groups(
+                    std::span<const MinimizerGenerationPayloadReadGroup>{});
+            } else if (mode == "control_position_namespace"
+                       || mode == "unauthorized_position") {
+                session.validate_full_source_attestation(
+                    std::move(*state->source_proof));
+                state->source_proof.reset();
+                const auto entries = metadata.directory.entries();
+                if (entries.empty()) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq rev3 session fixture has no payload entry")));
+                }
+                const MinimizerBucketDirEntry& entry = entries.front();
+                const auto position_sub_key =
+                    derive_minimizer_position_extent_sub_key(entry.sub_key);
+                if (!position_sub_key) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq rev3 session fixture position key is invalid")));
+                }
+                state->groups.push_back(MinimizerGenerationPayloadReadGroup{
+                    .range = IndexSubKeyRange{
+                        .generation_id = head.generation_id,
+                        .position_segment = entry.position_segment,
+                        .begin = *position_sub_key,
+                        .end = *position_sub_key + 1,
+                    },
+                    .requests = {
+                        IndexSubKeyRequest{
+                            .generation_id = head.generation_id,
+                            .position_segment = entry.position_segment,
+                            .sub_key = *position_sub_key,
+                            .first_chunk_no = entry.position_first_chunk,
+                            .expected_chunk_count = entry.position_chunk_count,
+                            .expected_total_bytes = entry.position_encoded_bytes,
+                            .expected_checksum = entry.position_checksum,
+                        },
+                    },
+                });
+                if (mode == "control_position_namespace") {
+                    session.plan_control_groups(
+                        std::span<const MinimizerGenerationPayloadReadGroup>{
+                            state->groups});
+                } else {
+                    session.plan_control_groups(
+                        std::span<const MinimizerGenerationPayloadReadGroup>{});
+                    session.plan_position_groups(
+                        std::span<const MinimizerGenerationPayloadReadGroup>{
+                            state->groups});
+                }
+            }
+        }
+        if (state->cap_changed) {
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .set_index_memory_cap_bytes(state->saved_memory_cap);
+            state->cap_changed = false;
+        }
+        state->source_proof.reset();
+        state->read_session.reset();
+        UnregisterSnapshot(state->registered_snapshot);
+        state->registered_snapshot = nullptr;
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("bioseq rev3 session fixture did not reach its expected failure")));
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        ErrorData* volatile saved_error = CopyErrorData();
+        FlushErrorState();
+        if (state->cap_changed) {
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .set_index_memory_cap_bytes(state->saved_memory_cap);
+            state->cap_changed = false;
+        }
+        if (state->read_session.has_value()) {
+            PG_TRY();
+            {
+                state->read_session.reset();
+            }
+            PG_CATCH();
+            {
+                FlushErrorState();
+            }
+            PG_END_TRY();
+        }
+        if (state->registered_snapshot != nullptr) {
+            Snapshot cleanup = std::exchange(
+                state->registered_snapshot, nullptr);
+            PG_TRY(); { UnregisterSnapshot(cleanup); }
+            PG_CATCH(); { FlushErrorState(); }
+            PG_END_TRY();
+        }
+        delete state;
+        ReThrowError(saved_error);
+    }
+    PG_END_TRY();
+}
+
+[[nodiscard]] inline std::int16_t single_seq_attno_for_inspection(Oid rel_oid) {
+    std::int16_t result = 0;
+    std::uint64_t count = 0;
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("bioseq minimizer generation inspection could not inspect the source schema")));
+    }
+    const std::string sql = fmt::format(
+        "SELECT a.attnum FROM pg_attribute a "
+        "JOIN pg_type t ON a.atttypid=t.oid "
+        "JOIN pg_namespace n ON t.typnamespace=n.oid "
+        "WHERE a.attrelid={}::oid AND t.typname='seq' "
+        "AND n.nspname IN ('bioseq','bioseq_internal') "
+        "AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+        static_cast<unsigned>(rel_oid));
+    const int status = SPI_execute(sql.c_str(), true, 2);
+    if (status == SPI_OK_SELECT) {
+        count = SPI_processed;
+        if (count == 1) {
+            bool is_null = false;
+            const Datum value = SPI_getbinval(
+                SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
+            if (!is_null) result = DatumGetInt16(value);
         }
     }
     SPI_finish();
+    if (status != SPI_OK_SELECT || count != 1 || result <= 0) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq minimizer generation inspection requires exactly one bioseq.seq column"),
+             errdetail("relation=%u visible_seq_columns=%llu",
+                 static_cast<unsigned>(rel_oid),
+                 static_cast<unsigned long long>(count))));
+    }
+    return result;
+}
+
+/// Resolve and fully validate one READY revision-3 generation under one
+/// registered MVCC snapshot. This setup-only bridge reads no payload extents
+/// and never enables ordinal 2. A preliminary metadata pass obtains and
+/// validates the generation geometry against the active k/w and fixed ABI;
+/// the existing inspector then independently revalidates the source row and
+/// complete metadata directory.
+[[nodiscard]] inline ReadyMinimizerGenerationInspection
+inspect_ready_minimizer_generation_impl(
+        Oid rel_oid,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno) {
+    if (!OidIsValid(rel_oid) || !IsBioseqColumnTableAmTable(rel_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+             errmsg("bioseq minimizer generation inspection requires a USING bioseq table")));
+    }
+    if (!object_ownercheck(RelationRelationId, rel_oid, GetUserId())) {
+        aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(rel_oid));
+    }
+    if (index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        && index_name != MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq minimizer generation inspection requires a minimizer index"),
+             errdetail("index_name=%.*s",
+                 static_cast<int>(index_name.size()), index_name.data())));
+    }
+    if (!bioseq::indexing::sql_bigint_can_represent(sequence_rowno)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+             errmsg("bioseq minimizer generation inspection query key exceeds BIGINT")));
+    }
+    if (bioseq_aligner_kmer_size <= 0
+        || bioseq_aligner_kmer_size
+            > static_cast<int>((std::numeric_limits<std::uint16_t>::max)())
+        || bioseq_aligner_window_size <= 0
+        || bioseq_aligner_window_size
+            > static_cast<int>((std::numeric_limits<std::uint16_t>::max)())) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("bioseq minimizer generation inspection has invalid active k/w parameters")));
+    }
+
+    const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
+    const RelationIdentity relation_identity = index_relation_identity(rel_oid);
+    if (!OidIsValid(relation_identity.tablespace_oid)
+        || !OidIsValid(relation_identity.relfilenode)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_UNDEFINED_TABLE),
+             errmsg("bioseq minimizer generation inspection source relation is unavailable")));
+    }
+    Snapshot active_snapshot = GetActiveSnapshot();
+    if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq minimizer generation inspection requires an active MVCC snapshot")));
+    }
+
+    struct InspectionState {
+        Relation relation = nullptr;
+        BioseqColumnReadState* read_state = nullptr;
+        Snapshot registered_snapshot = nullptr;
+        MemoryContext work_context = nullptr;
+    };
+    auto* state = new InspectionState{};
+    ReadyMinimizerGenerationInspection result{};
+    MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        state->registered_snapshot = RegisterSnapshot(active_snapshot);
+        if (state->registered_snapshot == nullptr
+            || state->registered_snapshot->regd_count == 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq minimizer generation inspection could not register its snapshot")));
+        }
+        state->work_context = AllocSetContextCreate(
+            CurrentMemoryContext, "bioseq ready generation SQL inspection",
+            ALLOCSET_DEFAULT_SIZES);
+        state->relation = try_safe_relation_open(rel_oid, AccessShareLock);
+        if (state->relation == nullptr
+            || state->relation->rd_locator.dbOid != MyDatabaseId
+            || static_cast<Oid>(state->relation->rd_locator.relNumber)
+                != relation_identity.relfilenode) {
+            ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_TABLE),
+                 errmsg("bioseq minimizer generation inspection source relation changed")));
+        }
+
+        TupleDesc source_desc = RelationGetDescr(state->relation);
+        MemoryContext previous_context = MemoryContextSwitchTo(
+            state->work_context);
+        List* projected = list_make1_int(seq_attno);
+        Datum* values = static_cast<Datum*>(palloc0(
+            sizeof(Datum) * static_cast<std::size_t>(source_desc->natts)));
+        bool* nulls = static_cast<bool*>(palloc0(
+            sizeof(bool) * static_cast<std::size_t>(source_desc->natts)));
+        state->read_state = BioseqColumnBeginRead(
+            state->relation, source_desc, projected, NIL,
+            state->work_context, state->registered_snapshot,
+            /*randomAccess=*/true, nullptr);
+        const bool row_visible = BioseqColumnReadRowByRowNumber(
+            state->read_state, sequence_rowno, values, nulls);
+        if (!row_visible || nulls[seq_attno - 1]) {
+            MemoryContextSwitchTo(previous_context);
+            ereport(ERROR,
+                (errcode(ERRCODE_NO_DATA_FOUND),
+                 errmsg("bioseq minimizer generation inspection source row is not visible"),
+                 errdetail("sequence_rowno=%llu",
+                     static_cast<unsigned long long>(sequence_rowno))));
+        }
+        pgseq_t* header = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(
+            values[seq_attno - 1]));
+        if (!is_locator_stub(header)) {
+            MemoryContextSwitchTo(previous_context);
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq minimizer generation source has no source epoch")));
+        }
+        const seq_locator locator = decode_locator_from_stub(header);
+        if (locator.source_epoch == 0) {
+            MemoryContextSwitchTo(previous_context);
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq minimizer generation source epoch is invalid")));
+        }
+        result.source = Rev3AuthoritativeSourceLocator{
+            .sequence_rowno = sequence_rowno,
+            .locator = locator,
+            .alphabet_code = static_cast<std::uint8_t>(header->alphabet_code),
+            .storage_unit_byte_width = logical_storage_unit_byte_width(header),
+            .padding_letters = header->padding_letters,
+            .compatibility_checksum = 0,
+        };
+        BioseqColumnEndRead(state->read_state);
+        state->read_state = nullptr;
+        MemoryContextSwitchTo(previous_context);
+        Relation finished_relation = std::exchange(state->relation, nullptr);
+        relation_close(finished_relation, AccessShareLock);
+
+        const std::string table_name = format_seqidx_name(
+            index_name,
+            relation_identity.db_oid,
+            relation_identity.tablespace_oid,
+            relation_identity.relfilenode,
+            seq_attno,
+            result.source.locator.bucket_idx,
+            result.source.locator.shard_idx);
+        const Rev3IndexAdministrationIdentity admin_identity{
+            .database_oid = relation_identity.db_oid,
+            .tablespace_oid = relation_identity.tablespace_oid,
+            .main_relfilenode = relation_identity.relfilenode,
+            .user_relid = rel_oid,
+            .column_attno = seq_attno,
+            .index_name = std::string{index_name},
+            .table_name = table_name,
+        };
+
+        const auto expected =
+            bioseq::indexing::expected_minimizer_compatibility_for_backend(
+                resolve_index_sketch_backend_from_gucs(),
+                result.source.alphabet_code,
+                result.source.storage_unit_byte_width,
+                static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
+                static_cast<std::uint16_t>(bioseq_aligner_window_size));
+        if (!expected) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq minimizer generation expected compatibility is invalid")));
+        }
+        MinimizerGenerationHead preliminary_head{};
+        std::uint64_t expected_source_identity = 0;
+        {
+            IndexStorageFragmentGenerationReadSessionPg preliminary{
+                table_name, sequence_rowno, state->registered_snapshot,
+                *expected,
+                Rev3SnapshotRegistration::borrow_registered};
+            preliminary_head = preliminary.read_active_head_once();
+            const MinimizerGenerationReadMetadata& metadata =
+                preliminary.read_manifest_directory_once(preliminary_head);
+            result.manifest = metadata.manifest;
+            result.source.compatibility_checksum =
+                bioseq::indexing::minimizer_generation_compatibility_checksum(
+                    result.manifest);
+            expected_source_identity = rev3_source_identity(
+                relation_identity.relfilenode, result.source);
+        }
+        if (expected_source_identity == 0) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq minimizer generation inspection source identity is invalid")));
+        }
+        if (result.manifest.kmer_size
+                != static_cast<std::uint16_t>(bioseq_aligner_kmer_size)
+            || result.manifest.window_size
+                != static_cast<std::uint16_t>(bioseq_aligner_window_size)
+            || result.manifest.alphabet_code != result.source.alphabet_code
+            || result.manifest.storage_unit_byte_width
+                != result.source.storage_unit_byte_width
+            || result.manifest.target_length
+                != result.source.locator.total_bp_size
+            || result.manifest.gpu_abi_version
+                != bioseq::indexing::kMinimizerSortedDenseGpuAbiVersion
+            || result.manifest.segment_geometry_version
+                != bioseq::indexing::kMinimizerSegmentGeometryVersion
+            || result.source.compatibility_checksum
+                != bioseq::indexing::minimizer_generation_compatibility_checksum(
+                    result.manifest)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq minimizer generation is incompatible with the active session"),
+                 errdetail("manifest k=%u w=%u active k=%d w=%d",
+                     static_cast<unsigned>(result.manifest.kmer_size),
+                     static_cast<unsigned>(result.manifest.window_size),
+                     bioseq_aligner_kmer_size, bioseq_aligner_window_size)));
+        }
+        result.identity = inspect_ready_minimizer_generation_identity_pg(
+            admin_identity, sequence_rowno, state->registered_snapshot,
+            *expected);
+        if (result.identity.generation_id != preliminary_head.generation_id
+            || result.identity.source_identity
+                != preliminary_head.source_identity
+            || result.identity.compatibility_checksum
+                != result.source.compatibility_checksum) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq minimizer generation identity changed during inspection")));
+        }
+        result.source_content_checksum =
+            result.identity.source_content_checksum;
+        result.database_oid = relation_identity.db_oid;
+        result.main_relfilenode = relation_identity.relfilenode;
+        result.column_attno = seq_attno;
+
+        Snapshot finished_snapshot = std::exchange(
+            state->registered_snapshot, nullptr);
+        UnregisterSnapshot(finished_snapshot);
+        MemoryContext finished_context = std::exchange(
+            state->work_context, nullptr);
+        MemoryContextDelete(finished_context);
+        delete state;
+        state = nullptr;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        ErrorData* volatile saved_error = CopyErrorData();
+        FlushErrorState();
+        if (state->read_state != nullptr) {
+            BioseqColumnReadState* cleanup = std::exchange(
+                state->read_state, nullptr);
+            PG_TRY(); { BioseqColumnEndRead(cleanup); }
+            PG_CATCH(); { FlushErrorState(); }
+            PG_END_TRY();
+        }
+        if (state->relation != nullptr) {
+            Relation cleanup = std::exchange(state->relation, nullptr);
+            PG_TRY(); { relation_close(cleanup, AccessShareLock); }
+            PG_CATCH(); { FlushErrorState(); }
+            PG_END_TRY();
+        }
+        if (state->registered_snapshot != nullptr) {
+            Snapshot cleanup = std::exchange(
+                state->registered_snapshot, nullptr);
+            PG_TRY(); { UnregisterSnapshot(cleanup); }
+            PG_CATCH(); { FlushErrorState(); }
+            PG_END_TRY();
+        }
+        if (state->work_context != nullptr) {
+            MemoryContext cleanup = std::exchange(
+                state->work_context, nullptr);
+            PG_TRY(); { MemoryContextDelete(cleanup); }
+            PG_CATCH(); { FlushErrorState(); }
+            PG_END_TRY();
+        }
+        delete state;
+        ReThrowError(saved_error);
+    }
+    PG_END_TRY();
+    return result;
+}
+
+[[noreturn]] inline void index_audit_error(std::string_view message) {
+    ereport(ERROR,
+        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+         errmsg("bioseq physical minimizer-index audit: %.*s",
+            static_cast<int>(message.size()), message.data())));
+    pg_unreachable();
+}
+
+inline void spi_connect_for_index_audit() {
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        index_audit_error("SPI connection failed");
+    }
+}
+
+[[nodiscard]] inline std::int64_t index_audit_scalar_i64(
+        const std::string& sql) {
+    spi_connect_for_index_audit();
+    const int status = SPI_execute(sql.c_str(), true, 0);
+    if (status != SPI_OK_SELECT || SPI_processed != 1
+        || SPI_tuptable == nullptr) {
+        SPI_finish();
+        index_audit_error("catalog query did not return exactly one row");
+    }
+    bool is_null = false;
+    const Datum value = SPI_getbinval(
+        SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
+    if (is_null) {
+        SPI_finish();
+        index_audit_error("catalog query returned NULL");
+    }
+    const std::int64_t result = DatumGetInt64(value);
+    SPI_finish();
+    if (result < 0) {
+        index_audit_error("catalog query returned a negative count");
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::vector<std::string> seqidx_prefixes_for(
+        Oid rel_oid, std::string_view name) {
+    const RelationIdentity rid = index_relation_identity(rel_oid);
+    std::vector<std::string> prefixes;
+    spi_connect_for_index_audit();
+    const std::string sql = fmt::format(
+        "SELECT a.attnum FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
+        "WHERE a.attrelid={}::oid AND t.typname='seq' AND n.nspname IN ('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped",
+        static_cast<unsigned>(rel_oid));
+    if (SPI_execute(sql.c_str(), true, 0) != SPI_OK_SELECT
+        || SPI_tuptable == nullptr) {
+        SPI_finish();
+        index_audit_error("sequence-column catalog lookup failed");
+    }
+    for (std::uint64_t row = 0; row < SPI_processed; ++row) {
+        bool is_null = false;
+        const Datum value = SPI_getbinval(
+            SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1, &is_null);
+        if (is_null) {
+            SPI_finish();
+            index_audit_error("sequence-column catalog lookup returned NULL");
+        }
+        const std::int16_t attno = DatumGetInt16(value);
+        prefixes.push_back(fmt::format(
+            "seqidx_{}_{:016x}_", short_index_for(name),
+            identity_hash64(rid.db_oid, rid.tablespace_oid,
+                rid.relfilenode, attno, name)));
+    }
+    SPI_finish();
+    if (prefixes.empty()) {
+        index_audit_error("target has no visible bioseq.seq column");
+    }
     return prefixes;
 }
 
-[[nodiscard]] inline std::vector<std::string> shard_relnames_with_prefix(const std::string& pfx) {
+[[nodiscard]] inline std::vector<std::string> shard_relnames_with_prefix(
+        const std::string& prefix) {
     std::vector<std::string> out;
-    if (SPI_connect() != SPI_OK_CONNECT) return out;
-    std::string esc; for (char c : pfx) { if (c=='_'||c=='%'||c=='\\') esc.push_back('\\'); esc.push_back(c); }
-    std::string sql = fmt::format(
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname='bioseq_internal' AND c.relkind='r' AND c.relname LIKE '{}%' ESCAPE '\\'", esc);
-    if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT)
-        for (std::uint64_t r = 0; r < SPI_processed; ++r) {
-            char* nm = SPI_getvalue(SPI_tuptable->vals[r], SPI_tuptable->tupdesc, 1);
-            if (nm) out.emplace_back(nm);
+    spi_connect_for_index_audit();
+    std::string escaped;
+    for (const char character : prefix) {
+        if (character == '_' || character == '%' || character == '\\') {
+            escaped.push_back('\\');
         }
+        escaped.push_back(character);
+    }
+    const std::string sql = fmt::format(
+        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname='bioseq_internal' AND c.relkind='r' AND c.relname LIKE '{}%' ESCAPE '\\'",
+        escaped);
+    if (SPI_execute(sql.c_str(), true, 0) != SPI_OK_SELECT
+        || SPI_tuptable == nullptr) {
+        SPI_finish();
+        index_audit_error("physical index relation lookup failed");
+    }
+    for (std::uint64_t row = 0; row < SPI_processed; ++row) {
+        char* name = SPI_getvalue(
+            SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1);
+        if (name == nullptr) {
+            SPI_finish();
+            index_audit_error("physical index relation lookup returned NULL");
+        }
+        out.emplace_back(name);
+    }
     SPI_finish();
     return out;
 }
 
-[[nodiscard]] inline std::int64_t count_in_shard(const std::string& relname, const std::string& where_clause) {
-    std::int64_t v = 0;
-    if (SPI_connect() != SPI_OK_CONNECT) return 0;
-    std::string sql = fmt::format("SELECT count(*)::bigint FROM bioseq_internal.{} {}", quote_identifier(relname.c_str()), where_clause);
-    if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT && SPI_processed > 0) {
-        bool isn=false; Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isn);
-        if (!isn) v = DatumGetInt64(d);
-    }
-    SPI_finish();
-    return v;
+[[nodiscard]] inline std::int64_t count_in_shard(
+        const std::string& relname,
+        const std::string& where_clause) {
+    return index_audit_scalar_i64(fmt::format(
+        "SELECT count(*)::bigint FROM bioseq_internal.{} {}",
+        quote_identifier(relname.c_str()), where_clause));
+}
+
+[[nodiscard]] inline bool shard_has_rev3_generation_key(
+        const std::string& relname) {
+    const std::int64_t matching_attributes = index_audit_scalar_i64(fmt::format(
+        "SELECT count(*)::bigint FROM pg_attribute "
+        "WHERE attrelid='bioseq_internal.{}'::regclass "
+        "AND attnum>0 AND NOT attisdropped AND ("
+        "(attname='generation_id' AND atttypid='int8'::regtype) OR "
+        "(attname='position_segment' AND atttypid='int4'::regtype) OR "
+        "(attname='sub_key' AND atttypid='int8'::regtype) OR "
+        "(attname='chunk_no' AND atttypid='int4'::regtype))",
+        quote_identifier(relname.c_str())));
+    return matching_attributes == 4;
 }
 
 [[nodiscard]] inline std::int64_t index_table_row_count_impl(Oid rel_oid, std::string_view name) {
     std::int64_t total = 0;
     for (const std::string& pfx : seqidx_prefixes_for(rel_oid, name))
-        for (const std::string& sh : shard_relnames_with_prefix(pfx))
-            total += count_in_shard(sh, "");
+        for (const std::string& sh : shard_relnames_with_prefix(pfx)) {
+            const std::int64_t rows = count_in_shard(sh, "");
+            if (rows > (std::numeric_limits<std::int64_t>::max)() - total) {
+                index_audit_error("persisted row count overflow");
+            }
+            total += rows;
+        }
     return total;
+}
+
+struct ColdNoIndexAbsenceAudit {
+    std::uint64_t target_rows = 0;
+    bool target_cardinality_metadata_only = true;
+    std::uint64_t source_parent_rows_read = 0;
+    std::uint64_t source_fragment_rows_read = 0;
+    std::uint64_t source_decoded_bp = 0;
+    std::uint64_t physical_index_relations = 0;
+    std::uint64_t persisted_index_rows = 0;
+    std::uint64_t generation_objects = 0;
+};
+
+/// Fail-closed, metadata-only evidence for one no-index policy. It reads
+/// Bioseq stripe metadata for target cardinality and PostgreSQL catalogs/index
+/// relations for persisted-index absence. It never forms a target tuple and
+/// therefore cannot hydrate or decode a sequence source.
+[[nodiscard]] inline ColdNoIndexAbsenceAudit
+cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
+    if (name != "minimizers_per_fragment"
+        && name != "minimizers_per_sequence") {
+        index_audit_error("audit requires an MPF or MPS minimizer policy");
+    }
+    Relation target = table_open(rel_oid, AccessShareLock);
+    if (!IsBioseqColumnTableAmTable(rel_oid)) {
+        table_close(target, AccessShareLock);
+        index_audit_error("target is not a USING bioseq relation");
+    }
+    ColdNoIndexAbsenceAudit audit{
+        .target_rows = BioseqColumnTableRowCount(target),
+    };
+    table_close(target, AccessShareLock);
+
+    for (const std::string& prefix : seqidx_prefixes_for(rel_oid, name)) {
+        for (const std::string& shard : shard_relnames_with_prefix(prefix)) {
+            ++audit.physical_index_relations;
+            const std::int64_t rows = count_in_shard(shard, "");
+            if (static_cast<std::uint64_t>(rows)
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - audit.persisted_index_rows) {
+                index_audit_error("persisted row count overflow");
+            }
+            audit.persisted_index_rows += static_cast<std::uint64_t>(rows);
+            if (shard_has_rev3_generation_key(shard)) {
+                const std::int64_t generations = count_in_shard(
+                    shard,
+                    fmt::format(
+                        "WHERE generation_id=0 AND position_segment=-1 "
+                        "AND sub_key={} AND chunk_no=0",
+                        static_cast<long long>(GENERATION_HEAD_SUB_KEY)));
+                if (static_cast<std::uint64_t>(generations)
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - audit.generation_objects) {
+                    index_audit_error("generation object count overflow");
+                }
+                audit.generation_objects +=
+                    static_cast<std::uint64_t>(generations);
+            }
+        }
+    }
+    return audit;
 }
 
 [[nodiscard]] inline std::int64_t index_distinct_sub_keys_impl(Oid rel_oid, std::string_view name, std::int64_t query_key) {
