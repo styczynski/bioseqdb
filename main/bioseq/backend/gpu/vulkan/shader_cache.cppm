@@ -149,8 +149,13 @@ concept is_runtime_compile_service = requires(Service& service, ShaderVariantKey
     const ShaderVariantKey& key)
 {
     constexpr std::uint32_t conservative_moltenvk_cap = 256u;
+    const ShaderWorkgroupSize workgroup = expected_shader_workgroup_size(key);
+    const std::uint64_t exact_threads =
+        static_cast<std::uint64_t>(workgroup.x)
+        * static_cast<std::uint64_t>(workgroup.y)
+        * static_cast<std::uint64_t>(workgroup.z);
     std::vector<std::filesystem::path> paths{cache_binary_archive_path(cache_dir, key)};
-    if (key.local_size != conservative_moltenvk_cap) {
+    if (exact_threads != conservative_moltenvk_cap) {
         paths.push_back(cache_dir / (cache_file_stem(key) + ".max_threads_"
                                      + std::to_string(conservative_moltenvk_cap)
                                      + ".metalar"));
@@ -283,14 +288,28 @@ kernel void bioseq_moltenvk_command_placeholder() {}
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.patch);
     hash = bioseq::common::hash_combine_64(hash, moltenvk_command_placeholder_msl());
     hash = bioseq::common::hash_combine_64(hash, "bioseq-metal-binary-archive-v2");
+    // SPIR-V -> MSL resource indices are pipeline ABI, even when the GLSL
+    // shader body itself is unchanged.  Keep an explicit transform revision
+    // and the concrete layout in the digest so an incompatible metallib or
+    // Metal binary archive is never reused under the old cache directory.
+    hash = bioseq::common::hash_combine_64(
+        hash, "bioseq-spirv-to-msl-resource-abi-v2");
 
     for_each_static_shader_variant(inputs.variants, [&hash](const ShaderVariantKey& key) {
+        const ShaderKind kind = checked_shader_kind(key.kind);
+        const DescriptorLayoutKind descriptor_layout = descriptor_layout_for(kind);
         hash = bioseq::common::hash_combine_64(hash, key.kind);
         hash = bioseq::common::hash_combine_64(hash, key.tile_size);
         hash = bioseq::common::hash_combine_64(hash, key.local_size);
         hash = bioseq::common::hash_combine_64(hash, key.max_span);
         hash = bioseq::common::hash_combine_64(
-            hash, shader_body_for_digest(checked_shader_kind(key.kind)));
+            hash, static_cast<std::uint32_t>(descriptor_layout));
+        hash = bioseq::common::hash_combine_64(
+            hash, descriptor_binding_count(descriptor_layout));
+        hash = bioseq::common::hash_combine_64(
+            hash, push_constant_size(kind));
+        hash = bioseq::common::hash_combine_64(
+            hash, shader_body_for_digest(kind));
     });
     std::ostringstream out;
     out << std::hex << std::setfill('0') << std::setw(16) << hash;
@@ -421,6 +440,28 @@ kernel void bioseq_moltenvk_command_placeholder() {}
             || !scan.has_array_stride(key.max_span / 8u))) {
         return std::unexpected("SPIR-V generate_units layout mismatch");
     }
+    if (kind == ShaderKind::phase_c_persisted_directory_select
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3))) {
+        return std::unexpected(
+            "SPIR-V persisted directory selection layout mismatch");
+    }
+    if (kind == ShaderKind::align_extend_banded_affine
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3)
+            || !scan.has_array_stride(4) || !scan.has_array_stride(16)
+            || !scan.has_array_stride(32))) {
+        return std::unexpected("SPIR-V alignment extension layout mismatch");
+    }
+    if (kind == ShaderKind::align_extend_simple_cigar
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3)
+            || !scan.has_binding(4) || !scan.has_binding(5)
+            || !scan.has_array_stride(4) || !scan.has_array_stride(40)
+            || !scan.has_array_stride(48))) {
+        return std::unexpected(
+            "SPIR-V alignment CIGAR extension layout mismatch");
+    }
     return {};
 }
 
@@ -531,44 +572,126 @@ struct MslCompileResult {
     return meta;
 }
 
+[[nodiscard]] inline std::expected<ShaderCacheMeta, std::string>
+read_compatible_cache_meta(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key,
+    std::string* entry_name)
+{
+    std::string entry;
+    auto meta = read_meta(cache_meta_path(cache_dir, key), &entry);
+    if (!meta) {
+        return std::unexpected(meta.error());
+    }
+    if (!(meta->key == key)) {
+        return std::unexpected("meta key mismatch");
+    }
+    if (entry.empty()) {
+        return std::unexpected("meta entry name is empty");
+    }
+    const ShaderWorkgroupSize expected = expected_shader_workgroup_size(key);
+    if (meta->wg_x != expected.x
+        || meta->wg_y != expected.y
+        || meta->wg_z != expected.z) {
+        return std::unexpected(shader_cache_message(
+            "meta workgroup mismatch: cached=", meta->wg_x, 'x',
+            meta->wg_y, 'x', meta->wg_z, " expected=", expected.x, 'x',
+            expected.y, 'x', expected.z));
+    }
+    if (entry_name != nullptr) {
+        *entry_name = entry;
+    }
+    return *meta;
+}
+
+[[nodiscard]] inline std::expected<void, std::string> require_nonempty_cache_file(
+    const std::filesystem::path& path,
+    std::string_view artifact)
+{
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        return std::unexpected(shader_cache_message(
+            artifact, " stat failed for ", path.string(), ": ", ec.message()));
+    }
+    if (!exists) {
+        return std::unexpected(shader_cache_message(
+            artifact, " missing: ", path.string()));
+    }
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return std::unexpected(shader_cache_message(
+            artifact, " size failed for ", path.string(), ": ", ec.message()));
+    }
+    if (size == 0) {
+        return std::unexpected(shader_cache_message(
+            artifact, " empty: ", path.string()));
+    }
+    return {};
+}
+
+[[nodiscard]] inline std::expected<void, std::string>
+cache_metallib_entry_status(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    if (auto meta = read_compatible_cache_meta(cache_dir, key, nullptr); !meta) {
+        return std::unexpected(shader_cache_message(
+            "metadata incompatible: ", meta.error()));
+    }
+    return require_nonempty_cache_file(
+        cache_metallib_path(cache_dir, key), "metallib");
+}
+
 [[nodiscard]] inline bool cache_metallib_entry_complete(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
-    std::string entry;
-    auto meta = read_meta(cache_meta_path(cache_dir, key), &entry);
-    if (!meta || !(meta->key == key) || entry.empty()) {
-        return false;
-    }
-    return std::filesystem::exists(cache_metallib_path(cache_dir, key));
+    return cache_metallib_entry_status(cache_dir, key).has_value();
 }
 
-[[nodiscard]] inline bool cache_binary_archive_complete(
+[[nodiscard]] inline std::expected<void, std::string>
+cache_binary_archive_status(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
 #if !defined(__APPLE__)
     (void)cache_dir;
     (void)key;
-    return true;
+    return {};
 #else
-    std::error_code ec;
     for (const std::filesystem::path& archive : cache_binary_archive_paths(cache_dir, key)) {
-        if (!std::filesystem::exists(archive, ec) || ec
-            || std::filesystem::file_size(archive, ec) == 0 || ec) {
-            return false;
+        if (auto present = require_nonempty_cache_file(archive, "Metal binary archive");
+            !present) {
+            return present;
         }
     }
-    return true;
+    return {};
 #endif
+}
+
+[[nodiscard]] inline bool cache_binary_archive_complete(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    return cache_binary_archive_status(cache_dir, key).has_value();
+}
+
+[[nodiscard]] inline std::expected<void, std::string> cache_entry_status(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    if (auto metallib = cache_metallib_entry_status(cache_dir, key); !metallib) {
+        return metallib;
+    }
+    return cache_binary_archive_status(cache_dir, key);
 }
 
 [[nodiscard]] inline bool cache_entry_complete(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
-    return cache_metallib_entry_complete(cache_dir, key)
-        && cache_binary_archive_complete(cache_dir, key);
+    return cache_entry_status(cache_dir, key).has_value();
 }
 
 [[nodiscard]] inline std::expected<std::filesystem::path, std::string>
@@ -777,6 +900,18 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (!msl) {
         return std::unexpected(msl.error());
     }
+    const ShaderWorkgroupSize expected_workgroup = expected_shader_workgroup_size(key);
+    const ShaderWorkgroupSize compiled_workgroup{
+        msl->wg_x == 0 ? 1u : msl->wg_x,
+        msl->wg_y == 0 ? 1u : msl->wg_y,
+        msl->wg_z == 0 ? 1u : msl->wg_z};
+    if (!(compiled_workgroup == expected_workgroup)) {
+        return std::unexpected(shader_cache_message(
+            "compiled SPIR-V workgroup mismatch for ", cache_file_stem(key),
+            ": reflected=", compiled_workgroup.x, 'x', compiled_workgroup.y, 'x',
+            compiled_workgroup.z, " expected=", expected_workgroup.x, 'x',
+            expected_workgroup.y, 'x', expected_workgroup.z));
+    }
 
     const std::filesystem::path stem = cache_dir / cache_file_stem(key);
     const std::filesystem::path metal_path = stem.string() + ".tmp.metal";
@@ -809,9 +944,9 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
 
     ShaderCacheMeta meta{};
     meta.key = key;
-    meta.wg_x = msl->wg_x == 0 ? 1u : msl->wg_x;
-    meta.wg_y = msl->wg_y == 0 ? 1u : msl->wg_y;
-    meta.wg_z = msl->wg_z == 0 ? 1u : msl->wg_z;
+    meta.wg_x = compiled_workgroup.x;
+    meta.wg_y = compiled_workgroup.y;
+    meta.wg_z = compiled_workgroup.z;
     meta.entry_len = static_cast<std::uint32_t>(
         std::min<std::size_t>(msl->entry_name.size(), 64u));
     const std::string entry = msl->entry_name.substr(0, meta.entry_len);
@@ -903,14 +1038,20 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (create_shader_module == nullptr) {
         return std::unexpected("vkCreateShaderModule function pointer is null");
     }
-    std::string entry;
-    auto meta = read_meta(cache_meta_path(cache_dir, key), &entry);
-    if (!meta || !(meta->key == key)) {
-        return std::unexpected(meta ? "meta key mismatch" : meta.error());
-    }
     auto code = make_moltenvk_metallib_module_code(cache_metallib_path(cache_dir, key));
     if (!code) {
         return std::unexpected(code.error());
+    }
+
+    // Re-read and validate metadata after the metallib bytes are resident and
+    // immediately before module creation.  The earlier completeness probe is
+    // only an optimization; it cannot be the trust boundary because a compile
+    // service may report success without publishing a compatible record, and
+    // cache files may be replaced between the probe and this loader.
+    std::string entry;
+    auto meta = read_compatible_cache_meta(cache_dir, key, &entry);
+    if (!meta) {
+        return std::unexpected(meta.error());
     }
 
     VkShaderModuleCreateInfo module_info{};
@@ -940,6 +1081,11 @@ template <is_runtime_compile_service Service>
         auto compile = service.ensure_variant_compiled(key);
         if (!compile) {
             return std::unexpected(compile.error());
+        }
+        if (auto published = cache_entry_status(cache_dir, key); !published) {
+            return std::unexpected(shader_cache_message(
+                "shader compile service returned success without a complete compatible cache entry for ",
+                cache_file_stem(key), ": ", published.error()));
         }
     }
     return load_cached_module(device, cache_dir, key, create_shader_module);

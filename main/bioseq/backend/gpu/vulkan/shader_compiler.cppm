@@ -78,6 +78,10 @@ enum class ShaderKind : std::uint8_t {
     seq_sort_prefix_check_generic,
     align_extend_banded_affine,
     align_extend_simple_cigar,
+    // Appended to preserve every established ShaderKind cache ordinal.
+    // DOC0371: consume resident query-minimizer words plus the authoritative
+    // encoded revision-3 directory and return only selected directory ordinals.
+    phase_c_persisted_directory_select,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -99,6 +103,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
     seq_sort,   // DOC0346 — { SeqWords, Descs, KeysOrIndex, ValsOrRanges }
     align_extension,  // { QuerySymbols, TargetSymbols, Jobs, Results }
     align_extension_cigar,  // { QuerySymbols, TargetSymbols, Jobs, Results, Cigar, Traceback }
+    phase_c_persisted_directory_select,
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -113,6 +118,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::phase_c_sketch:        return 9;
         case DescriptorLayoutKind::phase_c_scan:          return 3;
         case DescriptorLayoutKind::phase_c_seed:          return 8;
+        case DescriptorLayoutKind::phase_c_persisted_directory_select: return 4;
         case DescriptorLayoutKind::phase_c_sort:          return 5;
         case DescriptorLayoutKind::phase_c_index:         return 7;
         case DescriptorLayoutKind::phase_c_chain_range:   return 6;
@@ -141,6 +147,8 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_prefix_scan_add:     return DescriptorLayoutKind::phase_c_scan;
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:           return DescriptorLayoutKind::phase_c_seed;
+        case ShaderKind::phase_c_persisted_directory_select:
+            return DescriptorLayoutKind::phase_c_persisted_directory_select;
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return DescriptorLayoutKind::phase_c_sort;
@@ -187,6 +195,8 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_prefix_scan_add:     return 16;  // ScanPushC (4 × u32)
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:           return 52;  // SeedPushC (13 × u32)
+        case ShaderKind::phase_c_persisted_directory_select:
+            return 32;  // GpuPersistedDirectorySelectionPush
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return 20;  // SortPushC (5 × u32)
@@ -218,9 +228,11 @@ enum class DescriptorLayoutKind : std::uint8_t {
 }
 
 /// One shader-compilation request. `tile_size`, `local_size`, and `max_span`
-/// are substituted as compile-time `#define`s before glslang runs; only those
-/// three affect the emitted SPIR-V (shared-array lengths). The remaining fields
-/// describe the runtime push-constant routing and are carried for the pipeline
+/// are substituted as compile-time `#define`s before glslang runs. A shader may
+/// intentionally bake a fixed workgroup geometry instead of consuming
+/// `LOCAL_SIZE_X`; `expected_shader_workgroup_size()` is the authoritative
+/// compile/cache/runtime ABI for that distinction. The remaining fields
+/// describe runtime push-constant routing and are carried for the pipeline
 /// cache key (DOC0307 §4.5, §12).
 struct ShaderCompileRequest {
     ShaderKind kind;
@@ -232,6 +244,36 @@ struct ShaderCompileRequest {
     std::uint32_t unit_bits = 0;
     std::uint32_t bits_per_char = 0;
 };
+
+struct ShaderWorkgroupSize {
+    std::uint32_t x = 1;
+    std::uint32_t y = 1;
+    std::uint32_t z = 1;
+
+    [[nodiscard]] bool operator==(const ShaderWorkgroupSize&) const = default;
+};
+
+/// Compile-time execution geometry encoded in SPIR-V. Most kernels consume the
+/// request's LOCAL_SIZE_X macro. The radix kernels deliberately keep their
+/// established cache-key sentinel (`local_size == 1`) while their algorithm
+/// requires one lane per radix bin. Keep this mapping explicit: treating a key
+/// selector as reflected execution metadata rejects valid AOT artifacts and
+/// makes archive publication/completeness disagree.
+[[nodiscard]] inline constexpr ShaderWorkgroupSize expected_shader_workgroup_size(
+    const ShaderCompileRequest& request) noexcept
+{
+    switch (request.kind) {
+        case ShaderKind::phase_c_sort_radix_histogram:
+        case ShaderKind::phase_c_sort_radix_scan:
+        case ShaderKind::phase_c_sort_radix_scatter:
+            return ShaderWorkgroupSize{256u, 1u, 1u};
+        case ShaderKind::phase_c_chain_range_build:
+        case ShaderKind::align_extend_banded_affine:
+            return ShaderWorkgroupSize{1u, 1u, 1u};
+        default:
+            return ShaderWorkgroupSize{request.local_size, 1u, 1u};
+    }
+}
 
 /// Thrown by `compile_shader_spirv` on a rejected request or a glslang
 /// parse/link failure. The Vulkan runtime catches this and re-wraps it as a
@@ -1303,11 +1345,93 @@ void main() {
 }
 )GLSL";
 
+// DOC0371 persisted-index foundation. One workgroup deliberately owns the
+// complete target-wide query union: all lanes mark a global bitset, synchronize,
+// then lane zero compacts it in stable directory order. This avoids exposing a
+// host query-hash vector and gives the later PG reader only opaque ordinals.
+// The authoritative directory is the header-free revision-3 96-byte entry
+// stream (24 little-endian uint words per entry).
+constexpr std::string_view kPhaseCPersistedDirectorySelectBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer MinWords { uint min_words[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DirectoryWords { uint directory_words[]; };
+layout(std430, set = 0, binding = 2) buffer SelectedBits { uint selected_bits[]; };
+layout(std430, set = 0, binding = 3) buffer SelectedOrdinals { uint selected_ordinals[]; };
+
+layout(push_constant) uniform Params {
+    uint minimizer_count;
+    uint minimizer_word_kind;
+    uint minimizer_words32_per_record;
+    uint hash_shift;
+    uint directory_entry_count;
+    uint reserved_directory;
+    uint bitset_word_count;
+    uint reserved;
+} pc;
+
+uint64_t read_min_hash(uint i) {
+    if (pc.minimizer_word_kind == 0u) {
+        uint packed = min_words[i >> 1u];
+        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
+        return uint64_t(raw) >> pc.hash_shift;
+    }
+    uint base = i * pc.minimizer_words32_per_record;
+    if (pc.minimizer_word_kind == 1u) {
+        return uint64_t(min_words[base]) >> pc.hash_shift;
+    }
+    if (pc.minimizer_word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base])
+            | (uint64_t(min_words[base + 1u]) << 32);
+        return raw >> pc.hash_shift;
+    }
+    uint64_t high = uint64_t(min_words[base + 2u])
+        | (uint64_t(min_words[base + 3u]) << 32);
+    return high >> 8;
+}
+
+uint64_t directory_u64(uint ordinal, uint word_offset) {
+    uint base = ordinal * 24u + word_offset;
+    return uint64_t(directory_words[base])
+        | (uint64_t(directory_words[base + 1u]) << 32);
+}
+
+void main() {
+    for (uint i = gl_LocalInvocationID.x; i < pc.minimizer_count;
+        i += gl_WorkGroupSize.x) {
+        uint64_t hash = read_min_hash(i);
+        // Scan the complete authoritative directory. Hash ranges repeat once
+        // per persisted position core, so a caller-supplied segment filter
+        // would silently omit valid target anchors.
+        for (uint ordinal = 0u; ordinal < pc.directory_entry_count; ++ordinal) {
+            uint64_t low_hash = directory_u64(ordinal, 2u);
+            uint64_t high_hash = directory_u64(ordinal, 4u);
+            if (low_hash <= hash && hash <= high_hash) {
+                atomicOr(selected_bits[ordinal >> 5u], 1u << (ordinal & 31u));
+            }
+        }
+    }
+    memoryBarrierBuffer();
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0u) {
+        uint count = 0u;
+        for (uint ordinal = 0u; ordinal < pc.directory_entry_count; ++ordinal) {
+            uint present = selected_bits[ordinal >> 5u] >> (ordinal & 31u);
+            if ((present & 1u) != 0u) {
+                selected_ordinals[1u + count] = ordinal;
+                ++count;
+            }
+        }
+        selected_ordinals[0] = count;
+    }
+}
+)GLSL";
+
 /// DOC0310 §13 — device radix sort over parallel (key:uint64, value:uint64)
-/// arrays. One thread per workgroup processes a contiguous chunk; this keeps the
-/// scatter stable (in-chunk order preserved, chunks ordered by id) without
-/// shared-atomics. Histogram pass: per-chunk 256-bin counts of digit
-/// `(key >> radix_shift) & 0xff`.
+/// arrays. One 256-lane workgroup processes each contiguous chunk; lane 0
+/// assigns stable scatter destinations and all lanes move the values. Histogram
+/// pass: per-chunk 256-bin counts of digit `(key >> radix_shift) & 0xff`.
 constexpr std::string_view kPhaseCSortHistogramBody = R"GLSL(
 // Cooperative per-workgroup histogram: 256 threads (one per bin) zero and write
 // the shared histogram; all threads count this workgroup's chunk into it with
@@ -1344,7 +1468,7 @@ void main() {
 }
 )GLSL";
 
-/// DOC0310 §13 — multi-level histogram scan. One workgroup (1 invocation)
+/// DOC0310 §13 — multi-level histogram scan. One 256-lane workgroup
 /// computes, for every (workgroup, bin), its stable global start offset:
 /// `bin_base[bin] + sum_{wg' < wg} hist[wg'][bin]`, where `bin_base` is the
 /// exclusive prefix over bin totals. Writes the offsets back into `histogram`.
@@ -1390,7 +1514,7 @@ void main() {
 }
 )GLSL";
 
-/// DOC0310 §13 — stable scatter. Each workgroup (1 invocation) re-walks its
+/// DOC0310 §13 — stable scatter. Each 256-lane workgroup re-walks its
 /// chunk in order, using the per-(wg,bin) global offsets from the scan as a
 /// running cursor.
 constexpr std::string_view kPhaseCSortScatterBody = R"GLSL(
@@ -2245,7 +2369,7 @@ layout(push_constant) uniform Params {
     uint reserved0;
 } pc;
 
-int max3(int a, int b, int c) {
+int bioseq_max3(int a, int b, int c) {
     return max(max(a, b), c);
 }
 
@@ -2314,7 +2438,8 @@ void solve_job(uint job_index) {
                 reject_job(job_index);
                 return;
             }
-            int diag = max3(prev_m[j - 1u], prev_i[j - 1u], prev_d[j - 1u])
+            int diag = bioseq_max3(
+                prev_m[j - 1u], prev_i[j - 1u], prev_d[j - 1u])
                 + substitution_score(query_symbol, target_symbol);
             int match_state = max(0, diag);
             int insert_state = max(
@@ -2326,7 +2451,8 @@ void solve_job(uint job_index) {
             curr_i[j] = insert_state;
             curr_d[j] = delete_state;
 
-            int cell_best = max3(match_state, insert_state, delete_state);
+            int cell_best = bioseq_max3(
+                match_state, insert_state, delete_state);
             if (cell_best > best_score) {
                 best_score = cell_best;
                 best_query_end = i;
@@ -4041,6 +4167,8 @@ enum class SeqSortStage : std::uint8_t {
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:
             return std::string{kPhaseCSeedBody};
+        case ShaderKind::phase_c_persisted_directory_select:
+            return std::string{kPhaseCPersistedDirectorySelectBody};
         case ShaderKind::phase_c_sort_radix_histogram:
             return std::string{kPhaseCSortHistogramBody};
         case ShaderKind::phase_c_sort_radix_scan:

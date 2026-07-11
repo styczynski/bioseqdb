@@ -11,6 +11,7 @@ module;
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 export module bioseq.parallelism.memory_admission;
@@ -19,6 +20,53 @@ import bioseq.instr;
 export namespace bioseq::parallelism {
 
 class MemoryAdmissionController;
+
+/// Machine-readable reason returned when a non-blocking reservation is
+/// refused.  Callers that do not need diagnostics may keep using
+/// `try_reserve(bytes)`; strict accelerator paths pass an output record so a
+/// fail-closed decline names the actual predicate instead of collapsing every
+/// refusal into a generic "GPU path declined" error.
+enum class MemoryAdmissionFailureReason : std::uint8_t {
+    none,
+    system_pressure,
+    reservation_counter_overflow,
+    budget_exhausted,
+};
+
+struct MemoryAdmissionFailure {
+    MemoryAdmissionFailureReason reason = MemoryAdmissionFailureReason::none;
+    std::uint64_t requested_bytes = 0;
+    std::uint64_t reserved_bytes = 0;
+    std::uint64_t budget_ceiling_bytes =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t allocatable_after_reservations_bytes =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t process_footprint_bytes = 0;
+    std::uint64_t system_available_bytes = 0;
+    std::uint64_t system_total_bytes = 0;
+    std::uint64_t process_soft_cap_bytes = 0;
+
+    [[nodiscard]] constexpr bool failed() const noexcept {
+        return reason != MemoryAdmissionFailureReason::none;
+    }
+};
+
+[[nodiscard]] inline constexpr std::string_view
+memory_admission_failure_reason_name(
+    MemoryAdmissionFailureReason reason) noexcept
+{
+    switch (reason) {
+        case MemoryAdmissionFailureReason::none:
+            return "none";
+        case MemoryAdmissionFailureReason::system_pressure:
+            return "system_pressure";
+        case MemoryAdmissionFailureReason::reservation_counter_overflow:
+            return "reservation_counter_overflow";
+        case MemoryAdmissionFailureReason::budget_exhausted:
+            return "budget_exhausted";
+    }
+    return "unknown";
+}
 
 inline constexpr std::uint64_t kMinimizerIndexPeakBytesPerBp = 6;
 
@@ -139,23 +187,68 @@ public:
         return reserved < budget ? budget - reserved : 0;
     }
 
-    [[nodiscard]] std::optional<MemoryPermit> try_reserve(std::uint64_t bytes) noexcept {
+    [[nodiscard]] std::optional<MemoryPermit> try_reserve(
+            std::uint64_t bytes,
+            MemoryAdmissionFailure* failure = nullptr) noexcept {
+        if (failure != nullptr) {
+            *failure = MemoryAdmissionFailure{
+                .requested_bytes = bytes,
+            };
+        }
         if (bytes == 0) {
             return MemoryPermit{this, 0};
         }
-        if (bioseq::memory::default_budget().under_pressure()) {
+
+        auto& live_budget = bioseq::memory::default_budget();
+        const auto refuse = [failure, bytes, &live_budget](
+                MemoryAdmissionFailureReason reason,
+                std::uint64_t reserved,
+                std::uint64_t ceiling) noexcept
+                -> std::optional<MemoryPermit> {
+            if (failure != nullptr) {
+                const std::uint64_t after_reservations =
+                    ceiling == (std::numeric_limits<std::uint64_t>::max)()
+                        ? ceiling
+                        : reserved < ceiling ? ceiling - reserved : 0u;
+                *failure = MemoryAdmissionFailure{
+                    .reason = reason,
+                    .requested_bytes = bytes,
+                    .reserved_bytes = reserved,
+                    .budget_ceiling_bytes = ceiling,
+                    .allocatable_after_reservations_bytes = after_reservations,
+                    .process_footprint_bytes = live_budget.footprint_bytes(),
+                    .system_available_bytes = live_budget.available_bytes(),
+                    .system_total_bytes = live_budget.total_bytes(),
+                    .process_soft_cap_bytes = live_budget.soft_cap_bytes(),
+                };
+            }
             return std::nullopt;
+        };
+
+        if (live_budget.under_pressure()) {
+            const std::uint64_t current =
+                reserved_.load(std::memory_order_relaxed);
+            return refuse(
+                MemoryAdmissionFailureReason::system_pressure,
+                current,
+                budget_ceiling());
         }
 
         std::uint64_t current = reserved_.load(std::memory_order_relaxed);
         for (;;) {
             if (bytes > (std::numeric_limits<std::uint64_t>::max)() - current) {
-                return std::nullopt;
+                return refuse(
+                    MemoryAdmissionFailureReason::reservation_counter_overflow,
+                    current,
+                    budget_ceiling());
             }
             const std::uint64_t budget = budget_ceiling();
             if (budget != (std::numeric_limits<std::uint64_t>::max)()) {
                 if (current > budget || bytes > budget - current) {
-                    return std::nullopt;
+                    return refuse(
+                        MemoryAdmissionFailureReason::budget_exhausted,
+                        current,
+                        budget);
                 }
             }
             if (reserved_.compare_exchange_weak(

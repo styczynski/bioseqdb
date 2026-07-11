@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -27,6 +28,7 @@ import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_vulkan;
 import bioseq.sequences.seeding.vulkan;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
 import bioseq.storage.size;
 
 namespace {
@@ -164,6 +166,180 @@ TEST_CASE("vulkan seeding: empty result when no query minimizer hits the target"
     ASSERT(ok, "empty-hit seed lookup should still succeed", 0);
     ASSERT(gpu_slab.size() == 0, "no-hit query produced anchors", gpu_slab.size());
     cache.clear();
+}
+
+TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
+          "[vulkan][seeding][phase-b][decline]") {
+    const auto query = build_query();
+    const auto idx = build_target();
+    auto slab = ch::make_arena_slab<Anchor>();
+    vk::VulkanSeedLookupDecline decline{};
+
+    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<MinimapSketchData>(
+        std::span<const MinimapSketchData>{query.data(), query.size()},
+        std::nullopt,
+        idx,
+        nullptr,
+        /*vulkan_enabled=*/false,
+        200,
+        500,
+        15,
+        slab,
+        /*fused_frontend=*/false,
+        &decline));
+    REQUIRE(decline.reason
+            == vk::VulkanSeedLookupDeclineReason::vulkan_disabled);
+    REQUIRE(decline.query_minimizer_count == query.size());
+
+    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<MinimapSketchData>(
+        std::span<const MinimapSketchData>{query.data(), query.size()},
+        std::nullopt,
+        idx,
+        nullptr,
+        /*vulkan_enabled=*/true,
+        200,
+        500,
+        0,
+        slab,
+        /*fused_frontend=*/false,
+        &decline));
+    REQUIRE(decline.reason
+            == vk::VulkanSeedLookupDeclineReason::invalid_kmer_size);
+
+    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<MinimapSketchData>(
+        std::span<const MinimapSketchData>{query.data(), query.size()},
+        std::nullopt,
+        idx,
+        nullptr,
+        /*vulkan_enabled=*/true,
+        std::uint64_t{1} << 32,
+        500,
+        15,
+        slab,
+        /*fused_frontend=*/false,
+        &decline));
+    REQUIRE(decline.reason
+            == vk::VulkanSeedLookupDeclineReason::query_length_exceeds_u32);
+
+    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<MinimapSketchData>(
+        std::span<const MinimapSketchData>{query.data(), query.size()},
+        std::nullopt,
+        idx,
+        nullptr,
+        /*vulkan_enabled=*/true,
+        200,
+        500,
+        15,
+        slab,
+        /*fused_frontend=*/false,
+        &decline));
+    REQUIRE(decline.reason
+            == vk::VulkanSeedLookupDeclineReason::resident_index_unavailable);
+}
+
+TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admission metrics",
+          "[vulkan][seeding][phase-b][decline]") {
+    const bioseq::parallelism::MemoryAdmissionFailure admission{
+        .reason = bioseq::parallelism::MemoryAdmissionFailureReason::
+            budget_exhausted,
+        .requested_bytes = 84060352u,
+        .reserved_bytes = 1356268448u,
+        .budget_ceiling_bytes = 2193457152u,
+        .allocatable_after_reservations_bytes = 837188704u,
+        .process_footprint_bytes = 6284226112u,
+        .system_available_bytes = 4340940800u,
+        .system_total_bytes = 17179869184u,
+        .process_soft_cap_bytes = 13743895347u,
+    };
+    const vk::VulkanSeedLookupDecline seed_decline{
+        .reason = vk::VulkanSeedLookupDeclineReason::
+            seed_transient_memory_admission_denied,
+        .query_length = 5121827u,
+        .query_minimizer_count = 1023214u,
+        .query_prefix_length = 1023215u,
+        .exact_anchor_count = 1023214u,
+        .required_workgroups = 7994u,
+        .max_workgroup_count_x = 65535u,
+        .kmer_size = 15,
+        .max_occ = 500,
+        .fused_frontend = false,
+        .admission = admission,
+    };
+    const std::string formatted =
+        vk::format_vulkan_seed_lookup_decline(seed_decline);
+    REQUIRE(formatted.find("reason=seed_transient_memory_admission_denied")
+            != std::string::npos);
+    REQUIRE(formatted.find("admission_reason=budget_exhausted")
+            != std::string::npos);
+    REQUIRE(formatted.find("required_bytes=84060352") != std::string::npos);
+    REQUIRE(formatted.find("query_len=5121827") != std::string::npos);
+    REQUIRE(formatted.find("exact_anchors=1023214") != std::string::npos);
+    REQUIRE(formatted.find("required_workgroups=7994") != std::string::npos);
+
+    bool caught = false;
+    try {
+        vk::throw_vulkan_seed_lookup_strict_decline(
+            "Vulkan seed lookup fixture", seed_decline);
+    } catch (const vk::VulkanRuntimeError& error) {
+        caught = true;
+        const std::string message = error.what();
+        REQUIRE(message.find("Vulkan seed lookup fixture selected")
+                != std::string::npos);
+        REQUIRE(message.find("seed_transient_memory_admission_denied")
+                != std::string::npos);
+        REQUIRE(message.find("system_total_bytes=17179869184")
+                != std::string::npos);
+    }
+    REQUIRE(caught);
+
+    const vk::VulkanSeedLookupDecline cache_decline{
+        .reason = vk::VulkanSeedLookupDeclineReason::
+            resident_index_upload_declined,
+        .query_length = 5121827u,
+        .query_minimizer_count = 1023214u,
+        .kmer_size = 15,
+        .max_occ = 500,
+        .index_upload = {
+            .reason = idx_ns::GpuIndexUploadDeclineReason::
+                upload_peak_memory_admission_denied,
+            .resident_bytes = 100u,
+            .upload_peak_bytes = 200u,
+            .slot_bytes = 80u,
+            .position_bytes = 20u,
+            .admission = admission,
+        },
+    };
+    const std::string cache_formatted =
+        vk::format_vulkan_seed_lookup_decline(cache_decline);
+    REQUIRE(cache_formatted.find("reason=resident_index_upload_declined")
+            != std::string::npos);
+    REQUIRE(cache_formatted.find("upload_peak_memory_admission_denied")
+            != std::string::npos);
+    REQUIRE(cache_formatted.find("required_bytes=84060352")
+            != std::string::npos);
+    REQUIRE(cache_formatted.find("upload_peak_bytes=200")
+            != std::string::npos);
+}
+
+TEST_CASE("vulkan seeding: every typed decline reason has a stable metric name",
+          "[vulkan][seeding][phase-b][decline]") {
+    for (const auto reason : {
+            vk::VulkanSeedLookupDeclineReason::vulkan_disabled,
+            vk::VulkanSeedLookupDeclineReason::query_length_exceeds_u32,
+            vk::VulkanSeedLookupDeclineReason::query_minimizer_count_exceeds_u32,
+            vk::VulkanSeedLookupDeclineReason::query_prefix_length_exceeds_u32,
+            vk::VulkanSeedLookupDeclineReason::invalid_kmer_size,
+            vk::VulkanSeedLookupDeclineReason::hardware_device_unavailable,
+            vk::VulkanSeedLookupDeclineReason::index_cache_unavailable,
+            vk::VulkanSeedLookupDeclineReason::resident_index_upload_declined,
+            vk::VulkanSeedLookupDeclineReason::resident_index_unavailable,
+            vk::VulkanSeedLookupDeclineReason::exact_anchor_count_exceeds_u32,
+            vk::VulkanSeedLookupDeclineReason::dispatch_workgroup_limit_exceeded,
+            vk::VulkanSeedLookupDeclineReason::negative_max_occ_unsupported,
+            vk::VulkanSeedLookupDeclineReason::
+                seed_transient_memory_admission_denied}) {
+        REQUIRE(vk::vulkan_seed_lookup_decline_reason_name(reason) != "unknown");
+    }
 }
 
 }  // namespace

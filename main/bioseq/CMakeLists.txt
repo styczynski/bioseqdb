@@ -24,6 +24,37 @@ file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
+
+# PostgreSQL must publish the digest-derived MoltenVK environment and install
+# its shader provider before the process-local Vulkan Runtime singleton is
+# constructed.  Make bypasses fail at configure time, including calls hidden
+# in implementation include files instantiated by multiple typed TUs.
+file(GLOB_RECURSE BIOSEQ_PG_RUNTIME_GUARD_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.hpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.hpp)
+set(BIOSEQ_PG_RUNTIME_OWNER
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg.cppm)
+foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
+  if("${_bioseq_pg_source}" STREQUAL "${BIOSEQ_PG_RUNTIME_OWNER}")
+    continue()
+  endif()
+  file(READ "${_bioseq_pg_source}" _bioseq_pg_source_contents)
+  string(REGEX MATCH
+    "Runtime[ \t\r\n]*::[ \t\r\n]*instance[ \t\r\n]*\\("
+    _bioseq_direct_runtime_entry "${_bioseq_pg_source_contents}")
+  if(NOT "${_bioseq_direct_runtime_entry}" STREQUAL "")
+    message(FATAL_ERROR
+      "Direct PostgreSQL Vulkan Runtime entry in ${_bioseq_pg_source}; use ensure_pg_vulkan_runtime_ready()")
+  endif()
+endforeach()
 message("SOURCES ${SRC_FILES}")
 
 message("MODULES? ${SRC_MOD_FILES}")

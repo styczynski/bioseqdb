@@ -7,11 +7,13 @@
  * One TU per binary, three lambdas (`build_input` / `run_aligner` /
  * `evaluate_aligner`), one `bioseq::bench_framework::run(...)` call.
  *
- * Four benchmark blocks declared in `bench_v10_configuration.json`:
+ * Six benchmark blocks declared in `bench_v10_configuration.json`:
  *   * bench_aligners_grid          — full length × error × algorithm matrix
  *   * bench_aligners_repr_storage  — 32-bit / 128-bit MinimizerRepr cases
  *   * bench_aligners_rmq_repro     — pinned LONG/CCS RMQ-chaining seed
  *   * bench_aligners_curated       — curated correctness probes
+ *   * bench_aligners_xxl_hifi_relative — report_76 relative-performance gate
+ *   * bench_aligners_xxl_hifi_paired — serial paired-ratio companion gate
  *
  * Sample input reference: bench_framework/example_main.cpp.
  */
@@ -19,6 +21,7 @@
 #include "common.h"
 
 #include <simdjson.h>
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <cmath>
@@ -27,6 +30,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -35,6 +39,9 @@
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.chaining.simd;
+import bioseq.alignment.block_aligner;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
 import bioseq.storage.lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
@@ -66,6 +73,10 @@ using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+using bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
+using bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
+using bioseq::simd::HWY_NAMESPACE::SimdChainingExecutionProof;
+using bioseq::simd::HWY_NAMESPACE::BlockAlignerExecutionProof;
 namespace gen = bioseq::sequences::generation;
 using bench_generator_t = gen::alphabet_sequence_generator<seq::dna4, std::uint32_t>;
 
@@ -98,6 +109,24 @@ struct AlignerOutput {
     std::size_t total_pairs            = 0;
     double      sum_abs_position_offset = 0.0;
     bool        vulkan_hardware_unavailable = false;
+    /// The three Vulkan-labelled rows in this historical report_76 matrix are
+    /// deliberately mixed pipelines. None is evidence for the user's
+    /// all-on-GPU acceptance condition.
+    bool        historical_partial_gpu_probe = false;
+    bool        all_gpu_acceptance_eligible = false;
+    PartialVulkanExecutionProof partial_vulkan_execution_proof{};
+    TwoStackExecutionProof exact_simd_query_execution_proof{};
+    TwoStackExecutionProof exact_simd_target_execution_proof{};
+    SimdChainingExecutionProof simd_chaining_execution_proof{};
+    BlockAlignerExecutionProof block_aligner_execution_proof{};
+    bool exact_simd_query_execution_proof_present = false;
+    bool exact_simd_target_execution_proof_present = false;
+    bool simd_chaining_execution_proof_present = false;
+    bool block_aligner_execution_proof_present = false;
+    /// Set only after `require_selected_route_execution` accepts the
+    /// operation-originated proof for every processed pair. The strict XXL
+    /// raw companion persists this beside each duration.
+    bool        selected_route_execution_proof_accepted = false;
 };
 
 /// Pull a numeric field out of a simdjson element with a fallback.
@@ -263,6 +292,7 @@ struct AlignerOutput {
 struct AlgorithmDispatch {
     bool is_minimap2_reference = false;
     bool explicit_vulkan = false;
+    bool historical_partial_gpu_probe = false;
     Minimap2Params params{};
 };
 
@@ -301,10 +331,14 @@ struct AlgorithmDispatch {
 
     if (algo == "minimap2_dp") {
         dispatch.is_minimap2_reference = true;
-        dispatch.params.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+        dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SCALAR_MM2;
+        dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::SCALAR;
     } else if (algo == "minimap2_rmq") {
         dispatch.is_minimap2_reference = true;
-        dispatch.params.chaining_algorithm = ChainingAlgorithmType::RMQ;
+        dispatch.params.chaining_algorithm       = ChainingAlgorithmType::RMQ;
+        dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::SCALAR;
     } else if (algo == "bioseq_ksw2_scalar_dp_scalar_mm") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SCALAR_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
@@ -318,15 +352,17 @@ struct AlgorithmDispatch {
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
     } else if (algo == "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash") {
-        // DOC0304 Phase A: G3SA-style Vulkan tiled-DP chaining. Explicit GPU
-        // selection fails loudly when no hardware Vulkan device exists. Identical
-        // minimizer (two-stack nthash) + base aligner (KSW2) to
+        // DOC0304 Phase A historical PARTIAL-GPU probe: CPU ExactSimd
+        // minimizers, Vulkan score generation, CPU backtracking and CPU KSW2.
+        // Explicit Vulkan selection fails loudly when no hardware device exists.
+        // Identical minimizer (two-stack nthash) + base aligner (KSW2) to
         // bioseq_ksw2_simd_dp_two_stack_nthash, so the only varied dimension is
         // the chaining backend: SIMD_MM2 vs VULKAN_TILED_DP.
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::VULKAN_TILED_DP;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
         dispatch.explicit_vulkan = true;
+        dispatch.historical_partial_gpu_probe = true;
     } else if (algo == "bioseq_ksw2_batched_simd_dp_two_stack_nthash") {
         // DOC0254 §11.9: KSW2_BATCHED selected via runtime params.
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
@@ -340,13 +376,17 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::SCALAR;
+        dispatch.params.do_cigar                 = true;
     } else if (algo == "bioseq_block_simd_dp_two_stack_nthash") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+        dispatch.params.do_cigar                 = true;
     } else if (algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
-        // Vulkan minimap-int minimizers + Vulkan tiled-DP chaining + block
-        // aligner. The minimizer sketch is always the fused tiled Phase-C path
+        // Historical PARTIAL-GPU probe: Vulkan minimap-int minimizers and seed
+        // lookup, CPU target-index construction, Vulkan tiled-DP score
+        // generation, CPU backtracking, and CPU Block Aligner. The minimizer
+        // sketch is always the fused tiled Phase-C path
         // after DOC0351; this row keeps the older seed/index frontend settings
         // for comparison. The only varied
         // dimensions versus bioseq_block_simd_dp_two_stack_nthash (SIMD
@@ -360,18 +400,22 @@ struct AlgorithmDispatch {
         dispatch.params.vulkan_enabled            = true;
         dispatch.params.vulkan_seed_hits_enabled  = true;
         dispatch.params.vulkan_index_cache_enabled = true;
+        dispatch.params.do_cigar                  = true;
         // Keep the resident two-submit seed/index frontend OFF for the legacy
         // comparison row. This no longer selects a Phase-B minimizer sketch.
         dispatch.params.vulkan_fused_frontend_enabled  = false;
         dispatch.params.vulkan_gpu_index_build_enabled = false;
         dispatch.explicit_vulkan = true;
+        dispatch.historical_partial_gpu_probe = true;
     } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {
-        // DOC0310 Phase C — the resident two-submit Vulkan frontend: parallel
+        // DOC0310 Phase C historical PARTIAL-GPU probe — the resident two-submit
+        // Vulkan frontend: parallel
         // ordered tile sketch + GPU target-index build (device radix sort +
         // race-free slot table) + GPU seed count/emit + device anchor sort +
-        // Vulkan tiled-DP chaining + block aligner. Same aligner as the fastest
-        // CPU row (block aligner); the varied dimensions are the GPU frontend and
-        // the GPU index build. It fails loudly when no hardware Vulkan device
+        // Vulkan tiled-DP score generation, followed by CPU backtracking and CPU
+        // Block Aligner (`vulkan_extend_enabled=false`). Same aligner as the
+        // fastest CPU row; the varied dimensions are the GPU frontend and GPU
+        // index build. It fails loudly when no hardware Vulkan device
         // exists. This row is compared against
         // `bioseq_block_simd_dp_two_stack_nthash` (SIMD minimizers + SIMD
         // chaining + block aligner) and `minimap2_dp`.
@@ -384,28 +428,184 @@ struct AlgorithmDispatch {
         dispatch.params.vulkan_fused_frontend_enabled  = true;
         dispatch.params.vulkan_gpu_index_build_enabled = true;
         dispatch.params.vulkan_extend_enabled          = false;
+        dispatch.params.do_cigar                       = true;
         dispatch.explicit_vulkan = true;
+        dispatch.historical_partial_gpu_probe = true;
     } else if (algo == "bioseq_ksw2_rmq_scalar_mm") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::RMQ;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::SCALAR;
     } else {
         bioseq_log<ERR>("[bench_v10] unknown algorithm '{}'", algo);
+        throw std::invalid_argument(fmt::format(
+            "bench_v10 has no dispatch route for algorithm key '{}'", algo));
     }
     return dispatch;
+}
+
+/// Fail-closed proof policy for one completed pair. The minimap2 reference is
+/// intentionally outside Bioseq's proof ABI and therefore must emit no Bioseq
+/// algorithm proof. Every Bioseq row is validated against the selectors that
+/// fixed its template leaf. The strict XXL gate additionally requires positive
+/// non-empty vector work; ordinary benchmark rows still reject missing,
+/// malformed, forbidden, or unexpected evidence without requiring work from an
+/// empty input. Routes that did not select an algorithm must not emit its proof.
+void require_selected_route_execution(
+        std::string_view algo,
+        const AlgorithmDispatch& dispatch,
+        const MatchResultCollection& results,
+        bool strict_xxl_gate) {
+    if (dispatch.is_minimap2_reference) {
+        if (dispatch.params.minimizer_algorithm != MinimizerAlgorithmType::SCALAR
+            || dispatch.params.base_alignment_algorithm
+                != BaseAlignmentAlgorithmType::KSW2
+            || results.has_any_algorithm_execution_proof()) {
+            throw std::runtime_error(fmt::format(
+                "minimap2 reference row '{}' violated scalar/KSW2/no-Bioseq-proof policy",
+                algo));
+        }
+        return;
+    }
+
+    const bool exact_simd_sketch_selected =
+        dispatch.params.minimizer_algorithm
+            == MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    if (exact_simd_sketch_selected) {
+        if (!results.exact_simd_query_execution_accepted(
+                /*require_nonempty_vector_work=*/strict_xxl_gate)
+            || !results.exact_simd_target_execution_accepted(
+                /*require_nonempty_vector_work=*/strict_xxl_gate)) {
+            throw std::runtime_error(
+                "selected ExactSimd sketch route lacks accepted query/target proof");
+        }
+    } else if (results.exact_simd_query_execution_proof_present
+               || results.exact_simd_target_execution_proof_present) {
+        throw std::runtime_error(
+            "non-ExactSimd sketch route emitted ExactSimd proof");
+    }
+
+    const bool simd_chaining_selected =
+        dispatch.params.chaining_algorithm == ChainingAlgorithmType::SIMD_MM2;
+    if (simd_chaining_selected) {
+        if (!results.simd_chaining_execution_accepted(
+                /*require_nonempty_vector_work=*/strict_xxl_gate)) {
+            throw std::runtime_error(
+                "selected SIMD chaining route lacks accepted score/backtrack proof");
+        }
+    } else if (results.simd_chaining_execution_proof_present) {
+        throw std::runtime_error(
+            "non-SIMD chaining route emitted SIMD chaining proof");
+    }
+
+    const bool block_aligner_selected =
+        dispatch.params.base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    if (block_aligner_selected) {
+        if (!dispatch.params.do_cigar) {
+            if (strict_xxl_gate) {
+                throw std::runtime_error(fmt::format(
+                    "strict XXL Block Aligner row '{}' must request CIGAR execution",
+                    algo));
+            }
+            if (results.block_aligner_execution_proof_present) {
+                throw std::runtime_error(fmt::format(
+                    "Block Aligner row '{}' emitted proof although CIGAR was disabled",
+                    algo));
+            }
+        } else if (!results.block_aligner_execution_accepted(
+                       /*require_nonempty_simd_work=*/strict_xxl_gate)) {
+            const auto& proof = results.block_aligner_execution_proof;
+            throw std::runtime_error(fmt::format(
+                "selected Block Aligner lacks accepted SIMD proof: "
+                "algo='{}' cigar={} present={} accepted={} executed={} "
+                "nonempty={} vector_batches={} cells={} ksw2={} scalar_fallbacks={}",
+                algo, dispatch.params.do_cigar,
+                results.block_aligner_execution_proof_present,
+                proof.accepted(), proof.executed_calls(), proof.nonempty_calls,
+                proof.simd_dp_vector_batches, proof.simd_dp_cells,
+                proof.forbidden_ksw2_calls,
+                proof.forbidden_scalar_biological_fallbacks));
+        }
+    } else if (results.block_aligner_execution_proof_present) {
+        throw std::runtime_error(fmt::format(
+            "non-Block row '{}' emitted Block Aligner execution proof", algo));
+    }
+
+    if (dispatch.explicit_vulkan) {
+        bool expect_query_sketch = false;
+        bool expect_target_sketch = false;
+        bool expect_target_index_build = false;
+        bool expect_seed_lookup = false;
+        bool expect_chain_score = true;
+        if (algo == "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash") {
+            // CPU ExactSimd sketch/index/seed, Vulkan chain score only.
+        } else if (algo
+                   == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
+            expect_query_sketch = true;
+            expect_target_sketch = true;
+            expect_seed_lookup = true;
+        } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {
+            expect_query_sketch = true;
+            expect_target_sketch = true;
+            expect_target_index_build = true;
+            expect_seed_lookup = true;
+        } else {
+            throw std::logic_error(fmt::format(
+                "explicit Vulkan row '{}' has no proof-stage contract", algo));
+        }
+        if (strict_xxl_gate
+            && !results.partial_vulkan_execution_proof
+                    .exact_stage_mask_accepted(
+                        expect_query_sketch,
+                        expect_target_sketch,
+                        expect_target_index_build,
+                        expect_seed_lookup,
+                        expect_chain_score)) {
+            const auto& proof = results.partial_vulkan_execution_proof;
+            throw std::runtime_error(fmt::format(
+                "strict XXL Vulkan row '{}' lacks exact positive dispatch proof: "
+                "query_sketch={} target_sketch={} target_index_build={} "
+                "seed_lookup={} chain_score={} saturated={}",
+                algo,
+                proof.query_sketch_dispatches,
+                proof.target_sketch_dispatches,
+                proof.target_index_build_dispatches,
+                proof.seed_lookup_dispatches,
+                proof.chain_score_dispatches,
+                proof.saturated));
+        }
+    } else if (results.partial_vulkan_execution_proof.has_any_dispatch()) {
+        throw std::runtime_error(fmt::format(
+            "non-Vulkan row '{}' emitted partial Vulkan execution proof", algo));
+    }
 }
 
 /// Hand the (query, target) pair off to either the C reference or the
 /// bioseq port, then aggregate the per-pair primary-correctness flags
 /// into the AlignerOutput.
-[[nodiscard]] AlignerOutput run_aligner(std::string_view algo,
+[[nodiscard]] AlignerOutput run_aligner_impl(
+                                          std::string_view algo,
                                           const ParamMap& /*params*/,
-                                          const AlignerInput& input) {
+                                          const AlignerInput& input,
+                                          bool strict_xxl_gate,
+                                          bool capture_full_route_proof) {
     const AlgorithmDispatch dispatch = dispatch_algorithm(algo, input.kmer_size_override);
 
     AlignerOutput output;
     output.total_pairs = input.pairs.size();
+    output.historical_partial_gpu_probe =
+        dispatch.historical_partial_gpu_probe;
+    output.all_gpu_acceptance_eligible = false;
+    if (dispatch.explicit_vulkan != dispatch.historical_partial_gpu_probe) {
+        throw std::logic_error(fmt::format(
+            "Vulkan row '{}' lacks explicit historical partial-GPU classification",
+            algo));
+    }
     if (dispatch.explicit_vulkan && !is_explicit_vulkan_hardware_available(algo)) {
+        if (strict_xxl_gate) {
+            throw std::runtime_error(
+                "strict XXL gate requires every selected Vulkan row to execute");
+        }
         output.vulkan_hardware_unavailable = true;
         return output;
     }
@@ -443,7 +643,7 @@ struct AlgorithmDispatch {
                  input.targets_acgt[pair_index].size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (dispatch.explicit_vulkan) {
+            if (dispatch.explicit_vulkan || strict_xxl_gate) {
                 throw;
             }
             continue;
@@ -455,12 +655,41 @@ struct AlgorithmDispatch {
                  input.targets_acgt[pair_index].size(),
                  dispatch.params.kmer_size,
                  exception.what());
+            if (strict_xxl_gate) throw;
             continue;
         } catch (...) {
             bioseq_log<ERR>("[bench_v10] aligner threw non-std exception (algo='{}', pair_index={})",
                  algo, pair_index);
+            if (strict_xxl_gate) throw;
             continue;
         }
+        require_selected_route_execution(
+            algo, dispatch, results, strict_xxl_gate);
+        if (capture_full_route_proof) {
+            output.selected_route_execution_proof_accepted = true;
+            if (results.exact_simd_query_execution_proof_present) {
+                output.exact_simd_query_execution_proof.combine(
+                    results.exact_simd_query_execution_proof);
+                output.exact_simd_query_execution_proof_present = true;
+            }
+            if (results.exact_simd_target_execution_proof_present) {
+                output.exact_simd_target_execution_proof.combine(
+                    results.exact_simd_target_execution_proof);
+                output.exact_simd_target_execution_proof_present = true;
+            }
+            if (results.simd_chaining_execution_proof_present) {
+                output.simd_chaining_execution_proof.combine(
+                    results.simd_chaining_execution_proof);
+                output.simd_chaining_execution_proof_present = true;
+            }
+            if (results.block_aligner_execution_proof_present) {
+                output.block_aligner_execution_proof.combine(
+                    results.block_aligner_execution_proof);
+                output.block_aligner_execution_proof_present = true;
+            }
+        }
+        output.partial_vulkan_execution_proof.combine(
+            results.partial_vulkan_execution_proof);
         bool found_primary = false;
         for (const auto& match : results.view()) {
             output.total_results += 1;
@@ -476,7 +705,38 @@ struct AlgorithmDispatch {
             }
         }
     }
+    if (strict_xxl_gate
+        && (output.total_pairs != 1
+            || output.total_results != 1
+            || output.correct_pairs != 1)) {
+        throw std::runtime_error(fmt::format(
+            "strict XXL correctness gate rejected algo='{}': pairs={} "
+            "match_count={} correct_pairs={} (required 1/1/1)",
+            algo, output.total_pairs, output.total_results,
+            output.correct_pairs));
+    }
     return output;
+}
+
+[[nodiscard]] AlignerOutput run_aligner(
+        std::string_view algo,
+        const ParamMap& params,
+        const AlignerInput& input) {
+    return run_aligner_impl(algo, params, input, false, false);
+}
+
+[[nodiscard]] AlignerOutput run_aligner_strict_xxl(
+        std::string_view algo,
+        const ParamMap& params,
+        const AlignerInput& input) {
+    return run_aligner_impl(algo, params, input, true, false);
+}
+
+[[nodiscard]] AlignerOutput run_aligner_strict_xxl_paired(
+        std::string_view algo,
+        const ParamMap& params,
+        const AlignerInput& input) {
+    return run_aligner_impl(algo, params, input, true, true);
 }
 
 /// Translate `Output` into the evaluation metrics declared in the JSON
@@ -490,6 +750,25 @@ struct AlgorithmDispatch {
     const AlignerOutput& output)
 {
     std::map<std::string, double> metrics;
+    metrics.emplace("historical_partial_gpu_probe",
+                    output.historical_partial_gpu_probe ? 1.0 : 0.0);
+    metrics.emplace("all_gpu_acceptance_eligible",
+                    output.all_gpu_acceptance_eligible ? 1.0 : 0.0);
+    metrics.emplace("vulkan_query_sketch_dispatches",
+                    static_cast<double>(output.partial_vulkan_execution_proof
+                                            .query_sketch_dispatches));
+    metrics.emplace("vulkan_target_sketch_dispatches",
+                    static_cast<double>(output.partial_vulkan_execution_proof
+                                            .target_sketch_dispatches));
+    metrics.emplace("vulkan_target_index_build_dispatches",
+                    static_cast<double>(output.partial_vulkan_execution_proof
+                                            .target_index_build_dispatches));
+    metrics.emplace("vulkan_seed_lookup_dispatches",
+                    static_cast<double>(output.partial_vulkan_execution_proof
+                                            .seed_lookup_dispatches));
+    metrics.emplace("vulkan_chain_score_dispatches",
+                    static_cast<double>(output.partial_vulkan_execution_proof
+                                            .chain_score_dispatches));
     if (output.vulkan_hardware_unavailable) {
         const double not_measured = std::numeric_limits<double>::quiet_NaN();
         metrics.emplace("match_count", not_measured);
@@ -506,6 +785,186 @@ struct AlgorithmDispatch {
                      output.total_pairs == 0 ? 0.0
                      : output.sum_abs_position_offset / pairs_d);
     return metrics;
+}
+
+[[nodiscard]] nlohmann::json two_stack_proof_json(
+    const TwoStackExecutionProof& proof, bool present)
+{
+#define BIOSEQ_PROOF_FIELD(name) {#name, proof.name}
+    return nlohmann::json{
+        {"present", present},
+        BIOSEQ_PROOF_FIELD(bp_consumed),
+        BIOSEQ_PROOF_FIELD(minimizers_emitted),
+        BIOSEQ_PROOF_FIELD(vector_batches),
+        BIOSEQ_PROOF_FIELD(vector_lanes_visited),
+        BIOSEQ_PROOF_FIELD(masked_tail_lanes),
+        BIOSEQ_PROOF_FIELD(bridge_symbols_staged),
+        BIOSEQ_PROOF_FIELD(bridge_vector_runs),
+        BIOSEQ_PROOF_FIELD(consecutive_kmer_batches),
+        BIOSEQ_PROOF_FIELD(canonical_scramble_batches),
+        BIOSEQ_PROOF_FIELD(window_reduction_batches),
+        BIOSEQ_PROOF_FIELD(event_generation_batches),
+        BIOSEQ_PROOF_FIELD(stable_compress_batches),
+        BIOSEQ_PROOF_FIELD(row_transpose_batches),
+        BIOSEQ_PROOF_FIELD(row_vector_stores),
+        BIOSEQ_PROOF_FIELD(palindrome_lanes),
+        BIOSEQ_PROOF_FIELD(first_window_tie_events),
+        BIOSEQ_PROOF_FIELD(expiry_tie_events),
+        BIOSEQ_PROOF_FIELD(entering_min_transitions),
+        BIOSEQ_PROOF_FIELD(expiry_rescan_transitions),
+        BIOSEQ_PROOF_FIELD(final_flush_records),
+        BIOSEQ_PROOF_FIELD(fragment_symbols_staged),
+        BIOSEQ_PROOF_FIELD(packed_decode_batches),
+        BIOSEQ_PROOF_FIELD(packed_decode_lanes),
+        BIOSEQ_PROOF_FIELD(ambiguous_symbols),
+        BIOSEQ_PROOF_FIELD(ambiguous_reset_batches),
+        BIOSEQ_PROOF_FIELD(packed_word_boundary_merges),
+        BIOSEQ_PROOF_FIELD(scalar_orchestration_steps),
+        BIOSEQ_PROOF_FIELD(fail_closed_rejections),
+        BIOSEQ_PROOF_FIELD(scalar_backend_branches),
+        BIOSEQ_PROOF_FIELD(scalar_tail_symbols),
+        BIOSEQ_PROOF_FIELD(scalar_hash_symbols),
+        BIOSEQ_PROOF_FIELD(scalar_window_transitions),
+        BIOSEQ_PROOF_FIELD(scalar_event_records),
+        BIOSEQ_PROOF_FIELD(scalar_sort_records),
+        BIOSEQ_PROOF_FIELD(scalar_dedup_records),
+        BIOSEQ_PROOF_FIELD(saturated),
+    };
+#undef BIOSEQ_PROOF_FIELD
+}
+
+[[nodiscard]] nlohmann::json simd_chaining_proof_json(
+    const SimdChainingExecutionProof& proof, bool present)
+{
+#define BIOSEQ_PROOF_FIELD(name) {#name, proof.name}
+    return nlohmann::json{
+        {"present", present},
+        BIOSEQ_PROOF_FIELD(anchors_consumed),
+        BIOSEQ_PROOF_FIELD(score_vector_batches),
+        BIOSEQ_PROOF_FIELD(score_vector_lanes),
+        BIOSEQ_PROOF_FIELD(score_masked_lanes),
+        BIOSEQ_PROOF_FIELD(descending_candidate_steps),
+        BIOSEQ_PROOF_FIELD(visited_marks),
+        BIOSEQ_PROOF_FIELD(max_chain_skip_stops),
+        BIOSEQ_PROOF_FIELD(global_best_vector_batches),
+        BIOSEQ_PROOF_FIELD(global_best_vector_lanes),
+        BIOSEQ_PROOF_FIELD(backtrack_rank_batches),
+        BIOSEQ_PROOF_FIELD(backtrack_path_vector_batches),
+        BIOSEQ_PROOF_FIELD(backtrack_commit_vector_batches),
+        BIOSEQ_PROOF_FIELD(backtrack_vector_lanes),
+        BIOSEQ_PROOF_FIELD(backtrack_overlap_stops),
+        BIOSEQ_PROOF_FIELD(scalar_orchestration_steps),
+        BIOSEQ_PROOF_FIELD(fail_closed_rejections),
+        BIOSEQ_PROOF_FIELD(scalar_score_branches),
+        BIOSEQ_PROOF_FIELD(scalar_backtrack_branches),
+        BIOSEQ_PROOF_FIELD(shared_scalar_backtrack_calls),
+        BIOSEQ_PROOF_FIELD(saturated),
+    };
+#undef BIOSEQ_PROOF_FIELD
+}
+
+[[nodiscard]] nlohmann::json block_aligner_proof_json(
+    const BlockAlignerExecutionProof& proof, bool present)
+{
+#define BIOSEQ_PROOF_FIELD(name) {#name, proof.name}
+    return nlohmann::json{
+        {"present", present},
+        BIOSEQ_PROOF_FIELD(align_region_invocations),
+        BIOSEQ_PROOF_FIELD(serial_align_region_dispatches),
+        BIOSEQ_PROOF_FIELD(parallel_align_region_dispatches),
+        BIOSEQ_PROOF_FIELD(routed_region_scopes),
+        BIOSEQ_PROOF_FIELD(left_route_candidates),
+        BIOSEQ_PROOF_FIELD(gap_route_candidates),
+        BIOSEQ_PROOF_FIELD(right_route_candidates),
+        BIOSEQ_PROOF_FIELD(left_eligible),
+        BIOSEQ_PROOF_FIELD(left_executed),
+        BIOSEQ_PROOF_FIELD(gap_eligible),
+        BIOSEQ_PROOF_FIELD(gap_executed),
+        BIOSEQ_PROOF_FIELD(right_eligible),
+        BIOSEQ_PROOF_FIELD(right_executed),
+        BIOSEQ_PROOF_FIELD(global_calls),
+        BIOSEQ_PROOF_FIELD(native_xdrop_calls),
+        BIOSEQ_PROOF_FIELD(native_xdrop_terminations),
+        BIOSEQ_PROOF_FIELD(zero_work_calls),
+        BIOSEQ_PROOF_FIELD(nonempty_calls),
+        BIOSEQ_PROOF_FIELD(nonempty_calls_with_simd),
+        BIOSEQ_PROOF_FIELD(trace_calls),
+        BIOSEQ_PROOF_FIELD(executed_trace_calls),
+        BIOSEQ_PROOF_FIELD(forward_input_calls),
+        BIOSEQ_PROOF_FIELD(reversed_input_calls),
+        BIOSEQ_PROOF_FIELD(executed_global_calls),
+        BIOSEQ_PROOF_FIELD(executed_native_xdrop_calls),
+        BIOSEQ_PROOF_FIELD(executed_forward_input_calls),
+        BIOSEQ_PROOF_FIELD(executed_reversed_input_calls),
+        BIOSEQ_PROOF_FIELD(simd_lane8_calls),
+        BIOSEQ_PROOF_FIELD(simd_lane16_calls),
+        BIOSEQ_PROOF_FIELD(simd_dp_vector_batches),
+        BIOSEQ_PROOF_FIELD(simd_dp_cells),
+        BIOSEQ_PROOF_FIELD(adaptive_grow_events),
+        BIOSEQ_PROOF_FIELD(adaptive_shrink_events),
+        BIOSEQ_PROOF_FIELD(expected_reversed_compact_symbols),
+        BIOSEQ_PROOF_FIELD(reversed_compact_symbols),
+        BIOSEQ_PROOF_FIELD(config_identity_calls),
+        BIOSEQ_PROOF_FIELD(config_identity_xor),
+        BIOSEQ_PROOF_FIELD(config_identity_sum),
+        BIOSEQ_PROOF_FIELD(executed_config_identity_calls),
+        BIOSEQ_PROOF_FIELD(executed_config_identity_xor),
+        BIOSEQ_PROOF_FIELD(executed_config_identity_sum),
+        BIOSEQ_PROOF_FIELD(unsupported_contract_rejections),
+        BIOSEQ_PROOF_FIELD(forbidden_ksw2_calls),
+        BIOSEQ_PROOF_FIELD(forbidden_scalar_biological_fallbacks),
+        BIOSEQ_PROOF_FIELD(saturated),
+    };
+#undef BIOSEQ_PROOF_FIELD
+}
+
+/// Lossless per-repeat evidence for the statistically paired XXL companion.
+/// The framework adds algorithm/test-case/repeat/schedule/wall-clock fields
+/// and durably flushes the resulting object. Keeping the route proof beside
+/// every duration prevents a fast sample from being accepted after a silent
+/// backend change; repeat zero is also summarized separately as first-repeat
+/// evidence by the framework raw manifest (not claimed globally cold).
+[[nodiscard]] std::string serialize_xxl_paired_sample(
+    std::string_view /*algo*/,
+    const ParamMap& /*params*/,
+    const AlignerInput& /*input*/,
+    const AlignerOutput& output)
+{
+    const auto& proof = output.partial_vulkan_execution_proof;
+    return nlohmann::json{
+        {"payload_schema", "bioseq.xxl_hifi_paired.route_proof"},
+        {"payload_schema_version", 1},
+        {"total_pairs", output.total_pairs},
+        {"total_results", output.total_results},
+        {"correct_pairs", output.correct_pairs},
+        {"selected_route_execution_proof_accepted",
+            output.selected_route_execution_proof_accepted},
+        {"historical_partial_gpu_probe",
+            output.historical_partial_gpu_probe},
+        {"all_gpu_acceptance_eligible",
+            output.all_gpu_acceptance_eligible},
+        {"exact_simd_query_execution_proof", two_stack_proof_json(
+            output.exact_simd_query_execution_proof,
+            output.exact_simd_query_execution_proof_present)},
+        {"exact_simd_target_execution_proof", two_stack_proof_json(
+            output.exact_simd_target_execution_proof,
+            output.exact_simd_target_execution_proof_present)},
+        {"simd_chaining_execution_proof", simd_chaining_proof_json(
+            output.simd_chaining_execution_proof,
+            output.simd_chaining_execution_proof_present)},
+        {"block_aligner_execution_proof", block_aligner_proof_json(
+            output.block_aligner_execution_proof,
+            output.block_aligner_execution_proof_present)},
+        {"partial_vulkan_execution_proof", {
+            {"query_sketch_dispatches", proof.query_sketch_dispatches},
+            {"target_sketch_dispatches", proof.target_sketch_dispatches},
+            {"target_index_build_dispatches",
+                proof.target_index_build_dispatches},
+            {"seed_lookup_dispatches", proof.seed_lookup_dispatches},
+            {"chain_score_dispatches", proof.chain_score_dispatches},
+            {"saturated", proof.saturated},
+        }},
+    }.dump();
 }
 
 }  // namespace
@@ -526,8 +985,8 @@ int main(int argc, char** argv) {
 
     // Mandatory `std::function<...>` casts (README §3e) — `create_benchmark`'s
     // template-arg deduction won't bind a lambda or function pointer to a
-    // `std::function` parameter without help. Reused across the four blocks
-    // below since all four share the same I/O types and lambdas.
+    // `std::function` parameter without help. Reused across the six blocks
+    // below since all six share the same I/O types and lambdas.
     auto estimate = std::function<RunConstraints(
         std::string_view, std::string_view, simdjson::dom::element)>{
             estimate_aligner_resources};
@@ -536,9 +995,19 @@ int main(int argc, char** argv) {
         const RunConstraints&)>{build_input};
     auto run = std::function<AlignerOutput(
         std::string_view, const ParamMap&, const AlignerInput&)>{run_aligner};
+    auto run_strict_xxl = std::function<AlignerOutput(
+        std::string_view, const ParamMap&, const AlignerInput&)>{
+            run_aligner_strict_xxl};
+    auto run_strict_xxl_paired = std::function<AlignerOutput(
+        std::string_view, const ParamMap&, const AlignerInput&)>{
+            run_aligner_strict_xxl_paired};
     auto eval = std::function<std::map<std::string, double>(
         std::string_view, const ParamMap&,
         const AlignerInput&, const AlignerOutput&)>{evaluate_aligner};
+    auto serialize_paired = std::function<std::string(
+        std::string_view, const ParamMap&,
+        const AlignerInput&, const AlignerOutput&)>{
+            serialize_xxl_paired_sample};
 
     return bioseq::bench_framework::run(
         argc, argv, report_dir, data_dir,
@@ -553,5 +1022,14 @@ int main(int argc, char** argv) {
             "bench_aligners_rmq_repro", config_path, estimate, build, run, eval),
         create_benchmark<AlignerInput, AlignerOutput>(
             "Curated correctness probes",
-            "bench_aligners_curated", config_path, estimate, build, run, eval));
+            "bench_aligners_curated", config_path, estimate, build, run, eval),
+        create_benchmark<AlignerInput, AlignerOutput>(
+            "XXL_HIFI report_76 relative-performance gate",
+            "bench_aligners_xxl_hifi_relative",
+            config_path, estimate, build, run_strict_xxl, eval),
+        create_benchmark<AlignerInput, AlignerOutput>(
+            "XXL_HIFI paired relative-performance companion",
+            "bench_aligners_xxl_hifi_paired",
+            config_path, estimate, build, run_strict_xxl_paired, eval,
+            {}, serialize_paired));
 }

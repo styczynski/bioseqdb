@@ -53,6 +53,11 @@ static_assert(bioseq::indexing::is_index_chunked_storage_for<
                   FakeSequenceStorage, SequenceIndexType::INLINE_PER_SEQUENCE>);
 static_assert(bioseq::indexing::is_index_chunked_storage_for<
                   FakeTableStorage, SequenceIndexType::CHUNKED_PER_TABLE>);
+static_assert(bioseq::indexing::index_read_requirement_ordinal_valid(0));
+static_assert(bioseq::indexing::index_read_requirement_ordinal_valid(1));
+static_assert(bioseq::indexing::index_read_requirement_ordinal_valid(2));
+static_assert(!bioseq::indexing::index_read_requirement_ordinal_valid(-1));
+static_assert(!bioseq::indexing::index_read_requirement_ordinal_valid(3));
 
 // The §7.3 registry over the fake storages, instantiated with the three shipped
 // index templates (the §7.3 static_asserts inside supported_indexes additionally
@@ -70,6 +75,15 @@ TEST_CASE("DOC0279 §6.3 — fake storages model their chunked-storage concepts"
     // The static_asserts above are the real proof; this case just makes the
     // requirement visible to the test runner.
     SUCCEED("concept conformance holds at compile time");
+}
+
+TEST_CASE("index read requirement ordinals are exact and closed",
+          "[indexing][index-read-requirement]") {
+    using bioseq::indexing::IndexReadRequirement;
+    REQUIRE(static_cast<std::int32_t>(IndexReadRequirement::allow) == 0);
+    REQUIRE(static_cast<std::int32_t>(IndexReadRequirement::require_absent) == 1);
+    REQUIRE(static_cast<std::int32_t>(
+                IndexReadRequirement::require_compatible_persisted) == 2);
 }
 
 TEST_CASE("DOC0279 §7.3 — supported_indexes registry lists all three indexes with the right layout",

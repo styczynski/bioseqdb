@@ -58,6 +58,7 @@ import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
 import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
 import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
+import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
 
 namespace {
 
@@ -244,7 +245,8 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	        }
 
 	        std::span<lazy_t> batch(lazies.data(), lazies.size());
-	        auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+	        auto& gpu_rt =
+	            bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 	        const std::uint64_t dispatch_before = gpu_rt.seq_sort_dispatch_count();
 	        const std::uint64_t global_before = gpu_rt.seq_sort_global_compare_dispatch_count();
 	        const std::uint64_t dense_before = gpu_rt.seq_sort_dense_scatter_dispatch_count();

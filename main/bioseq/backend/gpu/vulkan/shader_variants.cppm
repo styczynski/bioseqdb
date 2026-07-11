@@ -27,7 +27,10 @@ struct ChainingPipelineKey {
 
 [[nodiscard]] ShaderKind checked_shader_kind(std::uint32_t raw);
 
-/// Shared shader-cache ABI key. Only these fields affect emitted SPIR-V.
+/// Shared shader-cache compile-request identity. Depending on ShaderKind, a
+/// field may be an established selector/sentinel rather than the reflected
+/// SPIR-V execution geometry; use `expected_shader_workgroup_size(key)` for the
+/// latter.
 struct ShaderVariantKey {
     std::uint32_t kind = 0;
     std::uint32_t tile_size = 384;
@@ -69,6 +72,7 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sketch_emit_words):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_seed_count):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_seed_emit):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_persisted_directory_select):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_histogram):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scan):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scatter):
@@ -91,6 +95,7 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_dense_scatter_generic):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_dna4):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_generic):
+        case static_cast<std::uint32_t>(ShaderKind::align_extend_banded_affine):
         case static_cast<std::uint32_t>(ShaderKind::align_extend_simple_cigar):
             return static_cast<ShaderKind>(raw);
         default:
@@ -134,6 +139,12 @@ struct VulkanStaticVariantInputs {
         static_cast<std::uint32_t>(kind), tile_size, local_size, max_span};
 }
 
+[[nodiscard]] inline ShaderWorkgroupSize expected_shader_workgroup_size(
+    const ShaderVariantKey& key)
+{
+    return expected_shader_workgroup_size(key.to_request());
+}
+
 [[nodiscard]] inline constexpr bool is_chain_key(
     const ShaderVariantKey& key) noexcept
 {
@@ -172,6 +183,7 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::phase_c_prefix_scan_add:
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:
+        case ShaderKind::phase_c_persisted_directory_select:
         case ShaderKind::phase_c_index_mark_runs:
         case ShaderKind::phase_c_index_emit_buckets:
             return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
@@ -196,6 +208,9 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::seq_sort_prefix_check_generic:
             return key.tile_size == 384u && key.local_size == 256u
                 && key.max_span == 0u;
+        case ShaderKind::align_extend_banded_affine:
+            return key.tile_size == 384u && key.local_size == 1u
+                && key.max_span == 512u;
         case ShaderKind::align_extend_simple_cigar:
             return key.tile_size == 384u
                 && (key.local_size == 1u || key.local_size == 64u)
@@ -238,6 +253,8 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_count, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_emit, 384u, 128u, 1u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_persisted_directory_select, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_scan, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_scatter, 384u, 1u, 1u));
@@ -259,6 +276,7 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::seq_sort_dense_scatter_generic, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_prefix_check_dna4, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_prefix_check_generic, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::align_extend_banded_affine, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 64u, 512u));
 }

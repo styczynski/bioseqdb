@@ -79,9 +79,13 @@ struct VulkanFeatureSet {
     bool software_device = false;
     std::uint32_t device_type = 0;
     std::uint32_t max_workgroup_invocations = 0;
+    std::uint32_t max_workgroup_size_x = 0;
+    std::uint32_t max_workgroup_size_y = 0;
+    std::uint32_t max_workgroup_size_z = 0;
     std::uint32_t max_workgroup_count_x = 0;
     std::uint32_t max_shared_memory_bytes = 0;
     std::uint64_t device_local_bytes = 0;
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
     std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
 
@@ -430,6 +434,17 @@ struct SeqSortKernelParams {
 /// open-addressed slot table and the hash-run-ordered positions buffer. The
 /// indexing layer adopts these into a `GpuResidentMinimizerIndex` outside the
 /// runtime module (which must not import `bioseq::indexing`).
+enum class GpuBuiltIndexFailureReason : std::uint8_t {
+    none,
+    invalid_shape,
+    minimizer_capacity_exceeds_u32,
+    memory_plan_invalid,
+    device_arena_allocation_failed,
+    output_capacity_overflow,
+    device_buffer_allocation_failed,
+    index_invariant_failed,
+};
+
 struct GpuBuiltIndex {
     Buffer slots;
     Buffer positions;
@@ -437,6 +452,8 @@ struct GpuBuiltIndex {
     std::uint32_t slot_mask = 0;
     std::uint32_t occupied_slots = 0;
     std::uint32_t position_count = 0;
+    GpuBuiltIndexFailureReason failure_reason =
+        GpuBuiltIndexFailureReason::none;
     bool valid = false;
 };
 
@@ -496,6 +513,25 @@ struct PhaseCSeedInputs {
     std::uint64_t target_position_offset = 0;
 };
 
+/// Device-only query-minimizer input plus the authoritative encoded revision-3
+/// directory. There is intentionally no host hash span in this ABI.
+struct GpuPersistedDirectorySelectionInputs {
+    const Buffer* device_minimizer_words = nullptr;
+    const Buffer* encoded_directory = nullptr;
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32_per_record = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t directory_entry_count = 0;
+};
+static_assert(std::is_standard_layout_v<GpuPersistedDirectorySelectionInputs>);
+
+/// Opaque stable directory ordinals read back after device union/compaction.
+struct GpuPersistedDirectorySelectionResult {
+    std::vector<std::uint32_t> ordinals{};
+    std::uint64_t device_query_minimizers_processed = 0;
+};
+
 /// Common query-side inputs for a batched resident seed→chain→coordinate run.
 /// The query minimizer words are shared by every job in the batch; each job
 /// supplies its own resident target index.
@@ -534,6 +570,15 @@ struct PhaseCSeedCoordinateJob {
     std::uint32_t query_index = 0;
 };
 
+/// Explicit algorithm identity for the seed-to-coordinate backend.  A caller
+/// selecting Vulkan tiled-DP must pass `vulkan_tiled_dp`; the approximate
+/// coordinate-vote prototype is a distinct algorithm and may never be entered
+/// implicitly as an optimization of tiled-DP.
+enum class PhaseCSeedCoordinateAlgorithm : std::uint8_t {
+    vulkan_tiled_dp = 0,
+    coordinate_vote = 1,
+};
+
 struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t problem_count = 0;
     std::uint64_t wave_count = 0;
@@ -542,7 +587,8 @@ struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t sort_dispatches = 0;
     std::uint64_t range_build_dispatches = 0;
     std::uint64_t chain_dispatches = 0;
-    std::uint64_t coordinate_reduce_dispatches = 0;
+    std::uint64_t chain_backtrack_dispatches = 0;
+    std::uint64_t coordinate_vote_dispatches = 0;
 };
 
 struct PhaseCSeedCoordinateBatchRun {
@@ -749,6 +795,13 @@ public:
         std::uint32_t kmer_size,
         std::int32_t max_occ);
 
+    /// Select persisted partitions without materializing query hashes on the
+    /// host. The device marks and compacts a target-wide ordinal union; only the
+    /// resulting stable ordinals cross back to the caller.
+    [[nodiscard]] GpuPersistedDirectorySelectionResult
+    run_persisted_directory_ordinal_selection(
+        const GpuPersistedDirectorySelectionInputs& inputs);
+
     GpuCoordinateOnlyResultWire run_phase_c_seed_to_coordinate_roundtrip(
         const PhaseCSeedInputs& inputs,
         std::uint64_t query_len,
@@ -772,6 +825,7 @@ public:
         std::span<const PhaseCSeedCoordinateJob> jobs,
         std::uint32_t kmer_size,
         std::int32_t max_occ,
+        PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
         const ChainingPipelineKey& chain_key,
         std::int32_t max_dist_x,
         std::int32_t max_dist_y,
@@ -790,6 +844,7 @@ public:
         std::uint64_t query_len,
         std::uint32_t kmer_size,
         std::int32_t max_occ,
+        PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
         const ChainingPipelineKey& chain_key,
         std::int32_t max_dist_x,
         std::int32_t max_dist_y,
@@ -1077,6 +1132,7 @@ inline void check_vk(VkResult result, const char* what) {
     X(vkGetPhysicalDeviceFeatures2) \
     X(vkGetPhysicalDeviceMemoryProperties) \
     X(vkGetPhysicalDeviceProperties) \
+    X(vkGetPhysicalDeviceProperties2) \
     X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkMapMemory) \
     X(vkQueueSubmit) \
@@ -2187,9 +2243,22 @@ void Runtime::init() {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physical_, &props);
+    VkPhysicalDeviceIDProperties id_properties{};
+    id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 properties2{};
+    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties2.pNext = &id_properties;
+    vkGetPhysicalDeviceProperties2(physical_, &properties2);
+    std::copy(
+        std::begin(id_properties.deviceUUID),
+        std::end(id_properties.deviceUUID),
+        features_.device_uuid.begin());
     features_.device_type = static_cast<std::uint32_t>(props.deviceType);
     features_.software_device = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     features_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
+    features_.max_workgroup_size_x = props.limits.maxComputeWorkGroupSize[0];
+    features_.max_workgroup_size_y = props.limits.maxComputeWorkGroupSize[1];
+    features_.max_workgroup_size_z = props.limits.maxComputeWorkGroupSize[2];
     features_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
     features_.max_shared_memory_bytes = props.limits.maxComputeSharedMemorySize;
 
@@ -2299,10 +2368,13 @@ void Runtime::init() {
     features_.device_name.back() = '\0';
     init_error_.clear();
     bioseq_log<DBG>(
-        "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
-        "maxSharedMem={}B, scalarBlockLayout={}, softwareDevice={})",
+        "[vulkan_runtime] device ready: {} (maxWGInvocations={}, "
+        "maxWGSize={}x{}x{}, maxWGCountX={}, maxSharedMem={}B, "
+        "scalarBlockLayout={}, softwareDevice={})",
         props.deviceName, features_.max_workgroup_invocations,
-        features_.max_workgroup_count_x, features_.max_shared_memory_bytes,
+        features_.max_workgroup_size_x, features_.max_workgroup_size_y,
+        features_.max_workgroup_size_z, features_.max_workgroup_count_x,
+        features_.max_shared_memory_bytes,
         features_.scalar_block_layout, features_.software_device);
 }
 
@@ -3329,10 +3401,31 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             return entry;
         }
     }
-    if (local_size == 0 || local_size > features_.max_workgroup_invocations) {
+    const ShaderVariantKey shader_key = make_shader_key(kind, 384u, local_size, max_span);
+    ShaderCompileRequest geometry_request{};
+    geometry_request.kind = kind;
+    geometry_request.tile_size = 384u;
+    geometry_request.local_size = local_size;
+    geometry_request.max_span = max_span;
+    const ShaderWorkgroupSize workgroup =
+        expected_shader_workgroup_size(geometry_request);
+    const std::uint64_t workgroup_invocations =
+        static_cast<std::uint64_t>(workgroup.x)
+        * static_cast<std::uint64_t>(workgroup.y)
+        * static_cast<std::uint64_t>(workgroup.z);
+    if (workgroup.x == 0 || workgroup.y == 0 || workgroup.z == 0
+        || workgroup.x > features_.max_workgroup_size_x
+        || workgroup.y > features_.max_workgroup_size_y
+        || workgroup.z > features_.max_workgroup_size_z
+        || workgroup_invocations > features_.max_workgroup_invocations) {
         throw VulkanRuntimeError(fmt::format(
-            "Phase B local_size {} exceeds maxComputeWorkGroupInvocations {}",
-            local_size, features_.max_workgroup_invocations));
+            "Phase B workgroup {}x{}x{} (key local_size {}) exceeds device "
+            "limits maxComputeWorkGroupSize={}x{}x{} or "
+            "maxComputeWorkGroupInvocations={}",
+            workgroup.x, workgroup.y, workgroup.z, local_size,
+            features_.max_workgroup_size_x, features_.max_workgroup_size_y,
+            features_.max_workgroup_size_z,
+            features_.max_workgroup_invocations));
     }
 
     const DescriptorLayoutKind layout_kind = descriptor_layout_for(kind);
@@ -3393,7 +3486,6 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &entry.descriptor_set),
              "vkAllocateDescriptorSets(phase_b)");
 
-    const ShaderVariantKey shader_key = make_shader_key(kind, 384u, local_size, max_span);
     if (use_shader_provider_locked()) {
         if (!metallib_provider_capable_) {
             vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
@@ -4678,9 +4770,14 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     const std::uint32_t k = params.kmer_size;
     out.target_len = bp;
     if (bp == 0u || w == 0u || k == 0u || bp < k || max_target_minimizers == 0u) {
+        out.failure_reason = GpuBuiltIndexFailureReason::invalid_shape;
         return out;  // empty/invalid shape; selected GPU callers throw.
     }
-    if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) return out;
+    if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::minimizer_capacity_exceeds_u32;
+        return out;
+    }
     if (query_gate_words.size()
         > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c index query gate exceeds uint32 word count");
@@ -4702,6 +4799,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         params.letters_per_unit,
         features_.max_workgroup_count_x);
     if (!memory_plan.valid) {
+        out.failure_reason = GpuBuiltIndexFailureReason::memory_plan_invalid;
         return out;
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
@@ -4757,6 +4855,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         bioseq_log<ERR>("[phase_c index] scaffold arena oversubscribed (bp={}, num_tiles={}, "
                         "arena_bytes={}); returning invalid GPU index",
                         bp, num_tiles, arena_bytes);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_arena_allocation_failed;
         arena.rewind(mark);
         return out;
     }
@@ -4831,6 +4931,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         if (filtered_count > max_target_minimizers) {
             bioseq_log<ERR>("[phase_c idx] filtered tm={} out of range (cap={})",
                             filtered_count, max_target_minimizers);
+            out.failure_reason =
+                GpuBuiltIndexFailureReason::output_capacity_overflow;
             arena.rewind(mark);
             return out;
         }
@@ -4841,6 +4943,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     if (keys.mapped == nullptr || vals.mapped == nullptr) {
         bioseq_log<ERR>("[phase_c index] capacity buffer alloc failed (cap={}); "
                         "returning invalid GPU index", emit_capacity);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
         arena.rewind(mark);
         return out;
     }
@@ -4893,6 +4997,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     if (tm > emit_capacity) {
         bioseq_log<ERR>("[phase_c idx] tm={} out of range / overflow (emit_capacity={}, cap={})",
                         tm, emit_capacity, max_target_minimizers);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::output_capacity_overflow;
         arena.rewind(mark); return out;
     }
 
@@ -4920,6 +5026,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         bioseq_log<ERR>("[phase_c index] scratch buffer alloc failed (tm={}, num_wg={}); "
                         "returning invalid GPU index",
                         tm, swg.num_workgroups);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
         arena.rewind(mark);
         return out;
     }
@@ -4987,6 +5095,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     const std::uint32_t num_buckets = scan_last + flag_last;
     if (num_buckets == 0u) {
         bioseq_log<ERR>("[phase_c idx] num_buckets=0 (tm={})", tm);
+        out.failure_reason = GpuBuiltIndexFailureReason::index_invariant_failed;
         arena.rewind(mark); return out;
     }
 
@@ -5683,7 +5792,7 @@ std::vector<GpuAlignmentExtensionResultWire> Runtime::run_alignment_extension_ro
     const PhaseBPipeline pipe = get_phase_b_pipeline_locked(
         ShaderKind::align_extend_banded_affine,
         kAlignmentExtensionLocal,
-        params.max_target_len);
+        k_gpu_alignment_extension_max_len);
 
     const std::uint64_t query_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(query_symbols.size()) * sizeof(std::uint32_t), 4u);
@@ -5872,7 +5981,6 @@ AlignmentCigarBatchResult Runtime::run_alignment_simple_cigar_roundtrip(
 namespace {
 
 constexpr std::uint32_t kPhaseCSeedCoordinateBatchWave = 4096u;
-constexpr bool kPhaseCCoordinateVoteFastPath = true;
 
 struct ChainRangePushLocal {
     std::uint32_t query_count;
@@ -5969,6 +6077,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     std::span<const PhaseCSeedCoordinateJob> jobs,
     std::uint32_t kmer_size,
     std::int32_t max_occ,
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
     const ChainingPipelineKey& chain_key,
     std::int32_t max_dist_x,
     std::int32_t max_dist_y,
@@ -5989,6 +6098,15 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     if (features_.max_workgroup_count_x == 0u) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate batch has zero workgroup limit");
     }
+    if (coordinate_algorithm != PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp
+        && coordinate_algorithm
+            != PhaseCSeedCoordinateAlgorithm::coordinate_vote) {
+        throw VulkanRuntimeError(
+            "phase_c seed-to-coordinate algorithm identity is invalid");
+    }
+    const bool coordinate_vote_selected =
+        coordinate_algorithm
+        == PhaseCSeedCoordinateAlgorithm::coordinate_vote;
     if (query_inputs.device_query_records != nullptr) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate device query records are not implemented");
     }
@@ -6071,7 +6189,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     for (std::size_t wave_begin = 0; wave_begin < jobs.size();) {
         std::size_t wave_end =
             std::min<std::size_t>(jobs.size(), wave_begin + kPhaseCSeedCoordinateBatchWave);
-        if (kPhaseCCoordinateVoteFastPath && wave_begin + 1u < wave_end) {
+        if (coordinate_vote_selected && wave_begin + 1u < wave_end) {
             std::size_t same_target_end = wave_begin + 1u;
             while (same_target_end < wave_end
                    && phase_c_same_coordinate_target(
@@ -6210,7 +6328,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 continue;
             }
 
-            if (kPhaseCCoordinateVoteFastPath) {
+            if (coordinate_vote_selected) {
                 std::vector<PhaseCSeedCoordinateWaveState*> active_states;
                 active_states.reserve(seed_active_count);
                 for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -6536,7 +6654,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         command_buffer_, vote_coord_batch_pipe, coord_infos,
                         &coord_push, sizeof(coord_push),
                         static_cast<std::uint32_t>(vote_jobs.size()));
-                    run.stats.coordinate_reduce_dispatches += 1u;
+                    run.stats.coordinate_vote_dispatches += 1u;
                     record_shader_to_host(command_buffer_);
                     submit_and_wait(
                         device_, queue_, command_buffer_, fence_,
@@ -6674,7 +6792,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     create_device_buffer(anchor_u64 * 8u, kPhaseBBufferUsage);
                 state.anchor_keys_buf =
                     create_device_buffer(state.total_anchors * 8u, kPhaseBBufferUsage);
-                if (kPhaseCCoordinateVoteFastPath) {
+                if (coordinate_vote_selected) {
                     state.result_buf = create_device_buffer(
                         sizeof(GpuCoordinateOnlyResultWire), kPhaseBBufferUsage);
                     if (state.anchors_buf.mapped == nullptr
@@ -6772,7 +6890,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 run.stats.seed_emit_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
-            if (kPhaseCCoordinateVoteFastPath) {
+            if (coordinate_vote_selected) {
                 for (PhaseCSeedCoordinateWaveState& state : states) {
                     if (!state.has_anchors) {
                         continue;
@@ -6801,7 +6919,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     record_phase_c_dispatch_locked(
                         command_buffer_, vote_coord_pipe, coord_infos,
                         &coord_push, sizeof(coord_push), 1u);
-                    run.stats.coordinate_reduce_dispatches += 1u;
+                    run.stats.coordinate_vote_dispatches += 1u;
                 }
                 record_shader_to_host(command_buffer_);
                 submit_and_wait(
@@ -7047,7 +7165,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 record_phase_c_dispatch_locked(
                     command_buffer_, coord_pipe, coord_infos,
                     &coord_push, sizeof(coord_push), 1u);
-                run.stats.coordinate_reduce_dispatches += 1u;
+                run.stats.chain_backtrack_dispatches += 1u;
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
@@ -7086,6 +7204,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
     std::uint64_t query_len,
     std::uint32_t kmer_size,
     std::int32_t max_occ,
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
     const ChainingPipelineKey& chain_key,
     std::int32_t max_dist_x,
     std::int32_t max_dist_y,
@@ -7116,6 +7235,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
         jobs,
         kmer_size,
         max_occ,
+        coordinate_algorithm,
         chain_key,
         max_dist_x,
         max_dist_y,
@@ -7497,6 +7617,182 @@ GpuCoordinateOnlyResultWire Runtime::run_phase_c_seed_to_coordinate_roundtrip(
     arena.rewind(mark);
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return result;
+}
+
+GpuPersistedDirectorySelectionResult
+Runtime::run_persisted_directory_ordinal_selection(
+    const GpuPersistedDirectorySelectionInputs& inputs)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "persisted directory selection requested on an unavailable Vulkan device");
+    }
+    if (inputs.minimizer_word_kind
+            > static_cast<std::uint32_t>(MinimizerWordKind::u64x2)
+        || (inputs.minimizer_word_kind
+                == static_cast<std::uint32_t>(MinimizerWordKind::u16)
+            ? inputs.minimizer_words32_per_record != 0u
+            : inputs.minimizer_words32_per_record
+                != (inputs.minimizer_word_kind
+                        == static_cast<std::uint32_t>(MinimizerWordKind::u32)
+                    ? 1u
+                    : inputs.minimizer_word_kind
+                            == static_cast<std::uint32_t>(MinimizerWordKind::u64)
+                        ? 2u : 4u))) {
+        throw VulkanRuntimeError(
+            "persisted directory selection has an unsupported minimizer wire");
+    }
+    if (inputs.directory_entry_count
+            > (std::numeric_limits<std::uint32_t>::max)()
+                / k_gpu_persisted_directory_entry_words
+        || (inputs.minimizer_word_kind
+                != static_cast<std::uint32_t>(MinimizerWordKind::u16)
+            && inputs.minimizer_count
+                > (std::numeric_limits<std::uint32_t>::max)()
+                    / inputs.minimizer_words32_per_record)) {
+        throw VulkanRuntimeError(
+            "persisted directory selection exceeds 32-bit shader indexing");
+    }
+    if (inputs.minimizer_count == 0u || inputs.directory_entry_count == 0u) {
+        return GpuPersistedDirectorySelectionResult{
+            .ordinals = {},
+            // No dispatch ran, so no query work may be attested even when a
+            // nonempty query was presented to an empty authoritative directory.
+            .device_query_minimizers_processed = 0u,
+        };
+    }
+    if (inputs.device_minimizer_words == nullptr
+        || !inputs.device_minimizer_words->valid()
+        || inputs.encoded_directory == nullptr
+        || !inputs.encoded_directory->valid()) {
+        throw VulkanRuntimeError(
+            "persisted directory selection requires resident device buffers");
+    }
+
+    const std::uint64_t query_bytes = minimizer_device_bytes(
+        inputs.minimizer_word_kind,
+        inputs.minimizer_words32_per_record,
+        inputs.minimizer_count);
+    const std::uint64_t directory_bytes =
+        static_cast<std::uint64_t>(inputs.directory_entry_count)
+        * k_gpu_persisted_directory_entry_bytes;
+    if (query_bytes > inputs.device_minimizer_words->bytes
+        || directory_bytes > inputs.encoded_directory->bytes) {
+        throw VulkanRuntimeError(
+            "persisted directory selection input buffer is truncated");
+    }
+
+    const std::uint64_t bitset_word_count64 =
+        (static_cast<std::uint64_t>(inputs.directory_entry_count) + 31u) / 32u;
+    const std::uint64_t bitset_bytes =
+        bitset_word_count64 * sizeof(std::uint32_t);
+    const std::uint64_t ordinal_bytes =
+        (static_cast<std::uint64_t>(inputs.directory_entry_count) + 1u)
+        * sizeof(std::uint32_t);
+    const std::uint64_t transient_bytes = sat_add(bitset_bytes, ordinal_bytes);
+    auto transient_permit =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(transient_bytes);
+    if (!transient_permit) {
+        throw VulkanRuntimeError(fmt::format(
+            "persisted directory selection memory admission failed for {} bytes",
+            transient_bytes));
+    }
+
+    constexpr VkBufferUsageFlags usage =
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    // `transient_permit` is declared before both buffers, so it is destroyed
+    // after them on every success/error exit.
+    Buffer selected_bits = create_device_buffer(bitset_bytes, usage);
+    Buffer selected_ordinals = create_device_buffer(ordinal_bytes, usage);
+    if (selected_bits.mapped == nullptr || selected_ordinals.mapped == nullptr) {
+        throw VulkanRuntimeError(
+            "persisted directory selection requires host-visible ordinal buffers");
+    }
+    std::memset(selected_bits.mapped, 0, static_cast<std::size_t>(bitset_bytes));
+    std::memset(selected_ordinals.mapped, 0, static_cast<std::size_t>(ordinal_bytes));
+
+    const PhaseBPipeline pipeline = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_persisted_directory_select, 128u, 1u);
+    const std::array<VkDescriptorBufferInfo, 4> infos{{
+        {inputs.device_minimizer_words->buffer, 0, query_bytes},
+        {inputs.encoded_directory->buffer, 0, directory_bytes},
+        {selected_bits.buffer, 0, bitset_bytes},
+        {selected_ordinals.buffer, 0, ordinal_bytes},
+    }};
+    const GpuPersistedDirectorySelectionPush push{
+        .minimizer_count = inputs.minimizer_count,
+        .minimizer_word_kind = inputs.minimizer_word_kind,
+        .minimizer_words32_per_record = inputs.minimizer_words32_per_record,
+        .hash_shift = inputs.hash_shift,
+        .directory_entry_count = inputs.directory_entry_count,
+        .reserved_directory = 0u,
+        .bitset_word_count = static_cast<std::uint32_t>(bitset_word_count64),
+        .reserved = 0u,
+    };
+
+    reset_phase_c_pool_locked();
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "reset(persisted_directory_select)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin),
+             "begin(persisted_directory_select)");
+
+    VkMemoryBarrier host_to_shader{};
+    host_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    host_to_shader.srcAccessMask =
+        VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    host_to_shader.dstAccessMask =
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        command_buffer_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+        1, &host_to_shader, 0, nullptr, 0, nullptr);
+    record_phase_c_dispatch_locked(
+        command_buffer_, pipeline, infos, &push, sizeof(push), 1u);
+
+    VkMemoryBarrier shader_to_host{};
+    shader_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    shader_to_host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    shader_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(
+        command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, 0,
+        1, &shader_to_host, 0, nullptr, 0, nullptr);
+    check_vk(vkEndCommandBuffer(command_buffer_),
+             "end(persisted_directory_select)");
+    submit_and_wait(
+        device_, queue_, command_buffer_, fence_,
+        "submit(persisted_directory_select)");
+
+    const auto* ordinal_words =
+        static_cast<const std::uint32_t*>(selected_ordinals.mapped);
+    const std::uint32_t selected_count = ordinal_words[0];
+    if (selected_count > inputs.directory_entry_count) {
+        throw VulkanRuntimeError(
+            "persisted directory selector returned an invalid count");
+    }
+    GpuPersistedDirectorySelectionResult result{
+        .ordinals = std::vector<std::uint32_t>(
+            ordinal_words + 1u, ordinal_words + 1u + selected_count),
+        .device_query_minimizers_processed = inputs.minimizer_count,
+    };
+    for (std::size_t index = 0; index < result.ordinals.size(); ++index) {
+        if (result.ordinals[index] >= inputs.directory_entry_count
+            || (index > 0
+                && result.ordinals[index] <= result.ordinals[index - 1u])) {
+            throw VulkanRuntimeError(
+                "persisted directory selector returned malformed ordinals");
+        }
+    }
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "reset(persisted_directory_select_post)");
     return result;
 }
 

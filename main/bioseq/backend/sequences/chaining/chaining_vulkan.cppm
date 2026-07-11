@@ -291,7 +291,7 @@ constexpr std::size_t kCoordinateOnlyFastProbeLimit = 16u;
 /// Run the Vulkan tiled-DP chaining path. Throws `VulkanRuntimeError` on any
 /// selected-GPU decline; algorithm fallback must be chosen by the caller before
 /// entering the pipeline.
-inline void run_chain_anchors_vulkan_impl(
+[[nodiscard]] inline bool run_chain_anchors_vulkan_impl(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
     ArenaSlab<Chain>& chains_out,
@@ -299,7 +299,7 @@ inline void run_chain_anchors_vulkan_impl(
 {
     const std::size_t n = anchors.size();
     const std::uint64_t n64 = static_cast<std::uint64_t>(n);
-    if (n == 0) return;
+    if (n == 0) return false;
     if (!params.vulkan_enabled) {
         throw bioseq::gpu::vulkan::VulkanRuntimeError(
             "Vulkan chaining selected but Minimap2Params disabled Vulkan");
@@ -321,7 +321,7 @@ inline void run_chain_anchors_vulkan_impl(
 
     const std::size_t range_count =
         count_gpu_chain_ranges(anchors, static_cast<std::uint64_t>(max_dist_x));
-    if (range_count == 0) return;
+    if (range_count == 0) return false;
     // DOC0353: the chaining kernel grid-strides one invocation per range and the
     // runtime clamps the dispatch to maxComputeWorkGroupCount[0], so range_count
     // is no longer bounded by the workgroup count — it is just the data size.
@@ -418,7 +418,7 @@ inline void run_chain_anchors_vulkan_impl(
             params.min_seed_count,
             kCoordinateOnlyFastProbeLimit);
         if (coord_trace.result.valid == 0u) {
-            return;
+            return true;
         }
         const std::size_t trace_count = coord_trace.trace.size();
         if (trace_count == 0
@@ -443,7 +443,7 @@ inline void run_chain_anchors_vulkan_impl(
             .anchor_count = static_cast<int32_t>(trace_count),
             .anchor_start = static_cast<int32_t>(anchor_start),
         });
-        return;
+        return true;
     }
 
     runtime.run_chaining_tiled_dp_roundtrip(
@@ -489,14 +489,14 @@ inline void run_chain_anchors_vulkan_impl(
         params.min_seed_count,
         chains_out,
         reordered_anchors_out);
-
+    return true;
 }
 
 }  // namespace detail
 
 /// Public entry point. Pins the `Anchor` ABI and runs the Vulkan tiled-DP path.
 /// If this backend is selected, no scalar fallback is allowed here.
-inline void chain_anchors_vulkan(
+inline bool chain_anchors_vulkan(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
     ArenaSlab<Chain>& chains_out,
@@ -515,7 +515,7 @@ inline void chain_anchors_vulkan(
         bioseq::instr::register_region_static("chain_anchors_vulkan");
     auto _scope = bioseq::instr::region(_desc);
 
-    detail::run_chain_anchors_vulkan_impl(
+    return detail::run_chain_anchors_vulkan_impl(
         anchors, params, chains_out, reordered_anchors_out);
 }
 
