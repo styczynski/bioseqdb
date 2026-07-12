@@ -1433,10 +1433,10 @@ export struct client_error {
 
 export struct response {
     long status_code{};
-    context::result_vector<char> body;
+    std::string body;
     std::vector<response_header> headers;
 
-    /// @brief Views arena-owned response bytes without copying them.
+    /// @brief Views the heap-owned response bytes without copying them.
     [[nodiscard]] std::string_view body_view() const noexcept {
         return {body.data(), body.size()};
     }
@@ -1748,46 +1748,20 @@ private:
         return std::move(*result);
     }
 
-    /// @brief Copies a transported response into the context result arena.
+    /// @brief Adopts a transported response body for the response lifetime.
+    ///
+    /// The body is transient scratch — parsed exactly once into owning provider
+    /// messages, then discarded — so it lives on the standard heap, not a
+    /// context arena. Routing an arbitrarily large HTTP body (up to
+    /// default_maximum_response_body_bytes = 64 MiB) through the small-object
+    /// result arena is both unsupportable (its 64 KiB blocks are far smaller
+    /// than a body can be, which trips a foonathan_memory reserve assertion)
+    /// and pointless (a needless copy). Moving the transport's std::string
+    /// through is O(1) and cannot fail.
     [[nodiscard]] response materialize(bioseq::external::transport_response transported) {
-        auto bytes = memory_context_.make_result_vector<char>();
-        while (bytes.capacity() < transported.body.size()) {
-            constexpr std::size_t allocation_quantum = alignof(std::max_align_t);
-            const std::size_t arena_capacity =
-                memory_context_.result_arena().next_capacity();
-            if (arena_capacity <= allocation_quantum) {
-                throw std::length_error("result arena block is too small for HTTP response");
-            }
-            const std::size_t safe_arena_capacity =
-                ((arena_capacity - allocation_quantum) / allocation_quantum)
-                * allocation_quantum;
-            if (safe_arena_capacity == 0) {
-                throw std::length_error("result arena block has no usable HTTP capacity");
-            }
-            std::size_t desired_capacity = bytes.capacity() == 0
-                ? std::min(transported.body.size(), safe_arena_capacity)
-                : bytes.capacity() > transported.body.size() / 2
-                    ? transported.body.size()
-                    : bytes.capacity() * 2;
-            const std::size_t remainder = desired_capacity % allocation_quantum;
-            if (remainder != 0) {
-                const std::size_t increment = allocation_quantum - remainder;
-                if (desired_capacity > std::numeric_limits<std::size_t>::max() - increment) {
-                    throw std::length_error("HTTP response exceeds result vector capacity");
-                }
-                desired_capacity += increment;
-            }
-            const std::size_t requested_capacity = std::min(
-                safe_arena_capacity, desired_capacity);
-            if (requested_capacity <= bytes.capacity()) {
-                throw std::length_error("result arena failed to grow for HTTP response");
-            }
-            bytes.reserve(requested_capacity);
-        }
-        bytes.insert(bytes.end(), transported.body.begin(), transported.body.end());
         return response{
             transported.status_code,
-            std::move(bytes),
+            std::move(transported.body),
             std::move(transported.headers),
         };
     }

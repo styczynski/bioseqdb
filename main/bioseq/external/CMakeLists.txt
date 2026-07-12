@@ -306,9 +306,20 @@ if(NOT _bioseq_oatpp_version_line)
     "The repo-local oatpp-master dependency must provide Oat++ 1.4.x")
 endif()
 
+# DOC0372 — the postgresql_bioseq extension is a shared object, so every static
+# archive that reaches its link (oatpp, via the provider adapters ->
+# bioseq_external_https) must be position-independent. oatpp's own CMake does not
+# force PIC, and its thread-local members emit R_X86_64_TPOFF32 relocations that a
+# shared object rejects ("recompile with -fPIC"). Force PIC on the whole oatpp
+# subtree by seeding the directory default before add_subdirectory; the standalone
+# external test exec (a PIE executable) is unaffected.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT TARGET oatpp)
   add_subdirectory("${_bioseq_oatpp_root}"
     "${CMAKE_CURRENT_BINARY_DIR}/oatpp" EXCLUDE_FROM_ALL)
+endif()
+if(TARGET oatpp)
+  set_target_properties(oatpp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 if(NOT TARGET oatpp::oatpp)
   add_library(oatpp::oatpp ALIAS oatpp)
@@ -345,3 +356,89 @@ foreach(_bioseq_descriptor IN LISTS _bioseq_external_descriptors_api_client)
     CLIENT_NAME "${_bioseq_client_name}"
     CLIENT_ROOT "${_bioseq_client_root}")
 endforeach()
+
+# ---------------------------------------------------------------------------
+# DOC0372 — PostgreSQL-independent provider core (concepts + structs only). No
+# Datum/tuple/palloc/SPI/PostgreSQL header, no alphabet, no libarchive edge.
+# Owns bioseq.external.provider.* and links only the runtime/leaf/templating
+# cores so metadata provider clients never schedule the sequence graph.
+# ---------------------------------------------------------------------------
+file(GLOB _bioseq_provider_core_modules CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/provider/*.cppm")
+add_library(bioseq_external_provider_core STATIC)
+set_target_properties(bioseq_external_provider_core PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_external_provider_core PRIVATE NO_POSTGRES=1)
+target_link_libraries(bioseq_external_provider_core PUBLIC
+  bioseq_runtime_core
+  bioseq_sink_control_core
+  bioseq_checked_arithmetic_core
+  bioseq_common_templating_core
+  hwy::hwy)
+target_sources(bioseq_external_provider_core
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+    FILES ${_bioseq_provider_core_modules})
+
+# ---------------------------------------------------------------------------
+# DOC0372 — provider metadata adapters (NCBI/UCSC/UniProt/EBI) + configured pack.
+# Each adapter normalizes one provider's generated GET client into the common
+# owning-row model. Links the generated clients + provider core + simdjson; no
+# PostgreSQL, alphabet, or transfer edge.
+# ---------------------------------------------------------------------------
+find_package(simdjson CONFIG REQUIRED)
+file(GLOB _bioseq_provider_adapter_modules CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/providers/*.cppm")
+# Classic (non-module) helper TUs for the adapters. simdjson's amalgamated
+# header exposes a TU-local serializer entity that GCC refuses to write into a
+# module CMI, so all simdjson use is confined to these plain translation units
+# (json_dom.cpp), matching the repo's existing simdjson usage in io_bench.
+file(GLOB _bioseq_provider_adapter_sources CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/providers/*.cpp")
+if(_bioseq_provider_adapter_modules)
+  add_library(bioseq_external_provider_adapters STATIC)
+  set_target_properties(bioseq_external_provider_adapters PROPERTIES
+    CXX_STANDARD 26
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS ON
+    CXX_MODULE_STD ON
+    POSITION_INDEPENDENT_CODE ON
+    INTERPROCEDURAL_OPTIMIZATION FALSE)
+  target_compile_definitions(bioseq_external_provider_adapters PRIVATE NO_POSTGRES=1)
+  target_link_libraries(bioseq_external_provider_adapters PUBLIC
+    bioseq_external_provider_core
+    bioseq_external_api_ncbi
+    bioseq_external_api_ucsc
+    bioseq_external_api_uniprot
+    bioseq_external_api_ebi
+    bioseq_external_https
+    simdjson::simdjson)
+  target_sources(bioseq_external_provider_adapters
+    PUBLIC FILE_SET CXX_MODULES
+      BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+      FILES ${_bioseq_provider_adapter_modules})
+  if(_bioseq_provider_adapter_sources)
+    target_sources(bioseq_external_provider_adapters
+      PRIVATE ${_bioseq_provider_adapter_sources})
+  endif()
+endif()
+
+# Provider-core + adapter tests run inside the existing external integration exec
+# so the `external-api` MCP mode builds and runs them without a sequence/PG target.
+if(TARGET bioseq_external_integration_tests_exec)
+  file(GLOB _bioseq_provider_test_sources CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
+  target_sources(bioseq_external_integration_tests_exec PRIVATE
+    ${_bioseq_provider_test_sources})
+  target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
+    bioseq_external_provider_core)
+  if(TARGET bioseq_external_provider_adapters)
+    target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
+      bioseq_external_provider_adapters)
+  endif()
+endif()

@@ -134,6 +134,64 @@ set(BIOSEQ_RUNTIME_CORE_MODULES
 set(BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_NOPG_MODULES})
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
 
+# DOC0372 — single-owner leaf targets extracted from the Domain-N set. These
+# stay in BIOSEQ_NOPG_MODULES (so the PG glob still excludes them) but leave
+# BIOSEQ_NOPG_OWNED_MODULES so they are compiled exactly once, here, with no
+# runtime/TBB/logging/IO/PG edge. Isolated generated + provider metadata targets
+# link these leaves without inheriting the sequence graph.
+set(BIOSEQ_SINK_CONTROL_MODULE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/sink_control.cppm")
+set(BIOSEQ_CHECKED_ARITHMETIC_MODULE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/checked_arithmetic.cppm")
+list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
+  "${BIOSEQ_SINK_CONTROL_MODULE}"
+  "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}")
+
+add_library(bioseq_sink_control_core STATIC)
+set_target_properties(bioseq_sink_control_core PROPERTIES
+  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_sink_control_core PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_sink_control_core
+  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES "${BIOSEQ_SINK_CONTROL_MODULE}")
+
+add_library(bioseq_checked_arithmetic_core STATIC)
+set_target_properties(bioseq_checked_arithmetic_core PROPERTIES
+  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_checked_arithmetic_core PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_checked_arithmetic_core
+  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}")
+
+# DOC0372 — lightweight templating core: value sequence, compile-time string,
+# pack iterate/search, and one-time runtime dispatch. Links Highway (required by
+# pack_for_each) but has no sequence, alphabet, PG, or external edge. The
+# Domain-N umbrella (bioseq.common.templating) and its remaining leaves keep
+# their ownership and link this core for the moved leaves' BMIs.
+set(BIOSEQ_COMMON_TEMPLATING_CORE_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/template_str.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_for_each.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_search.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/runtime_dispatch.cppm")
+list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
+  ${BIOSEQ_COMMON_TEMPLATING_CORE_MODULES})
+
+add_library(bioseq_common_templating_core STATIC)
+set_target_properties(bioseq_common_templating_core PROPERTIES
+  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_common_templating_core PRIVATE NO_POSTGRES=1)
+target_link_libraries(bioseq_common_templating_core PUBLIC hwy::hwy)
+target_sources(bioseq_common_templating_core
+  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES ${BIOSEQ_COMMON_TEMPLATING_CORE_MODULES})
+
 add_library(bioseq_runtime_core STATIC)
 set_target_properties(bioseq_runtime_core PROPERTIES
   CXX_STANDARD 26
@@ -238,6 +296,9 @@ endif()
 
 target_link_libraries(bioseq_modules_nopg PUBLIC
   bioseq_runtime_core
+  bioseq_sink_control_core
+  bioseq_checked_arithmetic_core
+  bioseq_common_templating_core
   safestring_static
   fmt
   ZLIB::ZLIB
@@ -343,6 +404,20 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 #     /tmp/bioseq_loglog.log.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
+
+# DOC0372 — the external CustomScan (backend/pg/external/scan.cppm) and its row
+# writer (row_writer.cppm) import the external provider stack, so they compile
+# into the extension only when the external API clients are enabled. The rest of
+# backend/pg/external/ (relation/errors/path_builder_slot) imports no provider
+# module and stays unconditional. The option is declared here (before
+# SRC_MOD_FILES is consumed by the postgresql_bioseq target); the later
+# add_subdirectory(external) reuses the same cached value.
+option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
+  "Configure generated external API clients and their integration tests" OFF)
+if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
+  list(FILTER SRC_MOD_FILES EXCLUDE
+    REGEX "/backend/pg/external/(scan|row_writer)\\.cppm$")
+endif()
 
 # GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
 # dispatch wrapper at -O3. Keep this as a build knob, not a C++ ifdef:
@@ -651,4 +726,16 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   set(BIOSEQ_EXTERNAL_GENERATED_ROOT
     "${CMAKE_CURRENT_BINARY_DIR}/generated/external")
   add_subdirectory(external)
+
+  # DOC0372 — link the compile-time provider pack into the extension so the
+  # external CustomScan (scan.cppm) and row writer resolve bioseq.external.run
+  # and the provider model, and expose those module BMIs to the extension's
+  # module compiles. BIOSEQ_EXTERNAL_PG gates the _PG_init registration and the
+  # conditional import of the scan module in backend/pg/column/column.cppm.
+  if(TARGET bioseq_external_provider_adapters)
+    target_link_libraries(postgresql_bioseq PRIVATE
+      bioseq_external_provider_core
+      bioseq_external_provider_adapters)
+    target_compile_definitions(postgresql_bioseq PRIVATE BIOSEQ_EXTERNAL_PG=1)
+  endif()
 endif()
