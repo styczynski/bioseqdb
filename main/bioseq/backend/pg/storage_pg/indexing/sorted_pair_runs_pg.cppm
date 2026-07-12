@@ -16,6 +16,7 @@ extern "C" {
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <span>
 #include <type_traits>
@@ -83,6 +84,43 @@ struct SortedRunStoreStats {
     std::uint64_t position_spill_count = 0;
 };
 
+#ifdef BIOSEQ_TEST_INDEXES
+/**
+ * Deterministic one-shot leaf failures used by PostgreSQL integration tests.
+ * "after" points model the important partial-success case: the BufFile state
+ * has changed, but the C++ caller must still poison/abandon its handles.
+ */
+enum class SortedRunPgLeafFailure : std::uint8_t {
+    none,
+    create_before,
+    create_after,
+    write_before,
+    write_after,
+    read_before,
+    read_after,
+    seek_before,
+    seek_after,
+    size_before,
+    size_after,
+    close_before,
+    close_after,
+    interrupt_before,
+    interrupt_after,
+    // Dedicated compaction point: unlike `create_before`, this does not count
+    // the input spill files created before a merge pass starts.
+    compact_create_before,
+};
+
+void arm_sorted_run_pg_leaf_failure(SortedRunPgLeafFailure point) noexcept;
+void arm_sorted_run_pg_leaf_failure_on_nth(
+    SortedRunPgLeafFailure point,
+    std::uint64_t operation) noexcept;
+void set_sorted_run_merge_reader_budget_for_test(
+    std::uint64_t bytes) noexcept;
+void disarm_sorted_run_pg_leaf_failure() noexcept;
+[[nodiscard]] bool sorted_run_pg_leaf_failure_is_armed() noexcept;
+#endif
+
 } // namespace bioseq::storage::indexing
 
 namespace bioseq::storage::indexing {
@@ -102,47 +140,201 @@ inline constexpr std::uint64_t kMinPositionBatchBytes = std::uint64_t{32} << 10;
 enum class SortedRunError {
     position_spill_create_failed,
     position_spill_rewind_failed,
+    position_buffer_admission_failed,
     temp_file_create_failed,
     admitted_run_without_permit,
     run_rewind_failed,
     merge_reader_admission_failed,
     compacted_run_rewind_failed,
     compact_temp_file_create_failed,
+    poisoned_store_reused,
+    finalized_store_reused,
 };
 
-void report_sorted_run_error(SortedRunError error);
+[[noreturn]] void report_sorted_run_error(SortedRunError error);
 
-template <class T>
-void release_vector_storage_noexcept(std::vector<T>& values) noexcept {
-    try {
-        std::vector<T> empty;
-        values.swap(empty);
-    } catch (...) {
-        values.clear();
-    }
+#ifdef BIOSEQ_TEST_INDEXES
+inline thread_local SortedRunPgLeafFailure g_sorted_run_pg_leaf_failure =
+    SortedRunPgLeafFailure::none;
+inline thread_local std::uint64_t g_sorted_run_pg_leaf_failure_remaining = 0;
+inline thread_local std::uint64_t
+    g_sorted_run_merge_reader_budget_for_test = 0;
+
+void arm_sorted_run_pg_leaf_failure(SortedRunPgLeafFailure point) noexcept {
+    arm_sorted_run_pg_leaf_failure_on_nth(point, 1u);
 }
 
-void close_buffile_noexcept(BufFile*& file) noexcept {
-    if (file == nullptr) {
+void arm_sorted_run_pg_leaf_failure_on_nth(
+        SortedRunPgLeafFailure point,
+        std::uint64_t operation) noexcept {
+    g_sorted_run_pg_leaf_failure = point;
+    g_sorted_run_pg_leaf_failure_remaining =
+        point == SortedRunPgLeafFailure::none
+            ? 0u
+            : std::max<std::uint64_t>(1u, operation);
+}
+
+void set_sorted_run_merge_reader_budget_for_test(
+        std::uint64_t bytes) noexcept {
+    g_sorted_run_merge_reader_budget_for_test = bytes;
+}
+
+void disarm_sorted_run_pg_leaf_failure() noexcept {
+    g_sorted_run_pg_leaf_failure = SortedRunPgLeafFailure::none;
+    g_sorted_run_pg_leaf_failure_remaining = 0;
+    g_sorted_run_merge_reader_budget_for_test = 0;
+}
+
+bool sorted_run_pg_leaf_failure_is_armed() noexcept {
+    return g_sorted_run_pg_leaf_failure != SortedRunPgLeafFailure::none;
+}
+
+void inject_sorted_run_pg_leaf_failure(SortedRunPgLeafFailure point) {
+    if (g_sorted_run_pg_leaf_failure != point) {
         return;
     }
-    PG_TRY();
-    {
-        BufFileClose(file);
-        file = nullptr;
+    if (g_sorted_run_pg_leaf_failure_remaining > 1u) {
+        --g_sorted_run_pg_leaf_failure_remaining;
+        return;
     }
-    PG_CATCH();
-    {
-        FlushErrorState();
-        file = nullptr;
+    // One-shot reset is deliberately before ERROR so a follow-up statement can
+    // prove recovery rather than repeatedly tripping the same test hook.
+    g_sorted_run_pg_leaf_failure = SortedRunPgLeafFailure::none;
+    g_sorted_run_pg_leaf_failure_remaining = 0;
+    ereport(ERROR,
+        (errcode(ERRCODE_INTERNAL_ERROR),
+         errmsg("injected sorted-run PostgreSQL leaf failure"),
+         errdetail("failure point %u", static_cast<unsigned>(point))));
+}
+#endif
+
+/** Error/unwind cleanup: drop only the C++ handle; ResourceOwner owns file. */
+void abandon_buffile_noexcept(BufFile*& file) noexcept {
+    file = nullptr;
+}
+
+[[nodiscard]] BufFile* create_temp_buffile_as_cpp() {
+    return bioseq::pg_utils::invoke_pg_as_cpp([] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::create_before);
+#endif
+        BufFile* result = BufFileCreateTemp(false);
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::create_after);
+#endif
+        return result;
+    });
+}
+
+void write_buffile_as_cpp(
+        BufFile* file,
+        const void* data,
+        std::size_t bytes) {
+    bioseq::pg_utils::invoke_pg_as_cpp([&] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::write_before);
+#endif
+        BufFileWrite(file, data, bytes);
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::write_after);
+#endif
+    });
+}
+
+void read_buffile_exact_as_cpp(
+        BufFile* file,
+        void* data,
+        std::size_t bytes) {
+    bioseq::pg_utils::invoke_pg_as_cpp([&] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::read_before);
+#endif
+        BufFileReadExact(file, data, bytes);
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::read_after);
+#endif
+    });
+}
+
+[[nodiscard]] int seek_buffile_as_cpp(
+        BufFile* file,
+        int fileno,
+        off_t offset,
+        int whence) {
+    return bioseq::pg_utils::invoke_pg_as_cpp([&] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::seek_before);
+#endif
+        const int result = BufFileSeek(file, fileno, offset, whence);
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::seek_after);
+#endif
+        return result;
+    });
+}
+
+[[nodiscard]] int64 size_buffile_as_cpp(BufFile* file) {
+    return bioseq::pg_utils::invoke_pg_as_cpp([&] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::size_before);
+#endif
+        const int64 result = BufFileSize(file);
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::size_after);
+#endif
+        return result;
+    });
+}
+
+void check_for_interrupts_as_cpp() {
+    bioseq::pg_utils::invoke_pg_as_cpp([] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::interrupt_before);
+#endif
+        CHECK_FOR_INTERRUPTS();
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::interrupt_after);
+#endif
+    });
+}
+
+/** Success-only close.  Clear the handle before entering PostgreSQL. */
+void close_buffile_checked_as_cpp(BufFile*& file) {
+    BufFile* closing = std::exchange(file, nullptr);
+    if (closing == nullptr) {
+        return;
     }
-    PG_END_TRY();
+    bioseq::pg_utils::invoke_pg_as_cpp([&] {
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::close_before);
+#endif
+        BufFileClose(closing);
+#ifdef BIOSEQ_TEST_INDEXES
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::close_after);
+#endif
+    });
 }
 
 struct MemoryRun {
-    std::vector<sorted_pair_t> pairs;
-    std::uint64_t admitted_bytes = 0;
+    // Reverse member destruction is part of the accounting contract: pair
+    // capacity must disappear before the reservation becomes reusable.
     bioseq::parallelism::MemoryPermit permit;
+    std::uint64_t admitted_bytes = 0;
+    std::vector<sorted_pair_t> pairs;
 };
 
 struct BufFileRun {
@@ -150,6 +342,77 @@ struct BufFileRun {
     std::uint64_t pair_count = 0;
     std::uint64_t byte_count = 0;
 };
+
+template <class T>
+struct AdmittedOwnedVector {
+    // Reverse destruction drops vector capacity before its reservation.
+    bioseq::parallelism::MemoryPermit permit;
+    std::vector<T> values;
+};
+
+template <class T>
+[[nodiscard]] bool try_ensure_admitted_vector_capacity(
+        std::vector<T>& values,
+        bioseq::parallelism::MemoryPermit& permit,
+        std::size_t required_capacity) {
+    const std::uint64_t existing_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(values.capacity()),
+        static_cast<std::uint64_t>(sizeof(T)));
+    if (existing_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
+        return false;
+    }
+    if (values.capacity() >= required_capacity) {
+        return existing_bytes == 0u
+            || (permit && permit.bytes() >= existing_bytes);
+    }
+    const std::uint64_t logical_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(required_capacity),
+        static_cast<std::uint64_t>(sizeof(T)));
+    const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
+        logical_bytes,
+        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    const std::uint64_t allocation_peak = bioseq::parallelism::saturating_add(
+        existing_bytes, admitted_headroom);
+    if (logical_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || admitted_headroom == (std::numeric_limits<std::uint64_t>::max)()
+        || allocation_peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        return false;
+    }
+    if (permit) {
+        if (permit.bytes() < existing_bytes
+            || !permit.grow_to(allocation_peak)) {
+            return false;
+        }
+    } else {
+        if (existing_bytes != 0u) {
+            return false;
+        }
+        auto acquired = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(allocation_peak);
+        if (!acquired) {
+            return false;
+        }
+        permit = std::move(*acquired);
+    }
+    values.reserve(required_capacity);
+    const std::uint64_t exact_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(values.capacity()),
+        static_cast<std::uint64_t>(sizeof(T)));
+    if (exact_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || exact_bytes > permit.bytes()) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    permit.shrink_to(exact_bytes);
+    return true;
+}
+
+template <class T>
+[[nodiscard]] bool try_ensure_admitted_vector_capacity(
+        AdmittedOwnedVector<T>& owned,
+        std::size_t required_capacity) {
+    return try_ensure_admitted_vector_capacity(
+        owned.values, owned.permit, required_capacity);
+}
 
 struct FileReader {
     BufFile* file = nullptr;
@@ -169,7 +432,8 @@ struct FileReader {
             const std::size_t count = static_cast<std::size_t>(
                 std::min<std::uint64_t>(remaining, cap));
             buffer.resize(count);
-            BufFileReadExact(file, buffer.data(), count * sizeof(SortedPairWire));
+            read_buffile_exact_as_cpp(
+                file, buffer.data(), count * sizeof(SortedPairWire));
             remaining -= count;
             offset = 0;
             available = count;
@@ -180,9 +444,10 @@ struct FileReader {
 };
 
 struct PositionAccumulator {
+    // Permit first => default reverse destruction drops both buffers first.
+    bioseq::parallelism::MemoryPermit resident_permit;
     std::vector<std::uint64_t> resident;
     std::vector<std::uint64_t> read_buffer;
-    bioseq::parallelism::MemoryPermit resident_permit;
     BufFile* spill = nullptr;
     std::uint64_t total = 0;
     std::uint64_t spilled_bytes = 0;
@@ -192,7 +457,7 @@ struct PositionAccumulator {
         resident.clear();
         read_buffer.clear();
         if (spill != nullptr) {
-            close_buffile_noexcept(spill);
+            close_buffile_checked_as_cpp(spill);
         }
         total = 0;
         spilled_bytes = 0;
@@ -203,43 +468,107 @@ struct PositionAccumulator {
             return;
         }
         auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
-        std::uint64_t batch_bytes = kTargetPositionBatchBytes;
+        std::uint64_t per_buffer_bytes = kTargetPositionBatchBytes;
         const std::uint64_t available = admission.allocatable_after_reservations();
         if (available != (std::numeric_limits<std::uint64_t>::max)()) {
-            batch_bytes = std::min(batch_bytes, available);
+            constexpr std::uint64_t total_headroom_factor =
+                2u * bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+            per_buffer_bytes = std::min(
+                per_buffer_bytes, available / total_headroom_factor);
         }
-        batch_bytes = std::max(batch_bytes, kMinPositionBatchBytes);
+        per_buffer_bytes -= per_buffer_bytes % sizeof(std::uint64_t);
+        if (per_buffer_bytes < kMinPositionBatchBytes) {
+            report_sorted_run_error(
+                SortedRunError::position_buffer_admission_failed);
+        }
         for (;;) {
-            if (auto permit = admission.try_reserve(batch_bytes)) {
-                resident.reserve(batch_bytes / sizeof(std::uint64_t));
-                read_buffer.reserve(batch_bytes / sizeof(std::uint64_t));
-                resident_permit = std::move(*permit);
+            constexpr std::uint64_t total_headroom_factor =
+                2u * bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+            if (per_buffer_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        / total_headroom_factor) {
+                report_sorted_run_error(
+                    SortedRunError::position_buffer_admission_failed);
+            }
+            // Reserve both buffers plus the accepted vector-capacity headroom
+            // before either std::vector::reserve may allocate.
+            const std::uint64_t requested_total_bytes =
+                per_buffer_bytes * total_headroom_factor;
+            if (auto permit = admission.try_reserve(requested_total_bytes)) {
+                struct CandidateBuffers {
+                    bioseq::parallelism::MemoryPermit permit;
+                    std::vector<std::uint64_t> resident;
+                    std::vector<std::uint64_t> read;
+                } candidate{
+                    .permit = std::move(*permit),
+                    .resident = {},
+                    .read = {},
+                };
+                const std::size_t units = static_cast<std::size_t>(
+                    per_buffer_bytes / sizeof(std::uint64_t));
+                candidate.resident.reserve(units);
+                candidate.read.reserve(units);
+
+                const auto capacity_bytes = [](std::size_t capacity)
+                        -> std::optional<std::uint64_t> {
+                    constexpr std::uint64_t max =
+                        (std::numeric_limits<std::uint64_t>::max)();
+                    if (capacity > max / sizeof(std::uint64_t)) {
+                        return std::nullopt;
+                    }
+                    return static_cast<std::uint64_t>(capacity)
+                        * sizeof(std::uint64_t);
+                };
+                const auto resident_bytes = capacity_bytes(
+                    candidate.resident.capacity());
+                const auto read_bytes = capacity_bytes(candidate.read.capacity());
+                if (!resident_bytes || !read_bytes
+                    || *resident_bytes
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - *read_bytes) {
+                    bioseq::parallelism::
+                        release_admitted_vector_capacities_before_permit(
+                            candidate.resident, candidate.read, candidate.permit);
+                    report_sorted_run_error(
+                        SortedRunError::position_buffer_admission_failed);
+                }
+                const std::uint64_t exact_total_bytes =
+                    *resident_bytes + *read_bytes;
+                if (exact_total_bytes > candidate.permit.bytes()) {
+                    bioseq::parallelism::
+                        release_admitted_vector_capacities_before_permit(
+                            candidate.resident, candidate.read, candidate.permit);
+                    report_sorted_run_error(
+                        SortedRunError::position_buffer_admission_failed);
+                }
+                candidate.permit.shrink_to(exact_total_bytes);
+                resident = std::move(candidate.resident);
+                read_buffer = std::move(candidate.read);
+                resident_permit = std::move(candidate.permit);
                 resident_batch_ready = true;
                 return;
             }
-            if (batch_bytes == kMinPositionBatchBytes) {
+            if (per_buffer_bytes == kMinPositionBatchBytes) {
                 break;
             }
-            batch_bytes = std::max(batch_bytes / 2, kMinPositionBatchBytes);
+            per_buffer_bytes = std::max(
+                per_buffer_bytes / 2u, kMinPositionBatchBytes);
+            per_buffer_bytes -= per_buffer_bytes % sizeof(std::uint64_t);
         }
-        // Keep the cursor usable when resident sorted runs have consumed the
-        // formal admission budget. This is a fixed 32 KiB scratch batch; larger
-        // k-mer hit lists still spill through BufFile in the usual way.
-        resident.reserve(kMinPositionBatchBytes / sizeof(std::uint64_t));
-        read_buffer.reserve(kMinPositionBatchBytes / sizeof(std::uint64_t));
-        resident_batch_ready = true;
+        report_sorted_run_error(
+            SortedRunError::position_buffer_admission_failed);
     }
 
     void push_unique_encoded(std::uint64_t encoded) {
         ensure_resident_batch();
         if (resident.size() == resident.capacity()) {
             if (spill == nullptr) {
-                spill = BufFileCreateTemp(false);
+                spill = create_temp_buffile_as_cpp();
                 if (spill == nullptr) {
                     report_sorted_run_error(SortedRunError::position_spill_create_failed);
                 }
             }
-            BufFileWrite(
+            write_buffile_as_cpp(
                 spill,
                 resident.data(),
                 resident.size() * sizeof(std::uint64_t));
@@ -255,7 +584,7 @@ struct PositionAccumulator {
             return;
         }
         if (spill != nullptr) {
-            if (BufFileSeek(spill, 0, 0, SEEK_SET) != 0) {
+            if (seek_buffile_as_cpp(spill, 0, 0, SEEK_SET) != 0) {
                 report_sorted_run_error(SortedRunError::position_spill_rewind_failed);
             }
             std::uint64_t remaining =
@@ -266,7 +595,7 @@ struct PositionAccumulator {
                 const std::size_t count = static_cast<std::size_t>(
                     std::min<std::uint64_t>(remaining, cap));
                 read_buffer.resize(count);
-                BufFileReadExact(
+                read_buffile_exact_as_cpp(
                     spill,
                     read_buffer.data(),
                     count * sizeof(std::uint64_t));
@@ -289,13 +618,24 @@ struct PositionAccumulator {
         sink.call(sink.ctx, kmer, cursor);
     }
 
-    void release_noexcept() noexcept {
-        resident_permit.release();
-        release_vector_storage_noexcept(resident);
-        release_vector_storage_noexcept(read_buffer);
+    void finish_success() {
         if (spill != nullptr) {
-            close_buffile_noexcept(spill);
+            close_buffile_checked_as_cpp(spill);
         }
+        bioseq::parallelism::release_admitted_vector_capacities_before_permit(
+            resident, read_buffer, resident_permit);
+        total = 0;
+        spilled_bytes = 0;
+        resident_batch_ready = false;
+    }
+
+    void abandon_pg_resources_noexcept() noexcept {
+        bioseq::parallelism::release_admitted_vector_capacities_before_permit(
+            resident, read_buffer, resident_permit);
+        // A PostgreSQL ERROR may have interrupted a BufFile operation. Do not
+        // issue another PG call while unwinding; ResourceOwner cleanup at the
+        // outer statement/transaction boundary owns this file.
+        abandon_buffile_noexcept(spill);
         total = 0;
         spilled_bytes = 0;
         resident_batch_ready = false;
@@ -303,14 +643,22 @@ struct PositionAccumulator {
 };
 
 struct MergeResources {
-    std::vector<FileReader> readers;
+    // Permit first => reader storage is destroyed before reservation release.
     bioseq::parallelism::MemoryPermit reader_budget_permit;
+    std::vector<FileReader> readers;
     PositionAccumulator positions;
 
-    void release_noexcept() noexcept {
-        release_vector_storage_noexcept(readers);
-        reader_budget_permit.release();
-        positions.release_noexcept();
+    void finish_success() {
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            readers, reader_budget_permit);
+        positions.finish_success();
+    }
+
+
+    void abandon_pg_resources_noexcept() noexcept {
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            readers, reader_budget_permit);
+        positions.abandon_pg_resources_noexcept();
     }
 };
 
@@ -330,6 +678,77 @@ struct MergeHeadGreater {
         return lhs.encoded > rhs.encoded;
     }
 };
+
+using MergeHeadQueue = std::priority_queue<
+    MergeHead, std::vector<MergeHead>, MergeHeadGreater>;
+
+struct AdmittedMergeHeadQueue {
+    // Queue capacity is destroyed before its permit by reverse order.
+    bioseq::parallelism::MemoryPermit permit;
+    MergeHeadQueue queue;
+
+    AdmittedMergeHeadQueue() = default;
+    AdmittedMergeHeadQueue(const AdmittedMergeHeadQueue&) = delete;
+    AdmittedMergeHeadQueue& operator=(const AdmittedMergeHeadQueue&) = delete;
+    AdmittedMergeHeadQueue(AdmittedMergeHeadQueue&& other) noexcept {
+        // Transfer queue storage while the source reservation is still live;
+        // only then move the permit.  This also makes a non-elided return safe.
+        queue.swap(other.queue);
+        permit = std::move(other.permit);
+    }
+    AdmittedMergeHeadQueue& operator=(AdmittedMergeHeadQueue&&) = delete;
+};
+
+[[nodiscard]] AdmittedMergeHeadQueue make_admitted_merge_head_queue(
+        std::size_t maximum_heads) {
+    const std::uint64_t logical_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(maximum_heads),
+        static_cast<std::uint64_t>(sizeof(MergeHead)));
+    const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
+        logical_bytes,
+        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    if (logical_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || admitted_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+        .try_reserve(admitted_headroom);
+    if (!permit) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    std::vector<MergeHead> backing;
+    backing.reserve(maximum_heads);
+    const std::uint64_t exact_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(backing.capacity()),
+        static_cast<std::uint64_t>(sizeof(MergeHead)));
+    if (exact_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || exact_bytes > permit->bytes()) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    permit->shrink_to(exact_bytes);
+    // Construct the potentially-throwing queue while the local permit still
+    // owns the reservation.  The final swaps/move are non-throwing.
+    MergeHeadQueue prepared{MergeHeadGreater{}, std::move(backing)};
+    AdmittedMergeHeadQueue admitted;
+    admitted.queue.swap(prepared);
+    admitted.permit = std::move(*permit);
+    return admitted;
+}
+
+[[nodiscard]] std::uint64_t file_reader_owned_capacity_bytes(
+        const std::vector<FileReader>& readers) noexcept {
+    std::uint64_t bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(readers.capacity()),
+        static_cast<std::uint64_t>(sizeof(FileReader)));
+    for (const FileReader& reader : readers) {
+        bytes = bioseq::parallelism::saturating_add(
+            bytes,
+            bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(reader.buffer.capacity()),
+                static_cast<std::uint64_t>(sizeof(SortedPairWire))));
+    }
+    return bytes;
+}
 
 } // namespace bioseq::storage::indexing
 
@@ -396,13 +815,21 @@ public:
     void release_resident_runs_noexcept() noexcept;
     void release_runs_noexcept() noexcept;
     void release_runs();
+    void abandon_after_pg_error_noexcept() noexcept {
+        poisoned_ = true;
+        release_runs_noexcept();
+    }
 
 	private:
 	    void steal_(SortedPairRunStore&& other) noexcept;
 	    void merge_runs_erased(SortedPairKmerSink sink);
 	    void merge_runs_erased_impl_(SortedPairKmerSink sink, MergeResources& resources);
+	    void finalize_file_handles_success_();
 	    [[nodiscard]] bool try_ensure_write_buffer_(std::size_t requested_bytes);
+	    [[nodiscard]] std::size_t spill_sorted_run_impl_(
+            std::span<const sorted_pair_t> sorted);
 	    [[nodiscard]] std::size_t spill_sorted_run_direct_(std::span<const sorted_pair_t> sorted);
+	    void demote_resident_runs_until_available_impl_(std::uint64_t bytes_needed);
 	    [[nodiscard]] bool demote_largest_resident_run_();
 	    [[nodiscard]] std::uint64_t merge_reader_budget_bytes_() const;
 	    void compact_file_runs_until_bounded_();
@@ -416,14 +843,19 @@ public:
     [[nodiscard]] bool try_open_file_readers_(MergeResources& resources);
     void open_file_readers_(MergeResources& resources);
 
+    bioseq::parallelism::MemoryPermit memory_runs_metadata_permit_;
     std::vector<MemoryRun> memory_runs_;
+    bioseq::parallelism::MemoryPermit file_runs_metadata_permit_;
     std::vector<BufFileRun> file_runs_;
     std::uint64_t memory_run_bytes_ = 0;
     std::uint64_t memory_run_peak_bytes_ = 0;
     std::uint64_t spilled_run_bytes_ = 0;
-    std::vector<SortedPairWire> write_buffer_;
+    // Permit first => default reverse destruction drops capacity first.
     bioseq::parallelism::MemoryPermit write_buffer_permit_;
+    std::vector<SortedPairWire> write_buffer_;
     SortedRunStoreStats stats_{};
+    bool poisoned_ = false;
+    bool finalized_ = false;
 };
 
 } // namespace bioseq::storage::indexing
@@ -445,20 +877,32 @@ void SortedPairPositionCursor::for_each_batch_erased(PositionBatchSink sink) con
 }
 
 void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
-    memory_runs_ = std::move(other.memory_runs_);
-    file_runs_ = std::move(other.file_runs_);
+    // The destination is capacity-free (default construction or checked
+    // release before move assignment).  Swap first while the source permit is
+    // still live, then transfer the permit; this leaves no unspecified
+    // moved-from vector capacity behind without a reservation.
+    memory_runs_.swap(other.memory_runs_);
+    memory_runs_metadata_permit_ =
+        std::move(other.memory_runs_metadata_permit_);
+    file_runs_.swap(other.file_runs_);
+    file_runs_metadata_permit_ =
+        std::move(other.file_runs_metadata_permit_);
     memory_run_bytes_ = other.memory_run_bytes_;
     memory_run_peak_bytes_ = other.memory_run_peak_bytes_;
     spilled_run_bytes_ = other.spilled_run_bytes_;
-    write_buffer_ = std::move(other.write_buffer_);
+    write_buffer_.swap(other.write_buffer_);
     write_buffer_permit_ = std::move(other.write_buffer_permit_);
     stats_ = other.stats_;
+    poisoned_ = other.poisoned_;
+    finalized_ = other.finalized_;
 
     other.file_runs_.clear();
     other.memory_run_bytes_ = 0;
     other.memory_run_peak_bytes_ = 0;
     other.spilled_run_bytes_ = 0;
     other.stats_ = {};
+    other.poisoned_ = true;
+    other.finalized_ = true;
 }
 
 	bool SortedPairRunStore::try_ensure_write_buffer_(std::size_t requested_bytes) {
@@ -466,20 +910,59 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	        return true;
 	    }
 	    requested_bytes = std::max<std::size_t>(requested_bytes, sizeof(SortedPairWire));
+	    if (requested_bytes
+	            > (std::numeric_limits<std::size_t>::max)()
+	                - (sizeof(SortedPairWire) - 1u)) {
+	        return false;
+	    }
+	    const std::uint64_t logical_bytes = static_cast<std::uint64_t>(requested_bytes);
+	    const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
+	        logical_bytes,
+	        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+	    if (admitted_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
+	        return false;
+	    }
 	    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-	        .try_reserve(static_cast<std::uint64_t>(requested_bytes));
+	        .try_reserve(admitted_headroom);
 	    if (!permit) {
 	        return false;
 	    }
-	    write_buffer_.reserve(requested_bytes / sizeof(SortedPairWire));
-	    write_buffer_permit_ = std::move(*permit);
+	    struct CandidateWriteBuffer {
+	        bioseq::parallelism::MemoryPermit permit;
+	        std::vector<SortedPairWire> values;
+	    } candidate{
+	        .permit = std::move(*permit),
+	        .values = {},
+	    };
+	    const std::size_t requested_pairs =
+	        (requested_bytes + sizeof(SortedPairWire) - 1u)
+	        / sizeof(SortedPairWire);
+	    candidate.values.reserve(requested_pairs);
+	    if (candidate.values.capacity()
+	            > (std::numeric_limits<std::uint64_t>::max)()
+	                / sizeof(SortedPairWire)) {
+	        return false;
+	    }
+	    const std::uint64_t exact_bytes =
+	        static_cast<std::uint64_t>(candidate.values.capacity())
+	        * sizeof(SortedPairWire);
+	    if (exact_bytes > candidate.permit.bytes()) {
+	        return false;
+	    }
+	    candidate.permit.shrink_to(exact_bytes);
+	    write_buffer_ = std::move(candidate.values);
+	    write_buffer_permit_ = std::move(candidate.permit);
 	    return true;
 	}
 
 	std::size_t SortedPairRunStore::spill_sorted_run_direct_(
 	        std::span<const sorted_pair_t> sorted) {
 	    const std::size_t run_index = memory_runs_.size() + file_runs_.size();
-	    BufFile* file = BufFileCreateTemp(false);
+	    if (!try_ensure_admitted_vector_capacity(
+	            file_runs_, file_runs_metadata_permit_, file_runs_.size() + 1u)) {
+	        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+	    }
+	    BufFile* file = create_temp_buffile_as_cpp();
 	    if (file == nullptr) {
 	        report_sorted_run_error(SortedRunError::temp_file_create_failed);
 	    }
@@ -493,8 +976,9 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	            const sorted_pair_t& p = sorted[off + i];
 	            stack_buffer[i] = SortedPairWire{.kmer = p.first, .encoded = p.second};
 	        }
-	        BufFileWrite(file, stack_buffer.data(), n * sizeof(SortedPairWire));
-	        CHECK_FOR_INTERRUPTS();
+	        write_buffile_as_cpp(
+            file, stack_buffer.data(), n * sizeof(SortedPairWire));
+	        check_for_interrupts_as_cpp();
 	    }
 
 	    run.pair_count = static_cast<std::uint64_t>(sorted.size());
@@ -502,7 +986,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	        sorted.size() * sizeof(SortedPairWire));
 	    spilled_run_bytes_ += run.byte_count;
 	    ++stats_.postgres_temp_file_count;
-	    const int64 size = BufFileSize(file);
+	    const int64 size = size_buffile_as_cpp(file);
 	    if (size > 0) {
 	        stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
 	    }
@@ -511,9 +995,14 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    return run_index;
 	}
 
-	std::size_t SortedPairRunStore::spill_sorted_run(std::span<const sorted_pair_t> sorted) {
+	std::size_t SortedPairRunStore::spill_sorted_run_impl_(
+        std::span<const sorted_pair_t> sorted) {
 	    const std::size_t run_index = memory_runs_.size() + file_runs_.size();
-	    BufFile* file = BufFileCreateTemp(false);
+	    if (!try_ensure_admitted_vector_capacity(
+	            file_runs_, file_runs_metadata_permit_, file_runs_.size() + 1u)) {
+	        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+	    }
+	    BufFile* file = create_temp_buffile_as_cpp();
     if (file == nullptr) {
         report_sorted_run_error(SortedRunError::temp_file_create_failed);
     }
@@ -521,7 +1010,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    BufFileRun& run = file_runs_.back();
 
 	    if (!try_ensure_write_buffer_(std::size_t{8} << 20)) {
-	        close_buffile_noexcept(file_runs_.back().file);
+	        close_buffile_checked_as_cpp(file_runs_.back().file);
 	        file_runs_.pop_back();
 	        return spill_sorted_run_direct_(sorted);
 	    }
@@ -533,8 +1022,9 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
             const sorted_pair_t& p = sorted[off + i];
             write_buffer_.push_back(SortedPairWire{.kmer = p.first, .encoded = p.second});
         }
-        BufFileWrite(file, write_buffer_.data(), n * sizeof(SortedPairWire));
-        CHECK_FOR_INTERRUPTS();
+        write_buffile_as_cpp(
+            file, write_buffer_.data(), n * sizeof(SortedPairWire));
+        check_for_interrupts_as_cpp();
     }
 
     run.pair_count = static_cast<std::uint64_t>(sorted.size());
@@ -542,7 +1032,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
         sorted.size() * sizeof(SortedPairWire));
     spilled_run_bytes_ += run.byte_count;
     ++stats_.postgres_temp_file_count;
-    const int64 size = BufFileSize(file);
+    const int64 size = size_buffile_as_cpp(file);
     if (size > 0) {
         stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
     }
@@ -550,6 +1040,20 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    stats_.spilled_bytes = spilled_run_bytes_;
 	    return run_index;
 	}
+
+std::size_t SortedPairRunStore::spill_sorted_run(
+        std::span<const sorted_pair_t> sorted) {
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    if (finalized_) {
+        report_sorted_run_error(SortedRunError::finalized_store_reused);
+    }
+    poisoned_ = true;
+    const std::size_t run_index = spill_sorted_run_impl_(sorted);
+    poisoned_ = false;
+    return run_index;
+}
 
 	bool SortedPairRunStore::demote_largest_resident_run_() {
 	    if (memory_runs_.empty()) {
@@ -566,7 +1070,8 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    const std::uint64_t admitted_bytes = run.admitted_bytes;
 	    spill_sorted_run_direct_(
 	        std::span<const sorted_pair_t>(run.pairs.data(), run.pairs.size()));
-	    run.permit.release();
+	    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+	        run.pairs, run.permit);
 	    if (memory_run_bytes_ >= admitted_bytes) {
 	        memory_run_bytes_ -= admitted_bytes;
 	    } else {
@@ -580,7 +1085,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    return true;
 	}
 
-	void SortedPairRunStore::demote_resident_runs_until_available(
+	void SortedPairRunStore::demote_resident_runs_until_available_impl_(
 	        std::uint64_t bytes_needed) {
 	    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
 	    while (!memory_runs_.empty()) {
@@ -595,6 +1100,19 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    }
 	}
 
+void SortedPairRunStore::demote_resident_runs_until_available(
+        std::uint64_t bytes_needed) {
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    if (finalized_) {
+        report_sorted_run_error(SortedRunError::finalized_store_reused);
+    }
+    poisoned_ = true;
+    demote_resident_runs_until_available_impl_(bytes_needed);
+    poisoned_ = false;
+}
+
 std::size_t SortedPairRunStore::spill_sorted_run_owned(
         std::vector<sorted_pair_t> sorted) {
     const std::uint64_t capacity_bytes =
@@ -608,40 +1126,50 @@ std::size_t SortedPairRunStore::spill_sorted_run_owned(
     }
 
     ++stats_.spill_count_from_pressure;
-    std::vector<sorted_pair_t>* volatile owned =
-        new std::vector<sorted_pair_t>(std::move(sorted));
-    std::size_t volatile run_index = 0;
-    PG_TRY();
-    {
-        run_index = spill_sorted_run(
-            std::span<const sorted_pair_t>(owned->data(), owned->size()));
-        delete owned;
-        owned = nullptr;
-    }
-    PG_CATCH();
-    {
-        delete owned;
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-    return run_index;
+    return spill_sorted_run(
+        std::span<const sorted_pair_t>(sorted.data(), sorted.size()));
 }
 
 std::size_t SortedPairRunStore::spill_sorted_run_owned_admitted(
         std::vector<sorted_pair_t> sorted,
         std::uint64_t admitted_bytes,
         bioseq::parallelism::MemoryPermit permit) {
-    if (!permit && admitted_bytes != 0) {
+    MemoryRun candidate{
+        .permit = std::move(permit),
+        .admitted_bytes = admitted_bytes,
+        .pairs = std::move(sorted),
+    };
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    if (finalized_) {
+        report_sorted_run_error(SortedRunError::finalized_store_reused);
+    }
+    if (!candidate.permit && admitted_bytes != 0) {
+        report_sorted_run_error(SortedRunError::admitted_run_without_permit);
+    }
+    const std::uint64_t exact_capacity_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(candidate.pairs.capacity()),
+        static_cast<std::uint64_t>(sizeof(sorted_pair_t)));
+    if (exact_capacity_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || exact_capacity_bytes != admitted_bytes
+        || candidate.permit.bytes() < exact_capacity_bytes
+        || memory_run_bytes_
+            > (std::numeric_limits<std::uint64_t>::max)() - admitted_bytes) {
         report_sorted_run_error(SortedRunError::admitted_run_without_permit);
     }
     const std::size_t run_index = memory_runs_.size() + file_runs_.size();
-    memory_run_bytes_ += admitted_bytes;
+    candidate.permit.shrink_to(exact_capacity_bytes);
+    const std::uint64_t next_memory_run_bytes =
+        memory_run_bytes_ + admitted_bytes;
+    if (!try_ensure_admitted_vector_capacity(
+            memory_runs_, memory_runs_metadata_permit_,
+            memory_runs_.size() + 1u)) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    memory_runs_.push_back(std::move(candidate));
+    memory_run_bytes_ = next_memory_run_bytes;
     memory_run_peak_bytes_ = std::max(memory_run_peak_bytes_, memory_run_bytes_);
-    memory_runs_.push_back(MemoryRun{
-        .pairs = std::move(sorted),
-        .admitted_bytes = admitted_bytes,
-        .permit = std::move(permit),
-    });
     stats_.resident_runs = static_cast<std::uint64_t>(memory_runs_.size());
     stats_.resident_bytes = memory_run_bytes_;
     stats_.resident_peak_bytes = memory_run_peak_bytes_;
@@ -649,6 +1177,11 @@ std::size_t SortedPairRunStore::spill_sorted_run_owned_admitted(
 }
 
 std::uint64_t SortedPairRunStore::merge_reader_budget_bytes_() const {
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_sorted_run_merge_reader_budget_for_test != 0u) {
+        return g_sorted_run_merge_reader_budget_for_test;
+    }
+#endif
     auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
     const std::uint64_t available = admission.allocatable_after_reservations();
     if (available == 0) {
@@ -673,25 +1206,30 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
         std::uint64_t{32} << 10,
         std::uint64_t{4} << 20);
     const std::uint64_t total_reader_bytes =
-        bioseq::parallelism::saturating_mul(
-            per_reader,
-            static_cast<std::uint64_t>(file_runs_.size()));
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-        .try_reserve(total_reader_bytes);
-    if (!permit) {
-        if (file_runs_.size() > 1) {
-            return false;
-        }
-        // The store has already compacted to one file run. Keep the merge
-        // streaming with a fixed 32 KiB reader instead of failing a query after
-        // the large sorted runs consumed the formal admission budget.
-        per_reader = std::uint64_t{32} << 10;
-    } else {
-        resources.reader_budget_permit = std::move(*permit);
+        bioseq::parallelism::saturating_add(
+            bioseq::parallelism::saturating_mul(
+                per_reader,
+                static_cast<std::uint64_t>(file_runs_.size())),
+            bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(file_runs_.size()),
+                static_cast<std::uint64_t>(sizeof(FileReader))));
+    const std::uint64_t reader_headroom = bioseq::parallelism::saturating_mul(
+        total_reader_bytes,
+        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    if (total_reader_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || reader_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
+        return false;
     }
+    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+        .try_reserve(reader_headroom);
+    if (!permit) {
+        return false;
+    }
+    resources.reader_budget_permit = std::move(*permit);
+    resources.readers.reserve(file_runs_.size());
 
     for (BufFileRun& run : file_runs_) {
-        if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
+        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
             report_sorted_run_error(SortedRunError::run_rewind_failed);
         }
         FileReader reader{};
@@ -700,14 +1238,22 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
         reader.buffer.reserve(std::max<std::uint64_t>(
             1, per_reader / sizeof(SortedPairWire)));
         resources.readers.push_back(std::move(reader));
-        stats_.merge_reader_buffer_bytes += per_reader;
     }
+    const std::uint64_t exact_reader_bytes =
+        file_reader_owned_capacity_bytes(resources.readers);
+    if (exact_reader_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || exact_reader_bytes > resources.reader_budget_permit.bytes()) {
+        resources.finish_success();
+        return false;
+    }
+    resources.reader_budget_permit.shrink_to(exact_reader_bytes);
+    stats_.merge_reader_buffer_bytes += exact_reader_bytes;
     return true;
 }
 
 void SortedPairRunStore::open_file_readers_(MergeResources& resources) {
     while (!try_open_file_readers_(resources)) {
-        resources.release_noexcept();
+        resources.finish_success();
         if (file_runs_.size() <= 1) {
             report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
         }
@@ -721,23 +1267,61 @@ void SortedPairRunStore::merge_sorted_file_runs_to_writer_(
         std::span<BufFileRun> runs,
         MergeResources& resources,
         Writer&& writer) {
-    resources.release_noexcept();
+    resources.finish_success();
+    const std::uint64_t reader_budget = merge_reader_budget_bytes_();
+    const std::uint64_t per_reader_bytes = std::clamp<std::uint64_t>(
+        reader_budget / std::max<std::size_t>(1u, runs.size()),
+        std::uint64_t{32} << 10,
+        std::uint64_t{4} << 20);
+    const std::uint64_t logical_reader_bytes = bioseq::parallelism::saturating_add(
+        bioseq::parallelism::saturating_mul(
+            static_cast<std::uint64_t>(runs.size()), per_reader_bytes),
+        bioseq::parallelism::saturating_mul(
+            static_cast<std::uint64_t>(runs.size()),
+            static_cast<std::uint64_t>(sizeof(FileReader))));
+    const std::uint64_t reader_headroom = bioseq::parallelism::saturating_mul(
+        logical_reader_bytes,
+        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    if (logical_reader_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || reader_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    auto reader_permit = bioseq::parallelism::MemoryAdmissionController::instance()
+        .try_reserve(reader_headroom);
+    if (!reader_permit) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    resources.reader_budget_permit = std::move(*reader_permit);
     resources.readers.reserve(runs.size());
-    std::priority_queue<MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
     for (BufFileRun& run : runs) {
-        if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
+        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
             report_sorted_run_error(SortedRunError::compacted_run_rewind_failed);
         }
         FileReader reader{};
         reader.file = run.file;
         reader.remaining = run.pair_count;
-        reader.buffer.reserve(std::size_t{1} << 15);
+        reader.buffer.reserve(static_cast<std::size_t>(
+            std::max<std::uint64_t>(
+                1u, per_reader_bytes / sizeof(SortedPairWire))));
+        resources.readers.push_back(std::move(reader));
+    }
+    const std::uint64_t exact_reader_bytes =
+        file_reader_owned_capacity_bytes(resources.readers);
+    if (exact_reader_bytes == (std::numeric_limits<std::uint64_t>::max)()
+        || exact_reader_bytes > resources.reader_budget_permit.bytes()) {
+        report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+    }
+    resources.reader_budget_permit.shrink_to(exact_reader_bytes);
+    stats_.merge_reader_buffer_bytes += exact_reader_bytes;
+
+    auto admitted_heap = make_admitted_merge_head_queue(runs.size());
+    MergeHeadQueue& heap = admitted_heap.queue;
+    for (std::size_t idx = 0; idx < resources.readers.size(); ++idx) {
+        FileReader& reader = resources.readers[idx];
         if (reader.read_next()) {
-            resources.readers.push_back(std::move(reader));
-            const std::size_t idx = resources.readers.size() - 1;
             heap.push(MergeHead{
-                .kmer = resources.readers.back().current.kmer,
-                .encoded = resources.readers.back().current.encoded,
+                .kmer = reader.current.kmer,
+                .encoded = reader.current.encoded,
                 .run_index = idx,
                 .file = true,
             });
@@ -762,45 +1346,46 @@ void SortedPairRunStore::merge_sorted_file_runs_to_writer_(
 BufFileRun SortedPairRunStore::merge_file_run_group_to_new_buffile_(
         std::size_t lo,
         std::size_t hi) {
-    BufFile* volatile out_file = BufFileCreateTemp(false);
+#ifdef BIOSEQ_TEST_INDEXES
+    bioseq::pg_utils::invoke_pg_as_cpp([] {
+        inject_sorted_run_pg_leaf_failure(
+            SortedRunPgLeafFailure::compact_create_before);
+    });
+#endif
+    BufFile* out_file = create_temp_buffile_as_cpp();
     if (out_file == nullptr) {
         report_sorted_run_error(SortedRunError::compact_temp_file_create_failed);
     }
-    MergeResources* volatile resources = new MergeResources();
+    auto resources = std::make_unique<MergeResources>();
     BufFileRun out{.file = out_file};
-    PG_TRY();
-    {
+    try {
         merge_sorted_file_runs_to_writer_(
             std::span<BufFileRun>(file_runs_.data() + lo, hi - lo),
             *resources,
             [&](SortedPairWire pair) {
-                BufFileWrite(out_file, &pair, sizeof(pair));
+                write_buffile_as_cpp(out_file, &pair, sizeof(pair));
                 ++out.pair_count;
                 out.byte_count += sizeof(pair);
             });
         ++stats_.postgres_temp_file_count;
-        const int64 size = BufFileSize(out.file);
+        const int64 size = size_buffile_as_cpp(out.file);
         if (size > 0) {
             stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
         }
-        resources->release_noexcept();
-        delete resources;
-        resources = nullptr;
+        resources->finish_success();
         out_file = nullptr;
+    } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+        resources->abandon_pg_resources_noexcept();
+        // out_file remains registered with the current ResourceOwner.
+        out_file = nullptr;
+        throw;
+    } catch (...) {
+        // The caller will turn the C++ failure into a PostgreSQL ERROR.  Do
+        // not call BufFileClose while preserving that original exception.
+        resources->abandon_pg_resources_noexcept();
+        abandon_buffile_noexcept(out_file);
+        throw;
     }
-    PG_CATCH();
-    {
-        if (resources != nullptr) {
-            resources->release_noexcept();
-            delete resources;
-        }
-        if (out_file != nullptr) {
-            BufFile* close_file = out_file;
-            close_buffile_noexcept(close_file);
-        }
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
     return out;
 }
 
@@ -811,33 +1396,46 @@ void SortedPairRunStore::compact_file_runs_to_output_count_(
         const std::size_t group_size = std::max<std::size_t>(
             2,
             (file_runs_.size() + target_output_runs - 1) / target_output_runs);
-        std::vector<BufFileRun>* volatile next = new std::vector<BufFileRun>();
-        PG_TRY();
-        {
-            next->reserve(target_output_runs);
+        AdmittedOwnedVector<BufFileRun> admitted_next;
+        if (!try_ensure_admitted_vector_capacity(
+                admitted_next, target_output_runs)) {
+            report_sorted_run_error(SortedRunError::merge_reader_admission_failed);
+        }
+        std::vector<BufFileRun>& next = admitted_next.values;
+        try {
             for (std::size_t lo = 0; lo < file_runs_.size(); lo += group_size) {
                 const std::size_t hi = std::min(file_runs_.size(), lo + group_size);
-                next->push_back(merge_file_run_group_to_new_buffile_(lo, hi));
+                next.push_back(merge_file_run_group_to_new_buffile_(lo, hi));
                 for (std::size_t i = lo; i < hi; ++i) {
-                    close_buffile_noexcept(file_runs_[i].file);
+                    close_buffile_checked_as_cpp(file_runs_[i].file);
                 }
             }
-            file_runs_ = std::move(*next);
-            delete next;
-            next = nullptr;
+            bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+                file_runs_, file_runs_metadata_permit_);
+            // `file_runs_` is now capacity-free.  Swap transfers the next
+            // allocation while its permit remains live and proves `next` is
+            // empty before that permit moves into the store.
+            file_runs_.swap(next);
+            file_runs_metadata_permit_ = std::move(admitted_next.permit);
             ++stats_.merge_pass_count;
-        }
-        PG_CATCH();
-        {
-            if (next != nullptr) {
-                for (BufFileRun& run : *next) {
-                    close_buffile_noexcept(run.file);
-                }
-                delete next;
+        } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+            // Some earlier input groups may already be closed.  The original
+            // run set is no longer retryable even if this helper is ever
+            // reached from a new caller that did not pre-poison the store.
+            poisoned_ = true;
+            for (BufFileRun& run : next) {
+                // ResourceOwner cleanup owns files touched by the failed PG
+                // operation; do not issue more PostgreSQL calls here.
+                run.file = nullptr;
             }
-            PG_RE_THROW();
+            throw;
+        } catch (...) {
+            poisoned_ = true;
+            for (BufFileRun& run : next) {
+                abandon_buffile_noexcept(run.file);
+            }
+            throw;
         }
-        PG_END_TRY();
     }
 }
 
@@ -858,7 +1456,9 @@ void SortedPairRunStore::merge_runs_erased_impl_(
     compact_file_runs_until_bounded_();
     open_file_readers_(resources);
 
-    std::priority_queue<MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
+    auto admitted_heap = make_admitted_merge_head_queue(
+        memory_runs_.size() + resources.readers.size());
+    MergeHeadQueue& heap = admitted_heap.queue;
     for (std::size_t run_index = 0; run_index < memory_runs_.size(); ++run_index) {
         const auto& pairs = memory_runs_[run_index].pairs;
         if (!pairs.empty()) {
@@ -930,48 +1530,80 @@ void SortedPairRunStore::merge_runs_erased_impl_(
 }
 
 void SortedPairRunStore::merge_runs_erased(SortedPairKmerSink sink) {
-    MergeResources* volatile resources = new MergeResources();
-    PG_TRY();
-    {
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    if (finalized_) {
+        report_sorted_run_error(SortedRunError::finalized_store_reused);
+    }
+    poisoned_ = true;
+    auto resources = std::make_unique<MergeResources>();
+    try {
         merge_runs_erased_impl_(sink, *resources);
-        resources->release_noexcept();
-        delete resources;
-        resources = nullptr;
+        resources->finish_success();
+        // MPS qualification and generation encoding deliberately replay the
+        // same immutable runs. Keep successful handles rewindable until the
+        // owning storage calls the checked `release_runs()` boundary.
+        poisoned_ = false;
+    } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+        resources->abandon_pg_resources_noexcept();
+        throw;
+    } catch (...) {
+        // The callback may throw an ordinary C++ exception.  Abandon all
+        // ResourceOwner-backed handles; closing here could mask that error.
+        resources->abandon_pg_resources_noexcept();
+        throw;
     }
-    PG_CATCH();
-    {
-        if (resources != nullptr) {
-            resources->release_noexcept();
-            delete resources;
-        }
-        PG_RE_THROW();
+}
+
+void SortedPairRunStore::finalize_file_handles_success_() {
+    for (BufFileRun& run : file_runs_) {
+        close_buffile_checked_as_cpp(run.file);
     }
-    PG_END_TRY();
 }
 
 void SortedPairRunStore::release_resident_runs_noexcept() noexcept {
     for (MemoryRun& run : memory_runs_) {
-        run.permit.release();
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            run.pairs, run.permit);
     }
-    memory_runs_.clear();
+    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+        memory_runs_, memory_runs_metadata_permit_);
     memory_run_bytes_ = 0;
     memory_run_peak_bytes_ = 0;
 }
 
 void SortedPairRunStore::release_runs_noexcept() noexcept {
     release_resident_runs_noexcept();
-    write_buffer_permit_.release();
-    release_vector_storage_noexcept(write_buffer_);
+    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+        write_buffer_, write_buffer_permit_);
     for (BufFileRun& run : file_runs_) {
-        close_buffile_noexcept(run.file);
+        // Destructors, move assignment and explicit error cleanup never enter
+        // PostgreSQL.  Temp files remain registered with ResourceOwner.
+        abandon_buffile_noexcept(run.file);
     }
-    file_runs_.clear();
+    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+        file_runs_, file_runs_metadata_permit_);
     spilled_run_bytes_ = 0;
     stats_ = {};
+    finalized_ = false;
 }
 
 void SortedPairRunStore::release_runs() {
-    release_runs_noexcept();
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    poisoned_ = true;
+    finalize_file_handles_success_();
+    release_resident_runs_noexcept();
+    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+        write_buffer_, write_buffer_permit_);
+    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+        file_runs_, file_runs_metadata_permit_);
+    spilled_run_bytes_ = 0;
+    stats_ = {};
+    finalized_ = false;
+    poisoned_ = false;
 }
 
 } // namespace bioseq::storage::indexing

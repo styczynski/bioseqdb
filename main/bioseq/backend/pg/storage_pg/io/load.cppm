@@ -76,6 +76,7 @@ import bioseq.io.public_api;               // stream_sequences_file, packed_sequ
 import bioseq.io.identifier_formats;       // header_format, header_format_from_sql_name (DOC0295)
 import bioseq.io.identifier_parser;        // resolve_identifier_mapping, parse_and_route_header
 import bioseq.storage.metadata;                   // create_estate_for_relation (DOC0295 §9.3);
+import bioseq.storage.physical;
                                            // bioseq_init_write_state +
                                            // BioseqColumnPopWriteStateForRelfilenode (DOC0322 §7)
                                            // (pg_utils already imported above: find_primary_key_oid)
@@ -236,6 +237,7 @@ struct default_col { std::int16_t attno; ExprState* state; };
 struct LoadContext {
     Oid main_relid;                                  // parent table OID (for update_index)
     Oid db_oid, spc_oid; RelFileNumber main_relfilenode;
+    std::uint64_t main_storage_id = 0;
     Relation parent_rel; TupleDesc parent_td;
     LoadColumns cols;
     bioseq::storage::seq_caches* caches;
@@ -349,7 +351,8 @@ void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
                       std::string_view header,
                       std::uint8_t alphabet_code, std::uint8_t byte_width,
                       std::uint16_t last_pad, sequence_size_t total_bp,
-                      const bioseq::storage::seq_locator& locator) {
+                      bioseq::storage::PendingSequenceSource&& pending_source) {
+    const bioseq::storage::seq_locator locator = pending_source.locator();
     pgseq_t* stub = bioseq::storage::alloc_locator_stub_in(
         BioseqColumnWritePerTupleContext(ctx.write_state),
         alphabet_code, byte_width, last_pad, total_bp, locator);
@@ -386,6 +389,7 @@ void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
 	        ctx.cols.header_attno, bioseq::pg_utils::pg_datum::from_pointer(htext));
 	}
     tuple_writer.end_tuple();  // defaults, ExecConstraints, BioseqColumnWriteRow, ctx reset
+    pending_source.publish_after_parent_row();
     error_context_stack = errctx.previous;
     ctx.current_header = {};
     ctx.current_column_name = nullptr;
@@ -418,7 +422,8 @@ struct load_stream_sink {
                 errmsg("bioseq.load: FASTA/FASTQ header exceeds INT_MAX")));
         header.assign(h);
         total_bp = 0;
-        writer.begin(ctx.db_oid, ctx.spc_oid, ctx.main_relfilenode,
+        writer.begin(ctx.main_relid, ctx.db_oid, ctx.spc_oid,
+                     ctx.main_relfilenode, ctx.main_storage_id,
                      ctx.cols.seq_attno, ctx.parent_td, kColAlphabetCode,
                      static_cast<std::uint8_t>(ColBW), ctx.cap_bytes,
                      ctx.caches);
@@ -438,10 +443,10 @@ struct load_stream_sink {
         const std::uint16_t last_pad = (total_bp == 0) ? 0
             : static_cast<std::uint16_t>(
                   ((total_bp + col_lpu - 1) / col_lpu) * col_lpu - total_bp);
-        const auto locator = writer.finish(total_bp, last_pad);
+        auto pending_source = writer.finish(total_bp, last_pad);
         write_parent_row(ctx, tuple_writer, header, kColAlphabetCode,
                          static_cast<std::uint8_t>(ColBW), last_pad,
-                         total_bp, locator);
+                         total_bp, std::move(pending_source));
         ++records;
     }
 };
@@ -1152,6 +1157,8 @@ void cleanup_load_context(LoadContext& ctx, bool commit) {
         ctx.db_oid           = ctx.parent_rel->rd_locator.dbOid;
         ctx.spc_oid          = ctx.parent_rel->rd_locator.spcOid;
         ctx.main_relfilenode = ctx.parent_rel->rd_locator.relNumber;
+        ctx.main_storage_id =
+            BioseqColumnStorageGetStorageId(ctx.parent_rel, false);
         ctx.cap_bytes        = bioseq::storage::read_max_sub_table_cap_bytes();
 
         ctx.write_state = bioseq_init_write_state(

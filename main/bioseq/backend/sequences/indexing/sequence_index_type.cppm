@@ -48,6 +48,37 @@ enum class IndexUpdatePolicy : std::uint8_t {
     return p == IndexUpdatePolicy::UPDATE_ON_INSERT ? "UPDATE_ON_INSERT" : "UPDATE_MANUALLY";
 }
 
+/// Per-call contract for reading a persisted target minimizer index. This is
+/// target-independent and travels unchanged from the SQL options decoder to
+/// the typed processor; it is not a GUC-derived execution hint.
+enum class IndexReadRequirement : std::uint8_t {
+    allow = 0,
+    require_absent = 1,
+    require_compatible_persisted = 2,
+};
+static_assert(static_cast<std::uint8_t>(IndexReadRequirement::allow) == 0);
+static_assert(static_cast<std::uint8_t>(IndexReadRequirement::require_absent) == 1);
+static_assert(static_cast<std::uint8_t>(
+                  IndexReadRequirement::require_compatible_persisted) == 2);
+
+[[nodiscard]] constexpr std::string_view index_read_requirement_name(
+        IndexReadRequirement requirement) noexcept {
+    switch (requirement) {
+        case IndexReadRequirement::allow: return "allow";
+        case IndexReadRequirement::require_absent: return "require_absent";
+        case IndexReadRequirement::require_compatible_persisted:
+            return "require_compatible_persisted";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr bool index_read_requirement_ordinal_valid(
+        std::int32_t ordinal) noexcept {
+    return ordinal >= static_cast<std::int32_t>(IndexReadRequirement::allow)
+        && ordinal <= static_cast<std::int32_t>(
+            IndexReadRequirement::require_compatible_persisted);
+}
+
 /// SQL-facing index names. Keep these in the low-level type module so registry,
 /// index implementations, scheduler, and SQL glue all share the same spelling
 /// without introducing module cycles.
@@ -89,7 +120,18 @@ constexpr std::array<std::string_view, 2> DEFAULT_UPDATE_ON_INSERT_INDEXES = {
 /// because the SQL column is BIGINT and the high reserved sentinels use int64_t.
 using index_sub_key_t = std::int64_t;
 constexpr index_sub_key_t TEMP_RUN_BASE     = index_sub_key_t{1} << 62;
+/// Revision-3 positions occupy a disjoint physical sub-key namespace.  The
+/// directory stores the logical/control key below this base; the position row
+/// key is derived as POSITION_EXTENT_BASE + logical_key.
+constexpr index_sub_key_t POSITION_EXTENT_BASE = index_sub_key_t{1} << 61;
+/// Revision-3 generation-head row, directly below the legacy directory sentinel.
+constexpr index_sub_key_t GENERATION_HEAD_SUB_KEY =
+    std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{1};
 constexpr index_sub_key_t DIRECTORY_SUB_KEY = std::numeric_limits<index_sub_key_t>::max();
+static_assert(POSITION_EXTENT_BASE > 0);
+static_assert(POSITION_EXTENT_BASE + POSITION_EXTENT_BASE == TEMP_RUN_BASE);
+static_assert(GENERATION_HEAD_SUB_KEY > TEMP_RUN_BASE);
+static_assert(GENERATION_HEAD_SUB_KEY < DIRECTORY_SUB_KEY);
 static_assert(DIRECTORY_SUB_KEY > TEMP_RUN_BASE);
 
 /// Largest blob we persist as ONE BYTEA index tuple. Bounded well under Postgres
