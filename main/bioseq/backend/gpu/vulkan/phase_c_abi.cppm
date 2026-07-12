@@ -17,12 +17,15 @@
  * query/target wires carry the output minimizer/anchor slices the count submit
  * fills. `GpuAnchorWire` deliberately mirrors the 24-byte `bioseq::chaining::Anchor`
  * so the device seed-emit writes straight into the chain-DP input buffer with no
- * transcode (DOC0310 §6).
+ * transcode (DOC0310 §6). The inactive grouped32 ABI2 records additionally pin
+ * direct consumption of format-4 12-byte controls and 4-byte segment-local
+ * positions; they expose no production route or constructible execution proof.
  */
 module;
 
 #include <bit>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -40,6 +43,11 @@ inline constexpr std::uint32_t k_phase_c_sketch_local = 64u;
 inline constexpr std::uint32_t k_phase_c_sketch_tile_span_max = 384u;
 inline constexpr std::uint32_t k_phase_c_scan_block = 256u;
 inline constexpr std::uint32_t k_phase_c_slot_offset_align = 256u;
+// Conservative VkDeviceMemory allocation quantum used by the pure peak plan.
+// The runtime still verifies the allocator-reported byte total before dispatch;
+// this bound makes the admission plan account for per-buffer padding rather
+// than assuming requested range == allocation size.
+inline constexpr std::uint32_t k_phase_c_peak_allocation_align = 64u * 1024u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_max_len = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_cigar_traceback_tile_len = 128u;
 inline constexpr std::uint32_t k_gpu_alignment_simple_cigar_max_len = 16'384u;
@@ -49,6 +57,601 @@ inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_cigar_overflow = 2u;
+// DOC0371 persisted-index foundation. The directory is uploaded exactly as the
+// header-free revision-3 96-byte little-endian entry stream; the shader reads
+// these word offsets directly and returns only stable directory ordinals.
+inline constexpr std::uint32_t k_gpu_persisted_directory_entry_bytes = 96u;
+inline constexpr std::uint32_t k_gpu_persisted_directory_entry_words = 24u;
+
+// Inactive grouped-hash32/segment-local32 GPU ABI2 foundation. These values
+// deliberately repeat the immutable format-4 widths at the Vulkan ABI boundary:
+// controls are consumed in-place as three little-endian u32 words and positions
+// remain one little-endian `(local_bp << 1) | strand` u32. No host-side decode,
+// pair rebuild, offset rebasing, or position globalization is part of this ABI.
+inline constexpr std::uint32_t k_gpu_grouped32_abi_version = 2u;
+inline constexpr std::uint32_t k_gpu_grouped32_control_bytes = 12u;
+inline constexpr std::uint32_t k_gpu_grouped32_position_bytes = 4u;
+inline constexpr std::uint32_t k_gpu_grouped32_max_local_bp = 0x7fffffffu;
+
+enum class GpuGrouped32ValidationError : std::uint32_t {
+    none = 0u,
+    descriptor_bounds = 1u << 0u,
+    descriptor_identity = 1u << 1u,
+    segment_bounds = 1u << 2u,
+    control_order = 1u << 3u,
+    control_positions = 1u << 4u,
+    position_bounds = 1u << 5u,
+    position_order = 1u << 6u,
+    query_bounds = 1u << 7u,
+    anchor_capacity = 1u << 8u,
+    emitted_count = 1u << 9u,
+    occurrence_overflow = 1u << 10u,
+    validation_gate = 1u << 11u,
+    adapter_state = 1u << 12u,
+    indirect_bounds = 1u << 13u,
+    sort_ownership = 1u << 14u,
+};
+
+enum class GpuGrouped32ValidationCompletion : std::uint32_t {
+    pending = 0u,
+    accepted = 1u,
+    rejected = 2u,
+};
+
+enum class GpuGrouped32PrefixAllocationStrategy : std::uint32_t {
+    coarse_query_scan = 1u,
+    hierarchical_segmented_scan = 2u,
+    atomic_reservation_reference_only = 3u,
+};
+
+enum class GpuGrouped32PhysicalDeviceKind : std::uint32_t {
+    other = 0u,
+    integrated_gpu = 1u,
+    discrete_gpu = 2u,
+    virtual_gpu = 3u,
+    cpu = 4u,
+};
+
+[[nodiscard]] constexpr GpuGrouped32ValidationError operator|(
+    GpuGrouped32ValidationError lhs,
+    GpuGrouped32ValidationError rhs) noexcept
+{
+    return static_cast<GpuGrouped32ValidationError>(
+        static_cast<std::uint32_t>(lhs)
+        | static_cast<std::uint32_t>(rhs));
+}
+
+struct GpuGrouped32ControlWire {
+    std::uint32_t hash = 0;
+    std::uint32_t position_offset = 0;
+    std::uint32_t position_count = 0;
+};
+
+struct GpuGrouped32PositionWire {
+    std::uint32_t local_bp_strand = 0;
+};
+
+/// `partition_id` is the stable authenticated directory identity and may be
+/// gapped. `directory_ordinal` binds the descriptor to its aggregate-buffer
+/// slot; validation requires exact ordinal equality plus strictly increasing
+/// stable IDs, never `partition_id == directory_ordinal`.
+struct GpuGrouped32PartitionWire {
+    std::uint32_t partition_id = 0;
+    std::uint32_t directory_ordinal = 0;
+    std::uint32_t position_segment = 0;
+    std::uint32_t control_offset = 0;
+    std::uint32_t control_count = 0;
+    std::uint32_t position_offset = 0;
+    std::uint32_t position_count = 0;
+    std::uint32_t low_hash = 0;
+    std::uint32_t high_hash = 0;
+    std::uint32_t flags = 0;
+    std::uint64_t segment_base_bp = 0;
+    std::uint64_t segment_end_bp = 0;
+    std::uint32_t reserved0 = 0;
+    std::uint32_t reserved1 = 0;
+};
+
+struct GpuGrouped32QueryMinimizerWire {
+    std::uint32_t hash = 0;
+    std::uint32_t query_bp_strand = 0;
+    std::uint32_t occurrence_index = 0;
+    std::uint32_t query_record_index = 0;
+};
+
+/// Dense device state ownership is independent of the trusted, non-dense u64
+/// BatchJoin ordinal carried through the terminal result.
+struct GpuGrouped32QueryRecordWire {
+    std::uint32_t minimizer_offset = 0;
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t query_length = 0;
+    std::uint32_t query_state_index = 0;
+    std::uint32_t occurrence_offset = 0;
+    std::uint32_t anchor_base = 0;
+    std::uint32_t anchor_capacity = 0;
+    std::uint32_t flags = 0;
+    std::uint64_t batch_join_ordinal = 0;
+    std::uint32_t reserved0 = 0;
+    std::uint32_t reserved1 = 0;
+};
+
+struct GpuGrouped32OccurrenceStateWire {
+    std::uint32_t global_count = 0;
+    std::uint32_t accepted_count = 0;
+    std::uint32_t anchor_offset = 0;
+    std::uint32_t emitted_count = 0;
+};
+
+struct GpuGrouped32QueryStateWire {
+    std::uint32_t anchor_count = 0;
+    std::uint32_t rejected_minimizers = 0;
+    std::uint32_t completed_minimizers = 0;
+    std::uint32_t status = 0;
+};
+
+/// The validation dispatch is globally completed only by its final workgroup.
+/// A compute-to-indirect/compute barrier must follow before any generated
+/// command is consumed. Every downstream shader independently gates on
+/// `completion == accepted && status == 0`.
+struct GpuGrouped32ValidationStateWire {
+    std::uint32_t status = 0;
+    std::uint32_t failed_partitions = 0;
+    std::uint32_t controls_checked = 0;
+    std::uint32_t positions_checked = 0;
+    std::uint32_t completed_workgroups = 0;
+    std::uint32_t expected_workgroups = 0;
+    std::uint32_t completion = 0;
+    std::uint32_t reserved = 0;
+};
+
+struct GpuGrouped32DispatchIndirectCommandWire {
+    std::uint32_t group_count_x = 0;
+    std::uint32_t group_count_y = 0;
+    std::uint32_t group_count_z = 0;
+};
+
+enum class GpuGrouped32IndirectStage : std::uint32_t {
+    validate = 0u,
+    accumulate_occurrences = 1u,
+    finalize_max_occ = 2u,
+    allocate_anchor_prefix = 3u,
+    build_sort_segments = 4u,
+    emit_global_anchors = 5u,
+    radix_sort = 6u,
+    count = 7u,
+};
+
+struct GpuGrouped32GlobalAnchorWire {
+    std::uint64_t ref_position = 0;
+    std::uint64_t query_position = 0;
+    std::uint32_t is_reverse = 0;
+    std::uint8_t query_span = 0;
+    std::uint8_t flags = 0;
+    std::uint16_t segment_id = 0;
+};
+
+/// Parallel radix key. Query ownership is redundantly carried and must match
+/// the owning `GpuGrouped32SortSegmentWire`; sort kernels may never mix slices.
+struct GpuGrouped32AnchorRadixKeyWire {
+    std::uint64_t ref_position = 0;
+    std::uint32_t is_reverse = 0;
+    std::uint32_t query_state_index = 0;
+};
+
+struct GpuGrouped32SortSegmentWire {
+    std::uint32_t anchor_begin = 0;
+    std::uint32_t anchor_count = 0;
+    std::uint32_t query_state_index = 0;
+    std::uint32_t flags = 0;
+    std::uint64_t batch_join_ordinal = 0;
+};
+
+struct GpuGrouped32FinalResultCigarWire {
+    std::uint64_t query_start = 0;
+    std::uint64_t query_end = 0;
+    std::uint64_t target_start = 0;
+    std::uint64_t target_end = 0;
+    std::uint64_t match_length = 0;
+    std::uint64_t block_length = 0;
+    std::int32_t chain_score = 0;
+    std::int32_t seed_count = 0;
+    std::uint32_t cigar_word_offset = 0;
+    std::uint32_t cigar_word_count = 0;
+    std::uint64_t batch_join_ordinal = 0;
+    std::uint32_t target_record_index = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t status = 0;
+    std::uint32_t reserved = 0;
+};
+
+struct GpuGrouped32Abi2Push {
+    std::uint32_t partition_count = 0;
+    std::uint32_t query_record_count = 0;
+    std::uint32_t query_minimizer_capacity = 0;
+    std::uint32_t occurrence_count = 0;
+    std::uint32_t control_count = 0;
+    std::uint32_t position_count = 0;
+    std::uint32_t anchor_capacity = 0;
+    std::uint32_t max_occ = 0;
+    std::uint32_t kmer_size = 15;
+    std::uint32_t validation_index = 0;
+    std::uint32_t validation_state_count = 0;
+    std::uint32_t indirect_base = 0;
+    std::uint32_t indirect_command_count = 0;
+    std::uint32_t max_partition_groups_y = 0;
+    std::uint32_t max_workgroups_x = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t adapter_state_index = 0;
+    std::uint32_t adapter_state_count = 0;
+};
+
+/// Host scheduling metadata only: biological count/hash/position decoding is
+/// performed by the adapter shader from the existing packed GPU sketch output.
+struct GpuGrouped32SketchQueryPlanWire {
+    std::uint32_t first_tile = 0;
+    std::uint32_t tile_count = 0;
+    std::uint32_t query_length = 0;
+    std::uint32_t query_state_index = 0;
+    std::uint32_t anchor_base = 0;
+    std::uint32_t anchor_capacity = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t reserved0 = 0;
+    std::uint64_t batch_join_ordinal = 0;
+    std::uint64_t reserved1 = 0;
+};
+
+struct GpuGrouped32QueryAdapterStateWire {
+    std::uint32_t status = 0;
+    std::uint32_t completed_records = 0;
+    std::uint32_t expected_records = 0;
+    std::uint32_t total_minimizers = 0;
+    std::uint32_t max_query_minimizers = 0;
+    std::uint32_t completion = 0;
+    std::uint32_t reserved0 = 0;
+    std::uint32_t reserved1 = 0;
+};
+
+struct GpuGrouped32QueryAdapterPush {
+    std::uint32_t query_plan_count = 0;
+    std::uint32_t tile_count = 0;
+    std::uint32_t packed_minimizer_capacity = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32 = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t pos_bits = 0;
+    std::uint32_t kmer_size = 15;
+    std::uint32_t adapter_state_index = 0;
+    std::uint32_t adapter_state_count = 0;
+    std::uint32_t validation_index = 0;
+    std::uint32_t validation_state_count = 0;
+    std::uint32_t indirect_base = 0;
+    std::uint32_t indirect_command_count = 0;
+    std::uint32_t max_workgroups_x = 0;
+    std::uint32_t max_partition_groups_y = 0;
+};
+
+struct GpuGrouped32IndirectPreparePush {
+    std::uint32_t partition_count = 0;
+    std::uint32_t query_record_count = 0;
+    std::uint32_t adapter_state_index = 0;
+    std::uint32_t adapter_state_count = 0;
+    std::uint32_t validation_index = 0;
+    std::uint32_t validation_state_count = 0;
+    std::uint32_t indirect_base = 0;
+    std::uint32_t indirect_command_count = 0;
+    std::uint32_t max_workgroups_x = 0;
+    std::uint32_t max_partition_groups_y = 0;
+    std::uint32_t local_size_x = 128;
+    std::uint32_t flags = 0;
+};
+
+struct GpuGrouped32DeviceIdentity {
+    std::array<std::uint8_t, 16> device_uuid{};
+    GpuGrouped32PhysicalDeviceKind device_kind =
+        GpuGrouped32PhysicalDeviceKind::other;
+    std::uint32_t vendor_id = 0;
+    std::uint32_t device_id = 0;
+    std::uint32_t driver_version = 0;
+
+    [[nodiscard]] bool operator==(
+        const GpuGrouped32DeviceIdentity&) const = default;
+};
+
+struct GpuGrouped32ResidentIdentity {
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t cache_identity = 0;
+    std::uint64_t resident_identity = 0;
+    std::uint64_t submission_identity = 0;
+    std::uint64_t fence_identity = 0;
+    std::uint64_t fence_value = 0;
+    GpuGrouped32DeviceIdentity device{};
+
+    [[nodiscard]] bool operator==(
+        const GpuGrouped32ResidentIdentity&) const = default;
+};
+
+struct GpuGrouped32ExecutionIdentity {
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t cache_identity = 0;
+    std::uint64_t resident_identity = 0;
+    std::uint64_t query_identity = 0;
+    std::uint64_t params_identity = 0;
+    std::uint64_t submission_identity = 0;
+    std::uint64_t fence_identity = 0;
+    std::uint64_t fence_value = 0;
+    GpuGrouped32DeviceIdentity device{};
+
+    [[nodiscard]] bool operator==(
+        const GpuGrouped32ExecutionIdentity&) const = default;
+};
+
+[[nodiscard]] inline bool gpu_grouped32_execution_matches_resident(
+    const GpuGrouped32ExecutionIdentity& execution,
+    const GpuGrouped32ResidentIdentity& resident) noexcept
+{
+    return execution.generation_id == resident.generation_id
+        && execution.source_identity == resident.source_identity
+        && execution.source_content_checksum == resident.source_content_checksum
+        && execution.compatibility_checksum == resident.compatibility_checksum
+        && execution.cache_identity == resident.cache_identity
+        && execution.resident_identity == resident.resident_identity
+        && execution.device == resident.device;
+}
+
+static_assert(sizeof(GpuGrouped32ControlWire) == 12);
+static_assert(offsetof(GpuGrouped32ControlWire, position_offset) == 4);
+static_assert(offsetof(GpuGrouped32ControlWire, position_count) == 8);
+static_assert(sizeof(GpuGrouped32PositionWire) == 4);
+static_assert(sizeof(GpuGrouped32PartitionWire) == 64);
+static_assert(offsetof(GpuGrouped32PartitionWire, directory_ordinal) == 4);
+static_assert(offsetof(GpuGrouped32PartitionWire, position_segment) == 8);
+static_assert(offsetof(GpuGrouped32PartitionWire, control_offset) == 12);
+static_assert(offsetof(GpuGrouped32PartitionWire, high_hash) == 32);
+static_assert(offsetof(GpuGrouped32PartitionWire, segment_base_bp) == 40);
+static_assert(offsetof(GpuGrouped32PartitionWire, segment_end_bp) == 48);
+static_assert(offsetof(GpuGrouped32PartitionWire, reserved1) == 60);
+static_assert(sizeof(GpuGrouped32QueryMinimizerWire) == 16);
+static_assert(sizeof(GpuGrouped32QueryRecordWire) == 48);
+static_assert(offsetof(GpuGrouped32QueryRecordWire, query_state_index) == 12);
+static_assert(offsetof(GpuGrouped32QueryRecordWire, batch_join_ordinal) == 32);
+static_assert(offsetof(GpuGrouped32QueryRecordWire, reserved1) == 44);
+static_assert(sizeof(GpuGrouped32OccurrenceStateWire) == 16);
+static_assert(sizeof(GpuGrouped32QueryStateWire) == 16);
+static_assert(sizeof(GpuGrouped32ValidationStateWire) == 32);
+static_assert(offsetof(GpuGrouped32ValidationStateWire, completed_workgroups) == 16);
+static_assert(offsetof(GpuGrouped32ValidationStateWire, completion) == 24);
+static_assert(sizeof(GpuGrouped32DispatchIndirectCommandWire) == 12);
+static_assert(sizeof(GpuGrouped32GlobalAnchorWire) == 24);
+static_assert(offsetof(GpuGrouped32GlobalAnchorWire, is_reverse) == 16);
+static_assert(offsetof(GpuGrouped32GlobalAnchorWire, query_span) == 20);
+static_assert(sizeof(GpuGrouped32AnchorRadixKeyWire) == 16);
+static_assert(offsetof(GpuGrouped32AnchorRadixKeyWire, query_state_index) == 12);
+static_assert(sizeof(GpuGrouped32SortSegmentWire) == 24);
+static_assert(offsetof(GpuGrouped32SortSegmentWire, batch_join_ordinal) == 16);
+static_assert(sizeof(GpuGrouped32FinalResultCigarWire) == 88);
+static_assert(offsetof(GpuGrouped32FinalResultCigarWire, chain_score) == 48);
+static_assert(offsetof(GpuGrouped32FinalResultCigarWire, batch_join_ordinal) == 64);
+static_assert(offsetof(GpuGrouped32FinalResultCigarWire, status) == 80);
+static_assert(sizeof(GpuGrouped32Abi2Push) == 72);
+static_assert(offsetof(GpuGrouped32Abi2Push, validation_state_count) == 40);
+static_assert(offsetof(GpuGrouped32Abi2Push, indirect_base) == 44);
+static_assert(offsetof(GpuGrouped32Abi2Push, flags) == 60);
+static_assert(offsetof(GpuGrouped32Abi2Push, adapter_state_index) == 64);
+static_assert(sizeof(GpuGrouped32SketchQueryPlanWire) == 48);
+static_assert(offsetof(GpuGrouped32SketchQueryPlanWire, batch_join_ordinal) == 32);
+static_assert(sizeof(GpuGrouped32QueryAdapterStateWire) == 32);
+static_assert(sizeof(GpuGrouped32QueryAdapterPush) == 64);
+static_assert(sizeof(GpuGrouped32IndirectPreparePush) == 48);
+static_assert(sizeof(GpuGrouped32DeviceIdentity) == 32);
+static_assert(sizeof(GpuGrouped32ResidentIdentity) == 104);
+static_assert(offsetof(GpuGrouped32ResidentIdentity, device) == 72);
+static_assert(sizeof(GpuGrouped32ExecutionIdentity) == 120);
+static_assert(offsetof(GpuGrouped32ExecutionIdentity, resident_identity) == 40);
+static_assert(offsetof(GpuGrouped32ExecutionIdentity, query_identity) == 48);
+static_assert(offsetof(GpuGrouped32ExecutionIdentity, device) == 88);
+static_assert(std::is_standard_layout_v<GpuGrouped32PartitionWire>);
+static_assert(std::is_standard_layout_v<GpuGrouped32QueryRecordWire>);
+static_assert(std::is_standard_layout_v<GpuGrouped32FinalResultCigarWire>);
+
+[[nodiscard]] inline bool gpu_grouped32_device_uuid_bound(
+    const GpuGrouped32DeviceIdentity& identity) noexcept
+{
+    return std::any_of(
+        identity.device_uuid.begin(), identity.device_uuid.end(),
+        [](std::uint8_t byte) noexcept { return byte != 0u; });
+}
+
+[[nodiscard]] inline bool gpu_grouped32_hardware_device(
+    const GpuGrouped32DeviceIdentity& identity) noexcept
+{
+    return gpu_grouped32_device_uuid_bound(identity)
+        && (identity.device_kind == GpuGrouped32PhysicalDeviceKind::integrated_gpu
+            || identity.device_kind
+                == GpuGrouped32PhysicalDeviceKind::discrete_gpu);
+}
+
+/// No accepted proof factory exists in this inactive foundation. The sole
+/// public constructor path creates a rejected test token so move-poisoning can
+/// be tested without forging a queue-fence-backed proof.
+class GpuGrouped32ValidatedResidentProof final {
+public:
+    GpuGrouped32ValidatedResidentProof(
+        const GpuGrouped32ValidatedResidentProof&) = delete;
+    GpuGrouped32ValidatedResidentProof& operator=(
+        const GpuGrouped32ValidatedResidentProof&) = delete;
+
+    GpuGrouped32ValidatedResidentProof(
+        GpuGrouped32ValidatedResidentProof&& source) noexcept
+        : data_(source.data_), moved_from_(source.moved_from_)
+    {
+        source.poison_after_move();
+    }
+
+    GpuGrouped32ValidatedResidentProof& operator=(
+        GpuGrouped32ValidatedResidentProof&& source) noexcept
+    {
+        if (this != &source) {
+            data_ = source.data_;
+            moved_from_ = source.moved_from_;
+            source.poison_after_move();
+        }
+        return *this;
+    }
+
+    [[nodiscard]] static GpuGrouped32ValidatedResidentProof
+    rejected_test_token() noexcept { return {}; }
+
+    [[nodiscard]] bool moved_from() const noexcept { return moved_from_; }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        const auto& id = data_.identity;
+        return !moved_from_
+            && data_.abi_version == k_gpu_grouped32_abi_version
+            && id.generation_id != 0u && id.source_identity != 0u
+            && id.source_content_checksum != 0u
+            && id.compatibility_checksum != 0u
+            && id.cache_identity != 0u && id.resident_identity != 0u
+            && id.submission_identity != 0u && id.fence_identity != 0u
+            && id.fence_value != 0u
+            && gpu_grouped32_hardware_device(id.device)
+            && data_.queue_fence_completed != 0u
+            && data_.validation_status == 0u
+            && data_.validated_partitions != 0u
+            && data_.validated_controls != 0u
+            && data_.validated_positions != 0u;
+    }
+
+private:
+    struct Data {
+        GpuGrouped32ResidentIdentity identity{};
+        std::uint64_t validated_controls = 0;
+        std::uint64_t validated_positions = 0;
+        std::uint32_t validated_partitions = 0;
+        std::uint32_t validation_status = 0;
+        std::uint32_t abi_version = 0;
+        std::uint32_t queue_fence_completed = 0;
+    };
+
+    GpuGrouped32ValidatedResidentProof() noexcept = default;
+
+    void poison_after_move() noexcept {
+        data_ = {};
+        moved_from_ = true;
+    }
+
+    Data data_{};
+    bool moved_from_ = false;
+};
+
+class GpuGrouped32ExecutionProof final {
+public:
+    GpuGrouped32ExecutionProof(const GpuGrouped32ExecutionProof&) = delete;
+    GpuGrouped32ExecutionProof& operator=(
+        const GpuGrouped32ExecutionProof&) = delete;
+
+    GpuGrouped32ExecutionProof(GpuGrouped32ExecutionProof&& source) noexcept
+        : data_(source.data_), moved_from_(source.moved_from_)
+    {
+        source.poison_after_move();
+    }
+
+    GpuGrouped32ExecutionProof& operator=(
+        GpuGrouped32ExecutionProof&& source) noexcept
+    {
+        if (this != &source) {
+            data_ = source.data_;
+            moved_from_ = source.moved_from_;
+            source.poison_after_move();
+        }
+        return *this;
+    }
+
+    [[nodiscard]] static GpuGrouped32ExecutionProof
+    rejected_test_token() noexcept { return {}; }
+
+    [[nodiscard]] bool moved_from() const noexcept { return moved_from_; }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        const auto& id = data_.identity;
+        return !moved_from_
+            && data_.abi_version == k_gpu_grouped32_abi_version
+            && id.generation_id != 0u && id.source_identity != 0u
+            && id.source_content_checksum != 0u
+            && id.compatibility_checksum != 0u
+            && id.cache_identity != 0u && id.resident_identity != 0u
+            && id.query_identity != 0u
+            && id.params_identity != 0u && id.submission_identity != 0u
+            && id.fence_identity != 0u && id.fence_value != 0u
+            && gpu_grouped32_hardware_device(id.device)
+            && gpu_grouped32_execution_matches_resident(
+                id, data_.validated_resident_identity)
+            && data_.validated_resident_identity.submission_identity != 0u
+            && data_.validated_resident_identity.fence_identity != 0u
+            && data_.validated_resident_identity.fence_value != 0u
+            && data_.queue_fence_completed != 0u
+            && data_.status == 0u
+            && data_.cpu_fallbacks == 0u && data_.simd_fallbacks == 0u
+            && data_.occurrence_dispatches != 0u
+            && data_.finalize_dispatches != 0u
+            && data_.prefix_dispatches != 0u
+            && data_.sort_segment_dispatches != 0u
+            && data_.anchor_emit_dispatches != 0u;
+    }
+
+private:
+    struct Data {
+        GpuGrouped32ExecutionIdentity identity{};
+        GpuGrouped32ResidentIdentity validated_resident_identity{};
+        std::uint64_t occurrence_dispatches = 0;
+        std::uint64_t finalize_dispatches = 0;
+        std::uint64_t prefix_dispatches = 0;
+        std::uint64_t sort_segment_dispatches = 0;
+        std::uint64_t anchor_emit_dispatches = 0;
+        std::uint64_t globalized_anchors = 0;
+        std::uint32_t status = 0;
+        std::uint32_t abi_version = 0;
+        std::uint32_t queue_fence_completed = 0;
+        std::uint32_t cpu_fallbacks = 0;
+        std::uint32_t simd_fallbacks = 0;
+    };
+
+    GpuGrouped32ExecutionProof() noexcept = default;
+
+    void poison_after_move() noexcept {
+        data_ = {};
+        moved_from_ = true;
+    }
+
+    Data data_{};
+    bool moved_from_ = false;
+};
+
+static_assert(!std::is_default_constructible_v<
+    GpuGrouped32ValidatedResidentProof>);
+static_assert(!std::is_default_constructible_v<GpuGrouped32ExecutionProof>);
+
+/// Push constants for the one-workgroup query-minimizer -> directory-ordinal
+/// selector. Query hashes remain inside the device buffer throughout the run.
+struct GpuPersistedDirectorySelectionPush {
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32_per_record = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t directory_entry_count = 0;
+    std::uint32_t reserved_directory = 0;
+    std::uint32_t bitset_word_count = 0;
+    std::uint32_t reserved = 0;
+};
+static_assert(sizeof(GpuPersistedDirectorySelectionPush) == 32);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, minimizer_count) == 0);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, reserved_directory) == 20);
+static_assert(offsetof(GpuPersistedDirectorySelectionPush, reserved) == 28);
 
 [[nodiscard]] inline constexpr std::uint64_t gpu_alignment_cigar_ceil_div_u64(
     const std::uint64_t value,
@@ -119,6 +722,15 @@ struct PhaseCSketchMemoryPlan {
     std::uint64_t counter_bytes = 0;
     std::uint64_t arena_pair_value_bytes = 0;
     std::uint64_t arena_scaffold_bytes = 0;
+    std::uint64_t target_index_initial_key_bytes = 0;
+    std::uint64_t target_index_key_scratch_bytes = 0;
+    std::uint64_t target_index_value_scratch_bytes = 0;
+    std::uint64_t target_index_histogram_bytes = 0;
+    std::uint64_t target_index_flag_scan_bytes = 0;
+    std::uint64_t target_index_scan_block_bytes = 0;
+    std::uint64_t target_index_bucket_bytes = 0;
+    std::uint64_t target_index_sort_peak_bytes = 0;
+    std::uint64_t target_index_bucket_peak_bytes = 0;
     std::uint64_t standalone_device_bytes = 0;
     std::uint64_t resident_output_bytes = 0;
     std::uint64_t host_transient_bytes = 0;
@@ -354,11 +966,76 @@ struct PhaseCSketchMemoryPlan {
     arena = add_aligned(arena, plan.arena_pair_value_bytes);
     plan.arena_scaffold_bytes = arena;
 
-    plan.standalone_device_bytes = phase_c_saturating_add(
-        plan.output_word_bytes,
-        phase_c_saturating_add(plan.pair_key_bytes, plan.pair_value_bytes));
-    plan.resident_output_bytes = plan.standalone_device_bytes;
-    plan.host_transient_bytes = plan.seq_bytes;
+    if (use == PhaseCSketchUse::target_index_build) {
+        const auto allocation_bytes = [](std::uint64_t bytes) {
+            return phase_c_align_up(
+                std::max<std::uint64_t>(bytes, 1u),
+                k_phase_c_peak_allocation_align);
+        };
+        const std::uint64_t flag_bytes =
+            phase_c_saturating_mul(output_capacity, 4u);
+        const std::uint64_t scanned_offset =
+            phase_c_align_up(flag_bytes, k_phase_c_slot_offset_align);
+        plan.target_index_flag_scan_bytes =
+            phase_c_saturating_add(scanned_offset, flag_bytes);
+        plan.target_index_initial_key_bytes = std::max(
+            plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
+        // The non-result key ping-pong allocation is reused as the aligned
+        // flags/scanned allocation after the radix fence.
+        plan.target_index_key_scratch_bytes = std::max(
+            plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
+        plan.target_index_value_scratch_bytes = plan.pair_value_bytes;
+        const std::uint64_t sort_groups = std::min<std::uint64_t>(
+            phase_c_ceil_div_u32(output_capacity, 512u), max_workgroups);
+        plan.target_index_histogram_bytes = phase_c_saturating_mul(
+            phase_c_saturating_mul(sort_groups, 256u), 4u);
+        plan.target_index_scan_block_bytes = phase_c_saturating_mul(
+            phase_c_ceil_div_u32(output_capacity, k_phase_c_scan_block), 4u);
+        plan.target_index_bucket_bytes =
+            phase_c_saturating_mul(output_capacity, 16u);
+
+        std::uint64_t sort_peak = 0u;
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_initial_key_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.pair_value_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_key_scratch_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_value_scratch_bytes));
+        sort_peak = phase_c_saturating_add(
+            sort_peak, allocation_bytes(plan.target_index_histogram_bytes));
+        plan.target_index_sort_peak_bytes = sort_peak;
+
+        // After the radix fence the unused value allocation and histogram are
+        // released. The non-result key allocation becomes flags+scanned;
+        // buckets are allocated at exact distinct-key count D (bounded by C).
+        std::uint64_t bucket_peak = 0u;
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_initial_key_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_value_scratch_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_key_scratch_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_scan_block_bytes));
+        bucket_peak = phase_c_saturating_add(
+            bucket_peak, allocation_bytes(plan.target_index_bucket_bytes));
+        plan.target_index_bucket_peak_bytes = bucket_peak;
+        plan.standalone_device_bytes = std::max(sort_peak, bucket_peak);
+        plan.resident_output_bytes = phase_c_saturating_add(
+            allocation_bytes(plan.target_index_value_scratch_bytes),
+            allocation_bytes(plan.target_index_bucket_bytes));
+    } else {
+        plan.standalone_device_bytes = phase_c_saturating_add(
+            plan.output_word_bytes,
+            phase_c_saturating_add(plan.pair_key_bytes, plan.pair_value_bytes));
+        plan.resident_output_bytes = plan.standalone_device_bytes;
+    }
+    // `tiles` and the packed sequence both exist on the host while their arena
+    // copies are live.
+    plan.host_transient_bytes = phase_c_saturating_add(
+        plan.seq_bytes, plan.tile_bytes);
     plan.admission_bytes = phase_c_saturating_add(
         plan.arena_scaffold_bytes,
         phase_c_saturating_add(

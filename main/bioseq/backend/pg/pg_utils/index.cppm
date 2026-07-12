@@ -20,13 +20,177 @@ module;
 
 #include "common.h"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <type_traits>
+#include <utility>
 
 export module bioseq.pg_utils;
 
 export import bioseq.pg_utils.lists;
 export import bioseq.pg_utils.bitmapset;
 export import bioseq.pg_utils.datums;
+
+export namespace bioseq::pg_utils {
+
+/**
+ * C++ representation of one PostgreSQL ERROR.  PG-only leaf boundaries throw
+ * this after PG_END_TRY, so generic/no-PG callers unwind vectors, queues,
+ * permits and proof authorities normally instead of being crossed by longjmp.
+ *
+ * The ErrorData copy is exact and lives in TopTransactionContext (or
+ * TopMemoryContext before transaction setup). It is deliberately not copied
+ * into fixed buffers. The outer C ABI releases this pointer from the exception,
+ * destroys every C++ owner, and only then calls ReThrowError.
+ */
+class PostgresErrorAsCpp final : public std::exception {
+public:
+    explicit PostgresErrorAsCpp(ErrorData* error) noexcept
+        : error_(error) {}
+
+    PostgresErrorAsCpp(const PostgresErrorAsCpp&) = delete;
+    PostgresErrorAsCpp& operator=(const PostgresErrorAsCpp&) = delete;
+    PostgresErrorAsCpp(PostgresErrorAsCpp&& other) noexcept
+        : error_(std::exchange(other.error_, nullptr)) {}
+    PostgresErrorAsCpp& operator=(PostgresErrorAsCpp&& other) noexcept {
+        if (this != &other) {
+            error_ = std::exchange(other.error_, nullptr);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] const char* what() const noexcept override {
+        return error_ == nullptr || error_->message == nullptr
+            ? "PostgreSQL ERROR without a message"
+            : error_->message;
+    }
+
+    /** Transfer the exact ErrorData to an outer PostgreSQL ABI boundary. */
+    [[nodiscard]] ErrorData* release_error_data() const noexcept {
+        return std::exchange(error_, nullptr);
+    }
+
+private:
+    mutable ErrorData* error_ = nullptr;
+};
+
+using PgCppInvokeBody = void (*)(void*);
+
+/**
+ * Non-template, hard-noinline sigsetjmp boundary.  It catches both PostgreSQL
+ * ERROR and C++ exceptions from the callback, restores PostgreSQL's exception
+ * stack via PG_END_TRY, and only then throws into its C++ caller.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+[[gnu::noinline, gnu::noipa]]
+#else
+[[gnu::noinline]]
+#endif
+void invoke_pg_as_cpp_erased(void* callback_context, PgCppInvokeBody body);
+
+/** Invoke one PG leaf operation and return/throw through ordinary C++ ABI. */
+template <class F>
+auto invoke_pg_as_cpp(F&& function)
+    -> std::invoke_result_t<std::remove_reference_t<F>&> {
+    using Function = std::remove_reference_t<F>;
+    using Result = std::invoke_result_t<Function&>;
+    static_assert(!std::is_reference_v<Result>,
+        "invoke_pg_as_cpp leaf callbacks must return a value or void");
+    if constexpr (std::is_void_v<Result>) {
+        struct CallState {
+            Function* function = nullptr;
+        } state{.function = std::addressof(function)};
+        invoke_pg_as_cpp_erased(
+            std::addressof(state),
+            +[](void* opaque) {
+                auto* call = static_cast<CallState*>(opaque);
+                std::invoke(*call->function);
+            });
+        return;
+    } else {
+        struct CallState {
+            Function* function = nullptr;
+            std::optional<Result> result;
+        } state{.function = std::addressof(function)};
+        invoke_pg_as_cpp_erased(
+            std::addressof(state),
+            +[](void* opaque) {
+                auto* call = static_cast<CallState*>(opaque);
+                call->result.emplace(std::invoke(*call->function));
+            });
+        return std::move(*state.result);
+    }
+}
+
+} // namespace bioseq::pg_utils
+
+namespace bioseq::pg_utils {
+
+namespace {
+
+struct PgCppInvokeState {
+    void* callback_context = nullptr;
+    PgCppInvokeBody body = nullptr;
+    std::exception_ptr cpp_error;
+    ErrorData* pg_error = nullptr;
+};
+
+} // namespace
+
+void invoke_pg_as_cpp_erased(
+        void* callback_context,
+        PgCppInvokeBody body) {
+    auto* state = new PgCppInvokeState{
+        .callback_context = callback_context,
+        .body = body,
+    };
+    MemoryContext saved_context = CurrentMemoryContext;
+    ResourceOwner saved_resource_owner = CurrentResourceOwner;
+    PG_TRY();
+    {
+        try {
+            if (state->body != nullptr) {
+                state->body(state->callback_context);
+            }
+        } catch (...) {
+            state->cpp_error = std::current_exception();
+        }
+    }
+    PG_CATCH();
+    {
+        CurrentResourceOwner = saved_resource_owner;
+        MemoryContext error_owner = TopTransactionContext != nullptr
+            ? TopTransactionContext
+            : TopMemoryContext;
+        MemoryContextSwitchTo(error_owner);
+        state->pg_error = CopyErrorData();
+        MemoryContextSwitchTo(saved_context);
+        FlushErrorState();
+    }
+    PG_END_TRY();
+
+    CurrentResourceOwner = saved_resource_owner;
+    MemoryContextSwitchTo(saved_context);
+
+    if (state->pg_error != nullptr) {
+        ErrorData* error = std::exchange(state->pg_error, nullptr);
+        delete state;
+        throw PostgresErrorAsCpp{error};
+    }
+    if (state->cpp_error != nullptr) {
+        std::exception_ptr error = std::move(state->cpp_error);
+        delete state;
+        std::rethrow_exception(error);
+    }
+    delete state;
+}
+
+} // namespace bioseq::pg_utils
 
 /*
  * PageCacheDisableScope temporarily forces bioseq_enable_page_cache to

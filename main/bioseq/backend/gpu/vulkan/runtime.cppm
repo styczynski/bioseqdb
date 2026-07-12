@@ -32,6 +32,7 @@ module;
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -79,9 +80,15 @@ struct VulkanFeatureSet {
     bool software_device = false;
     std::uint32_t device_type = 0;
     std::uint32_t max_workgroup_invocations = 0;
+    std::uint32_t max_workgroup_size_x = 0;
+    std::uint32_t max_workgroup_size_y = 0;
+    std::uint32_t max_workgroup_size_z = 0;
     std::uint32_t max_workgroup_count_x = 0;
     std::uint32_t max_shared_memory_bytes = 0;
+    std::uint64_t max_storage_buffer_range = 0;
+    std::uint64_t min_storage_buffer_offset_alignment = 1;
     std::uint64_t device_local_bytes = 0;
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
     std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
 
@@ -90,8 +97,15 @@ struct VulkanFeatureSet {
 struct Buffer {
     Buffer() = default;
     Buffer(Runtime* owner, VkBuffer buffer, VkDeviceMemory memory,
-           std::uint64_t bytes, void* mapped) noexcept
-        : owner(owner), buffer(buffer), memory(memory), bytes(bytes), mapped(mapped) {}
+           std::uint64_t bytes, std::uint64_t allocation_bytes,
+           VkMemoryPropertyFlags memory_properties,
+           bool process_footprint_reflected,
+           void* mapped) noexcept
+        : owner(owner), buffer(buffer), memory(memory), bytes(bytes),
+          allocation_bytes(allocation_bytes),
+          memory_properties(memory_properties),
+          process_footprint_reflected(process_footprint_reflected),
+          mapped(mapped) {}
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
     Buffer(Buffer&& other) noexcept { move_from(other); }
@@ -106,11 +120,20 @@ struct Buffer {
 
     void reset() noexcept;
     [[nodiscard]] bool valid() const noexcept { return buffer != VK_NULL_HANDLE; }
+    [[nodiscard]] bool host_visible_coherent() const noexcept {
+        constexpr VkMemoryPropertyFlags required =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        return (memory_properties & required) == required;
+    }
 
     Runtime* owner = nullptr;
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     std::uint64_t bytes = 0;
+    std::uint64_t allocation_bytes = 0;
+    VkMemoryPropertyFlags memory_properties = 0;
+    bool process_footprint_reflected = false;
     void* mapped = nullptr;
 
 private:
@@ -119,11 +142,17 @@ private:
         buffer = other.buffer;
         memory = other.memory;
         bytes = other.bytes;
+        allocation_bytes = other.allocation_bytes;
+        memory_properties = other.memory_properties;
+        process_footprint_reflected = other.process_footprint_reflected;
         mapped = other.mapped;
         other.owner = nullptr;
         other.buffer = VK_NULL_HANDLE;
         other.memory = VK_NULL_HANDLE;
         other.bytes = 0;
+        other.allocation_bytes = 0;
+        other.memory_properties = 0;
+        other.process_footprint_reflected = false;
         other.mapped = nullptr;
     }
 };
@@ -136,7 +165,7 @@ struct GpuChainRange {
 
 /// Thrown on any per-run Vulkan failure once the device is usable. Selected
 /// Vulkan algorithms must propagate this rather than silently using CPU work.
-class VulkanRuntimeError final : public std::runtime_error {
+class VulkanRuntimeError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
@@ -214,13 +243,97 @@ struct RuntimeSketchResult {
     bool overflow = false;
 };
 
+/// Whether a completed Vulkan sketch must also materialize its packed hashes
+/// in a host vector.  Device-only consumers still receive the exact count and
+/// resident device buffer; they do not pay for a hash download/decode.
+enum class VulkanSketchHostMaterialization : std::uint8_t {
+    host_and_device,
+    device_only,
+};
+
+/// Operation-originated evidence for both batch sketch protocols.  The
+/// established host-materialized path records count/scan/emit in one submit;
+/// device-only mode separates emit so its output can use the exact scanned
+/// count.  Default construction is deliberately invalid.
+class RuntimeSketchBatchDispatchProof {
+public:
+    RuntimeSketchBatchDispatchProof() = default;
+    RuntimeSketchBatchDispatchProof(
+        const RuntimeSketchBatchDispatchProof&) = default;
+    RuntimeSketchBatchDispatchProof& operator=(
+        const RuntimeSketchBatchDispatchProof&) = default;
+
+    [[nodiscard]] constexpr VulkanSketchHostMaterialization
+    materialization() const noexcept {
+        return materialization_;
+    }
+    [[nodiscard]] constexpr std::uint64_t count_dispatches() const noexcept {
+        return count_dispatches_;
+    }
+    [[nodiscard]] constexpr std::uint64_t
+    prefix_scan_sequences() const noexcept {
+        return prefix_scan_sequences_;
+    }
+    [[nodiscard]] constexpr std::uint64_t
+    prefix_scan_dispatches() const noexcept {
+        return prefix_scan_dispatches_;
+    }
+    [[nodiscard]] constexpr std::uint64_t emit_dispatches() const noexcept {
+        return emit_dispatches_;
+    }
+    [[nodiscard]] constexpr std::uint64_t
+    completed_roundtrips() const noexcept {
+        return completed_roundtrips_;
+    }
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool dispatch_shape_accepted = count_dispatches_ == 1u
+            && prefix_scan_sequences_ == 1u
+            && prefix_scan_dispatches_ == 3u
+            && emit_dispatches_ == 1u;
+        if (!dispatch_shape_accepted) return false;
+        switch (materialization_) {
+            case VulkanSketchHostMaterialization::host_and_device:
+                return completed_roundtrips_ == 1u;
+            case VulkanSketchHostMaterialization::device_only:
+                return completed_roundtrips_ == 2u;
+        }
+        return false;
+    }
+
+private:
+    friend class Runtime;
+
+    VulkanSketchHostMaterialization materialization_ =
+        VulkanSketchHostMaterialization::host_and_device;
+    std::uint64_t count_dispatches_ = 0;
+    std::uint64_t prefix_scan_sequences_ = 0;
+    std::uint64_t prefix_scan_dispatches_ = 0;
+    std::uint64_t emit_dispatches_ = 0;
+    std::uint64_t completed_roundtrips_ = 0;
+};
+
+static_assert(!RuntimeSketchBatchDispatchProof{}.accepted());
+
 struct RuntimeSketchBatchResult {
     Buffer minimizer_words;
     std::vector<std::byte> host_minimizer_bytes;
     std::vector<std::uint32_t> tile_counts;
     std::vector<std::uint32_t> tile_offsets;
+    RuntimeSketchBatchDispatchProof dispatch_proof{};
     std::uint64_t count = 0;
     bool overflow = false;
+};
+
+/// Physical admission plan for one batched Phase-C sketch.  The arena
+/// allocation includes any larger persistent high-water buffer already owned
+/// by the runtime; the output allocation uses the runtime-private Phase-B
+/// buffer usage flags rather than asking callers to reproduce them.
+struct PhaseCSketchBatchAllocationRequirements {
+    bool valid = false;
+    std::uint64_t arena_requested_bytes = 0;
+    std::uint64_t arena_allocation_bytes = 0;
+    std::uint64_t pessimistic_output_requested_bytes = 0;
+    std::uint64_t pessimistic_output_allocation_bytes = 0;
 };
 
 /// DOC0307 §4.5 — inputs to the seed-hit lookup roundtrip. The query minimizers
@@ -234,11 +347,16 @@ struct RuntimeSeedLookupInputs {
     const Buffer* slots = nullptr;
     const Buffer* positions = nullptr;
     std::uint32_t slot_mask = 0;
+    // Nonzero selects hash-sorted dense controls and is the exact control
+    // count. Zero selects open addressing via `slot_mask`.
+    std::uint32_t bucket_count = 0;
     std::uint32_t position_count = 0;
     std::uint32_t minimizer_word_kind = 0;
     std::uint32_t minimizer_words32_per_record = 0;
     std::uint32_t hash_shift = 0;
     std::uint32_t pos_bits = 0;
+    std::uint64_t target_len = 0;
+    std::uint64_t target_position_offset = 0;
 };
 
 // ===========================================================================
@@ -430,15 +548,160 @@ struct SeqSortKernelParams {
 /// open-addressed slot table and the hash-run-ordered positions buffer. The
 /// indexing layer adopts these into a `GpuResidentMinimizerIndex` outside the
 /// runtime module (which must not import `bioseq::indexing`).
+enum class GpuBuiltIndexFailureReason : std::uint8_t {
+    none,
+    invalid_shape,
+    minimizer_capacity_exceeds_u32,
+    memory_plan_invalid,
+    device_arena_allocation_failed,
+    output_capacity_overflow,
+    device_buffer_allocation_failed,
+    count_peak_memory_admission_denied,
+    main_peak_memory_admission_denied,
+    peak_allocation_exceeds_admission,
+    index_invariant_failed,
+};
+
+/// Canonical query-gate identity carried with every GPU-built index.  The
+/// digest accelerates rejection, but immutable exact words remain authoritative.
+inline constexpr std::uint32_t kPhaseCQueryGateBits = 26u;
+inline constexpr std::uint32_t kPhaseCQueryGateWordCount =
+    (std::uint32_t{1} << kPhaseCQueryGateBits) / 32u;
+inline constexpr std::uint32_t kPhaseCQueryGateMask =
+    (std::uint32_t{1} << kPhaseCQueryGateBits) - 1u;
+
+struct GpuBuiltIndexGateIdentity {
+    bool enabled = false;
+    std::uint32_t word_count = 0u;
+    std::uint32_t mask = 0u;
+    std::uint64_t digest_lo = 0u;
+    std::uint64_t digest_hi = 0u;
+    std::shared_ptr<const std::vector<std::uint32_t>> canonical_words{};
+
+    [[nodiscard]] bool well_formed() const noexcept {
+        if (!enabled) {
+            return word_count == 0u && mask == 0u
+                && digest_lo == 0u && digest_hi == 0u
+                && !canonical_words;
+        }
+        return word_count == kPhaseCQueryGateWordCount
+            && mask == kPhaseCQueryGateMask && canonical_words
+            && canonical_words->size() == word_count;
+    }
+
+    [[nodiscard]] bool exact_equals(
+        const GpuBuiltIndexGateIdentity& other) const
+    {
+        if (enabled != other.enabled || word_count != other.word_count
+            || mask != other.mask || digest_lo != other.digest_lo
+            || digest_hi != other.digest_hi) {
+            return false;
+        }
+        if (!enabled) return true;
+        if (!canonical_words || !other.canonical_words) return false;
+        // Freeze guarantees there is no mutable alias. Reusing the identical
+        // immutable owner is exact identity and avoids an 8 MiB cache-hit scan;
+        // distinct owners still compare every word after the digest prefilter.
+        if (canonical_words.get() == other.canonical_words.get()) return true;
+        return *canonical_words == *other.canonical_words;
+    }
+};
+
+struct GpuBuiltIndexOwnershipProof {
+    std::uint64_t count_phase_admissions = 0;
+    std::uint64_t main_peak_admissions = 0;
+    std::uint64_t resident_transfers = 0;
+    std::uint64_t adoption_rereserve_attempts = 0;
+    std::uint64_t adoption_successes = 0;
+    std::uint64_t resident_bytes = 0;
+    // Operation-originated dispatch/shape evidence.  Admission counters alone
+    // do not prove that the query-gated GPU kernels actually ran.
+    std::uint64_t gate_count_dispatches = 0;
+    std::uint64_t gated_emit_dispatches = 0;
+    std::uint64_t ungated_emit_dispatches = 0;
+    std::uint64_t retained_minimizer_count = 0;
+    std::uint64_t distinct_minimizer_count = 0;
+    std::uint64_t query_gate_enabled = 0;
+    std::uint64_t query_gate_word_count = 0;
+    std::uint64_t query_gate_mask = 0;
+    std::uint64_t query_gate_digest_lo = 0;
+    std::uint64_t query_gate_digest_hi = 0;
+    std::uint64_t peak_admitted_bytes = 0;
+    std::uint64_t peak_observed_bytes = 0;
+    // Immutable materialization evidence propagated through zero-copy adoption.
+    std::uint64_t materialization_admitted_bytes = 0;
+    std::uint64_t materialization_actual_allocation_bytes = 0;
+    std::uint64_t materialization_fully_touched_bytes = 0;
+    std::uint64_t materialization_reflected_delta_bytes = 0;
+    std::uint64_t materialization_permit_released = 0;
+    std::uint64_t materialization_host_visible = 0;
+    std::uint64_t materialization_host_coherent = 0;
+    std::uint64_t materialization_process_footprint_reflected = 0;
+};
+
 struct GpuBuiltIndex {
+    // Declared first so ownership is released only after both buffers.
+    bioseq::parallelism::MemoryPermit permit;
     Buffer slots;
     Buffer positions;
+    GpuBuiltIndexGateIdentity gate_identity{};
+    bioseq::parallelism::MemoryMaterializationCommit materialization{};
+    GpuBuiltIndexOwnershipProof ownership{};
+    std::uint64_t peak_admission_bytes = 0;
+    std::uint64_t observed_device_peak_bytes = 0;
+    bioseq::parallelism::MemoryAdmissionFailure main_peak_admission_failure{};
     std::uint64_t target_len = 0;
     std::uint32_t slot_mask = 0;
     std::uint32_t occupied_slots = 0;
     std::uint32_t position_count = 0;
+    GpuBuiltIndexFailureReason failure_reason =
+        GpuBuiltIndexFailureReason::none;
     bool valid = false;
+
+    GpuBuiltIndex() = default;
+    GpuBuiltIndex(const GpuBuiltIndex&) = delete;
+    GpuBuiltIndex& operator=(const GpuBuiltIndex&) = delete;
+    GpuBuiltIndex(GpuBuiltIndex&& other) noexcept {
+        move_from(other);
+    }
+    GpuBuiltIndex& operator=(GpuBuiltIndex&& other) noexcept {
+        if (this != &other) {
+            // The destination permit owns the destination buffers' admission.
+            // Destroy those buffers first; releasing the permit first creates a
+            // transient live-but-unadmitted allocation window.
+            positions.reset();
+            slots.reset();
+            permit.release();
+            move_from(other);
+        }
+        return *this;
+    }
+
+private:
+    void move_from(GpuBuiltIndex& other) noexcept {
+        permit = std::move(other.permit);
+        slots = std::move(other.slots);
+        positions = std::move(other.positions);
+        gate_identity = std::move(other.gate_identity);
+        materialization = other.materialization;
+        ownership = other.ownership;
+        peak_admission_bytes = other.peak_admission_bytes;
+        observed_device_peak_bytes = other.observed_device_peak_bytes;
+        main_peak_admission_failure = other.main_peak_admission_failure;
+        target_len = other.target_len;
+        slot_mask = other.slot_mask;
+        occupied_slots = other.occupied_slots;
+        position_count = other.position_count;
+        failure_reason = other.failure_reason;
+        valid = other.valid;
+        other.valid = false;
+    }
 };
+static_assert(std::is_standard_layout_v<GpuBuiltIndex>);
+static_assert(std::is_nothrow_move_constructible_v<GpuBuiltIndex>);
+static_assert(std::is_nothrow_move_assignable_v<GpuBuiltIndex>);
+static_assert(offsetof(GpuBuiltIndex, permit) < offsetof(GpuBuiltIndex, slots));
+static_assert(offsetof(GpuBuiltIndex, permit) < offsetof(GpuBuiltIndex, positions));
 
 /// DOC0345 Patch B — host-visible result of the GPU sketch+two-key-sort roundtrip.
 /// Owns the device buffer holding the final sorted run plus the downloaded
@@ -496,6 +759,25 @@ struct PhaseCSeedInputs {
     std::uint64_t target_position_offset = 0;
 };
 
+/// Device-only query-minimizer input plus the authoritative encoded revision-3
+/// directory. There is intentionally no host hash span in this ABI.
+struct GpuPersistedDirectorySelectionInputs {
+    const Buffer* device_minimizer_words = nullptr;
+    const Buffer* encoded_directory = nullptr;
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32_per_record = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t directory_entry_count = 0;
+};
+static_assert(std::is_standard_layout_v<GpuPersistedDirectorySelectionInputs>);
+
+/// Opaque stable directory ordinals read back after device union/compaction.
+struct GpuPersistedDirectorySelectionResult {
+    std::vector<std::uint32_t> ordinals{};
+    std::uint64_t device_query_minimizers_processed = 0;
+};
+
 /// Common query-side inputs for a batched resident seed→chain→coordinate run.
 /// The query minimizer words are shared by every job in the batch; each job
 /// supplies its own resident target index.
@@ -534,6 +816,15 @@ struct PhaseCSeedCoordinateJob {
     std::uint32_t query_index = 0;
 };
 
+/// Explicit algorithm identity for the seed-to-coordinate backend.  A caller
+/// selecting Vulkan tiled-DP must pass `vulkan_tiled_dp`; the approximate
+/// coordinate-vote prototype is a distinct algorithm and may never be entered
+/// implicitly as an optimization of tiled-DP.
+enum class PhaseCSeedCoordinateAlgorithm : std::uint8_t {
+    vulkan_tiled_dp = 0,
+    coordinate_vote = 1,
+};
+
 struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t problem_count = 0;
     std::uint64_t wave_count = 0;
@@ -542,7 +833,8 @@ struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t sort_dispatches = 0;
     std::uint64_t range_build_dispatches = 0;
     std::uint64_t chain_dispatches = 0;
-    std::uint64_t coordinate_reduce_dispatches = 0;
+    std::uint64_t chain_backtrack_dispatches = 0;
+    std::uint64_t coordinate_vote_dispatches = 0;
 };
 
 struct PhaseCSeedCoordinateBatchRun {
@@ -574,6 +866,18 @@ public:
 
     [[nodiscard]] Buffer create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     [[nodiscard]] Buffer create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
+    [[nodiscard]] std::uint64_t buffer_allocation_requirement(
+        std::uint64_t requested_bytes,
+        VkBufferUsageFlags usage);
+    [[nodiscard]] std::uint64_t phase_c_arena_allocation_requirement(
+        std::uint64_t requested_bytes);
+    [[nodiscard]] PhaseCSketchBatchAllocationRequirements
+    phase_c_sketch_batch_allocation_requirements(
+        std::uint64_t packed_sequence_bytes,
+        std::uint64_t tile_count,
+        std::uint32_t minimizer_word_kind,
+        std::uint32_t minimizer_words32,
+        std::uint64_t max_minimizers);
     void destroy_buffer(Buffer& buffer) noexcept;
 
     // One complete Phase A chaining submission. This records all H2D copies,
@@ -644,7 +948,8 @@ public:
         std::span<const std::uint32_t> prefix_counts,
         std::uint64_t query_len,
         std::uint32_t kmer_size,
-        std::uint64_t exact_anchor_count);
+        std::uint64_t exact_anchor_count,
+        const SeedAnchorSortPlan& sort_plan);
 
     // DOC0310 Phase C — accessor for the per-runtime reusable arena (§7).
     [[nodiscard]] GpuArena& phase_c_arena();
@@ -664,7 +969,8 @@ public:
         const VulkanRankLut& rank_lut,
         const VulkanSketchParams& params,
         std::span<const PhaseCSketchTileWire> tiles,
-        std::uint64_t max_minimizers);
+        std::uint64_t max_minimizers,
+        VulkanSketchHostMaterialization materialization);
 
     // DOC0310 Phase C — build the target minimizer index entirely on device
     // (§12): parallel sketch → device radix sort → race-free GPU slot table.
@@ -675,7 +981,9 @@ public:
         const VulkanSketchParams& params,
         std::uint64_t max_target_minimizers,
         std::span<const std::uint32_t> query_gate_words = {},
-        std::uint32_t query_gate_mask = 0u);
+        std::uint32_t query_gate_mask = 0u,
+        GpuBuiltIndexGateIdentity query_gate_identity = {},
+        bioseq::parallelism::MemoryPermit* peak_permit = nullptr);
 
     // DOC0345 Patch B — GPU per-segment sorted-pair seam: tiled `emit_mode=2`
     // emit of (kmer, encoded_pos) + a GPU two-key stable radix sort (by encoded
@@ -749,6 +1057,13 @@ public:
         std::uint32_t kmer_size,
         std::int32_t max_occ);
 
+    /// Select persisted partitions without materializing query hashes on the
+    /// host. The device marks and compacts a target-wide ordinal union; only the
+    /// resulting stable ordinals cross back to the caller.
+    [[nodiscard]] GpuPersistedDirectorySelectionResult
+    run_persisted_directory_ordinal_selection(
+        const GpuPersistedDirectorySelectionInputs& inputs);
+
     GpuCoordinateOnlyResultWire run_phase_c_seed_to_coordinate_roundtrip(
         const PhaseCSeedInputs& inputs,
         std::uint64_t query_len,
@@ -772,6 +1087,7 @@ public:
         std::span<const PhaseCSeedCoordinateJob> jobs,
         std::uint32_t kmer_size,
         std::int32_t max_occ,
+        PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
         const ChainingPipelineKey& chain_key,
         std::int32_t max_dist_x,
         std::int32_t max_dist_y,
@@ -790,6 +1106,7 @@ public:
         std::uint64_t query_len,
         std::uint32_t kmer_size,
         std::int32_t max_occ,
+        PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
         const ChainingPipelineKey& chain_key,
         std::int32_t max_dist_x,
         std::int32_t max_dist_y,
@@ -804,7 +1121,7 @@ public:
 
     /// Largest power-of-two anchor count the GPU bitonic sort can handle in one
     /// workgroup on this device (bounded by workgroup invocations + shared mem).
-    /// Larger anchor spans are rejected by selected Vulkan seed lookup.
+    /// Larger anchor spans use the scalable stable GPU radix path.
     [[nodiscard]] std::uint32_t gpu_anchor_sort_capacity() const noexcept {
         return gpu_anchor_sort_capacity_;
     }
@@ -891,6 +1208,8 @@ private:
     void resolve_moltenvk_private_api() noexcept;
     [[nodiscard]] bool use_shader_provider_locked() const noexcept;
     std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags flags) const;
+    [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(
+        std::uint64_t bytes, VkBufferUsageFlags usage) const;
     VkPipeline create_pipeline_locked(const ChainingPipelineKey& key);
     void upload_locked(Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
                        VkAccessFlags dst_access);
@@ -961,37 +1280,6 @@ inline void require_hardware_device(const Runtime& runtime, const char* operatio
     return a > b ? a : b;
 }
 
-[[nodiscard]] inline std::uint64_t chaining_reserved_bytes(
-    std::uint64_t anchor_count,
-    std::uint64_t range_count) noexcept
-{
-    using bioseq::parallelism::saturating_mul;
-    const std::uint64_t anchors = saturating_mul(anchor_count, 24);
-    const std::uint64_t scores  = saturating_mul(anchor_count, 4);
-    const std::uint64_t preds   = saturating_mul(anchor_count, 8);
-    const std::uint64_t ranges  = saturating_mul(range_count, 8);
-    const std::uint64_t device_bytes =
-        sat_add(sat_add(sat_add(anchors, scores), preds), ranges);
-    const std::uint64_t host_dp_bytes =
-        sat_add(sat_add(scores, preds), ranges);
-    const std::uint64_t transfer_scratch = sat_max(
-        sat_max(anchors, preds),
-        sat_max(scores, ranges));
-    return sat_add(sat_add(device_bytes, host_dp_bytes), transfer_scratch);
-}
-
-[[nodiscard]] inline std::uint64_t chaining_transfer_scratch_bytes(
-    std::uint64_t anchor_count,
-    std::uint64_t range_count) noexcept
-{
-    using bioseq::parallelism::saturating_mul;
-    const std::uint64_t anchors = saturating_mul(anchor_count, 24);
-    const std::uint64_t scores  = saturating_mul(anchor_count, 4);
-    const std::uint64_t preds   = saturating_mul(anchor_count, 8);
-    const std::uint64_t ranges  = saturating_mul(range_count, 8);
-    return sat_max(sat_max(anchors, preds), sat_max(scores, ranges));
-}
-
 [[nodiscard]] inline std::uint64_t phase_c_seed_exact_reserved_bytes(
     std::uint64_t anchor_count,
     std::uint64_t workgroup_count) noexcept
@@ -1042,6 +1330,7 @@ inline void check_vk(VkResult result, const char* what) {
     X(vkBindBufferMemory) \
     X(vkCmdBindDescriptorSets) \
     X(vkCmdBindPipeline) \
+    X(vkCmdCopyBuffer) \
     X(vkCmdDispatch) \
     X(vkCmdPipelineBarrier) \
     X(vkCmdPushConstants) \
@@ -1077,6 +1366,7 @@ inline void check_vk(VkResult result, const char* what) {
     X(vkGetPhysicalDeviceFeatures2) \
     X(vkGetPhysicalDeviceMemoryProperties) \
     X(vkGetPhysicalDeviceProperties) \
+    X(vkGetPhysicalDeviceProperties2) \
     X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkMapMemory) \
     X(vkQueueSubmit) \
@@ -1953,6 +2243,9 @@ void Buffer::reset() noexcept {
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     bytes = 0;
+    allocation_bytes = 0;
+    memory_properties = 0;
+    process_footprint_reflected = false;
     mapped = nullptr;
 }
 
@@ -2187,11 +2480,27 @@ void Runtime::init() {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physical_, &props);
+    VkPhysicalDeviceIDProperties id_properties{};
+    id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 properties2{};
+    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties2.pNext = &id_properties;
+    vkGetPhysicalDeviceProperties2(physical_, &properties2);
+    std::copy(
+        std::begin(id_properties.deviceUUID),
+        std::end(id_properties.deviceUUID),
+        features_.device_uuid.begin());
     features_.device_type = static_cast<std::uint32_t>(props.deviceType);
     features_.software_device = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     features_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
+    features_.max_workgroup_size_x = props.limits.maxComputeWorkGroupSize[0];
+    features_.max_workgroup_size_y = props.limits.maxComputeWorkGroupSize[1];
+    features_.max_workgroup_size_z = props.limits.maxComputeWorkGroupSize[2];
     features_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
+    features_.min_storage_buffer_offset_alignment =
+        props.limits.minStorageBufferOffsetAlignment;
     features_.max_shared_memory_bytes = props.limits.maxComputeSharedMemorySize;
+    features_.max_storage_buffer_range = props.limits.maxStorageBufferRange;
 
     VkPhysicalDeviceMemoryProperties mem_props{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &mem_props);
@@ -2277,20 +2586,13 @@ void Runtime::init() {
     // DOC0307 §7.2 — pick the largest power-of-two anchor count the per-query
     // bitonic sort can hold in one workgroup: bounded by workgroup invocations
     // and by shared memory (each lane holds a 24-byte AnchorWire + a 4-byte
-    // original index). Anchor spans above this are rejected so selected Vulkan
-    // seed lookup cannot hide a CPU sort.
+    // original index). Anchor spans above this capacity are routed to the
+    // scalable stable GPU radix path; selected Vulkan lookup never host-sorts.
     {
-        constexpr std::uint32_t per_lane_shared_bytes = 24u + 4u;
-        std::uint32_t capacity = 0;
-        for (std::uint32_t candidate = 1; candidate <= 1024u; candidate <<= 1) {
-            if (candidate > features_.max_workgroup_invocations) break;
-            if (static_cast<std::uint64_t>(candidate) * per_lane_shared_bytes
-                > features_.max_shared_memory_bytes) {
-                break;
-            }
-            capacity = candidate;
-        }
-        gpu_anchor_sort_capacity_ = capacity;
+        gpu_anchor_sort_capacity_ = seed_anchor_bitonic_capacity(
+            features_.max_workgroup_invocations,
+            features_.max_workgroup_size_x,
+            features_.max_shared_memory_bytes);
     }
 
     features_.available = true;
@@ -2299,10 +2601,14 @@ void Runtime::init() {
     features_.device_name.back() = '\0';
     init_error_.clear();
     bioseq_log<DBG>(
-        "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
-        "maxSharedMem={}B, scalarBlockLayout={}, softwareDevice={})",
+        "[vulkan_runtime] device ready: {} (maxWGInvocations={}, "
+        "maxWGSize={}x{}x{}, maxWGCountX={}, maxSharedMem={}B, "
+        "maxStorageBufferRange={}B, scalarBlockLayout={}, softwareDevice={})",
         props.deviceName, features_.max_workgroup_invocations,
-        features_.max_workgroup_count_x, features_.max_shared_memory_bytes,
+        features_.max_workgroup_size_x, features_.max_workgroup_size_y,
+        features_.max_workgroup_size_z, features_.max_workgroup_count_x,
+        features_.max_shared_memory_bytes,
+        features_.max_storage_buffer_range,
         features_.scalar_block_layout, features_.software_device);
 }
 
@@ -2396,6 +2702,10 @@ Buffer Runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
     alloc.memoryTypeIndex = find_memory_type(
         reqs.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties);
+    const VkMemoryPropertyFlags selected_properties =
+        memory_properties.memoryTypes[alloc.memoryTypeIndex].propertyFlags;
 
     VkDeviceMemory memory = VK_NULL_HANDLE;
     if (vkAllocateMemory(device_, &alloc, nullptr, &memory) != VK_SUCCESS) {
@@ -2413,7 +2723,70 @@ Buffer Runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
         vkDestroyBuffer(device_, buffer, nullptr);
         throw VulkanRuntimeError("vkMapMemory(host)");
     }
-    return Buffer{this, buffer, memory, bytes, mapped};
+    const bool footprint_reflected =
+#if defined(__APPLE__)
+        (selected_properties & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+            == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+#else
+        false;
+#endif
+    return Buffer{this, buffer, memory, bytes, reqs.size,
+                  selected_properties, footprint_reflected, mapped};
+}
+
+std::uint64_t Runtime::buffer_memory_requirement_locked(
+    std::uint64_t bytes, VkBufferUsageFlags usage) const
+{
+    if (bytes == 0u) bytes = 1u;
+    VkBufferCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.size = bytes;
+    info.usage = usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    check_vk(vkCreateBuffer(device_, &info, nullptr, &buffer),
+             "vkCreateBuffer(requirements)");
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device_, buffer, &requirements);
+    vkDestroyBuffer(device_, buffer, nullptr);
+    return requirements.size;
+}
+
+std::uint64_t Runtime::phase_c_arena_allocation_requirement(
+    std::uint64_t requested_bytes)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "phase_c_arena_allocation_requirement on unavailable device");
+    }
+    const std::uint64_t requested_requirement =
+        buffer_memory_requirement_locked(
+            requested_bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    // The Phase-C arena is persistent.  A smaller later case reuses the prior
+    // high-water allocation, so its count admission must cover that actual live
+    // allocation rather than only the new case's requested VkBuffer size.
+    const std::uint64_t current_requirement = phase_c_arena_
+        ? phase_c_arena_->device_buffer().allocation_bytes
+        : 0u;
+    return std::max(requested_requirement, current_requirement);
+}
+
+std::uint64_t Runtime::buffer_allocation_requirement(
+    std::uint64_t requested_bytes,
+    VkBufferUsageFlags usage)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "buffer_allocation_requirement on unavailable device");
+    }
+    return buffer_memory_requirement_locked(requested_bytes, usage);
 }
 
 Buffer Runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage) {
@@ -2456,6 +2829,10 @@ Buffer Runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
             reqs.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties);
+    const VkMemoryPropertyFlags selected_properties =
+        memory_properties.memoryTypes[mem_type].propertyFlags;
 
     VkMemoryAllocateInfo alloc{};
     alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -2480,7 +2857,17 @@ Buffer Runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
         // (Phase A requires unified memory) rather than silently mis-staging.
         mapped = nullptr;
     }
-    return Buffer{this, buffer, memory, bytes, mapped};
+    const bool footprint_reflected =
+#if defined(__APPLE__)
+        (selected_properties & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+            == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+#else
+        false;
+#endif
+    return Buffer{this, buffer, memory, bytes, reqs.size,
+                  selected_properties, footprint_reflected, mapped};
 }
 
 void Runtime::destroy_buffer(Buffer& buffer) noexcept {
@@ -2611,27 +2998,32 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
 void Runtime::upload_locked(
     Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
     VkAccessFlags dst_access) {
+    (void)transfer_scratch;  // unified-memory path has no bounce allocation
     (void)dst_access;  // host-coherent + queue submit makes host writes visible
     if (bytes.empty()) return;
     if (dst.mapped == nullptr) {
         // Phase A requires host-visible device buffers (unified memory). The
-        // scratch param is the future discrete-GPU bounce; reject cleanly here.
-        (void)transfer_scratch;
+        // scratch parameter is retained in the ABI for a future discrete-GPU
+        // bounce path; an invalid/default buffer is intentional today.
         throw VulkanRuntimeError("device buffer is not host-visible (Phase A needs unified memory)");
     }
     DEBUG_ASSERT(bytes.size() <= dst.bytes, "upload exceeds destination buffer size");
-    std::memcpy(dst.mapped, bytes.data(), bytes.size());
+    if (bytes.data() != static_cast<const std::byte*>(dst.mapped)) {
+        std::memcpy(dst.mapped, bytes.data(), bytes.size());
+    }
 }
 
 void Runtime::download_locked(
     Buffer& transfer_scratch, const Buffer& src, std::span<std::byte> bytes) {
+    (void)transfer_scratch;  // unified-memory path has no bounce allocation
     if (bytes.empty()) return;
     if (src.mapped == nullptr) {
-        (void)transfer_scratch;
         throw VulkanRuntimeError("device buffer is not host-visible (Phase A needs unified memory)");
     }
     DEBUG_ASSERT(bytes.size() <= src.bytes, "download exceeds source buffer size");
-    std::memcpy(bytes.data(), src.mapped, bytes.size());
+    if (bytes.data() != static_cast<std::byte*>(src.mapped)) {
+        std::memcpy(bytes.data(), src.mapped, bytes.size());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2668,8 +3060,6 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
     // workgroups — range_count is just data, no workgroup-count throw.
     const std::uint32_t chain_groups =
         std::min(range_count, features_.max_workgroup_count_x);
-    DEBUG_ASSERT(transfer_scratch.valid(), "transfer scratch buffer must be allocated");
-
     const VkPipeline pipeline = create_pipeline_locked(key);
 
     // H2D: write the anchors/ranges and the caller-initialised best-scores /
@@ -2793,8 +3183,6 @@ GpuCoordinateChainTraceResult Runtime::run_chaining_coordinate_trace_roundtrip(
 
     const std::uint32_t chain_groups =
         std::min(range_count, features_.max_workgroup_count_x);
-    DEBUG_ASSERT(transfer_scratch.valid(), "transfer scratch buffer must be allocated");
-
     const VkPipeline pipeline = create_pipeline_locked(key);
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
@@ -2980,9 +3368,11 @@ struct SeedLookupPush {
     std::uint32_t query_len;
     std::uint32_t kmer_size;
     std::uint32_t slot_mask;
+    std::uint32_t bucket_count;
     std::uint32_t exact_anchor_count;
+    std::uint32_t target_ref_bits;
 };
-static_assert(sizeof(SeedLookupPush) == 36);
+static_assert(sizeof(SeedLookupPush) == 44);
 
 constexpr VkBufferUsageFlags kPhaseBBufferUsage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -3329,10 +3719,31 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             return entry;
         }
     }
-    if (local_size == 0 || local_size > features_.max_workgroup_invocations) {
+    const ShaderVariantKey shader_key = make_shader_key(kind, 384u, local_size, max_span);
+    ShaderCompileRequest geometry_request{};
+    geometry_request.kind = kind;
+    geometry_request.tile_size = 384u;
+    geometry_request.local_size = local_size;
+    geometry_request.max_span = max_span;
+    const ShaderWorkgroupSize workgroup =
+        expected_shader_workgroup_size(geometry_request);
+    const std::uint64_t workgroup_invocations =
+        static_cast<std::uint64_t>(workgroup.x)
+        * static_cast<std::uint64_t>(workgroup.y)
+        * static_cast<std::uint64_t>(workgroup.z);
+    if (workgroup.x == 0 || workgroup.y == 0 || workgroup.z == 0
+        || workgroup.x > features_.max_workgroup_size_x
+        || workgroup.y > features_.max_workgroup_size_y
+        || workgroup.z > features_.max_workgroup_size_z
+        || workgroup_invocations > features_.max_workgroup_invocations) {
         throw VulkanRuntimeError(fmt::format(
-            "Phase B local_size {} exceeds maxComputeWorkGroupInvocations {}",
-            local_size, features_.max_workgroup_invocations));
+            "Phase B workgroup {}x{}x{} (key local_size {}) exceeds device "
+            "limits maxComputeWorkGroupSize={}x{}x{} or "
+            "maxComputeWorkGroupInvocations={}",
+            workgroup.x, workgroup.y, workgroup.z, local_size,
+            features_.max_workgroup_size_x, features_.max_workgroup_size_y,
+            features_.max_workgroup_size_z,
+            features_.max_workgroup_invocations));
     }
 
     const DescriptorLayoutKind layout_kind = descriptor_layout_for(kind);
@@ -3393,7 +3804,6 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &entry.descriptor_set),
              "vkAllocateDescriptorSets(phase_b)");
 
-    const ShaderVariantKey shader_key = make_shader_key(kind, 384u, local_size, max_span);
     if (use_shader_provider_locked()) {
         if (!metallib_provider_capable_) {
             vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
@@ -3438,6 +3848,17 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
         // Pin the SSBO wire ABI: a sort-range-stride mismatch would silently
         // corrupt direct SortRangeWire reads.
         const SpirvLayoutScan scan = scan_spirv_layout(spirv);
+        if (kind == ShaderKind::seed_lookup_anchors
+            && (!scan.has_binding(0) || !scan.has_binding(1)
+                || !scan.has_binding(2) || !scan.has_binding(3)
+                || !scan.has_binding(4) || !scan.has_binding(5)
+                || !scan.has_array_stride(24) || !scan.has_array_stride(8)
+                || !scan.has_struct_offsets({0u, 8u, 16u, 20u}))) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError("SPIR-V seed lookup anchor/key ABI mismatch");
+        }
         if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
             vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
             vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
@@ -3534,7 +3955,8 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     std::span<const std::uint32_t> prefix_counts,
     std::uint64_t query_len,
     std::uint32_t kmer_size,
-    std::uint64_t exact_anchor_count)
+    std::uint64_t exact_anchor_count,
+    const SeedAnchorSortPlan& sort_plan)
 {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -3545,6 +3967,45 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     }
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw VulkanRuntimeError("seed lookup missing resident index buffers");
+    }
+    if (static_cast<std::uint64_t>(inputs.position_count) * 8u
+        > inputs.positions->bytes) {
+        throw VulkanRuntimeError(
+            "seed lookup resident position range is malformed");
+    }
+    const std::uint64_t slot_count_from_bytes = inputs.slots->bytes / 16u;
+    if (inputs.bucket_count != 0u) {
+        if (inputs.slot_mask != 0u
+            || inputs.bucket_count > slot_count_from_bytes) {
+            throw VulkanRuntimeError(
+                "seed lookup sorted-dense index representation is malformed");
+        }
+    } else {
+        const std::uint64_t open_capacity =
+            static_cast<std::uint64_t>(inputs.slot_mask) + 1u;
+        if (inputs.slot_mask == 0u
+            || !std::has_single_bit(open_capacity)
+            || open_capacity > slot_count_from_bytes) {
+            throw VulkanRuntimeError(
+                "seed lookup open-addressed index representation is malformed");
+        }
+    }
+    const SeedAnchorSortPlan expected_sort_plan = make_seed_anchor_sort_plan(
+        exact_anchor_count,
+        inputs.target_len,
+        inputs.target_position_offset,
+        gpu_anchor_sort_capacity_,
+        features_.max_workgroup_count_x,
+        features_.max_workgroup_invocations,
+        features_.max_workgroup_size_x,
+        features_.max_storage_buffer_range);
+    if (!sort_plan.valid() || sort_plan != expected_sort_plan
+        || sort_plan.backend == SeedAnchorSortBackend::none) {
+        throw VulkanRuntimeError(
+            "seed lookup sort plan does not match the runtime/device contract");
+    }
+    if (prefix_counts.back() != exact_anchor_count) {
+        throw VulkanRuntimeError("seed lookup prefix total disagrees with anchor count");
     }
     const std::uint64_t minimizer_count = prefix_counts.size() - 1u;
     constexpr std::uint32_t seed_local = 128u;
@@ -3582,36 +4043,49 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
         kPhaseBBufferUsage);
     upload_locked(scratch, prefix_buf, std::as_bytes(prefix_counts), VK_ACCESS_SHADER_READ_BIT);
 
-    const std::uint64_t anchor_bytes = exact_anchor_count * std::uint64_t{24};
-    Buffer anchors_buf = create_device_buffer(
-        std::max<std::uint64_t>(anchor_bytes, 24u), kPhaseBBufferUsage);
-
-    const std::uint32_t sort_capacity = gpu_anchor_sort_capacity_;
-    const bool gpu_sort = sort_capacity > 0 && exact_anchor_count <= sort_capacity;
-    if (!gpu_sort) {
-        throw VulkanRuntimeError(fmt::format(
-            "Vulkan seed lookup selected but anchor count {} exceeds GPU sort capacity {}",
-            exact_anchor_count, sort_capacity));
-    }
+    const std::uint64_t anchor_bytes = sort_plan.anchor_bytes;
+    Buffer anchors_buf = create_device_buffer(anchor_bytes, kPhaseBBufferUsage);
+    Buffer anchor_keys_buf = create_device_buffer(
+        sort_plan.key_bytes, kPhaseBBufferUsage);
     Buffer ranges_buf;
     std::optional<PhaseBPipeline> sort_pipe;
-    ranges_buf = create_device_buffer(sizeof(SortRangeWire), kPhaseBBufferUsage);
-    const SortRangeWire range{0u, static_cast<std::uint32_t>(exact_anchor_count)};
-    upload_locked(scratch, ranges_buf,
-        std::span<const std::byte>{reinterpret_cast<const std::byte*>(&range), sizeof(range)},
-        VK_ACCESS_SHADER_READ_BIT);
-    sort_pipe = get_phase_b_pipeline_locked(
-        ShaderKind::sort_anchors_bitonic, sort_capacity, 256u);
+    Buffer anchors_scratch_buf;
+    Buffer anchor_keys_scratch_buf;
+    Buffer histogram_buf;
+    if (sort_plan.backend == SeedAnchorSortBackend::bitonic) {
+        ranges_buf = create_device_buffer(sizeof(SortRangeWire), kPhaseBBufferUsage);
+        const SortRangeWire range{
+            0u, static_cast<std::uint32_t>(exact_anchor_count)};
+        upload_locked(scratch, ranges_buf,
+            std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(&range), sizeof(range)},
+            VK_ACCESS_SHADER_READ_BIT);
+        sort_pipe = get_phase_b_pipeline_locked(
+            ShaderKind::sort_anchors_bitonic,
+            gpu_anchor_sort_capacity_,
+            256u);
+    } else {
+        anchors_scratch_buf = create_device_buffer(
+            sort_plan.anchor_bytes, kPhaseBBufferUsage);
+        anchor_keys_scratch_buf = create_device_buffer(
+            sort_plan.key_bytes, kPhaseBBufferUsage);
+        histogram_buf = create_device_buffer(
+            sort_plan.histogram_bytes, kPhaseBBufferUsage);
+    }
 
     {
-        const std::array<VkBuffer, 5> seed_bufs{
+        const std::array<VkBuffer, 6> seed_bufs{
             min_words->buffer, inputs.slots->buffer, inputs.positions->buffer,
-            prefix_buf.buffer, anchors_buf.buffer};
+            prefix_buf.buffer, anchors_buf.buffer, anchor_keys_buf.buffer};
         bind_phase_b_descriptors_locked(seed_pipe, seed_bufs);
-        if (gpu_sort) {
+        if (sort_plan.backend == SeedAnchorSortBackend::bitonic) {
             const std::array<VkBuffer, 2> sort_bufs{anchors_buf.buffer, ranges_buf.buffer};
             bind_phase_b_descriptors_locked(*sort_pipe, sort_bufs);
         }
+    }
+
+    if (sort_plan.backend == SeedAnchorSortBackend::radix) {
+        reset_phase_c_pool_locked();
     }
 
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(seed)");
@@ -3632,7 +4106,9 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
         static_cast<std::uint32_t>(minimizer_count), inputs.minimizer_words32_per_record,
         inputs.minimizer_word_kind, inputs.hash_shift, inputs.pos_bits,
         static_cast<std::uint32_t>(query_len), kmer_size, inputs.slot_mask,
-        static_cast<std::uint32_t>(exact_anchor_count)};
+        inputs.bucket_count,
+        static_cast<std::uint32_t>(exact_anchor_count),
+        sort_plan.target_ref_bits};
     vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, seed_pipe.pipeline);
     vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
                             seed_pipe.pipeline_layout, 0, 1, &seed_pipe.descriptor_set, 0, nullptr);
@@ -3640,18 +4116,44 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
                        0, sizeof(seed_push), &seed_push);
     vkCmdDispatch(command_buffer_, static_cast<std::uint32_t>(seed_groups), 1, 1);
 
-    if (gpu_sort) {
-        VkMemoryBarrier shader_to_shader{};
-        shader_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        shader_to_shader.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        shader_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &shader_to_shader,
-                             0, nullptr, 0, nullptr);
+    VkMemoryBarrier shader_to_shader{};
+    shader_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    shader_to_shader.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    shader_to_shader.dstAccessMask =
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                         &shader_to_shader, 0, nullptr, 0, nullptr);
+
+    bool radix_result_in_scratch = false;
+    if (sort_plan.backend == SeedAnchorSortBackend::bitonic) {
         vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, sort_pipe->pipeline);
         vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 sort_pipe->pipeline_layout, 0, 1, &sort_pipe->descriptor_set, 0, nullptr);
         vkCmdDispatch(command_buffer_, 1, 1, 1);
+    } else {
+        const GpuArenaSlice anchors{
+            &anchors_buf, 0u, sort_plan.anchor_bytes};
+        const GpuArenaSlice keys{
+            &anchor_keys_buf, 0u, sort_plan.key_bytes};
+        const GpuArenaSlice anchors_scratch{
+            &anchors_scratch_buf, 0u, sort_plan.anchor_bytes};
+        const GpuArenaSlice keys_scratch{
+            &anchor_keys_scratch_buf, 0u, sort_plan.key_bytes};
+        const GpuArenaSlice histogram{
+            &histogram_buf, 0u, sort_plan.histogram_bytes};
+        const GpuSortPlan radix_plan{
+            exact_anchor_count, 8u, 24u, 8u,
+            sort_plan.radix_pass_count};
+        record_radix_sort_locked(
+            command_buffer_, keys, anchors, keys_scratch, anchors_scratch,
+            histogram, radix_plan, sort_plan.num_workgroups,
+            sort_plan.elements_per_workgroup, 3u,
+            radix_result_in_scratch);
+        if (radix_result_in_scratch
+            != seed_radix_result_in_scratch(sort_plan.radix_pass_count)) {
+            throw VulkanRuntimeError("seed radix sort result parity mismatch");
+        }
     }
 
     VkMemoryBarrier shader_to_host{};
@@ -3673,9 +4175,29 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
 
     SeedLookupResult result;
     result.count = exact_anchor_count;
+    result.seed_lookup_dispatches = 1u;
+    result.open_addressed_lookup_dispatches =
+        inputs.bucket_count == 0u ? 1u : 0u;
+    result.sorted_dense_lookup_dispatches =
+        inputs.bucket_count != 0u ? 1u : 0u;
     result.host_bytes.resize(static_cast<std::size_t>(anchor_bytes));
-    download_locked(scratch, anchors_buf, std::span<std::byte>{
+    const Buffer& sorted_anchors = radix_result_in_scratch
+        ? anchors_scratch_buf : anchors_buf;
+    download_locked(scratch, sorted_anchors, std::span<std::byte>{
         result.host_bytes.data(), result.host_bytes.size()});
+
+    if (sort_plan.backend == SeedAnchorSortBackend::bitonic) {
+        result.sort_proof.bitonic_sort_dispatches = 1u;
+    } else {
+        result.sort_proof.radix_sort_operations = 1u;
+        result.sort_proof.radix_anchor_count = exact_anchor_count;
+        result.sort_proof.radix_passes = sort_plan.radix_pass_count;
+        result.sort_proof.radix_histogram_dispatches =
+            sort_plan.radix_pass_count;
+        result.sort_proof.radix_scan_dispatches = sort_plan.radix_pass_count;
+        result.sort_proof.radix_scatter_dispatches =
+            sort_plan.radix_pass_count;
+    }
 
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(seed-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
@@ -3702,6 +4224,69 @@ constexpr std::uint32_t kPhaseCSketchLocal = 64u;
 constexpr std::uint32_t kPhaseCSketchTileSpanMax = 384u;
 constexpr std::uint32_t kPhaseCScanBlock = 256u;
 constexpr std::uint32_t kPhaseCSlotOffsetAlign = 256u;
+
+struct PhaseCSketchBatchArenaRequest {
+    bool valid = false;
+    std::uint32_t num_blocks = 0;
+    std::uint64_t requested_bytes = 0;
+};
+
+/// Authoritative eight-slice request shared by admission planning and the
+/// dispatch itself: sequence, LUT, tile records, counts, offsets, scan blocks,
+/// counters, and pair-value scratch.
+[[nodiscard]] PhaseCSketchBatchArenaRequest
+phase_c_sketch_batch_arena_request(
+    std::uint64_t packed_sequence_bytes,
+    std::uint64_t tile_count) noexcept
+{
+    constexpr std::uint64_t limit =
+        (std::numeric_limits<std::uint64_t>::max)();
+    if (tile_count == 0u
+        || tile_count
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::uint32_t>::max)())) {
+        return {};
+    }
+    const std::uint32_t num_blocks = std::max<std::uint32_t>(
+        phase_c_ceil_div_u32(tile_count, kPhaseCScanBlock),
+        1u);
+    const auto append_slice = [](
+        std::uint64_t total,
+        std::uint64_t bytes) noexcept -> std::uint64_t {
+        return sat_add(
+            total,
+            phase_c_align_up(
+                std::max<std::uint64_t>(bytes, 4u),
+                kPhaseCSlotOffsetAlign));
+    };
+    const std::uint64_t tile_bytes = phase_c_saturating_mul(
+        tile_count,
+        sizeof(PhaseCSketchTileWire));
+    const std::uint64_t tile_u32_bytes = phase_c_saturating_mul(
+        tile_count,
+        sizeof(std::uint32_t));
+    const std::uint64_t block_bytes = phase_c_saturating_mul(
+        num_blocks,
+        sizeof(std::uint32_t));
+    std::uint64_t requested_bytes = 0u;
+    requested_bytes = append_slice(requested_bytes, packed_sequence_bytes);
+    requested_bytes = append_slice(requested_bytes, sizeof(VulkanRankLut));
+    requested_bytes = append_slice(requested_bytes, tile_bytes);
+    requested_bytes = append_slice(requested_bytes, tile_u32_bytes);
+    requested_bytes = append_slice(requested_bytes, tile_u32_bytes);
+    requested_bytes = append_slice(requested_bytes, block_bytes);
+    requested_bytes = append_slice(requested_bytes, 8u);
+    requested_bytes = append_slice(requested_bytes, 16u);
+    if (tile_bytes == limit || tile_u32_bytes == limit
+        || block_bytes == limit || requested_bytes == limit) {
+        return {};
+    }
+    return {
+        .valid = true,
+        .num_blocks = num_blocks,
+        .requested_bytes = requested_bytes,
+    };
+}
 
 using TileC = PhaseCSketchTileWire;
 static_assert(sizeof(TileC) == 24);
@@ -3807,6 +4392,63 @@ void record_shader_to_host(VkCommandBuffer cmd) {
 
 }  // namespace
 
+PhaseCSketchBatchAllocationRequirements
+Runtime::phase_c_sketch_batch_allocation_requirements(
+    std::uint64_t packed_sequence_bytes,
+    std::uint64_t tile_count,
+    std::uint32_t minimizer_word_kind,
+    std::uint32_t minimizer_words32,
+    std::uint64_t max_minimizers)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "phase_c_sketch_batch_allocation_requirements on unavailable device");
+    }
+    const bool minimizer_shape_valid =
+        (minimizer_word_kind == 0u && minimizer_words32 == 0u)
+        || (minimizer_word_kind == 1u && minimizer_words32 == 1u)
+        || (minimizer_word_kind == 2u && minimizer_words32 == 2u)
+        || (minimizer_word_kind == 3u && minimizer_words32 == 4u);
+    const PhaseCSketchBatchArenaRequest arena_request =
+        phase_c_sketch_batch_arena_request(
+            packed_sequence_bytes,
+            tile_count);
+    if (!minimizer_shape_valid || !arena_request.valid
+        || max_minimizers == 0u
+        || max_minimizers
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::uint32_t>::max)())) {
+        return {};
+    }
+    const std::uint64_t output_requested_bytes =
+        std::max<std::uint64_t>(
+            minimizer_device_bytes(
+                minimizer_word_kind,
+                minimizer_words32,
+                max_minimizers),
+            4u);
+    const std::uint64_t arena_requested_allocation =
+        buffer_memory_requirement_locked(
+            arena_request.requested_bytes,
+            kPhaseCArenaUsage);
+    const std::uint64_t current_arena_allocation = phase_c_arena_
+        ? phase_c_arena_->device_buffer().allocation_bytes
+        : 0u;
+    return {
+        .valid = true,
+        .arena_requested_bytes = arena_request.requested_bytes,
+        .arena_allocation_bytes = std::max(
+            arena_requested_allocation,
+            current_arena_allocation),
+        .pessimistic_output_requested_bytes = output_requested_bytes,
+        .pessimistic_output_allocation_bytes =
+            buffer_memory_requirement_locked(
+                output_requested_bytes,
+                kPhaseBBufferUsage),
+    };
+}
+
 Buffer Runtime::run_generate_units_roundtrip(
     std::uint32_t word_bits,
     std::span<const std::uint32_t> cdf,
@@ -3911,26 +4553,32 @@ bool GpuArena::ensure_capacity(
     // never grows mid-op (DOC0310 §7 forbids it while slices are live).
     try {
         if (device_bytes > device_capacity_) {
-            const std::uint64_t want = std::max<std::uint64_t>(device_bytes,
-                device_capacity_ == 0 ? device_bytes : device_capacity_ * 2u);
-            device_ = runtime_->create_device_buffer(want, kPhaseCArenaUsage);
+            // Operation starts only from a rewound mark. Release the obsolete
+            // arena before allocating its exact replacement so growth never
+            // creates an unadmitted old+new overlap or geometric 2x tail.
+            device_.reset();
+            device_capacity_ = 0u;
+            device_ = runtime_->create_device_buffer(
+                device_bytes, kPhaseCArenaUsage);
             if (device_.mapped == nullptr) return false;  // Phase C needs unified memory.
             device_capacity_ = device_.bytes;
             device_cursor_ = 0;
         }
         if (upload_bytes > upload_capacity_) {
-            const std::uint64_t want = std::max<std::uint64_t>(upload_bytes,
-                upload_capacity_ == 0 ? upload_bytes : upload_capacity_ * 2u);
+            upload_.reset();
+            upload_capacity_ = 0u;
             upload_ = runtime_->create_host_buffer(
-                want, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                upload_bytes,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             upload_capacity_ = upload_.bytes;
             upload_cursor_ = 0;
         }
         if (download_bytes > download_capacity_) {
-            const std::uint64_t want = std::max<std::uint64_t>(download_bytes,
-                download_capacity_ == 0 ? download_bytes : download_capacity_ * 2u);
+            download_.reset();
+            download_capacity_ = 0u;
             download_ = runtime_->create_host_buffer(
-                want, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                download_bytes,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             download_capacity_ = download_.bytes;
             download_cursor_ = 0;
         }
@@ -4208,9 +4856,15 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     }
     const std::uint32_t query_gate_word_count =
         static_cast<std::uint32_t>(query_gate_words.size());
+    if ((query_gate_word_count == 0u && query_gate_mask != 0u)
+        || (query_gate_word_count != 0u
+            && (query_gate_word_count != kPhaseCQueryGateWordCount
+                || query_gate_mask != kPhaseCQueryGateMask))) {
+        throw VulkanRuntimeError(
+            "phase_c sketch query gate has truncated/noncanonical coverage");
+    }
     const std::uint64_t query_gate_bytes =
         static_cast<std::uint64_t>(query_gate_words.size()) * sizeof(std::uint32_t);
-
     const std::uint64_t out_bytes = std::max<std::uint64_t>(
         minimizer_device_bytes(
             params.minimizer_word_kind,
@@ -4308,6 +4962,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         std::memcpy(base + query_gate_s.offset, query_gate_words.data(),
                     static_cast<std::size_t>(query_gate_bytes));
     }
+
     if (params.minimizer_word_kind == 0u) std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
 
     const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_sketch_tile, kPhaseCSketchLocal, std::max<std::uint32_t>(w, 1u));
@@ -4395,7 +5050,8 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     const VulkanRankLut& rank_lut,
     const VulkanSketchParams& params,
     std::span<const PhaseCSketchTileWire> tiles,
-    std::uint64_t max_minimizers)
+    std::uint64_t max_minimizers,
+    VulkanSketchHostMaterialization materialization)
 {
     std::lock_guard<std::mutex> guard(mu_);
     RuntimeSketchBatchResult result;
@@ -4403,6 +5059,12 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         throw VulkanRuntimeError(
             "run_phase_c_sketch_tile_batch_roundtrip on unavailable device");
     }
+    if (materialization != VulkanSketchHostMaterialization::host_and_device
+        && materialization != VulkanSketchHostMaterialization::device_only) {
+        throw VulkanRuntimeError(
+            "phase_c sketch tile batch has invalid host materialization mode");
+    }
+    result.dispatch_proof.materialization_ = materialization;
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
     if (tiles.empty() || w == 0u || k == 0u || max_minimizers == 0u) {
@@ -4418,8 +5080,15 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     }
 
     const std::uint32_t tile_count = static_cast<std::uint32_t>(tiles.size());
-    const std::uint32_t num_blocks =
-        std::max<std::uint32_t>(ceil_div_u32(tile_count, kPhaseCScanBlock), 1u);
+    const PhaseCSketchBatchArenaRequest arena_request =
+        phase_c_sketch_batch_arena_request(
+            packed_sequence.size(),
+            tile_count);
+    if (!arena_request.valid) {
+        throw VulkanRuntimeError(
+            "phase_c sketch tile batch arena request is invalid");
+    }
+    const std::uint32_t num_blocks = arena_request.num_blocks;
     const std::uint32_t sketch_groups = std::min(
         ceil_div_u32(tile_count, kPhaseCSketchLocal),
         features_.max_workgroup_count_x);
@@ -4427,37 +5096,29 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         return result;
     }
 
-    const std::uint64_t out_bytes = std::max<std::uint64_t>(
-        minimizer_device_bytes(
-            params.minimizer_word_kind,
-            params.minimizer_words32,
-            max_minimizers),
-        4u);
-    auto add_aligned =
-        [] (std::uint64_t total, std::uint64_t bytes) -> std::uint64_t {
-        return sat_add(
-            total,
-            phase_c_align_up(
-                std::max<std::uint64_t>(bytes, 4u),
-                kPhaseCSlotOffsetAlign));
-    };
-    std::uint64_t arena_bytes = 0u;
-    arena_bytes = add_aligned(arena_bytes, packed_sequence.size());
-    arena_bytes = add_aligned(arena_bytes, sizeof(VulkanRankLut));
-    arena_bytes = add_aligned(
-        arena_bytes,
-        static_cast<std::uint64_t>(tiles.size()) * sizeof(PhaseCSketchTileWire));
-    arena_bytes = add_aligned(arena_bytes, static_cast<std::uint64_t>(tile_count) * 4u);
-    arena_bytes = add_aligned(arena_bytes, static_cast<std::uint64_t>(tile_count) * 4u);
-    arena_bytes = add_aligned(arena_bytes, static_cast<std::uint64_t>(num_blocks) * 4u);
-    arena_bytes = add_aligned(arena_bytes, 8u);
-    arena_bytes = add_aligned(arena_bytes, 16u);
-
-    Buffer out_words = create_device_buffer(out_bytes, kPhaseBBufferUsage);
-    if (out_words.mapped == nullptr) {
-        throw VulkanRuntimeError("phase_c sketch tile batch non-unified output memory");
+    // Preserve the established host-materialized path: it reserves its
+    // pessimistic output up front and records count/scan/emit in one submit.
+    // Only device-only mode waits for the scan before allocating exact output.
+    Buffer host_materialized_out_words;
+    if (materialization
+        == VulkanSketchHostMaterialization::host_and_device) {
+        const std::uint64_t pessimistic_output_bytes =
+            std::max<std::uint64_t>(
+                minimizer_device_bytes(
+                    params.minimizer_word_kind,
+                    params.minimizer_words32,
+                    max_minimizers),
+                4u);
+        host_materialized_out_words = create_device_buffer(
+            pessimistic_output_bytes,
+            kPhaseBBufferUsage);
+        if (host_materialized_out_words.mapped == nullptr) {
+            throw VulkanRuntimeError(
+                "phase_c sketch tile batch non-unified host output memory");
+        }
     }
 
+    const std::uint64_t arena_bytes = arena_request.requested_bytes;
     GpuArena& arena = phase_c_arena();
     if (!arena.ensure_capacity(arena_bytes, 0u, 0u)) {
         throw VulkanRuntimeError(fmt::format(
@@ -4509,10 +5170,13 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     std::memset(base + offsets_s.offset, 0, static_cast<std::size_t>(offsets_s.size));
     std::memset(base + blocks_s.offset, 0, static_cast<std::size_t>(blocks_s.size));
     std::memset(base + counters_s.offset, 0, static_cast<std::size_t>(counters_s.size));
-    if (params.minimizer_word_kind == 0u) {
-        std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
+    if (materialization == VulkanSketchHostMaterialization::host_and_device
+        && params.minimizer_word_kind == 0u) {
+        std::memset(
+            host_materialized_out_words.mapped,
+            0,
+            static_cast<std::size_t>(host_materialized_out_words.bytes));
     }
-
     const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(
         ShaderKind::phase_c_sketch_tile,
         kPhaseCSketchLocal,
@@ -4527,12 +5191,23 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         1u);
     reset_phase_c_pool_locked();
 
-    const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
+    // Device-only count mode never dereferences binding 4, so it can use the
+    // tiny counters slice until the exact output exists.  Host mode binds its
+    // established pessimistic output, which the same submit later emits into.
+    const VkDescriptorBufferInfo initial_output_info =
+        materialization == VulkanSketchHostMaterialization::host_and_device
+        ? VkDescriptorBufferInfo{
+            host_materialized_out_words.buffer, 0, VK_WHOLE_SIZE}
+        : VkDescriptorBufferInfo{
+            counters_s.buffer->buffer,
+            counters_s.offset,
+            counters_s.size};
+    const std::array<VkDescriptorBufferInfo, 9> count_sketch_infos{{
         {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
         {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
         {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
         {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-        {out_words.buffer, 0, VK_WHOLE_SIZE},
+        initial_output_info,
         {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
         {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
         {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
@@ -4569,41 +5244,62 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     static const auto* _qsketch_d =
         bioseq::instr::register_region_static("phase_c_query_sketch_batch");
     auto _qsketch_s = bioseq::instr::region(_qsketch_d);
+    RuntimeSketchBatchDispatchProof dispatch_proof{};
+    dispatch_proof.materialization_ = materialization;
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(pc_sketch_batch)");
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check_vk(
         vkBeginCommandBuffer(command_buffer_, &begin),
-        "vkBeginCommandBuffer(pc_sketch_batch)");
+        "vkBeginCommandBuffer(pc_sketch_batch_count_scan)");
     record_host_to_shader(command_buffer_);
     record_phase_c_dispatch_locked(
-        command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+        command_buffer_, sketch_pipe, count_sketch_infos, &push, sizeof(push),
+        sketch_groups);
+    ++dispatch_proof.count_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0), num_blocks);
+    ++dispatch_proof.prefix_scan_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u);
+    ++dispatch_proof.prefix_scan_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, scan_add_pipe, scan_infos, &scan1, sizeof(scan1),
         ceil_div_u32(tile_count, 128u));
-    record_compute_barrier(command_buffer_);
-    push.emit_mode = 1u;
-    record_phase_c_dispatch_locked(
-        command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    ++dispatch_proof.prefix_scan_dispatches_;
+    ++dispatch_proof.prefix_scan_sequences_;
+    if (materialization
+        == VulkanSketchHostMaterialization::host_and_device) {
+        record_compute_barrier(command_buffer_);
+        push.emit_mode = 1u;
+        record_phase_c_dispatch_locked(
+            command_buffer_, sketch_pipe, count_sketch_infos, &push,
+            sizeof(push), sketch_groups);
+        ++dispatch_proof.emit_dispatches_;
+    }
     record_shader_to_host(command_buffer_);
-    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(pc_sketch_batch)");
+    check_vk(
+        vkEndCommandBuffer(command_buffer_),
+        "vkEndCommandBuffer(pc_sketch_batch_count_scan)");
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
-    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch_batch)");
+    check_vk(
+        vkQueueSubmit(queue_, 1, &submit, fence_),
+        "vkQueueSubmit(pc_sketch_batch_count_scan)");
     check_vk(
         vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
-        "vkWaitForFences(pc_sketch_batch)");
-    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch_batch)");
+        "vkWaitForFences(pc_sketch_batch_count_scan)");
+    check_vk(
+        vkResetFences(device_, 1, &fence_),
+        "vkResetFences(pc_sketch_batch_count_scan)");
+    ++dispatch_proof.completed_roundtrips_;
+    result.dispatch_proof = dispatch_proof;
 
     result.tile_counts.resize(tiles.size());
     result.tile_offsets.resize(tiles.size());
@@ -4621,17 +5317,93 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
 
     if (total > max_minimizers) {
         result.overflow = true;
-    } else {
+    } else if (materialization
+               == VulkanSketchHostMaterialization::host_and_device) {
         result.count = total;
         const std::uint64_t host_bytes =
             minimizer_host_bytes(params.minimizer_word_kind, total);
-        result.host_minimizer_bytes.resize(static_cast<std::size_t>(host_bytes));
+        result.host_minimizer_bytes.resize(
+            static_cast<std::size_t>(host_bytes));
         if (host_bytes > 0u) {
             std::memcpy(
                 result.host_minimizer_bytes.data(),
-                out_words.mapped,
+                host_materialized_out_words.mapped,
                 static_cast<std::size_t>(host_bytes));
         }
+        result.minimizer_words = std::move(host_materialized_out_words);
+    } else {
+        // The count/scan result is authoritative.  Allocate only the exact
+        // device payload (Vulkan requires a nonzero buffer, hence the 4-byte
+        // physical minimum for an empty logical result), then reuse the
+        // resident input/count/offset slices for an emit-only submission.
+        const std::uint64_t exact_device_bytes = std::max<std::uint64_t>(
+            minimizer_device_bytes(
+                params.minimizer_word_kind,
+                params.minimizer_words32,
+                total),
+            4u);
+        Buffer out_words = create_device_buffer(
+            exact_device_bytes,
+            kPhaseBBufferUsage);
+        if (out_words.mapped == nullptr) {
+            arena.rewind(mark);
+            throw VulkanRuntimeError(
+                "phase_c sketch tile batch non-unified exact output memory");
+        }
+        if (params.minimizer_word_kind == 0u) {
+            std::memset(
+                out_words.mapped,
+                0,
+                static_cast<std::size_t>(out_words.bytes));
+        }
+
+        const std::array<VkDescriptorBufferInfo, 9> emit_sketch_infos{{
+            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+            {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
+            {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
+            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
+            {out_words.buffer, 0, VK_WHOLE_SIZE},
+            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+            {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
+            {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
+            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+        }};
+
+        // The first queue submission is complete, so its descriptor sets may
+        // be recycled.  The arena mark and all resident slices remain live.
+        reset_phase_c_pool_locked();
+        check_vk(
+            vkResetCommandBuffer(command_buffer_, 0),
+            "vkResetCommandBuffer(pc_sketch_batch_emit)");
+        check_vk(
+            vkBeginCommandBuffer(command_buffer_, &begin),
+            "vkBeginCommandBuffer(pc_sketch_batch_emit)");
+        // Covers the packed-u16 zero-fill; the compute barrier carries the
+        // prior submission's count/offset shader writes into this emit read.
+        record_host_to_shader(command_buffer_);
+        record_compute_barrier(command_buffer_);
+        push.emit_mode = 1u;
+        record_phase_c_dispatch_locked(
+            command_buffer_, sketch_pipe, emit_sketch_infos, &push,
+            sizeof(push), sketch_groups);
+        ++dispatch_proof.emit_dispatches_;
+        record_shader_to_host(command_buffer_);
+        check_vk(
+            vkEndCommandBuffer(command_buffer_),
+            "vkEndCommandBuffer(pc_sketch_batch_emit)");
+        check_vk(
+            vkQueueSubmit(queue_, 1, &submit, fence_),
+            "vkQueueSubmit(pc_sketch_batch_emit)");
+        check_vk(
+            vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+            "vkWaitForFences(pc_sketch_batch_emit)");
+        check_vk(
+            vkResetFences(device_, 1, &fence_),
+            "vkResetFences(pc_sketch_batch_emit)");
+        ++dispatch_proof.completed_roundtrips_;
+        result.dispatch_proof = dispatch_proof;
+
+        result.count = total;
         result.minimizer_words = std::move(out_words);
     }
     arena.rewind(mark);
@@ -4666,29 +5438,68 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     const VulkanSketchParams& params,
     std::uint64_t max_target_minimizers,
     std::span<const std::uint32_t> query_gate_words,
-    std::uint32_t query_gate_mask)
+    std::uint32_t query_gate_mask,
+    GpuBuiltIndexGateIdentity query_gate_identity,
+    bioseq::parallelism::MemoryPermit* peak_permit)
 {
     std::lock_guard<std::mutex> guard(mu_);
     static const auto* _run_d = bioseq::instr::register_region_static("phase_c_index_run");
     auto _run_s = bioseq::instr::region(_run_d);
     GpuBuiltIndex out;
+    out.ownership.count_phase_admissions = peak_permit != nullptr ? 1u : 0u;
     if (!features_.available) throw VulkanRuntimeError("run_phase_c_build_target_index on unavailable device");
     const std::uint32_t bp = params.bp_size;
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
     out.target_len = bp;
     if (bp == 0u || w == 0u || k == 0u || bp < k || max_target_minimizers == 0u) {
+        out.failure_reason = GpuBuiltIndexFailureReason::invalid_shape;
         return out;  // empty/invalid shape; selected GPU callers throw.
     }
-    if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) return out;
+    if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::minimizer_capacity_exceeds_u32;
+        return out;
+    }
     if (query_gate_words.size()
         > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c index query gate exceeds uint32 word count");
     }
     const std::uint32_t query_gate_word_count =
         static_cast<std::uint32_t>(query_gate_words.size());
+    const bool gate_uses_identity_owner = query_gate_identity.canonical_words
+        && query_gate_words.data()
+            == query_gate_identity.canonical_words->data()
+        && query_gate_words.size()
+            == query_gate_identity.canonical_words->size();
+    const bool gate_shape_matches = query_gate_word_count == 0u
+        ? query_gate_identity.well_formed() && !query_gate_identity.enabled
+        : query_gate_identity.well_formed()
+            && query_gate_identity.enabled
+            && query_gate_identity.word_count == query_gate_word_count
+            && query_gate_identity.mask == query_gate_mask
+            && (gate_uses_identity_owner
+                || std::equal(
+                    query_gate_words.begin(), query_gate_words.end(),
+                    query_gate_identity.canonical_words->begin()));
+    if (!gate_shape_matches) {
+        throw VulkanRuntimeError(
+            "phase_c index query gate lacks matching immutable identity");
+    }
+    out.gate_identity = std::move(query_gate_identity);
+    out.ownership.query_gate_enabled = query_gate_word_count != 0u ? 1u : 0u;
+    out.ownership.query_gate_word_count = query_gate_word_count;
+    out.ownership.query_gate_mask = query_gate_word_count != 0u
+        ? query_gate_mask : 0u;
+    out.ownership.query_gate_digest_lo = query_gate_word_count != 0u
+        ? out.gate_identity.digest_lo : 0u;
+    out.ownership.query_gate_digest_hi = query_gate_word_count != 0u
+        ? out.gate_identity.digest_hi : 0u;
     const std::uint64_t query_gate_bytes =
         static_cast<std::uint64_t>(query_gate_words.size()) * sizeof(std::uint32_t);
+    const std::uint64_t flag_scan_alignment = std::max<std::uint64_t>(
+        kPhaseCSlotOffsetAlign,
+        features_.min_storage_buffer_offset_alignment);
 
     const PhaseCSketchMemoryPlan memory_plan = phase_c_sketch_memory_plan(
         bp,
@@ -4702,6 +5513,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         params.letters_per_unit,
         features_.max_workgroup_count_x);
     if (!memory_plan.valid) {
+        out.failure_reason = GpuBuiltIndexFailureReason::memory_plan_invalid;
         return out;
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
@@ -4728,6 +5540,23 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         query_gate_bytes == 0u
             ? 0u
             : sat_add(query_gate_bytes, std::uint64_t{kPhaseCSlotOffsetAlign}));
+    const std::uint64_t count_arena_requirement = std::max(
+        arena.device_buffer().allocation_bytes,
+        buffer_memory_requirement_locked(arena_bytes, kPhaseCArenaUsage));
+    const std::uint64_t count_required_peak = sat_add(
+        count_arena_requirement, memory_plan.host_transient_bytes);
+    if (peak_permit == nullptr) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        return out;
+    }
+    if (count_required_peak > peak_permit->bytes()
+        && !peak_permit->grow_to(
+            count_required_peak, &out.main_peak_admission_failure)) {
+        out.failure_reason = GpuBuiltIndexFailureReason::
+            count_peak_memory_admission_denied;
+        return out;
+    }
     if (!arena.ensure_capacity(arena_bytes, 0, 0)) {
         throw VulkanRuntimeError(fmt::format(
             "phase_c index arena grow failed (bp={}, arena_bytes={})",
@@ -4757,6 +5586,20 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         bioseq_log<ERR>("[phase_c index] scaffold arena oversubscribed (bp={}, num_tiles={}, "
                         "arena_bytes={}); returning invalid GPU index",
                         bp, num_tiles, arena_bytes);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_arena_allocation_failed;
+        arena.rewind(mark);
+        return out;
+    }
+
+    const std::uint64_t count_observed_peak = sat_add(
+        arena.device_buffer().allocation_bytes,
+        memory_plan.host_transient_bytes);
+    if (count_observed_peak > peak_permit->bytes()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        out.observed_device_peak_bytes =
+            arena.device_buffer().allocation_bytes;
         arena.rewind(mark);
         return out;
     }
@@ -4817,10 +5660,51 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
                 command_buffer_, sketch_pipe, infos, &push, sizeof(push), sketch_groups);
             record_shader_to_host(command_buffer_);
             submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx_count)");
+            out.ownership.gate_count_dispatches += 1u;
         }
         std::uint32_t filtered_count = 0;
         std::memcpy(&filtered_count, base + counters_s.offset, 4);
         if (filtered_count == 0u) {
+            const std::uint64_t empty_slot_requirement =
+                buffer_memory_requirement_locked(16u, kPhaseBBufferUsage);
+            const std::uint64_t empty_position_requirement =
+                buffer_memory_requirement_locked(8u, kPhaseBBufferUsage);
+            const std::uint64_t empty_peak = sat_add(
+                memory_plan.host_transient_bytes,
+                sat_add(arena.device_buffer().allocation_bytes,
+                    sat_add(empty_slot_requirement,
+                            empty_position_requirement)));
+            if (peak_permit == nullptr || !peak_permit->grow_to(
+                    empty_peak, &out.main_peak_admission_failure)) {
+                out.failure_reason = GpuBuiltIndexFailureReason::
+                    main_peak_memory_admission_denied;
+                arena.rewind(mark);
+                return out;
+            }
+            out.ownership.main_peak_admissions = 1u;
+            out.peak_admission_bytes = empty_peak;
+            out.ownership.peak_admitted_bytes = empty_peak;
+            out.slots = create_device_buffer(16u, kPhaseBBufferUsage);
+            out.positions = create_device_buffer(8u, kPhaseBBufferUsage);
+            if (out.slots.mapped == nullptr || out.positions.mapped == nullptr
+                || out.slots.allocation_bytes != empty_slot_requirement
+                || out.positions.allocation_bytes != empty_position_requirement) {
+                out.failure_reason =
+                    GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
+                arena.rewind(mark);
+                return out;
+            }
+            std::memset(out.slots.mapped, 0,
+                        static_cast<std::size_t>(out.slots.allocation_bytes));
+            std::memset(out.positions.mapped, 0,
+                        static_cast<std::size_t>(out.positions.allocation_bytes));
+            out.observed_device_peak_bytes = sat_add(
+                arena.device_buffer().allocation_bytes,
+                sat_add(out.slots.allocation_bytes,
+                        out.positions.allocation_bytes));
+            out.ownership.peak_observed_bytes = sat_add(
+                out.observed_device_peak_bytes,
+                memory_plan.host_transient_bytes);
             out.valid = true;
             out.occupied_slots = 0u;
             out.position_count = 0u;
@@ -4831,16 +5715,124 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         if (filtered_count > max_target_minimizers) {
             bioseq_log<ERR>("[phase_c idx] filtered tm={} out of range (cap={})",
                             filtered_count, max_target_minimizers);
+            out.failure_reason =
+                GpuBuiltIndexFailureReason::output_capacity_overflow;
             arena.rewind(mark);
             return out;
         }
         emit_capacity = filtered_count;
     }
-    Buffer keys = create_device_buffer(emit_capacity * 8u, kPhaseBBufferUsage);   // out_words: u64 hash/min
+    const std::uint64_t emit_flag_bytes = emit_capacity * 4u;
+    const std::uint64_t emit_flag_scan_bytes = sat_add(
+        phase_c_align_up(emit_flag_bytes, flag_scan_alignment),
+        emit_flag_bytes);
+    const PhaseCSketchMemoryPlan exact_main_plan = phase_c_sketch_memory_plan(
+        bp,
+        packed_sequence.size(),
+        sizeof(VulkanRankLut),
+        emit_capacity,
+        0u,
+        PhaseCSketchUse::target_index_build,
+        k,
+        w,
+        params.letters_per_unit,
+        features_.max_workgroup_count_x);
+    const auto allocation_requirement = [this](std::uint64_t bytes) {
+        return buffer_memory_requirement_locked(bytes, kPhaseBBufferUsage);
+    };
+    const std::uint64_t initial_key_requirement = allocation_requirement(
+        std::max<std::uint64_t>(emit_capacity * 8u, emit_flag_scan_bytes));
+    const std::uint64_t initial_value_requirement =
+        allocation_requirement(emit_capacity * 8u);
+    const std::uint64_t exact_flag_bytes = emit_capacity * 4u;
+    const std::uint64_t exact_flag_scan_bytes = sat_add(
+        phase_c_align_up(exact_flag_bytes, flag_scan_alignment),
+        exact_flag_bytes);
+    const std::uint64_t scratch_key_requirement = allocation_requirement(
+        std::max<std::uint64_t>(emit_capacity * 8u, exact_flag_scan_bytes));
+    const std::uint64_t scratch_value_requirement =
+        allocation_requirement(emit_capacity * 8u);
+    const WgPlan peak_wg = plan_workgroups(
+        emit_capacity, features_.max_workgroup_count_x);
+    const std::uint64_t histogram_requirement = allocation_requirement(
+        std::uint64_t{peak_wg.num_workgroups} * 256u * 4u);
+    const std::uint64_t scan_block_requirement = allocation_requirement(
+        std::uint64_t{ceil_div_u32(emit_capacity, kPhaseCScanBlock)} * 4u);
+    const std::uint64_t bucket_requirement =
+        allocation_requirement(emit_capacity * 16u);
+    const std::uint32_t planned_hash_passes = std::clamp<std::uint32_t>(
+        (params.hash_bits + 7u) / 8u, 1u, 8u);
+    const bool planned_sorted_in_scratch = (planned_hash_passes & 1u) != 0u;
+    const std::uint64_t sorted_key_requirement = planned_sorted_in_scratch
+        ? scratch_key_requirement : initial_key_requirement;
+    const std::uint64_t flag_workspace_requirement = planned_sorted_in_scratch
+        ? initial_key_requirement : scratch_key_requirement;
+    const std::uint64_t arena_requirement =
+        arena.device_buffer().allocation_bytes;
+    const std::uint64_t sort_device_peak = sat_add(
+        arena_requirement,
+        sat_add(initial_key_requirement,
+            sat_add(initial_value_requirement,
+                sat_add(scratch_key_requirement,
+                    sat_add(scratch_value_requirement,
+                            histogram_requirement)))));
+    const std::uint64_t mark_device_peak = sat_add(
+        arena_requirement,
+        sat_add(sorted_key_requirement,
+            sat_add(scratch_value_requirement,
+                sat_add(flag_workspace_requirement,
+                        scan_block_requirement))));
+    const std::uint64_t bucket_device_peak = sat_add(
+        arena_requirement,
+        sat_add(sorted_key_requirement,
+            sat_add(scratch_value_requirement,
+                sat_add(flag_workspace_requirement,
+                        bucket_requirement))));
+    const std::uint64_t exact_device_peak = std::max(
+        sort_device_peak, std::max(mark_device_peak, bucket_device_peak));
+    const std::uint64_t exact_main_admission = sat_add(
+        exact_device_peak, exact_main_plan.host_transient_bytes);
+    if (peak_permit == nullptr || !exact_main_plan.valid
+        || exact_main_admission == (std::numeric_limits<std::uint64_t>::max)()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
+    }
+    if (!peak_permit->grow_to(
+            exact_main_admission, &out.main_peak_admission_failure)) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::main_peak_memory_admission_denied;
+        arena.rewind(mark);
+        return out;
+    }
+    out.ownership.main_peak_admissions = 1u;
+    out.peak_admission_bytes = exact_main_admission;
+    out.ownership.peak_admitted_bytes = exact_main_admission;
+
+    Buffer keys = create_device_buffer(
+        std::max<std::uint64_t>(emit_capacity * 8u, emit_flag_scan_bytes),
+        kPhaseBBufferUsage);   // out_words: u64 hash/min; later flags+scan alias
     Buffer vals = create_device_buffer(emit_capacity * 8u, kPhaseBBufferUsage);   // out_pair_vals: u64 pos_strand/min
-    if (keys.mapped == nullptr || vals.mapped == nullptr) {
+    if (keys.mapped == nullptr || vals.mapped == nullptr
+        || keys.allocation_bytes != initial_key_requirement
+        || vals.allocation_bytes != initial_value_requirement) {
         bioseq_log<ERR>("[phase_c index] capacity buffer alloc failed (cap={}); "
                         "returning invalid GPU index", emit_capacity);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
+        arena.rewind(mark);
+        return out;
+    }
+    const std::uint64_t emit_observed_device = sat_add(
+        arena.device_buffer().allocation_bytes,
+        sat_add(keys.allocation_bytes, vals.allocation_bytes));
+    out.observed_device_peak_bytes = std::max(
+        out.observed_device_peak_bytes, emit_observed_device);
+    if (sat_add(emit_observed_device,
+                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
         arena.rewind(mark);
         return out;
     }
@@ -4878,11 +5870,45 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, infos, &push, sizeof(push), sketch_groups);
         record_shader_to_host(command_buffer_);
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx_emit)");
+        if (query_gate_bytes != 0u) {
+            out.ownership.gated_emit_dispatches += 1u;
+        } else {
+            out.ownership.ungated_emit_dispatches += 1u;
+        }
     }
     std::uint32_t emit_count = 0;
     std::memcpy(&emit_count, base + counters_s.offset, 4);   // counters[0] = exact minimizer count
     const std::uint64_t tm = emit_count;
+    out.ownership.retained_minimizer_count = tm;
     if (tm == 0u) {
+        keys.reset();
+        vals.reset();
+        const std::uint64_t empty_slot_requirement =
+            buffer_memory_requirement_locked(16u, kPhaseBBufferUsage);
+        const std::uint64_t empty_position_requirement =
+            buffer_memory_requirement_locked(8u, kPhaseBBufferUsage);
+        out.slots = create_device_buffer(16u, kPhaseBBufferUsage);
+        out.positions = create_device_buffer(8u, kPhaseBBufferUsage);
+        if (out.slots.mapped == nullptr || out.positions.mapped == nullptr
+            || out.slots.allocation_bytes != empty_slot_requirement
+            || out.positions.allocation_bytes != empty_position_requirement) {
+            out.failure_reason =
+                GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
+            arena.rewind(mark);
+            return out;
+        }
+        std::memset(out.slots.mapped, 0,
+                    static_cast<std::size_t>(out.slots.allocation_bytes));
+        std::memset(out.positions.mapped, 0,
+                    static_cast<std::size_t>(out.positions.allocation_bytes));
+        out.observed_device_peak_bytes = std::max(
+            out.observed_device_peak_bytes,
+            sat_add(arena.device_buffer().allocation_bytes,
+                sat_add(out.slots.allocation_bytes,
+                        out.positions.allocation_bytes)));
+        out.ownership.peak_observed_bytes = sat_add(
+            out.observed_device_peak_bytes,
+            exact_main_plan.host_transient_bytes);
         out.valid = true;
         out.occupied_slots = 0u;
         out.position_count = 0u;
@@ -4893,46 +5919,76 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     if (tm > emit_capacity) {
         bioseq_log<ERR>("[phase_c idx] tm={} out of range / overflow (emit_capacity={}, cap={})",
                         tm, emit_capacity, max_target_minimizers);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::output_capacity_overflow;
         arena.rewind(mark); return out;
     }
 
-    // tm-sized scratch + index buffers, now that the exact count is known. keys
-    // and vals (the emitted pairs) were allocated to either the query-gated
-    // count or the ungated capacity bound above; the radix sort ping-pongs them
-    // against tm-sized scratch.
+    const std::uint64_t tm_flag_bytes = tm * 4u;
+    const std::uint64_t tm_flag_scan_bytes = sat_add(
+        phase_c_align_up(tm_flag_bytes, flag_scan_alignment),
+        tm_flag_bytes);
+    const std::uint64_t tm_scratch_key_requirement = allocation_requirement(
+        std::max<std::uint64_t>(tm * 8u, tm_flag_scan_bytes));
+    const std::uint64_t tm_scratch_value_requirement =
+        allocation_requirement(tm * 8u);
+    const WgPlan tm_expected_wg = plan_workgroups(
+        tm, features_.max_workgroup_count_x);
+    const std::uint64_t tm_histogram_requirement = allocation_requirement(
+        std::uint64_t{tm_expected_wg.num_workgroups} * 256u * 4u);
+    const std::uint64_t tm_scan_block_requirement = allocation_requirement(
+        std::uint64_t{ceil_div_u32(tm, kPhaseCScanBlock)} * 4u);
+
+    // Exact-T sort scratch.  Lifetimes are split at GPU fences below so the
+    // bucket phase never overlaps the histogram and the unused value buffer.
     const WgPlan swg = plan_workgroups(tm, features_.max_workgroup_count_x);
-    Buffer keys_scr, vals_scr, hist, flags, scanned, iblocks, buckets, bslot;
+    const std::uint64_t flag_bytes = tm * 4u;
+    const std::uint64_t scanned_offset =
+        phase_c_align_up(flag_bytes, flag_scan_alignment);
+    const std::uint64_t flag_scan_bytes = sat_add(scanned_offset, flag_bytes);
+    Buffer keys_scr, vals_scr, hist;
     {
         static const auto* _alloc_d = bioseq::instr::register_region_static("phase_c_index_alloc");
         auto _alloc_s = bioseq::instr::region(_alloc_d);
-        keys_scr = create_device_buffer(tm * 8u, kPhaseBBufferUsage);
+        keys_scr = create_device_buffer(
+            std::max<std::uint64_t>(tm * 8u, flag_scan_bytes),
+            kPhaseBBufferUsage);
         vals_scr = create_device_buffer(tm * 8u, kPhaseBBufferUsage);
         hist = create_device_buffer(std::uint64_t{swg.num_workgroups} * 256u * 4u, kPhaseBBufferUsage);
-        flags = create_device_buffer(tm * 4u, kPhaseBBufferUsage);
-        scanned = create_device_buffer(tm * 4u, kPhaseBBufferUsage);
-        iblocks = create_device_buffer(std::uint64_t{ceil_div_u32(tm, kPhaseCScanBlock)} * 4u, kPhaseBBufferUsage);
-        buckets = create_device_buffer(tm * 16u, kPhaseBBufferUsage);
-        bslot = create_device_buffer(tm * 4u, kPhaseBBufferUsage);
     }
-    if (keys_scr.mapped == nullptr || vals_scr.mapped == nullptr || hist.mapped == nullptr
-        || flags.mapped == nullptr || scanned.mapped == nullptr || iblocks.mapped == nullptr
-        || buckets.mapped == nullptr || bslot.mapped == nullptr) {
+    if (keys_scr.mapped == nullptr || vals_scr.mapped == nullptr
+        || hist.mapped == nullptr
+        || keys_scr.allocation_bytes != tm_scratch_key_requirement
+        || vals_scr.allocation_bytes != tm_scratch_value_requirement
+        || hist.allocation_bytes != tm_histogram_requirement) {
         bioseq_log<ERR>("[phase_c index] scratch buffer alloc failed (tm={}, num_wg={}); "
                         "returning invalid GPU index",
                         tm, swg.num_workgroups);
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
         arena.rewind(mark);
         return out;
     }
     const GpuArenaSlice keys_scr_s{&keys_scr, 0, keys_scr.bytes};
     const GpuArenaSlice vals_scr_s{&vals_scr, 0, vals_scr.bytes};
     const GpuArenaSlice hist_s{&hist, 0, hist.bytes};
-    const GpuArenaSlice flags_s{&flags, 0, flags.bytes};
-    const GpuArenaSlice scanned_s{&scanned, 0, scanned.bytes};
-    const GpuArenaSlice iblocks_s{&iblocks, 0, iblocks.bytes};
-    const GpuArenaSlice buckets_s{&buckets, 0, buckets.bytes};
-    const GpuArenaSlice bslot_s{&bslot, 0, bslot.bytes};
 
-    // --- Submit 2: radix sort pairs by hash, mark runs, scan run-starts ---
+    out.observed_device_peak_bytes = sat_add(
+        arena.device_buffer().allocation_bytes,
+        sat_add(keys.allocation_bytes,
+            sat_add(vals.allocation_bytes,
+                sat_add(keys_scr.allocation_bytes,
+                    sat_add(vals_scr.allocation_bytes,
+                            hist.allocation_bytes)))));
+    if (sat_add(out.observed_device_peak_bytes,
+                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
+    }
+
+    // --- Submit 2a: radix sort pairs by hash. ---
     // Only sort the significant hash bytes: for K=15 dna4 the stored hash is
     // ~30 bits → 4 passes, not 8, roughly halving the sort.
     const std::uint32_t hash_passes = std::clamp<std::uint32_t>(
@@ -4949,22 +6005,130 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_idx2)");
         record_radix_sort_locked(command_buffer_, keys_s, vals_s, keys_scr_s, vals_scr_s, hist_s,
                                  sort_plan, swg.num_workgroups, swg.elems_per_wg, 1u, sorted_in_scratch);
-        const GpuArenaSlice& sorted_keys = sorted_in_scratch ? keys_scr_s : keys_s;
-        const PhaseBPipeline mark_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_index_mark_runs, 128u, 1u);
+        if (!sorted_in_scratch) {
+            VkMemoryBarrier compute_to_copy{};
+            compute_to_copy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            compute_to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            compute_to_copy.dstAccessMask =
+                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(
+                command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &compute_to_copy,
+                0u, nullptr, 0u, nullptr);
+            const VkBufferCopy copy{0u, 0u, tm * 8u};
+            vkCmdCopyBuffer(
+                command_buffer_, vals.buffer, vals_scr.buffer, 1u, &copy);
+            VkMemoryBarrier copy_to_host{};
+            copy_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            copy_to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            copy_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT
+                | VK_ACCESS_HOST_WRITE_BIT;
+            vkCmdPipelineBarrier(
+                command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT, 0u, 1u, &copy_to_host,
+                0u, nullptr, 0u, nullptr);
+        }
+        record_shader_to_host(command_buffer_);
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx2_sort)");
+    }
+
+    // Preserve the sorted value run in an exact-T allocation. Four K=15 hash
+    // passes finish in the capacity-C source buffer; copying once here removes
+    // that permanent C-sized resident tail and lets the source allocation die.
+    Buffer positions_exact;
+    Buffer flag_scan;
+    if (sorted_in_scratch) {
+        positions_exact = std::move(vals_scr);
+        vals.reset();
+        flag_scan = std::move(keys);
+    } else {
+        positions_exact = std::move(vals_scr);
+        vals.reset();
+        flag_scan = std::move(keys_scr);
+    }
+    if (positions_exact.allocation_bytes > tm * 8u) {
+        std::memset(
+            static_cast<std::byte*>(positions_exact.mapped) + tm * 8u,
+            0,
+            static_cast<std::size_t>(
+                positions_exact.allocation_bytes - tm * 8u));
+    }
+    hist.reset();
+
+    if (flag_scan.bytes < flag_scan_bytes) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
+    }
+    const GpuArenaSlice sorted_keys_s = sorted_in_scratch
+        ? GpuArenaSlice{&keys_scr, 0u, tm * 8u}
+        : GpuArenaSlice{&keys, 0u, tm * 8u};
+    const GpuArenaSlice flags_s{&flag_scan, 0u, flag_bytes};
+    const GpuArenaSlice scanned_s{
+        &flag_scan, scanned_offset, flag_bytes};
+    Buffer iblocks = create_device_buffer(
+        std::uint64_t{ceil_div_u32(tm, kPhaseCScanBlock)} * 4u,
+        kPhaseBBufferUsage);
+    if (iblocks.mapped == nullptr) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
+        arena.rewind(mark);
+        return out;
+    }
+    if (iblocks.allocation_bytes != tm_scan_block_requirement) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
+    }
+    const GpuArenaSlice iblocks_s{&iblocks, 0u, iblocks.bytes};
+    out.observed_device_peak_bytes = std::max(
+        out.observed_device_peak_bytes,
+        sat_add(arena.device_buffer().allocation_bytes,
+            sat_add(sorted_keys_s.buffer->allocation_bytes,
+                sat_add(positions_exact.allocation_bytes,
+                    sat_add(flag_scan.allocation_bytes,
+                            iblocks.allocation_bytes)))));
+    if (sat_add(out.observed_device_peak_bytes,
+                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
+    }
+    const VkDescriptorBufferInfo dummy{
+        counters_s.buffer->buffer, counters_s.offset, counters_s.size};
+
+    // --- Submit 2b: mark runs and scan flags after sort scratch is released. ---
+    {
+        static const auto* _rd =
+            bioseq::instr::register_region_static("phase_c_index_mark_scan");
+        auto _rs = bioseq::instr::region(_rd);
+        reset_phase_c_pool_locked();
+        check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_idx_mark)");
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_idx_mark)");
+        record_host_to_shader(command_buffer_);
+        const PhaseBPipeline mark_pipe = get_phase_b_pipeline_locked(
+            ShaderKind::phase_c_index_mark_runs, 128u, 1u);
         const std::array<VkDescriptorBufferInfo, 7> idx_infos{{
-            {sorted_keys.buffer->buffer, sorted_keys.offset, sorted_keys.size},
+            {sorted_keys_s.buffer->buffer, sorted_keys_s.offset, sorted_keys_s.size},
             {flags_s.buffer->buffer, flags_s.offset, flags_s.size},
             {scanned_s.buffer->buffer, scanned_s.offset, scanned_s.size},
-            {buckets_s.buffer->buffer, buckets_s.offset, buckets_s.size},
-            {bslot_s.buffer->buffer, bslot_s.offset, bslot_s.size},  // slot_claims placeholder
-            {keys_s.buffer->buffer, keys_s.offset, keys_s.size},     // slots placeholder
-            {bslot_s.buffer->buffer, bslot_s.offset, bslot_s.size},
+            dummy, dummy, dummy, dummy,
         }};
         IndexPushC ipush{static_cast<std::uint32_t>(tm), 0u, 0u, 0u, 0u, 0u};
-        record_phase_c_dispatch_locked(command_buffer_, mark_pipe, idx_infos, &ipush, sizeof(ipush), ceil_div_u32(tm, 128u));
+        record_phase_c_dispatch_locked(
+            command_buffer_, mark_pipe, idx_infos, &ipush, sizeof(ipush),
+            ceil_div_u32(tm, 128u));
         record_compute_barrier(command_buffer_);
-        const PhaseBPipeline scanb = get_phase_b_pipeline_locked(ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
-        const PhaseBPipeline scana = get_phase_b_pipeline_locked(ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
+        const PhaseBPipeline scanb = get_phase_b_pipeline_locked(
+            ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
+        const PhaseBPipeline scana = get_phase_b_pipeline_locked(
+            ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
         const std::uint32_t inb = ceil_div_u32(tm, kPhaseCScanBlock);
         const std::array<VkDescriptorBufferInfo, 3> iscan{{
             {flags_s.buffer->buffer, flags_s.offset, flags_s.size},
@@ -4979,14 +6143,23 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         record_compute_barrier(command_buffer_);
         record_phase_c_dispatch_locked(command_buffer_, scana, iscan, &is1, sizeof(is1), ceil_div_u32(tm, 128u));
         record_shader_to_host(command_buffer_);
-        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx2)");
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx_mark)");
     }
     std::uint32_t scan_last = 0, flag_last = 0;
-    std::memcpy(&scan_last, static_cast<const std::byte*>(scanned.mapped) + (tm - 1u) * 4u, 4);
-    std::memcpy(&flag_last, static_cast<const std::byte*>(flags.mapped) + (tm - 1u) * 4u, 4);
+    std::memcpy(
+        &scan_last,
+        static_cast<const std::byte*>(flag_scan.mapped)
+            + scanned_offset + (tm - 1u) * 4u,
+        4u);
+    std::memcpy(
+        &flag_last,
+        static_cast<const std::byte*>(flag_scan.mapped) + (tm - 1u) * 4u,
+        4u);
     const std::uint32_t num_buckets = scan_last + flag_last;
+    out.ownership.distinct_minimizer_count = num_buckets;
     if (num_buckets == 0u) {
         bioseq_log<ERR>("[phase_c idx] num_buckets=0 (tm={})", tm);
+        out.failure_reason = GpuBuiltIndexFailureReason::index_invariant_failed;
         arena.rewind(mark); return out;
     }
 
@@ -4996,13 +6169,47 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     // tripped the macOS GPU watchdog (VK_ERROR_DEVICE_LOST) at XXL_HIFI; the
     // sorted-bucket form removes that whole submit. `buckets` becomes the resident
     // index ("slots"); `positions` is the hash-run-ordered pos_strand array.
-    // positions = the hash-run-ordered (sorted) pos_strand values. The sorted
-    // values already live in `vals`/`vals_scr`; move that buffer straight into
-    // the resident index instead of copying ~0.75 GB per build.
+    iblocks.reset();
+    Buffer buckets = create_device_buffer(
+        std::uint64_t{num_buckets} * 16u, kPhaseBBufferUsage);
+    if (buckets.mapped == nullptr) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::device_buffer_allocation_failed;
+        arena.rewind(mark);
+        return out;
+    }
+    const std::uint64_t exact_bucket_requirement =
+        allocation_requirement(std::uint64_t{num_buckets} * 16u);
+    if (buckets.allocation_bytes != exact_bucket_requirement) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
+    }
+    const GpuArenaSlice buckets_s{&buckets, 0u, buckets.bytes};
     {
         static const auto* _bd = bioseq::instr::register_region_static("phase_c_idx_bucketmem");
         auto _bs = bioseq::instr::region(_bd);
-        std::memset(buckets.mapped, 0, static_cast<std::size_t>(std::uint64_t{num_buckets} * 16u));
+        // Touch the complete allocation, including Vk padding, so resident
+        // evidence never fabricates full-touch coverage.
+        std::memset(
+            buckets.mapped, 0,
+            static_cast<std::size_t>(buckets.allocation_bytes));
+    }
+
+    out.observed_device_peak_bytes = std::max(
+        out.observed_device_peak_bytes,
+        sat_add(arena.device_buffer().allocation_bytes,
+            sat_add(sorted_keys_s.buffer->allocation_bytes,
+                sat_add(positions_exact.allocation_bytes,
+                    sat_add(flag_scan.allocation_bytes,
+                            buckets.allocation_bytes)))));
+    if (sat_add(out.observed_device_peak_bytes,
+                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+        out.failure_reason =
+            GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
+        arena.rewind(mark);
+        return out;
     }
 
     // --- Submit 3: emit dense sorted buckets (single light dispatch). ---
@@ -5015,9 +6222,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
             {flags_s.buffer->buffer, flags_s.offset, flags_s.size},
             {scanned_s.buffer->buffer, scanned_s.offset, scanned_s.size},
             {buckets_s.buffer->buffer, buckets_s.offset, buckets_s.size},
-            {bslot_s.buffer->buffer, bslot_s.offset, bslot_s.size},   // unused placeholder
-            {buckets_s.buffer->buffer, buckets_s.offset, buckets_s.size},  // unused slots placeholder
-            {bslot_s.buffer->buffer, bslot_s.offset, bslot_s.size},
+            dummy, dummy, dummy,
         }};
         IndexPushC ipush{static_cast<std::uint32_t>(tm), 0u, 0u, num_buckets, 0u, 0u};
         reset_phase_c_pool_locked();
@@ -5032,11 +6237,14 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx3_buckets)");
     }
 
-    out.slots = std::move(buckets);   // sorted-by-hash dense buckets = resident index
-    out.positions = sorted_in_scratch ? std::move(vals_scr) : std::move(vals);  // sorted pos_strand
+    out.slots = std::move(buckets);   // exact-D sorted dense buckets
+    out.positions = std::move(positions_exact);  // exact-T sorted pos_strand
     out.slot_mask = 0u;               // 0 ⇒ seed binary-searches `occupied_slots` buckets
     out.occupied_slots = num_buckets;
     out.position_count = static_cast<std::uint32_t>(tm);
+    out.ownership.peak_observed_bytes = sat_add(
+        out.observed_device_peak_bytes,
+        exact_main_plan.host_transient_bytes);
     out.valid = true;
     arena.rewind(mark);
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_idx-post)");
@@ -5683,7 +6891,7 @@ std::vector<GpuAlignmentExtensionResultWire> Runtime::run_alignment_extension_ro
     const PhaseBPipeline pipe = get_phase_b_pipeline_locked(
         ShaderKind::align_extend_banded_affine,
         kAlignmentExtensionLocal,
-        params.max_target_len);
+        k_gpu_alignment_extension_max_len);
 
     const std::uint64_t query_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(query_symbols.size()) * sizeof(std::uint32_t), 4u);
@@ -5872,7 +7080,6 @@ AlignmentCigarBatchResult Runtime::run_alignment_simple_cigar_roundtrip(
 namespace {
 
 constexpr std::uint32_t kPhaseCSeedCoordinateBatchWave = 4096u;
-constexpr bool kPhaseCCoordinateVoteFastPath = true;
 
 struct ChainRangePushLocal {
     std::uint32_t query_count;
@@ -5969,6 +7176,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     std::span<const PhaseCSeedCoordinateJob> jobs,
     std::uint32_t kmer_size,
     std::int32_t max_occ,
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
     const ChainingPipelineKey& chain_key,
     std::int32_t max_dist_x,
     std::int32_t max_dist_y,
@@ -5989,6 +7197,15 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     if (features_.max_workgroup_count_x == 0u) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate batch has zero workgroup limit");
     }
+    if (coordinate_algorithm != PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp
+        && coordinate_algorithm
+            != PhaseCSeedCoordinateAlgorithm::coordinate_vote) {
+        throw VulkanRuntimeError(
+            "phase_c seed-to-coordinate algorithm identity is invalid");
+    }
+    const bool coordinate_vote_selected =
+        coordinate_algorithm
+        == PhaseCSeedCoordinateAlgorithm::coordinate_vote;
     if (query_inputs.device_query_records != nullptr) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate device query records are not implemented");
     }
@@ -6071,7 +7288,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     for (std::size_t wave_begin = 0; wave_begin < jobs.size();) {
         std::size_t wave_end =
             std::min<std::size_t>(jobs.size(), wave_begin + kPhaseCSeedCoordinateBatchWave);
-        if (kPhaseCCoordinateVoteFastPath && wave_begin + 1u < wave_end) {
+        if (coordinate_vote_selected && wave_begin + 1u < wave_end) {
             std::size_t same_target_end = wave_begin + 1u;
             while (same_target_end < wave_end
                    && phase_c_same_coordinate_target(
@@ -6210,7 +7427,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 continue;
             }
 
-            if (kPhaseCCoordinateVoteFastPath) {
+            if (coordinate_vote_selected) {
                 std::vector<PhaseCSeedCoordinateWaveState*> active_states;
                 active_states.reserve(seed_active_count);
                 for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -6536,7 +7753,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         command_buffer_, vote_coord_batch_pipe, coord_infos,
                         &coord_push, sizeof(coord_push),
                         static_cast<std::uint32_t>(vote_jobs.size()));
-                    run.stats.coordinate_reduce_dispatches += 1u;
+                    run.stats.coordinate_vote_dispatches += 1u;
                     record_shader_to_host(command_buffer_);
                     submit_and_wait(
                         device_, queue_, command_buffer_, fence_,
@@ -6674,7 +7891,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     create_device_buffer(anchor_u64 * 8u, kPhaseBBufferUsage);
                 state.anchor_keys_buf =
                     create_device_buffer(state.total_anchors * 8u, kPhaseBBufferUsage);
-                if (kPhaseCCoordinateVoteFastPath) {
+                if (coordinate_vote_selected) {
                     state.result_buf = create_device_buffer(
                         sizeof(GpuCoordinateOnlyResultWire), kPhaseBBufferUsage);
                     if (state.anchors_buf.mapped == nullptr
@@ -6772,7 +7989,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 run.stats.seed_emit_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
-            if (kPhaseCCoordinateVoteFastPath) {
+            if (coordinate_vote_selected) {
                 for (PhaseCSeedCoordinateWaveState& state : states) {
                     if (!state.has_anchors) {
                         continue;
@@ -6801,7 +8018,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     record_phase_c_dispatch_locked(
                         command_buffer_, vote_coord_pipe, coord_infos,
                         &coord_push, sizeof(coord_push), 1u);
-                    run.stats.coordinate_reduce_dispatches += 1u;
+                    run.stats.coordinate_vote_dispatches += 1u;
                 }
                 record_shader_to_host(command_buffer_);
                 submit_and_wait(
@@ -7047,7 +8264,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 record_phase_c_dispatch_locked(
                     command_buffer_, coord_pipe, coord_infos,
                     &coord_push, sizeof(coord_push), 1u);
-                run.stats.coordinate_reduce_dispatches += 1u;
+                run.stats.chain_backtrack_dispatches += 1u;
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
@@ -7086,6 +8303,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
     std::uint64_t query_len,
     std::uint32_t kmer_size,
     std::int32_t max_occ,
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
     const ChainingPipelineKey& chain_key,
     std::int32_t max_dist_x,
     std::int32_t max_dist_y,
@@ -7116,6 +8334,7 @@ Runtime::run_phase_c_seed_to_coordinate_batch_roundtrip(
         jobs,
         kmer_size,
         max_occ,
+        coordinate_algorithm,
         chain_key,
         max_dist_x,
         max_dist_y,
@@ -7500,6 +8719,182 @@ GpuCoordinateOnlyResultWire Runtime::run_phase_c_seed_to_coordinate_roundtrip(
     return result;
 }
 
+GpuPersistedDirectorySelectionResult
+Runtime::run_persisted_directory_ordinal_selection(
+    const GpuPersistedDirectorySelectionInputs& inputs)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "persisted directory selection requested on an unavailable Vulkan device");
+    }
+    if (inputs.minimizer_word_kind
+            > static_cast<std::uint32_t>(MinimizerWordKind::u64x2)
+        || (inputs.minimizer_word_kind
+                == static_cast<std::uint32_t>(MinimizerWordKind::u16)
+            ? inputs.minimizer_words32_per_record != 0u
+            : inputs.minimizer_words32_per_record
+                != (inputs.minimizer_word_kind
+                        == static_cast<std::uint32_t>(MinimizerWordKind::u32)
+                    ? 1u
+                    : inputs.minimizer_word_kind
+                            == static_cast<std::uint32_t>(MinimizerWordKind::u64)
+                        ? 2u : 4u))) {
+        throw VulkanRuntimeError(
+            "persisted directory selection has an unsupported minimizer wire");
+    }
+    if (inputs.directory_entry_count
+            > (std::numeric_limits<std::uint32_t>::max)()
+                / k_gpu_persisted_directory_entry_words
+        || (inputs.minimizer_word_kind
+                != static_cast<std::uint32_t>(MinimizerWordKind::u16)
+            && inputs.minimizer_count
+                > (std::numeric_limits<std::uint32_t>::max)()
+                    / inputs.minimizer_words32_per_record)) {
+        throw VulkanRuntimeError(
+            "persisted directory selection exceeds 32-bit shader indexing");
+    }
+    if (inputs.minimizer_count == 0u || inputs.directory_entry_count == 0u) {
+        return GpuPersistedDirectorySelectionResult{
+            .ordinals = {},
+            // No dispatch ran, so no query work may be attested even when a
+            // nonempty query was presented to an empty authoritative directory.
+            .device_query_minimizers_processed = 0u,
+        };
+    }
+    if (inputs.device_minimizer_words == nullptr
+        || !inputs.device_minimizer_words->valid()
+        || inputs.encoded_directory == nullptr
+        || !inputs.encoded_directory->valid()) {
+        throw VulkanRuntimeError(
+            "persisted directory selection requires resident device buffers");
+    }
+
+    const std::uint64_t query_bytes = minimizer_device_bytes(
+        inputs.minimizer_word_kind,
+        inputs.minimizer_words32_per_record,
+        inputs.minimizer_count);
+    const std::uint64_t directory_bytes =
+        static_cast<std::uint64_t>(inputs.directory_entry_count)
+        * k_gpu_persisted_directory_entry_bytes;
+    if (query_bytes > inputs.device_minimizer_words->bytes
+        || directory_bytes > inputs.encoded_directory->bytes) {
+        throw VulkanRuntimeError(
+            "persisted directory selection input buffer is truncated");
+    }
+
+    const std::uint64_t bitset_word_count64 =
+        (static_cast<std::uint64_t>(inputs.directory_entry_count) + 31u) / 32u;
+    const std::uint64_t bitset_bytes =
+        bitset_word_count64 * sizeof(std::uint32_t);
+    const std::uint64_t ordinal_bytes =
+        (static_cast<std::uint64_t>(inputs.directory_entry_count) + 1u)
+        * sizeof(std::uint32_t);
+    const std::uint64_t transient_bytes = sat_add(bitset_bytes, ordinal_bytes);
+    auto transient_permit =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(transient_bytes);
+    if (!transient_permit) {
+        throw VulkanRuntimeError(fmt::format(
+            "persisted directory selection memory admission failed for {} bytes",
+            transient_bytes));
+    }
+
+    constexpr VkBufferUsageFlags usage =
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    // `transient_permit` is declared before both buffers, so it is destroyed
+    // after them on every success/error exit.
+    Buffer selected_bits = create_device_buffer(bitset_bytes, usage);
+    Buffer selected_ordinals = create_device_buffer(ordinal_bytes, usage);
+    if (selected_bits.mapped == nullptr || selected_ordinals.mapped == nullptr) {
+        throw VulkanRuntimeError(
+            "persisted directory selection requires host-visible ordinal buffers");
+    }
+    std::memset(selected_bits.mapped, 0, static_cast<std::size_t>(bitset_bytes));
+    std::memset(selected_ordinals.mapped, 0, static_cast<std::size_t>(ordinal_bytes));
+
+    const PhaseBPipeline pipeline = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_persisted_directory_select, 128u, 1u);
+    const std::array<VkDescriptorBufferInfo, 4> infos{{
+        {inputs.device_minimizer_words->buffer, 0, query_bytes},
+        {inputs.encoded_directory->buffer, 0, directory_bytes},
+        {selected_bits.buffer, 0, bitset_bytes},
+        {selected_ordinals.buffer, 0, ordinal_bytes},
+    }};
+    const GpuPersistedDirectorySelectionPush push{
+        .minimizer_count = inputs.minimizer_count,
+        .minimizer_word_kind = inputs.minimizer_word_kind,
+        .minimizer_words32_per_record = inputs.minimizer_words32_per_record,
+        .hash_shift = inputs.hash_shift,
+        .directory_entry_count = inputs.directory_entry_count,
+        .reserved_directory = 0u,
+        .bitset_word_count = static_cast<std::uint32_t>(bitset_word_count64),
+        .reserved = 0u,
+    };
+
+    reset_phase_c_pool_locked();
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "reset(persisted_directory_select)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin),
+             "begin(persisted_directory_select)");
+
+    VkMemoryBarrier host_to_shader{};
+    host_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    host_to_shader.srcAccessMask =
+        VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    host_to_shader.dstAccessMask =
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        command_buffer_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+        1, &host_to_shader, 0, nullptr, 0, nullptr);
+    record_phase_c_dispatch_locked(
+        command_buffer_, pipeline, infos, &push, sizeof(push), 1u);
+
+    VkMemoryBarrier shader_to_host{};
+    shader_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    shader_to_host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    shader_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(
+        command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, 0,
+        1, &shader_to_host, 0, nullptr, 0, nullptr);
+    check_vk(vkEndCommandBuffer(command_buffer_),
+             "end(persisted_directory_select)");
+    submit_and_wait(
+        device_, queue_, command_buffer_, fence_,
+        "submit(persisted_directory_select)");
+
+    const auto* ordinal_words =
+        static_cast<const std::uint32_t*>(selected_ordinals.mapped);
+    const std::uint32_t selected_count = ordinal_words[0];
+    if (selected_count > inputs.directory_entry_count) {
+        throw VulkanRuntimeError(
+            "persisted directory selector returned an invalid count");
+    }
+    GpuPersistedDirectorySelectionResult result{
+        .ordinals = std::vector<std::uint32_t>(
+            ordinal_words + 1u, ordinal_words + 1u + selected_count),
+        .device_query_minimizers_processed = inputs.minimizer_count,
+    };
+    for (std::size_t index = 0; index < result.ordinals.size(); ++index) {
+        if (result.ordinals[index] >= inputs.directory_entry_count
+            || (index > 0
+                && result.ordinals[index] <= result.ordinals[index - 1u])) {
+            throw VulkanRuntimeError(
+                "persisted directory selector returned malformed ordinals");
+        }
+    }
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "reset(persisted_directory_select_post)");
+    return result;
+}
+
 SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     const PhaseCSeedInputs& inputs,
     std::uint64_t query_len,
@@ -7613,6 +9008,11 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
         record_shader_to_host(command_buffer_);
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed1)");
     }
+    result.seed_lookup_dispatches = 1u;
+    result.open_addressed_lookup_dispatches =
+        inputs.bucket_count == 0u ? 1u : 0u;
+    result.sorted_dense_lookup_dispatches =
+        inputs.bucket_count != 0u ? 1u : 0u;
     std::uint32_t plast = 0, clast = 0;
     std::memcpy(&plast, base + prefix_s.offset + (mc - 1u) * 4u, 4);
     std::memcpy(&clast, base + counts_s.offset + (mc - 1u) * 4u, 4);
@@ -7693,6 +9093,14 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     std::memcpy(result.host_bytes.data(),
                 static_cast<const std::byte*>(sorted_anchors.buffer->mapped) + sorted_anchors.offset,
                 static_cast<std::size_t>(total * 24u));
+    result.sort_proof.radix_sort_operations = 1u;
+    result.sort_proof.radix_anchor_count = total;
+    result.sort_proof.radix_passes = anchor_sort_plan.pass_count;
+    result.sort_proof.radix_histogram_dispatches =
+        anchor_sort_plan.pass_count;
+    result.sort_proof.radix_scan_dispatches = anchor_sort_plan.pass_count;
+    result.sort_proof.radix_scatter_dispatches =
+        anchor_sort_plan.pass_count;
 
     arena.rewind(mark);
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed-post)");

@@ -160,6 +160,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
         // must still return the correct NON-NULL real tally (A=4) — never NULL.
         {
             guc_scope no_read(ctx, "bioseq.read_sequence_index", "off");
+            ctx.clear_notices();
             const auto row = query_one(
                 ctx,
                 fmt::format("SELECT bioseq.symbol_count(seq0, 'A') FROM {} "
@@ -168,6 +169,23 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
             REQUIRE(row.size() == 1);
             REQUIRE(row[0].has_value());  // recompute never yields NULL
             REQUIRE(std::stoll(row[0].value()) == 4);
+            REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+
+			// Abort the executor after BioseqScan has populated the placeholder.
+			// The helper has already performed its normal cleanup at this point;
+			// this proves it leaves no ResourceOwner debt for a later projection
+			// error. The helper's internal PG_CATCH path is established by the
+			// heap-resident state and per-cleanup saved-ErrorData guards.
+            ctx.clear_notices();
+            const auto projection_error = sql_error(
+                ctx,
+                fmt::format(
+                    "SELECT bioseq.symbol_count(seq0, 'A') + 1 / (pk - pk) "
+                    "FROM {} WHERE pk = 4;",
+                    kBioseqColumn));
+            REQUIRE(projection_error.sqlstate == "22012");
+            REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+            REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         }
     }
 }

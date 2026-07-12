@@ -83,37 +83,222 @@ choose_vulkan_chaining_pipeline(const bioseq::gpu::vulkan::VulkanFeatureSet& f) 
             .max_workgroup_invocations = f.max_workgroup_invocations,
             .max_shared_memory_bytes = f.max_shared_memory_bytes,
             .default_window_size = 10u,
-        });
+    });
 }
+
+/// Exact component breakdown for the current Phase-A unified-memory chaining
+/// implementation. Keeping the components typed prevents a strict GPU decline
+/// from collapsing into an unactionable total byte count.
+struct VulkanChainingMemoryPlan {
+    std::uint64_t anchor_count = 0;
+    std::uint64_t device_anchor_count = 0;
+    std::uint64_t range_count = 0;
+    std::uint64_t device_anchor_bytes = 0;
+    std::uint64_t device_score_bytes = 0;
+    std::uint64_t device_predecessor_bytes = 0;
+    std::uint64_t device_range_bytes = 0;
+    std::uint64_t host_range_bytes = 0;
+    std::uint64_t compacted_host_anchor_bytes = 0;
+    std::uint64_t host_scored_index_bytes = 0;
+    std::uint64_t host_visited_bytes = 0;
+    std::uint64_t host_chain_index_bytes = 0;
+    std::uint64_t coordinate_device_trace_bytes = 0;
+    std::uint64_t coordinate_host_trace_bytes = 0;
+    std::uint64_t gpu_phase_bytes = 0;
+    std::uint64_t cpu_backtrack_phase_bytes = 0;
+    std::uint64_t total_bytes = 0;
+};
+
+inline void recompute_vulkan_chaining_memory_total(
+        VulkanChainingMemoryPlan& plan) noexcept {
+    using bioseq::parallelism::saturating_add;
+    const std::uint64_t common_host_bytes = saturating_add(
+        plan.host_range_bytes, plan.compacted_host_anchor_bytes);
+    plan.gpu_phase_bytes = common_host_bytes;
+    for (const std::uint64_t component : {
+            plan.device_anchor_bytes,
+            plan.device_score_bytes,
+            plan.device_predecessor_bytes,
+            plan.device_range_bytes,
+            plan.coordinate_device_trace_bytes,
+            plan.coordinate_host_trace_bytes}) {
+        plan.gpu_phase_bytes = saturating_add(
+            plan.gpu_phase_bytes, component);
+    }
+    plan.cpu_backtrack_phase_bytes = common_host_bytes;
+    for (const std::uint64_t component : {
+            plan.device_score_bytes,
+            plan.device_predecessor_bytes,
+            plan.host_scored_index_bytes,
+            plan.host_visited_bytes,
+            plan.host_chain_index_bytes}) {
+        plan.cpu_backtrack_phase_bytes = saturating_add(
+            plan.cpu_backtrack_phase_bytes, component);
+    }
+    plan.total_bytes = std::max(
+        plan.gpu_phase_bytes, plan.cpu_backtrack_phase_bytes);
+}
+
+[[nodiscard]] inline VulkanChainingMemoryPlan
+make_vulkan_chaining_memory_plan(
+        std::uint64_t anchor_count,
+        std::uint64_t range_count,
+        std::uint64_t device_anchor_count,
+        bool compaction_required,
+        bool coordinate_only) noexcept {
+    using bioseq::parallelism::saturating_add;
+    using bioseq::parallelism::saturating_mul;
+    VulkanChainingMemoryPlan plan{
+        .anchor_count = anchor_count,
+        .device_anchor_count = device_anchor_count,
+        .range_count = range_count,
+        .device_anchor_bytes =
+            saturating_mul(device_anchor_count, sizeof(Anchor)),
+        .device_score_bytes =
+            saturating_mul(device_anchor_count, sizeof(std::int32_t)),
+        .device_predecessor_bytes =
+            saturating_mul(device_anchor_count, sizeof(std::int64_t)),
+        .device_range_bytes = saturating_mul(
+            range_count, sizeof(bioseq::gpu::vulkan::GpuChainRange)),
+        .host_range_bytes = saturating_mul(
+            range_count, sizeof(bioseq::gpu::vulkan::GpuChainRange)),
+        .compacted_host_anchor_bytes = compaction_required
+            ? saturating_mul(device_anchor_count, sizeof(Anchor))
+            : 0u,
+    };
+    if (coordinate_only) {
+        plan.coordinate_device_trace_bytes = saturating_add(
+            saturating_mul(device_anchor_count, 2u * sizeof(std::uint32_t)),
+            sizeof(bioseq::gpu::vulkan::GpuCoordinateOnlyResultWire));
+        plan.coordinate_host_trace_bytes =
+            saturating_mul(device_anchor_count, sizeof(std::uint32_t));
+    } else {
+        plan.host_scored_index_bytes = saturating_mul(
+            device_anchor_count, sizeof(ScoredAnchorIndex));
+        plan.host_visited_bytes =
+            saturating_mul(device_anchor_count, sizeof(std::int32_t));
+        plan.host_chain_index_bytes =
+            saturating_mul(device_anchor_count, sizeof(std::int64_t));
+    }
+    recompute_vulkan_chaining_memory_total(plan);
+    return plan;
+}
+
+[[nodiscard]] inline VulkanChainingMemoryPlan
+make_vulkan_chaining_memory_plan(
+        std::uint64_t anchor_count,
+        std::uint64_t range_count) noexcept {
+    return make_vulkan_chaining_memory_plan(
+        anchor_count, range_count, anchor_count,
+        /*compaction_required=*/false,
+        /*coordinate_only=*/false);
+}
+
+inline void apply_vulkan_chaining_allocation_requirements(
+        VulkanChainingMemoryPlan& plan,
+        bioseq::gpu::vulkan::Runtime& runtime,
+        bool coordinate_only) {
+    constexpr VkBufferUsageFlags input_usage =
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    constexpr VkBufferUsageFlags output_usage =
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    plan.device_anchor_bytes = runtime.buffer_allocation_requirement(
+        bioseq::parallelism::saturating_mul(
+            plan.device_anchor_count, sizeof(Anchor)),
+        input_usage);
+    plan.device_range_bytes = runtime.buffer_allocation_requirement(
+        bioseq::parallelism::saturating_mul(
+            plan.range_count,
+            sizeof(bioseq::gpu::vulkan::GpuChainRange)),
+        input_usage);
+    plan.device_score_bytes = runtime.buffer_allocation_requirement(
+        bioseq::parallelism::saturating_mul(
+            plan.device_anchor_count, sizeof(std::int32_t)),
+        output_usage);
+    plan.device_predecessor_bytes = runtime.buffer_allocation_requirement(
+        bioseq::parallelism::saturating_mul(
+            plan.device_anchor_count, sizeof(std::int64_t)),
+        output_usage);
+    if (coordinate_only) {
+        plan.coordinate_device_trace_bytes = 0u;
+        for (const std::uint64_t requested : {
+                bioseq::parallelism::saturating_mul(
+                    plan.device_anchor_count, sizeof(std::uint32_t)),
+                bioseq::parallelism::saturating_mul(
+                    plan.device_anchor_count, sizeof(std::uint32_t)),
+                static_cast<std::uint64_t>(
+                    sizeof(bioseq::gpu::vulkan::GpuCoordinateOnlyResultWire))}) {
+            plan.coordinate_device_trace_bytes =
+                bioseq::parallelism::saturating_add(
+                    plan.coordinate_device_trace_bytes,
+                    runtime.buffer_allocation_requirement(
+                        requested, output_usage));
+        }
+    }
+    recompute_vulkan_chaining_memory_total(plan);
+}
+
+class VulkanChainingAdmissionError final
+    : public bioseq::gpu::vulkan::VulkanRuntimeError {
+public:
+    VulkanChainingMemoryPlan plan{};
+    bioseq::parallelism::MemoryAdmissionFailure admission{};
+
+    VulkanChainingAdmissionError(
+            VulkanChainingMemoryPlan memory_plan,
+            bioseq::parallelism::MemoryAdmissionFailure failure)
+        : bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but memory admission failed "
+            "(admission_reason={} required_bytes={} anchor_count={} "
+            "device_anchor_count={} range_count={} "
+            "device_anchor_bytes={} device_score_bytes={} "
+            "device_predecessor_bytes={} device_range_bytes={} "
+            "host_range_bytes={} compacted_host_anchor_bytes={} "
+            "host_scored_index_bytes={} host_visited_bytes={} "
+            "host_chain_index_bytes={} "
+            "coordinate_device_trace_bytes={} "
+            "coordinate_host_trace_bytes={} gpu_phase_bytes={} "
+            "cpu_backtrack_phase_bytes={} "
+            "allocatable_after_reservations_bytes={} reserved_bytes={} "
+            "budget_ceiling_bytes={} process_footprint_bytes={} "
+            "system_available_bytes={} system_total_bytes={} "
+            "process_soft_cap_bytes={})",
+            bioseq::parallelism::memory_admission_failure_reason_name(
+                failure.reason),
+            failure.requested_bytes,
+            memory_plan.anchor_count,
+            memory_plan.device_anchor_count,
+            memory_plan.range_count,
+            memory_plan.device_anchor_bytes,
+            memory_plan.device_score_bytes,
+            memory_plan.device_predecessor_bytes,
+            memory_plan.device_range_bytes,
+            memory_plan.host_range_bytes,
+            memory_plan.compacted_host_anchor_bytes,
+            memory_plan.host_scored_index_bytes,
+            memory_plan.host_visited_bytes,
+            memory_plan.host_chain_index_bytes,
+            memory_plan.coordinate_device_trace_bytes,
+            memory_plan.coordinate_host_trace_bytes,
+            memory_plan.gpu_phase_bytes,
+            memory_plan.cpu_backtrack_phase_bytes,
+            failure.allocatable_after_reservations_bytes,
+            failure.reserved_bytes,
+            failure.budget_ceiling_bytes,
+            failure.process_footprint_bytes,
+            failure.system_available_bytes,
+            failure.system_total_bytes,
+            failure.process_soft_cap_bytes)),
+          plan(memory_plan), admission(failure) {}
+};
 
 namespace detail {
 
-/// Count the independent hard chaining ranges in a sorted anchor span. A range
-/// boundary appears where the strand/chromosome key changes or two adjacent
-/// reference positions differ by more than `max_ref_dist` (anchors cannot chain
-/// across such a gap, so each range is an independent workgroup).
-[[nodiscard]] inline std::size_t
-count_gpu_chain_ranges(std::span<const Anchor> anchors, std::uint64_t max_ref_dist)
-{
-    if (anchors.empty()) return 0;
-    std::size_t range_count = 1;
-    for (std::size_t i = 1; i < anchors.size(); ++i) {
-        const Anchor& prev = anchors[i - 1];
-        const Anchor& cur = anchors[i];
-        const bool key_changed =
-            cur.ref_chromosome_key() != prev.ref_chromosome_key();
-        const bool hard_ref_gap =
-            cur.ref_position > prev.ref_position &&
-            cur.ref_position - prev.ref_position > max_ref_dist;
-        if (key_changed || hard_ref_gap) {
-            ++range_count;
-        }
-    }
-    return range_count;
-}
-
 /// Materialise the hard chaining ranges into a chain-arena array. The boundary
-/// predicate matches `count_gpu_chain_ranges` exactly so the fill count equals
+/// predicate matches `analyze_gpu_chaining_shape` exactly so the fill count equals
 /// the pre-counted `expected_range_count`.
 [[nodiscard]] inline std::span<bioseq::gpu::vulkan::GpuChainRange>
 build_gpu_chain_ranges(
@@ -159,6 +344,53 @@ constexpr std::uint32_t kGpuChainCompactRangeThreshold = 131'072u;
 constexpr std::uint32_t kGpuChainCompactRangeTarget = 65'536u;
 constexpr std::size_t kCoordinateOnlyFastProbeLimit = 16u;
 
+struct VulkanChainingShapePlan {
+    std::size_t range_count = 0;
+    std::size_t device_anchor_count = 0;
+    bool compaction_required = false;
+};
+
+[[nodiscard]] inline VulkanChainingShapePlan analyze_gpu_chaining_shape(
+        std::span<const Anchor> anchors,
+        std::uint64_t max_ref_dist) noexcept {
+    VulkanChainingShapePlan shape{};
+    if (anchors.empty()) return shape;
+
+    auto add_range = [&shape](std::size_t length) noexcept {
+        ++shape.range_count;
+        if (length > kGpuChainCompactRangeThreshold) {
+            shape.compaction_required = true;
+            const std::size_t stride =
+                (length + kGpuChainCompactRangeTarget - 1u)
+                / kGpuChainCompactRangeTarget;
+            // Exact number selected by compact_long_gpu_chain_ranges:
+            // 0,stride,... plus the last element when it is not already in
+            // that progression.
+            shape.device_anchor_count +=
+                1u + ((length - 1u) + stride - 1u) / stride;
+        } else {
+            shape.device_anchor_count += length;
+        }
+    };
+
+    std::size_t begin = 0u;
+    for (std::size_t i = 1u; i < anchors.size(); ++i) {
+        const Anchor& prev = anchors[i - 1u];
+        const Anchor& cur = anchors[i];
+        const bool key_changed =
+            cur.ref_chromosome_key() != prev.ref_chromosome_key();
+        const bool hard_ref_gap =
+            cur.ref_position > prev.ref_position
+            && cur.ref_position - prev.ref_position > max_ref_dist;
+        if (key_changed || hard_ref_gap) {
+            add_range(i - begin);
+            begin = i;
+        }
+    }
+    add_range(anchors.size() - begin);
+    return shape;
+}
+
 /// Very long hard ranges are usually near-colinear dense minimizer runs where
 /// chaining every anchor adds DP cost without improving the downstream extension
 /// seed. Keep sorted order and both range endpoints, but adaptively thin the
@@ -177,7 +409,8 @@ constexpr std::size_t kCoordinateOnlyFastProbeLimit = 16u;
             const std::uint32_t stride =
                 (range.length + kGpuChainCompactRangeTarget - 1u)
                 / kGpuChainCompactRangeTarget;
-            reserve_count += (range.length + stride - 1u) / stride + 1u;
+            reserve_count +=
+                1u + ((range.length - 1u) + stride - 1u) / stride;
         } else {
             reserve_count += range.length;
         }
@@ -291,7 +524,7 @@ constexpr std::size_t kCoordinateOnlyFastProbeLimit = 16u;
 /// Run the Vulkan tiled-DP chaining path. Throws `VulkanRuntimeError` on any
 /// selected-GPU decline; algorithm fallback must be chosen by the caller before
 /// entering the pipeline.
-inline void run_chain_anchors_vulkan_impl(
+[[nodiscard]] inline bool run_chain_anchors_vulkan_impl(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
     ArenaSlab<Chain>& chains_out,
@@ -299,7 +532,7 @@ inline void run_chain_anchors_vulkan_impl(
 {
     const std::size_t n = anchors.size();
     const std::uint64_t n64 = static_cast<std::uint64_t>(n);
-    if (n == 0) return;
+    if (n == 0) return false;
     if (!params.vulkan_enabled) {
         throw bioseq::gpu::vulkan::VulkanRuntimeError(
             "Vulkan chaining selected but Minimap2Params disabled Vulkan");
@@ -319,25 +552,32 @@ inline void run_chain_anchors_vulkan_impl(
 
     const auto key = choose_vulkan_chaining_pipeline(runtime.features());
 
-    const std::size_t range_count =
-        count_gpu_chain_ranges(anchors, static_cast<std::uint64_t>(max_dist_x));
-    if (range_count == 0) return;
+    const VulkanChainingShapePlan shape = analyze_gpu_chaining_shape(
+        anchors, static_cast<std::uint64_t>(max_dist_x));
+    const std::size_t range_count = shape.range_count;
+    if (range_count == 0) return false;
     // DOC0353: the chaining kernel grid-strides one invocation per range and the
     // runtime clamps the dispatch to maxComputeWorkGroupCount[0], so range_count
     // is no longer bounded by the workgroup count — it is just the data size.
 
-    const std::uint64_t reserved_bytes =
-        bioseq::gpu::vulkan::chaining_reserved_bytes(n64, range_count);
+    VulkanChainingMemoryPlan memory_plan =
+        make_vulkan_chaining_memory_plan(
+            n64,
+            range_count,
+            static_cast<std::uint64_t>(shape.device_anchor_count),
+            shape.compaction_required,
+            params.coordinate_only);
+    apply_vulkan_chaining_allocation_requirements(
+        memory_plan, runtime, params.coordinate_only);
+    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
     auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-        .try_reserve(reserved_bytes);
+        .try_reserve(memory_plan.total_bytes, &admission_failure);
     if (!permit) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-            "Vulkan chaining selected but memory admission failed for {} bytes",
-            reserved_bytes));
+        throw VulkanChainingAdmissionError{
+            memory_plan, admission_failure};
     }
 
     auto dp_scope = context::current().push<context::Arena::Chain>();
-    auto& dp_ctx = context::current();
     auto ranges = build_gpu_chain_ranges(
         anchors,
         static_cast<std::uint64_t>(max_dist_x),
@@ -346,32 +586,26 @@ inline void run_chain_anchors_vulkan_impl(
     std::span<const Anchor> dp_anchors = anchors;
     std::span<const bioseq::gpu::vulkan::GpuChainRange> dp_ranges = ranges;
     ArenaSlab<Anchor> compacted_anchors = make_arena_slab<Anchor>();
-    auto compacted_ranges = dp_ctx.alloc_chain_array<bioseq::gpu::vulkan::GpuChainRange>(
-        ranges.size());
     if (compact_long_gpu_chain_ranges(
-            anchors, ranges, compacted_anchors, compacted_ranges)) {
+            anchors, ranges, compacted_anchors, ranges)) {
         dp_anchors = compacted_anchors.as_const_span();
-        dp_ranges = {
-            compacted_ranges.data(),
-            ranges.size(),
-        };
+        dp_ranges = ranges;
     }
 
     const std::size_t dp_n = dp_anchors.size();
     const std::uint64_t dp_n64 = static_cast<std::uint64_t>(dp_n);
-    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::int64_t>(dp_n));
-    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(static_cast<std::int64_t>(dp_n));
-    for (std::size_t i = 0; i < dp_n; ++i) {
-        const auto span_score = static_cast<int32_t>(dp_anchors[i].query_span);
-        best_scores[i] = span_score;
-        predecessors[i] = -1;
+    if (dp_n != shape.device_anchor_count) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining shape preflight mismatch: planned {} anchors, "
+            "materialized {}",
+            shape.device_anchor_count,
+            dp_n));
     }
 
-    const std::uint64_t scratch_bytes =
-        bioseq::gpu::vulkan::chaining_transfer_scratch_bytes(dp_n64, dp_ranges.size());
-    auto transfer_scratch = runtime.create_host_buffer(
-        scratch_bytes,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    // Unified-memory Phase A writes/reads the mapped device buffers directly;
+    // the legacy transfer parameter remains an invalid sentinel and allocates
+    // no 24*N bounce buffer.
+    bioseq::gpu::vulkan::Buffer transfer_scratch{};
     auto anchors_buf = runtime.create_device_buffer(
         dp_n64 * sizeof(Anchor),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -388,6 +622,23 @@ inline void run_chain_anchors_vulkan_impl(
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    if (anchors_buf.mapped == nullptr || ranges_buf.mapped == nullptr
+        || score_buf.mapped == nullptr || pred_buf.mapped == nullptr
+        || !anchors_buf.host_visible_coherent()
+        || !ranges_buf.host_visible_coherent()
+        || !score_buf.host_visible_coherent()
+        || !pred_buf.host_visible_coherent()) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(
+            "Vulkan chaining requires host-visible coherent unified-memory buffers");
+    }
+    std::span<int32_t> best_scores{
+        static_cast<int32_t*>(score_buf.mapped), dp_n};
+    std::span<int64_t> predecessors{
+        static_cast<int64_t*>(pred_buf.mapped), dp_n};
+    for (std::size_t i = 0; i < dp_n; ++i) {
+        best_scores[i] = static_cast<int32_t>(dp_anchors[i].query_span);
+        predecessors[i] = -1;
+    }
     const std::int32_t gpu_max_chain_iter =
         std::min<std::int32_t>(params.max_chain_iter, 3000);
 
@@ -402,8 +653,8 @@ inline void run_chain_anchors_vulkan_impl(
             std::as_bytes(std::span<const Anchor>{dp_anchors.data(), dp_anchors.size()}),
             std::as_bytes(std::span<const bioseq::gpu::vulkan::GpuChainRange>{
                 dp_ranges.data(), dp_ranges.size()}),
-            std::as_bytes(std::span<const int32_t>{best_scores.data(), best_scores.size()}),
-            std::as_bytes(std::span<const int64_t>{predecessors.data(), predecessors.size()}),
+            std::as_bytes(std::span<const int32_t>{best_scores}),
+            std::as_bytes(std::span<const int64_t>{predecessors}),
             static_cast<std::uint32_t>(dp_n64),
             static_cast<std::uint32_t>(dp_ranges.size()),
             static_cast<std::uint64_t>(params.query_len),
@@ -418,7 +669,7 @@ inline void run_chain_anchors_vulkan_impl(
             params.min_seed_count,
             kCoordinateOnlyFastProbeLimit);
         if (coord_trace.result.valid == 0u) {
-            return;
+            return true;
         }
         const std::size_t trace_count = coord_trace.trace.size();
         if (trace_count == 0
@@ -443,7 +694,7 @@ inline void run_chain_anchors_vulkan_impl(
             .anchor_count = static_cast<int32_t>(trace_count),
             .anchor_start = static_cast<int32_t>(anchor_start),
         });
-        return;
+        return true;
     }
 
     runtime.run_chaining_tiled_dp_roundtrip(
@@ -456,8 +707,8 @@ inline void run_chain_anchors_vulkan_impl(
         std::as_bytes(std::span<const Anchor>{dp_anchors.data(), dp_anchors.size()}),
         std::as_bytes(std::span<const bioseq::gpu::vulkan::GpuChainRange>{
             dp_ranges.data(), dp_ranges.size()}),
-        std::as_writable_bytes(std::span<int32_t>{best_scores.data(), best_scores.size()}),
-        std::as_writable_bytes(std::span<int64_t>{predecessors.data(), predecessors.size()}),
+        std::as_writable_bytes(best_scores),
+        std::as_writable_bytes(predecessors),
         static_cast<std::uint32_t>(dp_n64),
         static_cast<std::uint32_t>(dp_ranges.size()),
         max_dist_x,
@@ -467,6 +718,14 @@ inline void run_chain_anchors_vulkan_impl(
         params.gap_penalty,
         params.skip_penalty,
         params.max_chain_skip);
+
+    // The queue fence completed inside the runtime call.  Anchors and hard
+    // ranges are host-owned below and their device copies are dead before CPU
+    // validation/backtracking allocates its 28*N arena scratch.  This lifetime
+    // split is what makes the admitted peak `max(gpu_phase, cpu_phase)` rather
+    // than the sum of both phases.
+    anchors_buf.reset();
+    ranges_buf.reset();
 
     for (std::size_t i = 0; i < dp_n; ++i) {
         const int64_t pred = predecessors[i];
@@ -482,21 +741,21 @@ inline void run_chain_anchors_vulkan_impl(
 
     backtrack_chains(
         dp_anchors,
-        std::span<const int32_t>{best_scores.data(), best_scores.size()},
-        std::span<const int64_t>{predecessors.data(), predecessors.size()},
+        std::span<const int32_t>{best_scores},
+        std::span<const int64_t>{predecessors},
         std::span<const int32_t>{},
         params.min_chain_score,
         params.min_seed_count,
         chains_out,
         reordered_anchors_out);
-
+    return true;
 }
 
 }  // namespace detail
 
 /// Public entry point. Pins the `Anchor` ABI and runs the Vulkan tiled-DP path.
 /// If this backend is selected, no scalar fallback is allowed here.
-inline void chain_anchors_vulkan(
+inline bool chain_anchors_vulkan(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
     ArenaSlab<Chain>& chains_out,
@@ -515,7 +774,7 @@ inline void chain_anchors_vulkan(
         bioseq::instr::register_region_static("chain_anchors_vulkan");
     auto _scope = bioseq::instr::region(_desc);
 
-    detail::run_chain_anchors_vulkan_impl(
+    return detail::run_chain_anchors_vulkan_impl(
         anchors, params, chains_out, reordered_anchors_out);
 }
 

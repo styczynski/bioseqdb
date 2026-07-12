@@ -108,6 +108,7 @@ enum class SortedRunError {
     merge_reader_admission_failed,
     compacted_run_rewind_failed,
     compact_temp_file_create_failed,
+    poisoned_store_reused,
 };
 
 void report_sorted_run_error(SortedRunError error);
@@ -137,6 +138,45 @@ void close_buffile_noexcept(BufFile*& file) noexcept {
         file = nullptr;
     }
     PG_END_TRY();
+}
+
+[[nodiscard]] BufFile* create_temp_buffile_as_cpp() {
+    return bioseq::pg_utils::invoke_pg_as_cpp(
+        [] { return BufFileCreateTemp(false); });
+}
+
+void write_buffile_as_cpp(
+        BufFile* file,
+        const void* data,
+        std::size_t bytes) {
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&] { BufFileWrite(file, data, bytes); });
+}
+
+void read_buffile_exact_as_cpp(
+        BufFile* file,
+        void* data,
+        std::size_t bytes) {
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&] { BufFileReadExact(file, data, bytes); });
+}
+
+[[nodiscard]] int seek_buffile_as_cpp(
+        BufFile* file,
+        int fileno,
+        off_t offset,
+        int whence) {
+    return bioseq::pg_utils::invoke_pg_as_cpp(
+        [&] { return BufFileSeek(file, fileno, offset, whence); });
+}
+
+[[nodiscard]] int64 size_buffile_as_cpp(BufFile* file) {
+    return bioseq::pg_utils::invoke_pg_as_cpp(
+        [&] { return BufFileSize(file); });
+}
+
+void check_for_interrupts_as_cpp() {
+    bioseq::pg_utils::invoke_pg_as_cpp([] { CHECK_FOR_INTERRUPTS(); });
 }
 
 struct MemoryRun {
@@ -169,7 +209,8 @@ struct FileReader {
             const std::size_t count = static_cast<std::size_t>(
                 std::min<std::uint64_t>(remaining, cap));
             buffer.resize(count);
-            BufFileReadExact(file, buffer.data(), count * sizeof(SortedPairWire));
+            read_buffile_exact_as_cpp(
+                file, buffer.data(), count * sizeof(SortedPairWire));
             remaining -= count;
             offset = 0;
             available = count;
@@ -234,12 +275,12 @@ struct PositionAccumulator {
         ensure_resident_batch();
         if (resident.size() == resident.capacity()) {
             if (spill == nullptr) {
-                spill = BufFileCreateTemp(false);
+                spill = create_temp_buffile_as_cpp();
                 if (spill == nullptr) {
                     report_sorted_run_error(SortedRunError::position_spill_create_failed);
                 }
             }
-            BufFileWrite(
+            write_buffile_as_cpp(
                 spill,
                 resident.data(),
                 resident.size() * sizeof(std::uint64_t));
@@ -255,7 +296,7 @@ struct PositionAccumulator {
             return;
         }
         if (spill != nullptr) {
-            if (BufFileSeek(spill, 0, 0, SEEK_SET) != 0) {
+            if (seek_buffile_as_cpp(spill, 0, 0, SEEK_SET) != 0) {
                 report_sorted_run_error(SortedRunError::position_spill_rewind_failed);
             }
             std::uint64_t remaining =
@@ -266,7 +307,7 @@ struct PositionAccumulator {
                 const std::size_t count = static_cast<std::size_t>(
                     std::min<std::uint64_t>(remaining, cap));
                 read_buffer.resize(count);
-                BufFileReadExact(
+                read_buffile_exact_as_cpp(
                     spill,
                     read_buffer.data(),
                     count * sizeof(std::uint64_t));
@@ -300,6 +341,19 @@ struct PositionAccumulator {
         spilled_bytes = 0;
         resident_batch_ready = false;
     }
+
+    void abandon_pg_resources_noexcept() noexcept {
+        resident_permit.release();
+        release_vector_storage_noexcept(resident);
+        release_vector_storage_noexcept(read_buffer);
+        // A PostgreSQL ERROR may have interrupted a BufFile operation. Do not
+        // issue another PG call while unwinding; ResourceOwner cleanup at the
+        // outer statement/transaction boundary owns this file.
+        spill = nullptr;
+        total = 0;
+        spilled_bytes = 0;
+        resident_batch_ready = false;
+    }
 };
 
 struct MergeResources {
@@ -311,6 +365,13 @@ struct MergeResources {
         release_vector_storage_noexcept(readers);
         reader_budget_permit.release();
         positions.release_noexcept();
+    }
+
+
+    void abandon_pg_resources_noexcept() noexcept {
+        release_vector_storage_noexcept(readers);
+        reader_budget_permit.release();
+        positions.abandon_pg_resources_noexcept();
     }
 };
 
@@ -396,13 +457,20 @@ public:
     void release_resident_runs_noexcept() noexcept;
     void release_runs_noexcept() noexcept;
     void release_runs();
+    void abandon_after_pg_error_noexcept() noexcept {
+        poisoned_ = true;
+        release_runs_noexcept();
+    }
 
 	private:
 	    void steal_(SortedPairRunStore&& other) noexcept;
 	    void merge_runs_erased(SortedPairKmerSink sink);
 	    void merge_runs_erased_impl_(SortedPairKmerSink sink, MergeResources& resources);
 	    [[nodiscard]] bool try_ensure_write_buffer_(std::size_t requested_bytes);
+	    [[nodiscard]] std::size_t spill_sorted_run_impl_(
+            std::span<const sorted_pair_t> sorted);
 	    [[nodiscard]] std::size_t spill_sorted_run_direct_(std::span<const sorted_pair_t> sorted);
+	    void demote_resident_runs_until_available_impl_(std::uint64_t bytes_needed);
 	    [[nodiscard]] bool demote_largest_resident_run_();
 	    [[nodiscard]] std::uint64_t merge_reader_budget_bytes_() const;
 	    void compact_file_runs_until_bounded_();
@@ -424,6 +492,7 @@ public:
     std::vector<SortedPairWire> write_buffer_;
     bioseq::parallelism::MemoryPermit write_buffer_permit_;
     SortedRunStoreStats stats_{};
+    bool poisoned_ = false;
 };
 
 } // namespace bioseq::storage::indexing
@@ -453,12 +522,14 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
     write_buffer_ = std::move(other.write_buffer_);
     write_buffer_permit_ = std::move(other.write_buffer_permit_);
     stats_ = other.stats_;
+    poisoned_ = other.poisoned_;
 
     other.file_runs_.clear();
     other.memory_run_bytes_ = 0;
     other.memory_run_peak_bytes_ = 0;
     other.spilled_run_bytes_ = 0;
     other.stats_ = {};
+    other.poisoned_ = true;
 }
 
 	bool SortedPairRunStore::try_ensure_write_buffer_(std::size_t requested_bytes) {
@@ -479,7 +550,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	std::size_t SortedPairRunStore::spill_sorted_run_direct_(
 	        std::span<const sorted_pair_t> sorted) {
 	    const std::size_t run_index = memory_runs_.size() + file_runs_.size();
-	    BufFile* file = BufFileCreateTemp(false);
+	    BufFile* file = create_temp_buffile_as_cpp();
 	    if (file == nullptr) {
 	        report_sorted_run_error(SortedRunError::temp_file_create_failed);
 	    }
@@ -493,8 +564,9 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	            const sorted_pair_t& p = sorted[off + i];
 	            stack_buffer[i] = SortedPairWire{.kmer = p.first, .encoded = p.second};
 	        }
-	        BufFileWrite(file, stack_buffer.data(), n * sizeof(SortedPairWire));
-	        CHECK_FOR_INTERRUPTS();
+	        write_buffile_as_cpp(
+            file, stack_buffer.data(), n * sizeof(SortedPairWire));
+	        check_for_interrupts_as_cpp();
 	    }
 
 	    run.pair_count = static_cast<std::uint64_t>(sorted.size());
@@ -502,7 +574,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	        sorted.size() * sizeof(SortedPairWire));
 	    spilled_run_bytes_ += run.byte_count;
 	    ++stats_.postgres_temp_file_count;
-	    const int64 size = BufFileSize(file);
+	    const int64 size = size_buffile_as_cpp(file);
 	    if (size > 0) {
 	        stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
 	    }
@@ -511,9 +583,10 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    return run_index;
 	}
 
-	std::size_t SortedPairRunStore::spill_sorted_run(std::span<const sorted_pair_t> sorted) {
+	std::size_t SortedPairRunStore::spill_sorted_run_impl_(
+        std::span<const sorted_pair_t> sorted) {
 	    const std::size_t run_index = memory_runs_.size() + file_runs_.size();
-	    BufFile* file = BufFileCreateTemp(false);
+	    BufFile* file = create_temp_buffile_as_cpp();
     if (file == nullptr) {
         report_sorted_run_error(SortedRunError::temp_file_create_failed);
     }
@@ -533,8 +606,9 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
             const sorted_pair_t& p = sorted[off + i];
             write_buffer_.push_back(SortedPairWire{.kmer = p.first, .encoded = p.second});
         }
-        BufFileWrite(file, write_buffer_.data(), n * sizeof(SortedPairWire));
-        CHECK_FOR_INTERRUPTS();
+        write_buffile_as_cpp(
+            file, write_buffer_.data(), n * sizeof(SortedPairWire));
+        check_for_interrupts_as_cpp();
     }
 
     run.pair_count = static_cast<std::uint64_t>(sorted.size());
@@ -542,7 +616,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
         sorted.size() * sizeof(SortedPairWire));
     spilled_run_bytes_ += run.byte_count;
     ++stats_.postgres_temp_file_count;
-    const int64 size = BufFileSize(file);
+    const int64 size = size_buffile_as_cpp(file);
     if (size > 0) {
         stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
     }
@@ -550,6 +624,17 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    stats_.spilled_bytes = spilled_run_bytes_;
 	    return run_index;
 	}
+
+std::size_t SortedPairRunStore::spill_sorted_run(
+        std::span<const sorted_pair_t> sorted) {
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    poisoned_ = true;
+    const std::size_t run_index = spill_sorted_run_impl_(sorted);
+    poisoned_ = false;
+    return run_index;
+}
 
 	bool SortedPairRunStore::demote_largest_resident_run_() {
 	    if (memory_runs_.empty()) {
@@ -580,7 +665,7 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    return true;
 	}
 
-	void SortedPairRunStore::demote_resident_runs_until_available(
+	void SortedPairRunStore::demote_resident_runs_until_available_impl_(
 	        std::uint64_t bytes_needed) {
 	    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
 	    while (!memory_runs_.empty()) {
@@ -595,6 +680,16 @@ void SortedPairRunStore::steal_(SortedPairRunStore&& other) noexcept {
 	    }
 	}
 
+void SortedPairRunStore::demote_resident_runs_until_available(
+        std::uint64_t bytes_needed) {
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    poisoned_ = true;
+    demote_resident_runs_until_available_impl_(bytes_needed);
+    poisoned_ = false;
+}
+
 std::size_t SortedPairRunStore::spill_sorted_run_owned(
         std::vector<sorted_pair_t> sorted) {
     const std::uint64_t capacity_bytes =
@@ -608,23 +703,10 @@ std::size_t SortedPairRunStore::spill_sorted_run_owned(
     }
 
     ++stats_.spill_count_from_pressure;
-    std::vector<sorted_pair_t>* volatile owned =
-        new std::vector<sorted_pair_t>(std::move(sorted));
-    std::size_t volatile run_index = 0;
-    PG_TRY();
-    {
-        run_index = spill_sorted_run(
-            std::span<const sorted_pair_t>(owned->data(), owned->size()));
-        delete owned;
-        owned = nullptr;
-    }
-    PG_CATCH();
-    {
-        delete owned;
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-    return run_index;
+    auto owned = std::make_unique<std::vector<sorted_pair_t>>(
+        std::move(sorted));
+    return spill_sorted_run(
+        std::span<const sorted_pair_t>(owned->data(), owned->size()));
 }
 
 std::size_t SortedPairRunStore::spill_sorted_run_owned_admitted(
@@ -691,7 +773,7 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
     }
 
     for (BufFileRun& run : file_runs_) {
-        if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
+        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
             report_sorted_run_error(SortedRunError::run_rewind_failed);
         }
         FileReader reader{};
@@ -725,7 +807,7 @@ void SortedPairRunStore::merge_sorted_file_runs_to_writer_(
     resources.readers.reserve(runs.size());
     std::priority_queue<MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
     for (BufFileRun& run : runs) {
-        if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
+        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
             report_sorted_run_error(SortedRunError::compacted_run_rewind_failed);
         }
         FileReader reader{};
@@ -762,45 +844,38 @@ void SortedPairRunStore::merge_sorted_file_runs_to_writer_(
 BufFileRun SortedPairRunStore::merge_file_run_group_to_new_buffile_(
         std::size_t lo,
         std::size_t hi) {
-    BufFile* volatile out_file = BufFileCreateTemp(false);
+    BufFile* out_file = create_temp_buffile_as_cpp();
     if (out_file == nullptr) {
         report_sorted_run_error(SortedRunError::compact_temp_file_create_failed);
     }
-    MergeResources* volatile resources = new MergeResources();
+    auto resources = std::make_unique<MergeResources>();
     BufFileRun out{.file = out_file};
-    PG_TRY();
-    {
+    try {
         merge_sorted_file_runs_to_writer_(
             std::span<BufFileRun>(file_runs_.data() + lo, hi - lo),
             *resources,
             [&](SortedPairWire pair) {
-                BufFileWrite(out_file, &pair, sizeof(pair));
+                write_buffile_as_cpp(out_file, &pair, sizeof(pair));
                 ++out.pair_count;
                 out.byte_count += sizeof(pair);
             });
         ++stats_.postgres_temp_file_count;
-        const int64 size = BufFileSize(out.file);
+        const int64 size = size_buffile_as_cpp(out.file);
         if (size > 0) {
             stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
         }
         resources->release_noexcept();
-        delete resources;
-        resources = nullptr;
         out_file = nullptr;
+    } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+        resources->abandon_pg_resources_noexcept();
+        // out_file remains registered with the current ResourceOwner.
+        out_file = nullptr;
+        throw;
+    } catch (...) {
+        resources->release_noexcept();
+        close_buffile_noexcept(out_file);
+        throw;
     }
-    PG_CATCH();
-    {
-        if (resources != nullptr) {
-            resources->release_noexcept();
-            delete resources;
-        }
-        if (out_file != nullptr) {
-            BufFile* close_file = out_file;
-            close_buffile_noexcept(close_file);
-        }
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
     return out;
 }
 
@@ -811,33 +886,31 @@ void SortedPairRunStore::compact_file_runs_to_output_count_(
         const std::size_t group_size = std::max<std::size_t>(
             2,
             (file_runs_.size() + target_output_runs - 1) / target_output_runs);
-        std::vector<BufFileRun>* volatile next = new std::vector<BufFileRun>();
-        PG_TRY();
-        {
-            next->reserve(target_output_runs);
+        std::vector<BufFileRun> next;
+        try {
+            next.reserve(target_output_runs);
             for (std::size_t lo = 0; lo < file_runs_.size(); lo += group_size) {
                 const std::size_t hi = std::min(file_runs_.size(), lo + group_size);
-                next->push_back(merge_file_run_group_to_new_buffile_(lo, hi));
+                next.push_back(merge_file_run_group_to_new_buffile_(lo, hi));
                 for (std::size_t i = lo; i < hi; ++i) {
                     close_buffile_noexcept(file_runs_[i].file);
                 }
             }
-            file_runs_ = std::move(*next);
-            delete next;
-            next = nullptr;
+            file_runs_ = std::move(next);
             ++stats_.merge_pass_count;
-        }
-        PG_CATCH();
-        {
-            if (next != nullptr) {
-                for (BufFileRun& run : *next) {
-                    close_buffile_noexcept(run.file);
-                }
-                delete next;
+        } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+            for (BufFileRun& run : next) {
+                // ResourceOwner cleanup owns files touched by the failed PG
+                // operation; do not issue more PostgreSQL calls here.
+                run.file = nullptr;
             }
-            PG_RE_THROW();
+            throw;
+        } catch (...) {
+            for (BufFileRun& run : next) {
+                close_buffile_noexcept(run.file);
+            }
+            throw;
         }
-        PG_END_TRY();
     }
 }
 
@@ -930,23 +1003,25 @@ void SortedPairRunStore::merge_runs_erased_impl_(
 }
 
 void SortedPairRunStore::merge_runs_erased(SortedPairKmerSink sink) {
-    MergeResources* volatile resources = new MergeResources();
-    PG_TRY();
-    {
+    if (poisoned_) {
+        report_sorted_run_error(SortedRunError::poisoned_store_reused);
+    }
+    poisoned_ = true;
+    auto resources = std::make_unique<MergeResources>();
+    try {
         merge_runs_erased_impl_(sink, *resources);
         resources->release_noexcept();
-        delete resources;
-        resources = nullptr;
+        poisoned_ = false;
+    } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+        resources->abandon_pg_resources_noexcept();
+        throw;
+    } catch (...) {
+        // The callback may throw an ordinary C++ exception. All PG leaves have
+        // already restored PostgreSQL's exception stack, so normal cleanup is
+        // safe and the original C++ exception remains authoritative.
+        resources->release_noexcept();
+        throw;
     }
-    PG_CATCH();
-    {
-        if (resources != nullptr) {
-            resources->release_noexcept();
-            delete resources;
-        }
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
 }
 
 void SortedPairRunStore::release_resident_runs_noexcept() noexcept {
@@ -962,8 +1037,17 @@ void SortedPairRunStore::release_runs_noexcept() noexcept {
     release_resident_runs_noexcept();
     write_buffer_permit_.release();
     release_vector_storage_noexcept(write_buffer_);
-    for (BufFileRun& run : file_runs_) {
-        close_buffile_noexcept(run.file);
+    if (poisoned_) {
+        for (BufFileRun& run : file_runs_) {
+            // A failed BufFile leaf is owned by PostgreSQL's ResourceOwner.
+            // Re-entering BufFileClose while propagating that error can mask
+            // the original SQLSTATE or longjmp across C++ cleanup.
+            run.file = nullptr;
+        }
+    } else {
+        for (BufFileRun& run : file_runs_) {
+            close_buffile_noexcept(run.file);
+        }
     }
     file_runs_.clear();
     spilled_run_bytes_ = 0;

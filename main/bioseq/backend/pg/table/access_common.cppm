@@ -129,8 +129,14 @@ export [[gnu::always_inline]] inline void
 hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
                             bioseq::storage::seq_caches* cache,
                             const bioseq::storage::BioseqAmCache& amc,
+                            Snapshot snapshot,
                             MemoryContext payload_mctx)
 {
+	if (snapshot == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("bioseq sequence hydration requires an explicit snapshot")));
+	}
 	if (cache == nullptr || amc.seq_attnos.empty()) {
 		return;
 	}
@@ -159,7 +165,7 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 		}
 		pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
 			loc.dbOid, loc.spcOid, loc.relNumber,
-			attno, loc_decoded, payload_mctx, cache);
+			attno, loc_decoded, snapshot, payload_mctx, cache);
 		slot->tts_values[idx] = PointerGetDatum(real);
 	}
 }
@@ -174,8 +180,14 @@ bioseq_hydrate_scan_slot(TableScanDesc sscan, TupleTableSlot* slot, bool force)
 	if (!force && scan->defer_seq_hydration) {
 		return;
 	}
+	if (scan->cs_readState == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("bioseq scan hydration requires an initialized read state")));
+	}
 	const auto& amc = bioseq::storage::bioseq_am_cache_for(scan->cs_base.rs_rd);
 	auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
 	hydrate_seq_columns_in_slot(scan->cs_base.rs_rd, slot, caches, amc,
+	                            scan->cs_readState->snapshot,
 	                            scan->scanContext);
 }

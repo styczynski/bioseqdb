@@ -9,12 +9,18 @@ module;
 #include <hwy/highway.h>                   // ONLY for the HWY_NAMESPACE macro
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <concepts>
 #include <cstring>
+#include <expected>
 #include <exception>
 #include <iterator>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -24,6 +30,7 @@ export module bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;            // MinimizerHashmapFragmentIndex, build_from_pairs, wire_for_each_*
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch E — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
@@ -55,14 +62,14 @@ using bioseq::storage::sequence_size_t;
 using bioseq::storage::lazy_compact_sequence;
 
 // ---- on-disk directory layout (§10.2) ------------------------------------
-struct MinimizerBucketDirEntry {
+struct MpsV2BucketDirEntry {
     std::uint64_t lo_kmer;       // inclusive smallest kmer in the bucket
     std::uint64_t hi_kmer;       // inclusive largest kmer in the bucket
     std::int64_t  sub_key;       // bucket's storage sub_key
 };
-static_assert(sizeof(MinimizerBucketDirEntry) == 24 && alignof(MinimizerBucketDirEntry) == 8);
+static_assert(sizeof(MpsV2BucketDirEntry) == 24 && alignof(MpsV2BucketDirEntry) == 8);
 
-struct MinimizerBucketDirectory {
+struct MpsV2BucketDirectory {
     static constexpr std::uint32_t kDirMagic   = 0xB1000002u;
     static constexpr std::uint32_t kDirVersion = 2u;
     static constexpr std::uint32_t kBuiltFromPhaseC = 1u << 0u;
@@ -73,43 +80,43 @@ struct MinimizerBucketDirectory {
     std::uint64_t num_buckets = 0;
     bioseq::storage::sequence_size_t total_distinct_kmers = 0;
     bioseq::storage::sequence_size_t total_positions      = 0;
-    // followed by MinimizerBucketDirEntry[num_buckets]
+    // followed by MpsV2BucketDirEntry[num_buckets]
 };
-static_assert(sizeof(MinimizerBucketDirectory) == 40 && alignof(MinimizerBucketDirectory) == 8,
+static_assert(sizeof(MpsV2BucketDirectory) == 40 && alignof(MpsV2BucketDirectory) == 8,
               "directory wire header layout pinned");
 static_assert(sizeof(bioseq::storage::sequence_size_t) == 8, "directory wire fields assume 8-byte sequence_size_t");
-static_assert(offsetof(MinimizerBucketDirectory, flags) == 8
-           && offsetof(MinimizerBucketDirectory, reserved) == 12
-           && offsetof(MinimizerBucketDirectory, num_buckets) == 16
-           && offsetof(MinimizerBucketDirectory, total_distinct_kmers) == 24
-           && offsetof(MinimizerBucketDirectory, total_positions) == 32,
+static_assert(offsetof(MpsV2BucketDirectory, flags) == 8
+           && offsetof(MpsV2BucketDirectory, reserved) == 12
+           && offsetof(MpsV2BucketDirectory, num_buckets) == 16
+           && offsetof(MpsV2BucketDirectory, total_distinct_kmers) == 24
+           && offsetof(MpsV2BucketDirectory, total_positions) == 32,
               "directory header field offsets pinned");
-static_assert(offsetof(MinimizerBucketDirEntry, sub_key) == 16, "dir entry field offsets pinned");
+static_assert(offsetof(MpsV2BucketDirEntry, sub_key) == 16, "dir entry field offsets pinned");
 
 /// Binary-search view over the directory chunk. Copies the blob into an owned
 /// 8-aligned int64 vector so per-bucket read_chunk does not invalidate it.
-struct DirView {
+struct MpsV2DirView {
     std::vector<std::int64_t> owned;
-    const MinimizerBucketDirectory* hdr = nullptr;
-    const MinimizerBucketDirEntry* entries = nullptr;
+    const MpsV2BucketDirectory* hdr = nullptr;
+    const MpsV2BucketDirEntry* entries = nullptr;
     std::size_t n = 0;
-    DirView(const char* blob, std::size_t bytes) {
-        if (bytes < sizeof(MinimizerBucketDirectory)) index_corruption_panic("directory: truncated");
+    MpsV2DirView(const char* blob, std::size_t bytes) {
+        if (bytes < sizeof(MpsV2BucketDirectory)) index_corruption_panic("directory: truncated");
         owned.resize((bytes + sizeof(std::int64_t) - 1) / sizeof(std::int64_t));
         std::memcpy(owned.data(), blob, bytes);
-        hdr = reinterpret_cast<const MinimizerBucketDirectory*>(owned.data());
-        if (hdr->magic != MinimizerBucketDirectory::kDirMagic || hdr->version != MinimizerBucketDirectory::kDirVersion)
+        hdr = reinterpret_cast<const MpsV2BucketDirectory*>(owned.data());
+        if (hdr->magic != MpsV2BucketDirectory::kDirMagic || hdr->version != MpsV2BucketDirectory::kDirVersion)
             index_corruption_panic("directory: magic/version");
         n = static_cast<std::size_t>(hdr->num_buckets);
-        const std::size_t expect = sizeof(MinimizerBucketDirectory) + sizeof(MinimizerBucketDirEntry) * n;
+        const std::size_t expect = sizeof(MpsV2BucketDirectory) + sizeof(MpsV2BucketDirEntry) * n;
         if (bytes != expect) index_corruption_panic("directory: size mismatch");
-        entries = reinterpret_cast<const MinimizerBucketDirEntry*>(
-            reinterpret_cast<const char*>(owned.data()) + sizeof(MinimizerBucketDirectory));
+        entries = reinterpret_cast<const MpsV2BucketDirEntry*>(
+            reinterpret_cast<const char*>(owned.data()) + sizeof(MpsV2BucketDirectory));
         for (std::size_t i = 1; i < n; ++i)
             if (entries[i].lo_kmer <= entries[i-1].hi_kmer)
                 index_corruption_panic("directory: not ascending/non-overlapping");
     }
-    [[nodiscard]] const MinimizerBucketDirEntry* find(std::uint64_t kmer) const {
+    [[nodiscard]] const MpsV2BucketDirEntry* find(std::uint64_t kmer) const {
         std::size_t lo = 0, hi = n;
         while (lo < hi) { std::size_t mid = (lo + hi) / 2; if (entries[mid].hi_kmer < kmer) lo = mid + 1; else hi = mid; }
         if (lo < n && entries[lo].lo_kmer <= kmer && kmer <= entries[lo].hi_kmer) return &entries[lo];
@@ -117,7 +124,7 @@ struct DirView {
     }
     [[nodiscard]] bool built_from_phase_c() const noexcept {
         return hdr != nullptr
-            && (hdr->flags & MinimizerBucketDirectory::kBuiltFromPhaseC) != 0u;
+            && (hdr->flags & MpsV2BucketDirectory::kBuiltFromPhaseC) != 0u;
     }
 };
 
@@ -329,6 +336,1214 @@ template <class Traits, std::size_t WindowSize, std::size_t KmerSize>
 }
 }  // namespace detail
 
+struct MpsSegmentMergeProbe {
+    template <class Positions>
+    void operator()(
+            std::uint32_t,
+            std::uint64_t,
+            Positions&& positions) const {
+        (void)positions.total_count();
+        positions.for_each_batch(
+            [](std::span<const std::uint64_t>) noexcept {});
+    }
+};
+
+template <class S>
+concept MpsSegmentQualifiedSpillStorage = requires(
+        S& storage,
+        std::uint32_t position_segment,
+        std::uint64_t span,
+        std::uint64_t target_length,
+        std::span<const detail::sorted_pair_t> run) {
+    { storage.begin_segment_spill_generation() }
+        -> std::same_as<MpsSegmentSpillStorageBinding>;
+    { std::as_const(storage).segment_spill_storage_binding() }
+        -> std::same_as<MpsSegmentSpillStorageBinding>;
+    { storage.spill_sorted_segment_run(position_segment, run) }
+        -> std::convertible_to<std::size_t>;
+    { storage.merge_segment_runs(MpsSegmentMergeProbe{}) }
+        -> std::same_as<void>;
+    { storage.reroute_segment_runs(span, span, target_length) }
+        -> std::convertible_to<bool>;
+};
+
+template <class S>
+class MpsExternalSpillGenerationReplayProducer;
+
+template <class S>
+class MpsUnboundExternalSpillReplayProducer;
+
+template <class S>
+struct MinimizerSequenceMergedIndex;
+
+using MpsContentDigest = std::array<std::byte, 32>;
+
+namespace mps_evidence_detail {
+class Sha256 {
+private:
+    std::array<std::uint32_t, 8> state_{
+        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    std::array<std::byte, 64> buffer_{};
+    std::size_t buffered_ = 0;
+    std::uint64_t total_bytes_ = 0;
+
+    inline static constexpr std::array<std::uint32_t, 64> round_constants{
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+
+    void transform_(const std::byte* block) noexcept {
+        std::array<std::uint32_t, 64> words{};
+        for (std::size_t index = 0; index < 16; ++index) {
+            const std::size_t offset = index * 4u;
+            words[index] =
+                static_cast<std::uint32_t>(
+                    std::to_integer<std::uint8_t>(block[offset])) << 24u
+                | static_cast<std::uint32_t>(
+                    std::to_integer<std::uint8_t>(block[offset + 1u])) << 16u
+                | static_cast<std::uint32_t>(
+                    std::to_integer<std::uint8_t>(block[offset + 2u])) << 8u
+                | static_cast<std::uint32_t>(
+                    std::to_integer<std::uint8_t>(block[offset + 3u]));
+        }
+        for (std::size_t index = 16; index < words.size(); ++index) {
+            const std::uint32_t s0 = std::rotr(words[index - 15u], 7)
+                ^ std::rotr(words[index - 15u], 18)
+                ^ (words[index - 15u] >> 3u);
+            const std::uint32_t s1 = std::rotr(words[index - 2u], 17)
+                ^ std::rotr(words[index - 2u], 19)
+                ^ (words[index - 2u] >> 10u);
+            words[index] = words[index - 16u] + s0
+                + words[index - 7u] + s1;
+        }
+        std::uint32_t a = state_[0];
+        std::uint32_t b = state_[1];
+        std::uint32_t c = state_[2];
+        std::uint32_t d = state_[3];
+        std::uint32_t e = state_[4];
+        std::uint32_t f = state_[5];
+        std::uint32_t g = state_[6];
+        std::uint32_t h = state_[7];
+        for (std::size_t index = 0; index < words.size(); ++index) {
+            const std::uint32_t sum1 = std::rotr(e, 6)
+                ^ std::rotr(e, 11) ^ std::rotr(e, 25);
+            const std::uint32_t choose = (e & f) ^ (~e & g);
+            const std::uint32_t temporary1 = h + sum1 + choose
+                + round_constants[index] + words[index];
+            const std::uint32_t sum0 = std::rotr(a, 2)
+                ^ std::rotr(a, 13) ^ std::rotr(a, 22);
+            const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+            const std::uint32_t temporary2 = sum0 + majority;
+            h = g;
+            g = f;
+            f = e;
+            e = d + temporary1;
+            d = c;
+            c = b;
+            b = a;
+            a = temporary1 + temporary2;
+        }
+        state_[0] += a;
+        state_[1] += b;
+        state_[2] += c;
+        state_[3] += d;
+        state_[4] += e;
+        state_[5] += f;
+        state_[6] += g;
+        state_[7] += h;
+    }
+
+public:
+    void update(std::span<const std::byte> bytes) noexcept {
+        for (const std::byte value : bytes) {
+            buffer_[buffered_++] = value;
+            ++total_bytes_;
+            if (buffered_ == buffer_.size()) {
+                transform_(buffer_.data());
+                buffered_ = 0;
+            }
+        }
+    }
+
+    void update_little_endian(std::uint64_t value) noexcept {
+        std::array<std::byte, 8> bytes{};
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::byte>(value & 0xffu);
+            value >>= 8u;
+        }
+        update(bytes);
+    }
+
+    [[nodiscard]] MpsContentDigest finalize() noexcept {
+        const std::uint64_t bit_length = total_bytes_ * 8u;
+        buffer_[buffered_++] = std::byte{0x80};
+        if (buffered_ > 56u) {
+            while (buffered_ < buffer_.size()) {
+                buffer_[buffered_++] = std::byte{0};
+            }
+            transform_(buffer_.data());
+            buffered_ = 0;
+        }
+        while (buffered_ < 56u) {
+            buffer_[buffered_++] = std::byte{0};
+        }
+        for (std::size_t index = 0; index < 8u; ++index) {
+            buffer_[63u - index] = static_cast<std::byte>(
+                (bit_length >> (index * 8u)) & 0xffu);
+        }
+        transform_(buffer_.data());
+        MpsContentDigest digest{};
+        for (std::size_t word = 0; word < state_.size(); ++word) {
+            for (std::size_t byte = 0; byte < 4u; ++byte) {
+                digest[word * 4u + byte] = static_cast<std::byte>(
+                    (state_[word] >> (24u - byte * 8u)) & 0xffu);
+            }
+        }
+        return digest;
+    }
+};
+}  // namespace mps_evidence_detail
+
+/// Operation-owned proof for one inactive format-4 MPS generation.  Native
+/// collection is performed exactly once into PostgreSQL-owned spill runs;
+/// planning and emission then replay those same runs.  The two phases therefore
+/// have deliberately separate route and replay evidence.
+class MpsGenerationExecutionEvidence {
+public:
+    MinimizerSketchBackend selected_backend = MinimizerSketchBackend::Scalar;
+    MinimizerSchemeIdentity minimizer_scheme{};
+    std::uint64_t target_length = 0;
+    std::uint16_t window_size = 0;
+    std::uint16_t kmer_size = 0;
+    std::uint64_t configured_core_span_bp = 0;
+    std::uint64_t peak_core_span_bp = 0;
+    std::uint64_t peak_core_events = 0;
+    std::uint64_t peak_paper_materialized_window_bp = 0;
+    std::uint64_t spill_run_count = 0;
+    std::uint64_t spilled_event_count = 0;
+    MpsContentDigest spill_content_digest{};
+    std::uint64_t spill_operation_epoch = 0;
+    MpsSegmentSpillStorageBinding spill_storage_binding{};
+    std::uint64_t spill_qualification_scan_count = 0;
+    std::uint64_t spill_qualification_merge_count = 0;
+    std::uint64_t short_core_runs = 0;
+    std::uint64_t scalar_core_runs = 0;
+    std::uint64_t exact_simd_core_runs = 0;
+    std::uint64_t paper_nthash_core_runs = 0;
+    std::uint64_t vulkan_core_runs = 0;
+    ExactSimdIndexExecutionProof exact_simd_proof{};
+    bool exact_simd_proof_present = false;
+    PackedPaperNthashIndexStatus packed_paper_status =
+        PackedPaperNthashIndexStatus::invalid_state;
+    PackedPaperNthashIndexExecutionProof packed_paper_proof{};
+    bool packed_paper_proof_present = false;
+    bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof vulkan_proof{};
+    std::uint64_t replay_scan_count = 0;
+    std::uint64_t replay_merge_pass_count = 0;
+    std::uint64_t replay_reroute_pass_count = 0;
+    std::uint64_t replay_completed_scan_count = 0;
+    std::uint64_t replay_failed_scan_count = 0;
+    std::uint64_t replay_binding_checked_failed_scan_count = 0;
+    std::uint64_t replay_illegal_span_transition_count = 0;
+    std::uint64_t replay_first_completed_event_count = 0;
+    std::uint64_t replay_last_completed_event_count = 0;
+    MpsContentDigest replay_first_completed_content_digest{};
+    MpsContentDigest replay_last_completed_content_digest{};
+    std::uint64_t replay_final_span_bp = 0;
+    MpsSegmentSpillStorageBinding replay_final_storage_binding{};
+    std::uint64_t replay_peak_callback_batch_events = 0;
+    std::uint64_t replay_visited_event_count = 0;
+    std::uint64_t manifest_position_count = 0;
+    std::uint64_t manifest_position_segment_span_bp = 0;
+    bool spill_complete = false;
+    bool backend_bound = false;
+    bool manifest_bound = false;
+    bool saturated = false;
+
+    static void add(
+            std::uint64_t& destination,
+            std::uint64_t increment,
+            bool& did_saturate) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            did_saturate = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    [[nodiscard]] bool spill_accepted() const noexcept {
+        if (!route_snapshot_matches_()
+            || !spill_complete || !backend_bound || saturated
+            || window_size == 0 || kmer_size == 0
+            || configured_core_span_bp == 0
+            || peak_core_span_bp > configured_core_span_bp
+            || minimizer_scheme
+                != minimizer_scheme_identity_for_backend(selected_backend)
+            || (spilled_event_count == 0) != (spill_run_count == 0)
+            || spill_qualification_scan_count != 1
+            || spill_qualification_merge_count
+                != (target_length == 0 ? 0u : 1u)
+            || authority_seal_ == 0
+            || spill_operation_epoch == 0
+            || spill_operation_epoch != authority_operation_epoch_
+            || spill_storage_binding != authority_storage_binding_
+            || spilled_event_count != authority_event_count_
+            || spill_content_digest != authority_content_digest_) {
+            return false;
+        }
+        const bool no_exact = exact_simd_core_runs == 0
+            && !exact_simd_proof_present;
+        const bool no_paper = paper_nthash_core_runs == 0
+            && !packed_paper_proof_present;
+        const bool no_vulkan = vulkan_core_runs == 0
+            && vulkan_proof.completed_roundtrips == 0
+            && vulkan_proof.downloaded_minimizers == 0
+            && vulkan_proof.gpu_window_splits == 0
+            && !vulkan_proof.saturated;
+        const std::uint64_t minimum_work_bases =
+            static_cast<std::uint64_t>(window_size) + kmer_size - 1u;
+        const bool require_backend_work = target_length >= minimum_work_bases;
+        if (!require_backend_work) {
+            return scalar_core_runs == 0 && exact_simd_core_runs == 0
+                && paper_nthash_core_runs == 0 && vulkan_core_runs == 0
+                && no_exact && no_paper && no_vulkan
+                && (target_length == 0
+                    ? short_core_runs == 0
+                    : short_core_runs != 0);
+        }
+        switch (selected_backend) {
+            case MinimizerSketchBackend::Scalar:
+                return scalar_core_runs != 0
+                    && exact_simd_core_runs == 0
+                    && paper_nthash_core_runs == 0
+                    && vulkan_core_runs == 0
+                    && no_exact && no_paper && no_vulkan;
+            case MinimizerSketchBackend::ExactSimd:
+                return scalar_core_runs == 0
+                    && exact_simd_core_runs != 0
+                    && paper_nthash_core_runs == 0
+                    && vulkan_core_runs == 0
+                    && exact_simd_proof_present
+                    && exact_simd_proof.accepted(true)
+                    && no_paper && no_vulkan;
+            case MinimizerSketchBackend::PaperNtHashSimd:
+                return scalar_core_runs == 0
+                    && exact_simd_core_runs == 0
+                    && paper_nthash_core_runs != 0
+                    && vulkan_core_runs == 0
+                    && no_exact && no_vulkan
+                    && packed_paper_proof_present
+                    && packed_paper_status
+                        == PackedPaperNthashIndexStatus::ok
+                    && packed_paper_proof.accepted(true);
+            case MinimizerSketchBackend::VulkanSegment:
+                return scalar_core_runs == 0
+                    && exact_simd_core_runs == 0
+                    && paper_nthash_core_runs == 0
+                    && vulkan_core_runs != 0
+                    && no_exact && no_paper
+                    && vulkan_proof.accepted(true);
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        if (!spill_accepted() || !replay_snapshot_matches_()
+            || !manifest_bound
+            || !manifest_authority_bound_
+            || !publication_binding_present_
+            || !publication_binding_.valid()
+            || manifest_position_count != spilled_event_count
+            || replay_illegal_span_transition_count != 0) {
+            return false;
+        }
+        if (target_length == 0) {
+            return replay_scan_count == 2
+                && replay_merge_pass_count == 0
+                && replay_reroute_pass_count == 0
+                && replay_completed_scan_count == 2
+                && replay_failed_scan_count == 0
+                && replay_binding_checked_failed_scan_count == 0
+                && replay_first_completed_event_count == 0
+                && replay_last_completed_event_count == 0
+                && replay_first_completed_content_digest
+                    == spill_content_digest
+                && replay_last_completed_content_digest
+                    == spill_content_digest
+                && replay_final_span_bp == 1
+                && replay_final_storage_binding == spill_storage_binding
+                && manifest_position_segment_span_bp == 0;
+        }
+        return replay_reroute_pass_count
+                    <= (std::numeric_limits<std::uint64_t>::max)() - 2u
+            && replay_scan_count == replay_reroute_pass_count + 2u
+            && replay_merge_pass_count == replay_scan_count
+            && replay_completed_scan_count == 2
+            && replay_failed_scan_count == replay_reroute_pass_count
+            && replay_binding_checked_failed_scan_count
+                == replay_failed_scan_count
+            && replay_first_completed_event_count == spilled_event_count
+            && replay_last_completed_event_count == spilled_event_count
+            && replay_first_completed_content_digest
+                == replay_last_completed_content_digest
+            && (replay_reroute_pass_count != 0
+                || replay_first_completed_content_digest
+                    == spill_content_digest)
+            && replay_final_storage_binding.valid()
+            && replay_final_storage_binding.generation_token
+                == spill_storage_binding.generation_token
+            && spill_storage_binding.mutation_version
+                <= (std::numeric_limits<std::uint64_t>::max)()
+                    - replay_reroute_pass_count
+            && replay_final_storage_binding.mutation_version
+                == spill_storage_binding.mutation_version
+                    + replay_reroute_pass_count
+            && replay_final_span_bp == manifest_position_segment_span_bp
+            && replay_final_span_bp != 0;
+    }
+
+    [[nodiscard]] bool publication_accepted(
+            const MinimizerGenerationPublicationBinding& expected)
+            const noexcept {
+        return accepted() && expected.valid()
+            && publication_binding_ == expected;
+    }
+
+    /// READY may release physical spill resources only from the exact logical
+    /// event-set incarnation replayed by this accepted generation.
+    [[nodiscard]] bool ready_release_binding_accepted(
+            MpsSegmentSpillStorageBinding before_release) const noexcept {
+        return accepted() && before_release.valid()
+            && before_release == replay_final_storage_binding
+            && before_release.generation_token
+                == spill_storage_binding.generation_token;
+    }
+
+private:
+    template <class>
+    friend class MpsExternalSpillGenerationReplayProducer;
+    template <class>
+    friend struct MinimizerSequenceMergedIndex;
+
+    // Lifetime-safe capability copied with the evidence.  Unlike the former
+    // retained MpsSpillAuthority* value, this remains meaningful after the last
+    // shared authority owner is destroyed and can never dangle.
+    std::uint64_t authority_seal_ = 0;
+    std::uint64_t authority_event_count_ = 0;
+    MpsContentDigest authority_content_digest_{};
+    std::uint64_t authority_operation_epoch_ = 0;
+    MpsSegmentSpillStorageBinding authority_storage_binding_{};
+    bool manifest_authority_bound_ = false;
+    MinimizerGenerationPublicationBinding publication_binding_{};
+    bool publication_binding_present_ = false;
+
+    struct RouteSnapshot {
+        MinimizerSketchBackend selected_backend = MinimizerSketchBackend::Scalar;
+        MinimizerSchemeIdentity minimizer_scheme{};
+        std::uint64_t target_length = 0;
+        std::uint16_t window_size = 0;
+        std::uint16_t kmer_size = 0;
+        std::uint64_t configured_core_span_bp = 0;
+        std::uint64_t peak_core_span_bp = 0;
+        std::uint64_t peak_core_events = 0;
+        std::uint64_t peak_paper_materialized_window_bp = 0;
+        std::uint64_t spill_run_count = 0;
+        std::uint64_t spilled_event_count = 0;
+        MpsContentDigest spill_content_digest{};
+        std::uint64_t spill_operation_epoch = 0;
+        MpsSegmentSpillStorageBinding spill_storage_binding{};
+        std::uint64_t spill_qualification_scan_count = 0;
+        std::uint64_t spill_qualification_merge_count = 0;
+        std::uint64_t short_core_runs = 0;
+        std::uint64_t scalar_core_runs = 0;
+        std::uint64_t exact_simd_core_runs = 0;
+        std::uint64_t paper_nthash_core_runs = 0;
+        std::uint64_t vulkan_core_runs = 0;
+        ExactSimdIndexExecutionProof exact_simd_proof{};
+        bool exact_simd_proof_present = false;
+        PackedPaperNthashIndexStatus packed_paper_status =
+            PackedPaperNthashIndexStatus::invalid_state;
+        PackedPaperNthashIndexExecutionProof packed_paper_proof{};
+        bool packed_paper_proof_present = false;
+        bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof vulkan_proof{};
+        bool spill_complete = false;
+        bool backend_bound = false;
+        bool saturated = false;
+    } route_snapshot_{};
+    bool route_snapshot_present_ = false;
+
+    struct ReplaySnapshot {
+        std::uint64_t replay_scan_count = 0;
+        std::uint64_t replay_merge_pass_count = 0;
+        std::uint64_t replay_reroute_pass_count = 0;
+        std::uint64_t replay_completed_scan_count = 0;
+        std::uint64_t replay_failed_scan_count = 0;
+        std::uint64_t replay_binding_checked_failed_scan_count = 0;
+        std::uint64_t replay_illegal_span_transition_count = 0;
+        std::uint64_t replay_first_completed_event_count = 0;
+        std::uint64_t replay_last_completed_event_count = 0;
+        MpsContentDigest replay_first_completed_content_digest{};
+        MpsContentDigest replay_last_completed_content_digest{};
+        std::uint64_t replay_final_span_bp = 0;
+        MpsSegmentSpillStorageBinding replay_final_storage_binding{};
+        std::uint64_t replay_peak_callback_batch_events = 0;
+        std::uint64_t replay_visited_event_count = 0;
+        std::uint64_t manifest_position_count = 0;
+        std::uint64_t manifest_position_segment_span_bp = 0;
+        bool manifest_bound = false;
+        MinimizerGenerationPublicationBinding publication_binding{};
+        bool publication_binding_present = false;
+    } replay_snapshot_{};
+    bool replay_snapshot_present_ = false;
+
+    [[nodiscard]] static bool same_vulkan_proof_(
+            const bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof& lhs,
+            const bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof& rhs)
+            noexcept {
+        return lhs.completed_roundtrips == rhs.completed_roundtrips
+            && lhs.downloaded_minimizers == rhs.downloaded_minimizers
+            && lhs.gpu_window_splits == rhs.gpu_window_splits
+            && lhs.saturated == rhs.saturated;
+    }
+
+    void capture_route_snapshot_() noexcept {
+        route_snapshot_ = RouteSnapshot{
+            .selected_backend = selected_backend,
+            .minimizer_scheme = minimizer_scheme,
+            .target_length = target_length,
+            .window_size = window_size,
+            .kmer_size = kmer_size,
+            .configured_core_span_bp = configured_core_span_bp,
+            .peak_core_span_bp = peak_core_span_bp,
+            .peak_core_events = peak_core_events,
+            .peak_paper_materialized_window_bp =
+                peak_paper_materialized_window_bp,
+            .spill_run_count = spill_run_count,
+            .spilled_event_count = spilled_event_count,
+            .spill_content_digest = spill_content_digest,
+            .spill_operation_epoch = spill_operation_epoch,
+            .spill_storage_binding = spill_storage_binding,
+            .spill_qualification_scan_count = spill_qualification_scan_count,
+            .spill_qualification_merge_count = spill_qualification_merge_count,
+            .short_core_runs = short_core_runs,
+            .scalar_core_runs = scalar_core_runs,
+            .exact_simd_core_runs = exact_simd_core_runs,
+            .paper_nthash_core_runs = paper_nthash_core_runs,
+            .vulkan_core_runs = vulkan_core_runs,
+            .exact_simd_proof = exact_simd_proof,
+            .exact_simd_proof_present = exact_simd_proof_present,
+            .packed_paper_status = packed_paper_status,
+            .packed_paper_proof = packed_paper_proof,
+            .packed_paper_proof_present = packed_paper_proof_present,
+            .vulkan_proof = vulkan_proof,
+            .spill_complete = spill_complete,
+            .backend_bound = backend_bound,
+            .saturated = saturated,
+        };
+        route_snapshot_present_ = true;
+    }
+
+    [[nodiscard]] bool route_snapshot_matches_() const noexcept {
+        const RouteSnapshot& value = route_snapshot_;
+        return route_snapshot_present_
+            && selected_backend == value.selected_backend
+            && minimizer_scheme == value.minimizer_scheme
+            && target_length == value.target_length
+            && window_size == value.window_size
+            && kmer_size == value.kmer_size
+            && configured_core_span_bp == value.configured_core_span_bp
+            && peak_core_span_bp == value.peak_core_span_bp
+            && peak_core_events == value.peak_core_events
+            && peak_paper_materialized_window_bp
+                == value.peak_paper_materialized_window_bp
+            && spill_run_count == value.spill_run_count
+            && spilled_event_count == value.spilled_event_count
+            && spill_content_digest == value.spill_content_digest
+            && spill_operation_epoch == value.spill_operation_epoch
+            && spill_storage_binding == value.spill_storage_binding
+            && spill_qualification_scan_count
+                == value.spill_qualification_scan_count
+            && spill_qualification_merge_count
+                == value.spill_qualification_merge_count
+            && short_core_runs == value.short_core_runs
+            && scalar_core_runs == value.scalar_core_runs
+            && exact_simd_core_runs == value.exact_simd_core_runs
+            && paper_nthash_core_runs == value.paper_nthash_core_runs
+            && vulkan_core_runs == value.vulkan_core_runs
+            && exact_simd_proof == value.exact_simd_proof
+            && exact_simd_proof_present == value.exact_simd_proof_present
+            && packed_paper_status == value.packed_paper_status
+            && packed_paper_proof == value.packed_paper_proof
+            && packed_paper_proof_present == value.packed_paper_proof_present
+            && same_vulkan_proof_(vulkan_proof, value.vulkan_proof)
+            && spill_complete == value.spill_complete
+            && backend_bound == value.backend_bound
+            && saturated == value.saturated;
+    }
+
+    void capture_replay_snapshot_() noexcept {
+        replay_snapshot_ = ReplaySnapshot{
+            .replay_scan_count = replay_scan_count,
+            .replay_merge_pass_count = replay_merge_pass_count,
+            .replay_reroute_pass_count = replay_reroute_pass_count,
+            .replay_completed_scan_count = replay_completed_scan_count,
+            .replay_failed_scan_count = replay_failed_scan_count,
+            .replay_binding_checked_failed_scan_count =
+                replay_binding_checked_failed_scan_count,
+            .replay_illegal_span_transition_count =
+                replay_illegal_span_transition_count,
+            .replay_first_completed_event_count =
+                replay_first_completed_event_count,
+            .replay_last_completed_event_count =
+                replay_last_completed_event_count,
+            .replay_first_completed_content_digest =
+                replay_first_completed_content_digest,
+            .replay_last_completed_content_digest =
+                replay_last_completed_content_digest,
+            .replay_final_span_bp = replay_final_span_bp,
+            .replay_final_storage_binding = replay_final_storage_binding,
+            .replay_peak_callback_batch_events =
+                replay_peak_callback_batch_events,
+            .replay_visited_event_count = replay_visited_event_count,
+            .manifest_position_count = manifest_position_count,
+            .manifest_position_segment_span_bp =
+                manifest_position_segment_span_bp,
+            .manifest_bound = manifest_bound,
+            .publication_binding = publication_binding_,
+            .publication_binding_present = publication_binding_present_,
+        };
+        replay_snapshot_present_ = true;
+    }
+
+    [[nodiscard]] bool replay_snapshot_matches_() const noexcept {
+        const ReplaySnapshot& value = replay_snapshot_;
+        return replay_snapshot_present_
+            && replay_scan_count == value.replay_scan_count
+            && replay_merge_pass_count == value.replay_merge_pass_count
+            && replay_reroute_pass_count == value.replay_reroute_pass_count
+            && replay_completed_scan_count == value.replay_completed_scan_count
+            && replay_failed_scan_count == value.replay_failed_scan_count
+            && replay_binding_checked_failed_scan_count
+                == value.replay_binding_checked_failed_scan_count
+            && replay_illegal_span_transition_count
+                == value.replay_illegal_span_transition_count
+            && replay_first_completed_event_count
+                == value.replay_first_completed_event_count
+            && replay_last_completed_event_count
+                == value.replay_last_completed_event_count
+            && replay_first_completed_content_digest
+                == value.replay_first_completed_content_digest
+            && replay_last_completed_content_digest
+                == value.replay_last_completed_content_digest
+            && replay_final_span_bp == value.replay_final_span_bp
+            && replay_final_storage_binding
+                == value.replay_final_storage_binding
+            && replay_peak_callback_batch_events
+                == value.replay_peak_callback_batch_events
+            && replay_visited_event_count == value.replay_visited_event_count
+            && manifest_position_count == value.manifest_position_count
+            && manifest_position_segment_span_bp
+                == value.manifest_position_segment_span_bp
+            && manifest_bound == value.manifest_bound
+            && publication_binding_ == value.publication_binding
+            && publication_binding_present_
+                == value.publication_binding_present;
+    }
+
+    void bind_spill_authority(
+            std::uint64_t seal,
+            std::uint64_t event_count,
+            const MpsContentDigest& content_digest,
+            MpsSegmentSpillStorageBinding storage_binding,
+            std::uint64_t operation_epoch) noexcept {
+        authority_seal_ = seal;
+        authority_event_count_ = event_count;
+        authority_content_digest_ = content_digest;
+        authority_storage_binding_ = storage_binding;
+        authority_operation_epoch_ = operation_epoch;
+    }
+
+    [[nodiscard]] bool authority_matches(
+            std::uint64_t seal,
+            std::uint64_t event_count,
+            const MpsContentDigest& content_digest,
+            MpsSegmentSpillStorageBinding storage_binding,
+            std::uint64_t operation_epoch) const noexcept {
+        return seal != 0 && seal == authority_seal_
+            && event_count == authority_event_count_
+            && content_digest == authority_content_digest_
+            && storage_binding == authority_storage_binding_
+            && operation_epoch == authority_operation_epoch_;
+    }
+
+    void bind_manifest_authority() noexcept {
+        manifest_authority_bound_ = true;
+    }
+
+    void bind_publication_authority(
+            const EncodedMinimizerGeneration& generation) noexcept {
+        publication_binding_ =
+            minimizer_generation_publication_binding(generation);
+        publication_binding_present_ = publication_binding_.valid();
+    }
+
+    [[nodiscard]] static std::uint64_t
+    next_spill_operation_epoch() noexcept {
+        static std::atomic<std::uint64_t> epoch{1u};
+        std::uint64_t value = epoch.load(std::memory_order_relaxed);
+        for (;;) {
+            if (value == 0) return 0;
+            const std::uint64_t next = value
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                ? 0u : value + 1u;
+            if (epoch.compare_exchange_weak(
+                    value,
+                    next,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                return value;
+            }
+        }
+    }
+
+
+    [[nodiscard]] static std::uint64_t
+    next_spill_authority_seal() noexcept {
+        static std::atomic<std::uint64_t> seal{1u};
+        std::uint64_t value = seal.load(std::memory_order_relaxed);
+        for (;;) {
+            if (value == 0) return 0;
+            const std::uint64_t next = value
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                ? 0u : value + 1u;
+            if (seal.compare_exchange_weak(
+                    value,
+                    next,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                return value;
+            }
+        }
+    }
+
+};
+
+/// Private-construction, immutable authority tying one spill operation to one
+/// storage object and the exact canonical event stream qualified from it.
+template <class S>
+class MpsSpillAuthority {
+private:
+    template <class>
+    friend struct MinimizerSequenceMergedIndex;
+    template <class>
+    friend class MpsExternalSpillGenerationReplayProducer;
+
+    S* storage_ = nullptr;
+    std::uint64_t target_length_ = 0;
+    std::uint64_t initial_span_bp_ = 0;
+    std::uint64_t run_count_ = 0;
+    std::uint64_t event_count_ = 0;
+    MpsContentDigest content_digest_{};
+    MpsSegmentSpillStorageBinding storage_binding_{};
+    std::uint64_t operation_epoch_ = 0;
+    std::uint64_t authority_seal_ = 0;
+    MinimizerSchemeIdentity minimizer_scheme_{};
+
+    MpsSpillAuthority(
+            S& storage,
+            std::uint64_t target_length,
+            std::uint64_t initial_span_bp,
+            std::uint64_t run_count,
+            std::uint64_t event_count,
+            const MpsContentDigest& content_digest,
+            MpsSegmentSpillStorageBinding storage_binding,
+            std::uint64_t operation_epoch,
+            std::uint64_t authority_seal,
+            MinimizerSchemeIdentity minimizer_scheme) noexcept
+        : storage_(&storage),
+          target_length_(target_length),
+          initial_span_bp_(initial_span_bp),
+          run_count_(run_count),
+          event_count_(event_count),
+          content_digest_(content_digest),
+          storage_binding_(storage_binding),
+          operation_epoch_(operation_epoch),
+          authority_seal_(authority_seal),
+          minimizer_scheme_(minimizer_scheme) {}
+
+public:
+    MpsSpillAuthority(const MpsSpillAuthority&) = delete;
+    MpsSpillAuthority& operator=(const MpsSpillAuthority&) = delete;
+    ~MpsSpillAuthority() = default;
+};
+
+/// Concrete MPS revision-3 producer over the existing PostgreSQL-owned
+/// external spill store. The store's bounded k-way merge owns its cursors and
+/// batches; this adapter owns no event or run payload. Replaying once per
+/// persisted core supplies the common encoder's segment-major canonical order.
+template <class S>
+class MpsExternalSpillGenerationReplayProducer {
+private:
+    S* storage_ = nullptr;
+    MinimizerSchemeIdentity minimizer_scheme_{};
+    std::uint64_t target_length_ = 0;
+    std::uint64_t qualified_span_ = 0;
+    std::uint64_t scan_count_ = 0;
+    std::uint64_t merge_pass_count_ = 0;
+    std::uint64_t reroute_pass_count_ = 0;
+    std::uint64_t peak_callback_batch_events_ = 0;
+    std::uint64_t visited_event_count_ = 0;
+    std::uint64_t completed_scan_count_ = 0;
+    std::uint64_t failed_scan_count_ = 0;
+    std::uint64_t illegal_span_transition_count_ = 0;
+    std::uint64_t first_completed_event_count_ = 0;
+    std::uint64_t last_completed_event_count_ = 0;
+    MpsContentDigest first_completed_content_digest_{};
+    MpsContentDigest last_completed_content_digest_{};
+    std::uint64_t final_span_bp_ = 0;
+    MpsSegmentSpillStorageBinding storage_binding_{};
+    MpsContentDigest expected_replay_digest_{};
+    bool expected_replay_digest_valid_ = false;
+    std::uint64_t binding_checked_failed_scan_count_ = 0;
+    bool has_completed_scan_ = false;
+    bool saturated_ = false;
+    bool terminal_ = false;
+    bool requires_halving_after_failed_scan_ = false;
+    MpsGenerationExecutionEvidence spill_evidence_{};
+    std::shared_ptr<const MpsSpillAuthority<S>> authority_{};
+
+    void add_counter_(
+            std::uint64_t& destination,
+            std::uint64_t increment = 1u) noexcept {
+        MpsGenerationExecutionEvidence::add(
+            destination, increment, saturated_);
+    }
+
+    void record_completed_scan_(
+            std::uint64_t event_count,
+            const MpsContentDigest& content_digest,
+            std::uint64_t span) noexcept {
+        add_counter_(completed_scan_count_);
+        if (!has_completed_scan_) {
+            first_completed_event_count_ = event_count;
+            first_completed_content_digest_ = content_digest;
+            has_completed_scan_ = true;
+        }
+        last_completed_event_count_ = event_count;
+        last_completed_content_digest_ = content_digest;
+        final_span_bp_ = span;
+    }
+
+    [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
+    fail_scan_(MinimizerGenerationWireError error) noexcept {
+        add_counter_(failed_scan_count_);
+        return std::unexpected(error);
+    }
+
+    template <class>
+    friend struct MinimizerSequenceMergedIndex;
+    template <class>
+    friend class MpsUnboundExternalSpillReplayProducer;
+
+    MpsExternalSpillGenerationReplayProducer(
+            S& storage,
+            std::uint64_t target_length,
+            std::uint64_t qualified_span,
+            MinimizerSchemeIdentity minimizer_scheme,
+            const MpsGenerationExecutionEvidence& spill_evidence = {},
+            std::shared_ptr<const MpsSpillAuthority<S>> authority = {},
+            MpsSegmentSpillStorageBinding storage_binding = {}) noexcept
+        : storage_(&storage),
+          minimizer_scheme_(minimizer_scheme),
+          target_length_(target_length),
+          qualified_span_(qualified_span),
+          spill_evidence_(spill_evidence),
+          authority_(std::move(authority)),
+          storage_binding_(storage_binding) {
+        if (!storage_binding_.valid()) {
+            storage_binding_ = storage.segment_spill_storage_binding();
+        }
+        if (authority_ != nullptr) {
+            expected_replay_digest_ = authority_->content_digest_;
+            expected_replay_digest_valid_ = true;
+        }
+    }
+
+public:
+    MpsExternalSpillGenerationReplayProducer(
+        const MpsExternalSpillGenerationReplayProducer&) = delete;
+    MpsExternalSpillGenerationReplayProducer& operator=(
+        const MpsExternalSpillGenerationReplayProducer&) = delete;
+    MpsExternalSpillGenerationReplayProducer(
+        MpsExternalSpillGenerationReplayProducer&&) = delete;
+    MpsExternalSpillGenerationReplayProducer& operator=(
+        MpsExternalSpillGenerationReplayProducer&&) = delete;
+
+    [[nodiscard]] MinimizerSchemeIdentity
+    minimizer_scheme_identity() const noexcept {
+        return minimizer_scheme_;
+    }
+
+    [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
+    scan_sorted_events(
+            std::uint64_t persisted_span,
+            CanonicalMinimizerEventReceiver receiver) {
+        add_counter_(scan_count_);
+        if (terminal_ || storage_ == nullptr || persisted_span == 0) {
+            return fail_scan_(MinimizerGenerationWireError::segment_span);
+        }
+        if (!storage_binding_.valid()
+            || storage_->segment_spill_storage_binding()
+                != storage_binding_) {
+            terminal_ = true;
+            return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
+        }
+        if (target_length_ == 0) {
+            mps_evidence_detail::Sha256 empty_hasher;
+            const MpsContentDigest empty_digest = empty_hasher.finalize();
+            if (storage_->segment_spill_storage_binding()
+                    != storage_binding_) {
+                terminal_ = true;
+                return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
+            }
+            if (authority_ != nullptr
+                && (authority_->storage_ != storage_
+                    || authority_->target_length_ != target_length_
+                    || authority_->event_count_ != 0
+                    || authority_->content_digest_ != empty_digest
+                    || authority_->operation_epoch_ == 0
+                    || authority_->storage_binding_ != storage_binding_
+                    || authority_->minimizer_scheme_ != minimizer_scheme_
+                    || !spill_evidence_.authority_matches(
+                        authority_->authority_seal_,
+                        0,
+                        empty_digest,
+                        authority_->storage_binding_,
+                        authority_->operation_epoch_))) {
+                terminal_ = true;
+                return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
+            }
+            record_completed_scan_(0, empty_digest, persisted_span);
+            if (completed_scan_count_ == 2u) {
+                terminal_ = true;
+            }
+            return {};
+        }
+        if (persisted_span != qualified_span_) {
+            const std::uint64_t expected_next_span = qualified_span_ / 2u;
+            if (!requires_halving_after_failed_scan_
+                || qualified_span_ <= 1u
+                || persisted_span != expected_next_span) {
+                add_counter_(illegal_span_transition_count_);
+                terminal_ = true;
+                return fail_scan_(MinimizerGenerationWireError::segment_span);
+            }
+            const MpsSegmentSpillStorageBinding before_reroute =
+                storage_binding_;
+            if (reroute_pass_count_
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || !storage_->reroute_segment_runs(
+                    qualified_span_, persisted_span, target_length_)) {
+                terminal_ = true;
+                return fail_scan_(MinimizerGenerationWireError::position_range);
+            }
+            const MpsSegmentSpillStorageBinding after_reroute =
+                storage_->segment_spill_storage_binding();
+            if (!after_reroute.valid()
+                || after_reroute.generation_token
+                    != before_reroute.generation_token
+                || before_reroute.mutation_version
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || after_reroute.mutation_version
+                    != before_reroute.mutation_version + 1u) {
+                terminal_ = true;
+                return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
+            }
+            add_counter_(reroute_pass_count_);
+            qualified_span_ = persisted_span;
+            storage_binding_ = after_reroute;
+            expected_replay_digest_valid_ = false;
+            requires_halving_after_failed_scan_ = false;
+        } else if (requires_halving_after_failed_scan_) {
+            add_counter_(illegal_span_transition_count_);
+            terminal_ = true;
+            return fail_scan_(MinimizerGenerationWireError::segment_span);
+        }
+        const std::uint64_t segment_count = target_length_ / persisted_span
+            + (target_length_ % persisted_span != 0 ? 1u : 0u);
+        if (!sql_integer_can_represent(segment_count)) {
+            terminal_ = true;
+            return fail_scan_(MinimizerGenerationWireError::segment_count);
+        }
+        if (merge_pass_count_
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            terminal_ = true;
+            return fail_scan_(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        add_counter_(merge_pass_count_);
+        std::optional<MinimizerGenerationWireError> structural_error;
+        std::optional<MinimizerGenerationWireError> receiver_error;
+        std::uint64_t scan_event_count = 0;
+        mps_evidence_detail::Sha256 scan_content_hasher;
+        std::uint32_t previous_segment = 0;
+        bool have_segment = false;
+        storage_->merge_segment_runs(
+            [&](std::uint32_t segment,
+                std::uint64_t hash,
+                auto&& positions) {
+                if (structural_error) {
+                    return;
+                }
+                if (segment >= segment_count
+                    || (have_segment && segment < previous_segment)) {
+                    structural_error =
+                        MinimizerGenerationWireError::segment_ordinal;
+                    return;
+                }
+                have_segment = true;
+                previous_segment = segment;
+                positions.for_each_batch(
+                    [&](std::span<const std::uint64_t> batch) {
+                        peak_callback_batch_events_ = std::max<std::uint64_t>(
+                            peak_callback_batch_events_, batch.size());
+                        if (structural_error) {
+                            return;
+                        }
+                        for (const std::uint64_t encoded_position : batch) {
+                            const std::uint64_t position =
+                                encoded_position >> 1u;
+                            if (position >= target_length_
+                                || position / persisted_span != segment) {
+                                structural_error =
+                                    MinimizerGenerationWireError::position_range;
+                                return;
+                            }
+                            if (visited_event_count_
+                                    == (std::numeric_limits<std::uint64_t>::max)()) {
+                                structural_error =
+                                    MinimizerGenerationWireError::arithmetic_overflow;
+                                return;
+                            }
+                            add_counter_(visited_event_count_);
+                            add_counter_(scan_event_count);
+                            scan_content_hasher.update_little_endian(hash);
+                            scan_content_hasher.update_little_endian(
+                                encoded_position);
+                            if (!receiver_error) {
+                                if (auto accepted = receiver(
+                                    CanonicalMinimizerEvent{
+                                        .hash = hash,
+                                        .encoded_position = encoded_position,
+                                    }); !accepted) {
+                                    receiver_error = accepted.error();
+                                }
+                            }
+                        }
+                    });
+            });
+        if (storage_->segment_spill_storage_binding() != storage_binding_) {
+            structural_error = MinimizerGenerationWireError::replay_mismatch;
+        }
+        if (structural_error) {
+            terminal_ = true;
+            return fail_scan_(*structural_error);
+        }
+        const MpsContentDigest content_digest =
+            scan_content_hasher.finalize();
+        if (authority_ != nullptr
+            && (authority_->storage_ != storage_
+                || authority_->target_length_ != target_length_
+                || authority_->event_count_ != scan_event_count
+                || authority_->operation_epoch_ == 0
+                || authority_->minimizer_scheme_ != minimizer_scheme_
+                || !spill_evidence_.authority_matches(
+                    authority_->authority_seal_,
+                    authority_->event_count_,
+                    authority_->content_digest_,
+                    authority_->storage_binding_,
+                    authority_->operation_epoch_))) {
+            terminal_ = true;
+            return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
+        }
+        if (expected_replay_digest_valid_) {
+            if (content_digest != expected_replay_digest_) {
+                terminal_ = true;
+                return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
+            }
+        } else {
+            expected_replay_digest_ = content_digest;
+            expected_replay_digest_valid_ = true;
+        }
+        if (receiver_error) {
+            add_counter_(binding_checked_failed_scan_count_);
+            if (completed_scan_count_ != 0) {
+                terminal_ = true;
+            } else {
+                requires_halving_after_failed_scan_ = true;
+            }
+            return fail_scan_(*receiver_error);
+        }
+        record_completed_scan_(scan_event_count, content_digest, persisted_span);
+        if (completed_scan_count_ == 2u) {
+            terminal_ = true;
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::uint64_t scan_count() const noexcept {
+        return scan_count_;
+    }
+    [[nodiscard]] std::uint64_t merge_pass_count() const noexcept {
+        return merge_pass_count_;
+    }
+    [[nodiscard]] std::uint64_t reroute_pass_count() const noexcept {
+        return reroute_pass_count_;
+    }
+    [[nodiscard]] std::uint64_t peak_callback_batch_events() const noexcept {
+        return peak_callback_batch_events_;
+    }
+    [[nodiscard]] std::uint64_t visited_event_count() const noexcept {
+        return visited_event_count_;
+    }
+    [[nodiscard]] std::uint64_t completed_scan_count() const noexcept {
+        return completed_scan_count_;
+    }
+    [[nodiscard]] std::uint64_t failed_scan_count() const noexcept {
+        return failed_scan_count_;
+    }
+    [[nodiscard]] std::uint64_t
+    illegal_span_transition_count() const noexcept {
+        return illegal_span_transition_count_;
+    }
+    [[nodiscard]] MpsGenerationExecutionEvidence
+    execution_evidence() const noexcept {
+        MpsGenerationExecutionEvidence evidence = spill_evidence_;
+        evidence.replay_scan_count = scan_count_;
+        evidence.replay_merge_pass_count = merge_pass_count_;
+        evidence.replay_reroute_pass_count = reroute_pass_count_;
+        evidence.replay_completed_scan_count = completed_scan_count_;
+        evidence.replay_failed_scan_count = failed_scan_count_;
+        evidence.replay_binding_checked_failed_scan_count =
+            binding_checked_failed_scan_count_;
+        evidence.replay_illegal_span_transition_count =
+            illegal_span_transition_count_;
+        evidence.replay_first_completed_event_count =
+            first_completed_event_count_;
+        evidence.replay_last_completed_event_count =
+            last_completed_event_count_;
+        evidence.replay_first_completed_content_digest =
+            first_completed_content_digest_;
+        evidence.replay_last_completed_content_digest =
+            last_completed_content_digest_;
+        evidence.replay_final_span_bp = final_span_bp_;
+        evidence.replay_final_storage_binding = storage_binding_;
+        evidence.replay_peak_callback_batch_events =
+            peak_callback_batch_events_;
+        evidence.replay_visited_event_count = visited_event_count_;
+        evidence.saturated = evidence.saturated || saturated_;
+        return evidence;
+    }
+    [[nodiscard]] static constexpr std::uint64_t owned_event_capacity() noexcept {
+        return 0;
+    }
+};
+
+/// Explicitly unbound replay seam for geometry/canonical-order tests. It can
+/// exercise retries but never carries a native route snapshot or spill
+/// authority, so its evidence cannot satisfy `accepted()`.
+template <class S>
+class MpsUnboundExternalSpillReplayProducer {
+private:
+    static MpsSegmentSpillStorageBinding binding_for_(S& storage) noexcept {
+        MpsSegmentSpillStorageBinding binding =
+            storage.segment_spill_storage_binding();
+        if (!binding.valid()) {
+            binding = storage.begin_segment_spill_generation();
+        }
+        return binding;
+    }
+
+    MpsExternalSpillGenerationReplayProducer<S> producer_;
+
+public:
+    MpsUnboundExternalSpillReplayProducer(
+            S& storage,
+            std::uint64_t target_length,
+            std::uint64_t qualified_span,
+            MinimizerSchemeIdentity minimizer_scheme) noexcept
+        : producer_(
+            storage,
+            target_length,
+            qualified_span,
+            minimizer_scheme,
+            {},
+            {},
+            binding_for_(storage)) {}
+
+    MpsUnboundExternalSpillReplayProducer(
+        const MpsUnboundExternalSpillReplayProducer&) = delete;
+    MpsUnboundExternalSpillReplayProducer& operator=(
+        const MpsUnboundExternalSpillReplayProducer&) = delete;
+    MpsUnboundExternalSpillReplayProducer(
+        MpsUnboundExternalSpillReplayProducer&&) = delete;
+    MpsUnboundExternalSpillReplayProducer& operator=(
+        MpsUnboundExternalSpillReplayProducer&&) = delete;
+
+    [[nodiscard]] MinimizerSchemeIdentity
+    minimizer_scheme_identity() const noexcept {
+        return producer_.minimizer_scheme_identity();
+    }
+    [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
+    scan_sorted_events(
+            std::uint64_t persisted_span,
+            CanonicalMinimizerEventReceiver receiver) {
+        return producer_.scan_sorted_events(persisted_span, receiver);
+    }
+    [[nodiscard]] std::uint64_t scan_count() const noexcept {
+        return producer_.scan_count();
+    }
+    [[nodiscard]] std::uint64_t merge_pass_count() const noexcept {
+        return producer_.merge_pass_count();
+    }
+    [[nodiscard]] std::uint64_t reroute_pass_count() const noexcept {
+        return producer_.reroute_pass_count();
+    }
+    [[nodiscard]] std::uint64_t completed_scan_count() const noexcept {
+        return producer_.completed_scan_count();
+    }
+    [[nodiscard]] std::uint64_t failed_scan_count() const noexcept {
+        return producer_.failed_scan_count();
+    }
+    [[nodiscard]] std::uint64_t
+    illegal_span_transition_count() const noexcept {
+        return producer_.illegal_span_transition_count();
+    }
+    [[nodiscard]] MpsGenerationExecutionEvidence
+    execution_evidence() const noexcept {
+        return producer_.execution_evidence();
+    }
+    [[nodiscard]] static constexpr std::uint64_t owned_event_capacity() noexcept {
+        return 0;
+    }
+};
+
 template <class S>
 struct MinimizerSequenceMergedIndex {
     static_assert(is_index_chunked_storage_for<S, SequenceIndexType::CHUNKED_PER_FRAGMENT>);
@@ -336,6 +1551,654 @@ struct MinimizerSequenceMergedIndex {
     static constexpr SequenceIndexType index_type = SequenceIndexType::CHUNKED_PER_FRAGMENT;
     static constexpr std::string_view  index_name = MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
     using storage_type = S;
+
+    class GenerationSpillResult {
+    private:
+        friend struct MinimizerSequenceMergedIndex<S>;
+
+        std::uint64_t run_count_ = 0;
+        ExactSimdIndexExecutionProof exact_simd_proof_{};
+        bool exact_simd_proof_present_ = false;
+        MinimizerSchemeIdentity minimizer_scheme_{};
+        std::uint64_t target_length_ = 0;
+        std::uint64_t position_segment_span_bp_ = 0;
+        MpsGenerationExecutionEvidence execution_evidence_{};
+        std::shared_ptr<const MpsSpillAuthority<S>> authority_{};
+
+        GenerationSpillResult(
+                std::uint64_t run_count,
+                const ExactSimdIndexExecutionProof& exact_simd_proof,
+                bool exact_simd_proof_present,
+                MinimizerSchemeIdentity minimizer_scheme,
+                std::uint64_t target_length,
+                std::uint64_t position_segment_span_bp,
+                const MpsGenerationExecutionEvidence& execution_evidence,
+                std::shared_ptr<const MpsSpillAuthority<S>> authority) noexcept
+            : run_count_(run_count),
+              exact_simd_proof_(exact_simd_proof),
+              exact_simd_proof_present_(exact_simd_proof_present),
+              minimizer_scheme_(minimizer_scheme),
+              target_length_(target_length),
+              position_segment_span_bp_(position_segment_span_bp),
+              execution_evidence_(execution_evidence),
+              authority_(std::move(authority)) {}
+
+        void poison_() noexcept {
+            run_count_ = 0;
+            exact_simd_proof_ = {};
+            exact_simd_proof_present_ = false;
+            minimizer_scheme_ = {};
+            target_length_ = 0;
+            position_segment_span_bp_ = 0;
+            execution_evidence_ = {};
+            authority_.reset();
+        }
+
+        void steal_from_(GenerationSpillResult&& other) noexcept {
+            run_count_ = other.run_count_;
+            exact_simd_proof_ = other.exact_simd_proof_;
+            exact_simd_proof_present_ = other.exact_simd_proof_present_;
+            minimizer_scheme_ = other.minimizer_scheme_;
+            target_length_ = other.target_length_;
+            position_segment_span_bp_ = other.position_segment_span_bp_;
+            execution_evidence_ = std::move(other.execution_evidence_);
+            authority_ = std::move(other.authority_);
+            other.poison_();
+        }
+
+    public:
+        GenerationSpillResult() = delete;
+        GenerationSpillResult(const GenerationSpillResult&) = delete;
+        GenerationSpillResult& operator=(const GenerationSpillResult&) = delete;
+        GenerationSpillResult(GenerationSpillResult&& other) noexcept {
+            steal_from_(std::move(other));
+        }
+        GenerationSpillResult& operator=(GenerationSpillResult&& other) noexcept {
+            if (this != &other) {
+                poison_();
+                steal_from_(std::move(other));
+            }
+            return *this;
+        }
+
+        [[nodiscard]] std::uint64_t run_count() const noexcept {
+            return run_count_;
+        }
+        [[nodiscard]] const ExactSimdIndexExecutionProof&
+        exact_simd_proof() const noexcept {
+            return exact_simd_proof_;
+        }
+        [[nodiscard]] bool exact_simd_proof_present() const noexcept {
+            return exact_simd_proof_present_;
+        }
+        [[nodiscard]] MinimizerSchemeIdentity
+        minimizer_scheme() const noexcept {
+            return minimizer_scheme_;
+        }
+        [[nodiscard]] std::uint64_t target_length() const noexcept {
+            return target_length_;
+        }
+        [[nodiscard]] std::uint64_t
+        position_segment_span_bp() const noexcept {
+            return position_segment_span_bp_;
+        }
+        [[nodiscard]] const MpsGenerationExecutionEvidence&
+        execution_evidence() const noexcept {
+            return execution_evidence_;
+        }
+    };
+
+    template <class R, class Scanner>
+    [[nodiscard]] static std::expected<
+        SegmentUnitRange,
+        MinimizerGenerationWireError>
+    make_generation_collection_range(
+            lazy_compact_sequence<R, Scanner>& sequence,
+            std::uint64_t core_lo,
+            std::uint64_t core_hi,
+            std::uint64_t halo_bp = 10u + 15u - 2u) noexcept {
+        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
+        constexpr std::uint64_t lpu = traits::letters_per_unit;
+        const std::uint64_t target_length = sequence.bp_size();
+        if (core_lo > core_hi || core_hi > target_length || lpu == 0) {
+            return std::unexpected(MinimizerGenerationWireError::bp_range);
+        }
+        const std::uint64_t collection_lo = core_lo >= halo_bp
+            ? core_lo - halo_bp : 0u;
+        const std::uint64_t collection_hi = core_hi
+                > target_length - std::min(target_length, halo_bp)
+            ? target_length : core_hi + halo_bp;
+        const std::uint64_t cs_u = collection_lo / lpu;
+        const std::uint64_t ce_u = collection_hi / lpu
+            + (collection_hi % lpu != 0 ? 1u : 0u);
+        if (cs_u > (std::numeric_limits<sequence_size_t>::max)()
+            || ce_u > (std::numeric_limits<sequence_size_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        return SegmentUnitRange{
+            .cs_u = static_cast<sequence_size_t>(cs_u),
+            .ce_u = static_cast<sequence_size_t>(ce_u),
+            .core_lo_bp = static_cast<sequence_size_t>(core_lo),
+            .core_hi_bp = static_cast<sequence_size_t>(core_hi),
+        };
+    }
+
+    template <class R, class Scanner>
+    [[nodiscard]] static std::expected<
+        ExactSimdIndexExecutionProof,
+        MinimizerGenerationWireError>
+    collect_generation_core_run(
+            lazy_compact_sequence<R, Scanner>& sequence,
+            MinimizerSketchBackend backend,
+            SegmentUnitRange range,
+            sketch_collector& collector,
+            std::vector<detail::sorted_pair_t>& output,
+            MpsGenerationExecutionEvidence* execution_evidence = nullptr,
+            bool allow_packed_paper = false) {
+        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
+        constexpr std::uint64_t lpu = traits::letters_per_unit;
+        const std::uint64_t target_length = sequence.bp_size();
+        const std::uint64_t size_units = target_length / lpu
+            + (target_length % lpu != 0 ? 1u : 0u);
+        if (range.core_lo_bp > range.core_hi_bp
+            || range.core_hi_bp > target_length
+            || range.cs_u > range.ce_u || range.ce_u > size_units) {
+            return std::unexpected(MinimizerGenerationWireError::bp_range);
+        }
+        if (range.core_lo_bp == range.core_hi_bp
+            || range.cs_u == range.ce_u) {
+            return ExactSimdIndexExecutionProof{};
+        }
+        if (range.cs_u
+                > (std::numeric_limits<std::uint64_t>::max)() / lpu) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        const std::uint64_t emit_base = range.cs_u * lpu;
+        constexpr std::uint64_t halo_bp = 10u + 15u - 2u;
+        const std::uint64_t collection_hi = range.core_hi_bp
+                > target_length - std::min(target_length, halo_bp)
+            ? target_length : range.core_hi_bp + halo_bp;
+        const std::uint64_t local_bp_size = collection_hi > emit_base
+            ? collection_hi - emit_base : 0u;
+        constexpr std::uint64_t minimum_work_bases = 10u + 15u - 1u;
+        const auto add_route = [execution_evidence](
+                std::uint64_t MpsGenerationExecutionEvidence::* member,
+                std::uint64_t increment = 1u) noexcept {
+            if (execution_evidence != nullptr) {
+                MpsGenerationExecutionEvidence::add(
+                    execution_evidence->*member,
+                    increment,
+                    execution_evidence->saturated);
+            }
+        };
+        if (local_bp_size < minimum_work_bases) {
+            add_route(&MpsGenerationExecutionEvidence::short_core_runs);
+            return ExactSimdIndexExecutionProof{};
+        }
+        if (backend == MinimizerSketchBackend::VulkanSegment) {
+            add_route(&MpsGenerationExecutionEvidence::vulkan_core_runs);
+            bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof core_proof{};
+            auto pairs =
+                bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                    sequence,
+                    static_cast<std::size_t>(range.cs_u),
+                    static_cast<std::size_t>(range.ce_u),
+                    emit_base,
+                    range.core_lo_bp,
+                    range.core_hi_bp,
+                    10,
+                    15,
+                    execution_evidence != nullptr ? &core_proof : nullptr);
+            if (execution_evidence != nullptr) {
+                execution_evidence->vulkan_proof.combine(core_proof);
+                execution_evidence->saturated =
+                    execution_evidence->saturated
+                    || execution_evidence->vulkan_proof.saturated;
+            }
+            output.insert(
+                output.end(),
+                std::make_move_iterator(pairs.begin()),
+                std::make_move_iterator(pairs.end()));
+            return ExactSimdIndexExecutionProof{};
+        }
+        if (backend != MinimizerSketchBackend::Scalar
+            && backend != MinimizerSketchBackend::ExactSimd
+            && backend != MinimizerSketchBackend::PaperNtHashSimd) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+
+        collector.clear();
+        ExactSimdIndexExecutionProof exact_simd_proof{};
+        if (backend == MinimizerSketchBackend::ExactSimd) {
+            add_route(&MpsGenerationExecutionEvidence::exact_simd_core_runs);
+            exact_simd_proof = collect_exact_simd_index_range_or_throw(
+                    collector,
+                    sequence,
+                    static_cast<std::size_t>(range.cs_u),
+                    static_cast<std::size_t>(range.ce_u),
+                    10,
+                    15,
+                    0,
+                    "minimizers_per_sequence build");
+            if (execution_evidence != nullptr) {
+                execution_evidence->exact_simd_proof.combine(
+                    exact_simd_proof);
+                execution_evidence->exact_simd_proof_present = true;
+                execution_evidence->saturated =
+                    execution_evidence->saturated
+                    || execution_evidence->exact_simd_proof.saturated;
+            }
+        } else if (backend == MinimizerSketchBackend::PaperNtHashSimd) {
+            if (!allow_packed_paper) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::compatibility_mismatch);
+            }
+            add_route(&MpsGenerationExecutionEvidence::paper_nthash_core_runs);
+            std::uint64_t materialized_window_bp = 0;
+            const auto paper_result =
+                collect_bounded_packed_paper_nthash_index_lazy(
+                    sequence,
+                    range.cs_u,
+                    range.ce_u,
+                    local_bp_size,
+                    10,
+                    15,
+                    collector,
+                    &materialized_window_bp);
+            if (execution_evidence != nullptr) {
+                execution_evidence->peak_paper_materialized_window_bp =
+                    std::max(
+                        execution_evidence->peak_paper_materialized_window_bp,
+                        materialized_window_bp);
+                execution_evidence->packed_paper_status = paper_result.status;
+                execution_evidence->packed_paper_proof.combine(
+                    paper_result.proof);
+                execution_evidence->packed_paper_proof_present = true;
+                execution_evidence->saturated =
+                    execution_evidence->saturated
+                    || execution_evidence->packed_paper_proof.saturated;
+            }
+            if (paper_result.status != PackedPaperNthashIndexStatus::ok) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::compatibility_mismatch);
+            }
+        } else {
+            add_route(&MpsGenerationExecutionEvidence::scalar_core_runs);
+            auto begin = sequence.cbegin();
+            begin += range.cs_u;
+            auto end = sequence.cbegin();
+            end += range.ce_u;
+            collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+                collector, sequence, begin, end, 10, 15);
+        }
+        for (const MinimapSketchData& minimizer
+             : collector.extract_sketches_data()) {
+            const std::uint64_t position = emit_base
+                + static_cast<std::uint64_t>(minimizer.last_pos());
+            if (position < range.core_lo_bp
+                || position >= range.core_hi_bp) {
+                continue;
+            }
+            output.emplace_back(
+                minimizer.kmer(),
+                (position << 1u)
+                    | static_cast<std::uint64_t>(minimizer.strand()));
+        }
+        return exact_simd_proof;
+    }
+
+    /// Bounded serial preparation seam for rev3 POC/tests. Each source core is
+    /// collected and spilled before the next is allocated; the returned MPS
+    /// producer reopens these same external runs for both encoder passes.
+    template <class R, class Scanner>
+    [[nodiscard]] static std::expected<
+        GenerationSpillResult,
+        MinimizerGenerationWireError>
+    spill_generation_replay_runs_serial(
+            S& storage,
+            lazy_compact_sequence<R, Scanner>& sequence,
+            MinimizerSketchBackend backend,
+            std::uint64_t core_span_bp = 0,
+            std::uint64_t position_segment_span_bp =
+                kMinimizerPreferredSegmentSpanBp,
+            MpsGenerationExecutionEvidence* execution_evidence_out = nullptr) {
+        static_assert(MpsSegmentQualifiedSpillStorage<S>);
+        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
+        constexpr std::uint64_t lpu = traits::letters_per_unit;
+        static_assert(lpu > 0);
+        static_assert(Scanner::fragment_storage_units
+            <= (std::numeric_limits<std::uint64_t>::max)() / lpu);
+        constexpr std::uint64_t default_core_span =
+            static_cast<std::uint64_t>(Scanner::fragment_storage_units) * lpu;
+        const std::uint64_t target_length = sequence.bp_size();
+        struct EvidenceOutputGuard {
+            MpsGenerationExecutionEvidence* output = nullptr;
+            MpsGenerationExecutionEvidence evidence{};
+            ~EvidenceOutputGuard() {
+                if (output != nullptr) {
+                    *output = evidence;
+                }
+            }
+        } evidence_guard;
+        evidence_guard.output = execution_evidence_out;
+        MpsGenerationExecutionEvidence& evidence = evidence_guard.evidence;
+        evidence.selected_backend = backend;
+        evidence.minimizer_scheme =
+            minimizer_scheme_identity_for_backend(backend);
+        evidence.target_length = target_length;
+        evidence.window_size = 10;
+        evidence.kmer_size = 15;
+        evidence.configured_core_span_bp =
+            core_span_bp == 0 ? default_core_span : core_span_bp;
+        if (core_span_bp == 0) {
+            core_span_bp = default_core_span;
+        }
+        if (core_span_bp == 0 || core_span_bp > default_core_span
+            || position_segment_span_bp == 0) {
+            return std::unexpected(MinimizerGenerationWireError::segment_span);
+        }
+        const MinimizerSchemeIdentity minimizer_scheme =
+            minimizer_scheme_identity_for_backend(backend);
+        if (!is_supported_minimizer_scheme_identity(
+                minimizer_scheme.id, minimizer_scheme.version)) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+        MpsSegmentSpillStorageBinding storage_binding =
+            storage.begin_segment_spill_generation();
+        if (!storage_binding.valid()) {
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        evidence.backend_bound = true;
+        std::vector<detail::sorted_pair_t> run;
+        sketch_collector collector;
+        std::uint64_t segment_lo = 0;
+        std::uint64_t segment_ordinal = 0;
+        while (segment_lo < target_length) {
+            if (!sql_integer_can_represent(segment_ordinal)) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::segment_count);
+            }
+            const std::uint64_t segment_hi = segment_lo + std::min(
+                position_segment_span_bp, target_length - segment_lo);
+            for (std::uint64_t core_lo = segment_lo;
+                 core_lo < segment_hi;) {
+                const std::uint64_t core_hi = core_lo
+                    + std::min(core_span_bp, segment_hi - core_lo);
+                auto range = make_generation_collection_range(
+                    sequence, core_lo, core_hi);
+                if (!range) {
+                    return std::unexpected(range.error());
+                }
+                evidence.peak_core_span_bp = std::max(
+                    evidence.peak_core_span_bp, core_hi - core_lo);
+                run.clear();
+                auto collected = collect_generation_core_run(
+                    sequence,
+                    backend,
+                    *range,
+                    collector,
+                    run,
+                    &evidence,
+                    true);
+                if (!collected) {
+                    return std::unexpected(collected.error());
+                }
+                evidence.peak_core_events = std::max<std::uint64_t>(
+                    evidence.peak_core_events, run.size());
+                detail::sort_pair_run(run);
+                if (!run.empty()) {
+                    const MpsSegmentSpillStorageBinding before_spill =
+                        storage_binding;
+                    storage.spill_sorted_segment_run(
+                        static_cast<std::uint32_t>(segment_ordinal),
+                        std::span<const detail::sorted_pair_t>{run});
+                    storage_binding = storage.segment_spill_storage_binding();
+                    if (!storage_binding.valid()
+                        || storage_binding.generation_token
+                            != before_spill.generation_token
+                        || before_spill.mutation_version
+                            == (std::numeric_limits<std::uint64_t>::max)()
+                        || storage_binding.mutation_version
+                            != before_spill.mutation_version + 1u) {
+                        return std::unexpected(
+                            MinimizerGenerationWireError::replay_mismatch);
+                    }
+                    MpsGenerationExecutionEvidence::add(
+                        evidence.spill_run_count, 1u, evidence.saturated);
+                    MpsGenerationExecutionEvidence::add(
+                        evidence.spilled_event_count,
+                        run.size(),
+                        evidence.saturated);
+                    if (evidence.saturated) {
+                        return std::unexpected(
+                            MinimizerGenerationWireError::arithmetic_overflow);
+                    }
+                }
+                core_lo = core_hi;
+            }
+            segment_lo = segment_hi;
+            ++segment_ordinal;
+        }
+
+        // Qualify the exact order-specific stream now resident in this storage
+        // incarnation. Authorized half-reroutes issue a successor mutation
+        // version and adopt a new full SHA-256 only after hashing every event.
+        struct SpillQualification {
+            std::uint64_t event_count = 0;
+            bool saturated = false;
+        } qualification;
+        auto qualification_producer =
+            MpsUnboundExternalSpillReplayProducer<S>{
+                storage,
+                target_length,
+                position_segment_span_bp,
+                minimizer_scheme};
+        const auto qualified = qualification_producer.scan_sorted_events(
+            position_segment_span_bp,
+            CanonicalMinimizerEventReceiver{
+                .context = &qualification,
+                .emit_fn = +[](void* context,
+                               const CanonicalMinimizerEvent& event)
+                    -> std::expected<void, MinimizerGenerationWireError> {
+                    auto& state = *static_cast<SpillQualification*>(context);
+                    MpsGenerationExecutionEvidence::add(
+                        state.event_count, 1u, state.saturated);
+                    if (state.saturated) {
+                        return std::unexpected(
+                            MinimizerGenerationWireError::arithmetic_overflow);
+                    }
+                    (void)event;
+                    return {};
+                },
+            });
+        if (!qualified) {
+            return std::unexpected(qualified.error());
+        }
+        if (qualification.event_count != evidence.spilled_event_count) {
+            return std::unexpected(
+                MinimizerGenerationWireError::duplicate_event);
+        }
+        const MpsGenerationExecutionEvidence qualification_evidence =
+            qualification_producer.execution_evidence();
+        evidence.spill_content_digest =
+            qualification_evidence.replay_first_completed_content_digest;
+        evidence.spill_qualification_scan_count =
+            qualification_producer.scan_count();
+        evidence.spill_qualification_merge_count =
+            qualification_producer.merge_pass_count();
+        const std::uint64_t operation_epoch =
+            MpsGenerationExecutionEvidence::next_spill_operation_epoch();
+        const std::uint64_t authority_seal =
+            MpsGenerationExecutionEvidence::next_spill_authority_seal();
+        if (operation_epoch == 0 || authority_seal == 0) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        evidence.spill_operation_epoch = operation_epoch;
+        evidence.spill_storage_binding = storage_binding;
+        auto authority = std::shared_ptr<const MpsSpillAuthority<S>>{
+            new MpsSpillAuthority<S>{
+                storage,
+                target_length,
+                position_segment_span_bp,
+                evidence.spill_run_count,
+                evidence.spilled_event_count,
+                evidence.spill_content_digest,
+                storage_binding,
+                operation_epoch,
+                authority_seal,
+                minimizer_scheme}};
+        evidence.bind_spill_authority(
+            authority_seal,
+            evidence.spilled_event_count,
+            evidence.spill_content_digest,
+            storage_binding,
+            operation_epoch);
+        evidence.spill_complete = true;
+        evidence.capture_route_snapshot_();
+        if (!evidence.spill_accepted()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+        return GenerationSpillResult{
+            evidence.spill_run_count,
+            evidence.exact_simd_proof,
+            evidence.exact_simd_proof_present,
+            minimizer_scheme,
+            target_length,
+            position_segment_span_bp,
+            evidence,
+            std::move(authority)};
+    }
+
+    [[nodiscard]] static auto make_generation_replay_producer(
+            S& storage,
+            std::uint64_t target_length,
+            GenerationSpillResult&& spill,
+            std::uint64_t position_segment_span_bp =
+                kMinimizerPreferredSegmentSpanBp) {
+        static_assert(MpsSegmentQualifiedSpillStorage<S>);
+        MpsGenerationExecutionEvidence evidence = spill.execution_evidence_;
+        std::shared_ptr<const MpsSpillAuthority<S>> authority =
+            std::move(spill.authority_);
+        const bool spill_identity_matches =
+            authority != nullptr
+            && authority->storage_ == &storage
+            && authority->target_length_ == target_length
+            && authority->initial_span_bp_ == position_segment_span_bp
+            && authority->run_count_ == spill.run_count_
+            && authority->event_count_ == evidence.spilled_event_count
+            && authority->content_digest_ == evidence.spill_content_digest
+            && authority->storage_binding_ == evidence.spill_storage_binding
+            && storage.segment_spill_storage_binding()
+                == authority->storage_binding_
+            && authority->operation_epoch_ == evidence.spill_operation_epoch
+            && authority->authority_seal_ != 0
+            && authority->minimizer_scheme_ == spill.minimizer_scheme_
+            && spill.target_length_ == target_length
+            && spill.position_segment_span_bp_ == position_segment_span_bp
+            && evidence.authority_matches(
+                authority->authority_seal_,
+                authority->event_count_,
+                authority->content_digest_,
+                authority->storage_binding_,
+                authority->operation_epoch_);
+        const bool evidence_identity_matches = spill_identity_matches
+            && spill.minimizer_scheme_ == evidence.minimizer_scheme
+            && spill.run_count_ == evidence.spill_run_count
+            && spill.exact_simd_proof_present_
+                == evidence.exact_simd_proof_present;
+        if (!evidence_identity_matches) {
+            evidence.backend_bound = false;
+            authority.reset();
+        }
+        const MinimizerSchemeIdentity producer_scheme =
+            evidence_identity_matches ? spill.minimizer_scheme_
+                                      : MinimizerSchemeIdentity{};
+        spill.poison_();
+        return MpsExternalSpillGenerationReplayProducer<S>{
+            storage, target_length, position_segment_span_bp,
+            producer_scheme,
+            evidence,
+            std::move(authority),
+            evidence.spill_storage_binding};
+    }
+
+    /// Concrete external-spill construction seam. The current revision-2
+    /// writer/reader remains live and fail-closed for ordinal 2.
+    template <MinimizerGenerationRowSink Sink>
+    [[nodiscard]] static std::expected<
+        EncodedMinimizerGeneration,
+        MinimizerGenerationWireError>
+    encode_persisted_generation(
+            S& storage,
+            Sink& sink,
+            GenerationSpillResult&& spill,
+            const MinimizerGenerationEncodeOptions& options,
+            const MinimizerGenerationFixedWidthLimits& limits = {},
+            MpsGenerationExecutionEvidence* execution_evidence_out = nullptr) {
+        if (execution_evidence_out != nullptr) {
+            *execution_evidence_out = {};
+        }
+        if (options.wire_format != MinimizerGenerationWireFormat::
+                grouped_hash32_segment_local32
+            || options.window_size != 10 || options.kmer_size != 15
+            || spill.position_segment_span_bp_
+                != kMinimizerPreferredSegmentSpanBp
+            || spill.authority_ == nullptr
+            || spill.authority_->storage_ != &storage
+            || storage.segment_spill_storage_binding()
+                != spill.authority_->storage_binding_
+            || !spill.execution_evidence_.spill_accepted()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+        auto producer = make_generation_replay_producer(
+            storage,
+            options.target_length,
+            std::move(spill),
+            kMinimizerPreferredSegmentSpanBp);
+        auto encoded = encode_minimizer_generation(
+            producer, sink, options, limits);
+        MpsGenerationExecutionEvidence evidence =
+            producer.execution_evidence();
+        if (encoded) {
+            evidence.manifest_position_count =
+                encoded->manifest.position_count;
+            evidence.manifest_position_segment_span_bp =
+                encoded->manifest.position_segment_span_bp;
+            evidence.manifest_bound =
+                encoded->manifest.wire_format
+                    == MinimizerGenerationWireFormat::
+                        grouped_hash32_segment_local32
+                && encoded->manifest.target_length == evidence.target_length
+                && encoded->manifest.position_count
+                    == evidence.spilled_event_count
+                && encoded->manifest.kmer_size == evidence.kmer_size
+                && encoded->manifest.window_size == evidence.window_size
+                && encoded->manifest.minimizer_scheme_id
+                    == evidence.minimizer_scheme.id
+                && encoded->manifest.minimizer_scheme_version
+                    == evidence.minimizer_scheme.version;
+            if (evidence.manifest_bound) {
+                evidence.bind_manifest_authority();
+                evidence.bind_publication_authority(*encoded);
+                evidence.capture_replay_snapshot_();
+            }
+            if (!evidence.accepted()) {
+                encoded = std::unexpected(
+                    MinimizerGenerationWireError::compatibility_mismatch);
+            }
+        }
+        if (execution_evidence_out != nullptr) {
+            *execution_evidence_out = evidence;
+        }
+        return encoded;
+    }
 
     template <class R, class Scanner>
     static void build(
@@ -347,7 +2210,7 @@ struct MinimizerSequenceMergedIndex {
         constexpr std::size_t lpu        = traits::letters_per_unit;
         constexpr std::size_t frag_units = Scanner::fragment_storage_units;
         constexpr std::size_t frag_bp    = frag_units * lpu;
-        constexpr std::size_t W          = w + k;
+        constexpr std::size_t W          = w + k - 2u;
         static_assert(frag_bp < (std::size_t{1} << 28), "fragment core positions fit 28-bit field");
         using detail::HDR; using detail::REC; using detail::BucketRecord;
         constexpr std::size_t kBucketTargetBytes = std::size_t{8} << 20;       // 8 MiB
@@ -359,12 +2222,17 @@ struct MinimizerSequenceMergedIndex {
 
         // ---- Pass 0: collect globalised (kmer, encoded) pairs, spill sorted runs.
         const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
-        const std::size_t size_u = (std::size_t)((total_bp + lpu - 1) / lpu);
-
         using pair_t = detail::sorted_pair_t;
-        struct CoreRange {
-            sequence_size_t core_lo = 0;
-            sequence_size_t core_hi = 0;
+        const auto make_core_range = [&seq](
+                sequence_size_t core_lo,
+                sequence_size_t core_hi) {
+            auto range = make_generation_collection_range(
+                seq, core_lo, core_hi, W);
+            if (!range) {
+                index_corruption_panic(
+                    "minimizers_per_sequence build: invalid collection/core range");
+            }
+            return *range;
         };
         struct AdmittedPairRun {
             std::vector<pair_t> pairs;
@@ -373,9 +2241,9 @@ struct MinimizerSequenceMergedIndex {
         };
         struct WorkerRangeResult {
             std::vector<AdmittedPairRun> runs;
-            std::vector<CoreRange> deferred_for_backend_spill;
+            std::vector<SegmentUnitRange> deferred_for_backend_spill;
             std::exception_ptr error;
-            CoreRange error_range{};
+            SegmentUnitRange error_range{};
         };
 
         auto release_untransferred_results_noexcept =
@@ -401,7 +2269,7 @@ struct MinimizerSequenceMergedIndex {
         // pairs are sorted on the HOST, so there is no CPU minimizer COLLECT on
         // this path. The scalar branch is unchanged.
         auto collect_core_range_pairs =
-            [&seq, total_bp, size_u, backend](
+            [&seq, backend](
                 sequence_size_t core_lo,
                 sequence_size_t core_hi,
                 sketch_collector& collector,
@@ -409,66 +2277,12 @@ struct MinimizerSequenceMergedIndex {
             if (core_hi <= core_lo) {
                 return;
             }
-
-            const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
-            const sequence_size_t coll_hi =
-                std::min(core_hi + static_cast<sequence_size_t>(W), total_bp);
-            const std::size_t lo_unit = static_cast<std::size_t>(coll_lo / lpu);
-            const std::size_t hi_unit = std::min(
-                static_cast<std::size_t>((coll_hi + lpu - 1) / lpu),
-                size_u);
-            const sequence_size_t emit_base =
-                static_cast<sequence_size_t>(lo_unit) * lpu;
-            const sequence_size_t collect_bp =
-                coll_hi > emit_base ? coll_hi - emit_base : 0;
-            if (collect_bp < static_cast<sequence_size_t>(W)) {
-                return;
-            }
-
-            if (backend == MinimizerSketchBackend::VulkanSegment) {
-                std::vector<pair_t> gpu_pairs =
-                    bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-                        seq,
-                        lo_unit,
-                        hi_unit,
-                        emit_base,
-                        core_lo,
-                        core_hi,
-                        w,
-                        k);
-                if (out.empty()) {
-                    out = std::move(gpu_pairs);
-                } else {
-                    out.insert(
-                        out.end(),
-                        std::make_move_iterator(gpu_pairs.begin()),
-                        std::make_move_iterator(gpu_pairs.end()));
-                }
-                return;
-            }
-
-            collector.clear();
-            auto begin_iter = seq.cbegin();
-            begin_iter += static_cast<sequence_size_t>(lo_unit);
-            auto end_iter = seq.cbegin();
-            end_iter += static_cast<sequence_size_t>(hi_unit);
-            collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
-                collector,
-                seq,
-                begin_iter,
-                end_iter,
-                w,
-                k);
-            for (const MinimapSketchData& minimizer : collector.extract_sketches_data()) {
-                const sequence_size_t global_pos =
-                    static_cast<sequence_size_t>(minimizer.last_pos()) + emit_base;
-                if (global_pos < core_lo || global_pos >= core_hi) {
-                    continue;
-                }
-                out.emplace_back(
-                    minimizer.kmer(),
-                    (static_cast<std::uint64_t>(global_pos) << 1)
-                        | static_cast<std::uint64_t>(minimizer.strand()));
+            auto range = make_generation_collection_range(
+                seq, core_lo, core_hi, W);
+            if (!range || !collect_generation_core_run(
+                    seq, backend, *range, collector, out)) {
+                index_corruption_panic(
+                    "minimizers_per_sequence build: collection/core geometry failed");
             }
         };
 
@@ -503,9 +2317,10 @@ struct MinimizerSequenceMergedIndex {
         };
 
         auto collect_sort_and_spill_backend_scratch =
-            [&](auto& self, CoreRange range) -> void {
+            [&](auto& self, SegmentUnitRange range) -> void {
                 const std::uint64_t bp =
-                    static_cast<std::uint64_t>(range.core_hi - range.core_lo);
+                    static_cast<std::uint64_t>(
+                        range.core_hi_bp - range.core_lo_bp);
                 const std::uint64_t reserve_bytes =
                     bioseq::parallelism::saturating_mul(
                         bp, static_cast<std::uint64_t>(sizeof(pair_t)));
@@ -548,19 +2363,20 @@ struct MinimizerSequenceMergedIndex {
                         backend == MinimizerSketchBackend::VulkanSegment
                             ? kVulkanEmergencyUnadmittedCoreBp
                             : kScalarEmergencyUnadmittedCoreBp;
-                    if (range.core_hi - range.core_lo > min_core_bp) {
+                    if (range.core_hi_bp - range.core_lo_bp > min_core_bp) {
                         const sequence_size_t mid =
-                            range.core_lo + (range.core_hi - range.core_lo) / 2;
-                        self(self, CoreRange{range.core_lo, mid});
-                        self(self, CoreRange{mid, range.core_hi});
+                            range.core_lo_bp
+                            + (range.core_hi_bp - range.core_lo_bp) / 2;
+                        self(self, make_core_range(range.core_lo_bp, mid));
+                        self(self, make_core_range(mid, range.core_hi_bp));
                         return;
                     }
                     std::vector<pair_t> scratch;
                     reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
                     sketch_collector collector;
                     collect_core_range_pairs(
-                        range.core_lo, range.core_hi, collector, scratch);
-                    if (backend == MinimizerSketchBackend::Scalar) {
+                        range.core_lo_bp, range.core_hi_bp, collector, scratch);
+                    if (backend != MinimizerSketchBackend::VulkanSegment) {
                         detail::sort_pair_run(scratch);
                     }
                     storage.spill_sorted_run(
@@ -575,8 +2391,8 @@ struct MinimizerSequenceMergedIndex {
                 reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
                 sketch_collector collector;
                 collect_core_range_pairs(
-                    range.core_lo, range.core_hi, collector, scratch);
-                if (backend == MinimizerSketchBackend::Scalar) {
+                    range.core_lo_bp, range.core_hi_bp, collector, scratch);
+                if (backend != MinimizerSketchBackend::VulkanSegment) {
                     detail::sort_pair_run(scratch);
                 }
                 storage.spill_sorted_run(
@@ -589,21 +2405,31 @@ struct MinimizerSequenceMergedIndex {
                 if (result.error) {
                     try {
                         std::rethrow_exception(result.error);
+                    } catch (const ExactSimdIndexRuntimeError&) {
+                        // Preserve the checked ExactSimd failure so the PG
+                        // SQL boundary can translate it to 0A000. Converting
+                        // it to index_corruption_panic would abort the backend
+                        // and hide the original unsupported shape/status.
+                        throw;
                     } catch (const std::exception& e) {
                         const std::string message =
                             "bioseq minimizers_per_sequence worker failed for core=["
-                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_lo))
+                            + std::to_string(static_cast<std::uint64_t>(
+                                result.error_range.core_lo_bp))
                             + ","
-                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_hi))
+                            + std::to_string(static_cast<std::uint64_t>(
+                                result.error_range.core_hi_bp))
                             + "): "
                             + e.what();
                         index_corruption_panic(message);
                     } catch (...) {
                         const std::string message =
                             "bioseq minimizers_per_sequence worker failed for core=["
-                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_lo))
+                            + std::to_string(static_cast<std::uint64_t>(
+                                result.error_range.core_lo_bp))
                             + ","
-                            + std::to_string(static_cast<std::uint64_t>(result.error_range.core_hi))
+                            + std::to_string(static_cast<std::uint64_t>(
+                                result.error_range.core_hi_bp))
                             + "): non-std exception";
                         index_corruption_panic(message);
                     }
@@ -617,7 +2443,7 @@ struct MinimizerSequenceMergedIndex {
                         run.admitted_bytes = 0;
                     }
                 }
-                for (CoreRange range : result.deferred_for_backend_spill) {
+                for (SegmentUnitRange range : result.deferred_for_backend_spill) {
                     collect_sort_and_spill_backend_scratch(
                         collect_sort_and_spill_backend_scratch, range);
                 }
@@ -626,13 +2452,14 @@ struct MinimizerSequenceMergedIndex {
         };
 
         auto collect_range_admitted =
-            [&](auto& self, CoreRange range, WorkerRangeResult& result) -> void {
+            [&](auto& self, SegmentUnitRange range, WorkerRangeResult& result) -> void {
                 if (result.error) {
                     return;
                 }
                 try {
                     const std::uint64_t bp =
-                        static_cast<std::uint64_t>(range.core_hi - range.core_lo);
+                        static_cast<std::uint64_t>(
+                            range.core_hi_bp - range.core_lo_bp);
                     const std::uint64_t reserve_bytes =
                         bioseq::parallelism::saturating_mul(
                             bp, static_cast<std::uint64_t>(sizeof(pair_t)));
@@ -666,14 +2493,15 @@ struct MinimizerSequenceMergedIndex {
                             backend == MinimizerSketchBackend::VulkanSegment
                                 ? kVulkanMinCoreBp
                                 : kScalarMinCoreBp;
-                        if (range.core_hi - range.core_lo <= min_core_bp) {
+                        if (range.core_hi_bp - range.core_lo_bp <= min_core_bp) {
                             result.deferred_for_backend_spill.push_back(range);
                             return;
                         }
                         const sequence_size_t mid =
-                            range.core_lo + (range.core_hi - range.core_lo) / 2;
-                        self(self, CoreRange{range.core_lo, mid}, result);
-                        self(self, CoreRange{mid, range.core_hi}, result);
+                            range.core_lo_bp
+                            + (range.core_hi_bp - range.core_lo_bp) / 2;
+                        self(self, make_core_range(range.core_lo_bp, mid), result);
+                        self(self, make_core_range(mid, range.core_hi_bp), result);
                         return;
                     }
 
@@ -687,8 +2515,8 @@ struct MinimizerSequenceMergedIndex {
                     reserve_pairs_or_panic(run.pairs, reserve_bytes / sizeof(pair_t));
                     sketch_collector collector;
                     collect_core_range_pairs(
-                        range.core_lo, range.core_hi, collector, run.pairs);
-                    if (backend == MinimizerSketchBackend::Scalar) {
+                        range.core_lo_bp, range.core_hi_bp, collector, run.pairs);
+                    if (backend != MinimizerSketchBackend::VulkanSegment) {
                         detail::sort_pair_run(run.pairs);
                     }
                     compact_admitted_run_after_sort(run);
@@ -701,11 +2529,12 @@ struct MinimizerSequenceMergedIndex {
                     if (backend == MinimizerSketchBackend::VulkanSegment
                         && split_admission_decline) {
                         constexpr sequence_size_t kMinGpuCoreBp = 256;
-                        if (range.core_hi - range.core_lo > kMinGpuCoreBp) {
+                        if (range.core_hi_bp - range.core_lo_bp > kMinGpuCoreBp) {
                             const sequence_size_t mid =
-                                range.core_lo + (range.core_hi - range.core_lo) / 2;
-                            self(self, CoreRange{range.core_lo, mid}, result);
-                            self(self, CoreRange{mid, range.core_hi}, result);
+                                range.core_lo_bp
+                                + (range.core_hi_bp - range.core_lo_bp) / 2;
+                            self(self, make_core_range(range.core_lo_bp, mid), result);
+                            self(self, make_core_range(mid, range.core_hi_bp), result);
                             return;
                         }
                     }
@@ -714,11 +2543,12 @@ struct MinimizerSequenceMergedIndex {
                 } catch (const std::bad_alloc&) {
                     if (backend == MinimizerSketchBackend::VulkanSegment) {
                         constexpr sequence_size_t kMinGpuCoreBp = 256;
-                        if (range.core_hi - range.core_lo > kMinGpuCoreBp) {
+                        if (range.core_hi_bp - range.core_lo_bp > kMinGpuCoreBp) {
                             const sequence_size_t mid =
-                                range.core_lo + (range.core_hi - range.core_lo) / 2;
-                            self(self, CoreRange{range.core_lo, mid}, result);
-                            self(self, CoreRange{mid, range.core_hi}, result);
+                                range.core_lo_bp
+                                + (range.core_hi_bp - range.core_lo_bp) / 2;
+                            self(self, make_core_range(range.core_lo_bp, mid), result);
+                            self(self, make_core_range(mid, range.core_hi_bp), result);
                             return;
                         }
                     }
@@ -746,14 +2576,14 @@ struct MinimizerSequenceMergedIndex {
                     frag_bp,
                     2u * W)
                 : scalar_fragments_per_block;
-        std::vector<CoreRange> window_ranges;
+        std::vector<SegmentUnitRange> window_ranges;
         for (std::size_t frag_lo = 0; frag_lo < nfrag; frag_lo += fragments_per_block) {
             const std::size_t frag_hi = std::min(nfrag, frag_lo + fragments_per_block);
             const sequence_size_t core_lo = static_cast<sequence_size_t>(frag_lo) * frag_bp;
             const sequence_size_t core_hi = std::min(
                 static_cast<sequence_size_t>(frag_hi) * frag_bp, total_bp);
             if (core_hi > core_lo) {
-                window_ranges.push_back(CoreRange{core_lo, core_hi});
+                window_ranges.push_back(make_core_range(core_lo, core_hi));
             }
         }
 
@@ -761,7 +2591,7 @@ struct MinimizerSequenceMergedIndex {
             std::vector<WorkerRangeResult> results(1);
             sketch_collector collector;
             (void)collector;
-            for (CoreRange range : window_ranges) {
+            for (SegmentUnitRange range : window_ranges) {
                 results[0] = WorkerRangeResult{};
                 collect_range_admitted(collect_range_admitted, range, results[0]);
                 transfer_result_runs(results);
@@ -769,10 +2599,11 @@ struct MinimizerSequenceMergedIndex {
         };
 
         auto& pool = bioseq::parallelism::GlobalPool::instance();
-        // DOC0345 Patch E — Vulkan serialises window submissions through the one
-        // runtime queue, so only the scalar backend may collect in parallel.
+        // Vulkan serialises window submissions through one runtime queue. Both
+        // host collectors are independent per range when the lazy scanner
+        // advertises worker sharing.
         const bool may_parallel_collect =
-            backend == MinimizerSketchBackend::Scalar
+            backend != MinimizerSketchBackend::VulkanSegment
             && bioseq::parallelism::task_parallel(pool.mode())
             && pool.max_concurrency() > 1
             && bioseq::storage::lazy_is_worker_shareable(seq)
@@ -804,7 +2635,7 @@ struct MinimizerSequenceMergedIndex {
         }
 
         // ---- Pass 1: k-way merge -> range-partitioned buckets + directory.
-        std::vector<MinimizerBucketDirEntry> dir;
+        std::vector<MpsV2BucketDirEntry> dir;
         std::vector<BucketRecord> ob_buckets;          // output bucket bucket-records
         std::vector<std::uint64_t> ob_positions;       // output bucket flat positions
         std::uint64_t ob_lo = 0, ob_hi = 0;
@@ -869,20 +2700,20 @@ struct MinimizerSequenceMergedIndex {
 
         // ---- write directory LAST.
         {
-            const std::size_t dir_bytes = sizeof(MinimizerBucketDirectory) + sizeof(MinimizerBucketDirEntry) * dir.size();
+            const std::size_t dir_bytes = sizeof(MpsV2BucketDirectory) + sizeof(MpsV2BucketDirEntry) * dir.size();
             std::array<std::size_t,1> plan{ dir_bytes };
             storage.resize_chunks(DIRECTORY_SUB_KEY, std::span<const std::size_t>(plan));
             storage.template write_to_each<char>(DIRECTORY_SUB_KEY, [&](std::size_t c, char* outbuf, std::size_t){
-                MinimizerBucketDirectory h;
-                h.magic = MinimizerBucketDirectory::kDirMagic; h.version = MinimizerBucketDirectory::kDirVersion;
+                MpsV2BucketDirectory h;
+                h.magic = MpsV2BucketDirectory::kDirMagic; h.version = MpsV2BucketDirectory::kDirVersion;
                 h.flags = backend == MinimizerSketchBackend::VulkanSegment
                     && bioseq::gpu::vulkan::alphabet_kernel_kind_of_traits<traits>()
                         != bioseq::gpu::vulkan::AlphabetKernelKind::dna4_nt4
-                    ? MinimizerBucketDirectory::kBuiltFromPhaseC
+                    ? MpsV2BucketDirectory::kBuiltFromPhaseC
                     : 0u;
                 h.num_buckets = dir.size(); h.total_distinct_kmers = total_distinct; h.total_positions = total_positions;
                 std::memcpy(outbuf, &h, sizeof(h));
-                if (!dir.empty()) std::memcpy(outbuf + sizeof(h), dir.data(), sizeof(MinimizerBucketDirEntry) * dir.size());
+                if (!dir.empty()) std::memcpy(outbuf + sizeof(h), dir.data(), sizeof(MpsV2BucketDirEntry) * dir.size());
                 return c;
             });
         }
@@ -947,7 +2778,7 @@ struct MinimizerSequenceMergedIndex {
         const char* dblob = storage.template read_chunk<char>(DIRECTORY_SUB_KEY, 0);
         const std::size_t dbytes = storage.chunk_byte_size(DIRECTORY_SUB_KEY, 0);
         storage.validate_minimizer_directory_or_error(dblob, dbytes);
-        DirView dir{ dblob, dbytes };
+        MpsV2DirView dir{ dblob, dbytes };
         const std::uint32_t max_occ_threshold =
             detail::effective_max_occ_threshold(max_occ, dir.built_from_phase_c());
         // 2. collect distinct query kmers + the distinct bucket sub_keys they touch.
@@ -955,7 +2786,7 @@ struct MinimizerSequenceMergedIndex {
         auto& wanted = scratch.wanted_sub_keys;
         for (const auto& qm : query_minimizers) {
             qkmers.push_back(qm.kmer());
-            if (const MinimizerBucketDirEntry* e = dir.find(qm.kmer())) wanted.push_back(e->sub_key);
+            if (const MpsV2BucketDirEntry* e = dir.find(qm.kmer())) wanted.push_back(e->sub_key);
         }
         auto sort_unique = [](auto& v){ std::sort(v.begin(), v.end()); v.erase(std::unique(v.begin(), v.end()), v.end()); };
         sort_unique(qkmers);
