@@ -78,6 +78,8 @@ template <class Key>
 export namespace bioseq::storage::indexing {
 
 using bioseq::indexing::index_sub_key_t;
+using bioseq::indexing::MinimizerSchemeIdentity;
+using bioseq::indexing::MinimizerSketchBackend;
 using bioseq::storage::sequence_size_t;
 
 struct IndexChunkKey {
@@ -106,6 +108,8 @@ struct AssembledIndexKey {
     Oid main_relfilenode = InvalidOid;
     std::int16_t column_attno = 0;
     std::uint64_t index_name_hash = 0;
+    MinimizerSketchBackend sketch_backend = MinimizerSketchBackend::Scalar;
+    MinimizerSchemeIdentity minimizer_scheme{};
     std::uint64_t query_key = 0;
     std::uint64_t query_signature = 0;
     sequence_size_t clip_lo_bp = 0;
@@ -145,12 +149,14 @@ struct AssembledIndexCacheHit {
 [[nodiscard]] inline bool operator==(const AssembledIndexKey& lhs, const AssembledIndexKey& rhs) noexcept {
     return std::tie(lhs.db_oid, lhs.user_relid, lhs.tablespace_oid,
                     lhs.main_relfilenode, lhs.column_attno, lhs.index_name_hash,
-                    lhs.query_key, lhs.query_signature, lhs.clip_lo_bp,
-                    lhs.clip_hi_bp)
+                    lhs.sketch_backend, lhs.minimizer_scheme.id,
+                    lhs.minimizer_scheme.version, lhs.query_key,
+                    lhs.query_signature, lhs.clip_lo_bp, lhs.clip_hi_bp)
         == std::tie(rhs.db_oid, rhs.user_relid, rhs.tablespace_oid,
                     rhs.main_relfilenode, rhs.column_attno, rhs.index_name_hash,
-                    rhs.query_key, rhs.query_signature, rhs.clip_lo_bp,
-                    rhs.clip_hi_bp);
+                    rhs.sketch_backend, rhs.minimizer_scheme.id,
+                    rhs.minimizer_scheme.version, rhs.query_key,
+                    rhs.query_signature, rhs.clip_lo_bp, rhs.clip_hi_bp);
 }
 
 struct ChunkCacheEntry {

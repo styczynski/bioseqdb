@@ -618,10 +618,11 @@ bioseq_guc_init()
 		{ "simd_minimap2_slow", 1, false },
 		{ "two_stack_nthash",   2, false },
 		{ "vulkan_minimap_int", 3, false },
+		{ "paper_nthash_simd",  4, false },
 		{ NULL, 0, false }
 	};
 	DefineCustomEnumVariable("bioseq.aligner.minimizer_algorithm",
-							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash, vulkan_minimap_int.",
+							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash, vulkan_minimap_int, paper_nthash_simd.",
 							 NULL, &bioseq_aligner_minimizer_algorithm, 0,
 							 minimizer_algorithm_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);

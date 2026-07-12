@@ -169,7 +169,7 @@ struct IndexBuildMpsDsmHeader {
     std::int32_t index_sketch_backend;  // DOC0345 Patch K — repurposed from `reserved` (keeps 72-byte size)
     bioseq::storage::seq_locator locator;
 };
-static_assert(sizeof(IndexBuildMpsDsmHeader) == 72);
+static_assert(sizeof(IndexBuildMpsDsmHeader) == 80);
 
 struct PersistFileChunkHeader {
     std::int64_t sub_key;
@@ -183,7 +183,7 @@ inline constexpr std::uint32_t kIndexPersistDsmVersion = 1;
 inline constexpr std::uint32_t kIndexPersistFileDsmMagic = 0xB1051D59u;
 inline constexpr std::uint32_t kIndexPersistFileDsmVersion = 1;
 inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
-inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 2;
+inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 3;
 
 struct PgMpsBuildStats {
     pg_atomic_uint64 generation;
@@ -626,7 +626,8 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     if (header.magic != kIndexBuildMpsDsmMagic
         || header.version != kIndexBuildMpsDsmVersion
         || header.index_name_len == 0
-        || header.locator.version != bioseq::storage::kLocatorVersion) {
+        || header.locator.version != bioseq::storage::kLocatorVersion
+        || header.locator.source_epoch == 0) {
         return std::nullopt;
     }
     const std::uint64_t name_offset = sizeof(IndexBuildMpsDsmHeader);
@@ -932,6 +933,7 @@ void ensure_persist_xact_callback_registered() {
     if (!bioseq_index_async_persist
         || target.index_name.empty()
         || locator.version != bioseq::storage::kLocatorVersion
+        || locator.source_epoch == 0
         || locator.num_fragments == 0
         || locator.total_bp_size == 0) {
         return false;
@@ -1063,6 +1065,27 @@ void register_scheduler_supervisor() {
 [[nodiscard]] std::filesystem::path runtime_cache_dir_from_digest(
         std::string_view digest) {
     return runtime_cache_root() / std::string(digest);
+}
+
+[[nodiscard]] std::expected<void, std::string>
+publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
+    const std::filesystem::path command_lib =
+        bioseq::gpu::vulkan::moltenvk_command_metallib_path(cache_dir);
+    if (::setenv(
+            "BIOSEQ_MOLTENVK_COMMAND_METALLIB", command_lib.c_str(), 1) != 0) {
+        const int saved_errno = errno;
+        return std::unexpected(fmt::format(
+            "setenv BIOSEQ_MOLTENVK_COMMAND_METALLIB failed: errno {} ({})",
+            saved_errno, std::strerror(saved_errno)));
+    }
+    if (::setenv(
+            "BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR", cache_dir.c_str(), 1) != 0) {
+        const int saved_errno = errno;
+        return std::unexpected(fmt::format(
+            "setenv BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR failed: errno {} ({})",
+            saved_errno, std::strerror(saved_errno)));
+    }
+    return {};
 }
 
 [[nodiscard]] std::string current_runtime_cache_digest() {
@@ -1251,19 +1274,21 @@ void wait_for_runtime_ready() {
         pg_read_barrier();
         if (state == RuntimeInitState::Ready) {
             const std::string digest = current_runtime_cache_digest();
+#if defined(__APPLE__)
+            if (digest.empty()) {
+                ConditionVariableCancelSleep();
+                report_runtime_init_unavailable(
+                    "load_bioseq_runtime reported ready without a shader-cache digest");
+            }
+#endif
             if (!digest.empty()) {
                 const std::filesystem::path cache_dir =
                     runtime_cache_dir_from_digest(digest);
-                const std::filesystem::path command_lib =
-                    bioseq::gpu::vulkan::moltenvk_command_metallib_path(cache_dir);
-                (void)::setenv(
-                    "BIOSEQ_MOLTENVK_COMMAND_METALLIB",
-                    command_lib.c_str(),
-                    1);
-                (void)::setenv(
-                    "BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR",
-                    cache_dir.c_str(),
-                    1);
+                if (auto published = publish_runtime_cache_env(cache_dir);
+                    !published) {
+                    ConditionVariableCancelSleep();
+                    report_runtime_init_unavailable(published.error());
+                }
             }
             backend_runtime_ready = true;
             ConditionVariableCancelSleep();
@@ -1437,10 +1462,9 @@ prepare_backend_local_shader_cache_env() {
         return std::unexpected(fmt::format(
             "moltenvk command library: {}", command_lib.error()));
     }
-    const std::filesystem::path command_path =
-        bioseq::gpu::vulkan::moltenvk_command_metallib_path(cache_dir);
-    (void)::setenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB", command_path.c_str(), 1);
-    (void)::setenv("BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR", cache_dir.c_str(), 1);
+    if (auto published = publish_runtime_cache_env(cache_dir); !published) {
+        return std::unexpected(published.error());
+    }
     return cache_dir;
 }
 
@@ -1592,6 +1616,23 @@ void install_pg_shader_provider_if_available() noexcept {
         &pg_shader_provider_load_module};
     bioseq::gpu::vulkan::install_runtime_shader_provider(&provider);
 #endif
+}
+
+/**
+ * The only supported PostgreSQL entry point for constructing/accessing the
+ * process-local Vulkan Runtime singleton.
+ *
+ * MoltenVK consumes the command-metallib and binary-archive environment when
+ * the singleton creates its device/pipeline state.  Installing the PostgreSQL
+ * shader provider or publishing the digest-derived cache directory afterwards
+ * is too late for that backend process.  Keep this ordering in one exported
+ * function so status/diagnostic SQL cannot poison a later selected GPU scan.
+ */
+[[nodiscard]] bioseq::gpu::vulkan::Runtime&
+ensure_pg_vulkan_runtime_ready() {
+    install_pg_shader_provider_if_available();
+    wait_for_runtime_ready();
+    return bioseq::gpu::vulkan::Runtime::instance();
 }
 
 void service_pending_shader_compiles() {
@@ -2049,7 +2090,8 @@ try_materialize_async_mps_worker_target(
 void process_mps_build_claim(
         const PersistClaim& claim,
         const char* base,
-        Size mapped) {
+        Size mapped,
+        Snapshot registered_snapshot) {
     const std::uint64_t worker_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
     const std::optional<MpsBuildMetadata> meta =
@@ -2123,6 +2165,16 @@ void process_mps_build_claim(
         bioseq::indexing::minimizer_sketch_backend_name(worker_backend));
     PG_TRY();
     {
+        if (worker_backend
+            == bioseq::indexing::MinimizerSketchBackend::PaperNtHashSimd) {
+            bioseq_report<ERR, PG>()
+                .code(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .msg("asynchronous paper_nthash_simd persistence requires the "
+                     "scheme-tagged READY-generation format")
+                .detail("legacy MPS payloads do not record a minimizer-scheme "
+                        "identity; the queued build is rejected without fallback");
+            __builtin_unreachable();
+        }
         pgseq_t::dispatch_instance(
             meta->alphabet_code,
             meta->storage_unit_byte_width,
@@ -2145,6 +2197,7 @@ void process_mps_build_claim(
                     target.column_attno,
                     meta->locator,
                     meta->last_fragment_padding,
+                    registered_snapshot,
                     caches,
                     work,
                     [&](auto& lazy) {
@@ -2346,16 +2399,24 @@ void process_persist_file_claim(
             static_cast<unsigned long long>(worker_end_ns - worker_start_ns));
 }
 
+inline void finish_persist_claim_transaction(
+        Snapshot registered_snapshot) {
+    PopActiveSnapshot();
+    UnregisterSnapshot(registered_snapshot);
+    CommitTransactionCommand();
+}
+
 void process_persist_claim(const PersistClaim& claim) {
     const std::uint64_t worker_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
     StartTransactionCommand();
-    PushActiveSnapshot(GetTransactionSnapshot());
+    Snapshot registered_snapshot =
+        RegisterSnapshot(GetTransactionSnapshot());
+    PushActiveSnapshot(registered_snapshot);
 
     dsm_segment* seg = dsm_attach(claim.dsm);
     if (seg == nullptr) {
-        PopActiveSnapshot();
-        CommitTransactionCommand();
+        finish_persist_claim_transaction(registered_snapshot);
         return;
     }
     char* base = static_cast<char*>(dsm_segment_address(seg));
@@ -2364,24 +2425,22 @@ void process_persist_claim(const PersistClaim& claim) {
         std::uint32_t magic = 0;
         std::memcpy(&magic, base, sizeof(magic));
         if (magic == kIndexBuildMpsDsmMagic) {
-            process_mps_build_claim(claim, base, mapped);
+            process_mps_build_claim(
+                claim, base, mapped, registered_snapshot);
             dsm_detach(seg);
-            PopActiveSnapshot();
-            CommitTransactionCommand();
+            finish_persist_claim_transaction(registered_snapshot);
             return;
         }
         if (magic == kIndexPersistFileDsmMagic) {
             process_persist_file_claim(claim, base, mapped);
             dsm_detach(seg);
-            PopActiveSnapshot();
-            CommitTransactionCommand();
+            finish_persist_claim_transaction(registered_snapshot);
             return;
         }
     }
     if (mapped < sizeof(IndexPersistDsmHeader)) {
         dsm_detach(seg);
-        PopActiveSnapshot();
-        CommitTransactionCommand();
+        finish_persist_claim_transaction(registered_snapshot);
         return;
     }
     IndexPersistDsmHeader header{};
@@ -2391,8 +2450,7 @@ void process_persist_claim(const PersistClaim& claim) {
         || header.payload_bytes > mapped
         || header.index_name_len == 0) {
         dsm_detach(seg);
-        PopActiveSnapshot();
-        CommitTransactionCommand();
+        finish_persist_claim_transaction(registered_snapshot);
         return;
     }
     const std::uint64_t directory_offset = align_up_u64(
@@ -2403,8 +2461,7 @@ void process_persist_claim(const PersistClaim& claim) {
     if (directory_offset > header.payload_bytes
         || directory_bytes > header.payload_bytes - directory_offset) {
         dsm_detach(seg);
-        PopActiveSnapshot();
-        CommitTransactionCommand();
+        finish_persist_claim_transaction(registered_snapshot);
         return;
     }
     std::string index_name(
@@ -2414,8 +2471,7 @@ void process_persist_claim(const PersistClaim& claim) {
     target.index_name = index_name;
     if (!worker_target_accepts_index_persist(target, index_name)) {
         dsm_detach(seg);
-        PopActiveSnapshot();
-        CommitTransactionCommand();
+        finish_persist_claim_transaction(registered_snapshot);
         bioseq_log<DBG>("[bioseq] index: discarded stale async persist job row={} index={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 index_name);
@@ -2429,8 +2485,7 @@ void process_persist_claim(const PersistClaim& claim) {
         if (chunk.offset > header.payload_bytes
             || chunk.size > header.payload_bytes - chunk.offset) {
             dsm_detach(seg);
-            PopActiveSnapshot();
-            CommitTransactionCommand();
+            finish_persist_claim_transaction(registered_snapshot);
             return;
         }
         bioseq::storage::indexing::write_serialized_index_chunk_pg(
@@ -2453,8 +2508,7 @@ void process_persist_claim(const PersistClaim& claim) {
         target.column_attno,
         index_name);
     dsm_detach(seg);
-    PopActiveSnapshot();
-    CommitTransactionCommand();
+    finish_persist_claim_transaction(registered_snapshot);
     const std::uint64_t worker_end_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
     bioseq_log<DBG>("[bioseq] index: async persist worker wrote row={} index={} chunks={} bytes={} worker_write_ns={}",

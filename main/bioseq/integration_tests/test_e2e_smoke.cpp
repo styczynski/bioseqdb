@@ -116,10 +116,10 @@ void run_smoke(const std::string& alpha_name, const std::string& seq_type,
     it::exec_sql(ctx, "SET bioseq.aligner.chaining_algorithm       = 'simd_mm2';");
     it::exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm      = 'two_stack_nthash';");
     // §13 / D7 — verify the minimizer-algorithm GUC is actually applied end-to-end
-    // (the enum GUC → Minimap2Params::minimizer_algorithm plumbing). For dna4 the
-    // small in-RAM smoke path runs the requested two-stack nthash SIMD kernel; for
-    // the 2/6 Gbp segmented path the GUC's *outcome* is the nt4-correct scalar
-    // collector (deviation #3), but the GUC must round-trip regardless.
+    // (the enum GUC → Minimap2Params::minimizer_algorithm plumbing). dna4 and
+    // dna5 both run the checked ExactSimd two-stack kernel; dna5 is normalized
+    // to nt4 in vectors and N performs minimap2's continuous l=0/max-slot
+    // transition while the existing minimizer ring keeps advancing.
     REQUIRE(it::query_scalar(ctx, "SHOW bioseq.aligner.minimizer_algorithm") == "two_stack_nthash");
     it::exec_sqlf(ctx, "CREATE TABLE {} (header text, seq {}) USING bioseq;", table, seq_type);
     it::exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");

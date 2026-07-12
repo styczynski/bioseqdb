@@ -560,7 +560,7 @@ namespace {
 // the source of truth — if it ever fires, update this offset in
 // lockstep).
 //
-// DOC0264 §5 — Phase C v2 locator layout (32 bytes):
+// DOC0371 — Phase C v3 locator layout (40 bytes; the existing length offset is stable):
 //   offset 0  version          (1 byte)
 //   offset 1  bucket_idx       (1 byte)
 //   offset 2  _pad_2           (2 bytes)
@@ -569,6 +569,7 @@ namespace {
 //   offset 12 _pad_4           (4 bytes)
 //   offset 16 total_bp_size    (8 bytes)
 //   offset 24 first_sub_row_no (8 bytes)
+//   offset 32 source_epoch     (8 bytes)
 constexpr std::uint8_t kLocatorStubMarkerLocal = 0x80;
 constexpr std::size_t  kLocatorTotalBpSizeOffset = 16;
 
@@ -728,6 +729,7 @@ Datum pg_compact_sequence_gt(PG_FUNCTION_ARGS)
  *   offset 12 _pad_4           (4 bytes)
  *   offset 16 total_bp_size    (8 bytes)   <-- this TU reads here
  *   offset 24 first_sub_row_no (8 bytes)
+ *   offset 32 source_epoch     (8 bytes)
  *
  * The 16-byte offset is anchored by
  *   static_assert(offsetof(seq_locator, total_bp_size) == 16, ...)

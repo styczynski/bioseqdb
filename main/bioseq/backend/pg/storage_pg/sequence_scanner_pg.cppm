@@ -55,6 +55,39 @@ static_assert(__cplusplus >= 202302L, "DOC0264 requires C++23-or-later");
 
 export namespace bioseq::storage {
 
+using scanner_pg_fragment_read_callback = void (*)(void*) noexcept;
+
+/**
+ * One non-template, type-erased setjmp boundary for every scanner_pg
+ * instantiation.  Keeping PG_TRY out of the class template prevents LTO from
+ * cloning/specialising the boundary into a caller that owns C++ objects.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+[[gnu::noinline, gnu::noipa]]
+#else
+[[gnu::noinline]]
+#endif
+void scanner_pg_run_fragment_reads_with_error_cleanup(
+        void* callback_context,
+        scanner_pg_fragment_read_callback read_body,
+        scanner_pg_fragment_read_callback cleanup_after_error) {
+    MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        read_body(callback_context);
+    }
+    PG_CATCH();
+    {
+        // MemoryContextScope destructors inside read_fragment are skipped by
+        // PostgreSQL's longjmp.  Restore the caller context before executing
+        // the noexcept C++ cleanup and rethrowing the original error.
+        MemoryContextSwitchTo(saved_context);
+        cleanup_after_error(callback_context);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
 // DOC0264 §7 — `sequence_scanner_pg<S>`.
 //
 // Production fragment-streaming scanner. Two construction modes:
@@ -109,11 +142,31 @@ struct sequence_scanner_pg final {
     [[gnu::always_inline]]
     void release_fragment(std::size_t fragment_no) const noexcept;
 
+    using fragment_read_callback = scanner_pg_fragment_read_callback;
+
+    /**
+     * Execute a fragment read behind a PostgreSQL error boundary.
+     *
+     * `read_body` and `cleanup_after_error` must not throw C++ exceptions.
+     * PostgreSQL ERROR/cancellation may longjmp out of `read_body`; the inner
+     * PG_CATCH then destroys caller-owned C++ materialization state before
+     * rethrowing the original PostgreSQL error.  Hard noinline is required:
+     * the setjmp frame must remain below every scanner_pg read that can ERROR.
+     */
+    [[gnu::always_inline]] static void run_fragment_reads_with_error_cleanup(
+            void* callback_context,
+            fragment_read_callback read_body,
+            fragment_read_callback cleanup_after_error) {
+        scanner_pg_run_fragment_reads_with_error_cleanup(
+            callback_context, read_body, cleanup_after_error);
+    }
+
     // PG-backed constructor (production target path).
     explicit sequence_scanner_pg(
         Oid db_oid, Oid tablespace_oid, Oid main_relfilenode,
         std::int16_t column_attno, const seq_locator& locator,
         std::size_t last_fragment_padding,
+        Snapshot registered_snapshot,
         seq_caches* caches, MemoryContext parent_mctx)
         : db_oid_(db_oid),
           tablespace_oid_(tablespace_oid),
@@ -123,10 +176,17 @@ struct sequence_scanner_pg final {
           total_bp_size_(locator.total_bp_size),
           last_fragment_padding_(last_fragment_padding),
           num_fragments_(locator.num_fragments),
+          snapshot_(registered_snapshot),
           caches_(caches),
           mctx_(nullptr),
           in_memory_data_{}
     {
+        if (snapshot_ == nullptr
+            || !IsMVCCSnapshot(snapshot_)
+            || snapshot_->regd_count == 0) {
+            bioseq_log<ERR, PG>(
+                "sequence_scanner_pg: requires a borrowed registered MVCC snapshot");
+        }
         if (caches_ == nullptr) {
             bioseq_log<ERR, PG>( "sequence_scanner_pg: caches pointer must be non-null");
         }
@@ -163,6 +223,7 @@ struct sequence_scanner_pg final {
           num_fragments_(
               (in_memory_data.size() + fragment_storage_units - 1)
                   / fragment_storage_units),
+          snapshot_(nullptr),
           caches_(nullptr),
           mctx_(nullptr),
           in_memory_data_(in_memory_data)
@@ -185,12 +246,14 @@ struct sequence_scanner_pg final {
           total_bp_size_(other.total_bp_size_),
           last_fragment_padding_(other.last_fragment_padding_),
           num_fragments_(other.num_fragments_),
+          snapshot_(other.snapshot_),
           caches_(other.caches_),
           mctx_(other.mctx_),
           in_memory_data_(other.in_memory_data_),
           slots_(other.slots_)
     {
         other.mctx_           = nullptr;
+        other.snapshot_       = nullptr;
         other.in_memory_data_ = base_container{};
         other.caches_         = nullptr;
         for (auto& slot : other.slots_) {
@@ -244,6 +307,12 @@ private:
     sequence_size_t                                      total_bp_size_;
     std::size_t                                          last_fragment_padding_;
     std::size_t                                          num_fragments_;
+    // Borrowed from the executor/admin owner. The scanner neither registers
+    // nor unregisters it, and every cached fragment reader starts from this
+    // statement snapshot. The column reader may own a refreshed registered
+    // copy when it flushes same-transaction pending writes; it never mutates
+    // the registration owned by this scanner's caller.
+    Snapshot                                             snapshot_;
     seq_caches*                                          caches_;
     MemoryContext                                        mctx_;
     // DOC0274 — in-memory mode backing span. Empty in PG-backed mode.
@@ -340,6 +409,16 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     seq_caches::entry& entry = caches_->entries[cache_key];
     entry.rel = shard;
 
+    // Compatibility is keyed by the caller-owned source snapshot. The
+    // column reader may replace its own snapshot pointer with a refreshed
+    // registered copy after flushing, so comparing read_state->snapshot would
+    // incorrectly discard a compatible cached reader.
+    if (entry.read_state != nullptr
+        && entry.read_snapshot_source != snapshot_) {
+        BioseqColumnEndRead(entry.read_state);
+        entry.read_state = nullptr;
+        entry.read_snapshot_source = nullptr;
+    }
     if (entry.read_state == nullptr) {
         MemoryContext payload_mctx = caches_->read_state_mctx != nullptr
             ? caches_->read_state_mctx
@@ -353,12 +432,12 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
                 projected.append(static_cast<AttrNumber>(i + 1));
             }
         }
-        Snapshot snap = GetTransactionSnapshot();
         entry.read_state = BioseqColumnBeginRead(shard, td, projected.release(),
                                              /*whereClauseList=*/NIL,
-                                             payload_mctx, snap,
+                                             payload_mctx, snapshot_,
                                              /*randomAccess=*/true, nullptr);
         BioseqColumnReadFlushPendingWrites(entry.read_state);
+        entry.read_snapshot_source = snapshot_;
         attr_needed.free();
     }
 
@@ -446,11 +525,13 @@ inline void with_lazy_postgres(
     std::int16_t column_attno,
     const seq_locator& locator,
     std::size_t last_fragment_padding,
+    Snapshot registered_snapshot,
     seq_caches* caches, MemoryContext parent_mctx, Fn&& fn)
 {
     using S = sequence_scanner_pg<R>;
     S scanner(db_oid, tablespace_oid, main_relfilenode, column_attno,
-              locator, last_fragment_padding, caches, parent_mctx);
+              locator, last_fragment_padding, registered_snapshot,
+              caches, parent_mctx);
     lazy_compact_sequence<R, S> lazy{std::move(scanner)};
     std::forward<Fn>(fn)(lazy);
 }
