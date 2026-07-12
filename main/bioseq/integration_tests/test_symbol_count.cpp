@@ -160,6 +160,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
         // must still return the correct NON-NULL real tally (A=4) — never NULL.
         {
             guc_scope no_read(ctx, "bioseq.read_sequence_index", "off");
+            ctx.clear_notices();
             const auto row = query_one(
                 ctx,
                 fmt::format("SELECT bioseq.symbol_count(seq0, 'A') FROM {} "
@@ -168,6 +169,57 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
             REQUIRE(row.size() == 1);
             REQUIRE(row[0].has_value());  // recompute never yields NULL
             REQUIRE(std::stoll(row[0].value()) == 4);
+            REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+
+			// Abort the executor after BioseqScan has populated the placeholder.
+			// The helper has already performed its normal cleanup at this point;
+			// this proves it leaves no ResourceOwner debt for a later projection
+			// error. The helper's internal PG_CATCH path is established by the
+			// heap-resident state and per-cleanup saved-ErrorData guards.
+            ctx.clear_notices();
+            const auto projection_error = sql_error(
+                ctx,
+                fmt::format(
+                    "SELECT bioseq.symbol_count(seq0, 'A') + 1 / (pk - pk) "
+                    "FROM {} WHERE pk = 4;",
+                    kBioseqColumn));
+            REQUIRE(projection_error.sqlstate == "22012");
+            REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+            REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         }
     }
+}
+
+TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backend recovery",
+		  "[symbol_count][columnar][pg_leaf][recovery]") {
+	auto ctx = fresh_context({kBioseqColumn});
+	seed_small_bioseq_column(ctx, kBioseqColumn);
+	exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+	const std::string read_sql = fmt::format(
+		"SELECT bioseq.symbol_count(seq0, 'A') FROM {} WHERE pk = 1;",
+		kBioseqColumn);
+	REQUIRE(query_scalar_int(ctx, read_sql) == 4);
+
+	for (const std::string_view point : {
+			std::string_view{"relation_lookup"},
+			std::string_view{"tuple_read"},
+			std::string_view{"detoast"},
+			std::string_view{"close"}}) {
+		exec_sqlf(ctx,
+			"SELECT bioseq_internal.arm_inline_sequence_pg_failure('{}');",
+			point);
+		ctx.clear_notices();
+		const auto error = sql_error(ctx, read_sql);
+		REQUIRE(error.sqlstate == "58030");
+		REQUIRE(error.contains(
+			"injected inline sequence storage PostgreSQL leaf failure"));
+		REQUIRE(error.contains(fmt::format("failure_point={}", point)));
+		REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+
+		// The hook is one-shot. Both SPI/executor use in a trivial statement and
+		// a second real inline-index read must succeed in this exact backend.
+		REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+		REQUIRE(query_scalar_int(ctx, read_sql) == 4);
+		REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+	}
 }

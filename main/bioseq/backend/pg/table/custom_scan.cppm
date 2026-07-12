@@ -28,8 +28,12 @@ module;
 #include "common.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
+#include <exception>
+#include <memory>
+#include <utility>
 
 
 extern "C" {
@@ -54,6 +58,7 @@ import bioseq.pg_utils;
 import bioseq.scheduler.dispatch_buffer_api;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.parallelism.mode;
+import bioseq.parallelism.memory_admission;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
 import bioseq.sequences.simd;             // stdc_recode_to_type_params
@@ -159,10 +164,10 @@ struct PerScanAlignerState {
  * the new query into TupleDispatchBuffer::configure_mmsearch — turning a
  * single-literal scan into a many-to-many alignment under NL.
  *
- * `paramid` follows pgsql's PARAM_EXEC ID space (matches Param->paramid).
- * `paramkind` is captured so we can validate it really is PARAM_EXEC at
- * ReScan (PARAM_EXTERN would route through a different ParamListInfo
- * member and is not currently supported).
+ * `paramid` and `paramkind` preserve PostgreSQL's native Param coordinates.
+ * PARAM_EXEC is resolved on ReScan after a Nested Loop installs its outer
+ * value; PARAM_EXTERN is resolved eagerly at Begin and again on ReScan from
+ * the executor's ParamListInfo.
  *
  * `seq_attno` / `column_name` / `alphabet_code` / `storage_unit_byte_width` /
  * `primary_key_attno` mirror the equivalent MmsearchContext fields so the
@@ -182,12 +187,11 @@ struct MmsearchParamRebind {
 	std::string column_name;
 	/*
 	 * Stash a pointer to the SPECIFIC mmsearch FuncExpr that
-	 * registered this rebind. Without this, ReScanCustomScan would
-	 * use find_mmsearch_funcexpr() which returns the FIRST
-	 * mmsearch in plan.qual order — and the planner is free to
+	 * registered this rebind. Selecting the first mmsearch in
+	 * plan.qual order is incorrect because the planner is free to
 	 * order quals differently from our priority-classified order.
 	 * For Param + Const-extra stacking the planner often places
-	 * the Const first, so find_mmsearch_funcexpr would return the
+	 * the Const first, so a plan-order lookup would return the
 	 * Const FuncExpr (whose arg1 is a Const) and the Param-rebind
 	 * loop would silently fall through, leaving the buffer's
 	 * primary mmsearch with stale bytes. Stashing the
@@ -279,10 +283,17 @@ struct BioseqPlaceholderConsts {
  */
 struct BioseqScanRuntime {
 	bioseq::scheduler::DispatchBufferRuntime buffer{kBioseqRuntimeBufferReserve};
+	bioseq::pg::alignment_execution::AlignmentNodeRegistrationHandle
+		alignment_registration{};
 	BioseqPlaceholderConsts                   placeholder_consts{};
 	List*                                     newtargetlist = nullptr;
 	PerScanAlignerState                       aligner_state{};
 	MmsearchParamRebind                       param_rebind{};
+	/* True only after the access-method source itself returned EOF. */
+	bool                                      source_exhausted = false;
+	bool                                      locator_passthrough = false;
+	int                                       locator_parent_token = 0;
+	AttrNumber                                locator_rowno_resno = InvalidAttrNumber;
 
 	/*
 	 * Cleanup hook registered against the query MemoryContext. Set up
@@ -296,6 +307,102 @@ struct BioseqScanRuntime {
 	BioseqScanState*                          owning_state = nullptr;
 	bool                                      cleanup_done = false;
 };
+
+/* Internal planner/executor ABI for the two-child join. */
+constexpr int kBioseqBatchJoinPlanVersion = 2;
+constexpr int kBioseqLocatorPassthroughMagic = 0x424c5031; /* BLP1 */
+constexpr int kBioseqBatchJoinPathPrivateFields = 13;
+constexpr int kBioseqBatchJoinPrivateFields = 17;
+
+enum BioseqBatchJoinPrivateIndex : int {
+	kBatchJoinVersion = 0,
+	kBatchJoinToken = 1,
+	kBatchJoinTargetRelationOid = 2,
+	kBatchJoinTargetStorageSeqAttno = 3,
+	kBatchJoinTargetSlotSeqResno = 4,
+	kBatchJoinTargetSlotRownoResno = 5,
+	kBatchJoinQuerySlotSeqResno = 6,
+	kBatchJoinTargetColumnCount = 7,
+	kBatchJoinQueryColumnCount = 8,
+	kBatchJoinAlphabetCode = 9,
+	kBatchJoinStorageUnitByteWidth = 10,
+	kBatchJoinPlaceholderSites = 11,
+	kBatchJoinMmsearchExpr = 12,
+	kBatchJoinIndexReadRequirement = 13,
+	kBatchJoinHonestStartupCost = 14,
+	kBatchJoinHonestTotalCost = 15,
+	kBatchJoinIncumbentCostFloor = 16,
+};
+
+struct BioseqBatchJoinPlaceholderSite {
+	AttrNumber resno = InvalidAttrNumber;
+	Oid funcid = InvalidOid;
+	int32 typmod = -1;
+	Oid collation = InvalidOid;
+};
+
+struct BioseqBatchJoinQueryTuple {
+	MinimalTuple tuple = nullptr;
+	TupleTableSlot* slot = nullptr;
+	std::uint64_t ordinal = 0;
+};
+
+struct BioseqBatchJoinRuntime {
+	bioseq::scheduler::DispatchBufferRuntime buffer{kBioseqRuntimeBufferReserve};
+	bioseq::pg::alignment_execution::AlignmentNodeRegistrationHandle
+		alignment_registration{};
+	PlanState* target_child = nullptr;
+	PlanState* query_child = nullptr;
+	bool target_child_initialized = false;
+	bool query_child_initialized = false;
+	bool target_child_ended = false;
+	bool query_child_ended = false;
+	MemoryContext query_tuple_context = nullptr;
+	std::vector<bioseq::parallelism::MemoryPermit> query_permits{};
+	std::vector<BioseqBatchJoinQueryTuple> query_tuples{};
+	std::vector<bioseq::scheduler::DispatchJoinQueryRef> all_query_refs{};
+	std::vector<BioseqBatchJoinPlaceholderSite> placeholder_sites{};
+	std::size_t next_query_batch = 0;
+	std::size_t active_query_batch_end = 0;
+	bool queries_materialized = false;
+	bool target_active = false;
+	bool target_eof = false;
+	bool current_pass_fully_drained = false;
+	TupleTableSlot* current_target_slot = nullptr;
+	Oid target_relation_oid = InvalidOid;
+	AttrNumber target_storage_seq_attno = InvalidAttrNumber;
+	AttrNumber target_slot_seq_resno = InvalidAttrNumber;
+	AttrNumber target_slot_rowno_resno = InvalidAttrNumber;
+	AttrNumber query_slot_seq_resno = InvalidAttrNumber;
+	int target_column_count = 0;
+	int query_column_count = 0;
+	std::uint8_t alphabet_code = 0;
+	std::uint8_t storage_unit_byte_width = 0;
+	std::uint64_t distinct_targets = 0;
+	std::uint64_t query_batch_count = 0;
+	std::uint64_t query_planner_admission_bytes = 0;
+	std::uint64_t query_reserved_admission_bytes = 0;
+	std::uint64_t query_actual_materialized_bytes = 0;
+	double query_planner_rows = 0.0;
+	int query_planner_width = 0;
+	Cost honest_startup_cost = 0.0;
+	Cost honest_total_cost = 0.0;
+	Cost incumbent_cost_floor = 0.0;
+	bioseq::indexing::IndexReadRequirement index_read_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	bool explain_only = false;
+	bioseq::pipeline_stats::PipelineExecutionStats aggregate_stats{};
+	MemoryContextCallback cleanup_callback{};
+	bool cleanup_done = false;
+};
+
+struct BioseqBatchJoinState {
+	CustomScanState custom_scanstate;
+	void* runtime = nullptr;
+};
+
+static_assert(std::is_standard_layout_v<BioseqBatchJoinState>);
+static_assert(offsetof(BioseqBatchJoinState, custom_scanstate) == 0);
 
 /*
  * Centralised accessor: each BioseqScanState owns exactly one
@@ -394,6 +501,7 @@ struct BioseqStubOids {
 	Oid mmsearch_oid;
 	Oid mmsearch_with_opts_oid;       // mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)
 	Oid bioseq_seq_type_oid;          // resolves to bioseq.seq pg_type row
+	Oid bioseq_aligner_options_type_oid;
 
 	Oid score_oid;                    // bioseq.score (alias for dp_score)
 	Oid dp_score_oid;
@@ -439,6 +547,8 @@ struct BioseqStubOids {
 	result.mmsearch_oid              = resolve("mmsearch(bioseq.seq, bioseq.seq)");
 	result.mmsearch_with_opts_oid    = resolve("mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)");
 	result.bioseq_seq_type_oid       = resolve_type("bioseq.seq");
+	result.bioseq_aligner_options_type_oid =
+		resolve_type("bioseq_aligner_options");
 	result.score_oid                 = resolve("bioseq.score(anyelement)");
 	result.dp_score_oid              = resolve("bioseq.dp_score(anyelement)");
 	result.query_len_oid             = resolve("bioseq.query_len(anyelement)");
@@ -467,8 +577,8 @@ struct BioseqStubOids {
  * Per-backend cache for BioseqStubOids. The prior implementation called
  * LookupStubOids() from every planner path entry (AddBioseqColumnScanPath,
  * CustomExecScan first-call init, ExplainCustomScan) — that is ~22
- * regprocedurein syscache hits per query. The cache is backed by syscache
- * invalidation for pg_proc OIDs, plus relcache invalidation for relation-driven
+ * regprocedurein syscache hits per query. The cache is backed by pg_proc and
+ * pg_type syscache invalidation, plus relcache invalidation for relation-driven
  * replans, so DROP/CREATE EXTENSION in one backend flushes the resolved OIDs
  * before the next lookup.
  */
@@ -530,7 +640,9 @@ static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
 			return false;
 		}
 	}
-	return oid_exists_in_syscache(TYPEOID, o.bioseq_seq_type_oid);
+	return oid_exists_in_syscache(TYPEOID, o.bioseq_seq_type_oid)
+		&& oid_exists_in_syscache(
+			TYPEOID, o.bioseq_aligner_options_type_oid);
 }
 
 [[nodiscard]] static const BioseqStubOids& get_cached_stub_oids() {
@@ -543,6 +655,9 @@ static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
 		CacheRegisterRelcacheCallback(invalidate_cached_stub_oids,
 									  PointerGetDatum(NULL));
 		CacheRegisterSyscacheCallback(PROCOID,
+									  invalidate_cached_stub_oids_syscache,
+									  PointerGetDatum(NULL));
+		CacheRegisterSyscacheCallback(TYPEOID,
 									  invalidate_cached_stub_oids_syscache,
 									  PointerGetDatum(NULL));
 		invalidation_registered = true;
@@ -695,6 +810,27 @@ detect_feature_flags(List* targetlist, List* qual, const BioseqStubOids& oids)
 	return detector.flags;
 }
 
+/* Planner baserestrictinfo is a List<RestrictInfo>, not an expression list.
+ * Expression walkers deliberately do not know how to descend RestrictInfo
+ * (PostgreSQL reports "unrecognized node type"), so unwrap only the exact
+ * clause field and fail closed if a future planner shape violates that ABI. */
+[[nodiscard]] static std::optional<BioseqScanFeatureFlags>
+detect_restrictinfo_feature_flags(
+		List* restrictions,
+		const BioseqStubOids& oids) {
+	BioseqFeatureDetector detector{&oids, BioseqScanFeatureFlags{}};
+	feature_flag_visitor visitor;
+	for (Node* node : PList<Node>(restrictions)) {
+		RestrictInfo* restriction = pg_node_try_as<RestrictInfo>(node);
+		if (restriction == nullptr || restriction->clause == nullptr) {
+			return std::nullopt;
+		}
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(restriction->clause), detector, visitor);
+	}
+	return detector.flags;
+}
+
 /*
  * DOC0279 — plan-time detection of an mmsearch typmod-coalesce (same alphabet,
  * different storage width between the bioseq.seq column and the query literal).
@@ -825,6 +961,50 @@ build_params_from_gucs()
 	return params;
 }
 
+[[nodiscard]] static Const*
+require_aligner_options_const(FuncExpr* mmsearch_fe, const BioseqStubOids& oids)
+{
+	if (mmsearch_fe == nullptr) {
+		return nullptr;
+	}
+	const int arity = list_length(mmsearch_fe->args);
+	if (mmsearch_fe->funcid == oids.mmsearch_oid && arity == 2) {
+		return nullptr;
+	}
+	if (arity != 3 || mmsearch_fe->funcid != oids.mmsearch_with_opts_oid) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("mmsearch aligner-options call has an invalid function shape"),
+			 errdetail("arity=%d funcid=%u expected_funcid=%u",
+				arity,
+				mmsearch_fe->funcid,
+				oids.mmsearch_with_opts_oid)));
+	}
+	PList<Node> args(mmsearch_fe->args);
+	Node* opt_node = args.third();
+	Const* opt_const = pg_node_try_as<Const>(opt_node);
+	if (opt_const == nullptr) {
+		const std::string_view node_tag_name =
+			pg_node_tag_name(pg_node_tag_or_invalid(opt_node));
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("mmsearch aligner_options must be a plan-time constant"),
+			 errdetail("third argument node tag is %.*s",
+				static_cast<int>(node_tag_name.size()),
+				node_tag_name.data()),
+			 errhint("Pass aligner_options(...) directly; parameterized or column-valued option records are not supported.")));
+	}
+	if (opt_const->consttype != oids.bioseq_aligner_options_type_oid) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("mmsearch aligner_options constant has the wrong type"),
+			 errdetail("consttype=%u expected=%u",
+				opt_const->consttype,
+				oids.bioseq_aligner_options_type_oid)));
+	}
+	return opt_const;
+}
+
 /*
  * If the third argument of a mmsearch FuncExpr is a row-typed Const
  * representing aligner_options(), decode its fields and overlay any
@@ -835,26 +1015,18 @@ build_params_from_gucs()
  * bioseq--1.0.sql. Each field is kept INT4 (or FLOAT8) so the decoder
  * just pulls a Datum per non-null slot.
  */
-static void
+[[nodiscard]] static bool
 apply_aligner_options_override(FuncExpr* mmsearch_fe,
 							   bioseq::simd::active_target::Minimap2Params& params,
+							   bioseq::indexing::IndexReadRequirement& index_read_requirement,
 							   const BioseqStubOids& oids)
 {
-	(void) oids; // composite decoding is self-contained
-	if (mmsearch_fe == nullptr) {
-		return;
-	}
-	if (list_length(mmsearch_fe->args) < 3) {
-		return;
-	}
-	PList<Node> args(mmsearch_fe->args);
-	Node* opt_node = args.third();
-	Const* opt_const = pg_node_try_as<Const>(opt_node);
+	Const* opt_const = require_aligner_options_const(mmsearch_fe, oids);
 	if (opt_const == nullptr) {
-		return;
+		return false;
 	}
 	if (opt_const->constisnull) {
-		return;
+		return false;
 	}
 	/*
 	 * The composite comes through as a HeapTupleHeader varlena. Deconstruct
@@ -864,6 +1036,22 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		PG_DETOAST_DATUM(opt_const->constvalue));
 	Oid row_typeoid    = HeapTupleHeaderGetTypeId(header);
 	int32 row_typmod   = HeapTupleHeaderGetTypMod(header);
+	auto free_detoasted_header = [&] {
+		if (reinterpret_cast<void*>(header)
+			!= reinterpret_cast<void*>(DatumGetPointer(opt_const->constvalue))) {
+			pfree(header);
+		}
+	};
+	if (row_typeoid != oids.bioseq_aligner_options_type_oid) {
+		const Oid actual_row_typeoid = row_typeoid;
+		free_detoasted_header();
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("mmsearch aligner_options payload has the wrong row type"),
+			 errdetail("header_typeoid=%u expected=%u",
+				actual_row_typeoid,
+				oids.bioseq_aligner_options_type_oid)));
+	}
 	TupleDesc tupdesc  = lookup_rowtype_tupdesc(row_typeoid, row_typmod);
 
 	HeapTupleData heap_tuple{};
@@ -875,18 +1063,97 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 	const int n_attrs = tupdesc->natts;
 	/*
 	 * Stack-sized buffers sized above the field count of the
-	 * bioseq_aligner_options composite (today's count is 32 after the DOC0304
-	 * vulkan_enabled field; 40 leaves headroom). Avoids the per-call heap
+	 * bioseq_aligner_options composite (36 fields including the appended
+	 * index_read_requirement; 40 leaves headroom). Avoids the per-call heap
 	 * allocation that std::vector<Datum> would add and keeps us clear of
 	 * std::vector<bool>'s proxy storage (no .data()).
 	 */
-	constexpr int kMaxOptionAttrs = 40; // current bioseq_aligner_options uses 32 fields
-	if (n_attrs > kMaxOptionAttrs) {
+	constexpr int kExpectedOptionAttrs = 36;
+	constexpr int kMaxOptionAttrs = 40;
+	if (n_attrs != kExpectedOptionAttrs) {
 		ReleaseTupleDesc(tupdesc);
+		free_detoasted_header();
 		ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("bioseq_aligner_options has %d fields, max supported is %d",
-					n_attrs, kMaxOptionAttrs)));
+			 errmsg("bioseq_aligner_options has %d fields, expected exactly %d",
+					n_attrs, kExpectedOptionAttrs)));
+	}
+	struct ExpectedAttribute {
+		const char* name;
+		Oid type_oid;
+	};
+	static constexpr std::array<ExpectedAttribute, kExpectedOptionAttrs>
+		expected_attributes{{
+			{"kmer_size", INT4OID},
+			{"window_size", INT4OID},
+			{"max_gap", INT4OID},
+			{"max_gap_ref", INT4OID},
+			{"bandwidth", INT4OID},
+			{"bandwidth_long", INT4OID},
+			{"max_chain_skip", INT4OID},
+			{"max_chain_iter", INT4OID},
+			{"min_seed_count", INT4OID},
+			{"min_chain_score", INT4OID},
+			{"chain_gap_scale", FLOAT8OID},
+			{"chain_skip_scale", FLOAT8OID},
+			{"mask_level", FLOAT8OID},
+			{"mask_len", INT4OID},
+			{"pri_ratio", FLOAT8OID},
+			{"best_n", INT4OID},
+			{"match_score", INT4OID},
+			{"mismatch_pen", INT4OID},
+			{"gap_open1", INT4OID},
+			{"gap_ext1", INT4OID},
+			{"gap_open2", INT4OID},
+			{"gap_ext2", INT4OID},
+			{"sc_ambi", INT4OID},
+			{"zdrop", INT4OID},
+			{"end_bonus", INT4OID},
+			{"max_occ", INT4OID},
+			{"mid_occ", INT4OID},
+			{"block_min_size", INT4OID},
+			{"block_max_size", INT4OID},
+			{"chaining_algorithm", INT4OID},
+			{"base_alignment_algorithm", INT4OID},
+			{"minimizer_algorithm", INT4OID},
+			{"vulkan_enabled", BOOLOID},
+			{"vulkan_seed_hits_enabled", BOOLOID},
+			{"vulkan_index_cache_enabled", BOOLOID},
+			{"index_read_requirement", INT4OID},
+		}};
+	for (int attr_index = 0; attr_index < kExpectedOptionAttrs; ++attr_index) {
+		Form_pg_attribute attribute = TupleDescAttr(tupdesc, attr_index);
+		const ExpectedAttribute& expected = expected_attributes[attr_index];
+		if (attribute->attisdropped
+			|| attribute->attnum != attr_index + 1
+			|| attribute->atttypid != expected.type_oid
+			|| std::strcmp(NameStr(attribute->attname), expected.name) != 0) {
+			char actual_name[NAMEDATALEN]{};
+			const std::size_t actual_name_size = std::min(
+				std::strlen(NameStr(attribute->attname)),
+				sizeof(actual_name) - 1);
+			std::memcpy(
+				actual_name,
+				NameStr(attribute->attname),
+				actual_name_size);
+			const AttrNumber actual_attnum = attribute->attnum;
+			const Oid actual_type_oid = attribute->atttypid;
+			const bool actual_dropped = attribute->attisdropped;
+			ReleaseTupleDesc(tupdesc);
+			free_detoasted_header();
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("bioseq_aligner_options catalog layout is incompatible"),
+				 errdetail("attribute %d: actual name=%s attnum=%d type=%u dropped=%s; expected name=%s attnum=%d type=%u",
+					attr_index + 1,
+					actual_name,
+					static_cast<int>(actual_attnum),
+					actual_type_oid,
+					actual_dropped ? "true" : "false",
+					expected.name,
+					attr_index + 1,
+					expected.type_oid)));
+		}
 	}
 	std::array<Datum, kMaxOptionAttrs> values{};
 	std::array<bool,  kMaxOptionAttrs> nulls{};
@@ -909,6 +1176,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		}
 	};
 	int idx = 0;
+	bool index_read_requirement_present = false;
 	get_int  (idx++, params.kmer_size);
 	get_int  (idx++, params.window_size);
 	get_int  (idx++, params.max_gap);
@@ -977,17 +1245,18 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 	++idx;
 	/*
 	 * DOC0307 Phase B — minimizer_algorithm. Known-good ordinals:
-	 * 0=SCALAR, 1=SIMD_MINIMAP2_SLOW, 2=TWO_STACK_NTHASH, 3=VULKAN_MINIMAP_INT.
+	 * 0=SCALAR, 1=SIMD_MINIMAP2_SLOW, 2=TWO_STACK_NTHASH,
+	 * 3=VULKAN_MINIMAP_INT, 4=PAPER_NTHASH_SIMD.
 	 */
 	if (idx < n_attrs && !nulls[idx]) {
 		const int32_t raw = DatumGetInt32(values[idx]);
-		if (raw >= 0 && raw <= 3) {
+		if (raw >= 0 && raw <= 4) {
 			params.minimizer_algorithm =
 				static_cast<bioseq::simd::active_target::MinimizerAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("aligner_options.minimizer_algorithm out of range: %d (expected 0..3)", raw)));
+					 errmsg("aligner_options.minimizer_algorithm out of range: %d (expected 0..4)", raw)));
 		}
 	}
 	++idx;
@@ -1008,32 +1277,22 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 	if (idx < n_attrs && !nulls[idx]) {
 		params.vulkan_index_cache_enabled = DatumGetBool(values[idx]);
 	}
+	++idx;
+	if (idx < n_attrs && !nulls[idx]) {
+		const int32_t raw = DatumGetInt32(values[idx]);
+		if (!bioseq::indexing::index_read_requirement_ordinal_valid(raw)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("aligner_options.index_read_requirement out of range: %d (expected 0..2)", raw)));
+		}
+		index_read_requirement =
+			static_cast<bioseq::indexing::IndexReadRequirement>(raw);
+		index_read_requirement_present = true;
+	}
 	ReleaseTupleDesc(tupdesc);
 	/* Free the detoasted copy if PG_DETOAST_DATUM actually copied. */
-	if (reinterpret_cast<void*>(header)
-		!= reinterpret_cast<void*>(DatumGetPointer(opt_const->constvalue))) {
-		pfree(header);
-	}
-}
-
-/*
- * Resolve the first mmsearch FuncExpr in `qual` (or nullptr when the plan
- * has no mmsearch filter). Shared between the params-override pass and the
- * BeginCustomScan buffer configure call site.
- */
-[[nodiscard]] static FuncExpr*
-find_mmsearch_funcexpr(List* qual, const BioseqStubOids& oids)
-{
-	for (auto q : PList<Node>(qual)) {
-		FuncExpr* fe = pg_node_try_as<FuncExpr>(q);
-		if (fe == nullptr) {
-			continue;
-		}
-		if (is_mmsearch_funcid(fe->funcid, oids)) {
-			return fe;
-		}
-	}
-	return nullptr;
+	free_detoasted_header();
+	return index_read_requirement_present;
 }
 
 /*
@@ -1088,7 +1347,10 @@ static void AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel,
 static void BioseqColumnSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 									   RangeTblEntry *rte);
 static void BioseqColumnGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
-										bool inhparent, RelOptInfo *rel);
+											bool inhparent, RelOptInfo *rel);
+static void BioseqBatchJoinSetJoinPathlistHook(
+	PlannerInfo* root, RelOptInfo* joinrel, RelOptInfo* outerrel,
+	RelOptInfo* innerrel, JoinType jointype, JoinPathExtraData* extra);
 
 static Plan * BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 											  RelOptInfo *rel,
@@ -1100,6 +1362,10 @@ static List * BioseqColumnScanPath_ReparameterizeCustomPathByChild(PlannerInfo *
 															   List *custom_private,
 															   RelOptInfo *child_rel);
 static Node * BioseqColumnScan_CreateCustomScanState(CustomScan *cscan);
+static Plan* BioseqBatchJoin_PlanCustomPath(
+	PlannerInfo* root, RelOptInfo* rel, CustomPath* best_path,
+	List* tlist, List* clauses, List* custom_plans);
+static Node* BioseqBatchJoin_CreateCustomScanState(CustomScan* cscan);
 
 static void BioseqColumnScan_BeginCustomScan(CustomScanState *node, EState *estate,
 										 int eflags);
@@ -1122,7 +1388,17 @@ static void BioseqColumn_ReinitializeDSMCustomScan(CustomScanState *node,
 											   void *coordinate);
 static void BioseqColumn_InitializeWorkerCustomScan(CustomScanState *node,
 												shm_toc *toc,
-												void *coordinate);
+											void *coordinate);
+static void BioseqBatchJoin_BeginCustomScan(
+	CustomScanState* node, EState* estate, int eflags);
+static TupleTableSlot* BioseqBatchJoin_ExecCustomScan(CustomScanState* node);
+static void BioseqBatchJoin_EndCustomScan(CustomScanState* node);
+static void BioseqBatchJoin_ReScanCustomScan(CustomScanState* node);
+static void BioseqBatchJoin_ExplainCustomScan(
+	CustomScanState* node, List* ancestors, ExplainState* es);
+static void ExplainPipelineExecutionStats(
+	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
+	ExplainState* es);
 
 /* helper functions to build strings for EXPLAIN */
 static const char * BioseqColumnPushdownClausesStr(List *context, List *clauses);
@@ -1136,6 +1412,7 @@ static List * BioseqColumnVarNeeded(BioseqScanState *bioseqScanState);
 
 /* saved hook value in case of unload */
 static set_rel_pathlist_hook_type PreviousSetRelPathlistHook = NULL;
+static set_join_pathlist_hook_type PreviousSetJoinPathlistHook = NULL;
 static get_relation_info_hook_type PreviousGetRelationInfoHook = NULL;
 
 static bool EnableBioseqColumnCustomScan = true;
@@ -1154,6 +1431,25 @@ const CustomPathMethods BioseqColumnScanPathMethods = {
 const CustomScanMethods BioseqColumnScanScanMethods = {
 	.CustomName = "BioseqScan",
 	.CreateCustomScanState = BioseqColumnScan_CreateCustomScanState,
+};
+
+const CustomPathMethods BioseqBatchJoinPathMethods = {
+	.CustomName = "BioseqBatchJoin",
+	.PlanCustomPath = BioseqBatchJoin_PlanCustomPath,
+};
+
+const CustomScanMethods BioseqBatchJoinScanMethods = {
+	.CustomName = "BioseqBatchJoin",
+	.CreateCustomScanState = BioseqBatchJoin_CreateCustomScanState,
+};
+
+const CustomExecMethods BioseqBatchJoinExecuteMethods = {
+	.CustomName = "BioseqBatchJoin",
+	.BeginCustomScan = BioseqBatchJoin_BeginCustomScan,
+	.ExecCustomScan = BioseqBatchJoin_ExecCustomScan,
+	.EndCustomScan = BioseqBatchJoin_EndCustomScan,
+	.ReScanCustomScan = BioseqBatchJoin_ReScanCustomScan,
+	.ExplainCustomScan = BioseqBatchJoin_ExplainCustomScan,
 };
 
 const CustomExecMethods BioseqColumnScanExecuteMethods = {
@@ -1251,6 +1547,8 @@ bioseq_customscan_init()
 {
 	PreviousSetRelPathlistHook = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = BioseqColumnSetRelPathlistHook;
+	PreviousSetJoinPathlistHook = set_join_pathlist_hook;
+	set_join_pathlist_hook = BioseqBatchJoinSetJoinPathlistHook;
 
 	PreviousGetRelationInfoHook = get_relation_info_hook;
 	get_relation_info_hook = BioseqColumnGetRelationInfoHook;
@@ -1316,6 +1614,7 @@ bioseq_customscan_init()
 		NULL);
 
 	RegisterCustomScanMethods(&BioseqColumnScanScanMethods);
+	RegisterCustomScanMethods(&BioseqBatchJoinScanMethods);
 }
 
 static void
@@ -1409,6 +1708,1065 @@ BioseqColumnGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 			memset(indexOptInfo->canreturn, false, indexOptInfo->ncolumns * sizeof(bool));
 		}
 	}
+}
+
+struct BatchJoinTargetProjectionProbe {
+	Index target_varno = 0;
+	AttrNumber target_seq_attno = InvalidAttrNumber;
+	const BioseqStubOids* oids = nullptr;
+	bool allow_mmsearch_qualifier = false;
+	bool forbidden = false;
+};
+
+struct batch_join_target_projection_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+		pg_expression_walk_cursor,
+		pg_node_view node,
+		BatchJoinTargetProjectionProbe& probe) const noexcept {
+		/* A validated mmsearch restriction consumes the locator inside the
+		 * BatchJoin executor, while match-result helpers are evaluated by its
+		 * parent from the current MatchResult. Neither argument is a request to
+		 * let the locator-backed datum escape into ordinary SQL evaluation. A
+		 * projected mmsearch call remains forbidden. */
+		if (FuncExpr* function = node.try_as<FuncExpr>()) {
+			if (probe.oids != nullptr
+				&& (is_bioseq_projection_funcid(function->funcid, *probe.oids)
+					|| (probe.allow_mmsearch_qualifier
+						&& is_mmsearch_funcid(
+							function->funcid, *probe.oids)))) {
+				return pg_walk_step::skip_subtree;
+			}
+		}
+		if (Var* var = node.try_as<Var>()) {
+			if (var->varno == probe.target_varno
+				&& (var->varattno == 0
+					|| var->varattno == probe.target_seq_attno)) {
+				probe.forbidden = true;
+				return pg_walk_step::stop;
+			}
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+[[nodiscard]] static bool batch_join_target_expression_is_forbidden(
+		Node* expression,
+		const Var* target_var,
+		const bool allow_mmsearch_qualifier) {
+	if (expression == nullptr || target_var == nullptr) {
+		return false;
+	}
+	BatchJoinTargetProjectionProbe probe{
+		target_var->varno, target_var->varattno,
+		&get_cached_stub_oids(), allow_mmsearch_qualifier, false};
+	batch_join_target_projection_visitor visitor;
+	pg_walk_expression_including_root(
+		expression, probe, visitor);
+	return probe.forbidden;
+}
+
+[[nodiscard]] static bool batch_join_target_restrictions_are_forbidden(
+		List* restrictions,
+		const Var* target_var,
+		const bool allow_mmsearch_qualifier) {
+	for (Node* node : PList<Node>(restrictions)) {
+		RestrictInfo* restriction = pg_node_try_as<RestrictInfo>(node);
+		if (restriction == nullptr || restriction->clause == nullptr
+			|| batch_join_target_expression_is_forbidden(
+				reinterpret_cast<Node*>(restriction->clause),
+				target_var,
+				allow_mmsearch_qualifier)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+[[nodiscard]] static bool batch_join_typmod_is_supported(
+		const int32 typmod) noexcept {
+	if (typmod < 0) {
+		return false;
+	}
+	const auto decoded = compact_sequence_stdc_type_params::decode(typmod);
+	constexpr std::uint8_t dna4_code = static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<seq::dna4>());
+	constexpr std::uint8_t dna5_code = static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<seq::dna5>());
+	const bool alphabet_supported = decoded.alphabet_code == dna4_code
+		|| decoded.alphabet_code == dna5_code;
+	const bool width_supported = decoded.storage_unit_byte_width == 1
+		|| decoded.storage_unit_byte_width == 2
+		|| decoded.storage_unit_byte_width == 4
+		|| decoded.storage_unit_byte_width == 8;
+	return alphabet_supported && width_supported
+		&& decoded.encode() == typmod;
+}
+
+/* Reject a Gather hidden below the common unary planner wrappers.  Looking
+ * only at cheapest_total_path->pathtype misses Projection/Material wrappers
+ * and lets a parallel child enter an executor that owns one backend-local
+ * query materialization. */
+[[nodiscard]] static bool batch_join_path_contains_parallel_execution(
+		const Path* path) noexcept {
+	if (path == nullptr) {
+		return false;
+	}
+	if (path->pathtype == T_Gather || path->pathtype == T_GatherMerge
+		|| path->parallel_aware || path->parallel_workers > 0) {
+		return true;
+	}
+	switch (path->pathtype) {
+		case T_Result:
+			return batch_join_path_contains_parallel_execution(
+				reinterpret_cast<const ProjectionPath*>(path)->subpath);
+		case T_Material:
+			return batch_join_path_contains_parallel_execution(
+				reinterpret_cast<const MaterialPath*>(path)->subpath);
+		case T_Memoize:
+			return batch_join_path_contains_parallel_execution(
+				reinterpret_cast<const MemoizePath*>(path)->subpath);
+		case T_Sort:
+			return batch_join_path_contains_parallel_execution(
+				reinterpret_cast<const SortPath*>(path)->subpath);
+		case T_IncrementalSort:
+			return batch_join_path_contains_parallel_execution(
+				reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath);
+		default:
+			return false;
+	}
+}
+
+struct BatchJoinBioseqPathCandidate {
+	CustomPath* scan = nullptr;
+	Path* cost_owner = nullptr;
+	const PathTarget* locator_target = nullptr;
+};
+
+[[nodiscard]] static bool path_target_has_equal_expression(
+		const PathTarget* target, const Node* expression) noexcept {
+	if (target == nullptr || expression == nullptr) {
+		return false;
+	}
+	for (Node* existing : PList<Node>(target->exprs)) {
+		if (equal(existing, expression)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+[[nodiscard]] static FuncExpr* batch_join_exact_target_helper(
+		Node* expression,
+		const Index target_relid) noexcept {
+	FuncExpr* helper = pg_node_try_as<FuncExpr>(expression);
+	if (helper == nullptr
+		|| !is_bioseq_projection_funcid(
+			helper->funcid, get_cached_stub_oids())
+		|| helper->funcretset
+		|| OidIsValid(helper->funcvariadic)
+		|| get_func_rettype(helper->funcid) != helper->funcresulttype
+		|| list_length(helper->args) != 1) {
+		return nullptr;
+	}
+	Var* argument = pg_node_try_as<Var>(
+		reinterpret_cast<Node*>(linitial(helper->args)));
+	return argument != nullptr
+		&& argument->varno == target_relid
+		&& argument->varattno > 0
+		&& argument->varlevelsup == 0
+		&& bms_is_empty(argument->varnullingrels)
+		? helper : nullptr;
+}
+
+/* Exact shape emitted by try_wrap_in_placeholder() for a direct helper call.
+ * Do not accept a generic PHV merely because a helper occurs somewhere below
+ * it: its evaluation level/nulling semantics may belong to unrelated SQL. */
+[[nodiscard]] static FuncExpr* batch_join_exact_helper_phv_function(
+		const PlaceHolderVar* placeholder,
+		const Index target_relid) noexcept {
+	if (placeholder == nullptr
+		|| placeholder->phid == 0
+		|| placeholder->phlevelsup != 0
+		|| !bms_is_empty(placeholder->phnullingrels)
+		|| bms_num_members(placeholder->phrels) != 1
+		|| !bms_is_member(static_cast<int>(target_relid), placeholder->phrels)) {
+		return nullptr;
+	}
+	return batch_join_exact_target_helper(
+		reinterpret_cast<Node*>(placeholder->phexpr), target_relid);
+}
+
+[[nodiscard]] static bool batch_join_is_exact_helper_phv(
+		const PlaceHolderVar* placeholder,
+		const Index target_relid) noexcept {
+	return batch_join_exact_helper_phv_function(
+		placeholder, target_relid) != nullptr;
+}
+
+struct BatchJoinProjectionDeltaProof {
+	const PathTarget* child_target = nullptr;
+	Index target_relid = 0;
+	bool saw_exact_helper_phv = false;
+	bool invalid = false;
+};
+
+struct batch_join_projection_delta_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+		pg_expression_walk_cursor,
+		pg_node_view node,
+		BatchJoinProjectionDeltaProof& proof) const noexcept {
+		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+			if (!batch_join_is_exact_helper_phv(
+					placeholder, proof.target_relid)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+			proof.saw_exact_helper_phv = true;
+			return pg_walk_step::skip_subtree;
+		}
+		if (Var* var = node.try_as<Var>()) {
+			if (!path_target_has_equal_expression(
+					proof.child_target, reinterpret_cast<Node*>(var))) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+/* Prove that the complete wrapper-only expression can be evaluated by the
+ * BatchJoin parent without changing semantics: it is nonvolatile, every Var
+ * is already produced by the child, every PHV is the exact helper-support
+ * shape, and at least one such helper PHV explains the wrapper delta. */
+[[nodiscard]] static bool batch_join_projection_delta_is_parent_safe(
+		Node* expression,
+		const PathTarget* child_target,
+		const Index target_relid) noexcept {
+	if (expression == nullptr || child_target == nullptr
+		|| contain_volatile_functions(expression)) {
+		return false;
+	}
+	BatchJoinProjectionDeltaProof proof{
+		child_target, target_relid, false, false};
+	batch_join_projection_delta_visitor visitor;
+	pg_walk_expression_including_root(expression, proof, visitor);
+	return !proof.invalid && proof.saw_exact_helper_phv;
+}
+
+/* A wrapper may also expose an ordinary target attribute needed above the
+ * join (for example t.pk).  Carrying that base Var through the locator child
+ * is exact; carrying the sequence datum, a whole row, a system attribute, a
+ * nulled outer-join Var, or an expression assembled at this level is not. */
+[[nodiscard]] static bool batch_join_is_safe_plain_target_var(
+		Node* expression,
+		const Index target_relid,
+		const AttrNumber target_seq_attno) noexcept {
+	Var* var = pg_node_try_as<Var>(expression);
+	return var != nullptr
+		&& var->varno == target_relid
+		&& var->varattno > 0
+		&& var->varattno != target_seq_attno
+		&& var->varlevelsup == 0
+		&& bms_is_empty(var->varnullingrels);
+}
+
+/* A helper support function can add a ProjectionPath at the base relation.
+ * BioseqBatchJoin may look through it only when every wrapper-only expression
+ * is either an exact helper expression evaluated by the parent or one plain,
+ * non-sequence target Var copied into the locator child. Any other expression
+ * is a real evaluation boundary and disqualifies this candidate. */
+[[nodiscard]] static bool batch_join_projection_is_parent_safe(
+		const ProjectionPath* projection,
+		const AttrNumber target_seq_attno) noexcept {
+	if (projection == nullptr || projection->subpath == nullptr
+		|| projection->path.pathtype != T_Result
+		|| projection->path.parent != projection->subpath->parent
+		|| projection->path.parent == nullptr
+		|| projection->path.parent->reloptkind != RELOPT_BASEREL
+		|| projection->path.parent->relid == 0
+		|| projection->path.param_info != nullptr
+		|| projection->subpath->param_info != nullptr
+		|| !equal(projection->path.pathkeys, projection->subpath->pathkeys)
+		|| projection->path.pathtarget == nullptr
+		|| projection->subpath->pathtarget == nullptr) {
+		return false;
+	}
+	bool saw_safe_delta = false;
+	for (Node* expression : PList<Node>(projection->path.pathtarget->exprs)) {
+		if (path_target_has_equal_expression(
+				projection->subpath->pathtarget, expression)) {
+			continue;
+		}
+		if (batch_join_is_safe_plain_target_var(
+				expression,
+				projection->path.parent->relid,
+				target_seq_attno)) {
+			saw_safe_delta = true;
+			continue;
+		}
+		if (!batch_join_projection_delta_is_parent_safe(
+				expression,
+				projection->subpath->pathtarget,
+				projection->path.parent->relid)) {
+			return false;
+		}
+		saw_safe_delta = true;
+	}
+	return saw_safe_delta;
+}
+
+[[nodiscard]] static BatchJoinBioseqPathCandidate
+find_unparameterized_bioseq_custom_path(
+		RelOptInfo* rel,
+		const AttrNumber target_seq_attno) noexcept {
+	BatchJoinBioseqPathCandidate best{};
+	for (Path* path : PList<Path>(rel->pathlist)) {
+		if (path == nullptr || path->param_info != nullptr) {
+			continue;
+		}
+		Path* cost_owner = path;
+		const PathTarget* locator_target = path->pathtarget;
+		/* Planner support can expose safe base attributes and wraps match-result helpers in
+		 * PlaceHolderVars at their originating base relation.  PostgreSQL can
+		 * consequently expose the otherwise eligible BioseqScan as the child
+		 * of a projection path.  The projection must not run in the locator
+		 * child: BioseqBatchJoin rewrites those helpers to parent-owned result
+		 * placeholders after the MatchResult exists.  Look through exactly
+		 * that narrowly proven parent-safe wrapper and retain the underlying scan. */
+		if (IsA(path, ProjectionPath)) {
+			auto* projection = reinterpret_cast<ProjectionPath*>(path);
+			if (!batch_join_projection_is_parent_safe(
+					projection, target_seq_attno)
+				|| batch_join_path_contains_parallel_execution(&projection->path)) {
+				continue;
+			}
+			locator_target = projection->path.pathtarget;
+			path = projection->subpath;
+		}
+		if (path == nullptr || path->pathtype != T_CustomScan
+			|| path->param_info != nullptr
+			|| batch_join_path_contains_parallel_execution(path)) {
+			continue;
+		}
+		auto* custom = reinterpret_cast<CustomPath*>(path);
+		if (custom->methods != &BioseqColumnScanPathMethods) {
+			continue;
+		}
+		if (best.scan == nullptr
+			|| compare_path_costs(
+				cost_owner, best.cost_owner, TOTAL_COST) < 0) {
+			best = BatchJoinBioseqPathCandidate{
+				custom, cost_owner, locator_target};
+		}
+	}
+	return best;
+}
+
+/*
+ * Integration-only proof seam for the exact production eligibility guard.
+ * SQL cannot reliably force an unrelated expression into a base-relation
+ * ProjectionPath: PostgreSQL will normally retain it in an upper projection.
+ * Construct the dangerous planner shapes directly and pass them through
+ * find_unparameterized_bioseq_custom_path(), which is the production entry
+ * point used by BioseqBatchJoinSetJoinPathlistHook().
+ */
+struct BatchJoinProjectionGuardFixture {
+	RelOptInfo* rel = nullptr;
+	CustomPath* scan = nullptr;
+	ProjectionPath* projection = nullptr;
+};
+
+[[nodiscard]] static PlaceHolderVar*
+make_batch_join_projection_guard_phv(
+		const Oid helper_oid,
+		const Oid result_type,
+		const Index relid,
+		const Index phid) {
+	auto* argument = makeVar(
+		relid, 1, INT4OID, -1, InvalidOid, 0);
+	auto* helper = makeFuncExpr(
+		helper_oid,
+		result_type,
+		list_make1(argument),
+		InvalidOid,
+		InvalidOid,
+		COERCE_EXPLICIT_CALL);
+	auto* placeholder = makeNode(PlaceHolderVar);
+	placeholder->phexpr = reinterpret_cast<Expr*>(helper);
+	placeholder->phrels = bms_make_singleton(static_cast<int>(relid));
+	placeholder->phnullingrels = nullptr;
+	placeholder->phid = phid;
+	placeholder->phlevelsup = 0;
+	return placeholder;
+}
+
+[[nodiscard]] static BatchJoinProjectionGuardFixture
+make_batch_join_projection_guard_fixture(
+		const Index relid,
+		List* wrapper_delta,
+		const Cost wrapper_startup,
+		const Cost wrapper_total,
+		const Cardinality wrapper_rows) {
+	auto* rel = makeNode(RelOptInfo);
+	rel->reloptkind = RELOPT_BASEREL;
+	rel->relid = relid;
+
+	auto* child_target = create_empty_pathtarget();
+	add_column_to_pathtarget(
+		child_target,
+		reinterpret_cast<Expr*>(
+			makeVar(relid, 1, INT4OID, -1, InvalidOid, 0)),
+		0);
+	auto* wrapper_target = copy_pathtarget(child_target);
+	for (Node* expression : PList<Node>(wrapper_delta)) {
+		add_column_to_pathtarget(
+			wrapper_target,
+			reinterpret_cast<Expr*>(expression),
+			0);
+	}
+
+	auto* scan = makeNode(CustomPath);
+	scan->path.pathtype = T_CustomScan;
+	scan->path.parent = rel;
+	scan->path.pathtarget = child_target;
+	scan->path.param_info = nullptr;
+	scan->path.parallel_aware = false;
+	scan->path.parallel_safe = false;
+	scan->path.parallel_workers = 0;
+	scan->path.rows = wrapper_rows;
+	scan->path.startup_cost = 1.0;
+	scan->path.total_cost = 2.0;
+	scan->path.pathkeys = NIL;
+	scan->methods = &BioseqColumnScanPathMethods;
+
+	auto* projection = makeNode(ProjectionPath);
+	projection->path.pathtype = T_Result;
+	projection->path.parent = rel;
+	projection->path.pathtarget = wrapper_target;
+	projection->path.param_info = nullptr;
+	projection->path.parallel_aware = false;
+	projection->path.parallel_safe = false;
+	projection->path.parallel_workers = 0;
+	projection->path.rows = wrapper_rows;
+	projection->path.startup_cost = wrapper_startup;
+	projection->path.total_cost = wrapper_total;
+	projection->path.pathkeys = NIL;
+	projection->subpath = &scan->path;
+	projection->dummypp = false;
+	rel->pathlist = list_make1(projection);
+	return BatchJoinProjectionGuardFixture{rel, scan, projection};
+}
+
+POSTGRES_FN(bioseq_internal_batch_join_projection_guard_probe)
+{
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq BatchJoin projection guard probe requires a composite result")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	constexpr Index target_relid = 1;
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	auto* exact_helper = make_batch_join_projection_guard_phv(
+		oids.score_oid, INT4OID, target_relid, 1);
+	const BatchJoinProjectionGuardFixture exact =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(exact_helper),
+			13.0,
+			37.0,
+			5.0);
+	const BatchJoinBioseqPathCandidate exact_candidate =
+		find_unparameterized_bioseq_custom_path(exact.rel, 2);
+	const bool accepts_exact_helper = exact_candidate.scan == exact.scan;
+	const bool preserves_wrapper_cost_owner =
+		exact_candidate.cost_owner == &exact.projection->path
+		&& exact_candidate.cost_owner->startup_cost == 13.0
+		&& exact_candidate.cost_owner->total_cost == 37.0
+		&& exact_candidate.cost_owner->rows == 5.0;
+
+	auto* unrelated_placeholder = makeNode(PlaceHolderVar);
+	unrelated_placeholder->phexpr = reinterpret_cast<Expr*>(
+		makeVar(target_relid, 1, INT4OID, -1, InvalidOid, 0));
+	unrelated_placeholder->phrels = bms_make_singleton(
+		static_cast<int>(target_relid));
+	unrelated_placeholder->phnullingrels = nullptr;
+	unrelated_placeholder->phid = 2;
+	unrelated_placeholder->phlevelsup = 0;
+	const BatchJoinProjectionGuardFixture unrelated =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make2(
+				make_batch_join_projection_guard_phv(
+					oids.score_oid, INT4OID, target_relid, 3),
+				unrelated_placeholder),
+			13.0,
+			37.0,
+			5.0);
+	const bool rejects_unrelated_phv =
+		find_unparameterized_bioseq_custom_path(unrelated.rel, 2).scan == nullptr;
+
+	const Oid nextval_oid = DatumGetObjectId(DirectFunctionCall1(
+		regprocedurein, CStringGetDatum("pg_catalog.nextval(regclass)")));
+	auto* nextval = makeFuncExpr(
+		nextval_oid,
+		INT8OID,
+		list_make1(makeConst(
+			REGCLASSOID,
+			-1,
+			InvalidOid,
+			static_cast<int16>(sizeof(Oid)),
+			ObjectIdGetDatum(InvalidOid),
+			false,
+			true)),
+		InvalidOid,
+		InvalidOid,
+		COERCE_EXPLICIT_CALL);
+	auto* volatile_mixed = makeNode(CoalesceExpr);
+	volatile_mixed->coalescetype = INT8OID;
+	volatile_mixed->coalescecollid = InvalidOid;
+	volatile_mixed->args = list_make2(
+		make_batch_join_projection_guard_phv(
+			oids.query_len_oid, INT8OID, target_relid, 4),
+		nextval);
+	volatile_mixed->location = -1;
+	const BatchJoinProjectionGuardFixture volatile_fixture =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(volatile_mixed),
+			13.0,
+			37.0,
+			5.0);
+	const bool rejects_volatile_mixed_expression =
+		find_unparameterized_bioseq_custom_path(volatile_fixture.rel, 2).scan
+			== nullptr;
+
+	const BatchJoinProjectionGuardFixture plain_target_var =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(makeVar(
+				target_relid, 2, INT4OID, -1, InvalidOid, 0)),
+			13.0,
+			37.0,
+			5.0);
+	const BatchJoinBioseqPathCandidate plain_candidate =
+		find_unparameterized_bioseq_custom_path(
+			plain_target_var.rel, /*target_seq_attno=*/3);
+	const bool accepts_plain_target_var =
+		plain_candidate.scan == plain_target_var.scan
+		&& plain_candidate.locator_target
+			== plain_target_var.projection->path.pathtarget;
+
+	const BatchJoinProjectionGuardFixture plain_target_sequence_var =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(makeVar(
+				target_relid, 3, INT4OID, -1, InvalidOid, 0)),
+			13.0,
+			37.0,
+			5.0);
+	const bool rejects_plain_target_sequence_var =
+		find_unparameterized_bioseq_custom_path(
+			plain_target_sequence_var.rel, /*target_seq_attno=*/3).scan
+			== nullptr;
+
+	const BatchJoinProjectionGuardFixture whole_row_var =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(makeVar(
+				target_relid, InvalidAttrNumber, RECORDOID,
+				-1, InvalidOid, 0)),
+			13.0,
+			37.0,
+			5.0);
+	const bool rejects_whole_row_var =
+		find_unparameterized_bioseq_custom_path(
+			whole_row_var.rel, /*target_seq_attno=*/3).scan == nullptr;
+
+	const BatchJoinProjectionGuardFixture system_var =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(makeVar(
+				target_relid, SelfItemPointerAttributeNumber, TIDOID,
+				-1, InvalidOid, 0)),
+			13.0,
+			37.0,
+			5.0);
+	const bool rejects_system_var =
+		find_unparameterized_bioseq_custom_path(
+			system_var.rel, /*target_seq_attno=*/3).scan == nullptr;
+
+	Var* nulled_var = makeVar(
+		target_relid, 2, INT4OID, -1, InvalidOid, 0);
+	nulled_var->varnullingrels = bms_make_singleton(
+		static_cast<int>(target_relid));
+	const BatchJoinProjectionGuardFixture nulling_var =
+		make_batch_join_projection_guard_fixture(
+			target_relid,
+			list_make1(nulled_var),
+			13.0,
+			37.0,
+			5.0);
+	const bool rejects_nulling_var =
+		find_unparameterized_bioseq_custom_path(
+			nulling_var.rel, /*target_seq_attno=*/3).scan == nullptr;
+
+	Datum values[9] = {
+		BoolGetDatum(accepts_exact_helper),
+		BoolGetDatum(rejects_unrelated_phv),
+		BoolGetDatum(rejects_volatile_mixed_expression),
+		BoolGetDatum(preserves_wrapper_cost_owner),
+		BoolGetDatum(accepts_plain_target_var),
+		BoolGetDatum(rejects_plain_target_sequence_var),
+		BoolGetDatum(rejects_whole_row_var),
+		BoolGetDatum(rejects_system_var),
+		BoolGetDatum(rejects_nulling_var),
+	};
+	bool nulls[9]{};
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+[[nodiscard]] static bool path_target_contains_expression(
+		const PathTarget* target, const Expr* expression) noexcept {
+	if (target == nullptr || expression == nullptr) {
+		return false;
+	}
+	for (Node* existing : PList<Node>(target->exprs)) {
+		if (equal(existing, expression)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+struct BatchJoinUnderlyingTargetVarCollector {
+	PathTarget* destination = nullptr;
+	Index target_relid = 0;
+	AttrNumber target_seq_attno = InvalidAttrNumber;
+	bool invalid = false;
+};
+
+struct batch_join_underlying_target_var_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor,
+			pg_node_view node,
+			BatchJoinUnderlyingTargetVarCollector& collector) const {
+		Var* var = node.try_as<Var>();
+		if (var == nullptr) {
+			return pg_walk_step::descend;
+		}
+		if (var->varno != collector.target_relid) {
+			return pg_walk_step::skip_subtree;
+		}
+		const bool exact_sequence_var =
+			var->varattno == collector.target_seq_attno
+			&& var->varattno > 0
+			&& var->varlevelsup == 0
+			&& bms_is_empty(var->varnullingrels);
+		if (!exact_sequence_var
+			&& !batch_join_is_safe_plain_target_var(
+				reinterpret_cast<Node*>(var),
+				collector.target_relid,
+				collector.target_seq_attno)) {
+			collector.invalid = true;
+			return pg_walk_step::stop;
+		}
+		/* The sequence Var is installed explicitly below.  Preserve every other
+		 * safe target Var, including a helper's load-bearing argument (normally
+		 * t.pk) hidden below a PlaceHolderVar/compound wrapper.  Skipping the
+		 * whole wrapper because it contains a bioseq helper must not erase that
+		 * base-column dependency from the locator child and combined scan tlist. */
+		if (!exact_sequence_var
+			&& collector.destination != nullptr
+			&& !path_target_contains_expression(
+				collector.destination,
+				reinterpret_cast<Expr*>(var))) {
+			add_column_to_pathtarget(
+				collector.destination,
+				reinterpret_cast<Expr*>(copyObject(var)), 0);
+		}
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+[[nodiscard]] static bool batch_join_append_underlying_target_vars(
+		PathTarget* destination,
+		const PathTarget* source,
+		const Index target_relid,
+		const AttrNumber target_seq_attno) {
+	if (destination == nullptr || source == nullptr || target_relid == 0
+		|| target_seq_attno <= 0) {
+		return false;
+	}
+	BatchJoinUnderlyingTargetVarCollector collector{
+		destination, target_relid, target_seq_attno, false};
+	batch_join_underlying_target_var_visitor visitor;
+	for (Node* expression : PList<Node>(source->exprs)) {
+		if (expression == nullptr) {
+			continue;
+		}
+		pg_walk_expression_including_root(expression, collector, visitor);
+		if (collector.invalid) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static int next_batch_join_plan_token = 1;
+
+[[nodiscard]] static Const* make_batch_join_cost_const(const Cost value) {
+	if (!std::isfinite(value)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin planner cost is not finite")));
+	}
+	return makeConst(
+		FLOAT8OID,
+		-1,
+		InvalidOid,
+		static_cast<int16>(sizeof(float8)),
+		Float8GetDatum(value),
+		false,
+		FLOAT8PASSBYVAL);
+}
+
+[[nodiscard]] static Cost batch_join_cost_from_node(
+		Node* node,
+		const char* field) {
+	Const* value = pg_node_try_as<Const>(node);
+	if (value == nullptr || value->consttype != FLOAT8OID
+		|| value->constisnull
+		|| value->constlen != static_cast<int16>(sizeof(float8))
+		|| value->constbyval != FLOAT8PASSBYVAL) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin cost ABI is invalid"),
+			 errdetail("field=%s", field)));
+	}
+	const Cost decoded = DatumGetFloat8(value->constvalue);
+	if (!std::isfinite(decoded)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin cost ABI is not finite"),
+			 errdetail("field=%s", field)));
+	}
+	return decoded;
+}
+
+static void
+BioseqBatchJoinSetJoinPathlistHook(
+		PlannerInfo* root,
+		RelOptInfo* joinrel,
+		RelOptInfo* outerrel,
+		RelOptInfo* innerrel,
+		JoinType jointype,
+		JoinPathExtraData* extra) {
+	if (PreviousSetJoinPathlistHook != nullptr) {
+		PreviousSetJoinPathlistHook(
+			root, joinrel, outerrel, innerrel, jointype, extra);
+	}
+	if (root == nullptr || joinrel == nullptr || outerrel == nullptr
+		|| innerrel == nullptr || extra == nullptr || jointype != JOIN_INNER
+		|| outerrel->reloptkind != RELOPT_BASEREL
+		|| innerrel->reloptkind != RELOPT_BASEREL
+		|| list_length(extra->restrictlist) != 1) {
+		return;
+	}
+
+	RestrictInfo* restriction = reinterpret_cast<RestrictInfo*>(
+		linitial(extra->restrictlist));
+	FuncExpr* mmsearch = restriction == nullptr
+		? nullptr
+		: pg_node_try_as<FuncExpr>(
+			reinterpret_cast<Node*>(restriction->clause));
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	if (mmsearch == nullptr
+		|| mmsearch->funcid != oids.mmsearch_with_opts_oid
+		|| list_length(mmsearch->args) != 3) {
+		return;
+	}
+	PList<Node> arguments(mmsearch->args);
+	Var* target_var = pg_node_try_as<Var>(arguments.first());
+	Var* query_var = pg_node_try_as<Var>(arguments.second());
+	/* Eligibility is non-throwing: fold only the option expression on a
+	 * private copy, and leave unsupported parameter/volatile/NULL shapes to
+	 * PostgreSQL's ordinary join paths. */
+	auto* batch_mmsearch = static_cast<FuncExpr*>(copyObject(mmsearch));
+	Node* folded_options = eval_const_expressions(
+		root, reinterpret_cast<Node*>(copyObject(arguments.third())));
+	lfirst(list_nth_cell(batch_mmsearch->args, 2)) = folded_options;
+	Const* options = pg_node_try_as<Const>(folded_options);
+	if (target_var == nullptr || query_var == nullptr || options == nullptr
+		|| options->constisnull
+		|| options->consttype != oids.bioseq_aligner_options_type_oid
+		|| target_var->varattno <= 0 || query_var->varattno <= 0
+		|| target_var->vartype != oids.bioseq_seq_type_oid
+		|| query_var->vartype != oids.bioseq_seq_type_oid
+		|| !batch_join_typmod_is_supported(target_var->vartypmod)
+		|| target_var->vartypmod != query_var->vartypmod
+		|| target_var->varcollid != query_var->varcollid) {
+		return;
+	}
+	/* Decode the exact 36-field catalog layout while planning.  The persisted
+	 * requirement is retained as a plan marker; ordinal 2 remains visible to
+	 * plain EXPLAIN but execution rejects it before either child is initialized. */
+	bioseq::simd::active_target::Minimap2Params planned_params =
+		build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement planned_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	(void)apply_aligner_options_override(
+		batch_mmsearch, planned_params, planned_requirement, oids);
+
+	RelOptInfo* target_rel = nullptr;
+	RelOptInfo* query_rel = nullptr;
+	if (target_var->varno == outerrel->relid
+		&& query_var->varno == innerrel->relid) {
+		target_rel = outerrel;
+		query_rel = innerrel;
+	} else if (target_var->varno == innerrel->relid
+			&& query_var->varno == outerrel->relid) {
+		target_rel = innerrel;
+		query_rel = outerrel;
+	} else {
+		return;
+	}
+	RangeTblEntry* target_rte = rt_fetch(target_var->varno, root->parse->rtable);
+	if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION
+		|| !OidIsValid(target_rte->relid)
+		|| !IsBioseqColumnTableAmTable(target_rte->relid)
+		|| batch_join_target_expression_is_forbidden(
+			reinterpret_cast<Node*>(root->processed_tlist), target_var,
+			/*allow_mmsearch_qualifier=*/false)
+		|| batch_join_target_restrictions_are_forbidden(
+			target_rel->baserestrictinfo, target_var,
+			/*allow_mmsearch_qualifier=*/true)) {
+		return;
+	}
+	const auto target_qual_features = detect_restrictinfo_feature_flags(
+		target_rel->baserestrictinfo, oids);
+	const auto query_qual_features = detect_restrictinfo_feature_flags(
+		query_rel->baserestrictinfo, oids);
+	/* The BatchJoin locator child deliberately does not execute its target
+	 * BioseqScan's alignment runtime.  A target-side base mmsearch therefore
+	 * has no safe owner after locator conversion; leave this shape to the
+	 * ordinary parameterized scan, which can consume both the join Param and
+	 * its base qual.  Query-side base mmsearch remains child-owned. */
+	if (!target_qual_features.has_value()
+		|| !query_qual_features.has_value()
+		|| target_qual_features->has_mmsearch
+		|| target_qual_features->any_match_projection
+		|| query_qual_features->any_match_projection) {
+		return;
+	}
+	const BatchJoinBioseqPathCandidate target_candidate =
+		find_unparameterized_bioseq_custom_path(
+			target_rel, target_var->varattno);
+	CustomPath* target_path = target_candidate.scan;
+	Path* query_path = query_rel->cheapest_total_path;
+	if (target_path == nullptr || target_candidate.locator_target == nullptr
+		|| query_path == nullptr
+		|| query_path->param_info != nullptr
+		|| batch_join_path_contains_parallel_execution(query_path)) {
+		return;
+	}
+
+	auto* locator_path = makeNode(CustomPath);
+	*locator_path = *target_path;
+	/* Preserve the wrapper's conservative projection cost when a helper-only
+	 * ProjectionPath was unwrapped. The locator child does not execute those
+	 * helpers, but underpricing the custom join is worse than retaining their
+	 * planner estimate. */
+	locator_path->path.startup_cost = target_candidate.cost_owner->startup_cost;
+	locator_path->path.total_cost = target_candidate.cost_owner->total_cost;
+	locator_path->path.rows = target_candidate.cost_owner->rows;
+	locator_path->path.pathtarget = create_empty_pathtarget();
+	auto append_locator_target = [locator_path](const PathTarget* source) {
+		if (source == nullptr) return;
+		for (Node* expression : PList<Node>(source->exprs)) {
+			if (bioseq_expr_uses_bioseq_projection(expression)
+				|| path_target_contains_expression(
+					locator_path->path.pathtarget,
+					reinterpret_cast<Expr*>(expression))) {
+				continue;
+			}
+			add_column_to_pathtarget(
+				locator_path->path.pathtarget,
+				reinterpret_cast<Expr*>(copyObject(expression)), 0);
+		}
+	};
+	/* Preserve the scan's ordinary expressions and safe plain expressions
+	 * introduced by the wrapper projection. Helper-bearing expressions are
+	 * parent-owned and handled by the recursive Var pass below. */
+	append_locator_target(target_path->path.pathtarget);
+	append_locator_target(target_candidate.locator_target);
+	/* A helper-bearing expression is intentionally not evaluated by the
+	 * locator child, but PostgreSQL setrefs still requires its underlying base
+	 * Vars to exist in the child/combined tlist.  The wrapper PathTarget is the
+	 * usual owner; joinrel->reltarget is the authoritative fallback for an
+	 * upper compound projection. */
+	if (!batch_join_append_underlying_target_vars(
+			locator_path->path.pathtarget,
+			target_candidate.locator_target,
+			target_rel->relid,
+			target_var->varattno)
+		|| !batch_join_append_underlying_target_vars(
+			locator_path->path.pathtarget,
+			joinrel->reltarget,
+			target_rel->relid,
+			target_var->varattno)) {
+		return;
+	}
+	locator_path->custom_private = static_cast<List*>(
+		copyObject(target_path->custom_private));
+	locator_path->custom_paths = static_cast<List*>(
+		copyObject(target_path->custom_paths));
+	if (!path_target_contains_expression(
+			locator_path->path.pathtarget,
+			reinterpret_cast<Expr*>(target_var))) {
+		add_column_to_pathtarget(
+			locator_path->path.pathtarget,
+			reinterpret_cast<Expr*>(copyObject(target_var)), 0);
+	}
+	Const* hidden_rowno = makeConst(
+		INT8OID, -1, InvalidOid, 8, Int64GetDatum(0), false, true);
+	add_column_to_pathtarget(
+		locator_path->path.pathtarget,
+		reinterpret_cast<Expr*>(hidden_rowno), 0);
+	if (next_batch_join_plan_token <= 0
+		|| next_batch_join_plan_token == (std::numeric_limits<int>::max)()) {
+		next_batch_join_plan_token = 1;
+	}
+	const int token = next_batch_join_plan_token++;
+	List* locator_tag = list_make4(
+		makeInteger(kBioseqLocatorPassthroughMagic),
+		makeInteger(kBioseqBatchJoinPlanVersion),
+		makeInteger(token),
+		makeInteger(0));
+	locator_path->custom_private = lappend(
+		locator_path->custom_private, locator_tag);
+	locator_path->path.parallel_safe = false;
+	locator_path->path.parallel_aware = false;
+	locator_path->path.parallel_workers = 0;
+
+	const auto typmod = compact_sequence_stdc_type_params::decode(
+		target_var->vartypmod);
+	auto* join_path = makeNode(CustomPath);
+	join_path->path.pathtype = T_CustomScan;
+	join_path->path.parent = joinrel;
+	join_path->path.pathtarget = copy_pathtarget(joinrel->reltarget);
+	join_path->path.param_info = nullptr;
+	join_path->path.parallel_aware = false;
+	join_path->path.parallel_safe = false;
+	join_path->path.parallel_workers = 0;
+	join_path->path.pathkeys = NIL;
+	join_path->path.rows = std::max(1.0, joinrel->rows);
+	/* The query child is fully materialized before the first output, so its
+	 * complete cost is startup.  The target child is read exactly once; never
+	 * underprice this as startup-only and force an unadmittable custom join. */
+	const double planned_query_rows = std::max(1.0, query_path->rows);
+	const double planned_query_width = std::max(
+		1, query_path->pathtarget == nullptr
+			? 1 : query_path->pathtarget->width);
+	const Cost query_materialization_cost = planned_query_rows
+		* (cpu_tuple_cost
+			+ cpu_operator_cost * (1.0 + planned_query_width / 64.0));
+	const Cost output_cost = join_path->path.rows * cpu_tuple_cost;
+	const Cost honest_startup_cost = query_path->total_cost
+		+ locator_path->path.startup_cost
+		+ query_materialization_cost;
+	const Cost honest_total_cost = std::max(
+		honest_startup_cost,
+		query_path->total_cost
+			+ locator_path->path.total_cost
+			+ query_materialization_cost
+			+ output_cost);
+	if (!std::isfinite(honest_startup_cost)
+		|| !std::isfinite(honest_total_cost)) {
+		return;
+	}
+
+	/* BioseqScan uses a historical negative planner sentinel (-100000 per
+	 * match-result owner) to win against the SQL rendezvous stub. A normal
+	 * parameterized Nested Loop multiplies that sentinel by the estimated
+	 * query rows, while this executor correctly charges its one target child
+	 * once. Consequently an honest BatchJoin cost can never be selected even
+	 * though its physical work is strictly less. After every semantic guard
+	 * above has passed, carry the honest cost as private EXPLAIN evidence but
+	 * place this sole owner path below the finite incumbent join-path floor.
+	 * The 2% margin is intentionally larger than PostgreSQL's fuzzy path-cost
+	 * comparison and remains finite/overflow checked. */
+	Cost incumbent_cost_floor = (std::numeric_limits<Cost>::max)();
+	bool incumbent_cost_present = false;
+	for (Path* incumbent : PList<Path>(joinrel->pathlist)) {
+		if (incumbent == nullptr) continue;
+		if (std::isfinite(incumbent->startup_cost)) {
+			incumbent_cost_floor = std::min(
+				incumbent_cost_floor, incumbent->startup_cost);
+			incumbent_cost_present = true;
+		}
+		if (std::isfinite(incumbent->total_cost)) {
+			incumbent_cost_floor = std::min(
+				incumbent_cost_floor, incumbent->total_cost);
+			incumbent_cost_present = true;
+		}
+	}
+	if (!incumbent_cost_present) {
+		incumbent_cost_floor = std::min(
+			honest_startup_cost, honest_total_cost);
+	}
+	const long double floor_wide = incumbent_cost_floor;
+	const long double preference_margin = std::max<long double>(
+		1.0L, std::abs(floor_wide) * 0.02L);
+	const long double preferred_wide = floor_wide - preference_margin;
+	if (!std::isfinite(preferred_wide)
+		|| preferred_wide
+			< static_cast<long double>(
+				(std::numeric_limits<Cost>::lowest)())) {
+		return;
+	}
+	const Cost preferred_cost = static_cast<Cost>(preferred_wide);
+	join_path->path.startup_cost = std::min(
+		honest_startup_cost, preferred_cost);
+	join_path->path.total_cost = std::min(
+		honest_total_cost, preferred_cost);
+	join_path->flags = 0;
+	join_path->custom_paths = list_make2(locator_path, query_path);
+	join_path->custom_private = list_make5(
+		makeInteger(kBioseqBatchJoinPlanVersion),
+		makeInteger(token),
+		makeInteger(static_cast<int>(target_rte->relid)),
+		makeInteger(target_var->varattno),
+		copyObject(target_var));
+	join_path->custom_private = lappend(
+		join_path->custom_private, copyObject(query_var));
+	join_path->custom_private = lappend(
+		join_path->custom_private, makeInteger(typmod.alphabet_code));
+	join_path->custom_private = lappend(
+		join_path->custom_private,
+		makeInteger(typmod.storage_unit_byte_width));
+	join_path->custom_private = lappend(
+		join_path->custom_private, batch_mmsearch);
+	join_path->custom_private = lappend(
+		join_path->custom_private,
+		makeInteger(static_cast<int>(planned_requirement)));
+	join_path->custom_private = lappend(
+		join_path->custom_private,
+		make_batch_join_cost_const(honest_startup_cost));
+	join_path->custom_private = lappend(
+		join_path->custom_private,
+		make_batch_join_cost_const(honest_total_cost));
+	join_path->custom_private = lappend(
+		join_path->custom_private,
+		make_batch_join_cost_const(incumbent_cost_floor));
+	Assert(list_length(join_path->custom_private)
+		== kBioseqBatchJoinPathPrivateFields);
+	join_path->methods = &BioseqBatchJoinPathMethods;
+	add_path(joinrel, &join_path->path);
 }
 
 
@@ -2435,11 +3793,16 @@ AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 			Path *parallelBioseqColumnScanPath = 
 				AddBioseqColumnScanPath(root, rel, rte, NULL);
 
-			parallelBioseqColumnScanPath->parallel_workers = bioseq_min_parallel_process_running;
-			parallelBioseqColumnScanPath->parallel_aware = true;
-			AdjustBioseqColumnParallelScanCost(parallelBioseqColumnScanPath);
-
-			add_partial_path(rel, parallelBioseqColumnScanPath);
+			if (parallelBioseqColumnScanPath->parallel_safe) {
+				parallelBioseqColumnScanPath->parallel_workers =
+					bioseq_min_parallel_process_running;
+				parallelBioseqColumnScanPath->parallel_aware = true;
+				AdjustBioseqColumnParallelScanCost(
+					parallelBioseqColumnScanPath);
+				add_partial_path(rel, parallelBioseqColumnScanPath);
+			} else {
+				bioseq_log<DBG>("[bioseq] pg: suppressing parallel partial path for alignment-owning custom scan");
+			}
 		}
 	}
 
@@ -2771,19 +4134,27 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * and emits every cross-product row with NULL bioseq.* columns —
 	 * the regression the user reported.
 	 */
+	bool has_mmsearch_scan_qual = false;
 	{
-		const BioseqStubOids& mmsearch_oids = get_cached_stub_oids();
-		for (auto rinfo : allClauses) {
-			Node* clause_node = reinterpret_cast<Node*>(rinfo->clause);
-			if (FuncExpr* fe = pg_node_try_as<FuncExpr>(clause_node)) {
-				if (is_mmsearch_funcid(fe->funcid, mmsearch_oids)) {
+			const BioseqStubOids& mmsearch_oids = get_cached_stub_oids();
+			for (auto rinfo : allClauses) {
+				Node* clause_node = reinterpret_cast<Node*>(rinfo->clause);
+				if (contains_mmsearch_qualifier(clause_node, mmsearch_oids)) {
+					has_mmsearch_scan_qual = true;
 					wehavemagic = true;
 					++wehavemagic_cnt;
-					bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() mmsearch in scan quals adds wehavemagic; new cnt={}",
+					bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() recursively nested mmsearch in scan quals adds wehavemagic; new cnt={}",
 							wehavemagic_cnt);
 				}
 			}
-		}
+	}
+	if (has_mmsearch_scan_qual) {
+		/*
+		 * DOC0371 \u00a75.2: the POC publishes backend-local proof and has no
+		 * DSM aggregation.  A worker-local snapshot must never masquerade as
+		 * leader proof, so every alignment-owning path is parallel unsafe.
+		 */
+		path->parallel_safe = false;
 	}
 
 	/*
@@ -3066,6 +4437,17 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	CustomScan *cscan = makeNode(CustomScan);
 
 	cscan->methods = &BioseqColumnScanScanMethods;
+	cscan->custom_private = NIL;
+	bool locator_passthrough_requested = false;
+	if (list_length(best_path->custom_private) >= 3) {
+		Node* possible_tag = reinterpret_cast<Node*>(
+			list_nth(best_path->custom_private, 2));
+		locator_passthrough_requested = possible_tag != nullptr
+			&& IsA(possible_tag, List)
+			&& list_length(reinterpret_cast<List*>(possible_tag)) == 4
+			&& intVal(list_nth(reinterpret_cast<List*>(possible_tag), 0))
+				== kBioseqLocatorPassthroughMagic;
+	}
 
 	/* XXX: also need to store projected column list for EXPLAIN */
 
@@ -3100,8 +4482,8 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	cscan->scan.plan.qual = extract_actual_clauses(
 		clauses, false /* no pseudoconstants */);
 
-		const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
-		for(auto n : PList<TargetEntry>(root->processed_tlist)) {
+			const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
+			if (!locator_passthrough_requested) for(auto n : PList<TargetEntry>(root->processed_tlist)) {
 			if (FuncExpr* fe = pg_node_try_as<FuncExpr>(pg_as_node(n->expr))) {
 				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
 					|| fe->funcid == plan_stub_oids.symbol_count_oid) {
@@ -3115,6 +4497,32 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
+	if (list_length(best_path->custom_private) >= 3) {
+		Node* tag_node = reinterpret_cast<Node*>(
+			list_nth(best_path->custom_private, 2));
+		if (tag_node != nullptr && IsA(tag_node, List)) {
+			List* tag = reinterpret_cast<List*>(copyObject(tag_node));
+			if (list_length(tag) == 4
+				&& intVal(list_nth(tag, 0))
+					== kBioseqLocatorPassthroughMagic
+				&& intVal(list_nth(tag, 1))
+					== kBioseqBatchJoinPlanVersion) {
+				TargetEntry* rowno_entry = reinterpret_cast<TargetEntry*>(
+					llast(cscan->scan.plan.targetlist));
+				if (rowno_entry == nullptr
+					|| exprType(reinterpret_cast<Node*>(rowno_entry->expr))
+						!= INT8OID) {
+					ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("Bioseq locator passthrough row-number column is missing")));
+				}
+				rowno_entry->resjunk = true;
+				lfirst(list_nth_cell(tag, 3)) =
+					makeInteger(rowno_entry->resno);
+				cscan->custom_private = lappend(cscan->custom_private, tag);
+			}
+		}
+	}
 
 	/*
 	 * Vectorized QUAL execution. Split QUAL list into vectorized list 
@@ -3143,6 +4551,460 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() returning");
 	return reinterpret_cast<Plan *>(cscan);
+}
+
+struct BatchJoinPlaceholderRegistration {
+	const BioseqStubOids* oids = nullptr;
+	Index target_relid = 0;
+	List** combined_tlist = nullptr;
+	List** encoded_sites = nullptr;
+	bool invalid = false;
+};
+
+[[nodiscard]] static bool batch_join_expression_has_match_helper(
+		Node* expression,
+		const BioseqStubOids& oids) {
+	if (expression == nullptr) {
+		return false;
+	}
+	BioseqFeatureDetector detector{&oids, BioseqScanFeatureFlags{}};
+	feature_flag_visitor visitor;
+	pg_walk_expression_including_root(expression, detector, visitor);
+	return detector.flags.any_match_projection;
+}
+
+static void batch_join_register_placeholder_site(
+		Node* identity,
+		FuncExpr* function,
+		BatchJoinPlaceholderRegistration& registration) {
+	if (identity == nullptr || function == nullptr
+		|| registration.combined_tlist == nullptr
+		|| registration.encoded_sites == nullptr) {
+		registration.invalid = true;
+		return;
+	}
+	const Oid type_oid = exprType(identity);
+	const int32 typmod = exprTypmod(identity);
+	const Oid collation = exprCollation(identity);
+	if (!OidIsValid(type_oid)
+		|| type_oid != function->funcresulttype
+		|| type_oid != get_func_rettype(function->funcid)) {
+		registration.invalid = true;
+		return;
+	}
+	const AttrNumber resno = static_cast<AttrNumber>(
+		list_length(*registration.combined_tlist) + 1);
+	/* PostgreSQL fixes a parent Result/Projection before recursing into this
+	 * child.  Therefore plan.targetlist must retain the original helper/PHV
+	 * tree long enough for the parent to match the child's output identity.
+	 * The same exact helper owner is a descriptor-only custom_scan_tlist
+	 * column: this CustomScan's later setrefs pass maps it to INDEX_VAR, and
+	 * BioseqBatchJoin fills the slot from MatchResult.  No executor evaluates
+	 * the function stub.  Distinct PHV ids or FuncExpr identities receive
+	 * distinct resnos even when their SQL result types are the same. */
+	TargetEntry* scan_entry = makeTargetEntry(
+		reinterpret_cast<Expr*>(copyObject(identity)),
+		resno,
+		nullptr,
+		false);
+	*registration.combined_tlist = lappend(
+		*registration.combined_tlist, scan_entry);
+	*registration.encoded_sites = lappend(
+		*registration.encoded_sites,
+		list_make4(
+			makeInteger(resno),
+			makeInteger(static_cast<int>(function->funcid)),
+			makeInteger(typmod),
+			makeInteger(static_cast<int>(collation))));
+}
+
+struct batch_join_placeholder_registration_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+		pg_expression_walk_cursor,
+		pg_node_view node,
+		BatchJoinPlaceholderRegistration& registration) const {
+		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+			FuncExpr* helper = batch_join_exact_helper_phv_function(
+				placeholder, registration.target_relid);
+			if (helper != nullptr) {
+				batch_join_register_placeholder_site(
+					reinterpret_cast<Node*>(placeholder), helper, registration);
+				return registration.invalid
+					? pg_walk_step::stop : pg_walk_step::skip_subtree;
+			}
+			/* A generic PHV containing a helper has evaluation/nulling semantics
+			 * that this join cannot reproduce.  Do not descend and accidentally
+			 * register only the inner FuncExpr. */
+			if (registration.oids != nullptr
+				&& batch_join_expression_has_match_helper(
+					reinterpret_cast<Node*>(placeholder->phexpr),
+					*registration.oids)) {
+				registration.invalid = true;
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::descend;
+		}
+		if (FuncExpr* function = node.try_as<FuncExpr>()) {
+			if (registration.oids != nullptr
+				&& is_bioseq_projection_funcid(
+					function->funcid, *registration.oids)) {
+				FuncExpr* exact = batch_join_exact_target_helper(
+					reinterpret_cast<Node*>(function), registration.target_relid);
+				if (exact == nullptr) {
+					registration.invalid = true;
+					return pg_walk_step::stop;
+				}
+				batch_join_register_placeholder_site(
+					reinterpret_cast<Node*>(function), exact, registration);
+				return registration.invalid
+					? pg_walk_step::stop : pg_walk_step::skip_subtree;
+			}
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+[[nodiscard]] static AttrNumber find_plan_tlist_expression_resno(
+		List* targetlist, const void* expression) noexcept {
+	for (TargetEntry* entry : PList<TargetEntry>(targetlist)) {
+		if (entry != nullptr && equal(entry->expr, expression)) {
+			return entry->resno;
+		}
+	}
+	return InvalidAttrNumber;
+}
+
+struct BatchJoinSetrefsCoverage {
+	List* scan_tlist = NIL;
+	const BioseqStubOids* oids = nullptr;
+	Var* missing_var = nullptr;
+	Node* missing_helper_identity = nullptr;
+};
+
+/* Mirror the relevant fix_upper_expr() lookup order before PostgreSQL's final
+ * setrefs pass.  A CustomScan with scanrelid == 0 must make every output Var
+ * discoverable in custom_scan_tlist; diagnosing that invariant here preserves
+ * the exact offending varno/attno instead of reducing it to PostgreSQL's
+ * generic "variable not found in subplan target list" error. */
+struct batch_join_setrefs_coverage_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor,
+			pg_node_view node,
+			BatchJoinSetrefsCoverage& coverage) const {
+		if (Var* var = node.try_as<Var>()) {
+			for (TargetEntry* entry : PList<TargetEntry>(coverage.scan_tlist)) {
+				Var* supplied = entry == nullptr
+					? nullptr
+					: pg_node_try_as<Var>(
+						reinterpret_cast<Node*>(entry->expr));
+				if (supplied != nullptr
+					&& supplied->varno == var->varno
+					&& supplied->varattno == var->varattno
+					&& bms_equal(
+						supplied->varnullingrels, var->varnullingrels)) {
+					return pg_walk_step::skip_subtree;
+				}
+			}
+			coverage.missing_var = var;
+			return pg_walk_step::stop;
+		}
+		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+			for (TargetEntry* entry : PList<TargetEntry>(coverage.scan_tlist)) {
+				if (entry != nullptr && IsA(entry->expr, PlaceHolderVar)
+					&& equal(entry->expr, placeholder)) {
+					return pg_walk_step::skip_subtree;
+				}
+			}
+			if (coverage.oids != nullptr
+				&& batch_join_expression_has_match_helper(
+					reinterpret_cast<Node*>(placeholder->phexpr),
+					*coverage.oids)) {
+				coverage.missing_helper_identity =
+					reinterpret_cast<Node*>(placeholder);
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::descend;
+		}
+		for (TargetEntry* entry : PList<TargetEntry>(coverage.scan_tlist)) {
+			if (entry != nullptr && entry->expr != nullptr
+				&& !IsA(entry->expr, Var)
+				&& !IsA(entry->expr, PlaceHolderVar)
+				&& equal(entry->expr, node.raw())) {
+				return pg_walk_step::skip_subtree;
+			}
+		}
+		if (FuncExpr* function = node.try_as<FuncExpr>();
+			coverage.oids != nullptr && function != nullptr
+			&& is_bioseq_projection_funcid(
+				function->funcid, *coverage.oids)) {
+			coverage.missing_helper_identity =
+				reinterpret_cast<Node*>(function);
+			return pg_walk_step::stop;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+static void validate_batch_join_setrefs_coverage(
+		List* output_tlist, List* scan_tlist) {
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	BatchJoinSetrefsCoverage coverage{
+		scan_tlist, &oids, nullptr, nullptr};
+	batch_join_setrefs_coverage_visitor visitor;
+	for (TargetEntry* output : PList<TargetEntry>(output_tlist)) {
+		if (output == nullptr || output->expr == nullptr) {
+			continue;
+		}
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(output->expr), coverage, visitor);
+		if (coverage.missing_helper_identity != nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin helper identity is absent from scan tuple"),
+				 errdetail(
+					"node_type=%d scan_columns=%d; executing the SQL helper stub is forbidden",
+					static_cast<int>(nodeTag(
+						coverage.missing_helper_identity)),
+					list_length(scan_tlist))));
+		}
+		if (coverage.missing_var != nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin output variable is absent from scan tuple"),
+				 errdetail(
+					"varno=%u attno=%d type=%u typmod=%d scan_columns=%d",
+					coverage.missing_var->varno,
+					coverage.missing_var->varattno,
+					coverage.missing_var->vartype,
+					coverage.missing_var->vartypmod,
+					list_length(scan_tlist))));
+		}
+	}
+}
+
+static Plan*
+BioseqBatchJoin_PlanCustomPath(
+		PlannerInfo* root,
+		RelOptInfo* rel,
+		CustomPath* best_path,
+		List* tlist,
+		List* clauses,
+		List* custom_plans) {
+	if (root == nullptr || rel == nullptr || best_path == nullptr
+		|| list_length(custom_plans) != 2
+		|| list_length(best_path->custom_private)
+			!= kBioseqBatchJoinPathPrivateFields) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin planner state is incomplete")));
+	}
+	const int version = intVal(list_nth(best_path->custom_private, 0));
+	const int token = intVal(list_nth(best_path->custom_private, 1));
+	const Oid target_relation_oid = static_cast<Oid>(
+		intVal(list_nth(best_path->custom_private, 2)));
+	const AttrNumber target_storage_seq_attno = static_cast<AttrNumber>(
+		intVal(list_nth(best_path->custom_private, 3)));
+	Var* target_var = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+		list_nth(best_path->custom_private, 4)));
+	Var* query_var = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+		list_nth(best_path->custom_private, 5)));
+	const int alphabet_code = intVal(list_nth(best_path->custom_private, 6));
+	const int storage_unit_byte_width =
+		intVal(list_nth(best_path->custom_private, 7));
+	Node* mmsearch_node = reinterpret_cast<Node*>(
+		list_nth(best_path->custom_private, 8));
+	FuncExpr* mmsearch = pg_node_try_as<FuncExpr>(mmsearch_node);
+	const int index_read_requirement = intVal(
+		list_nth(best_path->custom_private, 9));
+	const Cost honest_startup_cost = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(
+			list_nth(best_path->custom_private, 10)),
+		"honest_startup_cost");
+	const Cost honest_total_cost = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(
+			list_nth(best_path->custom_private, 11)),
+		"honest_total_cost");
+	const Cost incumbent_cost_floor = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(
+			list_nth(best_path->custom_private, 12)),
+		"incumbent_cost_floor");
+	if (version != kBioseqBatchJoinPlanVersion || token <= 0
+		|| target_var == nullptr || query_var == nullptr || mmsearch == nullptr
+		|| !bioseq::indexing::index_read_requirement_ordinal_valid(
+			index_read_requirement)
+		|| !batch_join_typmod_is_supported(target_var->vartypmod)
+		|| target_var->vartypmod != query_var->vartypmod
+		|| target_var->varcollid != query_var->varcollid) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin private plan ABI is invalid")));
+	}
+	Plan* target_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
+	Plan* query_plan = reinterpret_cast<Plan*>(lsecond(custom_plans));
+	if (target_plan == nullptr || query_plan == nullptr
+		|| !IsA(target_plan, CustomScan)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin target child is not a custom scan")));
+	}
+	auto* target_custom = reinterpret_cast<CustomScan*>(target_plan);
+	if (target_custom->methods != &BioseqColumnScanScanMethods
+		|| target_custom->scan.scanrelid != target_var->varno
+		|| list_length(target_custom->custom_private) != 1) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin target child lacks locator ownership")));
+	}
+	List* locator_tag = reinterpret_cast<List*>(
+		linitial(target_custom->custom_private));
+	if (locator_tag == nullptr || !IsA(locator_tag, List)
+		|| list_length(locator_tag) != 4
+		|| intVal(list_nth(locator_tag, 0))
+			!= kBioseqLocatorPassthroughMagic
+		|| intVal(list_nth(locator_tag, 1))
+			!= kBioseqBatchJoinPlanVersion
+		|| intVal(list_nth(locator_tag, 2)) != token) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin locator tag/token validation failed")));
+	}
+
+	const AttrNumber target_slot_seq_resno =
+		find_plan_tlist_expression_resno(target_plan->targetlist, target_var);
+	const AttrNumber query_slot_seq_resno =
+		find_plan_tlist_expression_resno(query_plan->targetlist, query_var);
+	const AttrNumber target_slot_rowno_resno = static_cast<AttrNumber>(
+		intVal(list_nth(locator_tag, 3)));
+	if (target_slot_seq_resno <= 0 || query_slot_seq_resno <= 0
+		|| target_slot_rowno_resno <= 0
+		|| target_slot_rowno_resno > list_length(target_plan->targetlist)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin child projection resnos are invalid")));
+	}
+	TargetEntry* target_seq_entry = reinterpret_cast<TargetEntry*>(
+		list_nth(target_plan->targetlist, target_slot_seq_resno - 1));
+	TargetEntry* query_seq_entry = reinterpret_cast<TargetEntry*>(
+		list_nth(query_plan->targetlist, query_slot_seq_resno - 1));
+	TargetEntry* rowno_entry = reinterpret_cast<TargetEntry*>(
+		list_nth(target_plan->targetlist, target_slot_rowno_resno - 1));
+	if (target_seq_entry == nullptr || query_seq_entry == nullptr
+		|| rowno_entry == nullptr || !rowno_entry->resjunk
+		|| target_seq_entry->resno != target_slot_seq_resno
+		|| query_seq_entry->resno != query_slot_seq_resno
+		|| rowno_entry->resno != target_slot_rowno_resno
+		|| exprType(reinterpret_cast<Node*>(rowno_entry->expr)) != INT8OID
+		|| exprTypmod(reinterpret_cast<Node*>(rowno_entry->expr)) != -1
+		|| OidIsValid(exprCollation(reinterpret_cast<Node*>(rowno_entry->expr)))
+		|| exprType(reinterpret_cast<Node*>(target_seq_entry->expr))
+			!= get_cached_stub_oids().bioseq_seq_type_oid
+		|| exprType(reinterpret_cast<Node*>(query_seq_entry->expr))
+			!= get_cached_stub_oids().bioseq_seq_type_oid
+		|| exprTypmod(reinterpret_cast<Node*>(target_seq_entry->expr))
+			!= target_var->vartypmod
+		|| exprTypmod(reinterpret_cast<Node*>(query_seq_entry->expr))
+			!= query_var->vartypmod
+		|| exprCollation(reinterpret_cast<Node*>(target_seq_entry->expr))
+			!= target_var->varcollid
+		|| exprCollation(reinterpret_cast<Node*>(query_seq_entry->expr))
+			!= query_var->varcollid) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("BioseqBatchJoin child sequence/row-number ABI is invalid")));
+	}
+
+	List* combined_tlist = NIL;
+	for (TargetEntry* source : PList<TargetEntry>(target_plan->targetlist)) {
+		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(source));
+		copied->resno = static_cast<AttrNumber>(list_length(combined_tlist) + 1);
+		combined_tlist = lappend(combined_tlist, copied);
+	}
+	const int target_column_count = list_length(combined_tlist);
+	for (TargetEntry* source : PList<TargetEntry>(query_plan->targetlist)) {
+		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(source));
+		copied->resno = static_cast<AttrNumber>(list_length(combined_tlist) + 1);
+		combined_tlist = lappend(combined_tlist, copied);
+	}
+	const int query_column_count =
+		list_length(combined_tlist) - target_column_count;
+
+	List* placeholder_sites = NIL;
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	List* output_tlist = NIL;
+	for (TargetEntry* output : PList<TargetEntry>(tlist)) {
+		if (output == nullptr) {
+			continue;
+		}
+		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(output));
+		BatchJoinPlaceholderRegistration registration{
+			&oids,
+			target_var->varno,
+			&combined_tlist,
+			&placeholder_sites,
+			false};
+		batch_join_placeholder_registration_visitor visitor;
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(copied->expr), registration, visitor);
+		if (registration.invalid) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin match helper identity is invalid"),
+				 errdetail(
+					"only exact target-owned FuncExpr or PlaceHolderVar helper sites are supported")));
+		}
+		output_tlist = lappend(output_tlist, copied);
+	}
+	validate_batch_join_setrefs_coverage(
+		output_tlist, combined_tlist);
+
+	auto* cscan = makeNode(CustomScan);
+	cscan->methods = &BioseqBatchJoinScanMethods;
+	cscan->flags = best_path->flags;
+	cscan->scan.scanrelid = 0;
+	/* Keep the pre-setrefs output expression identities intact.  PostgreSQL
+	 * fixes any upper Result/Projection against this child targetlist before
+	 * it recurses and maps this CustomScan against custom_scan_tlist. */
+	cscan->scan.plan.targetlist = output_tlist;
+	cscan->scan.plan.qual = NIL;
+	cscan->custom_exprs = NIL;
+	cscan->custom_plans = custom_plans;
+	cscan->custom_scan_tlist = combined_tlist;
+	cscan->custom_relids = bms_copy(rel->relids);
+	cscan->custom_private = list_make5(
+		makeInteger(kBioseqBatchJoinPlanVersion),
+		makeInteger(token),
+		makeInteger(static_cast<int>(target_relation_oid)),
+		makeInteger(target_storage_seq_attno),
+		makeInteger(target_slot_seq_resno));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(target_slot_rowno_resno));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(query_slot_seq_resno));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(target_column_count));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(query_column_count));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(alphabet_code));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(storage_unit_byte_width));
+	cscan->custom_private = lappend(cscan->custom_private, placeholder_sites);
+	cscan->custom_private = lappend(
+		cscan->custom_private, copyObject(mmsearch));
+	cscan->custom_private = lappend(
+		cscan->custom_private, makeInteger(index_read_requirement));
+	cscan->custom_private = lappend(
+		cscan->custom_private,
+		make_batch_join_cost_const(honest_startup_cost));
+	cscan->custom_private = lappend(
+		cscan->custom_private,
+		make_batch_join_cost_const(honest_total_cost));
+	cscan->custom_private = lappend(
+		cscan->custom_private,
+		make_batch_join_cost_const(incumbent_cost_floor));
+	Assert(list_length(cscan->custom_private) == kBioseqBatchJoinPrivateFields);
+	(void)clauses; /* the sole consumed mmsearch restriction is intentionally absent */
+	return reinterpret_cast<Plan*>(cscan);
 }
 
 
@@ -3273,15 +5135,181 @@ eval_params(Node *node, ExprContext *econtext)
 	return pg_mutate_expression(node, *econtext, mutator);
 }
 
+enum class MmsearchParamResolution : std::uint8_t {
+	configured,
+	null_value,
+};
+
+/* Resolve the exact Param that registered the primary mmsearch query.  Both
+ * supported Param kinds use PostgreSQL's expression machinery so PARAM_EXEC
+ * and PARAM_EXTERN read from their correct executor-owned storage. */
+[[nodiscard]] static MmsearchParamResolution resolve_mmsearch_param_query(
+		BioseqScanRuntime& runtime,
+		ExprContext* econtext,
+		const char* phase) {
+	if (!runtime.param_rebind.active || econtext == nullptr
+		|| (runtime.param_rebind.paramkind != PARAM_EXEC
+			&& runtime.param_rebind.paramkind != PARAM_EXTERN)
+		|| runtime.param_rebind.mmsearch_fe == nullptr
+		|| list_length(runtime.param_rebind.mmsearch_fe->args) < 2) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq mmsearch Param rebind metadata is invalid"),
+			 errdetail("phase=%s paramid=%d paramkind=%d",
+				phase,
+				runtime.param_rebind.paramid,
+				runtime.param_rebind.paramkind)));
+	}
+
+	PList<Node> arguments(runtime.param_rebind.mmsearch_fe->args);
+	Param* param = pg_node_try_as<Param>(arguments.second());
+	if (param == nullptr
+		|| static_cast<int>(param->paramkind)
+			!= runtime.param_rebind.paramkind
+		|| param->paramid != runtime.param_rebind.paramid
+		|| param->paramtype != runtime.param_rebind.param_typoid
+		|| param->paramtypmod != runtime.param_rebind.param_typmod) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("bioseq mmsearch Param changed after registration"),
+			 errdetail("phase=%s paramid=%d paramkind=%d",
+				phase,
+				runtime.param_rebind.paramid,
+				runtime.param_rebind.paramkind)));
+	}
+
+	Node* folded = eval_params(reinterpret_cast<Node*>(param), econtext);
+	Const* query_const = pg_node_try_as<Const>(folded);
+	if (query_const == nullptr
+		|| query_const->consttype != runtime.param_rebind.param_typoid
+		|| query_const->consttypmod != runtime.param_rebind.param_typmod) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("bioseq mmsearch Param resolved to an invalid value"),
+			 errdetail("phase=%s paramid=%d paramkind=%d",
+				phase,
+				runtime.param_rebind.paramid,
+				runtime.param_rebind.paramkind)));
+	}
+	if (query_const->constisnull) {
+		runtime.buffer.clear_mmsearch_context();
+		bioseq_log<DBG>(
+			"[bioseq] pg: {} mmsearch Param paramid={} kind={} resolved "
+			"to NULL; strict qual matches no rows",
+			phase,
+			runtime.param_rebind.paramid,
+			runtime.param_rebind.paramkind);
+		return MmsearchParamResolution::null_value;
+	}
+
+	pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
+		PG_DETOAST_DATUM(query_const->constvalue));
+	const auto query_type_params = query_hdr->get_type_params();
+	if (query_type_params.alphabet_code
+			!= runtime.param_rebind.alphabet_code
+		|| query_type_params.storage_unit_byte_width
+			!= runtime.param_rebind.storage_unit_byte_width) {
+		const unsigned actual_alphabet = query_type_params.alphabet_code;
+		const unsigned actual_width =
+			query_type_params.storage_unit_byte_width;
+		if (reinterpret_cast<void*>(query_hdr)
+			!= reinterpret_cast<void*>(
+				DatumGetPointer(query_const->constvalue))) {
+			pfree(query_hdr);
+		}
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("bioseq mmsearch Param payload typmod is incompatible"),
+			 errdetail(
+				"phase=%s paramid=%d paramkind=%d "
+				"expected_alphabet=%u expected_width=%u "
+				"actual_alphabet=%u actual_width=%u",
+				phase,
+				runtime.param_rebind.paramid,
+				runtime.param_rebind.paramkind,
+				static_cast<unsigned>(
+					runtime.param_rebind.alphabet_code),
+				static_cast<unsigned>(
+					runtime.param_rebind.storage_unit_byte_width),
+				actual_alphabet,
+				actual_width)));
+	}
+	const std::size_t query_total_bytes =
+		static_cast<std::size_t>(VARSIZE(query_hdr));
+	std::vector<char> query_varlena_bytes(query_total_bytes);
+	std::memcpy(
+		query_varlena_bytes.data(), query_hdr, query_total_bytes);
+	const std::uint32_t bp_size = query_hdr->bp_size;
+	if (reinterpret_cast<void*>(query_hdr)
+		!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
+		pfree(query_hdr);
+	}
+	runtime.buffer.configure_mmsearch(
+		runtime.param_rebind.seq_attno,
+		runtime.param_rebind.column_name,
+		std::move(query_varlena_bytes),
+		runtime.param_rebind.alphabet_code,
+		runtime.param_rebind.storage_unit_byte_width,
+		runtime.param_rebind.primary_key_attno);
+	bioseq_log<DBG>(
+		"[bioseq] pg: {} rebound mmsearch query bp_size={} extras_count={} "
+		"from Param paramid={} kind={}",
+		phase,
+		bp_size,
+		runtime.buffer.extra_query_count(),
+		runtime.param_rebind.paramid,
+		runtime.param_rebind.paramkind);
+	return MmsearchParamResolution::configured;
+}
+
+[[noreturn]] static void raise_column_scan_vulkan_error_as_cpp(
+		std::string_view detail,
+		std::string_view hint) {
+	const std::string owned_detail{detail};
+	const std::string owned_hint{hint};
+	const char* detail_cstr = owned_detail.c_str();
+	const char* hint_cstr = owned_hint.c_str();
+	bioseq::pg_utils::invoke_pg_as_cpp([detail_cstr, hint_cstr] {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg_internal("%s", "Vulkan aligner execution failed"),
+			 errdetail_internal("%s", detail_cstr),
+			 errhint("%s", hint_cstr)));
+	});
+	pg_unreachable();
+}
+
 
 static void
-BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int eflags)
+BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate, int eflags)
 {
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() entered");
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(cscanstate->ss.ps.plan);
 	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(cscanstate);
 	ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
 	cscanstate->ss.ss_currentScanDesc = NULL;
+	register_runtime_cleanup_callback(bioseqScanState, estate);
+	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
+	runtime.locator_passthrough = false;
+	runtime.locator_parent_token = 0;
+	runtime.locator_rowno_resno = InvalidAttrNumber;
+	if (list_length(cscan->custom_private) == 1) {
+		Node* tag_node = reinterpret_cast<Node*>(linitial(cscan->custom_private));
+		if (tag_node != nullptr && IsA(tag_node, List)) {
+			List* tag = reinterpret_cast<List*>(tag_node);
+			if (list_length(tag) != 4
+				|| intVal(list_nth(tag, 0)) != kBioseqLocatorPassthroughMagic
+				|| intVal(list_nth(tag, 1)) != kBioseqBatchJoinPlanVersion) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("Bioseq locator passthrough plan tag is invalid")));
+			}
+			runtime.locator_passthrough = true;
+			runtime.locator_parent_token = intVal(list_nth(tag, 2));
+			runtime.locator_rowno_resno = static_cast<AttrNumber>(
+				intVal(list_nth(tag, 3)));
+		}
+	}
 
 	/*
 	 * Make a new ExprContext just like the existing one, except that we don't
@@ -3311,8 +5339,12 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	}
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() iterating custom_private");
-	for (auto private_const_node : PList<Const>(cscan->custom_private))
+	for (auto private_node : PList<Node>(cscan->custom_private))
 	{
+		Const* private_const_node = pg_node_try_as<Const>(private_node);
+		if (private_const_node == nullptr) {
+			continue;
+		}
 		if (private_const_node->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
 			bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() setting vectorizationAggregate");
@@ -3326,7 +5358,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * filter which can be vectorized.
 	 */
 	bioseqScanState->vectorization.vectorizationEnabled =
-		bioseq_enable_vectorization &&
+		bioseq_enable_vectorization && !runtime.locator_passthrough &&
 		(bioseqScanState->vectorization.vectorizedQualList != NULL ||
 		 bioseqScanState->vectorization.vectorizationAggregate);
 
@@ -3425,7 +5457,6 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * the dispatch buffer so submit_scan has enough context to emit the
 	 * per-tuple log line and buffer the right column values.
 	 */
-	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 	/* Begin is the only place that should drop extras as part of the
 	 * primary reset — every Begin call repopulates them from scratch
 	 * via the qual loop. ReScan / failure paths must NOT drop extras
@@ -3464,6 +5495,8 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	bool primary_is_const = false;
 	AttrNumber primary_seq_attno = InvalidAttrNumber;
 	int32 primary_typmod_packed = -1;
+	FuncExpr* primary_mmsearch_fe = nullptr;
+	std::vector<FuncExpr*> extra_mmsearch_fes;
 
 	/*
 	 * Two-pass qual processing. The previous single-pass loop
@@ -3486,9 +5519,9 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 *
 	 * If we discover a Var-same-rel and a Param in the same plan
 	 * we reject the Param (we only have one primary slot); same for
-	 * multi-Param or multi-Var-same-rel. The user gets a NOTICE
-	 * line and the qual still evaluates as the C stub for those
-	 * dropped cases — same behaviour as before, just made explicit.
+	 * multi-Param or multi-Var-same-rel. Every top-level mmsearch qual must
+	 * be accounted for below: unsupported combinations fail closed rather
+	 * than being evaluated by the always-true SQL rendezvous stub.
 	 */
 	struct ClassifiedMmsearchQual {
 		FuncExpr* fe;
@@ -3499,15 +5532,32 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		bool is_var_same_rel;
 	};
 	std::vector<ClassifiedMmsearchQual> classified_quals;
+	std::size_t top_level_mmsearch_qual_count = 0;
 	for (auto qual_node : PList<Node>(cscan->scan.plan.qual))
 	{
 		FuncExpr* fe_classify = pg_node_try_as<FuncExpr>(qual_node);
-		if (fe_classify == nullptr) {
+		if (fe_classify == nullptr
+			|| !is_mmsearch_funcid(fe_classify->funcid, scan_stub_oids)) {
+			/* The storage-pruning copy deliberately drops every clause whose
+			 * subtree contains mmsearch(), but the alignment runtime currently
+			 * consumes only a top-level mmsearch FuncExpr. Letting a BooleanTest,
+			 * NOT, CASE, COALESCE, or other wrapper proceed would leave the
+			 * runtime unconfigured and evaluate the immutable SQL stub instead.
+			 * That stub is only a planner/executor rendezvous marker and must never
+			 * become the query's alignment result. */
+			if (contains_mmsearch_qualifier(qual_node, scan_stub_oids)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("nested mmsearch qualifier shape is unsupported"),
+					 errdetail("mmsearch must be consumed by the alignment runtime; executing its SQL stub without alignment is forbidden"),
+					 errhint("Place mmsearch(...) directly in a top-level AND conjunct.")));
+			}
 			continue;
 		}
-		if (!is_mmsearch_funcid(fe_classify->funcid, scan_stub_oids)) {
-			continue;
-		}
+		++top_level_mmsearch_qual_count;
+		/* Reject a parameterized/column-valued third argument even when this
+		 * qualifier is later rejected as an unsupported primary/extra shape. */
+		(void) require_aligner_options_const(fe_classify, scan_stub_oids);
 		pg_first_two_node_args classify_args = pg_first_two_args_if_arity_between(*fe_classify, 2, 3);
 		if (!classify_args.present()) {
 			continue;
@@ -3535,8 +5585,8 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * Sort by priority (Var-same-rel > Param > Const) using stable
 	 * partition so quals of equal priority keep planner order. The
 	 * Var-same-rel and Param branches can each fire AT MOST ONCE per
-	 * scan (they consume the single primary slot); subsequent quals
-	 * of the same priority are rejected with a NOTICE.
+	 * scan (they consume the single primary slot); unsupported subsequent
+	 * quals fail closed below.
 	 */
 	std::stable_sort(classified_quals.begin(), classified_quals.end(),
 		[](const ClassifiedMmsearchQual& lhs, const ClassifiedMmsearchQual& rhs) {
@@ -3548,6 +5598,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 			return pri(lhs) < pri(rhs);
 		});
 
+	std::size_t consumed_mmsearch_qual_count = 0;
 	for (auto& classified : classified_quals)
 	{
 		FuncExpr* fe                 = classified.fe;
@@ -3578,21 +5629,14 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 						query_param->paramtype, scan_stub_oids.bioseq_seq_type_oid);
 				continue;
 			}
-			/*
-			 * Only PARAM_EXEC is the planner-internal kind that
-			 * appears for parameterized inner-side NL scans (the
-			 * scenario we want to support — outer Var pushed into
-			 * the inner side as $0). PARAM_EXTERN comes from the
-			 * client protocol and would route through
-			 * `econtext->ecxt_param_list_info` rather than
-			 * `estate->es_param_exec_vals`; treating it the same
-			 * way would silently miss the rebind. Reject other
-			 * kinds for now so the failure is loud rather than
-			 * "rows but cigar empty".
-			 */
-			if (query_param->paramkind != PARAM_EXEC)
+			/* PARAM_EXEC is installed by a parameterized Nested Loop;
+			 * PARAM_EXTERN is supplied by PREPARE/client parameters. The
+			 * shared evaluator below routes each kind through PostgreSQL's
+			 * own ExprContext storage. */
+			if (query_param->paramkind != PARAM_EXEC
+				&& query_param->paramkind != PARAM_EXTERN)
 			{
-				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramkind={}, only PARAM_EXEC supported — bioseq.* projections will be NULL",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has unsupported paramkind={}",
 						static_cast<int>(query_param->paramkind));
 				continue;
 			}
@@ -3651,27 +5695,34 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		} else /* arg1_is_var_same_rel */ {
 			arg1_typmod = reinterpret_cast<Var*>(arg1)->vartypmod;
 		}
-		if (arg1_typmod < 0)
+		const bool runtime_typed_external_param =
+			arg1_is_param && arg1_typmod < 0
+			&& reinterpret_cast<Param*>(arg1)->paramkind == PARAM_EXTERN;
+		if (arg1_typmod < 0 && !runtime_typed_external_param)
 		{
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
 			continue;
 		}
 		const auto unpacked_typmod      = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
-		const auto unpacked_arg1_typmod = compact_sequence_stdc_type_params::decode(arg1_typmod);
+		/* PostgreSQL's generic PREPARE Param retains only the base type OID and
+		 * commonly reports paramtypmod=-1 even when the declaration spells a
+		 * bioseq typmod.  Its varlena header remains authoritative and is checked
+		 * on every Begin/ReScan by resolve_mmsearch_param_query(). */
+		const auto unpacked_arg1_typmod = runtime_typed_external_param
+			? unpacked_typmod
+			: compact_sequence_stdc_type_params::decode(arg1_typmod);
 		const bool typmod_match =
 			(unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code)
 			&& (unpacked_typmod.storage_unit_byte_width == unpacked_arg1_typmod.storage_unit_byte_width);
 		const bool same_alphabet =
 			unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code;
 		/*
-		 * For Param shapes (cross-table mmsearch) we historically
-		 * required exact typmod match; the runtime rebind path does
-		 * NOT have a re-encode hook today (the Param value is only
-		 * resolved during ReScan). Keep that invariant: reject
-		 * Param mismatches so users get a clear log line instead of
-		 * silent NULLs.
+		 * PARAM_EXEC and any PARAM_EXTERN carrying a planner typmod require an
+		 * exact match; the rebind path has no implicit re-encode. A generic
+		 * PARAM_EXTERN with paramtypmod=-1 is checked against the same target
+		 * shape from its physical pgseq header at runtime instead.
 		 */
-		if (arg1_is_param && !typmod_match)
+		if (arg1_is_param && !runtime_typed_external_param && !typmod_match)
 		{
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch (Param) col=({},{}) arg1=({},{}) — rejecting (Param coalesce not yet supported)",
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
@@ -3725,13 +5776,9 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		 * Subsequent mmsearch quals get treated as additional AND
 		 * filters. We require: (a) the primary was Const-driven,
 		 * (b) the extra is also Const-driven, (c) same seq column,
-		 * (d) matching typmod. Anything else is rejected: the qual
-		 * stays in `cscan->scan.plan.qual` and ExecQual evaluates
-		 * mmsearch via the always-true C stub, which silently makes
-		 * the AND-filter behaviour incorrect. We surface this via
-		 * ereport(NOTICE, ...) so the user sees the rejection
-		 * (default client_min_messages includes NOTICE) instead of
-		 * having to enable bioseq.logging.
+		 * (d) matching typmod. Anything else is rejected with ERROR: leaving
+		 * the qual in `scan.plan.qual` would evaluate mmsearch via the
+		 * always-true SQL rendezvous stub and silently weaken the AND.
 		 */
 		if (primary_configured)
 		{
@@ -3756,27 +5803,24 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 			 *     follow-up plan).
 			 */
 			if (!arg1_is_const) {
-				ereport(NOTICE,
-					(errmsg("bioseq: additional mmsearch qual ignored: only Const-typed extras are supported beyond the primary qual (extra_is_const=%d)",
+				ereport(ERROR,
+					(errmsg("bioseq: additional mmsearch qual is unsupported: only Const-typed extras are supported beyond the primary qual (extra_is_const=%d)",
 							arg1_is_const),
+					 errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errhint("Combine quals with the same column and a literal query to AND-filter rows.")));
-				pfree(attname_cstr);
-				continue;
 			}
 			if (col_var->varattno != primary_seq_attno) {
-				ereport(NOTICE,
-					(errmsg("bioseq: additional mmsearch qual ignored: column attno=%d differs from primary attno=%d",
+				ereport(ERROR,
+					(errmsg("bioseq: additional mmsearch qual is unsupported: column attno=%d differs from primary attno=%d",
 							static_cast<int>(col_var->varattno),
-							static_cast<int>(primary_seq_attno))));
-				pfree(attname_cstr);
-				continue;
+							static_cast<int>(primary_seq_attno)),
+					 errcode(ERRCODE_FEATURE_NOT_SUPPORTED)));
 			}
 			if (col_var->vartypmod != primary_typmod_packed) {
-				ereport(NOTICE,
-					(errmsg("bioseq: additional mmsearch qual ignored: typmod=%d differs from primary=%d",
-							col_var->vartypmod, primary_typmod_packed)));
-				pfree(attname_cstr);
-				continue;
+				ereport(ERROR,
+					(errmsg("bioseq: additional mmsearch qual is unsupported: typmod=%d differs from primary=%d",
+							col_var->vartypmod, primary_typmod_packed),
+					 errcode(ERRCODE_FEATURE_NOT_SUPPORTED)));
 			}
 			Const* query_const = reinterpret_cast<Const*>(arg1);
 			pgseq_t* extra_query_hdr = reinterpret_cast<pgseq_t*>(
@@ -3790,6 +5834,8 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 				pfree(extra_query_hdr);
 			}
 			runtime.buffer.add_extra_const_query(std::move(extra_varlena_bytes));
+			extra_mmsearch_fes.push_back(fe);
+			++consumed_mmsearch_qual_count;
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registered additional mmsearch (extra count now {})",
 					runtime.buffer.extra_query_count());
 			pfree(attname_cstr);
@@ -3878,11 +5924,10 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		else if (arg1_is_param)
 		{
 			/*
-			 * Parameterized-query case. Stash the Param coordinates so
-			 * BioseqColumnScan_ReScanCustomScan can resolve them per-rescan
-			 * via EvalParamsMutator. The buffer's mmsearch_context stays
-			 * inactive at Begin; ReScan installs it (or skips this scan
-			 * iteration when the Param resolves to NULL).
+		 * Parameterized-query case. Stash the Param coordinates for the
+		 * shared evaluator. PARAM_EXTERN is available and installed now;
+		 * PARAM_EXEC remains inactive until its Nested Loop parent installs
+		 * the value and calls ReScan.
 			 */
 			Param* query_param = reinterpret_cast<Param*>(arg1);
 			runtime.param_rebind.active            = true;
@@ -3896,6 +5941,11 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 			runtime.param_rebind.storage_unit_byte_width        = unpacked_typmod.storage_unit_byte_width;
 			runtime.param_rebind.primary_key_attno = primary_key_attno;
 			runtime.param_rebind.mmsearch_fe       = fe;
+			if (query_param->paramkind == PARAM_EXTERN) {
+				(void)resolve_mmsearch_param_query(
+					runtime, cscanstate->ss.ps.ps_ExprContext,
+					"BeginCustomScan");
+			}
 			primary_is_const = false;
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
 					query_param->paramid, static_cast<int>(query_param->paramkind),
@@ -3931,6 +5981,8 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		}
 
 		primary_configured = true;
+		++consumed_mmsearch_qual_count;
+		primary_mmsearch_fe = fe;
 		primary_seq_attno = col_var->varattno;
 		primary_typmod_packed = col_var->vartypmod;
 
@@ -3941,6 +5993,16 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		 * `primary_configured` branch above and stack as additional
 		 * AND filters.
 		 */
+	}
+	if (consumed_mmsearch_qual_count != top_level_mmsearch_qual_count
+		&& (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("mmsearch qualifier shape is unsupported"),
+			 errdetail("the alignment runtime consumed %llu of %llu top-level mmsearch qualifiers; executing any remainder through the SQL stub is forbidden",
+				static_cast<unsigned long long>(consumed_mmsearch_qual_count),
+				static_cast<unsigned long long>(top_level_mmsearch_qual_count)),
+			 errhint("Use a bioseq.seq column as the first argument and a non-null Const, PARAM_EXEC, PARAM_EXTERN, or same-relation bioseq.seq Var as the second argument.")));
 	}
 
 	/*
@@ -3956,10 +6018,77 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 */
 	const BioseqScanFeatureFlags features = detect_feature_flags(
 		cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
+	if (features.has_mmsearch && IsParallelWorker()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq alignment custom scans are parallel unsafe"),
+			 errdetail("statement execution attestation is backend-local and DSM aggregation is not implemented")));
+	}
 	bioseq::simd::active_target::Minimap2Params aligner_params = build_params_from_gucs();
-	FuncExpr* mmsearch_fe = find_mmsearch_funcexpr(
-		cscan->scan.plan.qual, scan_stub_oids);
-	apply_aligner_options_override(mmsearch_fe, aligner_params, scan_stub_oids);
+	std::optional<bioseq::indexing::IndexReadRequirement>
+		explicit_index_read_requirement;
+	bioseq::indexing::IndexReadRequirement primary_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	const bool primary_requirement_explicit = apply_aligner_options_override(
+		primary_mmsearch_fe,
+		aligner_params,
+		primary_requirement,
+		scan_stub_oids);
+	if (primary_requirement_explicit) {
+		explicit_index_read_requirement = primary_requirement;
+	}
+	for (FuncExpr* extra_fe : extra_mmsearch_fes) {
+		bioseq::simd::active_target::Minimap2Params ignored_extra_params =
+			aligner_params;
+		bioseq::indexing::IndexReadRequirement extra_requirement =
+			bioseq::indexing::IndexReadRequirement::allow;
+		const bool extra_requirement_explicit = apply_aligner_options_override(
+			extra_fe,
+			ignored_extra_params,
+			extra_requirement,
+			scan_stub_oids);
+		if (!extra_requirement_explicit) {
+			continue;
+		}
+		if (explicit_index_read_requirement.has_value()
+			&& extra_requirement != *explicit_index_read_requirement) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("stacked mmsearch index_read_requirement conflicts: explicit values differ"),
+				 errdetail("first_explicit=%.*s next_explicit=%.*s",
+					 static_cast<int>(bioseq::indexing::index_read_requirement_name(
+						 *explicit_index_read_requirement).size()),
+					 bioseq::indexing::index_read_requirement_name(
+						 *explicit_index_read_requirement).data(),
+					 static_cast<int>(bioseq::indexing::index_read_requirement_name(
+						 extra_requirement).size()),
+					 bioseq::indexing::index_read_requirement_name(
+						 extra_requirement).data())));
+		}
+		explicit_index_read_requirement = extra_requirement;
+	}
+	const bioseq::indexing::IndexReadRequirement index_read_requirement =
+		explicit_index_read_requirement.value_or(
+			bioseq::indexing::IndexReadRequirement::allow);
+	/*
+	 * C1 is deliberately fail-closed: the only currently readable persisted
+	 * MPF/MPS layouts predate the revision-3 READY head+manifest identity.
+	 * They cannot satisfy ordinal 2, and rebuilding pairs or trusting a warm
+	 * assembled/GPU cache would counterfeit a persisted-compatible read.
+	 * Reject executable scans here before Vulkan initialization and retain the
+	 * typed-processor check as defence in depth for non-standard callers. Plain
+	 * EXPLAIN keeps the ordinal visible without initializing either payload.
+	 */
+	if (index_read_requirement
+		== bioseq::indexing::IndexReadRequirement::
+			require_compatible_persisted
+		&& (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("required compatible persisted minimizer index unavailable"),
+			 errdetail("no current MPF or MPS payload has a revision-3 READY identity; legacy directories, the 8-byte MPS shim, and prewarmed assembled/GPU caches are incompatible"),
+			 errhint("Publish and wire a validated revision-3 generation reader, or choose index_read_requirement=allow/require_absent; pair-sort rebuild and recompute fallbacks are forbidden.")));
+	}
 	aligner_params.do_cigar           = features.uses_cigar;
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
@@ -3970,37 +6099,39 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		|| aligner_params.vulkan_extend_enabled
 		|| aligner_params.minimizer_algorithm
 			== bioseq::simd::active_target::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
-		|| aligner_params.chaining_algorithm
-			== bioseq::simd::active_target::ChainingAlgorithmType::VULKAN_TILED_DP;
+			|| aligner_params.chaining_algorithm
+				== bioseq::simd::active_target::ChainingAlgorithmType::VULKAN_TILED_DP;
 	if (features.has_mmsearch && selected_vulkan && !aligner_params.vulkan_enabled) {
-		bioseq_report<ERR, PG>()
-			.code(ERRCODE_INTERNAL_ERROR)
-			.msg("Vulkan aligner execution failed")
-			.detail("selected Vulkan execution requires bioseq.aligner.vulkan_enabled=on")
-			.hint("Set bioseq.aligner.vulkan_enabled=on, or select non-Vulkan minimizer/chaining algorithms before dispatch.");
+		raise_column_scan_vulkan_error_as_cpp(
+			"selected Vulkan execution requires "
+			"bioseq.aligner.vulkan_enabled=on",
+			"Set bioseq.aligner.vulkan_enabled=on, or select non-Vulkan "
+			"minimizer/chaining algorithms before dispatch.");
 	}
 	if (features.has_mmsearch && selected_vulkan && aligner_params.vulkan_enabled) {
-		bioseq::parallelism::pg::install_pg_shader_provider_if_available();
-		bioseq::parallelism::pg::wait_for_runtime_ready();
-		auto& vulkan_runtime = bioseq::gpu::vulkan::Runtime::instance();
+		auto& vulkan_runtime =
+			bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 		if (!vulkan_runtime.usable()) {
-			bioseq_report<ERR, PG>()
-				.code(ERRCODE_INTERNAL_ERROR)
-				.msg("Vulkan aligner execution failed")
-				.detail(
-					"selected Vulkan execution requires a usable Vulkan runtime; initialization_error={}",
-					vulkan_runtime.initialization_error())
-				.hint("Install a working Vulkan ICD, or select non-Vulkan minimizer/chaining algorithms before dispatch.");
+			const std::string diagnostic = fmt::format(
+				"selected Vulkan execution requires a usable Vulkan runtime; "
+				"initialization_error={}",
+				vulkan_runtime.initialization_error());
+			raise_column_scan_vulkan_error_as_cpp(
+				diagnostic,
+				"Install a working Vulkan ICD, or select non-Vulkan "
+				"minimizer/chaining algorithms before dispatch.");
 		}
 		if (vulkan_runtime.features().software_device) {
-			bioseq_report<ERR, PG>()
-				.code(ERRCODE_INTERNAL_ERROR)
-				.msg("Vulkan aligner execution failed")
-				.detail(
-					"selected Vulkan execution requires a hardware GPU; active Vulkan device '{}' is a software/CPU Vulkan device (VkPhysicalDeviceType={})",
-					vulkan_runtime.features().device_name.data(),
-					vulkan_runtime.features().device_type)
-				.hint("Use a hardware Vulkan ICD, or select non-Vulkan minimizer/chaining algorithms before dispatch.");
+			const std::string diagnostic = fmt::format(
+				"selected Vulkan execution requires a hardware GPU; active "
+				"Vulkan device '{}' is a software/CPU Vulkan device "
+				"(VkPhysicalDeviceType={})",
+				vulkan_runtime.features().device_name.data(),
+				vulkan_runtime.features().device_type);
+			raise_column_scan_vulkan_error_as_cpp(
+				diagnostic,
+				"Use a hardware Vulkan ICD, or select non-Vulkan "
+				"minimizer/chaining algorithms before dispatch.");
 		}
 	}
 
@@ -4050,12 +6181,72 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		scan_relfile = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
 	}
 	runtime.buffer.configure_params(aligner_params,
+							index_read_requirement,
 							features.has_mmsearch && bioseq_read_sequence_index,
 							resolved_user_relid,
-							scan_db_oid, scan_spc_oid, scan_relfile);
+							scan_db_oid, scan_spc_oid, scan_relfile,
+							bioseqScanState->snapshot);
+	if (features.has_mmsearch) {
+		const int plan_node_id = cscan->scan.plan.plan_node_id;
+		if (plan_node_id < 0) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq alignment scan has an invalid plan node id")));
+		}
+		runtime.alignment_registration =
+			bioseq::pg::alignment_execution::bind_alignment_node(
+				estate, static_cast<std::uint32_t>(plan_node_id));
+	}
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
+}
+
+static void
+BioseqColumnScan_BeginCustomScan(
+		CustomScanState* cscanstate,
+		EState* estate,
+		int eflags)
+{
+	ErrorData* exact_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char detail[512] = "std::exception without detail";
+	try {
+		BioseqColumnScan_BeginCustomScanImpl(cscanstate, estate, eflags);
+		return;
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		exact_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			detail,
+			error.what() == nullptr ? "std::exception without detail" : error.what(),
+			sizeof(detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+
+	BioseqScanState* state =
+		BioseqScanState::from_custom_scan_state(cscanstate);
+	if (state != nullptr && state->runtime != nullptr) {
+		auto* runtime = static_cast<BioseqScanRuntime*>(state->runtime);
+		runtime->buffer.abandon_join_runtime_after_pg_error_noexcept();
+	}
+	if (exact_error != nullptr) {
+		ReThrowError(exact_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqColumnScan Begin raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqColumnScan Begin raised an unknown C++ exception")));
+	}
 }
 
 /*
@@ -4447,7 +6638,1409 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 			consts.cigar_node->constvalue =
 				bioseq::pg_utils::pg_datum::from_text_cstring(cigar_str.c_str()).raw();
 			consts.cigar_node->constisnull = false;
+			}
+}
+
+[[nodiscard]] static BioseqBatchJoinRuntime* batch_join_runtime(
+		CustomScanState* node) noexcept {
+	auto* state = reinterpret_cast<BioseqBatchJoinState*>(node);
+	return state == nullptr
+		? nullptr
+		: static_cast<BioseqBatchJoinRuntime*>(state->runtime);
+}
+
+static void batch_join_release_executor_resources_checked(
+	CustomScanState* node,
+	BioseqBatchJoinRuntime& runtime,
+	bool delete_query_context);
+
+static void batch_join_abandon_executor_resources_after_error(
+	CustomScanState* node,
+	BioseqBatchJoinRuntime& runtime) noexcept;
+
+static void batch_join_runtime_cleanup(void* argument) {
+	auto* state = static_cast<BioseqBatchJoinState*>(argument);
+	if (state == nullptr || state->runtime == nullptr) {
+		return;
+	}
+	auto* runtime = static_cast<BioseqBatchJoinRuntime*>(state->runtime);
+	batch_join_abandon_executor_resources_after_error(
+		&state->custom_scanstate, *runtime);
+	state->runtime = nullptr;
+	delete runtime;
+}
+
+static void batch_join_clear_query_tuples(
+		BioseqBatchJoinRuntime& runtime,
+		const bool drop_slots) {
+	if (drop_slots) {
+		for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
+			if (query.slot != nullptr) {
+				ExecDropSingleTupleTableSlot(query.slot);
+				query.slot = nullptr;
+			}
 		}
+	}
+	runtime.query_tuples.clear();
+	runtime.all_query_refs.clear();
+	if (runtime.query_tuple_context != nullptr) {
+		MemoryContextReset(runtime.query_tuple_context);
+	}
+	/* The permit covers allocations owned by query_tuple_context (plus the
+	 * MinimalTuple slots above).  Release only after those owners are gone. */
+	runtime.query_permits.clear();
+	runtime.query_reserved_admission_bytes = 0;
+	runtime.query_actual_materialized_bytes = 0;
+	runtime.queries_materialized = false;
+}
+
+/* A child PlanState may legally return a pass-through scan/child slot rather
+ * than its ps_ResultTupleSlot.  Validate the slot that ExecProcNode actually
+ * returned before reading or copying it; the post-setrefs Plan targetlist is
+ * the planning ABI, while this is the independent executor ABI. */
+static void batch_join_validate_returned_child_slot(
+		TupleTableSlot* slot,
+		const int expected_columns,
+		const AttrNumber sequence_resno,
+		const AttrNumber rowno_resno,
+		const std::uint8_t alphabet_code,
+		const std::uint8_t storage_unit_byte_width,
+		const char* role) {
+	TupleDesc descriptor = slot == nullptr
+		? nullptr : slot->tts_tupleDescriptor;
+	const bool rowno_required = rowno_resno != InvalidAttrNumber;
+	if (descriptor == nullptr || expected_columns <= 0
+		|| descriptor->natts != expected_columns
+		|| sequence_resno <= 0 || sequence_resno > expected_columns
+		|| (rowno_required
+			&& (rowno_resno <= 0 || rowno_resno > expected_columns))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin returned %s slot layout is invalid", role),
+			 errdetail(
+				"expected_columns=%d actual_columns=%d sequence_resno=%d rowno_resno=%d",
+				expected_columns,
+				descriptor == nullptr ? -1 : descriptor->natts,
+				sequence_resno,
+				rowno_resno)));
+	}
+	const Oid sequence_type = get_cached_stub_oids().bioseq_seq_type_oid;
+	const int32 expected_typmod = compact_sequence_stdc_type_params{
+		alphabet_code, storage_unit_byte_width}.encode();
+	Form_pg_attribute sequence_attribute = TupleDescAttr(
+		descriptor, sequence_resno - 1);
+	Form_pg_attribute rowno_attribute = rowno_required
+		? TupleDescAttr(descriptor, rowno_resno - 1) : nullptr;
+	if (sequence_attribute->atttypid != sequence_type
+		|| sequence_attribute->atttypmod != expected_typmod
+		|| sequence_attribute->attcollation != get_typcollation(sequence_type)
+		|| (rowno_required
+			&& (rowno_attribute->atttypid != INT8OID
+				|| rowno_attribute->atttypmod != -1
+				|| OidIsValid(rowno_attribute->attcollation)))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("BioseqBatchJoin returned %s slot types are invalid", role),
+			 errdetail(
+				"sequence_type=%u sequence_typmod=%d sequence_collation=%u rowno_type=%u rowno_typmod=%d rowno_collation=%u",
+				sequence_attribute->atttypid,
+				sequence_attribute->atttypmod,
+				sequence_attribute->attcollation,
+				rowno_attribute == nullptr
+					? InvalidOid : rowno_attribute->atttypid,
+				rowno_attribute == nullptr
+					? -1 : rowno_attribute->atttypmod,
+				rowno_attribute == nullptr
+					? InvalidOid : rowno_attribute->attcollation)));
+	}
+}
+
+static void batch_join_materialize_queries(
+		BioseqBatchJoinRuntime& runtime) {
+	if (runtime.queries_materialized) {
+		return;
+	}
+	if (runtime.query_child == nullptr || runtime.query_tuple_context == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin query child is not initialized")));
+	}
+	if (!std::isfinite(runtime.query_planner_rows)
+		|| runtime.query_planner_rows < 0.0
+		|| runtime.query_planner_width < 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqBatchJoin query planner estimate is invalid")));
+	}
+	/* Reserve the planner's rows*width envelope before asking the child for
+	 * its first tuple.  Actual whole-MinimalTuple upper bounds below extend
+	 * this reservation before detoast/copy whenever the estimate is low. */
+	const double bounded_rows = std::min(
+		runtime.query_planner_rows,
+		static_cast<double>((std::numeric_limits<std::uint64_t>::max)()));
+	const std::uint64_t planner_rows = static_cast<std::uint64_t>(
+		std::ceil(bounded_rows));
+	const std::uint64_t planner_tuple_bytes =
+		bioseq::parallelism::saturating_add(
+			static_cast<std::uint64_t>(runtime.query_planner_width),
+			static_cast<std::uint64_t>(
+				MAXALIGN(MINIMAL_TUPLE_DATA_OFFSET)
+				+ sizeof(BioseqBatchJoinQueryTuple)
+				+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+				+ 256u));
+	runtime.query_planner_admission_bytes =
+		bioseq::parallelism::saturating_mul(
+			planner_rows, planner_tuple_bytes);
+	auto planner_permit =
+		bioseq::parallelism::MemoryAdmissionController::instance()
+			.try_reserve(runtime.query_planner_admission_bytes);
+	if (!planner_permit.has_value()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OUT_OF_MEMORY),
+			 errmsg("BioseqBatchJoin planned query relation cannot be admitted"),
+			 errdetail("planned_rows=%.0f planned_width=%d required_bytes=%llu",
+				runtime.query_planner_rows,
+				runtime.query_planner_width,
+				static_cast<unsigned long long>(
+					runtime.query_planner_admission_bytes))));
+	}
+	runtime.query_reserved_admission_bytes =
+		runtime.query_planner_admission_bytes;
+	runtime.query_permits.push_back(std::move(*planner_permit));
+	for (;;) {
+		TupleTableSlot* source = ExecProcNode(runtime.query_child);
+		if (TupIsNull(source)) {
+			break;
+		}
+		batch_join_validate_returned_child_slot(
+			source,
+			runtime.query_column_count,
+			runtime.query_slot_seq_resno,
+			InvalidAttrNumber,
+			runtime.alphabet_code,
+			runtime.storage_unit_byte_width,
+			"query");
+		slot_getallattrs(source);
+		bool query_is_null = source->tts_isnull[
+			runtime.query_slot_seq_resno - 1];
+		if (query_is_null) {
+			ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("BioseqBatchJoin query sequence is NULL")));
+		}
+		const Datum original = source->tts_values[
+			runtime.query_slot_seq_resno - 1];
+		const std::uint64_t raw_query_bytes = static_cast<std::uint64_t>(
+			toast_raw_datum_size(original));
+		const Size source_tuple_data = heap_compute_data_size(
+			source->tts_tupleDescriptor,
+			source->tts_values,
+			source->tts_isnull);
+		std::uint64_t tuple_upper_bound =
+			bioseq::parallelism::saturating_add(
+				static_cast<std::uint64_t>(
+					MAXALIGN(MINIMAL_TUPLE_DATA_OFFSET)),
+				static_cast<std::uint64_t>(source_tuple_data));
+		/* source_tuple_data includes the original (possibly external TOAST)
+		 * sequence datum. Adding the raw size rather than subtracting that datum
+		 * is deliberately conservative and covers the flat replacement without
+		 * inspecting or allocating any pass-by-reference value. */
+		tuple_upper_bound = bioseq::parallelism::saturating_add(
+			tuple_upper_bound, raw_query_bytes);
+		tuple_upper_bound = bioseq::parallelism::saturating_add(
+			tuple_upper_bound,
+			static_cast<std::uint64_t>(
+				sizeof(BioseqBatchJoinQueryTuple)
+				+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+				+ sizeof(TupleTableSlot)
+				+ static_cast<std::size_t>(
+					source->tts_tupleDescriptor->natts)
+					* (sizeof(Datum) + sizeof(bool))));
+		const std::uint64_t required_after_row =
+			bioseq::parallelism::saturating_add(
+				runtime.query_actual_materialized_bytes,
+				tuple_upper_bound);
+		if (required_after_row
+			== (std::numeric_limits<std::uint64_t>::max)()) {
+			ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("BioseqBatchJoin query admission size overflow")));
+		}
+		if (required_after_row > runtime.query_reserved_admission_bytes) {
+			const std::uint64_t additional_bytes = required_after_row
+				- runtime.query_reserved_admission_bytes;
+			auto additional_permit =
+				bioseq::parallelism::MemoryAdmissionController::instance()
+					.try_reserve(additional_bytes);
+			if (!additional_permit.has_value()) {
+				ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("BioseqBatchJoin query child cannot be admitted"),
+					 errdetail("query_ordinal=%zu required_additional_bytes=%llu whole_tuple_upper_bound=%llu",
+						runtime.query_tuples.size(),
+						static_cast<unsigned long long>(additional_bytes),
+						static_cast<unsigned long long>(tuple_upper_bound))));
+			}
+			runtime.query_permits.push_back(std::move(*additional_permit));
+			runtime.query_reserved_admission_bytes = required_after_row;
+		}
+		/* Every following operation may allocate; the complete tuple upper
+		 * bound is owned before the first detoast/copy. */
+		pgseq_t* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(original));
+		if (bioseq::storage::is_locator_stub(flat)) {
+			if (reinterpret_cast<void*>(flat)
+				!= reinterpret_cast<void*>(DatumGetPointer(original))) {
+				pfree(flat);
+			}
+				ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("BioseqBatchJoin query child did not materialize its sequence")));
+		}
+		if (flat->alphabet_code != runtime.alphabet_code
+			|| flat->storage_unit_byte_width
+				!= runtime.storage_unit_byte_width) {
+			if (reinterpret_cast<void*>(flat)
+				!= reinterpret_cast<void*>(DatumGetPointer(original))) {
+				pfree(flat);
+			}
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin query typmod changed after planning")));
+		}
+		source->tts_values[runtime.query_slot_seq_resno - 1] =
+			PointerGetDatum(flat);
+		MemoryContext old = MemoryContextSwitchTo(
+			runtime.query_tuple_context);
+		MinimalTuple copy = ExecCopySlotMinimalTuple(source);
+		MemoryContextSwitchTo(old);
+		if (reinterpret_cast<void*>(flat)
+			!= reinterpret_cast<void*>(DatumGetPointer(original))) {
+			pfree(flat);
+			source->tts_values[runtime.query_slot_seq_resno - 1] = original;
+		}
+		if (copy == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("BioseqBatchJoin failed to copy a query tuple")));
+		}
+		const std::uint64_t actual_tuple_bytes =
+			bioseq::parallelism::saturating_add(
+				static_cast<std::uint64_t>(copy->t_len),
+				static_cast<std::uint64_t>(
+					sizeof(BioseqBatchJoinQueryTuple)
+					+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+					+ sizeof(TupleTableSlot)));
+		runtime.query_actual_materialized_bytes =
+			bioseq::parallelism::saturating_add(
+				runtime.query_actual_materialized_bytes,
+				actual_tuple_bytes);
+		if (runtime.query_actual_materialized_bytes
+			> runtime.query_reserved_admission_bytes) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin whole-tuple admission under-estimated its allocation")));
+		}
+		const std::uint64_t ordinal = runtime.query_tuples.size();
+		if (ordinal
+			> static_cast<std::uint64_t>(
+				(std::numeric_limits<std::int32_t>::max)())) {
+			ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("BioseqBatchJoin query ordinal exceeds int32 dispatch ABI")));
+		}
+		TupleTableSlot* stable_slot = MakeSingleTupleTableSlot(
+			source->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+		ExecStoreMinimalTuple(copy, stable_slot, /*shouldFree=*/false);
+		slot_getallattrs(stable_slot);
+		runtime.query_tuples.push_back(BioseqBatchJoinQueryTuple{
+			.tuple = copy,
+			.slot = stable_slot,
+			.ordinal = ordinal,
+		});
+	}
+	runtime.all_query_refs.reserve(runtime.query_tuples.size());
+	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
+		runtime.all_query_refs.push_back(
+			bioseq::scheduler::DispatchJoinQueryRef{
+				.ordinal = query.ordinal,
+				.query_slot = query.slot,
+			});
+	}
+	runtime.queries_materialized = true;
+}
+
+static void batch_join_set_placeholder_value(
+		TupleTableSlot* slot,
+		const BioseqBatchJoinPlaceholderSite& site,
+		const bioseq::simd::active_target::MatchResult& match,
+		const BioseqStubOids& oids,
+		MemoryContext output_context) {
+	if (slot == nullptr || site.resno <= 0
+		|| site.resno > slot->tts_tupleDescriptor->natts) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin placeholder resno is invalid")));
+	}
+	Datum value = static_cast<Datum>(0);
+	bool is_null = false;
+	auto bigint = [&value](const std::uint64_t input) {
+		if (input > static_cast<std::uint64_t>(INT64_MAX)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("BioseqBatchJoin match coordinate exceeds bigint")));
+		}
+		value = Int64GetDatum(static_cast<std::int64_t>(input));
+	};
+	if (site.funcid == oids.score_oid || site.funcid == oids.dp_score_oid) {
+		value = Int32GetDatum(match.dp_score);
+	} else if (site.funcid == oids.query_len_oid) {
+		bigint(match.query_len);
+	} else if (site.funcid == oids.query_start_oid) {
+		bigint(match.query_start);
+	} else if (site.funcid == oids.query_end_oid) {
+		bigint(match.query_end);
+	} else if (site.funcid == oids.target_len_oid) {
+		bigint(match.target_len);
+	} else if (site.funcid == oids.target_start_oid) {
+		bigint(match.target_start);
+	} else if (site.funcid == oids.target_end_oid) {
+		bigint(match.target_end);
+	} else if (site.funcid == oids.num_matches_oid) {
+		bigint(match.num_matches);
+	} else if (site.funcid == oids.block_length_oid) {
+		bigint(match.block_length);
+	} else if (site.funcid == oids.mapq_oid) {
+		value = Int32GetDatum(match.mapq);
+	} else if (site.funcid == oids.chain_score_oid) {
+		value = Int32GetDatum(match.chain_score);
+	} else if (site.funcid == oids.dp_max_score_oid) {
+		value = Int32GetDatum(match.dp_max_score);
+	} else if (site.funcid == oids.seed_count_oid) {
+		value = Int32GetDatum(match.seed_count);
+	} else if (site.funcid == oids.secondary_chain_score_oid) {
+		value = Int32GetDatum(match.secondary_chain_score);
+	} else if (site.funcid == oids.is_reverse_oid) {
+		value = BoolGetDatum(match.is_reverse);
+	} else if (site.funcid == oids.is_primary_oid) {
+		value = BoolGetDatum(match.is_primary);
+	} else if (site.funcid == oids.has_cigar_oid) {
+		value = BoolGetDatum(match.has_cigar);
+	} else if (site.funcid == oids.divergence_oid) {
+		value = Float4GetDatum(match.divergence);
+	} else if (site.funcid == oids.cigar_oid) {
+		const std::string cigar =
+			bioseq::simd::active_target::format_cigar(match.cigar);
+		MemoryContext previous = MemoryContextSwitchTo(output_context);
+		value = CStringGetTextDatum(cigar.c_str());
+		MemoryContextSwitchTo(previous);
+	} else {
+		is_null = true;
+	}
+	slot->tts_values[site.resno - 1] = value;
+	slot->tts_isnull[site.resno - 1] = is_null;
+}
+
+static TupleTableSlot* batch_join_project_output(
+		CustomScanState* node,
+		BioseqBatchJoinRuntime& runtime,
+		const bioseq::scheduler::DispatchNextOutput& output) {
+	if (output.scan_slot_copy == nullptr || output.match == nullptr
+		|| output.query_ordinal >= runtime.query_tuples.size()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqBatchJoin output references invalid inputs")));
+	}
+	ExprContext* expression_context = node->ss.ps.ps_ExprContext;
+	if (expression_context == nullptr
+		|| expression_context->ecxt_per_tuple_memory == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin expression context is missing")));
+	}
+	/* We bypass ExecScan, so own the per-output reset it would normally do. */
+	ResetExprContext(expression_context);
+	TupleTableSlot* query_slot = runtime.query_tuples[
+		output.query_ordinal].slot;
+	TupleTableSlot* combined = node->ss.ss_ScanTupleSlot;
+	ExecClearTuple(combined);
+	slot_getallattrs(output.scan_slot_copy);
+	slot_getallattrs(query_slot);
+	if (runtime.target_column_count
+		> output.scan_slot_copy->tts_tupleDescriptor->natts
+		|| runtime.query_column_count
+		> query_slot->tts_tupleDescriptor->natts
+		|| runtime.target_column_count + runtime.query_column_count
+			> combined->tts_tupleDescriptor->natts) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin combined tuple layout is invalid")));
+	}
+	for (int i = 0; i < runtime.target_column_count; ++i) {
+		combined->tts_values[i] = output.scan_slot_copy->tts_values[i];
+		combined->tts_isnull[i] = output.scan_slot_copy->tts_isnull[i];
+	}
+	for (int i = 0; i < runtime.query_column_count; ++i) {
+		const int destination = runtime.target_column_count + i;
+		combined->tts_values[destination] = query_slot->tts_values[i];
+		combined->tts_isnull[destination] = query_slot->tts_isnull[i];
+	}
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	for (const BioseqBatchJoinPlaceholderSite& site : runtime.placeholder_sites) {
+		batch_join_set_placeholder_value(
+			combined, site, *output.match, oids,
+			expression_context->ecxt_per_tuple_memory);
+	}
+	ExecStoreVirtualTuple(combined);
+	expression_context->ecxt_scantuple = combined;
+	return node->ss.ps.ps_ProjInfo != nullptr
+		? ExecProject(node->ss.ps.ps_ProjInfo)
+		: combined;
+}
+
+static Node* BioseqBatchJoin_CreateCustomScanState(CustomScan* cscan) {
+	(void)cscan;
+	auto* state = reinterpret_cast<BioseqBatchJoinState*>(
+		newNode(sizeof(BioseqBatchJoinState), T_CustomScanState));
+	state->custom_scanstate.methods = &BioseqBatchJoinExecuteMethods;
+	state->runtime = nullptr;
+	return reinterpret_cast<Node*>(&state->custom_scanstate);
+}
+
+static void BioseqBatchJoin_BeginCustomScan(
+		CustomScanState* node, EState* estate, int eflags) {
+	auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+	if (IsParallelWorker() || cscan == nullptr
+		|| cscan->scan.scanrelid != 0
+		|| list_length(cscan->custom_plans) != 2
+		|| cscan->scan.plan.qual != NIL
+		|| cscan->custom_exprs != NIL
+		|| node->custom_ps != NIL
+		|| list_length(cscan->custom_private)
+			!= kBioseqBatchJoinPrivateFields) {
+			ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("BioseqBatchJoin executor shape is invalid or parallel")));
+	}
+	/* custom_scan_tlist deliberately retains original helper/PHV identities
+	 * as descriptor-only columns, but PostgreSQL setrefs must have removed
+	 * every helper from the executable plan targetlist.  If that contract ever
+	 * changes, fail before child initialization instead of silently executing a
+	 * rendezvous stub (which would fabricate a CPU-looking success). */
+	for (TargetEntry* output : PList<TargetEntry>(
+			cscan->scan.plan.targetlist)) {
+		if (output != nullptr && output->expr != nullptr
+			&& batch_join_expression_has_match_helper(
+				reinterpret_cast<Node*>(output->expr),
+				get_cached_stub_oids())) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin executable projection retained a match helper"),
+				 errdetail(
+					"setrefs did not map every helper identity to an executor-owned scan slot; no child was initialized")));
+		}
+	}
+	auto* state = reinterpret_cast<BioseqBatchJoinState*>(node);
+	auto* runtime = new BioseqBatchJoinRuntime{};
+	state->runtime = runtime;
+	runtime->cleanup_callback.func = batch_join_runtime_cleanup;
+	runtime->cleanup_callback.arg = state;
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile original_error = nullptr;
+	std::exception_ptr cpp_error;
+	PG_TRY();
+	{
+	  try {
+		MemoryContextRegisterResetCallback(
+			estate->es_query_cxt, &runtime->cleanup_callback);
+		auto private_integer = [cscan](const int index) -> int {
+			Node* encoded = reinterpret_cast<Node*>(
+				list_nth(cscan->custom_private, index));
+			if (encoded == nullptr || !IsA(encoded, Integer)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqBatchJoin private integer ABI is invalid"),
+					 errdetail("field=%d", index)));
+			}
+			return intVal(encoded);
+		};
+		const int version = private_integer(kBatchJoinVersion);
+		const int token = private_integer(kBatchJoinToken);
+		runtime->target_relation_oid = static_cast<Oid>(
+			private_integer(kBatchJoinTargetRelationOid));
+		runtime->target_storage_seq_attno = static_cast<AttrNumber>(
+			private_integer(kBatchJoinTargetStorageSeqAttno));
+		runtime->target_slot_seq_resno = static_cast<AttrNumber>(
+			private_integer(kBatchJoinTargetSlotSeqResno));
+		runtime->target_slot_rowno_resno = static_cast<AttrNumber>(
+			private_integer(kBatchJoinTargetSlotRownoResno));
+		runtime->query_slot_seq_resno = static_cast<AttrNumber>(
+			private_integer(kBatchJoinQuerySlotSeqResno));
+		runtime->target_column_count =
+			private_integer(kBatchJoinTargetColumnCount);
+		runtime->query_column_count =
+			private_integer(kBatchJoinQueryColumnCount);
+		const int raw_alphabet_code = private_integer(kBatchJoinAlphabetCode);
+		const int raw_storage_width =
+			private_integer(kBatchJoinStorageUnitByteWidth);
+		const int raw_requirement =
+			private_integer(kBatchJoinIndexReadRequirement);
+		runtime->honest_startup_cost = batch_join_cost_from_node(
+			reinterpret_cast<Node*>(list_nth(
+				cscan->custom_private, kBatchJoinHonestStartupCost)),
+			"honest_startup_cost");
+		runtime->honest_total_cost = batch_join_cost_from_node(
+			reinterpret_cast<Node*>(list_nth(
+				cscan->custom_private, kBatchJoinHonestTotalCost)),
+			"honest_total_cost");
+		runtime->incumbent_cost_floor = batch_join_cost_from_node(
+			reinterpret_cast<Node*>(list_nth(
+				cscan->custom_private, kBatchJoinIncumbentCostFloor)),
+			"incumbent_cost_floor");
+		Node* sites_node = reinterpret_cast<Node*>(
+			list_nth(cscan->custom_private, kBatchJoinPlaceholderSites));
+		/* PostgreSQL's canonical empty List is NIL, i.e. a null pointer.  Keep
+		 * shape validity separate from the decoded pointer so an empty helper
+		 * set is valid while every non-List node remains fail-closed. */
+		const bool sites_shape_valid =
+			sites_node == nullptr || IsA(sites_node, List);
+		List* sites = sites_node == nullptr
+			? NIL : reinterpret_cast<List*>(sites_node);
+		FuncExpr* mmsearch = pg_node_try_as<FuncExpr>(
+			reinterpret_cast<Node*>(
+				list_nth(cscan->custom_private, kBatchJoinMmsearchExpr)));
+		if (version != kBioseqBatchJoinPlanVersion || token <= 0
+			|| !OidIsValid(runtime->target_relation_oid)
+			|| runtime->target_storage_seq_attno <= 0
+			|| runtime->target_slot_seq_resno <= 0
+			|| runtime->target_slot_rowno_resno <= 0
+			|| runtime->query_slot_seq_resno <= 0
+			|| runtime->target_column_count <= 0
+			|| runtime->query_column_count <= 0
+			|| raw_alphabet_code < 0 || raw_alphabet_code > UINT8_MAX
+			|| (raw_storage_width != 1 && raw_storage_width != 2
+				&& raw_storage_width != 4 && raw_storage_width != 8)
+			|| !bioseq::indexing::index_read_requirement_ordinal_valid(
+				raw_requirement)
+			|| !sites_shape_valid || mmsearch == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin executor private ABI is invalid")));
+		}
+		runtime->alphabet_code = static_cast<std::uint8_t>(raw_alphabet_code);
+		runtime->storage_unit_byte_width =
+			static_cast<std::uint8_t>(raw_storage_width);
+		const int32 expected_typmod = compact_sequence_stdc_type_params{
+			runtime->alphabet_code,
+			runtime->storage_unit_byte_width}.encode();
+		if (!batch_join_typmod_is_supported(expected_typmod)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin encoded typmod is unsupported")));
+		}
+		runtime->index_read_requirement =
+			static_cast<bioseq::indexing::IndexReadRequirement>(
+				raw_requirement);
+		runtime->explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
+
+		/* Re-decode the catalog composite before any child initialization.  This
+		 * catches catalog drift and proves the ordinal marker was not altered
+		 * between planning and execution. */
+		bioseq::simd::active_target::Minimap2Params prevalidated_params =
+			build_params_from_gucs();
+		bioseq::indexing::IndexReadRequirement decoded_requirement =
+			bioseq::indexing::IndexReadRequirement::allow;
+		(void)apply_aligner_options_override(
+			mmsearch, prevalidated_params, decoded_requirement,
+			get_cached_stub_oids());
+		if (decoded_requirement != runtime->index_read_requirement) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin index requirement marker disagrees with options")));
+		}
+		if (runtime->index_read_requirement
+				== bioseq::indexing::IndexReadRequirement::
+				require_compatible_persisted
+			&& !runtime->explain_only) {
+			ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("required compatible persisted minimizer index unavailable"),
+				 errdetail("no current MPF or MPS payload has a revision-3 READY identity; revision-3 locator/GPU readers remain fail closed and no child was initialized")));
+		}
+
+		TupleDesc scan_desc = node->ss.ss_ScanTupleSlot == nullptr
+			? nullptr : node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		const std::int64_t child_column_count =
+			static_cast<std::int64_t>(runtime->target_column_count)
+			+ static_cast<std::int64_t>(runtime->query_column_count);
+		if (scan_desc == nullptr || child_column_count <= 0
+			|| child_column_count > scan_desc->natts
+			|| list_length(sites)
+				!= scan_desc->natts - child_column_count) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin scan tuple/private layout is invalid"),
+				 errdetail(
+					"target_columns=%d query_columns=%d scan_columns=%d placeholder_sites=%d",
+					runtime->target_column_count,
+					runtime->query_column_count,
+					scan_desc == nullptr ? -1 : scan_desc->natts,
+					list_length(sites))));
+		}
+		Bitmapset* placeholder_resnos = nullptr;
+		for (List* encoded : PList<List>(sites)) {
+			Node* encoded_node = reinterpret_cast<Node*>(encoded);
+			if (encoded_node == nullptr || !IsA(encoded_node, List)
+				|| list_length(encoded) != 4) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqBatchJoin placeholder ABI is invalid")));
+			}
+			for (int index = 0; index < 4; ++index) {
+				Node* value = reinterpret_cast<Node*>(list_nth(encoded, index));
+				if (value == nullptr || !IsA(value, Integer)) {
+					ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("BioseqBatchJoin placeholder scalar ABI is invalid")));
+				}
+			}
+			const int raw_resno = intVal(list_nth(encoded, 0));
+			const bool duplicate_resno = raw_resno > 0
+				&& bms_is_member(raw_resno, placeholder_resnos);
+			if (raw_resno <= child_column_count
+				|| raw_resno > scan_desc->natts
+				|| duplicate_resno) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqBatchJoin placeholder resno ABI is invalid"),
+					 errdetail(
+						"resno=%d child_columns=%lld scan_columns=%d duplicate=%s",
+						raw_resno,
+						static_cast<long long>(child_column_count),
+						scan_desc->natts,
+						duplicate_resno ? "true" : "false")));
+			}
+			placeholder_resnos = bms_add_member(
+				placeholder_resnos, raw_resno);
+			const BioseqBatchJoinPlaceholderSite site{
+				.resno = static_cast<AttrNumber>(raw_resno),
+				.funcid = static_cast<Oid>(intVal(list_nth(encoded, 1))),
+				.typmod = intVal(list_nth(encoded, 2)),
+				.collation = static_cast<Oid>(intVal(list_nth(encoded, 3))),
+			};
+			Form_pg_attribute attribute = scan_desc == nullptr
+				|| site.resno <= 0 || site.resno > scan_desc->natts
+				? nullptr : TupleDescAttr(scan_desc, site.resno - 1);
+			if (attribute == nullptr
+				|| !is_bioseq_projection_funcid(
+					site.funcid, get_cached_stub_oids())
+				|| attribute->atttypid != get_func_rettype(site.funcid)
+				|| attribute->atttypmod != site.typmod
+				|| attribute->attcollation != site.collation) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("BioseqBatchJoin placeholder type/resno ABI is invalid")));
+			}
+			runtime->placeholder_sites.push_back(site);
+		}
+		bms_free(placeholder_resnos);
+
+		Plan* target_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
+		Plan* query_plan = reinterpret_cast<Plan*>(lsecond(cscan->custom_plans));
+		if (target_plan == nullptr || query_plan == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin child plan ABI is invalid")));
+		}
+		runtime->query_planner_rows = std::max(0.0, query_plan->plan_rows);
+		runtime->query_planner_width = std::max(0, query_plan->plan_width);
+		runtime->target_child = ExecInitNode(target_plan, estate, eflags);
+		runtime->target_child_initialized = true;
+		node->custom_ps = lappend(node->custom_ps, runtime->target_child);
+		runtime->query_child = ExecInitNode(query_plan, estate, eflags);
+		runtime->query_child_initialized = true;
+		node->custom_ps = lappend(node->custom_ps, runtime->query_child);
+		auto* target_custom = reinterpret_cast<CustomScan*>(target_plan);
+		if (!IsA(target_plan, CustomScan)
+			|| target_custom->methods != &BioseqColumnScanScanMethods
+			|| list_length(target_custom->custom_private) != 1) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin target provider is invalid")));
+		}
+		CustomScanState* target_custom_state =
+			pg_node_try_as<CustomScanState>(
+				reinterpret_cast<Node*>(runtime->target_child));
+		if (target_custom_state == nullptr
+			|| target_custom_state->methods != &BioseqColumnScanExecuteMethods
+			|| target_custom_state->ss.ps.plan != target_plan
+			|| target_custom_state->ss.ss_currentRelation == nullptr
+			|| RelationGetRelid(target_custom_state->ss.ss_currentRelation)
+				!= runtime->target_relation_oid) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin initialized target provider state is invalid")));
+		}
+		BioseqScanState* target_bioseq_state =
+			BioseqScanState::from_custom_scan_state(target_custom_state);
+		Snapshot target_snapshot = target_bioseq_state->snapshot;
+		if (target_snapshot == nullptr
+			|| !IsMVCCSnapshot(target_snapshot)
+			|| target_snapshot->regd_count == 0) {
+			ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("BioseqBatchJoin target provider snapshot is not registered MVCC state")));
+		}
+		RangeTblEntry* target_rte = exec_rt_fetch(
+			target_custom->scan.scanrelid, estate);
+		if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION
+			|| target_rte->relid != runtime->target_relation_oid) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin target provider relation is invalid")));
+		}
+		List* locator_tag = reinterpret_cast<List*>(
+			linitial(target_custom->custom_private));
+		if (locator_tag == nullptr || list_length(locator_tag) != 4
+			|| intVal(list_nth(locator_tag, 0))
+				!= kBioseqLocatorPassthroughMagic
+			|| intVal(list_nth(locator_tag, 1))
+				!= kBioseqBatchJoinPlanVersion
+			|| intVal(list_nth(locator_tag, 2)) != token
+			|| intVal(list_nth(locator_tag, 3))
+				!= runtime->target_slot_rowno_resno) {
+				ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin target locator token mismatch")));
+		}
+		/* Validate against the post-setrefs Plan targetlists.  They are stable
+		 * planner ABI; ps_ResultTupleSlot is not, because projection-free and
+		 * pass-through PlanStates may return a scan/child slot instead.  The
+		 * actual slots are validated independently at each ExecProcNode edge. */
+		if (runtime->target_column_count
+				!= list_length(target_plan->targetlist)
+			|| runtime->query_column_count
+				!= list_length(query_plan->targetlist)
+			|| runtime->target_slot_seq_resno <= 0
+			|| runtime->target_slot_seq_resno
+				> runtime->target_column_count
+			|| runtime->target_slot_rowno_resno <= 0
+			|| runtime->target_slot_rowno_resno
+				> runtime->target_column_count
+			|| runtime->query_slot_seq_resno <= 0
+			|| runtime->query_slot_seq_resno
+				> runtime->query_column_count) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin post-setrefs child targetlists are invalid"),
+				 errdetail(
+					"target_private_columns=%d target_plan_columns=%d query_private_columns=%d query_plan_columns=%d target_sequence_resno=%d target_rowno_resno=%d query_sequence_resno=%d",
+					runtime->target_column_count,
+					list_length(target_plan->targetlist),
+					runtime->query_column_count,
+					list_length(query_plan->targetlist),
+					runtime->target_slot_seq_resno,
+					runtime->target_slot_rowno_resno,
+					runtime->query_slot_seq_resno)));
+		}
+		TargetEntry* target_seq_entry = reinterpret_cast<TargetEntry*>(
+			list_nth(
+				target_plan->targetlist,
+				runtime->target_slot_seq_resno - 1));
+		TargetEntry* target_rowno_entry = reinterpret_cast<TargetEntry*>(
+			list_nth(
+				target_plan->targetlist,
+				runtime->target_slot_rowno_resno - 1));
+		TargetEntry* query_seq_entry = reinterpret_cast<TargetEntry*>(
+			list_nth(
+				query_plan->targetlist,
+				runtime->query_slot_seq_resno - 1));
+		const int32 expected_sequence_typmod =
+			compact_sequence_stdc_type_params{
+				runtime->alphabet_code,
+				runtime->storage_unit_byte_width}.encode();
+		const Oid sequence_type =
+			get_cached_stub_oids().bioseq_seq_type_oid;
+		if (target_seq_entry == nullptr || target_rowno_entry == nullptr
+			|| query_seq_entry == nullptr
+			|| target_seq_entry->resno != runtime->target_slot_seq_resno
+			|| target_rowno_entry->resno != runtime->target_slot_rowno_resno
+			|| query_seq_entry->resno != runtime->query_slot_seq_resno
+			|| !target_rowno_entry->resjunk
+			|| exprType(reinterpret_cast<Node*>(target_seq_entry->expr))
+				!= get_cached_stub_oids().bioseq_seq_type_oid
+			|| exprType(reinterpret_cast<Node*>(query_seq_entry->expr))
+				!= get_cached_stub_oids().bioseq_seq_type_oid
+			|| exprTypmod(reinterpret_cast<Node*>(target_seq_entry->expr))
+				!= expected_sequence_typmod
+			|| exprTypmod(reinterpret_cast<Node*>(query_seq_entry->expr))
+				!= expected_sequence_typmod
+			|| exprCollation(reinterpret_cast<Node*>(target_seq_entry->expr))
+				!= exprCollation(reinterpret_cast<Node*>(query_seq_entry->expr))
+			|| exprCollation(reinterpret_cast<Node*>(target_seq_entry->expr))
+				!= get_typcollation(sequence_type)
+			|| exprType(reinterpret_cast<Node*>(target_rowno_entry->expr))
+				!= INT8OID
+			|| exprTypmod(reinterpret_cast<Node*>(target_rowno_entry->expr)) != -1
+			|| OidIsValid(exprCollation(
+				reinterpret_cast<Node*>(target_rowno_entry->expr)))) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin post-setrefs child targetlist types are invalid"),
+				 errdetail(
+					"target_sequence_type=%u target_sequence_typmod=%d target_sequence_collation=%u query_sequence_type=%u query_sequence_typmod=%d query_sequence_collation=%u rowno_type=%u rowno_typmod=%d rowno_collation=%u rowno_resjunk=%s",
+					target_seq_entry == nullptr ? InvalidOid
+						: exprType(reinterpret_cast<Node*>(target_seq_entry->expr)),
+					target_seq_entry == nullptr ? -1
+						: exprTypmod(reinterpret_cast<Node*>(target_seq_entry->expr)),
+					target_seq_entry == nullptr ? InvalidOid
+						: exprCollation(reinterpret_cast<Node*>(target_seq_entry->expr)),
+					query_seq_entry == nullptr ? InvalidOid
+						: exprType(reinterpret_cast<Node*>(query_seq_entry->expr)),
+					query_seq_entry == nullptr ? -1
+						: exprTypmod(reinterpret_cast<Node*>(query_seq_entry->expr)),
+					query_seq_entry == nullptr ? InvalidOid
+						: exprCollation(reinterpret_cast<Node*>(query_seq_entry->expr)),
+					target_rowno_entry == nullptr ? InvalidOid
+						: exprType(reinterpret_cast<Node*>(target_rowno_entry->expr)),
+					target_rowno_entry == nullptr ? -1
+						: exprTypmod(reinterpret_cast<Node*>(target_rowno_entry->expr)),
+					target_rowno_entry == nullptr ? InvalidOid
+						: exprCollation(reinterpret_cast<Node*>(target_rowno_entry->expr)),
+					target_rowno_entry != nullptr && target_rowno_entry->resjunk
+						? "true" : "false")));
+		}
+
+		bioseq::simd::active_target::Minimap2Params params =
+			build_params_from_gucs();
+		bioseq::indexing::IndexReadRequirement requirement =
+			bioseq::indexing::IndexReadRequirement::allow;
+		(void)apply_aligner_options_override(
+			mmsearch, params, requirement, get_cached_stub_oids());
+		if (requirement != runtime->index_read_requirement) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin requirement changed after prevalidation")));
+		}
+		/* Plan setrefs has deliberately replaced every match-result helper
+		 * with an INDEX_VAR into the combined scan tuple.  Derive expensive
+		 * stage requirements from the validated private placeholder kinds,
+		 * not by re-walking an executor targetlist in which helpers no longer
+		 * exist. */
+		params.do_cigar = false;
+		params.compute_divergence = false;
+		params.compute_mapq = false;
+		const BioseqStubOids& batch_oids = get_cached_stub_oids();
+		for (const BioseqBatchJoinPlaceholderSite& site :
+			 runtime->placeholder_sites) {
+			params.do_cigar = params.do_cigar
+				|| site.funcid == batch_oids.cigar_oid
+				|| site.funcid == batch_oids.has_cigar_oid;
+			params.compute_divergence = params.compute_divergence
+				|| site.funcid == batch_oids.divergence_oid;
+			params.compute_mapq = params.compute_mapq
+				|| site.funcid == batch_oids.mapq_oid;
+		}
+
+		Relation target_relation = table_open(
+			runtime->target_relation_oid, AccessShareLock);
+		if (target_relation->rd_tableam != GetBioseqColumnTableAmRoutine()) {
+			table_close(target_relation, AccessShareLock);
+			ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("BioseqBatchJoin target relation changed table AM")));
+		}
+		TupleDesc relation_desc = RelationGetDescr(target_relation);
+		Form_pg_attribute storage_sequence_attribute =
+			runtime->target_storage_seq_attno <= 0
+			|| runtime->target_storage_seq_attno > relation_desc->natts
+			? nullptr
+			: TupleDescAttr(
+				relation_desc, runtime->target_storage_seq_attno - 1);
+		if (storage_sequence_attribute == nullptr
+			|| storage_sequence_attribute->attisdropped
+			|| storage_sequence_attribute->atttypid
+				!= get_cached_stub_oids().bioseq_seq_type_oid
+			|| storage_sequence_attribute->atttypmod
+				!= expected_sequence_typmod
+			|| storage_sequence_attribute->attcollation
+				!= get_typcollation(sequence_type)) {
+			table_close(target_relation, AccessShareLock);
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin storage-column ABI changed after planning")));
+		}
+		char* target_column_name = get_attname(
+			runtime->target_relation_oid,
+			runtime->target_storage_seq_attno,
+			/*missing_ok=*/false);
+		/* The target child may have replaced the executor snapshot while
+		 * flushing its columnar write state. Borrow that exact registered
+		 * snapshot. batch_join_release_executor_resources_checked drains the
+		 * buffer (and its fragment readers) before ExecEndNode(target_child)
+		 * releases the child's registration. */
+		runtime->buffer.configure_params(
+			params,
+			requirement,
+			bioseq_read_sequence_index,
+			runtime->target_relation_oid,
+			target_relation->rd_locator.dbOid,
+			target_relation->rd_locator.spcOid,
+			target_relation->rd_locator.relNumber,
+			target_snapshot);
+		runtime->buffer.configure_mmsearch_join(
+			runtime->target_relation_oid,
+			runtime->target_storage_seq_attno,
+			runtime->target_slot_seq_resno,
+			runtime->target_slot_rowno_resno,
+			runtime->query_slot_seq_resno,
+			std::string{target_column_name},
+			runtime->alphabet_code,
+			runtime->storage_unit_byte_width);
+		pfree(target_column_name);
+		table_close(target_relation, AccessShareLock);
+
+		runtime->query_tuple_context = AllocSetContextCreate(
+			estate->es_query_cxt,
+			"BioseqBatchJoin query tuples",
+			ALLOCSET_DEFAULT_SIZES);
+		const int plan_node_id = cscan->scan.plan.plan_node_id;
+		if (plan_node_id < 0) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin plan node id is invalid")));
+		}
+		runtime->alignment_registration =
+			bioseq::pg::alignment_execution::bind_alignment_node(
+				estate, static_cast<std::uint32_t>(plan_node_id));
+	  } catch (...) {
+		cpp_error = std::current_exception();
+	  }
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		original_error = CopyErrorData();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	if (original_error != nullptr) {
+		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		ErrorData* exact_error = original_error;
+		ReThrowError(exact_error);
+	}
+	if (cpp_error != nullptr) {
+		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		char detail[512] = "unknown C++ exception";
+		try {
+			std::rethrow_exception(cpp_error);
+		} catch (const std::exception& error) {
+			strlcpy(detail,
+				error.what() == nullptr ? "std::exception without detail"
+					: error.what(),
+				sizeof(detail));
+		} catch (...) {
+		}
+		cpp_error = nullptr;
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin Begin raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+}
+
+static void batch_join_release_executor_resources_checked(
+		CustomScanState* node,
+		BioseqBatchJoinRuntime& runtime,
+		const bool delete_query_context) {
+	if (runtime.cleanup_done) {
+		return;
+	}
+	if (runtime.target_active) {
+		bioseq::pg_utils::invoke_pg_as_cpp([&] {
+			runtime.buffer.finish_join_target();
+		});
+		runtime.target_active = false;
+	}
+	bioseq::pg_utils::invoke_pg_as_cpp([&] {
+		runtime.buffer.reset_join_runtime_for_rescan();
+	});
+	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
+		if (query.slot != nullptr) {
+			TupleTableSlot* finished = query.slot;
+			bioseq::pg_utils::invoke_pg_as_cpp(
+				[finished] { ExecDropSingleTupleTableSlot(finished); });
+			query.slot = nullptr;
+		}
+	}
+	runtime.query_tuples.clear();
+	runtime.all_query_refs.clear();
+	if (runtime.query_tuple_context != nullptr) {
+		MemoryContext context = runtime.query_tuple_context;
+		bioseq::pg_utils::invoke_pg_as_cpp([&] {
+			if (delete_query_context) {
+				MemoryContextDelete(context);
+			} else {
+				MemoryContextReset(context);
+			}
+		});
+		runtime.query_tuple_context = nullptr;
+	}
+	/* Release admission only after the owning tuple context was reset/deleted. */
+	runtime.query_permits.clear();
+	runtime.query_reserved_admission_bytes = 0;
+	runtime.query_actual_materialized_bytes = 0;
+	runtime.queries_materialized = false;
+	if (runtime.query_child_initialized && !runtime.query_child_ended) {
+		PlanState* finished = runtime.query_child;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { ExecEndNode(finished); });
+		runtime.query_child_ended = true;
+	}
+	if (runtime.target_child_initialized && !runtime.target_child_ended) {
+		PlanState* finished = runtime.target_child;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { ExecEndNode(finished); });
+		runtime.target_child_ended = true;
+	}
+	if (node != nullptr) {
+		node->custom_ps = NIL;
+	}
+	runtime.cleanup_done = true;
+}
+
+static void batch_join_abandon_executor_resources_after_error(
+		CustomScanState* node,
+		BioseqBatchJoinRuntime& runtime) noexcept {
+	if (runtime.cleanup_done) {
+		return;
+	}
+	runtime.buffer.abandon_join_runtime_after_pg_error_noexcept();
+	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
+		query.slot = nullptr;
+		query.tuple = nullptr;
+	}
+	runtime.query_tuples.clear();
+	runtime.all_query_refs.clear();
+	runtime.placeholder_sites.clear();
+	runtime.query_tuple_context = nullptr;
+	runtime.query_permits.clear();
+	runtime.query_reserved_admission_bytes = 0;
+	runtime.query_actual_materialized_bytes = 0;
+	runtime.queries_materialized = false;
+	runtime.target_active = false;
+	runtime.current_target_slot = nullptr;
+	runtime.query_child = nullptr;
+	runtime.target_child = nullptr;
+	runtime.query_child_ended = true;
+	runtime.target_child_ended = true;
+	runtime.query_child_initialized = false;
+	runtime.target_child_initialized = false;
+	if (node != nullptr) {
+		node->custom_ps = NIL;
+	}
+	runtime.cleanup_done = true;
+}
+
+static TupleTableSlot* BioseqBatchJoin_ExecCustomScanImpl(
+		CustomScanState* node) {
+	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
+	if (runtime == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin runtime is missing")));
+	}
+	bioseq::pg::alignment_execution::ensure_alignment_node_registered(
+		runtime->alignment_registration);
+	batch_join_materialize_queries(*runtime);
+
+	for (;;) {
+		auto output = runtime->buffer.read_next_output();
+		if (output.has_value()) {
+			return batch_join_project_output(node, *runtime, *output);
+		}
+		if (runtime->target_active
+			&& runtime->next_query_batch < runtime->all_query_refs.size()) {
+			const std::size_t batch_end = std::min(
+				runtime->all_query_refs.size(),
+				runtime->next_query_batch + kBioseqRuntimeBufferReserve);
+			const std::span<const bioseq::scheduler::DispatchJoinQueryRef> batch{
+				runtime->all_query_refs.data() + runtime->next_query_batch,
+				batch_end - runtime->next_query_batch};
+			runtime->buffer.set_join_query_batch(batch);
+			if (runtime->buffer.run_join_query_batch_and_build_cursors()) {
+				const auto delta = runtime->buffer.execution_stats();
+				runtime->aggregate_stats.merge(delta);
+				bioseq::pg::alignment_execution::merge_alignment_batch(
+					runtime->alignment_registration,
+					delta);
+			}
+			runtime->next_query_batch = batch_end;
+			++runtime->query_batch_count;
+			continue;
+		}
+		if (runtime->target_active) {
+			runtime->buffer.finish_join_target();
+			runtime->target_active = false;
+			runtime->current_target_slot = nullptr;
+			runtime->next_query_batch = 0;
+		}
+		if (runtime->target_eof) {
+			bioseq::pg::alignment_execution::mark_alignment_pass_fully_drained(
+				runtime->alignment_registration);
+			runtime->current_pass_fully_drained = true;
+			return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+		}
+		TupleTableSlot* target = ExecProcNode(runtime->target_child);
+		if (TupIsNull(target)) {
+			runtime->target_eof = true;
+			continue;
+		}
+		batch_join_validate_returned_child_slot(
+			target,
+			runtime->target_column_count,
+			runtime->target_slot_seq_resno,
+			runtime->target_slot_rowno_resno,
+			runtime->alphabet_code,
+			runtime->storage_unit_byte_width,
+			"target");
+		runtime->current_target_slot = target;
+		runtime->buffer.begin_join_target(target);
+		runtime->buffer.prepare_join_target_queries(
+			std::span<const bioseq::scheduler::DispatchJoinQueryRef>{
+				runtime->all_query_refs});
+		runtime->target_active = true;
+		++runtime->distinct_targets;
+	}
+}
+
+static TupleTableSlot* BioseqBatchJoin_ExecCustomScan(
+		CustomScanState* node) {
+	TupleTableSlot* result = nullptr;
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile original_error = nullptr;
+	std::exception_ptr cpp_error;
+	PG_TRY();
+	{
+		try {
+			result = BioseqBatchJoin_ExecCustomScanImpl(node);
+		} catch (...) {
+			cpp_error = std::current_exception();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		original_error = CopyErrorData();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	if (original_error != nullptr) {
+		if (BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
+			runtime != nullptr) {
+			batch_join_abandon_executor_resources_after_error(
+				node, *runtime);
+		}
+		ErrorData* exact_error = original_error;
+		ReThrowError(exact_error);
+	}
+	if (cpp_error != nullptr) {
+		if (BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
+			runtime != nullptr) {
+			batch_join_abandon_executor_resources_after_error(
+				node, *runtime);
+		}
+		char detail[512] = "unknown C++ exception";
+		try {
+			std::rethrow_exception(cpp_error);
+		} catch (const std::exception& error) {
+			strlcpy(detail,
+				error.what() == nullptr ? "std::exception without detail"
+					: error.what(),
+				sizeof(detail));
+		} catch (...) {
+		}
+		cpp_error = nullptr;
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin Exec raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	return result;
+}
+
+static void BioseqBatchJoin_EndCustomScan(CustomScanState* node) {
+	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
+	if (runtime == nullptr || runtime->cleanup_done) {
+		return;
+	}
+	ErrorData* exact_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char detail[512] = "std::exception without detail";
+	try {
+		batch_join_release_executor_resources_checked(
+			node, *runtime, /*delete_query_context=*/false);
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		exact_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(detail,
+			error.what() == nullptr ? "std::exception without detail"
+				: error.what(),
+			sizeof(detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+	if (exact_error != nullptr || cpp_error || unknown_cpp_error) {
+		batch_join_abandon_executor_resources_after_error(node, *runtime);
+	}
+	if (exact_error != nullptr) {
+		ReThrowError(exact_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin checked End raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin checked End raised an unknown C++ exception")));
+	}
+}
+
+static void BioseqBatchJoin_ReScanCustomScan(CustomScanState* node) {
+	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
+	if (runtime == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin rescan runtime is missing")));
+	}
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile original_error = nullptr;
+	std::exception_ptr cpp_error;
+	PG_TRY();
+	{
+		try {
+			bioseq::pg::alignment_execution::mark_alignment_rescan(
+				runtime->alignment_registration);
+			if (runtime->target_active) {
+				runtime->buffer.finish_join_target();
+			}
+			runtime->buffer.reset_join_runtime_for_rescan();
+			batch_join_clear_query_tuples(*runtime, /*drop_slots=*/true);
+			runtime->target_active = false;
+			runtime->target_eof = false;
+			runtime->current_pass_fully_drained = false;
+			runtime->current_target_slot = nullptr;
+			runtime->next_query_batch = 0;
+			runtime->active_query_batch_end = 0;
+			ExecReScan(runtime->target_child);
+			ExecReScan(runtime->query_child);
+		} catch (...) {
+			cpp_error = std::current_exception();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		original_error = CopyErrorData();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	if (original_error != nullptr) {
+		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		ErrorData* exact_error = original_error;
+		ReThrowError(exact_error);
+	}
+	if (cpp_error != nullptr) {
+		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		char detail[512] = "unknown C++ exception";
+		try {
+			std::rethrow_exception(cpp_error);
+		} catch (const std::exception& error) {
+			strlcpy(detail,
+				error.what() == nullptr ? "std::exception without detail"
+					: error.what(),
+				sizeof(detail));
+		} catch (...) {
+		}
+		cpp_error = nullptr;
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin ReScan raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+}
+
+static void BioseqBatchJoin_ExplainCustomScan(
+		CustomScanState* node, List* ancestors, ExplainState* es) {
+	(void)ancestors;
+	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
+	ExplainPropertyInteger(
+		"Bioseq Query Batch Capacity", nullptr,
+		static_cast<std::int64_t>(kBioseqRuntimeBufferReserve), es);
+	ExplainPropertyText(
+		"Bioseq Residual Mmsearch Qual", "absent", es);
+	ExplainPropertyInteger(
+		"Bioseq Batch ABI Version", nullptr,
+		static_cast<std::int64_t>(kBioseqBatchJoinPlanVersion), es);
+	if (runtime == nullptr) {
+		return;
+	}
+	ExplainPropertyFloat(
+		"Bioseq Honest Startup Cost", nullptr,
+		runtime->honest_startup_cost, 2, es);
+	ExplainPropertyFloat(
+		"Bioseq Honest Total Cost", nullptr,
+		runtime->honest_total_cost, 2, es);
+	ExplainPropertyFloat(
+		"Bioseq Incumbent Cost Floor", nullptr,
+		runtime->incumbent_cost_floor, 2, es);
+	ExplainPropertyInteger(
+		"Bioseq Match Placeholder Sites", nullptr,
+		static_cast<std::int64_t>(runtime->placeholder_sites.size()), es);
+	ExplainPropertyText(
+		"Bioseq Index Read Requirement",
+		bioseq::indexing::index_read_requirement_name(
+			runtime->index_read_requirement).data(), es);
+	ExplainPropertyBool(
+		"Bioseq Requirement Executable",
+		runtime->index_read_requirement
+			!= bioseq::indexing::IndexReadRequirement::
+				require_compatible_persisted,
+		es);
+	ExplainPropertyText(
+		"Bioseq CPU Prepared Target",
+		runtime->index_read_requirement
+			== bioseq::indexing::IndexReadRequirement::require_absent
+				? "disabled: ExactSimd target-sketch backend unavailable"
+				: "persisted-only query-hash union; one target index per parameter group",
+		es);
+	ExplainPropertyFloat(
+		"Bioseq Query Planner Rows", nullptr,
+		runtime->query_planner_rows, 0, es);
+	ExplainPropertyInteger(
+		"Bioseq Query Planner Width", "bytes",
+		static_cast<std::int64_t>(runtime->query_planner_width), es);
+	ExplainPropertyInteger(
+		"Bioseq Query Planner Admission", "bytes",
+		static_cast<std::int64_t>(std::min<std::uint64_t>(
+			runtime->query_planner_admission_bytes,
+			static_cast<std::uint64_t>(INT64_MAX))), es);
+	ExplainPropertyInteger(
+		"Bioseq Query Actual Materialization", "bytes",
+		static_cast<std::int64_t>(std::min<std::uint64_t>(
+			runtime->query_actual_materialized_bytes,
+			static_cast<std::uint64_t>(INT64_MAX))), es);
+	ExplainPropertyInteger(
+		"Bioseq Distinct Targets", nullptr,
+		static_cast<std::int64_t>(runtime->distinct_targets), es);
+	ExplainPropertyInteger(
+		"Bioseq Query Batches", nullptr,
+		static_cast<std::int64_t>(runtime->query_batch_count), es);
+	ExplainPipelineExecutionStats(runtime->aggregate_stats, es);
 }
 
 /*
@@ -4463,12 +8056,110 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
  * of the GUC — the GUC only chooses whether the stored chunk is preferred.
  * Replaces the deleted meta_sidecar / 49-stub path.
  */
+struct SymbolCountReadResources {
+	MemoryContext caller_context = nullptr;
+	MemoryContext scratch = nullptr;
+	bioseq::storage::seq_caches* caches = nullptr;
+	BioseqColumnReadState* row_read_state = nullptr;
+};
+
+static void
+release_symbol_count_read_resources_checked(
+	SymbolCountReadResources* resources)
+{
+	if (resources == nullptr) {
+		return;
+	}
+	if (resources->caller_context != nullptr
+		&& CurrentMemoryContext != resources->caller_context) {
+		bioseq::pg_utils::invoke_pg_as_cpp([resources] {
+			MemoryContextSwitchTo(resources->caller_context);
+		});
+	}
+	if (resources->row_read_state != nullptr) {
+		BioseqColumnReadState* finished = resources->row_read_state;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { BioseqColumnEndRead(finished); });
+		resources->row_read_state = nullptr;
+	}
+	if (resources->caches != nullptr) {
+		bioseq::storage::seq_caches* finished = resources->caches;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { finished->close_all(/*commit=*/false); });
+		bioseq::pg_utils::invoke_pg_as_cpp([finished] {
+			bioseq::storage::destroy_seq_caches(finished);
+		});
+		resources->caches = nullptr;
+	}
+	if (resources->scratch != nullptr) {
+		MemoryContext finished = resources->scratch;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { MemoryContextDelete(finished); });
+		resources->scratch = nullptr;
+	}
+}
+
+static void
+abandon_symbol_count_read_resources_after_error(
+	SymbolCountReadResources* resources) noexcept
+{
+	if (resources == nullptr) {
+		return;
+	}
+	// PostgreSQL's transaction/ResourceOwner will release readers, relations,
+	// and palloc contexts.  Do not issue any PG call while preserving the
+	// original ErrorData; only discharge ordinary C++ heap ownership.
+	resources->row_read_state = nullptr;
+	if (resources->caches != nullptr) {
+		bioseq::storage::seq_caches* abandoned = std::exchange(
+			resources->caches, nullptr);
+		for (auto& [key, entry] : abandoned->entries) {
+			(void)key;
+			entry.rel = nullptr;
+			entry.write_state = nullptr;
+			entry.read_state = nullptr;
+			entry.read_snapshot_source = nullptr;
+			entry.pending_bytes_delta = 0;
+			entry.pending_total_payload_delta = 0;
+		}
+		abandoned->entries.clear();
+		abandoned->~seq_caches();
+	}
+	resources->scratch = nullptr;
+}
+
+[[noreturn]] static void symbol_count_error_as_cpp(
+		int sqlstate,
+		std::string_view message) {
+	bioseq::pg_utils::invoke_pg_as_cpp([sqlstate, message] {
+		ereport(ERROR,
+			(errcode(sqlstate),
+			 errmsg("%.*s", static_cast<int>(message.size()),
+				message.data())));
+	});
+	pg_unreachable();
+}
+
 static void
 populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
-								   Relation main, int64_t rowno)
+								   Relation main, int64_t rowno,
+								   Snapshot registered_snapshot)
 {
 	if (consts.symbol_count_sites.empty()) {
 		return;
+	}
+	SymbolCountReadResources* resources = nullptr;
+	ErrorData* exact_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char detail[512] = "std::exception without detail";
+	try {
+	if (registered_snapshot == nullptr
+		|| !IsMVCCSnapshot(registered_snapshot)
+		|| registered_snapshot->regd_count == 0) {
+		symbol_count_error_as_cpp(
+			ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+			"bioseq symbol-count read requires a registered MVCC executor snapshot");
 	}
 	auto set_all_null = [&]() {
 		for (auto& s : consts.symbol_count_sites)
@@ -4480,92 +8171,194 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 	const Oid relid = RelationGetRelid(main);
 	const auto rid = bsi::index_relation_identity(relid);
 	TupleDesc td   = RelationGetDescr(main);
-	Snapshot snap  = GetTransactionSnapshot();
 
-	MemoryContext scratch = AllocSetContextCreate(CurrentMemoryContext,
-		"bioseq_symcount", ALLOCSET_SMALL_SIZES);
-	bioseq::storage::seq_caches* caches = bioseq::storage::alloc_seq_caches(scratch);
-	caches->side                = bioseq::storage::seq_caches::Side::Read;
-	caches->lock_mode           = AccessShareLock;
-	caches->read_state_mctx     = scratch;
-	caches->main_database_oid   = rid.db_oid;
-	caches->main_tablespace_oid = rid.tablespace_oid;
-	caches->main_relfilenode    = rid.relfilenode;
-
-	/* Project every distinct site column and random-access read the row once. */
-	List* projected = NIL;
-	for (auto& s : consts.symbol_count_sites)
-		if (s.placeholder != nullptr && !list_member_int(projected, s.column_attno))
-			projected = lappend_int(projected, s.column_attno);
-
-	std::vector<Datum> vals(td->natts);
-	auto nulls_owner = std::make_unique<bool[]>(td->natts);
-	bool* nulls = nulls_owner.get();
-	BioseqColumnReadState* rs = BioseqColumnBeginRead(main, td, projected, NIL, scratch, snap,
-											  /*randomAccess=*/true, nullptr);
-	const bool row_ok = BioseqColumnReadRowByRowNumber(
-		rs, static_cast<uint64_t>(rowno), vals.data(), nulls);
-	BioseqColumnEndRead(rs);
-
-	for (auto& site : consts.symbol_count_sites) {
-		if (site.placeholder == nullptr) continue;
-		if (!row_ok || site.rank < 0 || nulls[site.column_attno - 1]) {
-			site.placeholder->constisnull = true;
-			continue;
-		}
-		MemoryContext old = MemoryContextSwitchTo(scratch);
-		pgseq_t* hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[site.column_attno - 1]));
-		MemoryContextSwitchTo(old);
-		const std::uint8_t alpha = hdr->alphabet_code;
-		const bool stub          = bioseq::storage::is_locator_stub(hdr);
-		const std::uint8_t bw    = stub ? bioseq::storage::logical_storage_unit_byte_width(hdr)
-										: hdr->storage_unit_byte_width;
-		bioseq::storage::seq_locator loc{};
-		if (stub) loc = bioseq::storage::decode_locator_from_stub(hdr);
-
-		/* (2) stored read — the ONLY thing read_sequence_index gates here. */
-		std::optional<std::int64_t> stored;
-		if (bioseq_read_sequence_index && stub) {
-			auto store = bsi::open_sequence_storage(relid, rid.db_oid, rid.tablespace_oid,
-				rid.relfilenode, site.column_attno,
-				bioseq::indexing::SymbolCountsIndex<bsi::IndexStorageSequencePg>::index_name, loc,
-				static_cast<uint64_t>(rowno), caches, scratch);
-			stored = bioseq::indexing::SymbolCountsIndex<bsi::IndexStorageSequencePg>::read_count(
-				store, static_cast<std::size_t>(site.rank));
-		}
-		if (stored.has_value()) {
-			site.placeholder->constvalue =
-				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(*stored)).raw();
-			site.placeholder->constisnull = false;
-			continue;
-		}
-
-		/* (3) unconditional recompute fallback (never gated by the GUC). */
-		std::int64_t cnt = 0;
-		pgseq_t::dispatch_instance(alpha, bw, [&]<class S>() {
-			if (stub) {
-				constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
-				const std::size_t pad = (loc.total_bp_size % lpu) == 0 ? 0
-					: static_cast<std::size_t>(lpu - loc.total_bp_size % lpu);
-				bioseq::storage::with_lazy_postgres<S>(rid.db_oid, rid.tablespace_oid,
-					rid.relfilenode, site.column_attno, loc, pad, caches, scratch,
-					[&](auto& lazy) {
-						auto counts = bioseq::indexing::tally_symbol_counts(lazy);
-						if (static_cast<std::size_t>(site.rank) < counts.size())
-							cnt = counts[site.rank];
-					});
-			} else {
-				compact_sequence_range<S> range{*hdr};
-				auto lazy = bioseq::storage::make_lazy_in_memory(range);
-				auto counts = bioseq::indexing::tally_symbol_counts(lazy);
-				if (static_cast<std::size_t>(site.rank) < counts.size())
-					cnt = counts[site.rank];
-			}
+	/* Mutable ownership lives in this record so ordinary C++ catches can either
+	 * checked-close it on success or abandon PG handles without replacing the
+	 * original ErrorData. */
+	resources = bioseq::pg_utils::invoke_pg_as_cpp([] {
+		return static_cast<SymbolCountReadResources*>(
+			palloc0(sizeof(SymbolCountReadResources)));
+	});
+	resources->caller_context = CurrentMemoryContext;
+	resources->scratch = bioseq::pg_utils::invoke_pg_as_cpp([] {
+		return AllocSetContextCreate(CurrentMemoryContext,
+			"bioseq_symcount", ALLOCSET_SMALL_SIZES);
+	});
+	resources->caches = bioseq::pg_utils::invoke_pg_as_cpp(
+		[resources] {
+			return bioseq::storage::alloc_seq_caches(resources->scratch);
 		});
-		site.placeholder->constvalue  = bioseq::pg_utils::pg_datum::from(cnt).raw();
-		site.placeholder->constisnull = false;
+	resources->caches->side = bioseq::storage::seq_caches::Side::Read;
+	resources->caches->lock_mode = AccessShareLock;
+	resources->caches->read_state_mctx = resources->scratch;
+	resources->caches->main_database_oid = rid.db_oid;
+	resources->caches->main_tablespace_oid = rid.tablespace_oid;
+	resources->caches->main_relfilenode = rid.relfilenode;
+
+	auto* vals = bioseq::pg_utils::invoke_pg_as_cpp([resources, td] {
+		return static_cast<Datum*>(MemoryContextAllocZero(
+			resources->scratch,
+			sizeof(Datum) * static_cast<std::size_t>(td->natts)));
+	});
+	auto* nulls = bioseq::pg_utils::invoke_pg_as_cpp([resources, td] {
+		return static_cast<bool*>(MemoryContextAllocZero(
+			resources->scratch,
+			sizeof(bool) * static_cast<std::size_t>(td->natts)));
+	});
+		/* Project every distinct site column and keep the transient List plus
+		 * direct read state inside scratch. Catch restores caller_context if an
+		 * ereport jumps over this explicit context switch. */
+		MemoryContext previous_context =
+			bioseq::pg_utils::invoke_pg_as_cpp([resources] {
+				return MemoryContextSwitchTo(resources->scratch);
+			});
+		List* projected = bioseq::pg_utils::invoke_pg_as_cpp([&consts] {
+			List* result = NIL;
+			for (auto& site : consts.symbol_count_sites) {
+				if (site.placeholder != nullptr
+					&& !list_member_int(result, site.column_attno)) {
+					result = lappend_int(result, site.column_attno);
+				}
+			}
+			return result;
+		});
+		resources->row_read_state = bioseq::pg_utils::invoke_pg_as_cpp(
+			[&] {
+				return BioseqColumnBeginRead(
+					main, td, projected, NIL, resources->scratch,
+					registered_snapshot,
+					/*randomAccess=*/true, nullptr);
+			});
+		bioseq::pg_utils::invoke_pg_as_cpp([previous_context] {
+			MemoryContextSwitchTo(previous_context);
+		});
+		const bool row_ok = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+			return BioseqColumnReadRowByRowNumber(
+				resources->row_read_state, static_cast<uint64_t>(rowno),
+				vals, nulls);
+		});
+		/* vals contains by-reference Datums owned by row_read_state's
+		 * stripeReadContext.  Keep the reader alive until every symbol-count
+		 * site has detoasted/consumed those values; the unified release below
+		 * ends it on both success and ERROR. */
+
+		for (auto& site : consts.symbol_count_sites) {
+			if (site.placeholder == nullptr) continue;
+			if (!row_ok || site.rank < 0 || nulls[site.column_attno - 1]) {
+				site.placeholder->constisnull = true;
+				continue;
+			}
+			MemoryContext old = bioseq::pg_utils::invoke_pg_as_cpp(
+				[resources] {
+					return MemoryContextSwitchTo(resources->scratch);
+				});
+			pgseq_t* hdr = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+				return reinterpret_cast<pgseq_t*>(
+					PG_DETOAST_DATUM(vals[site.column_attno - 1]));
+			});
+			bioseq::pg_utils::invoke_pg_as_cpp(
+				[old] { MemoryContextSwitchTo(old); });
+			const std::uint8_t alpha = hdr->alphabet_code;
+			const bool stub = bioseq::storage::is_locator_stub(hdr);
+			const std::uint8_t bw = stub
+				? bioseq::storage::logical_storage_unit_byte_width(hdr)
+				: hdr->storage_unit_byte_width;
+			bioseq::storage::seq_locator loc{};
+			if (stub) loc = bioseq::storage::decode_locator_from_stub(hdr);
+
+			/* (2) stored read — the ONLY thing read_sequence_index gates here. */
+			std::optional<std::int64_t> stored;
+			if (bioseq_read_sequence_index && stub) {
+				auto store = bsi::open_sequence_storage(
+						relid, rid.db_oid, rid.tablespace_oid,
+						rid.relfilenode, site.column_attno,
+						bioseq::indexing::SymbolCountsIndex<
+							bsi::IndexStorageSequencePg>::index_name,
+						loc, static_cast<uint64_t>(rowno),
+						resources->caches, resources->scratch);
+				try {
+					stored = bioseq::indexing::SymbolCountsIndex<
+						bsi::IndexStorageSequencePg>::read_count(
+							store, static_cast<std::size_t>(site.rank));
+					store.close_checked();
+				} catch (...) {
+					store.abandon_after_pg_error_noexcept();
+					throw;
+				}
+			}
+			if (stored.has_value()) {
+				site.placeholder->constvalue =
+					bioseq::pg_utils::pg_datum::from(
+						static_cast<std::int64_t>(*stored)).raw();
+				site.placeholder->constisnull = false;
+				continue;
+			}
+
+			/* (3) unconditional recompute fallback (never gated by the GUC). */
+			std::int64_t cnt = 0;
+			pgseq_t::dispatch_instance(alpha, bw, [&]<class S>() {
+				if (stub) {
+					constexpr std::size_t lpu =
+						compact_sequence_range<S>::traits::letters_per_unit;
+					const std::size_t pad = (loc.total_bp_size % lpu) == 0
+						? 0
+						: static_cast<std::size_t>(
+							lpu - loc.total_bp_size % lpu);
+					bioseq::storage::with_lazy_postgres<S>(
+						rid.db_oid, rid.tablespace_oid, rid.relfilenode,
+						site.column_attno, loc, pad, registered_snapshot,
+						resources->caches,
+						resources->scratch, [&](auto& lazy) {
+							auto counts =
+								bioseq::indexing::tally_symbol_counts(lazy);
+							if (static_cast<std::size_t>(site.rank)
+								< counts.size())
+								cnt = counts[site.rank];
+						});
+				} else {
+					compact_sequence_range<S> range{*hdr};
+					auto lazy = bioseq::storage::make_lazy_in_memory(range);
+					auto counts = bioseq::indexing::tally_symbol_counts(lazy);
+					if (static_cast<std::size_t>(site.rank) < counts.size())
+						cnt = counts[site.rank];
+				}
+			});
+			site.placeholder->constvalue =
+				bioseq::pg_utils::pg_datum::from(cnt).raw();
+			site.placeholder->constisnull = false;
+		}
+		release_symbol_count_read_resources_checked(resources);
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[resources] { pfree(resources); });
+		resources = nullptr;
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		exact_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(detail,
+			error.what() == nullptr ? "std::exception without detail"
+				: error.what(),
+			sizeof(detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
 	}
-	MemoryContextDelete(scratch);
+	if (exact_error != nullptr || cpp_error || unknown_cpp_error) {
+		abandon_symbol_count_read_resources_after_error(resources);
+	}
+	if (exact_error != nullptr) {
+		ReThrowError(exact_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq symbol-count read raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq symbol-count read raised an unknown C++ exception")));
+	}
 }
 
 
@@ -4611,12 +8404,21 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 		if (runtime.buffer.has_finished_writing())
 		{
 			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
-			auto next = runtime.buffer.read_next_output();
-			if (!next)
-			{
-				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() output cursor drained; returning empty slot (EOF)");
-				return ExecClearTuple(node->ps.ps_ResultTupleSlot);
-			}
+				auto next = runtime.buffer.read_next_output();
+				if (!next)
+				{
+					if (runtime.source_exhausted) {
+						bioseq::pg::alignment_execution::
+							mark_alignment_pass_fully_drained(
+								runtime.alignment_registration);
+						bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() final output cursor drained; returning empty slot (EOF)");
+						return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+					}
+					/* A capacity rollover completed. Drop only that physical
+					 * batch and resume the still-live access-method scan. */
+					runtime.buffer.clear_slots();
+					continue;
+				}
 
 			/*
 			 * Update every placeholder Const from the MatchResult. The
@@ -4632,7 +8434,8 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			 */
 			populate_symbol_count_placeholders(runtime.placeholder_consts,
 											   node->ss_currentRelation,
-											   next->sequence_rowno);
+											   next->sequence_rowno,
+											   bioseqScanState->snapshot);
 
 			/*
 			 * Re-install the buffered scan slot as the current scan
@@ -4662,10 +8465,15 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
-			if (TupIsNull(slot))
-			{
-				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() source exhausted; running batch processor");
-				runtime.buffer.run_batch_and_build_cursors();
+				if (TupIsNull(slot))
+				{
+					runtime.source_exhausted = true;
+					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() source exhausted; running batch processor");
+				if (runtime.buffer.run_batch_and_build_cursors()) {
+					bioseq::pg::alignment_execution::merge_alignment_batch(
+						runtime.alignment_registration,
+						runtime.buffer.execution_stats());
+				}
 				continue; /* Next iteration enters Phase 2. */
 			}
 		}
@@ -4684,10 +8492,15 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
 				slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
-				if (TupIsNull(slot))
-				{
-					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted; running batch processor");
-					runtime.buffer.run_batch_and_build_cursors();
+					if (TupIsNull(slot))
+					{
+						runtime.source_exhausted = true;
+						bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted; running batch processor");
+					if (runtime.buffer.run_batch_and_build_cursors()) {
+						bioseq::pg::alignment_execution::merge_alignment_batch(
+							runtime.alignment_registration,
+							runtime.buffer.execution_stats());
+					}
 					continue;
 				}
 
@@ -4755,8 +8568,9 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 		 * the inline hydration bioseq_getnextslot performs on non-deferred
 		 * scan paths.
 		 */
-		if (!runtime.buffer.mmsearch_active()) {
-			bioseq_hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
+			if (!runtime.buffer.mmsearch_active()
+				&& !runtime.locator_passthrough) {
+				bioseq_hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
 		}
 
 		/*
@@ -4769,10 +8583,17 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 		bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			if (runtime.buffer.mmsearch_active()) {
-				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
-				runtime.buffer.submit_scan(econtext->ecxt_scantuple);
-			}
+				if (runtime.buffer.mmsearch_active()) {
+					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
+					runtime.buffer.submit_scan(econtext->ecxt_scantuple);
+					if (runtime.buffer.ready_to_dispatch()) {
+						if (runtime.buffer.run_batch_and_build_cursors()) {
+							bioseq::pg::alignment_execution::merge_alignment_batch(
+								runtime.alignment_registration,
+								runtime.buffer.execution_stats());
+						}
+					}
+				}
 			else {
 				/*
 				 * No WHERE mmsearch(...) qual installed -> there is nothing
@@ -4798,7 +8619,8 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 						row_number = static_cast<int64_t>(tid_to_row_number(slot->tts_tid));
 					}
 					populate_symbol_count_placeholders(runtime.placeholder_consts,
-													   node->ss_currentRelation, row_number);
+											   node->ss_currentRelation, row_number,
+											   bioseqScanState->snapshot);
 				}
 
 				ProjectionInfo* proj = ExecBuildProjectionInfo(
@@ -4807,7 +8629,33 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 					node->ps.ps_ResultTupleSlot,
 					&(node->ps),
 					slot->tts_tupleDescriptor);
-				return ExecProject(proj);
+					TupleTableSlot* projected = ExecProject(proj);
+					if (runtime.locator_passthrough) {
+						if (!ItemPointerIsValid(&slot->tts_tid)
+							|| runtime.locator_rowno_resno <= 0
+							|| runtime.locator_rowno_resno
+								> projected->tts_tupleDescriptor->natts) {
+							ereport(ERROR,
+								(errcode(ERRCODE_INTERNAL_ERROR),
+								 errmsg("Bioseq locator passthrough row-number projection is invalid")));
+						}
+						Form_pg_attribute rowno_attribute = TupleDescAttr(
+							projected->tts_tupleDescriptor,
+							runtime.locator_rowno_resno - 1);
+						if (rowno_attribute->atttypid != INT8OID) {
+							ereport(ERROR,
+								(errcode(ERRCODE_DATATYPE_MISMATCH),
+								 errmsg("Bioseq locator passthrough row-number column is not bigint")));
+						}
+						slot_getallattrs(projected);
+						projected->tts_values[
+							runtime.locator_rowno_resno - 1] =
+							Int64GetDatum(static_cast<std::int64_t>(
+								tid_to_row_number(slot->tts_tid)));
+						projected->tts_isnull[
+							runtime.locator_rowno_resno - 1] = false;
+					}
+					return projected;
 			}
 		}
 		else
@@ -4998,10 +8846,11 @@ BioseqColumnScanNext(BioseqScanState *bioseqScanState)
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
-		BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
-		const bool needs_deferred_hydration =
-			(runtime.buffer.mmsearch_active() || runtime.param_rebind.active)
-			&& !runtime.buffer.per_row_self_alignment();
+			BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
+			const bool needs_deferred_hydration =
+				(runtime.locator_passthrough
+				 || runtime.buffer.mmsearch_active() || runtime.param_rebind.active)
+				&& !runtime.buffer.per_row_self_alignment();
 
 		/*
 		 * DOC0260 §8/§9 — deferred hydration is only valid for the batched
@@ -5092,9 +8941,53 @@ BioseqColumnScanRecheck(BioseqScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 BioseqColumnScan_ExecCustomScan(CustomScanState *node)
 {
-	return CustomExecScan(BioseqScanState::from_custom_scan_state(node),
-						  reinterpret_cast<ExecScanAccessMtd>(BioseqColumnScanNext),
-						  reinterpret_cast<ExecScanRecheckMtd>(BioseqColumnScanRecheck));
+	TupleTableSlot* result = nullptr;
+	ErrorData* exact_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char detail[512] = "std::exception without detail";
+	try {
+		BioseqScanState* state = BioseqScanState::from_custom_scan_state(node);
+		BioseqScanRuntime& runtime = bioseq_runtime(state);
+		bioseq::pg::alignment_execution::ensure_alignment_node_registered(
+			runtime.alignment_registration);
+		result = CustomExecScan(
+			state,
+			reinterpret_cast<ExecScanAccessMtd>(BioseqColumnScanNext),
+			reinterpret_cast<ExecScanRecheckMtd>(BioseqColumnScanRecheck));
+		return result;
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		exact_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			detail,
+			error.what() == nullptr ? "std::exception without detail" : error.what(),
+			sizeof(detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+
+	BioseqScanState* state = BioseqScanState::from_custom_scan_state(node);
+	if (state != nullptr && state->runtime != nullptr) {
+		auto* runtime = static_cast<BioseqScanRuntime*>(state->runtime);
+		runtime->buffer.abandon_join_runtime_after_pg_error_noexcept();
+	}
+	if (exact_error != nullptr) {
+		ReThrowError(exact_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqColumnScan Exec raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqColumnScan Exec raised an unknown C++ exception")));
+	}
+	return result;
 }
 
 
@@ -5189,6 +9082,8 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(node->ss.ps.plan);
 	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
+	bioseq::pg::alignment_execution::mark_alignment_rescan(
+		runtime.alignment_registration);
 
 	ResetExprContext(bioseqScanState->css_RuntimeContext);
 	List *allClauses = PList<List>(cscan->custom_exprs).second();
@@ -5208,6 +9103,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	 * defer this to there.
 	 */
 	runtime.buffer.clear_slots();
+	runtime.source_exhausted = false;
 
 	/*
 	 * Param-driven mmsearch rebind: when the planner rewrote the
@@ -5218,103 +9114,19 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	 * triggering rescan), so we resolve it via EvalParamsMutator
 	 * against a copy of the original FuncExpr argument.
 	 *
-	 * We re-walk plan.qual rather than caching the original Param
-	 * pointer because EvalParamsMutator (above) already replaced
-	 * Params in `bioseqScanState->qual` with Consts; the originals
-	 * still live in cscan->scan.plan.qual and are stable across
-	 * rescans.
+	 * MmsearchParamRebind retains the exact plan FuncExpr because the copied
+	 * storage qual has already folded Params and planner order may put a Const
+	 * extra before the Param-driven primary.
 	 */
 	if (runtime.param_rebind.active)
 	{
-		/*
-		 * Defence in depth: BeginCustomScan should already have
-		 * accepted only PARAM_EXEC, but if a future change relaxes
-		 * that gate the rebind path must not silently route through
-		 * the wrong ParamListInfo. Refuse to rebind if the kind
-		 * doesn't match what the rebind path supports.
-		 */
-		if (runtime.param_rebind.paramkind != PARAM_EXEC) {
-			bioseq_log<DBG>("[bioseq] pg: ReScanCustomScan() refusing rebind for non-PARAM_EXEC kind={}",
-					runtime.param_rebind.paramkind);
-			runtime.buffer.clear_mmsearch_context();
-		} else {
-		const BioseqStubOids& scan_stub_oids = get_cached_stub_oids();
-		(void)scan_stub_oids;
-		/*
-		 * Use the stashed Param FuncExpr from BeginCustomScan rather
-		 * than re-walking plan.qual. With multi-mmsearch stacking
-		 * (Param primary + Const extra), `find_mmsearch_funcexpr`
-		 * may return the wrong FuncExpr (the planner is free to put
-		 * the Const first), and that would silently leave the
-		 * Param-driven primary unresolved on rescan.
-		 */
-		FuncExpr* mmsearch_fe = runtime.param_rebind.mmsearch_fe;
-		ExprContext* econtext = node->ss.ps.ps_ExprContext;
-		bool reconfigured = false;
-		if (mmsearch_fe != nullptr && list_length(mmsearch_fe->args) >= 2)
-		{
-			PList<Node> fe_args(mmsearch_fe->args);
-			Node* arg1 = fe_args.second();
-			if (pg_node_try_as<Param>(arg1) != nullptr)
-			{
-				/*
-				 * EvalParamsMutator is the same helper used to fold
-				 * Params in plain qualifiers — it returns a Const node
-				 * holding the current Param value (or constisnull=true
-				 * if the Param resolved to NULL).
-				 */
-				Node* folded = eval_params(arg1, econtext);
-				if (Const* query_const = pg_node_try_as<Const>(folded))
-				{
-					if (!query_const->constisnull
-						&& query_const->consttype == scan_stub_oids.bioseq_seq_type_oid)
-					{
-						pgseq_t* query_hdr =
-							reinterpret_cast<pgseq_t*>(
-								PG_DETOAST_DATUM(query_const->constvalue));
-						const std::size_t query_total_bytes =
-							static_cast<std::size_t>(VARSIZE(query_hdr));
-						std::vector<char> query_varlena_bytes(query_total_bytes);
-						std::memcpy(query_varlena_bytes.data(), query_hdr,
-									query_total_bytes);
-						const uint32_t bp_size = query_hdr->bp_size;
-						if (reinterpret_cast<void*>(query_hdr)
-							!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
-							pfree(query_hdr);
-						}
-						runtime.buffer.configure_mmsearch(
-							runtime.param_rebind.seq_attno,
-							runtime.param_rebind.column_name,
-							std::move(query_varlena_bytes),
-							runtime.param_rebind.alphabet_code,
-							runtime.param_rebind.storage_unit_byte_width,
-							runtime.param_rebind.primary_key_attno);
-						reconfigured = true;
-						bioseq_log<DBG>("[bioseq] pg: ReScanCustomScan() rebound mmsearch query bp_size={} extras_count={} from Param paramid={}",
-								bp_size,
-								runtime.buffer.extra_query_count(),
-								runtime.param_rebind.paramid);
-					}
-					else if (query_const->constisnull)
-					{
-						bioseq_log<DBG>("[bioseq] pg: ReScanCustomScan() Param paramid={} resolved to NULL; mmsearch will match no rows",
-								runtime.param_rebind.paramid);
-					}
-				}
-			}
-		}
-		if (!reconfigured)
-		{
-			/*
-			 * Could not resolve the Param. Mark the buffer's mmsearch
-			 * context inactive so this rescan iteration skips batch
-			 * processing entirely and the qual evaluates as the
-			 * tautology stub (which still rejects via NULL semantics
-			 * when a param was NULL, since mmsearch is STRICT).
-			 */
-			runtime.buffer.clear_mmsearch_context();
-		}
-		}  /* end of else (paramkind == PARAM_EXEC) */
+		/* The stashed FuncExpr identifies the exact primary Param even when
+		 * planner qual ordering puts a Const extra first.  NULL clears only
+		 * the primary context; the strict plan qual rejects every row while
+		 * registered Const extras survive for a later non-NULL rescan. */
+		(void)resolve_mmsearch_param_query(
+			runtime, node->ss.ps.ps_ExprContext,
+			"ReScanCustomScan");
 	}
 
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
@@ -5330,130 +9142,182 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 
 
 static void
-ExplainGpuBatchStats(
-	const bioseq::scheduler::DispatchGpuBatchExecutionStats& gpu,
+ExplainPipelineExecutionStats(
+	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es)
 {
+	const auto requested_backend =
+		bioseq::pipeline_stats::executed_backend_name(stats.requested_backend);
+	const auto actual_backend =
+		bioseq::pipeline_stats::executed_backend_name(stats.actual_backend);
+	const auto requested_source =
+		bioseq::pipeline_stats::target_index_source_name(
+			stats.requested_target_index_source);
+	const auto actual_source =
+		bioseq::pipeline_stats::target_index_source_name(
+			stats.actual_target_index_source);
+	const auto& operational = stats.operational;
+	const auto& query_sketch_timing = operational.timing[
+		bioseq::pipeline_stats::stage_index(
+			bioseq::pipeline_stats::PipelineStage::query_sketch)];
+	const auto& target_index_build_timing = operational.timing[
+		bioseq::pipeline_stats::stage_index(
+			bioseq::pipeline_stats::PipelineStage::target_index_build)];
+
 	if (es->format == EXPLAIN_FORMAT_TEXT) {
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-			"* GPU batch [taken=%s problems=%llu waves=%llu "
-			"idx_built=%llu idx_reused=%llu seed_dispatches=%llu "
-			"chain_dispatches=%llu extend_dispatches=%llu "
-			"cpu_fallback_rows=%llu simd_fallback_rows=%llu declines=%llu]\n",
-			gpu.gpu_batched_branch_taken ? "true" : "false",
-			static_cast<unsigned long long>(gpu.gpu_problem_count),
-			static_cast<unsigned long long>(gpu.gpu_wave_count),
-			static_cast<unsigned long long>(gpu.gpu_segment_indexes_built),
-			static_cast<unsigned long long>(gpu.gpu_segment_indexes_reused),
-			static_cast<unsigned long long>(gpu.gpu_seed_dispatches),
-			static_cast<unsigned long long>(gpu.gpu_chain_dispatches),
-			static_cast<unsigned long long>(gpu.gpu_extend_dispatches),
-			static_cast<unsigned long long>(gpu.cpu_fallback_rows),
-			static_cast<unsigned long long>(gpu.simd_fallback_rows),
-			static_cast<unsigned long long>(gpu.vulkan_declines));
+			"* Execution proof [requested_backend=%.*s actual_backend=%.*s "
+			"requested_index_source=%.*s actual_index_source=%.*s "
+			"attempted=%llu fully_attested=%llu unattested=%llu "
+			"environment_mixed=%s persisted_identity_mixed=%s "
+			"identity_conflict=%s saturated=%s]\n",
+			static_cast<int>(requested_backend.size()), requested_backend.data(),
+			static_cast<int>(actual_backend.size()), actual_backend.data(),
+			static_cast<int>(requested_source.size()), requested_source.data(),
+			static_cast<int>(actual_source.size()), actual_source.data(),
+			static_cast<unsigned long long>(stats.attempted_alignment_jobs),
+			static_cast<unsigned long long>(stats.fully_attested_alignment_jobs),
+			static_cast<unsigned long long>(stats.unattested_alignment_jobs),
+			stats.environment.mixed_invalid ? "true" : "false",
+			stats.mixed_persisted_identity ? "true" : "false",
+			operational.operational_identity_conflict ? "true" : "false",
+			operational.stats_saturated ? "true" : "false");
+		if (stats.unattested_alignment_jobs != 0) {
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str,
+				"* First unattested [target_row=%llu query_ordinal=%llu]\n",
+				static_cast<unsigned long long>(
+					stats.first_unattested_target_row),
+				static_cast<unsigned long long>(
+					stats.first_unattested_query_ordinal));
+		}
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-			"* GPU pipeline [pipeline_ns=%llu query_sketch_ns=%llu "
-			"target_dedup_ns=%llu target_plan_ns=%llu index_build_ns=%llu "
-			"problem_build_ns=%llu seed_chain_runtime_ns=%llu]\n",
-			static_cast<unsigned long long>(gpu.gpu_batch_pipeline_ns),
-			static_cast<unsigned long long>(gpu.gpu_query_sketch_ns),
-			static_cast<unsigned long long>(gpu.gpu_target_dedup_ns),
-			static_cast<unsigned long long>(gpu.gpu_target_plan_ns),
-			static_cast<unsigned long long>(gpu.gpu_index_build_ns),
-			static_cast<unsigned long long>(gpu.gpu_problem_build_ns),
-			static_cast<unsigned long long>(gpu.gpu_seed_chain_runtime_ns));
+			"* Index outcomes [targets=%llu persisted=%llu missing_persisted=%llu "
+			"recomputed=%llu]\n",
+			static_cast<unsigned long long>(operational.target_rows),
+			static_cast<unsigned long long>(operational.persisted_index_rows),
+			static_cast<unsigned long long>(
+				operational.missing_persisted_index_rows),
+			static_cast<unsigned long long>(
+				operational.recomputed_target_index_rows));
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-			"* GPU CIGAR [jobs=%llu bounded=%llu exact=%llu "
-			"unit_gap=%llu gridded=%llu query_symbols=%llu "
-			"target_symbols=%llu packed_words=%llu traceback_words=%llu "
-			"prepare_ns=%llu symbol_pack_ns=%llu classify_ns=%llu "
-			"runtime_ns=%llu decode_ns=%llu]\n",
-			static_cast<unsigned long long>(gpu.gpu_cigar_jobs),
-			static_cast<unsigned long long>(gpu.gpu_cigar_bounded_jobs),
-			static_cast<unsigned long long>(gpu.gpu_cigar_exact_jobs),
-			static_cast<unsigned long long>(gpu.gpu_cigar_unit_gap_jobs),
-			static_cast<unsigned long long>(gpu.gpu_cigar_gridded_jobs),
-			static_cast<unsigned long long>(gpu.gpu_cigar_query_symbols),
-			static_cast<unsigned long long>(gpu.gpu_cigar_target_symbols),
-			static_cast<unsigned long long>(gpu.gpu_cigar_packed_words),
-			static_cast<unsigned long long>(gpu.gpu_cigar_traceback_words),
-			static_cast<unsigned long long>(gpu.gpu_cigar_prepare_ns),
-			static_cast<unsigned long long>(gpu.gpu_cigar_symbol_pack_ns),
-			static_cast<unsigned long long>(gpu.gpu_cigar_classify_ns),
-			static_cast<unsigned long long>(gpu.gpu_cigar_runtime_ns),
-			static_cast<unsigned long long>(gpu.gpu_cigar_decode_ns));
+			"* GPU dispatch [seed=%llu chain=%llu chain_backtrack=%llu "
+				"coordinate_vote=%llu extend=%llu backend_declines=%llu "
+				"backend_fallbacks=%llu]\n",
+				static_cast<unsigned long long>(operational.gpu_seed_dispatches),
+				static_cast<unsigned long long>(operational.gpu_chain_dispatches),
+				static_cast<unsigned long long>(
+					operational.gpu_chain_backtrack_dispatches),
+				static_cast<unsigned long long>(
+					operational.gpu_coordinate_vote_dispatches),
+				static_cast<unsigned long long>(operational.gpu_extend_dispatches),
+			static_cast<unsigned long long>(operational.backend_declines),
+			static_cast<unsigned long long>(operational.backend_fallbacks));
+		/*
+		 * Keep the compact headline above for human scans, and also expose the
+		 * algorithm-identity counters as ordinary textual EXPLAIN properties.
+		 * These values come from the same completed PipelineExecutionStats
+		 * aggregate as the headline; selection flags never populate them.
+		 */
+		ExplainPropertyUInteger("GPU Chain Dispatches", nullptr,
+			operational.gpu_chain_dispatches, es);
+		ExplainPropertyUInteger("GPU Chain Backtrack Dispatches", nullptr,
+			operational.gpu_chain_backtrack_dispatches, es);
+		ExplainPropertyUInteger("GPU Coordinate Vote Dispatches", nullptr,
+			operational.gpu_coordinate_vote_dispatches, es);
+		appendStringInfoSpaces(es->str, es->indent * 2);
+		appendStringInfo(es->str,
+			"* Host evidence [query_sketch_ns=%llu target_index_build_ns=%llu "
+			"query_hash_readbacks=%llu query_symbol_packing=%llu "
+			"target_symbol_packing=%llu alignment_classification=%llu "
+			"cigar_construction=%llu]\n",
+			static_cast<unsigned long long>(query_sketch_timing.host_wall_ns),
+			static_cast<unsigned long long>(
+				target_index_build_timing.host_wall_ns),
+			static_cast<unsigned long long>(
+				operational.host_query_hash_readbacks),
+			static_cast<unsigned long long>(
+				operational.host_query_symbol_packing_calls),
+			static_cast<unsigned long long>(
+				operational.host_target_symbol_packing_calls),
+			static_cast<unsigned long long>(
+				operational.host_alignment_job_classification_calls),
+			static_cast<unsigned long long>(
+				operational.host_cigar_construction_calls));
 		return;
 	}
 
-	ExplainOpenGroup("Bioseq GPU Batch", "Bioseq GPU Batch", true, es);
-	ExplainPropertyBool("Batched Branch Taken",
-		gpu.gpu_batched_branch_taken, es);
-	ExplainPropertyUInteger("GPU Problem Count", nullptr,
-		gpu.gpu_problem_count, es);
-	ExplainPropertyUInteger("GPU Wave Count", nullptr,
-		gpu.gpu_wave_count, es);
-	ExplainPropertyUInteger("GPU Segment Indexes Built", nullptr,
-		gpu.gpu_segment_indexes_built, es);
-	ExplainPropertyUInteger("GPU Segment Indexes Reused", nullptr,
-		gpu.gpu_segment_indexes_reused, es);
+	ExplainOpenGroup(
+		"Bioseq Execution Proof", "Bioseq Execution Proof", true, es);
+	ExplainPropertyText(
+		"Requested Backend", requested_backend.data(), es);
+	ExplainPropertyText(
+		"Actual Backend", actual_backend.data(), es);
+	ExplainPropertyText(
+		"Requested Target Index Source", requested_source.data(), es);
+	ExplainPropertyText(
+		"Actual Target Index Source", actual_source.data(), es);
+	ExplainPropertyUInteger("Attempted Alignment Jobs", nullptr,
+		stats.attempted_alignment_jobs, es);
+	ExplainPropertyUInteger("Fully Attested Alignment Jobs", nullptr,
+		stats.fully_attested_alignment_jobs, es);
+	ExplainPropertyUInteger("Unattested Alignment Jobs", nullptr,
+		stats.unattested_alignment_jobs, es);
+	if (stats.unattested_alignment_jobs != 0) {
+		ExplainPropertyUInteger("First Unattested Target Row", nullptr,
+			stats.first_unattested_target_row, es);
+		ExplainPropertyUInteger("First Unattested Query Ordinal", nullptr,
+			stats.first_unattested_query_ordinal, es);
+	}
+	ExplainPropertyBool(
+		"Environment Mixed Invalid", stats.environment.mixed_invalid, es);
+	ExplainPropertyBool(
+		"Mixed Persisted Identity", stats.mixed_persisted_identity, es);
+	ExplainPropertyBool("Operational Identity Conflict",
+		operational.operational_identity_conflict, es);
+	ExplainPropertyBool(
+		"Stats Saturated", operational.stats_saturated, es);
+	ExplainPropertyUInteger("Target Rows", nullptr,
+		operational.target_rows, es);
+	ExplainPropertyUInteger("Persisted Index Rows", nullptr,
+		operational.persisted_index_rows, es);
+	ExplainPropertyUInteger("Missing Persisted Index Rows", nullptr,
+		operational.missing_persisted_index_rows, es);
+	ExplainPropertyUInteger("Recomputed Target Index Rows", nullptr,
+		operational.recomputed_target_index_rows, es);
 	ExplainPropertyUInteger("GPU Seed Dispatches", nullptr,
-		gpu.gpu_seed_dispatches, es);
+		operational.gpu_seed_dispatches, es);
 	ExplainPropertyUInteger("GPU Chain Dispatches", nullptr,
-		gpu.gpu_chain_dispatches, es);
+		operational.gpu_chain_dispatches, es);
+	ExplainPropertyUInteger("GPU Chain Backtrack Dispatches", nullptr,
+		operational.gpu_chain_backtrack_dispatches, es);
+	ExplainPropertyUInteger("GPU Coordinate Vote Dispatches", nullptr,
+		operational.gpu_coordinate_vote_dispatches, es);
 	ExplainPropertyUInteger("GPU Extend Dispatches", nullptr,
-		gpu.gpu_extend_dispatches, es);
-	ExplainPropertyUInteger("CPU Fallback Rows", nullptr,
-		gpu.cpu_fallback_rows, es);
-	ExplainPropertyUInteger("SIMD Fallback Rows", nullptr,
-		gpu.simd_fallback_rows, es);
-	ExplainPropertyUInteger("Vulkan Declines", nullptr,
-		gpu.vulkan_declines, es);
-	ExplainPropertyUInteger("GPU Batch Pipeline Ns", nullptr,
-		gpu.gpu_batch_pipeline_ns, es);
-	ExplainPropertyUInteger("GPU Query Sketch Ns", nullptr,
-		gpu.gpu_query_sketch_ns, es);
-	ExplainPropertyUInteger("GPU Target Dedup Ns", nullptr,
-		gpu.gpu_target_dedup_ns, es);
-	ExplainPropertyUInteger("GPU Target Plan Ns", nullptr,
-		gpu.gpu_target_plan_ns, es);
-	ExplainPropertyUInteger("GPU Index Build Ns", nullptr,
-		gpu.gpu_index_build_ns, es);
-	ExplainPropertyUInteger("GPU Problem Build Ns", nullptr,
-		gpu.gpu_problem_build_ns, es);
-	ExplainPropertyUInteger("GPU Seed Chain Runtime Ns", nullptr,
-		gpu.gpu_seed_chain_runtime_ns, es);
-	ExplainPropertyUInteger("GPU CIGAR Jobs", nullptr,
-		gpu.gpu_cigar_jobs, es);
-	ExplainPropertyUInteger("GPU CIGAR Bounded Jobs", nullptr,
-		gpu.gpu_cigar_bounded_jobs, es);
-	ExplainPropertyUInteger("GPU CIGAR Exact Jobs", nullptr,
-		gpu.gpu_cigar_exact_jobs, es);
-	ExplainPropertyUInteger("GPU CIGAR Unit Gap Jobs", nullptr,
-		gpu.gpu_cigar_unit_gap_jobs, es);
-	ExplainPropertyUInteger("GPU CIGAR Gridded Jobs", nullptr,
-		gpu.gpu_cigar_gridded_jobs, es);
-	ExplainPropertyUInteger("GPU CIGAR Query Symbols", nullptr,
-		gpu.gpu_cigar_query_symbols, es);
-	ExplainPropertyUInteger("GPU CIGAR Target Symbols", nullptr,
-		gpu.gpu_cigar_target_symbols, es);
-	ExplainPropertyUInteger("GPU CIGAR Packed Words", nullptr,
-		gpu.gpu_cigar_packed_words, es);
-	ExplainPropertyUInteger("GPU CIGAR Traceback Words", nullptr,
-		gpu.gpu_cigar_traceback_words, es);
-	ExplainPropertyUInteger("GPU CIGAR Prepare Ns", nullptr,
-		gpu.gpu_cigar_prepare_ns, es);
-	ExplainPropertyUInteger("GPU CIGAR Symbol Pack Ns", nullptr,
-		gpu.gpu_cigar_symbol_pack_ns, es);
-	ExplainPropertyUInteger("GPU CIGAR Classify Ns", nullptr,
-		gpu.gpu_cigar_classify_ns, es);
-	ExplainPropertyUInteger("GPU CIGAR Runtime Ns", nullptr,
-		gpu.gpu_cigar_runtime_ns, es);
-	ExplainPropertyUInteger("GPU CIGAR Decode Ns", nullptr,
-		gpu.gpu_cigar_decode_ns, es);
-	ExplainCloseGroup("Bioseq GPU Batch", "Bioseq GPU Batch", true, es);
+		operational.gpu_extend_dispatches, es);
+	ExplainPropertyUInteger("Backend Declines", nullptr,
+		operational.backend_declines, es);
+	ExplainPropertyUInteger("Backend Fallbacks", nullptr,
+		operational.backend_fallbacks, es);
+	ExplainPropertyUInteger("Query Sketch Host Wall Ns", nullptr,
+		query_sketch_timing.host_wall_ns, es);
+	ExplainPropertyUInteger("Target Index Build Host Wall Ns", nullptr,
+		target_index_build_timing.host_wall_ns, es);
+	ExplainPropertyUInteger("Host Query Hash Readbacks", nullptr,
+		operational.host_query_hash_readbacks, es);
+	ExplainPropertyUInteger("Host Query Symbol Packing Calls", nullptr,
+		operational.host_query_symbol_packing_calls, es);
+	ExplainPropertyUInteger("Host Target Symbol Packing Calls", nullptr,
+		operational.host_target_symbol_packing_calls, es);
+	ExplainPropertyUInteger("Host Alignment Job Classification Calls", nullptr,
+		operational.host_alignment_job_classification_calls, es);
+	ExplainPropertyUInteger("Host CIGAR Construction Calls", nullptr,
+		operational.host_cigar_construction_calls, es);
+	ExplainCloseGroup(
+		"Bioseq Execution Proof", "Bioseq Execution Proof", true, es);
 }
 
 static void
@@ -5976,10 +9840,9 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			}
 
 			/*
-			 * Surface the per-batch execution counters from the
-			 * BatchProcessor stats. Only meaningful after ANALYZE has
-			 * actually run the scan (`last_stats.targets_considered`
-			 * is zero before the first batch).
+			 * Surface canonical pipeline stats. Only meaningful after ANALYZE has
+			 * actually run the scan (target_rows is zero before the first
+			 * completed batch).
 			 */
 			auto print_submit = [&](const char* label) {
 				appendStringInfoSpaces(es->str, es->indent * 2);
@@ -5987,20 +9850,24 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			};
 			if (explain_runtime != nullptr) {
 				const auto& stats = explain_runtime->buffer.execution_stats();
-				if (stats.targets_considered > 0) {
+				const auto& operational = stats.operational;
+				if (operational.target_rows > 0) {
 					StringInfoData submit_label;
 					initStringInfo(&submit_label);
 					appendStringInfo(&submit_label,
-						"Submit results [targets=%zu prebuilt_index=%zu recomputed=%zu]",
-						stats.targets_considered,
-						stats.targets_with_prebuilt_index,
-						stats.targets_recomputed_minimizers);
+						"Submit results [targets=%llu persisted_index=%llu recomputed=%llu]",
+						static_cast<unsigned long long>(
+							operational.target_rows),
+						static_cast<unsigned long long>(
+							operational.persisted_index_rows),
+						static_cast<unsigned long long>(
+							operational.recomputed_target_index_rows));
 					print_submit(submit_label.data);
 					pfree(submit_label.data);
 				} else {
 					print_submit("Submit results");
 				}
-				ExplainGpuBatchStats(stats.gpu, es);
+				ExplainPipelineExecutionStats(stats, es);
 			} else {
 				print_submit("Submit results");
 			}
@@ -6015,11 +9882,20 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				if (explain_runtime != nullptr) {
 					const auto& stats = explain_runtime->buffer.execution_stats();
+					const auto& operational = stats.operational;
 					appendStringInfo(es->str,
-						"batch summary: targets_considered=%zu, prebuilt_index=%zu, recomputed=%zu\n",
-						stats.targets_considered,
-						stats.targets_with_prebuilt_index,
-						stats.targets_recomputed_minimizers);
+						"batch summary: target_rows=%llu, persisted_index=%llu, "
+						"recomputed=%llu, attempted_jobs=%llu, unattested_jobs=%llu\n",
+						static_cast<unsigned long long>(
+							operational.target_rows),
+						static_cast<unsigned long long>(
+							operational.persisted_index_rows),
+						static_cast<unsigned long long>(
+							operational.recomputed_target_index_rows),
+						static_cast<unsigned long long>(
+							stats.attempted_alignment_jobs),
+						static_cast<unsigned long long>(
+							stats.unattested_alignment_jobs));
 				}
 				--es->indent;
 			}
@@ -6086,7 +9962,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			ExplainCloseGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
 			if (explain_runtime != nullptr) {
 				const auto& stats = explain_runtime->buffer.execution_stats();
-				ExplainGpuBatchStats(stats.gpu, es);
+				ExplainPipelineExecutionStats(stats, es);
 			}
 		}
 	}
@@ -6225,7 +10101,15 @@ BioseqColumn_InitializeWorkerCustomScan(CustomScanState *node,
 	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 	ParallelBioseqColumnScan pscan = reinterpret_cast<ParallelBioseqColumnScan>(coordinate);
 	bioseqScanState->parallelBioseqColumnScan = pscan;
-	bioseqScanState->snapshot = RestoreSnapshot(pscan->snapshotData);
+	if (bioseqScanState->snapshotRegisteredByUs) {
+		UnregisterSnapshot(bioseqScanState->snapshot);
+		bioseqScanState->snapshotRegisteredByUs = false;
+	}
+	bioseqScanState->snapshot = RegisterSnapshot(
+		RestoreSnapshot(pscan->snapshotData));
+	bioseqScanState->snapshotRegisteredByUs = true;
+	bioseq_runtime(bioseqScanState).buffer.replace_executor_snapshot(
+		bioseqScanState->snapshot);
 }
 
 

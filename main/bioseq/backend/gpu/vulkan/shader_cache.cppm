@@ -17,6 +17,7 @@ module;
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <optional>
 #include <sstream>
 #include <span>
@@ -149,8 +150,13 @@ concept is_runtime_compile_service = requires(Service& service, ShaderVariantKey
     const ShaderVariantKey& key)
 {
     constexpr std::uint32_t conservative_moltenvk_cap = 256u;
+    const ShaderWorkgroupSize workgroup = expected_shader_workgroup_size(key);
+    const std::uint64_t exact_threads =
+        static_cast<std::uint64_t>(workgroup.x)
+        * static_cast<std::uint64_t>(workgroup.y)
+        * static_cast<std::uint64_t>(workgroup.z);
     std::vector<std::filesystem::path> paths{cache_binary_archive_path(cache_dir, key)};
-    if (key.local_size != conservative_moltenvk_cap) {
+    if (exact_threads != conservative_moltenvk_cap) {
         paths.push_back(cache_dir / (cache_file_stem(key) + ".max_threads_"
                                      + std::to_string(conservative_moltenvk_cap)
                                      + ".metalar"));
@@ -283,15 +289,58 @@ kernel void bioseq_moltenvk_command_placeholder() {}
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.patch);
     hash = bioseq::common::hash_combine_64(hash, moltenvk_command_placeholder_msl());
     hash = bioseq::common::hash_combine_64(hash, "bioseq-metal-binary-archive-v2");
+    // SPIR-V -> MSL resource indices are pipeline ABI, even when the GLSL
+    // shader body itself is unchanged.  Keep an explicit transform revision
+    // and the concrete layout in the digest so an incompatible metallib or
+    // Metal binary archive is never reused under the old cache directory.
+    hash = bioseq::common::hash_combine_64(
+        hash, "bioseq-spirv-to-msl-resource-abi-v2");
 
     for_each_static_shader_variant(inputs.variants, [&hash](const ShaderVariantKey& key) {
+        const ShaderKind kind = checked_shader_kind(key.kind);
+        const DescriptorLayoutKind descriptor_layout = descriptor_layout_for(kind);
         hash = bioseq::common::hash_combine_64(hash, key.kind);
         hash = bioseq::common::hash_combine_64(hash, key.tile_size);
         hash = bioseq::common::hash_combine_64(hash, key.local_size);
         hash = bioseq::common::hash_combine_64(hash, key.max_span);
         hash = bioseq::common::hash_combine_64(
-            hash, shader_body_for_digest(checked_shader_kind(key.kind)));
+            hash, static_cast<std::uint32_t>(descriptor_layout));
+        hash = bioseq::common::hash_combine_64(
+            hash, descriptor_binding_count(descriptor_layout));
+        hash = bioseq::common::hash_combine_64(
+            hash, push_constant_size(kind));
+        hash = bioseq::common::hash_combine_64(
+            hash, shader_body_for_digest(kind));
     });
+    std::ostringstream out;
+    out << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return out.str();
+}
+
+/// Content identity for an explicitly requested grouped32 ABI2 preseed. This
+/// does not participate in the production supervisor cache digest or AOT set;
+/// callers can record/compare it when measuring an inactive preseed operation.
+[[nodiscard]] inline std::string grouped32_inactive_shader_set_digest_hex()
+{
+    std::uint64_t hash = bioseq::common::fnv1a_64(
+        "bioseq-grouped32-inactive-preseed-v1");
+    for_each_inactive_grouped32_shader_variant(
+        [&hash](const ShaderVariantKey& key) {
+            const ShaderKind kind = checked_shader_kind(key.kind);
+            const auto layout = descriptor_layout_for(kind);
+            hash = bioseq::common::hash_combine_64(hash, key.kind);
+            hash = bioseq::common::hash_combine_64(hash, key.tile_size);
+            hash = bioseq::common::hash_combine_64(hash, key.local_size);
+            hash = bioseq::common::hash_combine_64(hash, key.max_span);
+            hash = bioseq::common::hash_combine_64(
+                hash, static_cast<std::uint32_t>(layout));
+            hash = bioseq::common::hash_combine_64(
+                hash, descriptor_binding_count(layout));
+            hash = bioseq::common::hash_combine_64(
+                hash, push_constant_size(kind));
+            hash = bioseq::common::hash_combine_64(
+                hash, shader_body_for_digest(kind));
+        });
     std::ostringstream out;
     out << std::hex << std::setfill('0') << std::setw(16) << hash;
     return out.str();
@@ -413,6 +462,14 @@ kernel void bioseq_moltenvk_command_placeholder() {}
             return std::unexpected("SPIR-V chain_tiled_dp_u64 ABI mismatch");
         }
     }
+    if (kind == ShaderKind::seed_lookup_anchors
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3)
+            || !scan.has_binding(4) || !scan.has_binding(5)
+            || !scan.has_array_stride(24) || !scan.has_array_stride(8)
+            || !scan.has_struct_offsets({0u, 8u, 16u, 20u}))) {
+        return std::unexpected("SPIR-V seed_lookup_anchors ABI mismatch");
+    }
     if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
         return std::unexpected("SPIR-V sort_anchors_bitonic range stride mismatch");
     }
@@ -420,6 +477,177 @@ kernel void bioseq_moltenvk_command_placeholder() {}
         && (!scan.has_binding(0) || !scan.has_binding(1)
             || !scan.has_array_stride(key.max_span / 8u))) {
         return std::unexpected("SPIR-V generate_units layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_persisted_directory_select
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3))) {
+        return std::unexpected(
+            "SPIR-V persisted directory selection layout mismatch");
+    }
+    const auto binding_scalar = [&scan](std::uint32_t binding,
+                                        std::uint32_t stride) {
+        return scan.has_binding_array_stride(0u, binding, stride);
+    };
+    const auto binding_struct = [&scan](
+            std::uint32_t binding,
+            std::uint32_t stride,
+            std::initializer_list<std::uint32_t> offsets) {
+        return scan.has_binding_array_stride(0u, binding, stride)
+            && scan.has_binding_struct_offsets(
+                0u, binding,
+                std::span<const std::uint32_t>{offsets.begin(), offsets.size()});
+    };
+    const auto core_push = [&scan]() {
+        constexpr std::array<std::uint32_t, 18> offsets{
+            0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u,
+            36u, 40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u};
+        return scan.has_push_constant_offsets(offsets);
+    };
+    const auto partition = [&]() {
+        return binding_struct(0u, 64u,
+            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u,
+             40u, 48u, 56u, 60u});
+    };
+    const auto control = [&]() {
+        return binding_struct(1u, 12u, {0u, 4u, 8u});
+    };
+    const auto query_record = [&]() {
+        return binding_struct(3u, 48u,
+            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u, 44u});
+    };
+    const auto query_minimizer = [&]() {
+        return binding_struct(4u, 16u, {0u, 4u, 8u, 12u});
+    };
+    const auto occurrence = [&]() {
+        return binding_struct(5u, 16u, {0u, 4u, 8u, 12u});
+    };
+    const auto query_state = [&]() {
+        return binding_struct(6u, 16u, {0u, 4u, 8u, 12u});
+    };
+    const auto validation = [&]() {
+        return binding_struct(8u, 32u,
+            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u});
+    };
+    const auto adapter_state_core = [&]() {
+        return binding_struct(12u, 32u,
+            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u});
+    };
+    const auto complete_core_layout = [&]() {
+        return partition() && control() && binding_scalar(2u, 4u)
+            && query_record() && query_minimizer() && occurrence()
+            && query_state()
+            && binding_struct(7u, 24u, {0u, 8u, 16u, 20u})
+            && validation()
+            && binding_struct(9u, 12u, {0u, 4u, 8u})
+            && binding_struct(10u, 16u, {0u, 8u, 12u})
+            && binding_struct(11u, 24u, {0u, 4u, 8u, 12u, 16u})
+            && adapter_state_core() && core_push();
+    };
+    const bool grouped32_core_kind =
+        kind == ShaderKind::phase_c_grouped32_validate
+        || kind == ShaderKind::phase_c_grouped32_accumulate_occurrences
+        || kind == ShaderKind::phase_c_grouped32_finalize_max_occ
+        || kind == ShaderKind::phase_c_grouped32_allocate_anchor_prefix
+        || kind == ShaderKind::phase_c_grouped32_build_sort_segments
+        || kind == ShaderKind::phase_c_grouped32_emit_global_anchors
+        || kind == ShaderKind::phase_c_grouped32_clear_state
+        || kind == ShaderKind::phase_c_grouped32_finalize_validation;
+    if (grouped32_core_kind && !complete_core_layout()) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 complete core layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_validate
+        && (!partition() || !control() || !binding_scalar(2u, 4u)
+            || !query_record() || !query_minimizer() || !validation()
+            || !binding_struct(9u, 12u, {0u, 4u, 8u})
+            || !adapter_state_core() || !core_push())) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 validation layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_accumulate_occurrences
+        && (!partition() || !control() || !query_record()
+            || !query_minimizer() || !occurrence() || !validation()
+            || !adapter_state_core() || !core_push())) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 occurrence layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_finalize_max_occ
+        && (!query_record() || !query_minimizer() || !occurrence()
+            || !query_state() || !validation() || !adapter_state_core()
+            || !core_push())) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 finalize layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_allocate_anchor_prefix
+        && (!query_record() || !occurrence() || !query_state()
+            || !validation() || !adapter_state_core() || !core_push())) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 prefix layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_build_sort_segments
+        && (!query_record() || !query_state() || !validation()
+            || !binding_struct(11u, 24u, {0u, 4u, 8u, 12u, 16u})
+            || !adapter_state_core() || !core_push())) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 sort-ownership layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_emit_global_anchors
+        && (!partition() || !control() || !binding_scalar(2u, 4u)
+            || !query_record() || !query_minimizer() || !occurrence()
+            || !binding_struct(7u, 24u, {0u, 8u, 16u, 20u})
+            || !validation()
+            || !binding_struct(10u, 16u, {0u, 8u, 12u})
+            || !adapter_state_core() || !core_push())) {
+        return std::unexpected(
+            "SPIR-V grouped32 ABI2 anchor-emission layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_adapt_query_sketch
+        || kind == ShaderKind::phase_c_grouped32_finalize_query_adapter) {
+        constexpr std::array<std::uint32_t, 16> push_offsets{
+            0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u,
+            32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u};
+        const bool ok = binding_scalar(0u, 4u)
+            && binding_scalar(1u, 4u) && binding_scalar(2u, 4u)
+            && binding_struct(3u, 48u,
+                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u})
+            && binding_struct(4u, 48u,
+                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u, 44u})
+            && binding_struct(5u, 16u, {0u, 4u, 8u, 12u})
+            && binding_struct(6u, 32u,
+                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u})
+            && binding_struct(7u, 32u,
+                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u})
+            && binding_struct(8u, 12u, {0u, 4u, 8u})
+            && scan.has_push_constant_offsets(push_offsets);
+        if (!ok) return std::unexpected(
+            "SPIR-V grouped32 ABI2 sketch-adapter layout mismatch");
+    }
+    if (kind == ShaderKind::phase_c_grouped32_prepare_indirect) {
+        constexpr std::array<std::uint32_t, 12> push_offsets{
+            0u, 4u, 8u, 12u, 16u, 20u,
+            24u, 28u, 32u, 36u, 40u, 44u};
+        const bool ok = partition() && query_record() && validation()
+            && binding_struct(9u, 12u, {0u, 4u, 8u})
+            && adapter_state_core()
+            && scan.has_push_constant_offsets(push_offsets);
+        if (!ok) return std::unexpected(
+            "SPIR-V grouped32 ABI2 indirect-preparation layout mismatch");
+    }
+    if (kind == ShaderKind::align_extend_banded_affine
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3)
+            || !scan.has_array_stride(4) || !scan.has_array_stride(16)
+            || !scan.has_array_stride(32))) {
+        return std::unexpected("SPIR-V alignment extension layout mismatch");
+    }
+    if (kind == ShaderKind::align_extend_simple_cigar
+        && (!scan.has_binding(0) || !scan.has_binding(1)
+            || !scan.has_binding(2) || !scan.has_binding(3)
+            || !scan.has_binding(4) || !scan.has_binding(5)
+            || !scan.has_array_stride(4) || !scan.has_array_stride(40)
+            || !scan.has_array_stride(48))) {
+        return std::unexpected(
+            "SPIR-V alignment CIGAR extension layout mismatch");
     }
     return {};
 }
@@ -430,6 +658,8 @@ struct MslCompileResult {
     std::uint32_t wg_x = 1;
     std::uint32_t wg_y = 1;
     std::uint32_t wg_z = 1;
+    bool needs_buffer_size_buffer = false;
+    std::uint32_t buffer_size_buffer_index = 25u;
 };
 
 [[nodiscard]] inline std::expected<MslCompileResult, std::string> spirv_to_msl(
@@ -442,6 +672,10 @@ struct MslCompileResult {
         spirv_cross::CompilerMSL::Options options{};
         options.set_msl_version(version.major, version.minor, version.patch);
         options.argument_buffers = false;
+        // MoltenVK and SPIRV-Cross reserve Metal buffer 25 for the runtime
+        // array-length table used by OpArrayLength. Keep it explicit and reject
+        // any descriptor mapping that would collide with that implicit input.
+        options.buffer_size_buffer_index = 25u;
         compiler.set_msl_options(options);
 
         const ShaderKind kind = checked_shader_kind(key.kind);
@@ -449,6 +683,49 @@ struct MslCompileResult {
         const std::uint32_t binding_count =
             descriptor_binding_count(descriptor_layout_for(kind));
         const std::uint32_t base = push_size > 0 ? 1u : 0u;
+        if (base + binding_count > options.buffer_size_buffer_index) {
+            return std::unexpected(
+                "SPIR-V descriptor mapping collides with MSL buffer-size input");
+        }
+        const auto resources = compiler.get_shader_resources();
+        std::vector<std::uint64_t> observed_storage_bindings;
+        observed_storage_bindings.reserve(resources.storage_buffers.size());
+        for (const auto& resource : resources.storage_buffers) {
+            if (!compiler.has_decoration(
+                    resource.id, spv::DecorationDescriptorSet)
+                || !compiler.has_decoration(
+                    resource.id, spv::DecorationBinding)) {
+                return std::unexpected(
+                    "SPIR-V storage resource lacks set/binding decoration");
+            }
+            const std::uint32_t descriptor_set = compiler.get_decoration(
+                resource.id, spv::DecorationDescriptorSet);
+            const std::uint32_t binding = compiler.get_decoration(
+                resource.id, spv::DecorationBinding);
+            if (descriptor_set != 0u || binding >= binding_count) {
+                return std::unexpected(shader_cache_message(
+                    "SPIR-V resource outside descriptor ABI: set=",
+                    descriptor_set, " binding=", binding,
+                    " binding_count=", binding_count));
+            }
+            const std::uint64_t identity =
+                (std::uint64_t(descriptor_set) << 32u) | binding;
+            if (std::find(observed_storage_bindings.begin(),
+                          observed_storage_bindings.end(), identity)
+                != observed_storage_bindings.end()) {
+                return std::unexpected(shader_cache_message(
+                    "SPIR-V duplicate storage binding: set=",
+                    descriptor_set, " binding=", binding));
+            }
+            observed_storage_bindings.push_back(identity);
+        }
+        const std::size_t expected_push_count = push_size == 0u ? 0u : 1u;
+        if (resources.push_constant_buffers.size() != expected_push_count) {
+            return std::unexpected(shader_cache_message(
+                "SPIR-V push-constant resource count mismatch: observed=",
+                resources.push_constant_buffers.size(), " expected=",
+                expected_push_count));
+        }
         auto add_storage_binding = [&compiler](
                 std::uint32_t desc_set,
                 std::uint32_t binding,
@@ -479,6 +756,16 @@ struct MslCompileResult {
         result.wg_x = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0);
         result.wg_y = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1);
         result.wg_z = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2);
+        result.needs_buffer_size_buffer = compiler.needs_buffer_size_buffer();
+        result.buffer_size_buffer_index = options.buffer_size_buffer_index;
+        const ShaderWorkgroupSize expected = expected_shader_workgroup_size(key);
+        if (result.wg_x != expected.x || result.wg_y != expected.y
+            || result.wg_z != expected.z) {
+            return std::unexpected(shader_cache_message(
+                "SPIR-V/MSL workgroup mismatch: reflected=", result.wg_x,
+                'x', result.wg_y, 'x', result.wg_z, " expected=",
+                expected.x, 'x', expected.y, 'x', expected.z));
+        }
         return result;
     } catch (const std::exception& e) {
         return std::unexpected(shader_cache_message("SPIR-V to MSL failed: ", e.what()));
@@ -531,44 +818,126 @@ struct MslCompileResult {
     return meta;
 }
 
+[[nodiscard]] inline std::expected<ShaderCacheMeta, std::string>
+read_compatible_cache_meta(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key,
+    std::string* entry_name)
+{
+    std::string entry;
+    auto meta = read_meta(cache_meta_path(cache_dir, key), &entry);
+    if (!meta) {
+        return std::unexpected(meta.error());
+    }
+    if (!(meta->key == key)) {
+        return std::unexpected("meta key mismatch");
+    }
+    if (entry.empty()) {
+        return std::unexpected("meta entry name is empty");
+    }
+    const ShaderWorkgroupSize expected = expected_shader_workgroup_size(key);
+    if (meta->wg_x != expected.x
+        || meta->wg_y != expected.y
+        || meta->wg_z != expected.z) {
+        return std::unexpected(shader_cache_message(
+            "meta workgroup mismatch: cached=", meta->wg_x, 'x',
+            meta->wg_y, 'x', meta->wg_z, " expected=", expected.x, 'x',
+            expected.y, 'x', expected.z));
+    }
+    if (entry_name != nullptr) {
+        *entry_name = entry;
+    }
+    return *meta;
+}
+
+[[nodiscard]] inline std::expected<void, std::string> require_nonempty_cache_file(
+    const std::filesystem::path& path,
+    std::string_view artifact)
+{
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        return std::unexpected(shader_cache_message(
+            artifact, " stat failed for ", path.string(), ": ", ec.message()));
+    }
+    if (!exists) {
+        return std::unexpected(shader_cache_message(
+            artifact, " missing: ", path.string()));
+    }
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return std::unexpected(shader_cache_message(
+            artifact, " size failed for ", path.string(), ": ", ec.message()));
+    }
+    if (size == 0) {
+        return std::unexpected(shader_cache_message(
+            artifact, " empty: ", path.string()));
+    }
+    return {};
+}
+
+[[nodiscard]] inline std::expected<void, std::string>
+cache_metallib_entry_status(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    if (auto meta = read_compatible_cache_meta(cache_dir, key, nullptr); !meta) {
+        return std::unexpected(shader_cache_message(
+            "metadata incompatible: ", meta.error()));
+    }
+    return require_nonempty_cache_file(
+        cache_metallib_path(cache_dir, key), "metallib");
+}
+
 [[nodiscard]] inline bool cache_metallib_entry_complete(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
-    std::string entry;
-    auto meta = read_meta(cache_meta_path(cache_dir, key), &entry);
-    if (!meta || !(meta->key == key) || entry.empty()) {
-        return false;
-    }
-    return std::filesystem::exists(cache_metallib_path(cache_dir, key));
+    return cache_metallib_entry_status(cache_dir, key).has_value();
 }
 
-[[nodiscard]] inline bool cache_binary_archive_complete(
+[[nodiscard]] inline std::expected<void, std::string>
+cache_binary_archive_status(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
 #if !defined(__APPLE__)
     (void)cache_dir;
     (void)key;
-    return true;
+    return {};
 #else
-    std::error_code ec;
     for (const std::filesystem::path& archive : cache_binary_archive_paths(cache_dir, key)) {
-        if (!std::filesystem::exists(archive, ec) || ec
-            || std::filesystem::file_size(archive, ec) == 0 || ec) {
-            return false;
+        if (auto present = require_nonempty_cache_file(archive, "Metal binary archive");
+            !present) {
+            return present;
         }
     }
-    return true;
+    return {};
 #endif
+}
+
+[[nodiscard]] inline bool cache_binary_archive_complete(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    return cache_binary_archive_status(cache_dir, key).has_value();
+}
+
+[[nodiscard]] inline std::expected<void, std::string> cache_entry_status(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    if (auto metallib = cache_metallib_entry_status(cache_dir, key); !metallib) {
+        return metallib;
+    }
+    return cache_binary_archive_status(cache_dir, key);
 }
 
 [[nodiscard]] inline bool cache_entry_complete(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
-    return cache_metallib_entry_complete(cache_dir, key)
-        && cache_binary_archive_complete(cache_dir, key);
+    return cache_entry_status(cache_dir, key).has_value();
 }
 
 [[nodiscard]] inline std::expected<std::filesystem::path, std::string>
@@ -777,6 +1146,18 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (!msl) {
         return std::unexpected(msl.error());
     }
+    const ShaderWorkgroupSize expected_workgroup = expected_shader_workgroup_size(key);
+    const ShaderWorkgroupSize compiled_workgroup{
+        msl->wg_x == 0 ? 1u : msl->wg_x,
+        msl->wg_y == 0 ? 1u : msl->wg_y,
+        msl->wg_z == 0 ? 1u : msl->wg_z};
+    if (!(compiled_workgroup == expected_workgroup)) {
+        return std::unexpected(shader_cache_message(
+            "compiled SPIR-V workgroup mismatch for ", cache_file_stem(key),
+            ": reflected=", compiled_workgroup.x, 'x', compiled_workgroup.y, 'x',
+            compiled_workgroup.z, " expected=", expected_workgroup.x, 'x',
+            expected_workgroup.y, 'x', expected_workgroup.z));
+    }
 
     const std::filesystem::path stem = cache_dir / cache_file_stem(key);
     const std::filesystem::path metal_path = stem.string() + ".tmp.metal";
@@ -809,9 +1190,9 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
 
     ShaderCacheMeta meta{};
     meta.key = key;
-    meta.wg_x = msl->wg_x == 0 ? 1u : msl->wg_x;
-    meta.wg_y = msl->wg_y == 0 ? 1u : msl->wg_y;
-    meta.wg_z = msl->wg_z == 0 ? 1u : msl->wg_z;
+    meta.wg_x = compiled_workgroup.x;
+    meta.wg_y = compiled_workgroup.y;
+    meta.wg_z = compiled_workgroup.z;
     meta.entry_len = static_cast<std::uint32_t>(
         std::min<std::size_t>(msl->entry_name.size(), 64u));
     const std::string entry = msl->entry_name.substr(0, meta.entry_len);
@@ -903,14 +1284,20 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (create_shader_module == nullptr) {
         return std::unexpected("vkCreateShaderModule function pointer is null");
     }
-    std::string entry;
-    auto meta = read_meta(cache_meta_path(cache_dir, key), &entry);
-    if (!meta || !(meta->key == key)) {
-        return std::unexpected(meta ? "meta key mismatch" : meta.error());
-    }
     auto code = make_moltenvk_metallib_module_code(cache_metallib_path(cache_dir, key));
     if (!code) {
         return std::unexpected(code.error());
+    }
+
+    // Re-read and validate metadata after the metallib bytes are resident and
+    // immediately before module creation.  The earlier completeness probe is
+    // only an optimization; it cannot be the trust boundary because a compile
+    // service may report success without publishing a compatible record, and
+    // cache files may be replaced between the probe and this loader.
+    std::string entry;
+    auto meta = read_compatible_cache_meta(cache_dir, key, &entry);
+    if (!meta) {
+        return std::unexpected(meta.error());
     }
 
     VkShaderModuleCreateInfo module_info{};
@@ -940,6 +1327,11 @@ template <is_runtime_compile_service Service>
         auto compile = service.ensure_variant_compiled(key);
         if (!compile) {
             return std::unexpected(compile.error());
+        }
+        if (auto published = cache_entry_status(cache_dir, key); !published) {
+            return std::unexpected(shader_cache_message(
+                "shader compile service returned success without a complete compatible cache entry for ",
+                cache_file_stem(key), ": ", published.error()));
         }
     }
     return load_cached_module(device, cache_dir, key, create_shader_module);

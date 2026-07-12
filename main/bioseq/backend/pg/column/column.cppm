@@ -31,7 +31,6 @@ import bioseq.config;
 import bioseq.pg_utils;
 import bioseq.storage.manager;
 import bioseq.scheduler.supervisor_pg;
-import bioseq.storage.indexing_pg.residency;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.column.planner_hook;        // DOC0322 §9.4 — exported bioseq_planner_init
 import bioseq.table.batch_sort_scan;      // exported bioseq_batch_sort_init (sequence ORDER BY)
@@ -84,7 +83,10 @@ bioseq_init()
 	 * spill is freed before the slot is dropped. */
 	CacheRegisterRelcacheCallback(bioseq::storage::bioseq_am_cache_invalidate,
 								  PointerGetDatum(NULL));
-	bioseq::storage::indexing::install_index_residency_callbacks();
+	/* Index residency callbacks install lazily before the first cache
+	 * lookup/store. No entry exists before that point, and keeping registration
+	 * out of `_PG_init` lets a later SQL transaction resume safely if only a
+	 * prefix of the three callback leaves registered before an ERROR. */
 
 	/* DOC0260 §11.3 step 3 — orphan reaper. We deliberately do NOT call
 	 * `ReapOrphanSeqSubTables()` directly from `_PG_init` because there is
@@ -618,10 +620,11 @@ bioseq_guc_init()
 		{ "simd_minimap2_slow", 1, false },
 		{ "two_stack_nthash",   2, false },
 		{ "vulkan_minimap_int", 3, false },
+		{ "paper_nthash_simd",  4, false },
 		{ NULL, 0, false }
 	};
 	DefineCustomEnumVariable("bioseq.aligner.minimizer_algorithm",
-							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash, vulkan_minimap_int.",
+							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash, vulkan_minimap_int, paper_nthash_simd.",
 							 NULL, &bioseq_aligner_minimizer_algorithm, 0,
 							 minimizer_algorithm_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
