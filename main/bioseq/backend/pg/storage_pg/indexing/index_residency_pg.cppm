@@ -78,6 +78,8 @@ template <class Key>
 export namespace bioseq::storage::indexing {
 
 using bioseq::indexing::index_sub_key_t;
+using bioseq::indexing::MinimizerSchemeIdentity;
+using bioseq::indexing::MinimizerSketchBackend;
 using bioseq::storage::sequence_size_t;
 
 struct IndexChunkKey {
@@ -106,6 +108,8 @@ struct AssembledIndexKey {
     Oid main_relfilenode = InvalidOid;
     std::int16_t column_attno = 0;
     std::uint64_t index_name_hash = 0;
+    MinimizerSketchBackend sketch_backend = MinimizerSketchBackend::Scalar;
+    MinimizerSchemeIdentity minimizer_scheme{};
     std::uint64_t query_key = 0;
     std::uint64_t query_signature = 0;
     sequence_size_t clip_lo_bp = 0;
@@ -145,12 +149,14 @@ struct AssembledIndexCacheHit {
 [[nodiscard]] inline bool operator==(const AssembledIndexKey& lhs, const AssembledIndexKey& rhs) noexcept {
     return std::tie(lhs.db_oid, lhs.user_relid, lhs.tablespace_oid,
                     lhs.main_relfilenode, lhs.column_attno, lhs.index_name_hash,
-                    lhs.query_key, lhs.query_signature, lhs.clip_lo_bp,
-                    lhs.clip_hi_bp)
+                    lhs.sketch_backend, lhs.minimizer_scheme.id,
+                    lhs.minimizer_scheme.version, lhs.query_key,
+                    lhs.query_signature, lhs.clip_lo_bp, lhs.clip_hi_bp)
         == std::tie(rhs.db_oid, rhs.user_relid, rhs.tablespace_oid,
                     rhs.main_relfilenode, rhs.column_attno, rhs.index_name_hash,
-                    rhs.query_key, rhs.query_signature, rhs.clip_lo_bp,
-                    rhs.clip_hi_bp);
+                    rhs.sketch_backend, rhs.minimizer_scheme.id,
+                    rhs.minimizer_scheme.version, rhs.query_key,
+                    rhs.query_signature, rhs.clip_lo_bp, rhs.clip_hi_bp);
 }
 
 struct ChunkCacheEntry {
@@ -248,6 +254,50 @@ void evict_relation_residency(Oid relid) noexcept {
     }
     for (std::size_t entry_index = 0; entry_index < state.assembled_entries.size();) {
         if (state.assembled_entries[entry_index].key.user_relid == relid) {
+            evict_assembled_index(entry_index);
+        } else {
+            ++entry_index;
+        }
+    }
+}
+
+/// Evict every backend-local cache entry for one logical sidecar identity.
+///
+/// Relcache callbacks receive the sidecar relation OID, while residency keys
+/// intentionally carry the owning user relation OID.  A destructive sidecar
+/// schema replacement therefore cannot rely on `evict_relation_residency`:
+/// the two OIDs are different.  The generation-storage cutover calls this
+/// identity form before dropping the old sidecar and again after publishing
+/// the fresh physical relation.
+void evict_index_residency(
+        Oid db_oid,
+        Oid user_relid,
+        Oid tablespace_oid,
+        Oid main_relfilenode,
+        std::int16_t column_attno,
+        std::uint64_t requested_index_name_hash) noexcept {
+    ResidencyState& state = residency_state();
+    const auto matches = [db_oid, user_relid, tablespace_oid,
+            main_relfilenode, column_attno,
+            requested_index_name_hash](const auto& key) noexcept {
+        return key.db_oid == db_oid
+            && key.user_relid == user_relid
+            && key.tablespace_oid == tablespace_oid
+            && key.main_relfilenode == main_relfilenode
+            && key.column_attno == column_attno
+            && key.index_name_hash == requested_index_name_hash;
+    };
+    for (std::size_t entry_index = 0;
+         entry_index < state.chunk_entries.size();) {
+        if (matches(state.chunk_entries[entry_index].key)) {
+            evict_chunk_index(entry_index);
+        } else {
+            ++entry_index;
+        }
+    }
+    for (std::size_t entry_index = 0;
+         entry_index < state.assembled_entries.size();) {
+        if (matches(state.assembled_entries[entry_index].key)) {
             evict_assembled_index(entry_index);
         } else {
             ++entry_index;
