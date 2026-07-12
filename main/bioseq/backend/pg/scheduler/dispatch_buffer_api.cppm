@@ -17,6 +17,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -24,55 +25,21 @@ export module bioseq.scheduler.dispatch_buffer_api;
 
 import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
+import bioseq.sequences.pipe;
+import bioseq.indexing.type;
 
 export namespace bioseq::scheduler {
-
-struct DispatchGpuBatchExecutionStats {
-    bool gpu_batched_branch_taken = false;
-    std::uint64_t gpu_problem_count = 0;
-    std::uint64_t gpu_wave_count = 0;
-    std::uint64_t gpu_segment_indexes_built = 0;
-    std::uint64_t gpu_segment_indexes_reused = 0;
-    std::uint64_t gpu_seed_dispatches = 0;
-    std::uint64_t gpu_chain_dispatches = 0;
-    std::uint64_t gpu_extend_dispatches = 0;
-    std::uint64_t cpu_fallback_rows = 0;
-    std::uint64_t simd_fallback_rows = 0;
-    std::uint64_t vulkan_declines = 0;
-    std::uint64_t gpu_batch_pipeline_ns = 0;
-    std::uint64_t gpu_query_sketch_ns = 0;
-    std::uint64_t gpu_target_dedup_ns = 0;
-    std::uint64_t gpu_target_plan_ns = 0;
-    std::uint64_t gpu_index_build_ns = 0;
-    std::uint64_t gpu_problem_build_ns = 0;
-    std::uint64_t gpu_seed_chain_runtime_ns = 0;
-    std::uint64_t gpu_cigar_jobs = 0;
-    std::uint64_t gpu_cigar_bounded_jobs = 0;
-    std::uint64_t gpu_cigar_exact_jobs = 0;
-    std::uint64_t gpu_cigar_unit_gap_jobs = 0;
-    std::uint64_t gpu_cigar_gridded_jobs = 0;
-    std::uint64_t gpu_cigar_query_symbols = 0;
-    std::uint64_t gpu_cigar_target_symbols = 0;
-    std::uint64_t gpu_cigar_packed_words = 0;
-    std::uint64_t gpu_cigar_traceback_words = 0;
-    std::uint64_t gpu_cigar_prepare_ns = 0;
-    std::uint64_t gpu_cigar_symbol_pack_ns = 0;
-    std::uint64_t gpu_cigar_classify_ns = 0;
-    std::uint64_t gpu_cigar_runtime_ns = 0;
-    std::uint64_t gpu_cigar_decode_ns = 0;
-};
-
-struct DispatchBatchExecutionStats {
-    std::size_t targets_considered = 0;
-    std::size_t targets_with_prebuilt_index = 0;
-    std::size_t targets_recomputed_minimizers = 0;
-    DispatchGpuBatchExecutionStats gpu{};
-};
 
 struct DispatchNextOutput {
     TupleTableSlot* scan_slot_copy = nullptr;
     std::int64_t sequence_rowno = -1;
+    std::uint64_t query_ordinal = 0;
     const bioseq::simd::active_target::MatchResult* match = nullptr;
+};
+
+struct DispatchJoinQueryRef {
+    std::uint64_t ordinal = 0;
+    TupleTableSlot* query_slot = nullptr;
 };
 
 class DispatchBufferRuntime {
@@ -87,11 +54,15 @@ public:
 
     void configure_params(
         const bioseq::simd::active_target::Minimap2Params& params,
+        bioseq::indexing::IndexReadRequirement index_read_requirement,
         bool read_sequence_index,
         Oid scan_user_relid,
         Oid scan_user_database_oid,
         Oid scan_user_tablespace_oid,
-        Oid scan_user_main_relfilenode);
+        Oid scan_user_main_relfilenode,
+        Snapshot executor_snapshot);
+
+    void replace_executor_snapshot(Snapshot executor_snapshot);
 
     void configure_mmsearch(
         AttrNumber seq_attno,
@@ -114,12 +85,33 @@ public:
     void mark_alphabet_mismatch_recompute();
     void clear_mmsearch_context(bool clear_extras = false);
     void add_extra_const_query(std::vector<char> query_varlena_bytes);
+
+    void configure_mmsearch_join(
+        Oid target_relation_oid,
+        AttrNumber target_storage_seq_attno,
+        AttrNumber target_slot_seq_resno,
+        AttrNumber target_slot_rowno_resno,
+        AttrNumber query_slot_seq_resno,
+        std::string target_column_name,
+        std::uint8_t alphabet_code,
+        std::uint8_t storage_unit_byte_width);
+    void begin_join_target(TupleTableSlot* locator_passthrough_target);
+    void prepare_join_target_queries(
+        std::span<const DispatchJoinQueryRef> all_queries);
+    void set_join_query_batch(std::span<const DispatchJoinQueryRef> queries);
+    [[nodiscard]] bool run_join_query_batch_and_build_cursors();
+    void finish_join_target();
+    void reset_join_runtime_for_rescan();
+    void abandon_join_runtime_after_pg_error_noexcept() noexcept;
+
     void submit_scan(TupleTableSlot* scan_slot);
-    void run_batch_and_build_cursors();
+    [[nodiscard]] bool ready_to_dispatch() const;
+    [[nodiscard]] bool run_batch_and_build_cursors();
     void clear_slots();
 
     [[nodiscard]] std::optional<DispatchNextOutput> read_next_output();
-    [[nodiscard]] DispatchBatchExecutionStats execution_stats() const;
+    [[nodiscard]] bioseq::pipeline_stats::PipelineExecutionStats
+    execution_stats() const;
     [[nodiscard]] std::size_t extra_query_count() const;
     [[nodiscard]] bool has_finished_writing() const;
     [[nodiscard]] bool mmsearch_active() const;
