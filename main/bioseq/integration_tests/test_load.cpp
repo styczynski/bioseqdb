@@ -309,6 +309,131 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     }
 }
 
+TEST_CASE("bioseq.load: grouped32 uses the post-load locator rebuild path",
+          "[load][integration][doc0371][rev4][guc]") {
+    constexpr std::string_view table = "load_grouped32_ready";
+    constexpr std::string_view rollback_table = "load_grouped32_rollback";
+    it::connection_test_context ctx;
+    it::reset_extension(ctx, {table, rollback_table});
+
+    const std::string body = gen_bases(65565, 371, false);
+    const std::string path = "/tmp/bioseq_test_load_grouped32.fasta";
+    write_fasta(path, {{"grouped32", body}});
+
+    it::exec_sqlf(ctx,
+        "CREATE TABLE {} "
+        "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        table);
+    it::exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
+    it::exec_sql(ctx,
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+    it::exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+    it::exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+    it::exec_sql(ctx,
+        "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
+
+    // load bypasses per-tuple index maintenance, publishes all source
+    // locators, flushes its write states, then intentionally invokes the same
+    // guarded bioseq.update_index route used by the explicit POC.
+    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.load('{}'::regclass, '{}');", table, path)) == 1);
+    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {};", table)) == 1);
+    const auto inspected = it::query_one(ctx, fmt::format(
+        "SELECT generation_id::text,gpu_abi_version::text,kmer_size::text,"
+        "window_size::text,total_bp_size::text "
+        "FROM bioseq.inspect_ready_minimizer_generation("
+        "'{}'::regclass,'minimizers_per_fragment',0);",
+        table));
+    REQUIRE(inspected.size() == 5);
+    REQUIRE(std::stoll(inspected[0].value()) > 0);
+    REQUIRE(inspected[1].value() == "2");
+    REQUIRE(inspected[2].value() == "15");
+    REQUIRE(inspected[3].value() == "10");
+    REQUIRE(inspected[4].value() == "65565");
+
+    // A requested post-load index is part of load's atomic success contract.
+    // Re-enable a forbidden async writer: update_index must fail through SPI,
+    // bioseq.load must propagate that exact failure, and the streamed parent
+    // row/source fragments must roll back with the failed index maintenance.
+    it::exec_sqlf(ctx,
+        "CREATE TABLE {} "
+        "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        rollback_table);
+    const long long rollback_relfilenode = it::query_scalar_int(ctx, fmt::format(
+        "SELECT pg_relation_filenode('{}'::regclass)::bigint;",
+        rollback_table));
+    const auto source_version_count = [&] {
+        return it::query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM bioseq_internal.sequence_source_version "
+            "WHERE user_relid='{}'::regclass "
+            "AND main_relfilenode={}::oid;",
+            rollback_table, rollback_relfilenode));
+    };
+    const auto source_shard_catalog_count = [&] {
+        return it::query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM bioseq_internal.seq_sub_table "
+            "WHERE main_relfilenode={}::oid;",
+            rollback_relfilenode));
+    };
+    const auto source_fragment_relation_count = [&] {
+        return it::query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM pg_class "
+            "WHERE relnamespace='bioseq_internal'::regnamespace "
+            "AND (relname ~ '^seq_sub_[0-9]+_[0-9]+_{}_' "
+            "OR relname ~ '^idx_sidecar_[0-9]+_[0-9]+_{}_');",
+            rollback_relfilenode, rollback_relfilenode));
+    };
+    const auto index_shard_catalog_count = [&] {
+        return it::query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM bioseq_internal.index_table_shard "
+            "WHERE main_relfilenode={}::oid;",
+            rollback_relfilenode));
+    };
+    const auto metadata_age_count = [&] {
+        return it::query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM bioseq_internal.metadata_age_log "
+            "WHERE user_relid='{}'::regclass "
+            "AND main_relfilenode={}::oid;",
+            rollback_table, rollback_relfilenode));
+    };
+    const auto generation_relation_count = [&] {
+        return it::query_scalar_int(ctx,
+            "SELECT count(*) FROM pg_class "
+            "WHERE relnamespace='bioseq_internal'::regnamespace "
+            "AND relname LIKE 'seqidx_mpf_%';");
+    };
+    const long long parent_rows_before = it::query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {};", rollback_table));
+    const long long source_versions_before = source_version_count();
+    const long long source_shards_before = source_shard_catalog_count();
+    const long long source_fragment_relations_before =
+        source_fragment_relation_count();
+    const long long index_shards_before = index_shard_catalog_count();
+    const long long metadata_age_before = metadata_age_count();
+    const long long generation_relations_before = generation_relation_count();
+    const long long index_rows_before = it::index_table_row_count(
+        ctx, "minimizers_per_fragment", rollback_table);
+    it::exec_sql(ctx, "SET bioseq.index_async_persist = on;");
+    const auto load_error = it::sql_error(ctx, fmt::format(
+        "SELECT bioseq.load('{}'::regclass, '{}');",
+        rollback_table, path));
+    REQUIRE(load_error.sqlstate == "0A000");
+    REQUIRE(load_error.contains(
+        "requires asynchronous persistence to be disabled"));
+    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {};", rollback_table)) == parent_rows_before);
+    REQUIRE(source_version_count() == source_versions_before);
+    REQUIRE(source_shard_catalog_count() == source_shards_before);
+    REQUIRE(source_fragment_relation_count()
+            == source_fragment_relations_before);
+    REQUIRE(index_shard_catalog_count() == index_shards_before);
+    REQUIRE(metadata_age_count() == metadata_age_before);
+    REQUIRE(generation_relation_count() == generation_relations_before);
+    REQUIRE(it::index_table_row_count(
+        ctx, "minimizers_per_fragment", rollback_table) == index_rows_before);
+}
+
 TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integration]") {
     it::connection_test_context ctx;
     it::reset_extension(ctx, {});
@@ -426,6 +551,8 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch (
                                std::string_view{"e1nn"}, std::string_view{"e10bad"},
                                std::string_view{"gis"} });
     it::exec_sql(ctx, "SET DateStyle = 'ISO, MDY';");   // T10 date assumes MDY (§10)
+    const std::string backend_pid =
+        it::query_scalar(ctx, "SELECT pg_backend_pid()::text;");
 
     const std::string body = gen_bases(2000, 4242, /*with_n=*/false);
     const std::string query = body.substr(0, 1200);
@@ -454,6 +581,53 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch (
             "mmsearch(seq, '{}'::bioseq.seq('dna4', 64))", query));
         REQUIRE_FALSE(hits.empty());
         REQUIRE(hits[0][0].value() == "R9RJF1");
+
+        // SPI_finish destroys its private procedure context. Post-load index
+        // maintenance and the active-read resolver must both restore the
+        // pre-connect caller context, otherwise the first search may appear to
+        // work while poisoning this same backend for its next allocation.
+        REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()::text;")
+                == backend_pid);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT 1;") == 1);
+        const auto repeated_hits = it::query_rows(ctx, fmt::format(
+            "SELECT accession FROM up WHERE "
+            "mmsearch(seq, '{}'::bioseq.seq('dna4', 64))", query));
+        REQUIRE_FALSE(repeated_hits.empty());
+        REQUIRE(repeated_hits[0][0].value() == "R9RJF1");
+        REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()::text;")
+                == backend_pid);
+
+        // The active-read policy is trusted extension metadata.  Ordinary
+        // readers are intentionally denied bioseq_internal privileges, so
+        // direct catalog resolution must rely on the already-authorized user
+        // relation instead of imposing an internal-table ACL requirement.
+        // Execute the real mmsearch path as a non-owner with SELECT only on
+        // the user table; this catches owner-only resolver regressions that
+        // the normal superuser integration connection would conceal.
+        it::exec_sql(ctx,
+            "DROP ROLE IF EXISTS bioseq_load_reader_regression; "
+            "CREATE ROLE bioseq_load_reader_regression NOLOGIN; "
+            "GRANT SELECT ON up TO bioseq_load_reader_regression; "
+            "REVOKE ALL ON SCHEMA bioseq_internal "
+            "FROM bioseq_load_reader_regression; "
+            "REVOKE ALL ON bioseq_internal.index_policy "
+            "FROM bioseq_load_reader_regression;");
+        REQUIRE(it::query_scalar(ctx,
+            "SELECT has_schema_privilege('bioseq_load_reader_regression', "
+            "'bioseq_internal', 'USAGE')::text;") == "f");
+        REQUIRE(it::query_scalar(ctx,
+            "SELECT has_table_privilege('bioseq_load_reader_regression', "
+            "'bioseq_internal.index_policy', 'SELECT')::text;") == "f");
+        it::exec_sql(ctx, "SET ROLE bioseq_load_reader_regression;");
+        const auto reader_hits = it::query_rows(ctx, fmt::format(
+            "SELECT accession FROM up WHERE "
+            "mmsearch(seq, '{}'::bioseq.seq('dna4', 64))", query));
+        REQUIRE_FALSE(reader_hits.empty());
+        REQUIRE(reader_hits[0][0].value() == "R9RJF1");
+        it::exec_sql(ctx,
+            "RESET ROLE; "
+            "REVOKE SELECT ON up FROM bioseq_load_reader_regression; "
+            "DROP ROLE bioseq_load_reader_regression;");
     }
 
     // --- B. auto-detected GenBank: bracket tags -> int + text columns (T2). ---

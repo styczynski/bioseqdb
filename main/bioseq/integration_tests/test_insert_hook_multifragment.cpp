@@ -77,8 +77,13 @@ TEST_CASE("DOC0279 a manual symbol_counts policy still gives the correct fallbac
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "doc0279_ih2") == 0);
     // symbol_count still returns the correct real tally via the unconditional recompute fallback.
     guc_scope off(ctx, "bioseq.read_sequence_index", "off");
+    ctx.clear_notices();
     REQUIRE(query_scalar_int(ctx,
         "SELECT bioseq.symbol_count(seq0,'A') FROM doc0279_ih2 WHERE pk=1") == 4);
     REQUIRE(query_scalar_int(ctx,
         "SELECT bioseq.symbol_count(seq0,'T') FROM doc0279_ih2 WHERE pk=1") == 4);
+    // Two calls used to leave two copies of the same seq_sub relation and
+    // registered snapshot in the ResourceOwner, matching the duplicate
+    // warnings in the full integration log.
+    REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 }

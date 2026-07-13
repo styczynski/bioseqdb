@@ -20,13 +20,196 @@ module;
 
 #include "common.h"
 
+#include <algorithm>
+#include <array>
+#include <concepts>
 #include <cstring>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <type_traits>
+#include <utility>
 
 export module bioseq.pg_utils;
 
 export import bioseq.pg_utils.lists;
 export import bioseq.pg_utils.bitmapset;
 export import bioseq.pg_utils.datums;
+
+export namespace bioseq::pg_utils {
+
+/**
+ * C++ representation of one PostgreSQL ERROR.  PG-only leaf boundaries throw
+ * this after PG_END_TRY, so generic/no-PG callers unwind vectors, queues,
+ * permits and proof authorities normally instead of being crossed by longjmp.
+ *
+ * The ErrorData copy is exact and lives in TopTransactionContext (or
+ * TopMemoryContext before transaction setup). It is deliberately not copied
+ * into fixed buffers. The outer C ABI releases this pointer from the exception,
+ * destroys every C++ owner, and only then calls ReThrowError.
+ */
+class PostgresErrorAsCpp final : public std::exception {
+public:
+    explicit PostgresErrorAsCpp(ErrorData* error) noexcept
+        : error_(error) {}
+
+    PostgresErrorAsCpp(const PostgresErrorAsCpp&) = delete;
+    PostgresErrorAsCpp& operator=(const PostgresErrorAsCpp&) = delete;
+    PostgresErrorAsCpp(PostgresErrorAsCpp&& other) noexcept
+        : error_(std::exchange(other.error_, nullptr)) {}
+    PostgresErrorAsCpp& operator=(PostgresErrorAsCpp&&) = delete;
+    ~PostgresErrorAsCpp() noexcept override {
+        ErrorData* unreleased = std::exchange(error_, nullptr);
+        if (unreleased != nullptr) {
+            // FreeErrorData only releases the CopyErrorData allocation and
+            // its fields; it cannot raise ERROR.  A destructor must never
+            // enter a sigsetjmp/longjmp boundary while C++ is unwinding.
+            FreeErrorData(unreleased);
+        }
+    }
+
+    [[nodiscard]] const char* what() const noexcept override {
+        return error_ == nullptr || error_->message == nullptr
+            ? "PostgreSQL ERROR without a message"
+            : error_->message;
+    }
+
+    /** Transfer the exact ErrorData to an outer PostgreSQL ABI boundary. */
+    [[nodiscard]] ErrorData* release_error_data() noexcept {
+        return std::exchange(error_, nullptr);
+    }
+
+private:
+    ErrorData* error_ = nullptr;
+};
+
+static_assert(!std::is_copy_constructible_v<PostgresErrorAsCpp>);
+static_assert(std::is_nothrow_move_constructible_v<PostgresErrorAsCpp>);
+static_assert(!std::is_move_assignable_v<PostgresErrorAsCpp>);
+static_assert(std::is_nothrow_destructible_v<PostgresErrorAsCpp>);
+static_assert(noexcept(
+    std::declval<PostgresErrorAsCpp&>().release_error_data()));
+template <class Error>
+concept MutableOnlyErrorDataRelease =
+    requires(Error& error) {
+        { error.release_error_data() } -> std::same_as<ErrorData*>;
+    }
+    && !requires(const Error& error) { error.release_error_data(); };
+static_assert(MutableOnlyErrorDataRelease<PostgresErrorAsCpp>);
+
+using PgCppInvokeBody = void (*)(void*);
+
+/**
+ * Non-template, hard-noinline sigsetjmp boundary.  It catches both PostgreSQL
+ * ERROR and C++ exceptions from the callback, restores PostgreSQL's exception
+ * stack via PG_END_TRY, and only then throws into its C++ caller.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+[[gnu::noinline, gnu::noipa]]
+#else
+[[gnu::noinline]]
+#endif
+void invoke_pg_as_cpp_erased(void* callback_context, PgCppInvokeBody body);
+
+/** Invoke one PG leaf operation and return/throw through ordinary C++ ABI. */
+template <class F>
+auto invoke_pg_as_cpp(F&& function)
+    -> std::invoke_result_t<std::remove_reference_t<F>&> {
+    using Function = std::remove_reference_t<F>;
+    using Result = std::invoke_result_t<Function&>;
+    static_assert(!std::is_reference_v<Result>,
+        "invoke_pg_as_cpp leaf callbacks must return a value or void");
+    if constexpr (std::is_void_v<Result>) {
+        struct CallState {
+            Function* function = nullptr;
+        } state{.function = std::addressof(function)};
+        invoke_pg_as_cpp_erased(
+            std::addressof(state),
+            +[](void* opaque) {
+                auto* call = static_cast<CallState*>(opaque);
+                std::invoke(*call->function);
+            });
+        return;
+    } else {
+        struct CallState {
+            Function* function = nullptr;
+            std::optional<Result> result;
+        } state{.function = std::addressof(function)};
+        invoke_pg_as_cpp_erased(
+            std::addressof(state),
+            +[](void* opaque) {
+                auto* call = static_cast<CallState*>(opaque);
+                call->result.emplace(std::invoke(*call->function));
+            });
+        return std::move(*state.result);
+    }
+}
+
+} // namespace bioseq::pg_utils
+
+namespace bioseq::pg_utils {
+
+namespace {
+
+struct PgCppInvokeState {
+    void* callback_context = nullptr;
+    PgCppInvokeBody body = nullptr;
+    std::exception_ptr cpp_error;
+    ErrorData* pg_error = nullptr;
+};
+
+} // namespace
+
+void invoke_pg_as_cpp_erased(
+        void* callback_context,
+        PgCppInvokeBody body) {
+    auto* state = new PgCppInvokeState{
+        .callback_context = callback_context,
+        .body = body,
+    };
+    MemoryContext saved_context = CurrentMemoryContext;
+    ResourceOwner saved_resource_owner = CurrentResourceOwner;
+    PG_TRY();
+    {
+        try {
+            if (state->body != nullptr) {
+                state->body(state->callback_context);
+            }
+        } catch (...) {
+            state->cpp_error = std::current_exception();
+        }
+    }
+    PG_CATCH();
+    {
+        CurrentResourceOwner = saved_resource_owner;
+        MemoryContext error_owner = TopTransactionContext != nullptr
+            ? TopTransactionContext
+            : TopMemoryContext;
+        MemoryContextSwitchTo(error_owner);
+        state->pg_error = CopyErrorData();
+        MemoryContextSwitchTo(saved_context);
+        FlushErrorState();
+    }
+    PG_END_TRY();
+
+    CurrentResourceOwner = saved_resource_owner;
+    MemoryContextSwitchTo(saved_context);
+
+    if (state->pg_error != nullptr) {
+        ErrorData* error = std::exchange(state->pg_error, nullptr);
+        delete state;
+        throw PostgresErrorAsCpp{error};
+    }
+    if (state->cpp_error != nullptr) {
+        std::exception_ptr error = std::move(state->cpp_error);
+        delete state;
+        std::rethrow_exception(error);
+    }
+    delete state;
+}
+
+} // namespace bioseq::pg_utils
 
 /*
  * PageCacheDisableScope temporarily forces bioseq_enable_page_cache to
@@ -299,14 +482,25 @@ public:
      * non-null, it is set to indicate whether the entry was pre-existing.
      */
     Entry* find_or_insert(const void* key, bool* found_existing = nullptr) {
-        acquire();
-        bool local_found = false;
-        Entry* result = static_cast<Entry*>(
-            hash_search(table_, key, HASH_ENTER, &local_found));
+        struct FindOrInsertResult {
+            Entry* entry = nullptr;
+            bool found = false;
+        };
+        const FindOrInsertResult result =
+            bioseq::pg_utils::invoke_pg_as_cpp([this, key] {
+            acquire();
+            bool local_found = false;
+            Entry* entry = static_cast<Entry*>(
+                hash_search(table_, key, HASH_ENTER, &local_found));
+            return FindOrInsertResult{
+                .entry = entry,
+                .found = local_found,
+            };
+        });
         if (found_existing != nullptr) {
-            *found_existing = local_found;
+            *found_existing = result.found;
         }
-        return result;
+        return result.entry;
     }
 
     /* Removes an entry if present. No-op if the table is uninitialised. */
@@ -341,7 +535,11 @@ public:
      */
     template<typename Frame>
     [[nodiscard]] Frame* alloc_in_context() {
-        MemoryContextScope context_guard(context_);
-        return make0<Frame>();
+        return bioseq::pg_utils::invoke_pg_as_cpp([this] {
+            const MemoryContext previous = MemoryContextSwitchTo(context_);
+            Frame* result = make0<Frame>();
+            MemoryContextSwitchTo(previous);
+            return result;
+        });
     }
 };
