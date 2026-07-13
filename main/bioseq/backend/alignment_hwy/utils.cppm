@@ -18,6 +18,8 @@ module;
 #include <cstring>
 #include <array>
 #include <climits>
+#include <limits>
+#include <type_traits>
 
 export module bioseq.alignment.utils;
 
@@ -66,8 +68,17 @@ struct ScoringMatrix {
 
     // --- SIMD-aligned rows (block-aligner layout) ---
     static constexpr size_t SIMD_ROWS = AlphabetDim + 1;
-    static constexpr size_t SIMD_COLS = 16;
+    // The upstream Block Aligner uses one 16-byte shuffle table for DNA and
+    // two for amino-acid alphabets.  Keep that rule generic: one table per
+    // 16 rank values, including the dedicated NULL/padding rank.  A fixed
+    // 16-byte row silently aliased row N's high-rank scores into row N+1 for
+    // aa20/aa27 and made ranks >= 16 select unrelated bytes.
+    static constexpr size_t SIMD_LUT_COUNT = (AlphabetDim + 1 + 15) / 16;
+    static constexpr size_t SIMD_COLS = SIMD_LUT_COUNT * 16;
     static constexpr uint8_t NULL_BYTE = static_cast<uint8_t>(AlphabetDim);
+
+    static_assert(AlphabetDim < std::numeric_limits<std::uint8_t>::max(),
+                  "ScoringMatrix rank plus NULL sentinel must fit in uint8_t");
 
     HWY_ALIGN int8_t simd_scores[SIMD_ROWS * SIMD_COLS] = {};
 
@@ -95,16 +106,58 @@ struct ScoringMatrix {
         return simd_scores + i * SIMD_COLS;
     }
 
+    /// Validate that the SIMD lookup bank is an exact projection of the
+    /// biological score matrix, including NULL/padding sentinels. Block
+    /// Aligner attestation calls this once per admitted alignment, never in
+    /// the DP loop.
+    [[nodiscard]] bool block_layout_valid() const noexcept {
+        for (size_t row = 0; row < AlphabetDim; ++row) {
+            for (size_t col = 0; col < AlphabetDim; ++col) {
+                if (simd_scores[row * SIMD_COLS + col]
+                    != entries[row * AlphabetDim + col]) {
+                    return false;
+                }
+            }
+            for (size_t col = AlphabetDim; col < SIMD_COLS; ++col) {
+                if (simd_scores[row * SIMD_COLS + col] != INT8_MIN) {
+                    return false;
+                }
+            }
+        }
+        for (size_t col = 0; col < SIMD_COLS; ++col) {
+            if (simd_scores[AlphabetDim * SIMD_COLS + col] != INT8_MIN) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Stable identity of every score consumed by the Block kernel. This
+    /// binds proof evidence to match/mismatch/ambiguity semantics instead of
+    /// merely to gap and block-size parameters.
+    [[nodiscard]] std::uint64_t block_semantic_identity() const noexcept {
+        std::uint64_t hash = 1469598103934665603ULL;
+        const auto mix = [&hash](std::uint64_t value) noexcept {
+            hash ^= value;
+            hash *= 1099511628211ULL;
+        };
+        mix(AlphabetDim);
+        for (const int8_t score : entries) {
+            mix(static_cast<std::uint8_t>(score));
+        }
+        return hash;
+    }
+
     /// Score lookup: for reference char c and L query chars at query_ptr,
     /// return L i16 scores.
     ///
     /// Hot path inside the block-aligner inner loop — every DP cell pays
-    /// one call. Implemented as a single PSHUFB-class table lookup over
-    /// the 16-byte SIMD row followed by a sign-extending PromoteTo to
-    /// int16. The previous scalar fallback round-tripped through a stack
-    /// array (~2x slower on M1).
-    /// Load the 16-byte SIMD scoring row for reference char `c` into a
-    /// LUT vector that can be reused across many query positions. Pull
+    /// one call. DNA remains one PSHUFB-class table lookup; alphabets wider
+    /// than 16 ranks use the upstream-style bank of 16-byte tables and SIMD
+    /// selection. The selected bytes are sign-extended to int16. The previous
+    /// scalar fallback round-tripped through a stack array (~2x slower on M1).
+    /// Load the SIMD scoring-row table bank for reference char `c` so it can
+    /// be reused across many query positions. Pull
     /// this out of the inner DP loop and call once per column iteration —
     /// the LUT only depends on `c`, not on the query offset.
     template<class D>
@@ -113,27 +166,48 @@ struct ScoringMatrix {
                       "load_score_lut expects an int16_t SIMD tag.");
         const hn::Rebind<uint8_t, D> du8;
         const hn::Twice<decltype(du8)> du8_twice;
-        return hn::LoadDup128(
-            du8_twice, reinterpret_cast<const uint8_t*>(simd_row_ptr(c)));
+        using lut_vec_t = decltype(hn::LoadDup128(
+            du8_twice, reinterpret_cast<const uint8_t*>(simd_row_ptr(c))));
+        std::array<lut_vec_t, SIMD_LUT_COUNT> result{};
+        const auto* row = reinterpret_cast<const uint8_t*>(simd_row_ptr(c));
+        for (size_t lut_index = 0; lut_index < SIMD_LUT_COUNT; ++lut_index) {
+            result[lut_index] = hn::LoadDup128(
+                du8_twice, row + lut_index * 16);
+        }
+        return result;
     }
 
     /// Score lookup: with a pre-loaded `lut` from load_score_lut, look up
     /// L i16 scores for the L query bytes at query_ptr.
     ///
     /// Hot path inside the block-aligner inner loop — every DP cell pays
-    /// one call. Implemented as a single PSHUFB-class table lookup over
-    /// the 16-byte SIMD row followed by a sign-extending PromoteTo to
-    /// int16. Hoisting the row load out of the inner loop saves one
+    /// one call. DNA is the original single-table fast path; wider alphabets
+    /// stay entirely SIMD via multiple 16-byte table lookups. Hoisting the
+    /// row load out of the inner loop saves one
     /// LoadDup128 per cell.
     template<class D, class LUT>
     HWY_INLINE hn::Vec<D> get_scores_with_lut(
-        D d, LUT lut, const uint8_t* query_ptr) const
+        D d, const LUT& lut, const uint8_t* query_ptr) const
     {
         static_assert(std::is_same_v<hn::TFromD<D>, int16_t>,
                       "get_scores_with_lut expects an int16_t SIMD tag.");
         const hn::Rebind<uint8_t, D> du8;
         const auto query_vec = hn::LoadU(du8, query_ptr);
-        const auto scores_u8 = hn::TableLookupBytes(lut, query_vec);
+        auto scores_u8 = hn::TableLookupBytes(lut[0], query_vec);
+        if constexpr (SIMD_LUT_COUNT > 1) {
+            const auto rank_in_lut = hn::And(
+                query_vec, hn::Set(du8, static_cast<uint8_t>(0x0f)));
+            const auto rank_lut_index = hn::ShiftRight<4>(query_vec);
+            scores_u8 = hn::Set(du8, static_cast<uint8_t>(0x80));
+            for (size_t lut_index = 0; lut_index < SIMD_LUT_COUNT; ++lut_index) {
+                const auto candidate = hn::TableLookupBytes(
+                    lut[lut_index], rank_in_lut);
+                const auto selected = hn::Eq(
+                    rank_lut_index,
+                    hn::Set(du8, static_cast<uint8_t>(lut_index)));
+                scores_u8 = hn::IfThenElse(selected, candidate, scores_u8);
+            }
+        }
         // Sign-extend i8 -> i16. Reinterpret the looked-up bytes as
         // signed first so PromoteTo replicates the sign bit (some matrix
         // entries — and the NULL row — are INT8_MIN).

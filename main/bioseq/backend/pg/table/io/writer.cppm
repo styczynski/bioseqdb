@@ -117,8 +117,11 @@ BioseqColumnBeginWrite(RelFileLocator relfilelocator,
  *
  * Returns the "row number" assigned to written row.
  */
-export uint64_t
-BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bool *columnNulls)
+static uint64_t
+BioseqColumnWriteRowPgLeaf(
+	BioseqColumnWriteState *writeState,
+	Datum *columnValues,
+	bool *columnNulls)
 {
 	uint32_t columnIndex = 0;
 	StripeBuffers *stripeBuffers = writeState->stripeBuffers;
@@ -127,8 +130,6 @@ BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bo
 	BioseqColumnOptions *options = &writeState->options;
 	const uint32_t chunkRowCount = options->chunkRowCount;
 	ChunkData *chunkData = writeState->chunkData;
-	MemoryContextScope ctx_guard{writeState->stripeWriteContext};
-
 	uint32_t chunkIndex;
 	uint32_t chunkRowIndex;
 
@@ -280,6 +281,23 @@ BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bo
 }
 
 
+export uint64_t
+BioseqColumnWriteRow(
+	BioseqColumnWriteState *writeState,
+	Datum *columnValues,
+	bool *columnNulls)
+{
+	return bioseq::pg_utils::invoke_pg_as_cpp([&] {
+		const MemoryContext previous =
+			MemoryContextSwitchTo(writeState->stripeWriteContext);
+		const uint64_t result = BioseqColumnWriteRowPgLeaf(
+			writeState, columnValues, columnNulls);
+		MemoryContextSwitchTo(previous);
+		return result;
+	});
+}
+
+
 /*
  * BioseqColumnEndWrite finishes a columnar data load operation. If we have an unflushed
  * stripe, we flush it.
@@ -287,6 +305,23 @@ BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bo
 export void
 BioseqColumnEndWrite(BioseqColumnWriteState *writeState)
 {
+	/*
+	 * A checked PG leaf restores the MemoryContext that was current when it
+	 * entered.  Never let a caller delete stripeWriteContext while executing
+	 * inside that context (or one of its children), otherwise the next checked
+	 * leaf restores a dangling allocator.  Move to the owning parent first.
+	 */
+	MemoryContext active = CurrentMemoryContext;
+	MemoryContext walker = active;
+	while (walker != nullptr && walker != writeState->stripeWriteContext)
+	{
+		walker = MemoryContextGetParent(walker);
+	}
+	if (walker == writeState->stripeWriteContext)
+	{
+		MemoryContextSwitchTo(
+			MemoryContextGetParent(writeState->stripeWriteContext));
+	}
 	BioseqColumnFlushPendingWrites(writeState);
 
 	MemoryContextDelete(writeState->stripeWriteContext);
@@ -296,14 +331,12 @@ BioseqColumnEndWrite(BioseqColumnWriteState *writeState)
 }
 
 
-void
-BioseqColumnFlushPendingWrites(BioseqColumnWriteState *writeState)
+static void
+BioseqColumnFlushPendingWritesPgLeaf(BioseqColumnWriteState *writeState)
 {
 	StripeBuffers *stripeBuffers = writeState->stripeBuffers;
 	if (stripeBuffers != NULL)
 	{
-		MemoryContextScope ctx_guard{writeState->stripeWriteContext};
-
 		FlushStripe(writeState);
 		MemoryContextReset(writeState->stripeWriteContext);
 
@@ -311,6 +344,18 @@ BioseqColumnFlushPendingWrites(BioseqColumnWriteState *writeState)
 		writeState->stripeBuffers = NULL;
 		writeState->stripeSkipList = NULL;
 	}
+}
+
+
+void
+BioseqColumnFlushPendingWrites(BioseqColumnWriteState *writeState)
+{
+	bioseq::pg_utils::invoke_pg_as_cpp([writeState] {
+		const MemoryContext previous =
+			MemoryContextSwitchTo(writeState->stripeWriteContext);
+		BioseqColumnFlushPendingWritesPgLeaf(writeState);
+		MemoryContextSwitchTo(previous);
+	});
 }
 
 

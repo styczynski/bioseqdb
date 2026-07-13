@@ -39,13 +39,14 @@ if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@22/bin/clang)
   set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@22/bin/clang++)
   # The `import std` experimental-feature gate UUID is CMake-version-specific.
-  # CMake 4.3.1 (the version installed on this "H" box) expects
-  # 451f2fe2-... (same value the "W" llvm box already uses); the previous
-  # d0edc3af-... value is for an older CMake and 4.3.1 rejects it with
-  # "CMAKE_EXPERIMENTAL_CXX_IMPORT_STD is set to incorrect value", which
-  # disables import-std and fails the generate step. (Confirmed against the
-  # `CxxImportStd` UUID embedded in the cmake 4.3.1 binary.)
-  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+  # Homebrew CMake 4.2.x expects d0edc3af-..., while 4.3.x expects
+  # 451f2fe2-.... Select it explicitly so a fresh build tree remains usable
+  # when Homebrew moves between those supported versions.
+  if(CMAKE_VERSION VERSION_LESS "4.3")
+    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+  else()
+    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+  endif()
   # clang >= 22 no longer resolves libc++.modules.json via the compiler's
   # `-print-file-name` search path (it lives under <toolchain>/lib/c++/ now, not
   # the clang resource dir), so CMake's import-std / CMAKE_CXX_MODULE_STD support

@@ -104,6 +104,20 @@ register_bioseq_am_routine(const TableAmRoutine* routine) noexcept
 	g_bioseq_am_routine = routine;
 }
 
+/*
+ * Relation-handle variant for callers that already hold a relcache pin and
+ * relation lock.  Reusing that exact handle is essential during dependency
+ * deletion: reopening an OID from PostgreSQL's precomputed DROP list can fail
+ * after an earlier recursive drop has already removed the catalog row.
+ */
+export bool
+IsBioseqColumnTableAmRelation(Relation relation) noexcept
+{
+	return relation != nullptr
+		&& g_bioseq_am_routine != nullptr
+		&& relation->rd_tableam == g_bioseq_am_routine;
+}
+
 
 /*
  * IsBioseqColumnTableAmTable returns true if relation has the bioseq table
@@ -123,7 +137,7 @@ IsBioseqColumnTableAmTable(Oid relationId)
 	 * avoid race conditions.
 	 */
 	Relation rel = safe_relation_open(relationId, AccessShareLock);
-	bool result = rel->rd_tableam == g_bioseq_am_routine;
+	bool result = IsBioseqColumnTableAmRelation(rel);
 	relation_close(rel, NoLock);
 
 	return result;

@@ -337,8 +337,10 @@ export struct BioseqColumnWriteState
 	 * DOC0260 Phase A — per-write-state seq_caches (sub-table cache used by
 	 * sequence_storage_manager). Opaque void* so this struct stays decoupled
 	 * from bioseq::storage; the actual `bioseq::storage::seq_caches*` is
-	 * placement-new'd into stripeWriteContext by bioseq_init_write_state and
-	 * destroyed by BioseqColumnEndWrite. Holds the per-write-state cap snapshot.
+         * placement-new'd into stripeWriteContext's stable owning parent and
+         * destroyed by the write-state pop hook before BioseqColumnEndWrite on
+         * commit. It must outlive every reset of the stripe scratch context.
+         * Holds the per-write-state cap snapshot.
 	 */
 	void *seq_caches;
 };

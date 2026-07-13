@@ -41,6 +41,7 @@ module;
 #include <chrono>
 #include <compare>
 #include <cstddef>
+#include <exception>
 #include <numeric>
 #include <span>
 #include <vector>
@@ -58,6 +59,8 @@ import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
 import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
 import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
+import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
+import bioseq.pg_utils;                 // PostgresErrorAsCpp at the PG callback seam
 
 namespace {
 
@@ -101,6 +104,15 @@ static_assert(offsetof(BioseqBatchSortState, css) == 0,
 [[nodiscard]] inline BioseqBatchSortRuntime* runtime_of(CustomScanState* node) {
     return static_cast<BioseqBatchSortRuntime*>(
         reinterpret_cast<BioseqBatchSortState*>(node)->runtime);
+}
+
+inline void release_batch_sort_scratch_as_cpp(
+		MemoryContext old_context,
+		MemoryContext scratch) {
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[old_context] { MemoryContextSwitchTo(old_context); });
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[scratch] { MemoryContextDelete(scratch); });
 }
 
 /* MemoryContext reset callback — frees the C++ runtime even on error paths so
@@ -177,8 +189,9 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
     const std::uint8_t alphabet_code = first_hdr->alphabet_code;
     const std::uint8_t byte_width    = first_hdr->storage_unit_byte_width;
 
-    std::vector<std::size_t> order;
-    pgseq_t::dispatch_instance(alphabet_code, byte_width, [&]<class S>() {
+	std::vector<std::size_t> order;
+	try {
+	pgseq_t::dispatch_instance(alphabet_code, byte_width, [&]<class S>() {
         using unit_t = typename compact_sequence_range<S>::traits::storage_unit;
         using scanner_t = bioseq::storage::sequence_scanner_none<unit_t>;
         using lazy_t = bioseq::storage::lazy_compact_sequence<S, scanner_t>;
@@ -244,7 +257,8 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	        }
 
 	        std::span<lazy_t> batch(lazies.data(), lazies.size());
-	        auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+	        auto& gpu_rt =
+	            bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 	        const std::uint64_t dispatch_before = gpu_rt.seq_sort_dispatch_count();
 	        const std::uint64_t global_before = gpu_rt.seq_sort_global_compare_dispatch_count();
 	        const std::uint64_t dense_before = gpu_rt.seq_sort_dense_scatter_dispatch_count();
@@ -266,10 +280,16 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	                sort_end - sort_start).count());
 	        rt->accelerator = rt->gpu_dispatch_delta == 0 ? "compare_sequences_scalar" : "gpu";
 	    });
+	} catch (...) {
+		// Readiness errors are C++ exceptions only after their inner PG_END_TRY.
+		// Restore/delete the PG scratch context after every C++ owner in the typed
+		// dispatch has unwound, then let the callback boundary rethrow exactly.
+		release_batch_sort_scratch_as_cpp(old_cxt, scratch);
+		throw;
+	}
 
-    MemoryContextSwitchTo(old_cxt);
-    MemoryContextDelete(scratch);
-    return order;
+	release_batch_sort_scratch_as_cpp(old_cxt, scratch);
+	return order;
 }
 
 /* ================================================================== */
@@ -318,7 +338,7 @@ BioseqBatchSort_BeginCustomScan(CustomScanState* node, EState* estate, int eflag
 }
 
 TupleTableSlot*
-BioseqBatchSort_ExecCustomScan(CustomScanState* node)
+BioseqBatchSort_ExecCustomScanImpl(CustomScanState* node)
 {
     auto* rt = runtime_of(node);
     ExprContext* econtext = node->ss.ps.ps_ExprContext;
@@ -369,7 +389,54 @@ BioseqBatchSort_ExecCustomScan(CustomScanState* node)
     if (node->ss.ps.ps_ProjInfo != nullptr) {
         return ExecProject(node->ss.ps.ps_ProjInfo);
     }
-    return rt->sortslot;
+	return rt->sortslot;
+}
+
+TupleTableSlot*
+BioseqBatchSort_ExecCustomScan(CustomScanState* node)
+{
+	ErrorData* exact_error = nullptr;
+	TupleTableSlot* result = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char detail[512] = "std::exception without detail";
+	try {
+		result = BioseqBatchSort_ExecCustomScanImpl(node);
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		exact_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			detail,
+			error.what() == nullptr ? "std::exception without detail" : error.what(),
+			sizeof(detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+	if (exact_error != nullptr || cpp_error || unknown_cpp_error) {
+		MemoryContext recovery_context =
+			node != nullptr && node->ss.ps.state != nullptr
+				? node->ss.ps.state->es_query_cxt
+				: TopMemoryContext;
+		MemoryContextSwitchTo(recovery_context);
+		BioseqBatchSort_RuntimeCleanup(
+			reinterpret_cast<BioseqBatchSortState*>(node));
+	}
+	if (exact_error != nullptr) {
+		ReThrowError(exact_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchSort Exec raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchSort Exec raised an unknown C++ exception")));
+	}
+	return result;
 }
 
 void

@@ -1,57 +1,38 @@
 /**
  * @file chaining_simd.cppm
- * @brief SIMD-accelerated DP chaining using Highway.
+ * @brief Exact bounded SIMD implementation of minimap2-style DP chaining.
  *
- * Same algorithm as scalar DP chaining, but the inner predecessor search
- * loop is vectorized: instead of evaluating one scoring pair at a time,
- * we evaluate L predecessors simultaneously (L = number of int32 SIMD lanes).
- *
- * Key design decisions:
- *   - Structure-of-Arrays (SoA) layout for SIMD-friendly memory access
- *   - **Approximate max_skip**: after every batch with no lane-improvement we
- *     bump a counter; once batches_without_improvement * L exceeds
- *     params.max_chain_skip we break out of the predecessor scan. The TAL
- *     reference deliberately removes max_skip because for short reads the
- *     vectorized brute-force scan is fast enough; for long reads (>100 kbp)
- *     where windows hold thousands of anchors the unbounded scan dominates
- *     wall-clock and runs ~6x slower than the scalar path. The
- *     batch-granularity check is conservative (we only break *after* a full
- *     batch passes with no improvement) so the choice of best predecessor
- *     stays close to scalar's; if a single later lane would have improved we
- *     miss it, but for the parameter regime minimap2 ships in (max_skip = 25,
- *     max_iter = 5000) the chain quality is unaffected on benchmark inputs.
- *   - Scalar fallback for small ranges (candidate_idx - window_start <= 5)
- *   - Global-best long-range optimization remains scalar
- *   - skip_penalty must be zero (asserted at entry)
- *
- * Complexity: O(n * min(max_iter, n_anchors_until_skip) / L) where L is the
- * SIMD lane count.
- *
- * Reference: Intel TAL parallel_chaining_v2_22.h, with the max_skip
- * optimization re-introduced for long-read regimes per
- * REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md.
+ * Every biological score is evaluated by Highway vectors, including ranges
+ * with one to five predecessors and final partial vectors.  Candidate results
+ * are consumed in descending anchor order so the visited/max_chain_skip state
+ * machine is identical to the scalar reference.  Chain extraction is local to
+ * this backend: predecessor paths are gathered in lane batches and committed
+ * with vector visited-prefix operations in strict score-rank order.
  */
 module;
 
-#include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
+#include <hwy/highway.h>
 
 #include "common.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
-#include <vector>
-#include <span>
 #include <cstring>
 #include <limits>
-#include <algorithm>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 
 export module bioseq.sequences.chaining.simd;
 
+import bioseq.common.context;
 import bioseq.common.mlogging;
+import bioseq.instr;
 import bioseq.sequences.chaining.utils;
 import bioseq.simd.utils;
-import bioseq.common.context;
-import bioseq.instr;
 
 export {
 
@@ -59,276 +40,485 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// Import chaining types into this namespace for convenience
 using bioseq::chaining::Anchor;
+using bioseq::chaining::ArenaSlab;
 using bioseq::chaining::Chain;
 using bioseq::chaining::ChainingParams;
-using bioseq::chaining::compute_chaining_score;
-using bioseq::chaining::backtrack_chains;
 
-// ============================================================================
-// Structure-of-Arrays (SoA) anchor layout for SIMD
-// ============================================================================
-
-/// Structure-of-Arrays layout for SIMD chaining.
-///
-/// Memory layout: one contiguous align-arena allocation (SPEC §6.3) sliced
-/// into three (padding + anchor_count)-element regions. The leading
-/// padding (= MaxLanes) is zero so backward SIMD loads from index j-(L-1)
-/// never read before the region.
-///
-/// Why 32-bit truncation is safe: The scoring function only uses the lower
-/// 32 bits of ref_bits (ref_position) and query_bits (query_position).
-/// Upper bits are used only for window-start advancement, which remains scalar.
-/// This matches TAL: anchor_r[i] = (num_bits_t)anc[i].r.
-struct SoaAnchors {
-    uint32_t* ref_positions   = nullptr;
-    uint32_t* query_positions = nullptr;
-    uint32_t* query_spans     = nullptr;
-    size_t padding = 0;
-    size_t count   = 0;
-
-    [[nodiscard]] uint32_t* ref_data()   { return ref_positions + padding; }
-    [[nodiscard]] uint32_t* query_data() { return query_positions + padding; }
-    [[nodiscard]] uint32_t* span_data()  { return query_spans + padding; }
-    [[nodiscard]] const uint32_t* ref_data()   const { return ref_positions + padding; }
-    [[nodiscard]] const uint32_t* query_data() const { return query_positions + padding; }
-    [[nodiscard]] const uint32_t* span_data()  const { return query_spans + padding; }
+enum class SimdChainingStatus : std::uint8_t {
+    ok = 0,
+    unsupported_simd_target,
+    invalid_parameters,
+    anchor_count_overflow,
+    workspace_overflow,
+    cyclic_predecessors,
 };
 
-/// Convert AoS anchor array to SoA layout with SIMD padding.
-///
-/// Allocates three aligned arrays of (MaxLanes + anchor_count) uint32_t each.
-/// The first MaxLanes elements are zero-padded to prevent out-of-bounds reads
-/// when the SIMD inner loop loads backward from small indices.
-///
-/// @param d_int    Highway int32 tag (used for MaxLanes)
-/// @param anchors  AoS anchor array
-/// @return SoA layout with padding
+[[nodiscard]] constexpr std::string_view simd_chaining_status_name(
+    SimdChainingStatus status) noexcept
+{
+    switch (status) {
+        case SimdChainingStatus::ok: return "ok";
+        case SimdChainingStatus::unsupported_simd_target:
+            return "unsupported_simd_target";
+        case SimdChainingStatus::invalid_parameters:
+            return "invalid_parameters";
+        case SimdChainingStatus::anchor_count_overflow:
+            return "anchor_count_overflow";
+        case SimdChainingStatus::workspace_overflow:
+            return "workspace_overflow";
+        case SimdChainingStatus::cyclic_predecessors:
+            return "cyclic_predecessors";
+    }
+    return "unknown";
+}
+
+class SimdChainingRuntimeError final : public std::runtime_error {
+public:
+    SimdChainingRuntimeError(
+        SimdChainingStatus status,
+        std::string_view detail)
+        : std::runtime_error(
+              std::string{"Exact SIMD chaining rejected: "}
+              + std::string{simd_chaining_status_name(status)}
+              + ": " + std::string{detail}),
+          status_(status) {}
+
+    [[nodiscard]] SimdChainingStatus status() const noexcept {
+        return status_;
+    }
+
+private:
+    SimdChainingStatus status_;
+};
+
+/**
+ * Algorithm-local evidence only.  This intentionally is not mapped into the
+ * canonical pipeline proof yet.
+ */
+struct SimdChainingExecutionProof {
+    std::uint64_t anchors_consumed = 0;
+    std::uint64_t score_vector_batches = 0;
+    std::uint64_t score_vector_lanes = 0;
+    std::uint64_t score_masked_lanes = 0;
+    std::uint64_t descending_candidate_steps = 0;
+    std::uint64_t visited_marks = 0;
+    std::uint64_t max_chain_skip_stops = 0;
+    std::uint64_t global_best_vector_batches = 0;
+    std::uint64_t global_best_vector_lanes = 0;
+    std::uint64_t backtrack_rank_batches = 0;
+    std::uint64_t backtrack_path_vector_batches = 0;
+    std::uint64_t backtrack_commit_vector_batches = 0;
+    std::uint64_t backtrack_vector_lanes = 0;
+    std::uint64_t backtrack_overlap_stops = 0;
+    std::uint64_t scalar_orchestration_steps = 0;
+    std::uint64_t fail_closed_rejections = 0;
+
+    // Forbidden paths.  They are never incremented by this implementation;
+    // tests assert zero so later routing cannot silently launder scalar work.
+    std::uint64_t scalar_score_branches = 0;
+    std::uint64_t scalar_backtrack_branches = 0;
+    std::uint64_t shared_scalar_backtrack_calls = 0;
+    bool saturated = false;
+
+    static void add_counter(
+            std::uint64_t& destination,
+            std::uint64_t increment,
+            bool& did_saturate) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            did_saturate = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    void combine(const SimdChainingExecutionProof& other) noexcept {
+        saturated = saturated || other.saturated;
+#define BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(name) \
+        add_counter(name, other.name, saturated)
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(anchors_consumed);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(score_vector_batches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(score_vector_lanes);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(score_masked_lanes);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(descending_candidate_steps);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(visited_marks);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(max_chain_skip_stops);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(global_best_vector_batches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(global_best_vector_lanes);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(backtrack_rank_batches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(backtrack_path_vector_batches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(backtrack_commit_vector_batches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(backtrack_vector_lanes);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(backtrack_overlap_stops);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(scalar_orchestration_steps);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(fail_closed_rejections);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(scalar_score_branches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(scalar_backtrack_branches);
+        BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER(shared_scalar_backtrack_calls);
+#undef BIOSEQ_COMBINE_SIMD_CHAIN_COUNTER
+    }
+
+    [[nodiscard]] constexpr bool accepted(
+            bool require_nonempty_vector_work = false) const noexcept {
+        const bool exact_backend = !saturated
+            && fail_closed_rejections == 0
+            && scalar_score_branches == 0
+            && scalar_backtrack_branches == 0
+            && shared_scalar_backtrack_calls == 0;
+        if (!exact_backend || !require_nonempty_vector_work) {
+            return exact_backend;
+        }
+        return anchors_consumed > 1
+            && score_vector_batches > 0
+            && score_vector_lanes > 0
+            && backtrack_rank_batches > 0
+            && backtrack_path_vector_batches > 0
+            && backtrack_commit_vector_batches > 0
+            && backtrack_vector_lanes > 0;
+    }
+
+    [[nodiscard]] constexpr bool operator==(
+        const SimdChainingExecutionProof&) const noexcept = default;
+};
+
+namespace chaining_simd_detail {
+
+// Production attestation needs route evidence without turning the O(n*iter)
+// score loop into a stream of counter stores.  These booleans live in the
+// caller's frame, are set only at the actual SIMD call sites, and are folded
+// into SimdChainingExecutionProof once after the kernels return.  The detailed
+// proof mode used by algorithm tests remains available unchanged.
+struct SimdChainingRouteSummary {
+    bool score_vector_work = false;
+    bool global_best_vector_work = false;
+    bool backtrack_rank_work = false;
+    bool backtrack_path_vector_work = false;
+    bool backtrack_commit_vector_work = false;
+};
+
+template<bool TrackProof>
+HWY_INLINE void proof_add(
+    SimdChainingExecutionProof* proof,
+    std::uint64_t SimdChainingExecutionProof::* member,
+    std::uint64_t value = 1) noexcept
+{
+    if constexpr (TrackProof) {
+        proof->*member += value;
+    } else {
+        (void)proof;
+        (void)member;
+        (void)value;
+    }
+}
+
+[[noreturn]] inline void reject(
+    SimdChainingExecutionProof* proof,
+    SimdChainingStatus status,
+    std::string_view detail)
+{
+    if (proof != nullptr) {
+        ++proof->fail_closed_rejections;
+    }
+    throw SimdChainingRuntimeError(status, detail);
+}
+
+struct SoaAnchors {
+    std::uint32_t* ref_positions = nullptr;
+    std::uint32_t* query_positions = nullptr;
+    std::uint32_t* query_spans = nullptr;
+    std::size_t count = 0;
+
+    [[nodiscard]] std::uint32_t* ref_data() noexcept {
+        return ref_positions;
+    }
+    [[nodiscard]] std::uint32_t* query_data() noexcept {
+        return query_positions;
+    }
+    [[nodiscard]] std::uint32_t* span_data() noexcept {
+        return query_spans;
+    }
+    [[nodiscard]] const std::uint32_t* ref_data() const noexcept {
+        return ref_positions;
+    }
+    [[nodiscard]] const std::uint32_t* query_data() const noexcept {
+        return query_positions;
+    }
+    [[nodiscard]] const std::uint32_t* span_data() const noexcept {
+        return query_spans;
+    }
+};
+
 template<class D>
 [[nodiscard]] SoaAnchors create_soa_anchors(
-    D d_int, std::span<const Anchor> anchors)
+    D,
+    std::span<const Anchor> anchors)
 {
-    const size_t max_lanes = hn::MaxLanes(d_int);
-    const size_t anchor_count = anchors.size();
-    const size_t total_size = max_lanes + anchor_count;
-
-    // One contiguous chain-arena allocation for all three arrays (SPEC §6.3).
-    auto combined = context::current().alloc_chain_array<uint32_t, 64>(3 * total_size);
-    SoaAnchors soa;
-    soa.ref_positions   = combined.data();
-    soa.query_positions = combined.data() + total_size;
-    soa.query_spans     = combined.data() + 2 * total_size;
-    soa.padding = max_lanes;
-    soa.count   = anchor_count;
-
-    // Zero-fill padding region for each of the three slices
-    std::memset(soa.ref_positions,   0, max_lanes * sizeof(uint32_t));
-    std::memset(soa.query_positions, 0, max_lanes * sizeof(uint32_t));
-    std::memset(soa.query_spans,     0, max_lanes * sizeof(uint32_t));
-
-    // Convert AoS -> SoA (single pass, no redundant copies)
-    uint32_t* HWY_RESTRICT ref_out   = soa.ref_data();
-    uint32_t* HWY_RESTRICT query_out = soa.query_data();
-    uint32_t* HWY_RESTRICT span_out  = soa.span_data();
-    for (size_t idx = 0; idx < anchor_count; ++idx) {
-        ref_out[idx]   = static_cast<uint32_t>(anchors[idx].ref_bits());
-        query_out[idx] = static_cast<uint32_t>(anchors[idx].query_bits());
-        span_out[idx]  = static_cast<uint32_t>(anchors[idx].query_span);
+    const std::size_t count = anchors.size();
+    auto storage =
+        context::current().alloc_chain_array<std::uint32_t, 64>(3 * count);
+    SoaAnchors result{
+        .ref_positions = storage.data(),
+        .query_positions = storage.data() + count,
+        .query_spans = storage.data() + 2 * count,
+        .count = count,
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        // Bounded same-range deltas are preserved modulo 2^32, including
+        // references crossing the 4-Gbp boundary.
+        result.ref_positions[i] =
+            static_cast<std::uint32_t>(anchors[i].ref_position);
+        result.query_positions[i] =
+            static_cast<std::uint32_t>(anchors[i].query_position);
+        result.query_spans[i] =
+            static_cast<std::uint32_t>(anchors[i].query_span);
     }
-
-    return soa;
+    return result;
 }
 
-// ============================================================================
-// Vectorized scoring kernel
-// ============================================================================
-
-/// Vectorized chaining score computation.
-///
-/// Computes chaining score between anchor i (broadcast) and L predecessors
-/// simultaneously. Invalid lanes get INT32_MIN.
-///
-/// Algorithm per lane (same as scalar compute_chaining_score):
-///   1. query_distance = current_query_pos - predecessor_query_pos
-///   2. ref_distance = current_ref_pos - predecessor_ref_pos
-///   3. diagonal_deviation = |ref_distance - query_distance|
-///   4. gap_length = min(ref_distance, query_distance)
-///   5. Validity checks (INT32_MIN if fail)
-///   6. score = min(predecessor_span, gap_length)
-///   7. Gap penalty when diagonal_deviation != 0 || gap_length > predecessor_span
-///
-/// Note: skip_penalty is omitted (must be zero, enforced at chain_anchors_simd entry).
-/// The TAL reference deliberately removes skip_penalty from the vectorized path.
-///
-/// @param d_int    Highway int32 tag
-/// @param d_float  Highway float32 tag
-/// @param current_ref_pos_vec       Broadcast of anchor i's ref position
-/// @param current_query_pos_vec     Broadcast of anchor i's query position
-/// @param predecessor_ref_pos_vec   L predecessors' ref positions
-/// @param predecessor_query_pos_vec L predecessors' query positions
-/// @param predecessor_span_vec      L predecessors' query spans
-/// @param max_ref_dist_vec          Broadcast max reference distance
-/// @param max_query_dist_vec        Broadcast max query distance
-/// @param bandwidth_vec             Broadcast bandwidth
-/// @param gap_penalty_vec           Broadcast gap penalty
-/// @return Vector of int32 chaining scores (INT32_MIN for invalid lanes)
 template<class D, class D_F>
 HWY_INLINE hn::Vec<D> vectorized_chaining_score(
-    D d_int, D_F d_float,
-    hn::Vec<D> current_ref_pos_vec,
-    hn::Vec<D> current_query_pos_vec,
-    hn::Vec<D> predecessor_ref_pos_vec,
-    hn::Vec<D> predecessor_query_pos_vec,
-    hn::Vec<D> predecessor_span_vec,
-    hn::Vec<D> max_ref_dist_vec,
-    hn::Vec<D> max_query_dist_vec,
-    hn::Vec<D> bandwidth_vec,
-    hn::Vec<D_F> gap_penalty_vec)
+    D d,
+    D_F df,
+    hn::Mask<D> active,
+    hn::Vec<D> current_ref,
+    hn::Vec<D> current_query,
+    hn::Vec<D> predecessor_ref,
+    hn::Vec<D> predecessor_query,
+    hn::Vec<D> predecessor_span,
+    hn::Vec<D> max_ref_dist,
+    hn::Vec<D> max_query_dist,
+    hn::Vec<D> bandwidth,
+    hn::Vec<D_F> gap_penalty,
+    hn::Vec<D_F> skip_penalty)
 {
-    const auto zero = hn::Zero(d_int);
-    const auto invalid_score = hn::Set(d_int, std::numeric_limits<int32_t>::min());
+    const auto zero = hn::Zero(d);
+    const auto invalid_score =
+        hn::Set(d, std::numeric_limits<std::int32_t>::min());
+    const auto query_distance = hn::Sub(current_query, predecessor_query);
+    const auto ref_distance = hn::Sub(current_ref, predecessor_ref);
+    const auto diagonal_deviation =
+        hn::Abs(hn::Sub(ref_distance, query_distance));
+    const auto gap_length = hn::Min(ref_distance, query_distance);
 
-    // Distance computations
-    const auto query_distance_vec = hn::Sub(current_query_pos_vec, predecessor_query_pos_vec);
-    const auto ref_distance_vec = hn::Sub(current_ref_pos_vec, predecessor_ref_pos_vec);
-    const auto diagonal_deviation_vec = hn::Abs(hn::Sub(ref_distance_vec, query_distance_vec));
-    const auto gap_length_vec = hn::Min(ref_distance_vec, query_distance_vec);
+    const auto invalid = hn::Or(
+        hn::Not(active),
+        hn::Or(
+            hn::Or(
+                hn::Or(
+                    hn::Le(query_distance, zero),
+                    hn::Gt(query_distance, max_ref_dist)),
+                hn::Eq(ref_distance, zero)),
+            hn::Or(
+                hn::Gt(query_distance, max_query_dist),
+                hn::Gt(diagonal_deviation, bandwidth))));
 
-    // Validity masks (true = INVALID pair)
-    const auto invalid_query_not_positive = hn::Or(
-        hn::Lt(query_distance_vec, zero), hn::Eq(query_distance_vec, zero));
-    const auto invalid_query_exceeds_max_ref = hn::Gt(query_distance_vec, max_ref_dist_vec);
-    const auto invalid_ref_is_zero = hn::Eq(ref_distance_vec, zero);
-    const auto invalid_query_exceeds_max_query = hn::Gt(query_distance_vec, max_query_dist_vec);
-    const auto invalid_diagonal_exceeds_bandwidth = hn::Gt(diagonal_deviation_vec, bandwidth_vec);
-
-    const auto any_invalid = hn::Or(
-        hn::Or(hn::Or(invalid_query_not_positive, invalid_query_exceeds_max_ref),
-               invalid_ref_is_zero),
-        hn::Or(invalid_query_exceeds_max_query, invalid_diagonal_exceeds_bandwidth));
-
-    // Base score: min(predecessor_span, gap_length), or INT32_MIN where invalid
-    auto chaining_score_vec = hn::IfThenElse(
-        any_invalid, invalid_score, hn::Min(predecessor_span_vec, gap_length_vec));
-
-    // Gap penalty -- applied when diagonal_deviation > 0 OR gap_length > predecessor_span
-    const auto needs_gap_penalty = hn::AndNot(any_invalid,
-        hn::Or(hn::Gt(diagonal_deviation_vec, zero),
-               hn::Gt(gap_length_vec, predecessor_span_vec)));
-
-    // Fast path: when no lane needs a penalty, skip the (expensive) log2
-    // and float-conversion chain entirely. For very long sequences with
-    // many invalid pairs this trims the ~10 vector ops per lane otherwise
-    // wasted on a result that will be masked to zero.
-    if (hn::AllFalse(d_int, needs_gap_penalty)) {
-        return chaining_score_vec;
+    auto score = hn::IfThenElse(
+        invalid, invalid_score, hn::Min(predecessor_span, gap_length));
+    const auto needs_penalty = hn::AndNot(
+        invalid,
+        hn::Or(
+            hn::Ne(diagonal_deviation, zero),
+            hn::Gt(gap_length, predecessor_span)));
+    if (hn::AllFalse(d, needs_penalty)) {
+        return score;
     }
 
-    // linear_penalty = gap_penalty * diagonal_deviation
-    const auto linear_penalty_vec = hn::Mul(
-        gap_penalty_vec, hn::ConvertTo(d_float, diagonal_deviation_vec));
-
-    // logarithmic_penalty = (diagonal_deviation >= 1) ? fast_log2(diagonal_deviation + 1) : 0
-    const auto deviation_plus_one = hn::Add(diagonal_deviation_vec, hn::Set(d_int, 1));
-    const auto raw_log2_vec = vectorized_fast_log2(d_int, d_float, deviation_plus_one);
-    const auto deviation_ge_one_int = hn::Or(
-        hn::Gt(diagonal_deviation_vec, hn::Set(d_int, 1)),
-        hn::Eq(diagonal_deviation_vec, hn::Set(d_int, 1)));
-    // Rebind int mask to float mask for IfThenElseZero with float vector
-    const auto deviation_ge_one_float = hn::RebindMask(d_float, deviation_ge_one_int);
-    const auto logarithmic_penalty_vec = hn::IfThenElseZero(deviation_ge_one_float, raw_log2_vec);
-
-    // total_penalty = (int)(linear_penalty + 0.5 * logarithmic_penalty)
-    const auto half = hn::Set(d_float, 0.5f);
-    const auto total_penalty_float = hn::MulAdd(half, logarithmic_penalty_vec, linear_penalty_vec);
-    auto total_penalty_int = hn::ConvertTo(d_int, total_penalty_float);
-
-    // Zero out penalty for lanes that don't need it
-    total_penalty_int = hn::IfThenElseZero(needs_gap_penalty, total_penalty_int);
-
-    // score -= penalty
-    chaining_score_vec = hn::Sub(chaining_score_vec, total_penalty_int);
-
-    return chaining_score_vec;
+    const auto deviation_f = hn::ConvertTo(df, diagonal_deviation);
+    const auto gap_length_f = hn::ConvertTo(df, gap_length);
+    // Same source ordering as scalar:
+    // gap_penalty * diagonal_deviation + skip_penalty * gap_length.
+    const auto linear_penalty = hn::MulAdd(
+        gap_penalty,
+        deviation_f,
+        hn::Mul(skip_penalty, gap_length_f));
+    const auto raw_log2 = vectorized_fast_log2(
+        d, df, hn::Add(diagonal_deviation, hn::Set(d, 1)));
+    const auto deviation_positive_f = hn::RebindMask(
+        df, hn::Gt(diagonal_deviation, zero));
+    const auto logarithmic_penalty =
+        hn::IfThenElseZero(deviation_positive_f, raw_log2);
+    const auto penalty_f = hn::MulAdd(
+        hn::Set(df, 0.5F), logarithmic_penalty, linear_penalty);
+    const auto penalty_i = hn::IfThenElseZero(
+        needs_penalty, hn::ConvertTo(d, penalty_f));
+    return hn::Sub(score, penalty_i);
 }
 
-// ============================================================================
-// SIMD DP forward pass
-// ============================================================================
+template<bool TrackProof, class D>
+HWY_INLINE hn::Vec<D> score_candidate_batch(
+    D d,
+    std::size_t active_lanes,
+    std::int64_t load_start,
+    std::int64_t current_idx,
+    const SoaAnchors& soa,
+    std::int32_t max_ref_dist,
+    std::int32_t max_query_dist,
+    const ChainingParams& params,
+    SimdChainingExecutionProof* proof)
+{
+    using DF = hn::RebindToFloat<D>;
+    const DF df;
+    const auto active = hn::FirstN(d, active_lanes);
+    const auto predecessor_ref = hn::MaskedLoad(
+        active, d,
+        reinterpret_cast<const std::int32_t*>(
+            soa.ref_data() + load_start));
+    const auto predecessor_query = hn::MaskedLoad(
+        active, d,
+        reinterpret_cast<const std::int32_t*>(
+            soa.query_data() + load_start));
+    const auto predecessor_span = hn::MaskedLoad(
+        active, d,
+        reinterpret_cast<const std::int32_t*>(
+            soa.span_data() + load_start));
+    const auto scores = vectorized_chaining_score(
+        d,
+        df,
+        active,
+        hn::Set(d, static_cast<std::int32_t>(
+            soa.ref_data()[current_idx])),
+        hn::Set(d, static_cast<std::int32_t>(
+            soa.query_data()[current_idx])),
+        predecessor_ref,
+        predecessor_query,
+        predecessor_span,
+        hn::Set(d, max_ref_dist),
+        hn::Set(d, max_query_dist),
+        hn::Set(d, params.bandwidth),
+        hn::Set(df, params.gap_penalty),
+        hn::Set(df, params.skip_penalty));
+    proof_add<TrackProof>(
+        proof, &SimdChainingExecutionProof::score_vector_batches);
+    proof_add<TrackProof>(
+        proof, &SimdChainingExecutionProof::score_vector_lanes,
+        active_lanes);
+    proof_add<TrackProof>(
+        proof, &SimdChainingExecutionProof::score_masked_lanes,
+        hn::Lanes(d) - active_lanes);
+    return scores;
+}
 
-/// Forward DP pass with SIMD-vectorized inner loop.
-///
-/// Writes best_scores[0..anchor_count), predecessors[0..anchor_count), peak_scores[0..anchor_count).
-///
-/// The outer loop is sequential (each anchor depends on predecessors' scores).
-/// The inner loop scans backwards from i-1 to window_start in steps of L lanes.
-/// For ranges with <= 5 predecessors, falls back to scalar to avoid SIMD overhead.
-///
-/// @param d_int          Highway int32 tag
-/// @param anchors        Sorted anchor array (AoS, for scalar paths and window advancement)
-/// @param soa            SoA anchor data (for SIMD loads)
-/// @param best_scores    f[] array -- MUST be padded: best_scores[-MaxLanes..-1] must be valid and zero
-/// @param predecessors   p[] array (std::vector)
-/// @param peak_scores    v[] array (std::vector)
-/// @param params         Chaining parameters (must have prepare() called)
-template<class D>
+template<bool TrackProof, class D>
+[[nodiscard]] std::int32_t score_one_candidate(
+    D d,
+    std::int64_t candidate_idx,
+    std::int64_t current_idx,
+    const SoaAnchors& soa,
+    std::int32_t max_ref_dist,
+    std::int32_t max_query_dist,
+    const ChainingParams& params,
+    SimdChainingExecutionProof* proof)
+{
+    HWY_ALIGN std::int32_t lanes[hn::MaxLanes(d)];
+    const auto scores = score_candidate_batch<TrackProof>(
+        d, 1, candidate_idx, current_idx, soa,
+        max_ref_dist, max_query_dist, params, proof);
+    hn::Store(scores, d, lanes);
+    return lanes[0];
+}
+
+template<bool TrackProof, class D>
+[[nodiscard]] std::int32_t exact_global_best(
+    D d,
+    const std::int32_t* best_scores,
+    std::int32_t begin,
+    std::int32_t end,
+    SimdChainingExecutionProof* proof)
+{
+    const std::size_t lanes = hn::Lanes(d);
+    auto lane_best_scores =
+        hn::Set(d, std::numeric_limits<std::int32_t>::min());
+    auto lane_best_indices = hn::Set(d, -1);
+
+    for (std::int32_t block = begin; block < end;
+         block += static_cast<std::int32_t>(lanes))
+    {
+        const std::size_t active_lanes = std::min<std::size_t>(
+            lanes, static_cast<std::size_t>(end - block));
+        const auto active = hn::FirstN(d, active_lanes);
+        const auto scores = hn::MaskedLoad(
+            active, d, best_scores + block);
+        const auto indices = hn::Add(
+            hn::Set(d, block), hn::Iota(d, 0));
+        const auto better = hn::And(
+            active,
+            hn::Or(
+                hn::Gt(scores, lane_best_scores),
+                hn::And(
+                    hn::Eq(scores, lane_best_scores),
+                    hn::Gt(indices, lane_best_indices))));
+        lane_best_scores = hn::IfThenElse(
+            better, scores, lane_best_scores);
+        lane_best_indices = hn::IfThenElse(
+            better, indices, lane_best_indices);
+        proof_add<TrackProof>(
+            proof,
+            &SimdChainingExecutionProof::global_best_vector_batches);
+        proof_add<TrackProof>(
+            proof,
+            &SimdChainingExecutionProof::global_best_vector_lanes,
+            active_lanes);
+    }
+
+    const auto maximum_score = hn::MaxOfLanes(d, lane_best_scores);
+    const auto tied_indices = hn::IfThenElse(
+        hn::Eq(lane_best_scores, maximum_score),
+        lane_best_indices,
+        hn::Set(d, -1));
+    // Scalar scans descending and replaces only on strict improvement, so the
+    // largest index wins every score tie.
+    return hn::GetLane(hn::MaxOfLanes(d, tied_indices));
+}
+
+template<bool TrackProof, class D>
 void simd_dp_forward_pass(
-    D d_int,
+    D d,
     std::span<const Anchor> anchors,
     const SoaAnchors& soa,
-    int32_t* HWY_RESTRICT best_scores,
-    std::span<int64_t> predecessors,
-    std::span<int32_t> peak_scores,
-    const ChainingParams& params)
+    std::span<std::int32_t> best_scores,
+    std::span<std::int32_t> predecessors,
+    std::span<std::int32_t> peak_scores,
+    const ChainingParams& params,
+    SimdChainingExecutionProof* proof,
+    SimdChainingRouteSummary* route_summary)
 {
-    using D_F = hn::RebindToFloat<D>;
-    D_F d_float;
-    const size_t lane_count = hn::Lanes(d_int);
-    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
+    const std::int32_t anchor_count =
+        static_cast<std::int32_t>(anchors.size());
+    const std::int32_t lanes =
+        static_cast<std::int32_t>(hn::Lanes(d));
+    const std::int32_t max_ref_dist =
+        std::max(params.max_gap, params.bandwidth);
+    const std::int32_t max_query_dist =
+        std::max(params.max_gap, params.bandwidth);
 
-    int32_t max_ref_dist = params.max_gap;
-    int32_t max_query_dist = params.max_gap;
-    if (max_ref_dist < params.bandwidth) max_ref_dist = params.bandwidth;
-    if (max_query_dist < params.bandwidth) max_query_dist = params.bandwidth;
+    auto visited = context::current().alloc_chain_array<std::int32_t>(
+        anchors.size());
+    std::memset(
+        visited.data(), 0,
+        anchors.size() * sizeof(std::int32_t));
 
-    // Broadcast constant parameters
-    const auto max_ref_dist_vec = hn::Set(d_int, max_ref_dist);
-    const auto max_query_dist_vec = hn::Set(d_int, max_query_dist);
-    const auto bandwidth_vec = hn::Set(d_int, params.bandwidth);
-    const auto gap_penalty_vec = hn::Set(d_float, params.gap_penalty);
-    const auto no_predecessor_vec = hn::Set(d_int, static_cast<int32_t>(-1));
+    HWY_ALIGN std::int32_t score_lanes[hn::MaxLanes(d)];
+    std::int32_t window_start = 0;
+    std::int32_t global_best_idx = -1;
+    bool route_score_vector_work = false;
+    bool route_global_best_vector_work = false;
 
-    const uint32_t* HWY_RESTRICT soa_ref   = soa.ref_data();
-    const uint32_t* HWY_RESTRICT soa_query = soa.query_data();
-    const uint32_t* HWY_RESTRICT soa_span  = soa.span_data();
+    for (std::int32_t current_idx = 0;
+         current_idx < anchor_count; ++current_idx)
+    {
+        std::int32_t best_predecessor = -1;
+        std::int32_t best_score =
+            static_cast<std::int32_t>(anchors[current_idx].query_span);
+        std::int32_t skip_count = 0;
 
-    int64_t window_start = 0;
-    int64_t global_best_idx = -1;
-
-    HWY_ALIGN int32_t best_score_lanes[hn::MaxLanes(d_int)];
-    HWY_ALIGN int32_t best_predecessor_lanes[hn::MaxLanes(d_int)];
-
-    // Approximate max_skip: cap the number of consecutive batches with no
-    // lane-improvement before we bail. Equivalent in spirit to the scalar
-    // path's `n_skip > max_skip` break, but at batch granularity rather
-    // than per-pair (the SIMD pipeline does not maintain the
-    // `t[]`/`visited` array).
-    const int32_t max_chain_skip = params.max_chain_skip;
-    const int64_t max_consecutive_skip_batches = max_chain_skip > 0
-        ? std::max<int64_t>(1, static_cast<int64_t>(max_chain_skip)
-                                / std::max<int64_t>(1, static_cast<int64_t>(lane_count)) + 1)
-        : std::numeric_limits<int64_t>::max();
-
-    for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
-        int32_t best_predecessor = -1;
-        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
-
-        // === Window advancement (scalar, full 64-bit ref_bits for chromosome check) ===
-        while (window_start < current_idx &&
-               (anchors[current_idx].ref_chromosome_key() != anchors[window_start].ref_chromosome_key() ||
-                anchors[current_idx].ref_bits() > anchors[window_start].ref_bits()
-                    + static_cast<uint64_t>(max_ref_dist)))
+        while (window_start < current_idx
+               && (anchors[current_idx].ref_chromosome_key()
+                       != anchors[window_start].ref_chromosome_key()
+                   || anchors[current_idx].ref_bits()
+                       > anchors[window_start].ref_bits()
+                           + static_cast<std::uint64_t>(max_ref_dist)))
         {
             ++window_start;
         }
@@ -336,281 +526,551 @@ void simd_dp_forward_pass(
             window_start = current_idx - params.max_chain_iter;
         }
 
-        int64_t candidate_idx = current_idx - 1;
-        int64_t search_end = window_start;
-        const int64_t lanes = static_cast<int64_t>(lane_count);
+        std::int32_t search_end = window_start;
+        std::int32_t cached_global_pair_score =
+            std::numeric_limits<std::int32_t>::min();
+        bool global_pair_score_cached = false;
+        bool stopped = false;
 
-        // === SIMD path: when predecessor range is large enough ===
-        if (candidate_idx - window_start > 5) {
-            const auto current_ref_broadcast = hn::Set(
-                d_int, static_cast<int32_t>(soa_ref[current_idx]));
-            const auto current_query_broadcast = hn::Set(
-                d_int, static_cast<int32_t>(soa_query[current_idx]));
-            auto best_score_vec = hn::Set(d_int, best_score);
-            auto best_predecessor_vec = no_predecessor_vec;
-            int64_t consecutive_skip_batches = 0;
+        for (std::int32_t candidate_end = current_idx;
+             candidate_end > window_start && !stopped;)
+        {
+            route_score_vector_work = true;
+            const std::int32_t active_lanes =
+                std::min(lanes, candidate_end - window_start);
+            const std::int32_t load_start =
+                candidate_end - active_lanes;
+            const auto scores = score_candidate_batch<TrackProof>(
+                d,
+                static_cast<std::size_t>(active_lanes),
+                load_start,
+                current_idx,
+                soa,
+                max_ref_dist,
+                max_query_dist,
+                params,
+                proof);
+            hn::Store(scores, d, score_lanes);
 
-            // Full-vector iterations: scan backwards in steps of L lanes
-            for (; (candidate_idx - (lanes - 1)) >= window_start; candidate_idx -= lanes) {
-                const int64_t load_start = candidate_idx - (lanes - 1);
-                const auto predecessor_ref_vec = hn::LoadU(d_int,
-                    reinterpret_cast<const int32_t*>(&soa_ref[load_start]));
-                const auto predecessor_query_vec = hn::LoadU(d_int,
-                    reinterpret_cast<const int32_t*>(&soa_query[load_start]));
-                const auto predecessor_span_vec = hn::LoadU(d_int,
-                    reinterpret_cast<const int32_t*>(&soa_span[load_start]));
-                const auto predecessor_best_score_vec = hn::LoadU(d_int,
-                    &best_scores[load_start]);
-
-                auto pair_score_vec = vectorized_chaining_score(
-                    d_int, d_float,
-                    current_ref_broadcast, current_query_broadcast,
-                    predecessor_ref_vec, predecessor_query_vec, predecessor_span_vec,
-                    max_ref_dist_vec, max_query_dist_vec, bandwidth_vec, gap_penalty_vec);
-
-                // total_score = pair_score + predecessor's best_score
-                const auto total_score_vec = hn::Add(predecessor_best_score_vec, pair_score_vec);
-
-                // Lane-wise max update
-                const auto is_improvement = hn::Gt(total_score_vec, best_score_vec);
-                const auto predecessor_indices_vec = hn::Add(
-                    hn::Set(d_int, static_cast<int32_t>(load_start)), hn::Iota(d_int, 0));
-
-                best_score_vec = hn::Max(total_score_vec, best_score_vec);
-                best_predecessor_vec = hn::IfThenElse(
-                    is_improvement, predecessor_indices_vec, best_predecessor_vec);
-
-                // Approximate max_skip: bail when this batch (and the
-                // previous ones in `consecutive_skip_batches`) produced no
-                // improvement at all. Cheap mask reduction; the broadcast
-                // result is identical across lanes so the AllFalse short
-                // circuits early on every architecture.
-                if (hn::AllFalse(d_int, is_improvement)) {
-                    if (++consecutive_skip_batches >= max_consecutive_skip_batches) {
-                        // Pretend we've consumed the whole window. The
-                        // global_best_idx fallback below still gets a shot
-                        // at finding a long-range chain target.
-                        candidate_idx = window_start - 1;
-                        break;
-                    }
-                } else {
-                    consecutive_skip_batches = 0;
+            for (std::int32_t lane = active_lanes - 1;
+                 lane >= 0; --lane)
+            {
+                const std::int32_t candidate_idx = load_start + lane;
+                const std::int32_t pair_score = score_lanes[lane];
+                proof_add<TrackProof>(
+                    proof,
+                    &SimdChainingExecutionProof::descending_candidate_steps);
+                proof_add<TrackProof>(
+                    proof,
+                    &SimdChainingExecutionProof::scalar_orchestration_steps);
+                if (pair_score
+                    == std::numeric_limits<std::int32_t>::min())
+                {
+                    continue;
                 }
-            }
-
-            // Partial tail: candidate_idx >= window_start but candidate_idx-(lanes-1) < window_start
-            if (candidate_idx >= window_start) {
-                const int64_t load_start = candidate_idx - (lanes - 1);
-                const auto predecessor_ref_vec = hn::LoadU(d_int,
-                    reinterpret_cast<const int32_t*>(&soa_ref[load_start]));
-                const auto predecessor_query_vec = hn::LoadU(d_int,
-                    reinterpret_cast<const int32_t*>(&soa_query[load_start]));
-                const auto predecessor_span_vec = hn::LoadU(d_int,
-                    reinterpret_cast<const int32_t*>(&soa_span[load_start]));
-                const auto predecessor_best_score_vec = hn::LoadU(d_int,
-                    &best_scores[load_start]);
-
-                auto pair_score_vec = vectorized_chaining_score(
-                    d_int, d_float,
-                    current_ref_broadcast, current_query_broadcast,
-                    predecessor_ref_vec, predecessor_query_vec, predecessor_span_vec,
-                    max_ref_dist_vec, max_query_dist_vec, bandwidth_vec, gap_penalty_vec);
-
-                auto total_score_vec = hn::Add(predecessor_best_score_vec, pair_score_vec);
-
-                // Mask out lanes below window_start -- set to INT32_MIN so they never win
-                const size_t invalid_lane_count = static_cast<size_t>(
-                    window_start - load_start);
-                const auto valid_lane_mask = hn::Not(hn::FirstN(d_int, invalid_lane_count));
-                const auto invalid_sentinel = hn::Set(d_int,
-                    std::numeric_limits<int32_t>::min());
-                total_score_vec = hn::IfThenElse(
-                    valid_lane_mask, total_score_vec, invalid_sentinel);
-
-                const auto is_improvement = hn::Gt(total_score_vec, best_score_vec);
-                const auto predecessor_indices_vec = hn::Add(
-                    hn::Set(d_int, static_cast<int32_t>(load_start)), hn::Iota(d_int, 0));
-
-                best_score_vec = hn::Max(total_score_vec, best_score_vec);
-                best_predecessor_vec = hn::IfThenElse(
-                    is_improvement, predecessor_indices_vec, best_predecessor_vec);
-            }
-
-            // Horizontal reduction: extract scalar best_score and best_predecessor
-            hn::Store(best_score_vec, d_int, best_score_lanes);
-            hn::Store(best_predecessor_vec, d_int, best_predecessor_lanes);
-            for (int64_t lane = static_cast<int64_t>(lane_count) - 1; lane >= 0; --lane) {
-                if (best_score_lanes[lane] > best_score) {
-                    best_score = best_score_lanes[lane];
-                    best_predecessor = best_predecessor_lanes[lane];
-                } else if (best_score_lanes[lane] == best_score) {
-                    best_predecessor = std::max(best_predecessor, best_predecessor_lanes[lane]);
-                    if (best_score == static_cast<int32_t>(anchors[current_idx].query_span)) {
-                        best_predecessor = -1;
-                    }
+                if (candidate_idx == global_best_idx) {
+                    cached_global_pair_score = pair_score;
+                    global_pair_score_cached = true;
                 }
-            }
-            search_end = window_start;
 
-        } else {
-            // === Scalar fallback for small ranges ===
-            for (; candidate_idx >= window_start; --candidate_idx) {
-                const int32_t pair_score = compute_chaining_score(
-                    anchors[current_idx], anchors[candidate_idx],
-                    max_ref_dist, max_query_dist, params.bandwidth,
-                    params.gap_penalty, params.skip_penalty);
-                if (pair_score == std::numeric_limits<int32_t>::min()) continue;
-                const int32_t total_score = pair_score + best_scores[candidate_idx];
+                const std::int32_t total_score =
+                    pair_score + best_scores[candidate_idx];
                 if (total_score > best_score) {
                     best_score = total_score;
-                    best_predecessor = static_cast<int32_t>(candidate_idx);
+                    best_predecessor = candidate_idx;
+                    if (skip_count > 0) {
+                        --skip_count;
+                    }
+                } else if (
+                    visited[candidate_idx] == current_idx)
+                {
+                    if (++skip_count > params.max_chain_skip) {
+                        search_end = candidate_idx;
+                        proof_add<TrackProof>(
+                            proof,
+                            &SimdChainingExecutionProof::
+                                max_chain_skip_stops);
+                        stopped = true;
+                        break;
+                    }
+                }
+                if (predecessors[candidate_idx] >= 0) {
+                    visited[predecessors[candidate_idx]] = current_idx;
+                    proof_add<TrackProof>(
+                        proof,
+                        &SimdChainingExecutionProof::visited_marks);
                 }
             }
-            search_end = candidate_idx;
+            candidate_end = load_start;
         }
 
-        // === Global-best long-range optimization (scalar) ===
-        if (global_best_idx < 0 ||
-            anchors[current_idx].ref_bits() - anchors[global_best_idx].ref_bits()
-                > static_cast<uint64_t>(max_ref_dist))
+        if (global_best_idx < 0
+            || anchors[current_idx].ref_bits()
+                    - anchors[global_best_idx].ref_bits()
+                > static_cast<std::uint64_t>(max_ref_dist))
         {
-            int32_t global_best_score = std::numeric_limits<int32_t>::min();
-            global_best_idx = -1;
-            for (int64_t scan_idx = current_idx - 1; scan_idx >= window_start; --scan_idx) {
-                if (global_best_score < best_scores[scan_idx]) {
-                    global_best_score = best_scores[scan_idx];
-                    global_best_idx = scan_idx;
-                }
-            }
+            route_global_best_vector_work =
+                route_global_best_vector_work || window_start < current_idx;
+            global_best_idx = exact_global_best<TrackProof>(
+                d, best_scores.data(), window_start, current_idx, proof);
+            global_pair_score_cached = false;
         }
+
         if (global_best_idx >= 0 && global_best_idx < search_end) {
-            const int32_t probe_score = compute_chaining_score(
-                anchors[current_idx], anchors[global_best_idx],
-                max_ref_dist, max_query_dist, params.bandwidth,
-                params.gap_penalty, params.skip_penalty);
-            if (probe_score != std::numeric_limits<int32_t>::min()
-                && best_score < probe_score + best_scores[global_best_idx])
+            route_score_vector_work =
+                route_score_vector_work || !global_pair_score_cached;
+            const std::int32_t global_pair_score =
+                global_pair_score_cached
+                ? cached_global_pair_score
+                : score_one_candidate<TrackProof>(
+                      d,
+                      global_best_idx,
+                      current_idx,
+                      soa,
+                      max_ref_dist,
+                      max_query_dist,
+                      params,
+                      proof);
+            if (global_pair_score
+                    != std::numeric_limits<std::int32_t>::min()
+                && best_score
+                    < global_pair_score + best_scores[global_best_idx])
             {
-                best_score = probe_score + best_scores[global_best_idx];
-                best_predecessor = static_cast<int32_t>(global_best_idx);
+                best_score =
+                    global_pair_score + best_scores[global_best_idx];
+                best_predecessor = global_best_idx;
             }
         }
 
-        // === Store results ===
         best_scores[current_idx] = best_score;
         predecessors[current_idx] = best_predecessor;
-        peak_scores[current_idx] = (best_predecessor >= 0
-            && peak_scores[best_predecessor] > best_score)
-            ? peak_scores[best_predecessor] : best_score;
+        peak_scores[current_idx] =
+            best_predecessor >= 0
+                    && peak_scores[best_predecessor] > best_score
+                ? peak_scores[best_predecessor]
+                : best_score;
 
-        if (global_best_idx < 0 ||
-            (anchors[current_idx].ref_bits() - anchors[global_best_idx].ref_bits()
-                <= static_cast<uint64_t>(max_ref_dist)
-             && best_scores[global_best_idx] < best_scores[current_idx]))
+        if (global_best_idx < 0
+            || (anchors[current_idx].ref_bits()
+                        - anchors[global_best_idx].ref_bits()
+                    <= static_cast<std::uint64_t>(max_ref_dist)
+                && best_scores[global_best_idx]
+                    < best_scores[current_idx]))
         {
             global_best_idx = current_idx;
         }
     }
+    if (route_summary != nullptr) {
+        route_summary->score_vector_work = route_score_vector_work;
+        route_summary->global_best_vector_work =
+            route_global_best_vector_work;
+    }
 }
 
-// ============================================================================
-// Top-level entry point
-// ============================================================================
+struct ScoredAnchorIndex {
+    std::int32_t score;
+    std::int64_t anchor_index;
+};
 
-/// SIMD-accelerated DP chaining.
-///
-/// Same algorithm as scalar DP, but the inner predecessor search loop is
-/// vectorized using Highway SIMD. Falls back to scalar for small ranges.
-///
-/// Requires skip_penalty == 0 (the vectorized scoring kernel omits it).
-/// If skip_penalty is non-zero, use chain_anchors_scalar instead.
-///
-/// @param anchors                  Sorted anchor array (read-only span; the
-///                                  kernel only reads positions and emits a
-///                                  freshly-reordered anchor span).
-/// @param params                   Chaining parameters (must have prepare()
-///                                  called).
-/// @param chains_out               Output slab — surviving chains are appended
-///                                  here in score-descending order.
-/// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                  appended in chain order; `Chain::anchor_start`
-///                                  indexes into this slab.
+struct ScoreAscending {
+    [[nodiscard]] bool operator()(
+        const ScoredAnchorIndex& lhs,
+        const ScoredAnchorIndex& rhs) const noexcept
+    {
+        return lhs.score < rhs.score;
+    }
+};
+
+template<bool TrackProof, class D>
+void backtrack_chains_simd(
+    D d,
+    std::span<const Anchor> anchors,
+    std::span<const std::int32_t> best_scores,
+    std::span<const std::int32_t> predecessors,
+    std::int32_t min_score,
+    std::int32_t min_seed_count,
+    ArenaSlab<Chain>& chains_out,
+    ArenaSlab<Anchor>& reordered_anchors_out,
+    SimdChainingExecutionProof* proof,
+    SimdChainingRouteSummary* route_summary)
+{
+    const std::int32_t anchor_count =
+        static_cast<std::int32_t>(anchors.size());
+    const std::int32_t lanes =
+        static_cast<std::int32_t>(hn::Lanes(d));
+    auto& ctx = context::current();
+
+    auto scored = ctx.alloc_chain_array<ScoredAnchorIndex>(
+        anchors.size());
+    std::size_t scored_count = 0;
+    for (std::int32_t i = 0; i < anchor_count; ++i) {
+        if (best_scores[i] >= min_score) {
+            scored[scored_count++] =
+                ScoredAnchorIndex{best_scores[i], i};
+        }
+    }
+    std::sort(
+        scored.data(), scored.data() + scored_count,
+        ScoreAscending{});
+
+    auto visited = ctx.alloc_chain_array<std::int32_t>(
+        anchors.size());
+    std::memset(
+        visited.data(), 0,
+        anchors.size() * sizeof(std::int32_t));
+
+    const std::size_t matrix_elements =
+        anchors.size() * static_cast<std::size_t>(lanes);
+    auto paths = ctx.alloc_chain_array<std::int32_t, 64>(
+        matrix_elements);
+
+    HWY_ALIGN std::int32_t start_lanes[hn::MaxLanes(d)];
+    HWY_ALIGN std::int32_t length_lanes[hn::MaxLanes(d)];
+    HWY_ALIGN std::int32_t terminal_lanes[hn::MaxLanes(d)];
+    const auto lane_bases = hn::Mul(
+        hn::Iota(d, 0), hn::Set(d, anchor_count));
+    const auto one = hn::Set(d, 1);
+    const auto minus_one = hn::Set(d, -1);
+    bool route_rank_work = false;
+    bool route_path_work = false;
+    bool route_commit_work = false;
+
+    std::int64_t highest_rank =
+        static_cast<std::int64_t>(scored_count) - 1;
+    while (highest_rank >= 0) {
+        const std::int32_t batch_count =
+            std::min<std::int32_t>(
+                lanes,
+                static_cast<std::int32_t>(highest_rank + 1));
+        for (std::int32_t lane = 0; lane < lanes; ++lane) {
+            start_lanes[lane] = lane < batch_count
+                ? static_cast<std::int32_t>(
+                      scored[highest_rank - lane].anchor_index)
+                : -1;
+        }
+
+        auto current = hn::Load(d, start_lanes);
+        auto active = hn::FirstN(
+            d, static_cast<std::size_t>(batch_count));
+        auto lengths = hn::Zero(d);
+        auto terminals = minus_one;
+        std::int32_t depth = 0;
+
+        for (; depth < anchor_count && !hn::AllFalse(d, active);
+             ++depth)
+        {
+            route_path_work = true;
+            const auto safe_indices = hn::IfThenElse(
+                active, current, hn::Zero(d));
+            const auto seen = hn::MaskedGatherIndex(
+                active, d, visited.data(), safe_indices);
+            const auto hit_visited = hn::And(
+                active, hn::Ne(seen, hn::Zero(d)));
+            terminals = hn::IfThenElse(
+                hit_visited, current, terminals);
+            const auto append = hn::AndNot(hit_visited, active);
+            const auto path_offsets =
+                hn::Add(lane_bases, hn::Set(d, depth));
+            hn::MaskedScatterIndex(
+                current, append, d, paths.data(), path_offsets);
+            lengths = hn::Add(
+                lengths, hn::IfThenElse(append, one, hn::Zero(d)));
+
+            const auto gather_indices = hn::IfThenElse(
+                append, current, hn::Zero(d));
+            const auto next = hn::MaskedGatherIndex(
+                append, d, predecessors.data(), gather_indices);
+            const auto next_active = hn::And(
+                append, hn::Gt(next, minus_one));
+            current = hn::IfThenElse(
+                next_active, next, minus_one);
+            active = next_active;
+
+            proof_add<TrackProof>(
+                proof,
+                &SimdChainingExecutionProof::
+                    backtrack_path_vector_batches);
+            proof_add<TrackProof>(
+                proof,
+                &SimdChainingExecutionProof::backtrack_vector_lanes,
+                hn::CountTrue(d, append));
+        }
+        if (!hn::AllFalse(d, active)) {
+            reject(
+                proof,
+                SimdChainingStatus::cyclic_predecessors,
+                "predecessor path exceeds anchor count");
+        }
+
+        hn::Store(lengths, d, length_lanes);
+        hn::Store(terminals, d, terminal_lanes);
+        proof_add<TrackProof>(
+            proof,
+            &SimdChainingExecutionProof::backtrack_rank_batches);
+        route_rank_work = true;
+
+        // Rank order is semantically observable when paths overlap.  Each
+        // lane therefore commits after all higher-priority lanes in this
+        // batch, but every path prefix is tested and marked in SIMD chunks.
+        for (std::int32_t lane = 0; lane < batch_count; ++lane) {
+            const std::int32_t collected_length = length_lanes[lane];
+            const std::int32_t* lane_path =
+                paths.data()
+                + static_cast<std::size_t>(lane) * anchors.size();
+            std::int32_t committed_length = 0;
+            std::int32_t terminal = terminal_lanes[lane];
+
+            for (std::int32_t offset = 0;
+                 offset < collected_length;)
+            {
+                route_commit_work = true;
+                const std::int32_t active_lanes =
+                    std::min(lanes, collected_length - offset);
+                const auto valid = hn::FirstN(
+                    d, static_cast<std::size_t>(active_lanes));
+                const auto path_indices = hn::MaskedLoad(
+                    valid, d, lane_path + offset);
+                const auto safe_indices = hn::IfThenElse(
+                    valid, path_indices, hn::Zero(d));
+                const auto seen = hn::MaskedGatherIndex(
+                    valid, d, visited.data(), safe_indices);
+                const auto hit = hn::And(
+                    valid, hn::Ne(seen, hn::Zero(d)));
+                const std::intptr_t first_hit =
+                    hn::FindFirstTrue(d, hit);
+                const std::int32_t commit_count =
+                    first_hit >= 0
+                    ? static_cast<std::int32_t>(first_hit)
+                    : active_lanes;
+                const auto commit = hn::FirstN(
+                    d, static_cast<std::size_t>(commit_count));
+                hn::MaskedScatterIndex(
+                    one, commit, d, visited.data(), safe_indices);
+
+                committed_length += commit_count;
+                proof_add<TrackProof>(
+                    proof,
+                    &SimdChainingExecutionProof::
+                        backtrack_commit_vector_batches);
+                proof_add<TrackProof>(
+                    proof,
+                    &SimdChainingExecutionProof::scalar_orchestration_steps);
+                if (first_hit >= 0) {
+                    terminal = lane_path[offset + first_hit];
+                    proof_add<TrackProof>(
+                        proof,
+                        &SimdChainingExecutionProof::
+                            backtrack_overlap_stops);
+                    break;
+                }
+                offset += active_lanes;
+            }
+
+            const std::int64_t rank = highest_rank - lane;
+            const std::int32_t chain_score =
+                terminal < 0
+                ? scored[rank].score
+                : scored[rank].score - best_scores[terminal];
+            if (chain_score >= min_score
+                && committed_length >= min_seed_count)
+            {
+                chains_out.push_back(Chain{
+                    .score = chain_score,
+                    .anchor_count = committed_length,
+                    .anchor_start = static_cast<std::int32_t>(
+                        reordered_anchors_out.size()),
+                });
+                for (std::int32_t i = committed_length;
+                     i > 0; --i)
+                {
+                    reordered_anchors_out.push_back(
+                        anchors[lane_path[i - 1]]);
+                }
+            }
+        }
+        highest_rank -= batch_count;
+    }
+    if (route_summary != nullptr) {
+        route_summary->backtrack_rank_work = route_rank_work;
+        route_summary->backtrack_path_vector_work = route_path_work;
+        route_summary->backtrack_commit_vector_work = route_commit_work;
+    }
+}
+
+template<bool TrackProof, class D>
+void run_exact_simd_chaining(
+    D d,
+    std::span<const Anchor> anchors,
+    const ChainingParams& params,
+    ArenaSlab<Chain>& chains_out,
+    ArenaSlab<Anchor>& reordered_anchors_out,
+    SimdChainingExecutionProof* proof,
+    SimdChainingRouteSummary* route_summary)
+{
+    const std::size_t count = anchors.size();
+    auto soa = create_soa_anchors(d, anchors);
+    auto best_scores =
+        context::current().alloc_chain_array<std::int32_t>(count);
+    auto predecessors =
+        context::current().alloc_chain_array<std::int32_t>(count);
+    auto peak_scores =
+        context::current().alloc_chain_array<std::int32_t>(count);
+    std::memset(
+        predecessors.data(), 0xFF,
+        count * sizeof(std::int32_t));
+
+    simd_dp_forward_pass<TrackProof>(
+        d,
+        anchors,
+        soa,
+        best_scores,
+        predecessors,
+        peak_scores,
+        params,
+        proof,
+        route_summary);
+    {
+        // Keep `backtrack_chains` attached to the rewritten local SIMD
+        // backtracker. A surrounding orchestration scope would preserve the
+        // label while timing unrelated work and could conceal a fallback.
+        static const auto* backtrack_region_desc =
+            bioseq::instr::register_region_static("backtrack_chains");
+        auto backtrack_region_scope =
+            bioseq::instr::region(backtrack_region_desc);
+        backtrack_chains_simd<TrackProof>(
+            d,
+            anchors,
+            best_scores,
+            predecessors,
+            params.min_chain_score,
+            params.min_seed_count,
+            chains_out,
+            reordered_anchors_out,
+            proof,
+            route_summary);
+    }
+}
+
+}  // namespace chaining_simd_detail
+
+/**
+ * Exact SIMD DP chaining.  Supplying proof is optional and does not alter
+ * output.  Unsupported inputs throw; this entry point never calls a scalar
+ * scoring or backtracking implementation.
+ */
 void chain_anchors_simd(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
-    ::bioseq::chaining::ArenaSlab<Chain>& chains_out,
-    ::bioseq::chaining::ArenaSlab<Anchor>& reordered_anchors_out)
+    ArenaSlab<Chain>& chains_out,
+    ArenaSlab<Anchor>& reordered_anchors_out,
+    SimdChainingExecutionProof* proof = nullptr,
+    bool aggregate_proof = false)
 {
-    static const auto* _simd_desc =
+    if (proof != nullptr) {
+        *proof = {};
+        proof->anchors_consumed = anchors.size();
+    }
+
+    hn::ScalableTag<std::int32_t> d;
+    const std::size_t lanes = hn::Lanes(d);
+    if (lanes < 2) {
+        chaining_simd_detail::reject(
+            proof,
+            SimdChainingStatus::unsupported_simd_target,
+            "the selected Highway target has fewer than two int32 lanes");
+    }
+    if (params.max_gap < 0
+        || params.bandwidth < 0
+        || params.max_chain_skip < 0
+        || params.max_chain_iter < 0
+        || params.min_seed_count < 0
+        || !std::isfinite(params.gap_penalty)
+        || !std::isfinite(params.skip_penalty)
+        || params.gap_penalty < 0.0F
+        || params.skip_penalty < 0.0F)
+    {
+        chaining_simd_detail::reject(
+            proof,
+            SimdChainingStatus::invalid_parameters,
+            "distances, iteration limits, seed count, and penalties must "
+            "be finite and non-negative");
+    }
+    if (anchors.size()
+        > static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max()))
+    {
+        chaining_simd_detail::reject(
+            proof,
+            SimdChainingStatus::anchor_count_overflow,
+            "anchor indices do not fit the exact int32 SIMD ABI");
+    }
+    if (!anchors.empty()
+        && anchors.size()
+            > static_cast<std::size_t>(
+                  std::numeric_limits<std::int32_t>::max())
+                  / lanes)
+    {
+        chaining_simd_detail::reject(
+            proof,
+            SimdChainingStatus::workspace_overflow,
+            "lane-batched backtracking workspace exceeds int32 gather ABI");
+    }
+    if (anchors.empty()) {
+        return;
+    }
+
+    static const auto* region_desc =
         bioseq::instr::register_region_static("mg_lchain_simd");
-    auto _simd_scope = bioseq::instr::region(_simd_desc);
-    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
-    if (anchor_count == 0) return;
+    auto region_scope = bioseq::instr::region(region_desc);
+    auto chain_scope =
+        context::current().push<context::Arena::Chain>();
 
-    // The vectorized scoring kernel omits skip_penalty * gap_length.
-    // Enforce that skip_penalty is zero; fall back to scalar if not.
-    DEBUG_ASSERT(params.skip_penalty == 0.0f,
-        "chain_anchors_simd requires skip_penalty == 0. "
-        "Use chain_anchors_scalar for non-zero chain_skip_scale.");
-
-    hn::ScalableTag<int32_t> d_int;
-
-    auto chain_scope = context::current().push<context::Arena::Chain>();
-
-    SoaAnchors soa;
-    {
-        static const auto* _aos_desc =
-            bioseq::instr::register_region_static("mg_lchain_simd_aos_to_soa");
-        auto _aos_scope = bioseq::instr::region(_aos_desc);
-        soa = create_soa_anchors(d_int, anchors);
+    if (proof != nullptr && aggregate_proof) {
+        chaining_simd_detail::SimdChainingRouteSummary route_summary{};
+        chaining_simd_detail::run_exact_simd_chaining<false>(
+            d,
+            anchors,
+            params,
+            chains_out,
+            reordered_anchors_out,
+            nullptr,
+            &route_summary);
+        proof->score_vector_batches = route_summary.score_vector_work ? 1u : 0u;
+        proof->score_vector_lanes = route_summary.score_vector_work ? 1u : 0u;
+        proof->global_best_vector_batches =
+            route_summary.global_best_vector_work ? 1u : 0u;
+        proof->global_best_vector_lanes =
+            route_summary.global_best_vector_work ? 1u : 0u;
+        proof->backtrack_rank_batches = route_summary.backtrack_rank_work ? 1u : 0u;
+        proof->backtrack_path_vector_batches =
+            route_summary.backtrack_path_vector_work ? 1u : 0u;
+        proof->backtrack_commit_vector_batches =
+            route_summary.backtrack_commit_vector_work ? 1u : 0u;
+        proof->backtrack_vector_lanes =
+            route_summary.backtrack_path_vector_work ? 1u : 0u;
+    } else if (proof != nullptr) {
+        chaining_simd_detail::run_exact_simd_chaining<true>(
+            d,
+            anchors,
+            params,
+            chains_out,
+            reordered_anchors_out,
+            proof,
+            nullptr);
+    } else {
+        chaining_simd_detail::run_exact_simd_chaining<false>(
+            d,
+            anchors,
+            params,
+            chains_out,
+            reordered_anchors_out,
+            nullptr,
+            nullptr);
     }
-
-    // Allocate padded best_scores array (f[]) from the chain arena.
-    // SIMD loads access best_scores[j-(L-1)] which can be negative, so we
-    // prepend MaxLanes zero-filled elements as safe padding (SPEC §5.2).
-    const size_t max_lane_count = hn::MaxLanes(d_int);
-    auto score_storage_span = context::current().alloc_chain_array<int32_t, 64>(
-        max_lane_count + anchor_count);
-    std::memset(score_storage_span.data(), 0,
-        score_storage_span.size() * sizeof(int32_t));
-    int32_t* padded_best_scores = score_storage_span.data() + max_lane_count;
-
-    // Same arena-bump pattern the scalar path uses (proposal-1 §A.3):
-    // skip the make_chain_vector + assign/resize churn; the DP body
-    // writes peak_scores before reading it. predecessors needs the -1
-    // sentinel for the read-before-write check, so memset(0xff) once
-    // beats per-element placement-new through the vector wrapper.
-    auto predecessors = context::current().alloc_chain_array<int64_t>(anchor_count);
-    auto peak_scores  = context::current().alloc_chain_array<int32_t>(anchor_count);
-    std::memset(predecessors.data(), 0xff,
-                static_cast<std::size_t>(anchor_count) * sizeof(int64_t));
-
-    {
-        static const auto* _fwd_desc =
-            bioseq::instr::register_loop_static("mg_lchain_simd_forward");
-        auto _fwd_scope = bioseq::instr::loop(_fwd_desc);
-        // simd_dp_forward_pass owns the inner iterations; the loop scope
-        // captures the wrapping region time. tick() is not invoked from the
-        // outer scope because the simd helper does not expose an iteration
-        // count — region-style timing is sufficient at this granularity.
-        (void)_fwd_scope;
-        simd_dp_forward_pass(d_int, anchors, soa,
-            padded_best_scores, predecessors, peak_scores, params);
-    }
-
-    bioseq_log<DBG>("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
-
-    static const auto* _bt_desc =
-        bioseq::instr::register_region_static("backtrack_chains");
-    auto _bt_scope = bioseq::instr::region(_bt_desc);
-    backtrack_chains(anchors,
-        std::span<const int32_t>(padded_best_scores, anchor_count),
-        std::span<const int64_t>(predecessors),
-        std::span<const int32_t>(peak_scores),
-        params.min_chain_score, params.min_seed_count,
-        chains_out, reordered_anchors_out);
+    bioseq_log<DBG>(
+        "[chaining_simd] exact SIMD chaining complete for {} anchors",
+        anchors.size());
 }
-
 
 }  // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

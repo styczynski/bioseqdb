@@ -14,12 +14,12 @@
         "description": "active read minimizer index selected before the timed Vulkan query"
       }
     },
-    "bioseq_no_index": {
+    "bioseq_recompute_only": {
       "pipeline_mode": {
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0294 scheduler mode for the bioseq SQL recompute path"
+        "description": "DOC0294 scheduler mode for the explicitly named async-persistence diagnostic"
       },
       "minimizer_index": {
         "type": "string",
@@ -31,7 +31,7 @@
         "type": "string",
         "default": "on",
         "enum": ["off", "on"],
-        "description": "stage the selected no-index recompute minimizer index for async persistence"
+        "description": "diagnostic-only async persistence; excluded from cold no-index performance acceptance"
       },
       "mps_pair_sort_impl": {
         "type": "string",
@@ -79,7 +79,7 @@
     "matrix": {
       "for": {"E2E_2GBP_DNA4": 1},
       "over": {
-        "bioseq_no_index": {
+        "bioseq_recompute_only": {
           "pipeline_mode": ["task_parallel"],
           "minimizer_index": ["minimizers_per_sequence"],
           "recompute_async_persist": ["on"],
