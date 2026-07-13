@@ -57,6 +57,7 @@ import bioseq.storage.manager;
 import bioseq.storage.size;
 import bioseq.table.io;
 import bioseq.storage.metadata;                  // DOC0322 §7 — bioseq_init_write_state
+import bioseq.storage.physical;
 import bioseq.types.pg_compact_sequence;
 
 using bioseq::storage::sequence_size_t;
@@ -72,11 +73,12 @@ constexpr std::size_t   kFragmentBp =
     kFragmentStorageUnits * kDna4LettersPerUnit;  // 32 768
 
 template <bioseq::sequences::generation::packed_sequence_config R>
-[[nodiscard]] bioseq::storage::seq_locator insert_compact_range_streamed(
+[[nodiscard]] bioseq::storage::PendingSequenceSource insert_compact_range_streamed(
     const compact_sequence_range<R>& seq,
     Relation parent_rel,
     TupleDesc parent_td,
     std::int16_t attno,
+    std::uint64_t main_storage_id,
     sequence_size_t cap_bytes,
     bioseq::storage::seq_caches* caches) {
     using traits = typename compact_sequence_range<R>::traits;
@@ -112,6 +114,7 @@ template <bioseq::sequences::generation::packed_sequence_config R>
     };
 
     return bioseq::storage::bioseq_default_storage_manager::insert_sequence_streamed(
+        RelationGetRelid(parent_rel), main_storage_id,
         parent_rel->rd_locator.dbOid,
         parent_rel->rd_locator.spcOid,
         parent_rel->rd_locator.relNumber,
@@ -225,7 +228,8 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
     BioseqColumnWriteState* write_state = bioseq_init_write_state(
         parent_rel, parent_td, parent_relid, GetCurrentSubTransactionId());
     if (write_state->seq_caches == nullptr) {
-        auto* fresh = bioseq::storage::alloc_seq_caches(write_state->stripeWriteContext);
+        auto* fresh = bioseq::storage::alloc_seq_caches(
+            MemoryContextGetParent(write_state->stripeWriteContext));
         fresh->side                = bioseq::storage::seq_caches::Side::Write;
         fresh->lock_mode           = RowExclusiveLock;
         fresh->main_database_oid   = parent_rel->rd_locator.dbOid;
@@ -236,6 +240,8 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
     }
     auto* caches = static_cast<bioseq::storage::seq_caches*>(write_state->seq_caches);
     const auto cap_bytes = caches->cap_bytes_snapshot;
+    const std::uint64_t main_storage_id =
+        BioseqColumnStorageGetStorageId(parent_rel, false);
 
     // (4) Per-sequence: stream fragments, build stub, parent-row insert.
     constexpr std::int16_t seq_attno = 2;  // 1-based: id is 1, seq is 2
@@ -286,8 +292,9 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
             }
         };
 
-        const bioseq::storage::seq_locator locator =
+        auto pending_source =
             bioseq::storage::bioseq_default_storage_manager::insert_sequence_streamed(
+                parent_relid, main_storage_id,
                 parent_rel->rd_locator.dbOid,
                 parent_rel->rd_locator.spcOid,
                 parent_rel->rd_locator.relNumber,
@@ -298,6 +305,7 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
                 cap_bytes,
                 caches,
                 producer);
+        const bioseq::storage::seq_locator locator = pending_source.locator();
 
         // Build the locator-stub varlena in the write-state's per-tuple ctx,
         // then put it into slot and write the parent row directly via the
@@ -317,6 +325,7 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
         Datum  write_values[2] = { slot->tts_values[0], slot->tts_values[1] };
         bool   write_nulls[2]  = { false, false };
         (void) BioseqColumnWriteRow(write_state, write_values, write_nulls);
+        pending_source.publish_after_parent_row();
     }
 
     // (5) Flush write states + close the sub-table seq_caches' Relations +
@@ -464,7 +473,8 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
     BioseqColumnWriteState* write_state = bioseq_init_write_state(
         parent_rel, parent_td, parent_relid, GetCurrentSubTransactionId());
     if (write_state->seq_caches == nullptr) {
-        auto* fresh = bioseq::storage::alloc_seq_caches(write_state->stripeWriteContext);
+        auto* fresh = bioseq::storage::alloc_seq_caches(
+            MemoryContextGetParent(write_state->stripeWriteContext));
         fresh->side                = bioseq::storage::seq_caches::Side::Write;
         fresh->lock_mode           = RowExclusiveLock;
         fresh->main_database_oid   = parent_rel->rd_locator.dbOid;
@@ -475,6 +485,8 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
     }
     auto* caches = static_cast<bioseq::storage::seq_caches*>(write_state->seq_caches);
     const auto cap_bytes = caches->cap_bytes_snapshot;
+    const std::uint64_t main_storage_id =
+        BioseqColumnStorageGetStorageId(parent_rel, false);
 
     constexpr std::int16_t query_attno  = 2;
     constexpr std::int16_t target_attno = 3;
@@ -501,12 +513,16 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
             const std::uint16_t target_padding =
                 static_cast<std::uint16_t>(pair.target->padding());
 
-            const bioseq::storage::seq_locator query_loc =
+            auto query_source =
                 insert_compact_range_streamed(
-                    pair.query, parent_rel, parent_td, query_attno, cap_bytes, caches);
-            const bioseq::storage::seq_locator target_loc =
+                    pair.query, parent_rel, parent_td, query_attno,
+                    main_storage_id, cap_bytes, caches);
+            auto target_source =
                 insert_compact_range_streamed(
-                    *pair.target, parent_rel, parent_td, target_attno, cap_bytes, caches);
+                    *pair.target, parent_rel, parent_td, target_attno,
+                    main_storage_id, cap_bytes, caches);
+            const bioseq::storage::seq_locator query_loc = query_source.locator();
+            const bioseq::storage::seq_locator target_loc = target_source.locator();
 
             pgseq_t* query_stub = bioseq::storage::alloc_locator_stub_in(
                 BioseqColumnWritePerTupleContext(write_state),
@@ -535,6 +551,8 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
                 write_nulls[idx] = false;
             }
             (void) BioseqColumnWriteRow(write_state, write_values, write_nulls);
+            query_source.publish_after_parent_row();
+            target_source.publish_after_parent_row();
         }
         first += batch_count;
     }
@@ -566,7 +584,7 @@ Datum bioseq_locator_inspect(PG_FUNCTION_ARGS)
     }
     BlessTupleDesc(out_td);
 
-    bioseq::pg_utils::pg_datum_list<7> values{};
+    bioseq::pg_utils::pg_datum_list<8> values{};
 
     if (!bioseq::storage::is_locator_stub(hdr)) {
         // For an inline (non-stub) value, return (version=0, bucket_idx=0,
@@ -580,7 +598,8 @@ Datum bioseq_locator_inspect(PG_FUNCTION_ARGS)
         values.set(4, static_cast<std::int64_t>(0));
         values.set(5, static_cast<std::int64_t>(hdr->bp_size));
         values.set(6, static_cast<std::int64_t>(0));
-        values.set(7, static_cast<std::int32_t>(hdr->padding_letters));
+        values.set(7, static_cast<std::int64_t>(0));
+        values.set(8, static_cast<std::int32_t>(hdr->padding_letters));
         HeapTuple tup = values.form_tuple(out_td);
         Datum result = bioseq::pg_utils::pg_datum::from_heap_tuple(tup).raw();
         PG_FREE_IF_COPY(hdr, 0);
@@ -599,7 +618,15 @@ Datum bioseq_locator_inspect(PG_FUNCTION_ARGS)
     }
     values.set(5, static_cast<std::int64_t>(loc.total_bp_size));
     values.set(6, static_cast<std::int64_t>(loc.first_sub_row_no));
-    values.set(7, static_cast<std::int32_t>(hdr->padding_letters));
+    if (loc.source_epoch == 0
+        || loc.source_epoch
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)())) {
+        bioseq_log<ERR, PG>(
+            "bioseq.locator_inspect: source epoch is outside positive BIGINT");
+    }
+    values.set(7, static_cast<std::int64_t>(loc.source_epoch));
+    values.set(8, static_cast<std::int32_t>(hdr->padding_letters));
 
     HeapTuple tup = values.form_tuple(out_td);
     Datum result = bioseq::pg_utils::pg_datum::from_heap_tuple(tup).raw();

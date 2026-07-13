@@ -474,12 +474,12 @@ TEST_CASE("EXPLAIN VERBOSE on CROSS JOIN pins the bioseq plan-text invariants",
 
 TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
           "[join][prepared][rescan][lifecycle]") {
-    // BioseqScanRuntime is allocated lazily per-scan-state, but a
-    // prepared statement's CachedPlan reuses the same
-    // CustomScanState across executions via ReScan. Catches stale
-    // buffered tuples or use-after-free across re-executions.
+    // Force the generic CachedPlan so $1 remains PARAM_EXTERN at
+    // BeginCustomScan.  Custom plans often fold it to Const and would not
+    // exercise the client-parameter binder at all.
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
+	exec_sql(ctx, "SET plan_cache_mode = force_generic_plan;");
 
     exec_sqlf(ctx,
               "PREPARE p_join_test(bioseq.seq('dna4', 32)) AS "
@@ -487,6 +487,11 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
               "  FROM {} t1 LEFT JOIN {} t2 ON t1.pk = t2.pk "
               " WHERE mmsearch(t1.seq0, $1) ORDER BY t1.pk;",
               kHoeJoin, kHoeJoin);
+	const auto generic_plan = explain_text<false>(
+		ctx,
+		"EXECUTE p_join_test("
+		"'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));");
+	REQUIRE(plan_contains(generic_plan, "Custom Scan (BioseqScan)"));
 
     const auto run1 = query_rows(
         ctx,
@@ -497,6 +502,8 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
     const auto run3 = query_rows(
         ctx,
         "EXECUTE p_join_test('CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));");
+	const auto run_null = query_rows(
+		ctx, "EXECUTE p_join_test(NULL);");
 
     // Same parameter must produce same output (no stale state).
     REQUIRE(run1 == run3);
@@ -504,6 +511,30 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
     // set; if it doesn't (rare alignment coincidence) at least the
     // result is non-empty so the test isn't a tautology.
     REQUIRE_FALSE(run2.empty());
+	// mmsearch is STRICT: a NULL external Param is a no-match, never an
+	// inactive-buffer path that leaks through the SQL rendezvous stub.
+	REQUIRE(run_null.empty());
+
+	const long long before_bad_typmod = query_scalar_int(
+		ctx,
+		"SELECT execution_id FROM "
+		"bioseq.last_alignment_execution_stats() LIMIT 1;");
+	const auto bad_typmod = sql_error(
+		ctx,
+		"EXECUTE p_join_test("
+		"'ACGTACGTACGTACGTACGTACGTACGTACGT'"
+		"::bioseq.seq('dna5', 32));");
+	REQUIRE(bad_typmod.sqlstate == "42804");
+	REQUIRE(bad_typmod.contains(
+		"bioseq mmsearch Param payload typmod is incompatible"));
+	/* A generic PREPARE Param loses its declared typmod in the plan, so the
+	 * pgseq payload is checked at runtime. Rejection happens before a new
+	 * alignment root can replace the last completed snapshot. */
+	REQUIRE(query_scalar_int(
+		ctx,
+		"SELECT execution_id FROM "
+		"bioseq.last_alignment_execution_stats() LIMIT 1;")
+		== before_bad_typmod);
 
     exec_sql(ctx, "DEALLOCATE p_join_test;");
 }
@@ -650,6 +681,59 @@ TEST_CASE("LATERAL JOIN with mmsearch on inner side parameterises per outer row"
     }
 }
 
+TEST_CASE("PARAM_EXEC rescan clears NULL and restores the next primary query",
+          "[join][lateral][param_rebind][null][lifecycle]") {
+    /* OFFSET 0 keeps the LATERAL child as a parameterized Nested Loop inner
+     * scan, so p.probe reaches BioseqScan as PARAM_EXEC.  VALUES supplies the
+     * load-bearing non-NULL -> NULL -> non-NULL rescan sequence in one
+     * executor: the NULL iteration must not replay stale matches, and the
+     * third iteration must reconfigure the same scan state successfully. */
+    auto ctx = fresh_context({kHoeJoin});
+    seed_hoe_fixture(ctx, kHoeJoin);
+
+    const std::string sql = fmt::format(
+        "SELECT p.ord, sub.pk "
+        "FROM (VALUES (1, {}), "
+        "             (2, NULL::bioseq.seq('dna4', 32)), "
+        "             (3, {})) AS p(ord, probe) "
+        "LEFT JOIN LATERAL ("
+        "  SELECT t.pk FROM {} t "
+        "  WHERE mmsearch(t.seq0, p.probe) "
+        "  ORDER BY t.pk OFFSET 0"
+        ") sub ON true "
+        "ORDER BY p.ord, sub.pk",
+        hoe_probe_literal(), hoe_probe_literal(), kHoeJoin);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Nested Loop"));
+    REQUIRE(plan_contains(plan, "Values Scan"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+
+    const auto rows = query_rows(ctx, sql + ";");
+    std::vector<std::string> first_matches;
+    std::vector<std::string> restored_matches;
+    std::size_t null_outer_rows = 0;
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 2);
+        REQUIRE(row[0].has_value());
+        const long long ordinal = std::stoll(*row[0]);
+        if (ordinal == 1) {
+            REQUIRE(row[1].has_value());
+            first_matches.push_back(*row[1]);
+        } else if (ordinal == 2) {
+            REQUIRE_FALSE(row[1].has_value());
+            ++null_outer_rows;
+        } else if (ordinal == 3) {
+            REQUIRE(row[1].has_value());
+            restored_matches.push_back(*row[1]);
+        } else {
+            FAIL("unexpected PARAM_EXEC probe ordinal");
+        }
+    }
+    REQUIRE_FALSE(first_matches.empty());
+    REQUIRE(null_outer_rows == 1);
+    REQUIRE(restored_matches == first_matches);
+}
+
 TEST_CASE("Many-to-many mmsearch as join filter pins documented NULL-projection behaviour",
           "[join][documented_limitation][many_to_many]") {
     // Pinning the documented limitation from REPORT §6: fully
@@ -699,6 +783,7 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
 
+    ctx.clear_notices();
     const auto rows = query_rows(
         ctx,
         fmt::format(
@@ -719,6 +804,7 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
         const auto count = std::stoll(row[2].value());
         REQUIRE(count >= 0);
     }
+    REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
     // Guard: a row inserted WITHOUT the stored INLINE index, read back with
     // bioseq.read_sequence_index = off, must still surface a NON-NULL real
@@ -734,6 +820,7 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
     }
     {
         guc_scope no_read(ctx, "bioseq.read_sequence_index", "off");
+        ctx.clear_notices();
         const auto guard_row = query_one(
             ctx,
             fmt::format(
@@ -742,6 +829,10 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
         REQUIRE(guard_row.size() == 1);
         REQUIRE(guard_row[0].has_value());  // recompute fallback is never NULL
         REQUIRE(std::stoll(guard_row[0].value()) == 8);
+        // The recompute opens seq_sub plus a registered random-read snapshot.
+        // Both must be released before PQexec returns; the pre-fix helper
+        // deleted only its MemoryContext and emitted this warning at commit.
+        REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
     }
 }
 

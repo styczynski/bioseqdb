@@ -13,21 +13,1486 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
 import bioseq.common.mlogging;
+import bioseq.common.context;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.vulkan;
+import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.pipe;
+import bioseq.storage.scanner;
 import bioseq.storage.lazy;
 import bioseq.sequences.chaining.utils;
 import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.minimap_port;
 import bioseq.indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_vulkan;    // GpuIndexCacheIdentity
+import bioseq.parallelism.memory_admission;
 import bioseq.sequences.cigar;
+import bioseq.storage.size;
 import bioseq.alignment;
 import bioseq.alignment.utils;
 import bioseq.gpu.vulkan.runtime;
+
+namespace {
+
+struct RawSketchAppendFixture {
+    using storage_t = std::uint64_t;
+    std::uint64_t value = 0;
+};
+static_assert(std::is_trivially_copyable_v<RawSketchAppendFixture>);
+static_assert(sizeof(RawSketchAppendFixture)
+              == sizeof(RawSketchAppendFixture::storage_t));
+
+struct BudgetedSketchLifetimeProbe {
+    using storage_t = std::uint64_t;
+    struct layout_t {
+        static constexpr std::uint32_t pos_bits = 28u;
+        static constexpr std::uint32_t hash_bits = 35u;
+    };
+    static constexpr std::uint32_t hash_shift = 29u;
+    static constexpr std::uint64_t pos_field_mask = (std::uint64_t{1} << 28u) - 1u;
+
+    bioseq::parallelism::MemoryAdmissionController* admission = nullptr;
+    std::uint64_t expected_reserved = 0;
+    bool* destroyed_with_live_permit = nullptr;
+    bool active = true;
+
+    [[nodiscard]] std::uint64_t raw_value() const noexcept { return 0u; }
+    BudgetedSketchLifetimeProbe() = default;
+    BudgetedSketchLifetimeProbe(
+            bioseq::parallelism::MemoryAdmissionController* owner,
+            std::uint64_t expected,
+            bool* observed) noexcept
+        : admission(owner),
+          expected_reserved(expected),
+          destroyed_with_live_permit(observed)
+    {}
+    BudgetedSketchLifetimeProbe(BudgetedSketchLifetimeProbe&& other) noexcept
+        : admission(other.admission),
+          expected_reserved(other.expected_reserved),
+          destroyed_with_live_permit(other.destroyed_with_live_permit),
+          active(std::exchange(other.active, false))
+    {}
+    BudgetedSketchLifetimeProbe(const BudgetedSketchLifetimeProbe&) = delete;
+    BudgetedSketchLifetimeProbe& operator=(const BudgetedSketchLifetimeProbe&) = delete;
+    BudgetedSketchLifetimeProbe& operator=(BudgetedSketchLifetimeProbe&&) = delete;
+    ~BudgetedSketchLifetimeProbe() {
+        if (active) {
+            *destroyed_with_live_permit =
+                admission->reserved_bytes() == expected_reserved;
+        }
+    }
+};
+
+TEST_CASE("BudgetedSketchVector transfers and destroys host capacity before admission",
+          "[pipeline][sketch][memory-admission][lifetime]") {
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& admission;
+        std::uint64_t previous = 0;
+        ~RestoreCap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap, baseline + (std::uint64_t{1} << 20)));
+
+    using Owned = ::bioseq::simd::HWY_NAMESPACE::
+        BudgetedSketchVector<BudgetedSketchLifetimeProbe>;
+    const auto make_owned = [&](bool& observed) {
+        constexpr std::size_t count = 4u;
+        const std::uint64_t headroom =
+            count * sizeof(BudgetedSketchLifetimeProbe)
+            * bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+        auto permit = admission.try_reserve(headroom);
+        REQUIRE(permit.has_value());
+        Owned owned;
+        owned.permit = std::move(*permit);
+        owned.minimizers.reserve(count);
+        const std::uint64_t exact =
+            owned.minimizers.capacity() * sizeof(BudgetedSketchLifetimeProbe);
+        REQUIRE(exact <= owned.permit->bytes());
+        owned.permit->shrink_to(exact);
+        owned.minimizers.emplace_back(
+            &admission, baseline + exact, &observed);
+        return owned;
+    };
+
+    bool implicit_observed = false;
+    {
+        Owned owned = make_owned(implicit_observed);
+        Owned moved{std::move(owned)};
+        REQUIRE(owned.minimizers.capacity() == 0u);
+        REQUIRE_FALSE(owned.permit.has_value());
+        REQUIRE(moved.minimizers.size() == 1u);
+    }
+    REQUIRE(implicit_observed);
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    bool explicit_observed = false;
+    {
+        Owned owned = make_owned(explicit_observed);
+        owned.release_owned_memory_before_permit();
+        REQUIRE(owned.minimizers.capacity() == 0u);
+        REQUIRE_FALSE(owned.permit.has_value());
+    }
+    REQUIRE(explicit_observed);
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("raw sketch batches grow geometrically and nested query scopes release only their tail",
+          "[pipeline][sketch][arena][memory]")
+{
+    constexpr std::size_t initial_capacity = 140'000; // > 1 MiB as uint64_t.
+    constexpr std::size_t batch_size = 4'096;
+    constexpr std::size_t batch_count = 64;
+    constexpr std::size_t emitted_count = batch_size * batch_count;
+
+    context::context ctx;
+    context::installed_context_scope installed{ctx};
+    REQUIRE(ctx.chain_heap_fallback_bytes() == 0);
+
+    std::vector<RawSketchAppendFixture> survivor;
+    {
+        auto outer_scope = ctx.push<context::Arena::Chain>();
+        auto outer_slab =
+            ::bioseq::chaining::make_arena_slab<RawSketchAppendFixture>();
+        outer_slab.reserve(initial_capacity);
+        outer_slab.resize(1);
+        outer_slab.data()[0].value = 0xfeedfacecafebeefULL;
+        const std::size_t outer_bytes =
+            initial_capacity * sizeof(RawSketchAppendFixture);
+        REQUIRE(ctx.chain_heap_fallback_bytes() == outer_bytes);
+
+        // Repeat the faithful under-estimated raw-batch append shape. Before
+        // geometric growth this performed one exact allocation and full-prefix
+        // copy for every batch after `initial_capacity` was crossed.
+        for (std::size_t round = 0; round < 3; ++round) {
+            {
+                auto query_scope = ctx.push<context::Arena::Chain>();
+                auto sketches =
+                    ::bioseq::chaining::make_arena_slab<RawSketchAppendFixture>();
+                sketches.reserve(initial_capacity);
+                ::bioseq::simd::HWY_NAMESPACE::pipe::
+                    sketch_collector_arena_adapter<RawSketchAppendFixture>
+                        collector{&sketches};
+                std::vector<std::uint64_t> raw(batch_size);
+
+                for (std::size_t batch = 0; batch < batch_count; ++batch) {
+                    for (std::size_t i = 0; i < batch_size; ++i) {
+                        raw[i] = (static_cast<std::uint64_t>(batch) << 32u)
+                               | static_cast<std::uint64_t>(i);
+                    }
+                    REQUIRE(collector.append_raw_storage(raw.data(), raw.size()));
+                }
+
+                REQUIRE(sketches.size() == emitted_count);
+                REQUIRE(sketches.capacity() == initial_capacity * 2);
+                REQUIRE(sketches.data()[0].value == 0u);
+                REQUIRE(sketches.data()[batch_size - 1].value == batch_size - 1);
+                REQUIRE(sketches.data()[batch_size].value
+                        == (std::uint64_t{1} << 32u));
+                REQUIRE(sketches.data()[emitted_count - 1].value
+                        == ((std::uint64_t{batch_count - 1} << 32u)
+                            | std::uint64_t{batch_size - 1}));
+
+                const std::size_t expected_query_bytes =
+                    (initial_capacity + initial_capacity * 2)
+                    * sizeof(RawSketchAppendFixture);
+                REQUIRE(ctx.chain_heap_fallback_bytes()
+                        == outer_bytes + expected_query_bytes);
+                survivor.assign(
+                    sketches.data(),
+                    sketches.data() + sketches.size());
+            }
+
+            // Inner heap blocks are gone, the outer allocation and its bytes
+            // remain live, and ordinary result ownership survives the unwind.
+            REQUIRE(ctx.chain_heap_fallback_bytes() == outer_bytes);
+            REQUIRE(outer_slab.data()[0].value == 0xfeedfacecafebeefULL);
+            REQUIRE(survivor.size() == emitted_count);
+            REQUIRE(survivor.back().value
+                    == ((std::uint64_t{batch_count - 1} << 32u)
+                        | std::uint64_t{batch_size - 1}));
+        }
+    }
+    REQUIRE(ctx.chain_heap_fallback_bytes() == 0);
+}
+
+using bioseq::pipeline_stats::ExecutedBackend;
+using bioseq::pipeline_stats::ExecutionEngine;
+using bioseq::pipeline_stats::ExecutionEnvironmentProof;
+using bioseq::pipeline_stats::OptionalProofBool;
+using bioseq::pipeline_stats::PipelineCachePolicy;
+using bioseq::pipeline_stats::PipelineJobExecutionStats;
+using bioseq::pipeline_stats::PipelineStage;
+using bioseq::pipeline_stats::TargetIndexSource;
+
+[[nodiscard]] ExecutionEnvironmentProof make_cpu_environment(
+    std::uint32_t workers = 2) {
+    ExecutionEnvironmentProof environment{};
+    environment.effective_cpu_workers = workers;
+    return environment;
+}
+
+[[nodiscard]] ExecutionEnvironmentProof make_gpu_environment(
+    std::uint32_t workers = 2) {
+    ExecutionEnvironmentProof environment{};
+    environment.effective_cpu_workers = workers;
+    environment.gpu_environment_present = true;
+    environment.gpu_device_uuid[0] = 0x42;
+    environment.gpu_driver_identity[0] = 'v';
+    environment.gpu_driver_identity[1] = 'k';
+    environment.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::immutable_preseed_all_hit;
+    environment.gpu_pipeline_cache_seed_sha256[0] = 0x91;
+    environment.gpu_pipeline_cache_seed_size = 64;
+    environment.gpu_pipeline_cache_manifest_checksum = 0x1234;
+    environment.gpu_pipeline_cache_hit = OptionalProofBool::true_value;
+    return environment;
+}
+
+[[nodiscard]] PipelineJobExecutionStats make_attested_job(
+    ExecutedBackend backend,
+    TargetIndexSource source) {
+    PipelineJobExecutionStats job{};
+    job.requested_backend = backend;
+    job.actual_backend = backend;
+    job.requested_target_index_source = source;
+    job.actual_target_index_source = source;
+    job.environment = backend == ExecutedBackend::vulkan_gpu
+        ? make_gpu_environment()
+        : make_cpu_environment();
+    if (source == TargetIndexSource::persisted) {
+        job.persisted_generation_id = 17;
+        job.persisted_source_identity = 0xabc;
+    }
+    for (std::size_t i = 0; i < bioseq::pipeline_stats::pipeline_stage_count; ++i) {
+        const auto stage = static_cast<PipelineStage>(i);
+        const ExecutionEngine engine = bioseq::pipeline_stats::expected_execution_engine(
+            backend, source, stage);
+        if (engine == ExecutionEngine::count) continue;
+        auto& coverage = job.stages.coverage[i];
+        coverage.eligible_jobs = 1;
+        coverage.executed_jobs[bioseq::pipeline_stats::engine_index(engine)] = 1;
+    }
+    return job;
+}
+
+[[nodiscard]] PipelineJobExecutionStats make_zero_match_job(
+    ExecutedBackend backend,
+    TargetIndexSource source) {
+    auto job = make_attested_job(backend, source);
+    for (std::size_t i = 0; i < bioseq::pipeline_stats::pipeline_stage_count; ++i) {
+        const auto stage = static_cast<PipelineStage>(i);
+        if (!bioseq::pipeline_stats::stage_requires_front_end_eligibility(source, stage)) {
+            job.stages.coverage[i] = {};
+        }
+    }
+    return job;
+}
+
+} // namespace
+
+TEST_CASE("DOC0371 canonical pipeline stages have stable ordinals and names",
+          "[pipe][pipeline-stats][abi]") {
+    using bioseq::pipeline_stats::pipeline_stage_name;
+    static_assert(static_cast<std::uint8_t>(PipelineStage::query_sketch) == 0);
+    static_assert(static_cast<std::uint8_t>(PipelineStage::target_index_build) == 2);
+    static_assert(static_cast<std::uint8_t>(PipelineStage::chain_backtrack) == 8);
+    static_assert(static_cast<std::uint8_t>(PipelineStage::target_window_io) == 14);
+    static_assert(static_cast<std::uint8_t>(PipelineStage::right_extension) == 19);
+    static_assert(static_cast<std::uint8_t>(PipelineStage::count) == 20);
+    static_assert(bioseq::pipeline_stats::pipeline_stage_count == 20);
+    static_assert(std::is_trivially_copyable_v<
+        bioseq::pipeline_stats::PipelineExecutionStats>);
+    static_assert(std::is_standard_layout_v<
+        bioseq::pipeline_stats::PipelineExecutionStats>);
+
+    constexpr std::array<std::string_view, 20> expected_names{
+        "query_sketch",
+        "target_sketch",
+        "target_index_build",
+        "persisted_index_decode",
+        "partition_selection",
+        "device_index_upload",
+        "seed_lookup",
+        "chain_score",
+        "chain_backtrack",
+        "region_generation",
+        "primary_secondary_reduction",
+        "divergence_estimation",
+        "mapq",
+        "target_window_plan",
+        "target_window_io",
+        "target_window_upload",
+        "cigar_job_generation",
+        "left_extension",
+        "gap_extension",
+        "right_extension",
+    };
+    for (std::size_t i = 0; i < expected_names.size(); ++i) {
+        REQUIRE(pipeline_stage_name(static_cast<PipelineStage>(i)) == expected_names[i]);
+    }
+}
+
+TEST_CASE("DOC0371 measured modes match the literal exclusive-engine matrix",
+          "[pipe][pipeline-stats][abi][engine-matrix]") {
+    using namespace bioseq::pipeline_stats;
+    using E = ExecutionEngine;
+    constexpr E forbidden = E::count;
+    constexpr std::array<E, 20> simd_recomputed{
+        E::simd_cpu, E::simd_cpu, E::scalar_cpu, forbidden, forbidden,
+        forbidden, E::scalar_cpu, E::simd_cpu, E::simd_cpu, E::scalar_cpu,
+        E::scalar_cpu, E::scalar_cpu, E::scalar_cpu, E::scalar_cpu, E::host_io,
+        forbidden, E::scalar_cpu, E::simd_cpu, E::simd_cpu, E::simd_cpu,
+    };
+    constexpr std::array<E, 20> simd_persisted{
+        E::simd_cpu, forbidden, forbidden, E::host_io, E::scalar_cpu,
+        forbidden, E::scalar_cpu, E::simd_cpu, E::simd_cpu, E::scalar_cpu,
+        E::scalar_cpu, E::scalar_cpu, E::scalar_cpu, E::scalar_cpu, E::host_io,
+        forbidden, E::scalar_cpu, E::simd_cpu, E::simd_cpu, E::simd_cpu,
+    };
+    constexpr std::array<E, 20> gpu_recomputed{
+        E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, forbidden, forbidden,
+        forbidden, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu,
+        E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::host_io,
+        E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu,
+    };
+    constexpr std::array<E, 20> gpu_persisted{
+        E::vulkan_gpu, forbidden, forbidden, E::host_io, E::vulkan_gpu,
+        E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu,
+        E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::host_io,
+        E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu, E::vulkan_gpu,
+    };
+    const auto require_matrix = [](
+        ExecutedBackend backend,
+        TargetIndexSource source,
+        const std::array<E, 20>& expected) {
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            REQUIRE(expected_execution_engine(
+                        backend, source, static_cast<PipelineStage>(i))
+                    == expected[i]);
+        }
+    };
+    require_matrix(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed, simd_recomputed);
+    require_matrix(
+        ExecutedBackend::simd_cpu, TargetIndexSource::persisted, simd_persisted);
+    require_matrix(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::recomputed, gpu_recomputed);
+    require_matrix(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted, gpu_persisted);
+
+    constexpr std::array<bool, 20> recomputed_required{
+        true, true, true, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false, false, false,
+    };
+    constexpr std::array<bool, 20> persisted_required{
+        true, false, false, true, true, false, false, false, false, false,
+        false, false, false, false, false, false, false, false, false, false,
+    };
+    for (std::size_t i = 0; i < pipeline_stage_count; ++i) {
+        const auto stage = static_cast<PipelineStage>(i);
+        REQUIRE(stage_requires_front_end_eligibility(
+                    TargetIndexSource::recomputed, stage)
+                == recomputed_required[i]);
+        REQUIRE(stage_requires_front_end_eligibility(
+                    TargetIndexSource::persisted, stage)
+                == persisted_required[i]);
+    }
+}
+
+TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
+          "[pipe][pipeline-stats][merge]") {
+    using namespace bioseq::pipeline_stats;
+
+    StageCoverage coverage{};
+    coverage.eligible_jobs = sql_bigint_value_max;
+    coverage.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] =
+        sql_bigint_value_max;
+    StageCoverage increment{};
+    increment.eligible_jobs = 1;
+    increment.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 1;
+    REQUIRE(coverage.merge(increment));
+    REQUIRE(coverage.eligible_jobs == sql_bigint_value_max);
+    REQUIRE(coverage.executed_jobs[engine_index(ExecutionEngine::simd_cpu)]
+            == sql_bigint_value_max);
+
+    std::uint64_t exact_boundary = sql_bigint_value_max - 1;
+    REQUIRE_FALSE(merge_counter(exact_boundary, 1));
+    REQUIRE(exact_boundary == sql_bigint_value_max);
+    std::uint64_t oversized = (std::numeric_limits<std::uint64_t>::max)();
+    REQUIRE(merge_counter(oversized, 0));
+    REQUIRE(oversized == sql_bigint_value_max);
+
+    PipelineOperationalStats operational{};
+    operational.target_rows = sql_bigint_value_max;
+    PipelineOperationalStats operational_increment{};
+    operational_increment.target_rows = 1;
+    operational.merge(operational_increment);
+    REQUIRE(operational.target_rows == sql_bigint_value_max);
+    REQUIRE(operational.stats_saturated);
+
+    REQUIRE(merge_backend_identity(ExecutedBackend::none, ExecutedBackend::simd_cpu)
+            == ExecutedBackend::simd_cpu);
+    REQUIRE(merge_backend_identity(ExecutedBackend::simd_cpu, ExecutedBackend::simd_cpu)
+            == ExecutedBackend::simd_cpu);
+    REQUIRE(merge_backend_identity(ExecutedBackend::simd_cpu, ExecutedBackend::vulkan_gpu)
+            == ExecutedBackend::mixed_invalid);
+    REQUIRE(merge_target_index_identity(TargetIndexSource::recomputed,
+                                        TargetIndexSource::persisted)
+            == TargetIndexSource::mixed_invalid);
+
+    ExecutionEnvironmentProof merged{};
+    const ExecutionEnvironmentProof cpu = make_cpu_environment(3);
+    merged.merge(cpu);
+    REQUIRE_FALSE(merged.mixed_invalid);
+    merged.merge(cpu);
+    REQUIRE_FALSE(merged.mixed_invalid);
+    merged.merge(make_cpu_environment(4));
+    REQUIRE(merged.mixed_invalid);
+
+    ExecutionEnvironmentProof missing{};
+    missing.merge(ExecutionEnvironmentProof{});
+    REQUIRE(missing.mixed_invalid);
+}
+
+TEST_CASE("DOC0371 prepared CRC identities preserve all u64 bits and publish once",
+          "[pipe][pipeline-stats][operational-identity]") {
+    using namespace bioseq::pipeline_stats;
+    constexpr std::array<std::uint64_t, 4> identities{
+        0,
+        sql_bigint_value_max,
+        std::uint64_t{1} << 63,
+        (std::numeric_limits<std::uint64_t>::max)(),
+    };
+
+    for (const std::uint64_t identity : identities) {
+        PipelineOperationalStats aggregate{};
+        PipelineOperationalStats publication{};
+        publication.cpu_prepared_key_set_checksum = identity;
+        publication.cpu_prepared_key_set_checksum_present = true;
+        publication.cpu_prepared_build_set_checksum = identity;
+        publication.cpu_prepared_build_set_checksum_present = true;
+        aggregate.merge(publication);
+
+        REQUIRE(aggregate.cpu_prepared_key_set_checksum_present);
+        REQUIRE(aggregate.cpu_prepared_key_set_checksum == identity);
+        REQUIRE(aggregate.cpu_prepared_build_set_checksum_present);
+        REQUIRE(aggregate.cpu_prepared_build_set_checksum == identity);
+        REQUIRE_FALSE(aggregate.operational_identity_conflict);
+        REQUIRE_FALSE(aggregate.stats_saturated);
+    }
+
+    PipelineOperationalStats duplicate{};
+    PipelineOperationalStats first_publication{};
+    first_publication.cpu_prepared_key_set_checksum = std::uint64_t{1} << 63;
+    first_publication.cpu_prepared_key_set_checksum_present = true;
+    duplicate.merge(first_publication);
+    duplicate.merge(first_publication);
+    REQUIRE(duplicate.operational_identity_conflict);
+    REQUIRE(duplicate.cpu_prepared_key_set_checksum == (std::uint64_t{1} << 63));
+    REQUIRE_FALSE(duplicate.stats_saturated);
+
+    PipelineOperationalStats mismatch{};
+    PipelineOperationalStats low{};
+    low.cpu_prepared_build_set_checksum = 7;
+    low.cpu_prepared_build_set_checksum_present = true;
+    PipelineOperationalStats high{};
+    high.cpu_prepared_build_set_checksum =
+        (std::numeric_limits<std::uint64_t>::max)();
+    high.cpu_prepared_build_set_checksum_present = true;
+    mismatch.merge(low);
+    mismatch.merge(high);
+    REQUIRE(mismatch.operational_identity_conflict);
+    REQUIRE(mismatch.cpu_prepared_build_set_checksum == 7);
+    REQUIRE_FALSE(mismatch.stats_saturated);
+}
+
+TEST_CASE("DOC0371 job validation enforces the exclusive backend/source matrix",
+          "[pipe][pipeline-stats][attestation]") {
+    using namespace bioseq::pipeline_stats;
+
+    const auto simd_recomputed = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    const auto gpu_persisted = make_attested_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted);
+    REQUIRE(validate_job_execution_stats(simd_recomputed));
+    REQUIRE(validate_job_execution_stats(gpu_persisted));
+
+    auto wrong_engine = simd_recomputed;
+    auto& query_sketch =
+        wrong_engine.stages.coverage[stage_index(PipelineStage::query_sketch)];
+    query_sketch.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 0;
+    query_sketch.executed_jobs[engine_index(ExecutionEngine::scalar_cpu)] = 1;
+    REQUIRE_FALSE(validate_job_execution_stats(wrong_engine));
+
+    auto fallback = gpu_persisted;
+    fallback.stages.coverage[stage_index(PipelineStage::chain_score)].fallback_jobs = 1;
+    REQUIRE_FALSE(validate_job_execution_stats(fallback));
+
+    auto forbidden_stage = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::persisted);
+    auto& rebuilt_target =
+        forbidden_stage.stages.coverage[stage_index(PipelineStage::target_sketch)];
+    rebuilt_target.eligible_jobs = 1;
+    rebuilt_target.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 1;
+    REQUIRE_FALSE(validate_job_execution_stats(forbidden_stage));
+
+    auto missing_identity = gpu_persisted;
+    missing_identity.persisted_generation_id = 0;
+    REQUIRE_FALSE(validate_job_execution_stats(missing_identity));
+
+    auto repeated_required_stage = simd_recomputed;
+    auto& repeated_query = repeated_required_stage.stages.coverage[
+        stage_index(PipelineStage::query_sketch)];
+    repeated_query.eligible_jobs = 2;
+    repeated_query.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 2;
+    REQUIRE_FALSE(validate_job_execution_stats(repeated_required_stage));
+
+    auto missing_required_stage = simd_recomputed;
+    missing_required_stage.stages.coverage[
+        stage_index(PipelineStage::query_sketch)] = {};
+    REQUIRE_FALSE(validate_job_execution_stats(missing_required_stage));
+
+    auto entirely_unattributed = simd_recomputed;
+    entirely_unattributed.stages = {};
+    REQUIRE_FALSE(validate_job_execution_stats(entirely_unattributed));
+
+    auto no_extension = simd_recomputed;
+    no_extension.stages.coverage[stage_index(PipelineStage::gap_extension)] = {};
+    REQUIRE(validate_job_execution_stats(no_extension));
+}
+
+TEST_CASE("DOC0371 zero-match jobs retain front-end proof for every measured mode",
+          "[pipe][pipeline-stats][attestation][zero-match]") {
+    using namespace bioseq::pipeline_stats;
+    REQUIRE(validate_job_execution_stats(make_zero_match_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed)));
+    REQUIRE(validate_job_execution_stats(make_zero_match_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::persisted)));
+    REQUIRE(validate_job_execution_stats(make_zero_match_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::recomputed)));
+    REQUIRE(validate_job_execution_stats(make_zero_match_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted)));
+}
+
+TEST_CASE("DOC0371 SQL-bound proof values reject max plus one without clamping",
+          "[pipe][pipeline-stats][attestation][sql-bounds]") {
+    using namespace bioseq::pipeline_stats;
+    auto boundary = make_attested_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted);
+    boundary.environment.effective_cpu_workers = sql_integer_value_max;
+    boundary.environment.gpu_pipeline_cache_seed_size = sql_bigint_value_max;
+    boundary.persisted_generation_id = sql_bigint_value_max;
+    boundary.logical_target_row = sql_bigint_value_max;
+    boundary.query_ordinal = sql_bigint_value_max;
+    REQUIRE(validate_job_execution_stats(boundary));
+
+    auto workers_overflow = boundary;
+    workers_overflow.environment.effective_cpu_workers = sql_integer_value_max + 1;
+    REQUIRE_FALSE(validate_job_execution_stats(workers_overflow));
+
+    auto seed_size_overflow = boundary;
+    seed_size_overflow.environment.gpu_pipeline_cache_seed_size =
+        sql_bigint_value_max + 1;
+    REQUIRE_FALSE(validate_job_execution_stats(seed_size_overflow));
+
+    auto generation_overflow = boundary;
+    generation_overflow.persisted_generation_id = sql_bigint_value_max + 1;
+    REQUIRE_FALSE(validate_job_execution_stats(generation_overflow));
+
+    auto target_row_overflow = boundary;
+    target_row_overflow.logical_target_row = sql_bigint_value_max + 1;
+    REQUIRE_FALSE(validate_job_execution_stats(target_row_overflow));
+
+    auto query_ordinal_overflow = boundary;
+    query_ordinal_overflow.query_ordinal = sql_bigint_value_max + 1;
+    REQUIRE_FALSE(validate_job_execution_stats(query_ordinal_overflow));
+}
+
+TEST_CASE("DOC0371 GPU environment requires canonical UTF-8 and policy-valid seed size",
+          "[pipe][pipeline-stats][attestation][environment]") {
+    using namespace bioseq::pipeline_stats;
+    constexpr auto constexpr_valid_four_byte = [] {
+        std::array<char, 128> value{};
+        value[0] = static_cast<char>(0xf0);
+        value[1] = static_cast<char>(0x9f);
+        value[2] = static_cast<char>(0x98);
+        value[3] = static_cast<char>(0x80);
+        return value;
+    }();
+    constexpr auto constexpr_invalid_surrogate = [] {
+        std::array<char, 128> value{};
+        value[0] = static_cast<char>(0xed);
+        value[1] = static_cast<char>(0xa0);
+        value[2] = static_cast<char>(0x80);
+        return value;
+    }();
+    static_assert(canonical_nonempty_driver_identity(constexpr_valid_four_byte));
+    static_assert(!canonical_nonempty_driver_identity(constexpr_invalid_surrogate));
+
+    std::array<char, 128> valid_utf8{};
+    valid_utf8[0] = static_cast<char>(0xc3);
+    valid_utf8[1] = static_cast<char>(0xa9);
+    REQUIRE(canonical_nonempty_driver_identity(valid_utf8));
+
+    std::array<char, 128> valid_three_byte{};
+    valid_three_byte[0] = static_cast<char>(0xe2);
+    valid_three_byte[1] = static_cast<char>(0x82);
+    valid_three_byte[2] = static_cast<char>(0xac);
+    REQUIRE(canonical_nonempty_driver_identity(valid_three_byte));
+
+    std::array<char, 128> valid_four_byte{};
+    valid_four_byte[0] = static_cast<char>(0xf0);
+    valid_four_byte[1] = static_cast<char>(0x9f);
+    valid_four_byte[2] = static_cast<char>(0x98);
+    valid_four_byte[3] = static_cast<char>(0x80);
+    REQUIRE(canonical_nonempty_driver_identity(valid_four_byte));
+
+    std::array<char, 128> stray_continuation{};
+    stray_continuation[0] = static_cast<char>(0x80);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(stray_continuation));
+
+    std::array<char, 128> invalid_continuation{};
+    invalid_continuation[0] = static_cast<char>(0xc3);
+    invalid_continuation[1] = '(';
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(invalid_continuation));
+
+    std::array<char, 128> overlong{};
+    overlong[0] = static_cast<char>(0xc0);
+    overlong[1] = static_cast<char>(0xaf);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(overlong));
+
+    std::array<char, 128> c1_overlong{};
+    c1_overlong[0] = static_cast<char>(0xc1);
+    c1_overlong[1] = static_cast<char>(0xbf);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(c1_overlong));
+
+    std::array<char, 128> e0_overlong{};
+    e0_overlong[0] = static_cast<char>(0xe0);
+    e0_overlong[1] = static_cast<char>(0x9f);
+    e0_overlong[2] = static_cast<char>(0xbf);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(e0_overlong));
+
+    std::array<char, 128> surrogate{};
+    surrogate[0] = static_cast<char>(0xed);
+    surrogate[1] = static_cast<char>(0xa0);
+    surrogate[2] = static_cast<char>(0x80);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(surrogate));
+
+    std::array<char, 128> above_unicode_max{};
+    above_unicode_max[0] = static_cast<char>(0xf4);
+    above_unicode_max[1] = static_cast<char>(0x90);
+    above_unicode_max[2] = static_cast<char>(0x80);
+    above_unicode_max[3] = static_cast<char>(0x80);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(above_unicode_max));
+
+    std::array<char, 128> f0_overlong{};
+    f0_overlong[0] = static_cast<char>(0xf0);
+    f0_overlong[1] = static_cast<char>(0x8f);
+    f0_overlong[2] = static_cast<char>(0xbf);
+    f0_overlong[3] = static_cast<char>(0xbf);
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(f0_overlong));
+
+    std::array<char, 128> nonzero_padding{};
+    nonzero_padding[0] = 'v';
+    nonzero_padding[2] = 'x';
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(nonzero_padding));
+
+    std::array<char, 128> unterminated{};
+    unterminated.fill('x');
+    REQUIRE_FALSE(canonical_nonempty_driver_identity(unterminated));
+
+    auto immutable_without_seed = make_gpu_environment();
+    immutable_without_seed.gpu_pipeline_cache_seed_size = 0;
+    REQUIRE_FALSE(environment_is_valid_for_backend(
+        immutable_without_seed, ExecutedBackend::vulkan_gpu));
+
+    auto isolated_empty_seed = immutable_without_seed;
+    isolated_empty_seed.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::isolated_miss_diagnostic;
+    isolated_empty_seed.gpu_pipeline_cache_hit = OptionalProofBool::false_value;
+    REQUIRE(environment_is_valid_for_backend(
+        isolated_empty_seed, ExecutedBackend::vulkan_gpu));
+}
+
+TEST_CASE("DOC0371 aggregate merge rejects persisted and environment identity drift",
+          "[pipe][pipeline-stats][identity]") {
+    using namespace bioseq::pipeline_stats;
+    PipelineExecutionStats aggregate{};
+    auto first = make_attested_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted);
+    first.logical_target_row = 11;
+    first.query_ordinal = 7;
+    aggregate.merge_job(first);
+    REQUIRE(aggregate.fully_attested_alignment_jobs == 1);
+    REQUIRE_FALSE(aggregate.mixed_persisted_identity);
+
+    auto changed_generation = first;
+    changed_generation.persisted_generation_id = 18;
+    changed_generation.logical_target_row = 12;
+    aggregate.merge_job(changed_generation);
+    REQUIRE(aggregate.mixed_persisted_identity);
+    REQUIRE(aggregate.attempted_alignment_jobs == 2);
+    REQUIRE(aggregate.fully_attested_alignment_jobs == 0);
+    REQUIRE(aggregate.unattested_alignment_jobs == 2);
+    REQUIRE(aggregate.first_unattested_target_row == 11);
+    REQUIRE(aggregate.first_unattested_query_ordinal == 7);
+
+    auto changed_environment = first;
+    changed_environment.environment.effective_cpu_workers = 3;
+    changed_environment.logical_target_row = 13;
+    aggregate.merge_job(changed_environment);
+    REQUIRE(aggregate.environment.mixed_invalid);
+    REQUIRE(aggregate.attempted_alignment_jobs == 3);
+    REQUIRE(aggregate.fully_attested_alignment_jobs == 0);
+    REQUIRE(aggregate.unattested_alignment_jobs == 3);
+    REQUIRE(aggregate.first_unattested_target_row == 11);
+    REQUIRE(aggregate.first_unattested_query_ordinal == 7);
+}
+
+TEST_CASE("DOC0371 merge_job and aggregate merge have identical drift semantics",
+          "[pipe][pipeline-stats][identity][grouping]") {
+    using namespace bioseq::pipeline_stats;
+    const auto aggregate_job = [](const PipelineJobExecutionStats& job) {
+        PipelineExecutionStats stats{};
+        stats.merge_job(job);
+        return stats;
+    };
+    const auto require_same_counts_and_coordinates = [](
+            const PipelineExecutionStats& direct,
+            const PipelineExecutionStats& grouped) {
+        REQUIRE(direct.requested_backend == grouped.requested_backend);
+        REQUIRE(direct.actual_backend == grouped.actual_backend);
+        REQUIRE(direct.requested_target_index_source
+                == grouped.requested_target_index_source);
+        REQUIRE(direct.actual_target_index_source
+                == grouped.actual_target_index_source);
+        REQUIRE(direct.attempted_alignment_jobs
+                == grouped.attempted_alignment_jobs);
+        REQUIRE(direct.fully_attested_alignment_jobs
+                == grouped.fully_attested_alignment_jobs);
+        REQUIRE(direct.unattested_alignment_jobs
+                == grouped.unattested_alignment_jobs);
+        REQUIRE(direct.first_attempted_target_row
+                == grouped.first_attempted_target_row);
+        REQUIRE(direct.first_attempted_query_ordinal
+                == grouped.first_attempted_query_ordinal);
+        REQUIRE(direct.first_unattested_target_row
+                == grouped.first_unattested_target_row);
+        REQUIRE(direct.first_unattested_query_ordinal
+                == grouped.first_unattested_query_ordinal);
+    };
+
+    SECTION("persisted generation drift") {
+        auto first = make_attested_job(
+            ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted);
+        first.logical_target_row = 41;
+        first.query_ordinal = 5;
+        auto second = first;
+        second.logical_target_row = 42;
+        second.query_ordinal = 6;
+        second.persisted_generation_id = 18;
+
+        PipelineExecutionStats direct{};
+        direct.merge_job(first);
+        direct.merge_job(second);
+        auto grouped = aggregate_job(first);
+        grouped.merge(aggregate_job(second));
+
+        require_same_counts_and_coordinates(direct, grouped);
+        REQUIRE(direct.requested_backend == ExecutedBackend::vulkan_gpu);
+        REQUIRE(direct.actual_backend == ExecutedBackend::vulkan_gpu);
+        REQUIRE(direct.mixed_persisted_identity);
+        REQUIRE(grouped.mixed_persisted_identity);
+        REQUIRE(direct.attempted_alignment_jobs == 2);
+        REQUIRE(direct.fully_attested_alignment_jobs == 0);
+        REQUIRE(direct.unattested_alignment_jobs == 2);
+        REQUIRE(direct.first_unattested_target_row == 41);
+        REQUIRE(direct.first_unattested_query_ordinal == 5);
+    }
+
+    SECTION("environment drift") {
+        auto first = make_attested_job(
+            ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+        first.logical_target_row = 51;
+        first.query_ordinal = 7;
+        auto second = first;
+        second.logical_target_row = 52;
+        second.query_ordinal = 8;
+        second.environment.effective_cpu_workers = 3;
+
+        PipelineExecutionStats direct{};
+        direct.merge_job(first);
+        direct.merge_job(second);
+        auto grouped = aggregate_job(first);
+        grouped.merge(aggregate_job(second));
+
+        require_same_counts_and_coordinates(direct, grouped);
+        REQUIRE(direct.requested_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(direct.actual_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(direct.environment.mixed_invalid);
+        REQUIRE(grouped.environment.mixed_invalid);
+        REQUIRE(direct.attempted_alignment_jobs == 2);
+        REQUIRE(direct.fully_attested_alignment_jobs == 0);
+        REQUIRE(direct.unattested_alignment_jobs == 2);
+        REQUIRE(direct.first_unattested_target_row == 51);
+        REQUIRE(direct.first_unattested_query_ordinal == 7);
+    }
+}
+
+TEST_CASE("DOC0371 aggregate merge cannot launder absent environments",
+          "[pipe][pipeline-stats][identity][environment]") {
+    using namespace bioseq::pipeline_stats;
+    const auto missing_environment_operand = [] {
+        PipelineExecutionStats stats{};
+        stats.requested_backend = ExecutedBackend::simd_cpu;
+        stats.actual_backend = ExecutedBackend::simd_cpu;
+        stats.requested_target_index_source = TargetIndexSource::recomputed;
+        stats.actual_target_index_source = TargetIndexSource::recomputed;
+        stats.attempted_alignment_jobs = 1;
+        stats.fully_attested_alignment_jobs = 1;
+        stats.first_attempted_target_row = 91;
+        stats.first_attempted_query_ordinal = 4;
+        return stats;
+    };
+    const auto valid_operand = [] {
+        PipelineExecutionStats stats{};
+        stats.merge_job(make_attested_job(
+            ExecutedBackend::simd_cpu, TargetIndexSource::recomputed));
+        return stats;
+    };
+
+    auto missing_left = missing_environment_operand();
+    missing_left.merge(valid_operand());
+    REQUIRE(missing_left.environment.mixed_invalid);
+    REQUIRE(missing_left.attempted_alignment_jobs == 2);
+    REQUIRE(missing_left.fully_attested_alignment_jobs == 0);
+    REQUIRE(missing_left.unattested_alignment_jobs == 2);
+    REQUIRE(missing_left.first_unattested_target_row == 91);
+    REQUIRE(missing_left.first_unattested_query_ordinal == 4);
+
+    auto missing_right = valid_operand();
+    missing_right.merge(missing_environment_operand());
+    REQUIRE(missing_right.environment.mixed_invalid);
+    REQUIRE(missing_right.attempted_alignment_jobs == 2);
+    REQUIRE(missing_right.fully_attested_alignment_jobs == 0);
+    REQUIRE(missing_right.unattested_alignment_jobs == 2);
+    REQUIRE(missing_right.first_unattested_target_row == 0);
+    REQUIRE(missing_right.first_unattested_query_ordinal == 0);
+
+    PipelineExecutionStats zero_job_nonempty{};
+    zero_job_nonempty.requested_backend = ExecutedBackend::simd_cpu;
+    zero_job_nonempty.actual_backend = ExecutedBackend::simd_cpu;
+    zero_job_nonempty.requested_target_index_source = TargetIndexSource::recomputed;
+    zero_job_nonempty.actual_target_index_source = TargetIndexSource::recomputed;
+    zero_job_nonempty.environment = make_cpu_environment();
+    PipelineExecutionStats zero_job_aggregate{};
+    zero_job_aggregate.merge(zero_job_nonempty);
+    REQUIRE(zero_job_aggregate.environment.mixed_invalid);
+    REQUIRE(zero_job_aggregate.attempted_alignment_jobs == 0);
+    REQUIRE(zero_job_aggregate.fully_attested_alignment_jobs == 0);
+    REQUIRE(zero_job_aggregate.unattested_alignment_jobs == 0);
+}
+
+TEST_CASE("DOC0371 exact-empty proof checks every stage and operational member",
+          "[pipe][pipeline-stats][identity][empty]") {
+    using namespace bioseq::pipeline_stats;
+    const PipelineExecutionStats empty{};
+    REQUIRE(PipelineExecutionStats::is_exact_empty_proof_operand(empty));
+
+    SECTION("stage coverage is evidence even with no attempted jobs") {
+        auto injected = empty;
+        injected.stages.coverage[
+            stage_index(PipelineStage::query_sketch)].eligible_jobs = 1;
+        REQUIRE_FALSE(PipelineExecutionStats::is_exact_empty_proof_operand(
+            injected));
+    }
+
+    SECTION("stage timing is operational evidence") {
+        auto injected = empty;
+        injected.operational.timing[
+            stage_index(PipelineStage::query_sketch)].host_wall_ns = 1;
+        REQUIRE_FALSE(PipelineExecutionStats::is_exact_empty_proof_operand(
+            injected));
+    }
+
+    SECTION("an ordinary operational counter is evidence") {
+        auto injected = empty;
+        injected.operational.target_rows = 1;
+        REQUIRE_FALSE(PipelineExecutionStats::is_exact_empty_proof_operand(
+            injected));
+    }
+
+    SECTION("a zero-valued report-once identity still has a presence bit") {
+        auto injected = empty;
+        injected.operational.cpu_prepared_key_set_checksum_present = true;
+        REQUIRE_FALSE(PipelineExecutionStats::is_exact_empty_proof_operand(
+            injected));
+    }
+}
+
+TEST_CASE("DOC0371 zero-job stage evidence cannot launder a complete aggregate",
+          "[pipe][pipeline-stats][attestation][grouping][laundering]") {
+    using namespace bioseq::pipeline_stats;
+    auto job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    job.logical_target_row = 71;
+    job.query_ordinal = 8;
+    PipelineExecutionStats complete{};
+    complete.merge_job(job);
+    REQUIRE(PipelineExecutionStats::can_retain_full_attestation(complete));
+
+    PipelineExecutionStats injected{};
+    auto& query = injected.stages.coverage[
+        stage_index(PipelineStage::query_sketch)];
+    query.eligible_jobs = 1;
+    query.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 1;
+    REQUIRE_FALSE(PipelineExecutionStats::is_exact_empty_proof_operand(
+        injected));
+
+    const auto require_rejected = [](const PipelineExecutionStats& stats) {
+        REQUIRE(stats.requested_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(stats.actual_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(stats.attempted_alignment_jobs == 1);
+        REQUIRE(stats.fully_attested_alignment_jobs == 0);
+        REQUIRE(stats.unattested_alignment_jobs == 1);
+        REQUIRE(stats.first_unattested_target_row == 71);
+        REQUIRE(stats.first_unattested_query_ordinal == 8);
+        REQUIRE_FALSE(PipelineExecutionStats::aggregate_stage_coverage_is_valid(
+            stats));
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            stats));
+    };
+
+    auto injected_on_right = complete;
+    injected_on_right.merge(injected);
+    require_rejected(injected_on_right);
+
+    auto injected_on_left = injected;
+    injected_on_left.merge(complete);
+    require_rejected(injected_on_left);
+}
+
+TEST_CASE("DOC0371 aggregate retention rejects malformed stage matrices",
+          "[pipe][pipeline-stats][attestation][matrix][laundering]") {
+    using namespace bioseq::pipeline_stats;
+    auto job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    job.logical_target_row = 81;
+    job.query_ordinal = 6;
+    PipelineExecutionStats complete{};
+    complete.merge_job(job);
+    REQUIRE(PipelineExecutionStats::aggregate_stage_coverage_is_valid(
+        complete));
+    REQUIRE(PipelineExecutionStats::can_retain_full_attestation(complete));
+
+    const auto require_malformed_stage_rejected = [](
+            const PipelineExecutionStats& malformed) {
+        REQUIRE_FALSE(PipelineExecutionStats::aggregate_stage_coverage_is_valid(
+            malformed));
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            malformed));
+        PipelineExecutionStats merged{};
+        merged.merge(malformed);
+        REQUIRE(merged.attempted_alignment_jobs == 1);
+        REQUIRE(merged.fully_attested_alignment_jobs == 0);
+        REQUIRE(merged.unattested_alignment_jobs == 1);
+        REQUIRE(merged.first_unattested_target_row == 81);
+        REQUIRE(merged.first_unattested_query_ordinal == 6);
+    };
+
+    SECTION("required front-end coverage is missing") {
+        auto malformed = complete;
+        malformed.stages.coverage[
+            stage_index(PipelineStage::query_sketch)] = {};
+        require_malformed_stage_rejected(malformed);
+    }
+
+    SECTION("stage total exceeds the attempted-job total") {
+        auto malformed = complete;
+        auto& query = malformed.stages.coverage[
+            stage_index(PipelineStage::query_sketch)];
+        query.eligible_jobs = 2;
+        query.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 2;
+        require_malformed_stage_rejected(malformed);
+    }
+
+    SECTION("a forbidden engine lane carries work") {
+        auto malformed = complete;
+        malformed.stages.coverage[
+            stage_index(PipelineStage::query_sketch)]
+            .executed_jobs[engine_index(ExecutionEngine::scalar_cpu)] = 1;
+        require_malformed_stage_rejected(malformed);
+    }
+
+    SECTION("a fallback lane carries work") {
+        auto malformed = complete;
+        malformed.stages.coverage[
+            stage_index(PipelineStage::query_sketch)].fallback_jobs = 1;
+        require_malformed_stage_rejected(malformed);
+    }
+
+    SECTION("a mode-forbidden stage carries work") {
+        auto malformed = complete;
+        auto& upload = malformed.stages.coverage[
+            stage_index(PipelineStage::device_index_upload)];
+        upload.eligible_jobs = 1;
+        upload.executed_jobs[engine_index(ExecutionEngine::simd_cpu)] = 1;
+        require_malformed_stage_rejected(malformed);
+    }
+
+    SECTION("a saturated aggregate cannot retain proof") {
+        auto malformed = complete;
+        malformed.operational.stats_saturated = true;
+        REQUIRE(PipelineExecutionStats::aggregate_stage_coverage_is_valid(
+            malformed));
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            malformed));
+        PipelineExecutionStats merged{};
+        merged.merge(malformed);
+        REQUIRE(merged.fully_attested_alignment_jobs == 0);
+        REQUIRE(merged.unattested_alignment_jobs == 1);
+        REQUIRE(merged.first_unattested_target_row == 81);
+        REQUIRE(merged.first_unattested_query_ordinal == 6);
+    }
+}
+
+TEST_CASE("DOC0371 backend declines and fallbacks always revoke attestation",
+          "[pipe][pipeline-stats][operational][fallback][grouping]") {
+    using namespace bioseq::pipeline_stats;
+    auto job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    job.logical_target_row = 91;
+    job.query_ordinal = 7;
+
+    const auto require_revoked = [](const PipelineExecutionStats& stats) {
+        REQUIRE(stats.attempted_alignment_jobs == 1);
+        REQUIRE(stats.fully_attested_alignment_jobs == 0);
+        REQUIRE(stats.unattested_alignment_jobs == 1);
+        REQUIRE(stats.first_unattested_target_row == 91);
+        REQUIRE(stats.first_unattested_query_ordinal == 7);
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            stats));
+    };
+
+    for (const bool is_fallback : {false, true}) {
+        PipelineOperationalStats evidence{};
+        if (is_fallback) {
+            evidence.backend_fallbacks = 1;
+        } else {
+            evidence.backend_declines = 1;
+        }
+
+        PipelineExecutionStats operational_after_job{};
+        operational_after_job.merge_job(job);
+        operational_after_job.merge_operational(evidence);
+        require_revoked(operational_after_job);
+
+        PipelineExecutionStats operational_before_job{};
+        operational_before_job.merge_operational(evidence);
+        operational_before_job.merge_job(job);
+        require_revoked(operational_before_job);
+
+        PipelineExecutionStats operational_only{};
+        operational_only.merge_operational(evidence);
+        PipelineExecutionStats grouped_after_job{};
+        grouped_after_job.merge_job(job);
+        grouped_after_job.merge(operational_only);
+        require_revoked(grouped_after_job);
+
+        auto grouped_before_job = operational_only;
+        PipelineExecutionStats job_only{};
+        job_only.merge_job(job);
+        grouped_before_job.merge(job_only);
+        require_revoked(grouped_before_job);
+    }
+}
+
+TEST_CASE("DOC0371 mixed CPU diagnostics retain environment without becoming proof",
+          "[pipe][pipeline-stats][identity][environment][diagnostic]") {
+    using namespace bioseq::pipeline_stats;
+    PipelineJobExecutionStats job{};
+    job.requested_backend = ExecutedBackend::mixed_invalid;
+    job.actual_backend = ExecutedBackend::mixed_invalid;
+    job.requested_target_index_source = TargetIndexSource::recomputed;
+    job.actual_target_index_source = TargetIndexSource::recomputed;
+    job.environment = make_cpu_environment();
+
+    PipelineExecutionStats node{};
+    node.merge_job(job);
+    REQUIRE(node.attempted_alignment_jobs == 1);
+    REQUIRE(node.fully_attested_alignment_jobs == 0);
+    REQUIRE(node.unattested_alignment_jobs == 1);
+    REQUIRE(PipelineExecutionStats::diagnostic_environment_is_valid(node));
+
+    PipelineExecutionStats statement{};
+    statement.merge(node);
+    REQUIRE(statement.actual_backend == ExecutedBackend::mixed_invalid);
+    REQUIRE(statement.fully_attested_alignment_jobs == 0);
+    REQUIRE(statement.unattested_alignment_jobs == 1);
+    REQUIRE_FALSE(statement.environment.mixed_invalid);
+    REQUIRE(PipelineExecutionStats::diagnostic_environment_is_valid(statement));
+
+    PipelineExecutionStats valid_sibling{};
+    auto valid_job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    valid_job.logical_target_row = 12;
+    valid_job.query_ordinal = 3;
+    valid_sibling.merge_job(valid_job);
+    statement.merge(valid_sibling);
+    REQUIRE(statement.actual_backend == ExecutedBackend::mixed_invalid);
+    REQUIRE(statement.fully_attested_alignment_jobs == 0);
+    REQUIRE(statement.unattested_alignment_jobs == 2);
+    REQUIRE(PipelineExecutionStats::diagnostic_environment_is_valid(statement));
+
+    auto gpu_work_with_cpu_environment = node;
+    gpu_work_with_cpu_environment.operational.gpu_seed_dispatches = 1;
+    REQUIRE_FALSE(PipelineExecutionStats::diagnostic_environment_is_valid(
+        gpu_work_with_cpu_environment));
+    PipelineExecutionStats rejected_statement{};
+    rejected_statement.merge(gpu_work_with_cpu_environment);
+    REQUIRE(rejected_statement.environment.mixed_invalid);
+}
+
+TEST_CASE("DOC0371 aggregate merge is associative under environment drift",
+          "[pipe][pipeline-stats][identity][environment][associative]") {
+    using namespace bioseq::pipeline_stats;
+    const auto aggregate_job = [](const PipelineJobExecutionStats& job) {
+        PipelineExecutionStats stats{};
+        stats.merge_job(job);
+        return stats;
+    };
+
+    auto first_job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    first_job.logical_target_row = 10;
+    first_job.query_ordinal = 1;
+    auto second_job = first_job;
+    second_job.logical_target_row = 20;
+    second_job.query_ordinal = 2;
+    second_job.environment.effective_cpu_workers = 3;
+    auto third_job = second_job;
+    third_job.logical_target_row = 30;
+    third_job.query_ordinal = 3;
+
+    auto left_grouped = aggregate_job(first_job);
+    left_grouped.merge(aggregate_job(second_job));
+    left_grouped.merge(aggregate_job(third_job));
+
+    auto right_tail = aggregate_job(second_job);
+    right_tail.merge(aggregate_job(third_job));
+    auto right_grouped = aggregate_job(first_job);
+    right_grouped.merge(right_tail);
+
+    const auto require_same_fail_closed_result = [](
+            const PipelineExecutionStats& stats) {
+        REQUIRE(stats.requested_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(stats.actual_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(stats.requested_target_index_source
+                == TargetIndexSource::recomputed);
+        REQUIRE(stats.actual_target_index_source
+                == TargetIndexSource::recomputed);
+        REQUIRE(stats.environment.mixed_invalid);
+        REQUIRE(stats.attempted_alignment_jobs == 3);
+        REQUIRE(stats.fully_attested_alignment_jobs == 0);
+        REQUIRE(stats.unattested_alignment_jobs == 3);
+        REQUIRE(stats.first_attempted_target_row == 10);
+        REQUIRE(stats.first_attempted_query_ordinal == 1);
+        REQUIRE(stats.first_unattested_target_row == 10);
+        REQUIRE(stats.first_unattested_query_ordinal == 1);
+    };
+    require_same_fail_closed_result(left_grouped);
+    require_same_fail_closed_result(right_grouped);
+    REQUIRE(left_grouped.attempted_alignment_jobs
+            == right_grouped.attempted_alignment_jobs);
+    REQUIRE(left_grouped.fully_attested_alignment_jobs
+            == right_grouped.fully_attested_alignment_jobs);
+    REQUIRE(left_grouped.unattested_alignment_jobs
+            == right_grouped.unattested_alignment_jobs);
+    REQUIRE(left_grouped.first_unattested_target_row
+            == right_grouped.first_unattested_target_row);
+    REQUIRE(left_grouped.first_unattested_query_ordinal
+            == right_grouped.first_unattested_query_ordinal);
+}
+
+TEST_CASE("DOC0371 aggregate merge is associative at SQL bigint saturation",
+          "[pipe][pipeline-stats][saturation][associative]") {
+    using namespace bioseq::pipeline_stats;
+    const auto aggregate_job = [](std::uint64_t target_row) {
+        auto job = make_attested_job(
+            ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+        job.logical_target_row = target_row;
+        PipelineExecutionStats stats{};
+        stats.merge_job(job);
+        return stats;
+    };
+
+    auto near_limit = aggregate_job(10);
+    near_limit.attempted_alignment_jobs = sql_bigint_value_max;
+    near_limit.fully_attested_alignment_jobs = sql_bigint_value_max;
+    auto second = aggregate_job(20);
+    auto third = aggregate_job(30);
+
+    auto left_grouped = near_limit;
+    left_grouped.merge(second);
+    left_grouped.merge(third);
+
+    auto right_tail = second;
+    right_tail.merge(third);
+    auto right_grouped = near_limit;
+    right_grouped.merge(right_tail);
+
+    const auto require_saturated = [](const PipelineExecutionStats& stats) {
+        REQUIRE(stats.attempted_alignment_jobs == sql_bigint_value_max);
+        REQUIRE(stats.fully_attested_alignment_jobs == 0);
+        REQUIRE(stats.unattested_alignment_jobs == sql_bigint_value_max);
+        REQUIRE(stats.first_unattested_target_row == 10);
+        REQUIRE(stats.first_unattested_query_ordinal == 0);
+        REQUIRE(stats.operational.stats_saturated);
+    };
+    require_saturated(left_grouped);
+    require_saturated(right_grouped);
+    REQUIRE(left_grouped.requested_backend == right_grouped.requested_backend);
+    REQUIRE(left_grouped.actual_backend == right_grouped.actual_backend);
+    REQUIRE(left_grouped.fully_attested_alignment_jobs
+            == right_grouped.fully_attested_alignment_jobs);
+    REQUIRE(left_grouped.unattested_alignment_jobs
+            == right_grouped.unattested_alignment_jobs);
+}
+
+TEST_CASE("DOC0371 operational saturation is fail closed independent of ordering",
+          "[pipe][pipeline-stats][operational][saturation][grouping]") {
+    using namespace bioseq::pipeline_stats;
+    auto job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    job.logical_target_row = 61;
+    job.query_ordinal = 9;
+    const auto saturate_operational = [](PipelineExecutionStats& stats) {
+        PipelineOperationalStats at_limit{};
+        at_limit.target_rows = sql_bigint_value_max;
+        PipelineOperationalStats overflow{};
+        overflow.target_rows = 1;
+        stats.merge_operational(at_limit);
+        stats.merge_operational(overflow);
+    };
+
+    PipelineExecutionStats operational_after_job{};
+    operational_after_job.merge_job(job);
+    saturate_operational(operational_after_job);
+
+    PipelineExecutionStats operational_before_job{};
+    saturate_operational(operational_before_job);
+    operational_before_job.merge_job(job);
+
+    PipelineExecutionStats operational_only{};
+    saturate_operational(operational_only);
+    PipelineExecutionStats grouped{};
+    grouped.merge_job(job);
+    grouped.merge(operational_only);
+
+    const auto require_fail_closed = [](const PipelineExecutionStats& stats) {
+        REQUIRE(stats.requested_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(stats.actual_backend == ExecutedBackend::simd_cpu);
+        REQUIRE(stats.attempted_alignment_jobs == 1);
+        REQUIRE(stats.fully_attested_alignment_jobs == 0);
+        REQUIRE(stats.unattested_alignment_jobs == 1);
+        REQUIRE(stats.first_unattested_target_row == 61);
+        REQUIRE(stats.first_unattested_query_ordinal == 9);
+        REQUIRE(stats.operational.target_rows == sql_bigint_value_max);
+        REQUIRE(stats.operational.stats_saturated);
+    };
+    require_fail_closed(operational_after_job);
+    require_fail_closed(operational_before_job);
+    require_fail_closed(grouped);
+}
+
+TEST_CASE("DOC0371 aggregate environment drift reclassifies both job sets",
+          "[pipe][pipeline-stats][identity][environment][drift]") {
+    using namespace bioseq::pipeline_stats;
+    const auto aggregate_job = [](const PipelineJobExecutionStats& job) {
+        PipelineExecutionStats stats{};
+        stats.merge_job(job);
+        return stats;
+    };
+    const auto require_reclassified = [](const PipelineExecutionStats& stats) {
+        REQUIRE(stats.environment.mixed_invalid);
+        REQUIRE(stats.attempted_alignment_jobs == 2);
+        REQUIRE(stats.fully_attested_alignment_jobs == 0);
+        REQUIRE(stats.unattested_alignment_jobs == 2);
+    };
+
+    auto worker_left_job = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    auto worker_right_job = worker_left_job;
+    worker_right_job.environment.effective_cpu_workers = 3;
+    auto worker_left = aggregate_job(worker_left_job);
+    worker_left.merge(aggregate_job(worker_right_job));
+    require_reclassified(worker_left);
+
+    auto device_left_job = make_attested_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted);
+    auto device_right_job = device_left_job;
+    device_right_job.environment.gpu_device_uuid[1] = 0x7f;
+    auto device_left = aggregate_job(device_left_job);
+    device_left.merge(aggregate_job(device_right_job));
+    require_reclassified(device_left);
+
+    auto cache_right_job = device_left_job;
+    cache_right_job.environment.gpu_pipeline_cache_seed_sha256[1] = 0x55;
+    auto cache_left = aggregate_job(device_left_job);
+    cache_left.merge(aggregate_job(cache_right_job));
+    require_reclassified(cache_left);
+}
+
+TEST_CASE("DOC0371 per-job coverage does not multiply operational events",
+          "[pipe][pipeline-stats][operational-once]") {
+    using namespace bioseq::pipeline_stats;
+    PipelineExecutionStats aggregate{};
+    auto job = make_attested_job(
+        ExecutedBackend::vulkan_gpu, TargetIndexSource::persisted);
+    for (std::uint64_t i = 0; i < 4096; ++i) {
+        job.logical_target_row = i;
+        job.query_ordinal = i;
+        aggregate.merge_job(job);
+    }
+    REQUIRE(aggregate.operational.target_rows == 0);
+
+    PipelineOperationalStats once{};
+    once.target_rows = 1;
+    once.gpu_queue_submits = 1;
+    once.gpu_persisted_resident_uploads = 1;
+    aggregate.merge_operational(once);
+
+    REQUIRE(aggregate.attempted_alignment_jobs == 4096);
+    REQUIRE(aggregate.fully_attested_alignment_jobs == 4096);
+    REQUIRE(aggregate.unattested_alignment_jobs == 0);
+    REQUIRE(aggregate.first_unattested_target_row == unset_job_ordinal);
+    REQUIRE(aggregate.stages.coverage[stage_index(PipelineStage::query_sketch)].eligible_jobs
+            == 4096);
+    REQUIRE(aggregate.stages.coverage[stage_index(PipelineStage::query_sketch)]
+                .executed_jobs[engine_index(ExecutionEngine::vulkan_gpu)]
+            == 4096);
+    REQUIRE(aggregate.operational.gpu_queue_submits == 1);
+    REQUIRE(aggregate.operational.gpu_persisted_resident_uploads == 1);
+    REQUIRE(aggregate.operational.target_rows == 1);
+    REQUIRE_FALSE(aggregate.operational.stats_saturated);
+}
+
+TEST_CASE("DOC0371 dispatch primary and extra-query aggregates merge once",
+          "[pipe][pipeline-stats][dispatch-consumer][operational-once]") {
+    using namespace bioseq::pipeline_stats;
+    const auto incomplete_invocation = [](
+            const std::uint64_t query_ordinal,
+            const std::uint64_t seed_dispatches,
+            const bool primary_invocation) {
+        PipelineExecutionStats invocation{};
+        PipelineJobExecutionStats job{};
+        job.requested_backend = ExecutedBackend::vulkan_gpu;
+        job.actual_backend = ExecutedBackend::mixed_invalid;
+        job.requested_target_index_source = TargetIndexSource::recomputed;
+        job.actual_target_index_source = TargetIndexSource::recomputed;
+        job.logical_target_row = 41;
+        job.query_ordinal = query_ordinal;
+        invocation.merge_job(job);
+        if (primary_invocation) {
+            invocation.operational.target_rows = 1;
+            invocation.operational.recomputed_target_index_rows = 1;
+        }
+        invocation.operational.gpu_seed_dispatches = seed_dispatches;
+        return invocation;
+    };
+
+    PipelineExecutionStats completed_buffer{};
+    completed_buffer.merge(incomplete_invocation(0, 1, true));
+    completed_buffer.merge(incomplete_invocation(1, 2, false));
+
+    REQUIRE(completed_buffer.requested_backend == ExecutedBackend::vulkan_gpu);
+    REQUIRE(completed_buffer.actual_backend == ExecutedBackend::mixed_invalid);
+    REQUIRE(completed_buffer.requested_target_index_source
+            == TargetIndexSource::recomputed);
+    REQUIRE(completed_buffer.actual_target_index_source
+            == TargetIndexSource::recomputed);
+    REQUIRE(completed_buffer.attempted_alignment_jobs == 2);
+    REQUIRE(completed_buffer.fully_attested_alignment_jobs == 0);
+    REQUIRE(completed_buffer.unattested_alignment_jobs == 2);
+    REQUIRE(completed_buffer.first_unattested_target_row == 41);
+    REQUIRE(completed_buffer.first_unattested_query_ordinal == 0);
+    REQUIRE(completed_buffer.operational.target_rows == 1);
+    REQUIRE(completed_buffer.operational.persisted_index_rows == 0);
+    REQUIRE(completed_buffer.operational.recomputed_target_index_rows == 1);
+    REQUIRE(completed_buffer.operational.gpu_seed_dispatches == 3);
+    REQUIRE(completed_buffer.environment.mixed_invalid);
+    REQUIRE_FALSE(completed_buffer.operational.stats_saturated);
+}
+
+TEST_CASE("DOC0371 persisted request cannot be laundered by recompute outcome",
+          "[pipe][pipeline-stats][dispatch-consumer][index-source]") {
+    using namespace bioseq::pipeline_stats;
+    PipelineExecutionStats invocation{};
+    PipelineJobExecutionStats job{};
+    job.requested_backend = ExecutedBackend::simd_cpu;
+    job.actual_backend = ExecutedBackend::mixed_invalid;
+    job.requested_target_index_source = TargetIndexSource::persisted;
+    job.actual_target_index_source = TargetIndexSource::recomputed;
+    job.logical_target_row = 19;
+    job.query_ordinal = 3;
+    invocation.merge_job(job);
+
+    PipelineOperationalStats operational{};
+    operational.target_rows = 1;
+    operational.missing_persisted_index_rows = 1;
+    operational.recomputed_target_index_rows = 1;
+    invocation.merge_operational(operational);
+
+    REQUIRE(invocation.requested_target_index_source
+            == TargetIndexSource::persisted);
+    REQUIRE(invocation.actual_target_index_source
+            == TargetIndexSource::recomputed);
+    REQUIRE(invocation.attempted_alignment_jobs == 1);
+    REQUIRE(invocation.fully_attested_alignment_jobs == 0);
+    REQUIRE(invocation.unattested_alignment_jobs == 1);
+    REQUIRE(invocation.first_unattested_target_row == 19);
+    REQUIRE(invocation.first_unattested_query_ordinal == 3);
+    REQUIRE(invocation.operational.target_rows == 1);
+    REQUIRE(invocation.operational.persisted_index_rows == 0);
+    REQUIRE(invocation.operational.missing_persisted_index_rows == 1);
+    REQUIRE(invocation.operational.recomputed_target_index_rows == 1);
+    REQUIRE_FALSE(invocation.mixed_persisted_identity);
+}
+
+TEST_CASE("DOC0371 logical target identity survives payload coalescing",
+          "[pipe][pipeline-stats][dispatch-consumer][logical-row]") {
+    using bioseq::pipeline_stats::count_unique_logical_target_rows;
+
+    // The GPU resident-target layer may coalesce identical sequence bytes,
+    // but two distinct relation row identities must still count twice.
+    std::array<std::uint64_t, 2> identical_payload_distinct_rows{41, 42};
+    REQUIRE(count_unique_logical_target_rows(
+                std::span<std::uint64_t>{identical_payload_distinct_rows})
+            == 2);
+
+    // Re-observing the same logical row is the only case that collapses.
+    std::array<std::uint64_t, 2> repeated_logical_row{41, 41};
+    REQUIRE(count_unique_logical_target_rows(
+                std::span<std::uint64_t>{repeated_logical_row})
+            == 1);
+}
 
 HWY_BEFORE_NAMESPACE();
 
@@ -250,6 +1715,555 @@ TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch
             REQUIRE(result == v);
         }
     }
+}
+
+TEST_CASE("Exact SIMD chaining metadata permits canonical nonzero skip penalty",
+          "[pipe][exact-simd][chaining][metadata]") {
+    using CA = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using Kernel = algorithm_traits<CA::SIMD_MM2>::kernel_type;
+    using Cep = ConstexprAlignerParams<10, 15, 28>;
+    const auto properties = Kernel::template static_properties<Cep>();
+    const auto property = std::ranges::find_if(
+        properties,
+        [](const NamedProperty& candidate) {
+            return candidate.name == "requires_zero_skip_penalty";
+        });
+    REQUIRE(property != properties.end());
+    REQUIRE(property->value == "false");
+}
+
+TEST_CASE("ExactSimd collection proof merge is actual fail-closed evidence",
+          "[pipe][exact-simd][proof][merge][tamper][empty]") {
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using ::bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
+
+    const auto actual_range_proof = [](std::uint64_t bp) {
+        TwoStackExecutionProof proof{};
+        proof.bp_consumed = bp;
+        proof.fragment_symbols_staged = bp;
+        proof.packed_decode_lanes = bp;
+        proof.generic_u64_kernel_calls = 1;
+        proof.event_generation_batches = 1;
+        proof.stable_compress_batches = 1;
+        if (bp != 0) {
+            proof.vector_batches = 1;
+            proof.vector_lanes_visited = bp;
+            proof.generic_u64_candidate_blocks = 1;
+            proof.generic_u64_lane_visits = bp;
+            proof.consecutive_kmer_batches = 1;
+            proof.canonical_scramble_batches = 1;
+            proof.window_reduction_batches = 1;
+            proof.event_generation_batches = 2;
+            proof.stable_compress_batches = 2;
+            proof.tie_matrix_event_batches = 1;
+            proof.row_transpose_batches = 1;
+            proof.row_vector_stores = 1;
+            proof.packed_decode_batches = 1;
+        }
+        return proof;
+    };
+
+    MatchResultCollection first;
+    first.record_exact_simd_target_execution_proof(
+        actual_range_proof(17));
+    MatchResultCollection second;
+    second.record_exact_simd_target_execution_proof(
+        actual_range_proof(23));
+    first.combine_execution_proof(second);
+    REQUIRE(first.exact_simd_target_execution_proof_present);
+    REQUIRE(first.exact_simd_target_execution_proof.bp_consumed == 40);
+    REQUIRE(first.exact_simd_target_execution_proof.packed_decode_lanes == 40);
+    REQUIRE(first.exact_simd_target_execution_accepted(
+        /*require_nonempty_vector_work=*/true));
+
+    MatchResultCollection missing;
+    REQUIRE_FALSE(missing.exact_simd_target_execution_accepted(false));
+
+    MatchResultCollection manufactured_empty;
+    manufactured_empty.record_exact_simd_query_execution_proof(
+        TwoStackExecutionProof{});
+    REQUIRE_FALSE(
+        manufactured_empty.exact_simd_query_execution_accepted(false));
+
+    MatchResultCollection tampered;
+    auto forbidden = actual_range_proof(8);
+    forbidden.scalar_hash_symbols = 1;
+    tampered.record_exact_simd_target_execution_proof(forbidden);
+    REQUIRE_FALSE(tampered.exact_simd_target_execution_accepted(false));
+
+    // An actual zero-bp invocation is valid route evidence for ordinary
+    // diagnostics, but it cannot satisfy the strict positive-work gate.
+    MatchResultCollection empty_actual;
+    empty_actual.record_exact_simd_query_execution_proof(
+        actual_range_proof(0));
+    REQUIRE(empty_actual.exact_simd_query_execution_accepted(false));
+    REQUIRE_FALSE(empty_actual.exact_simd_query_execution_accepted(true));
+
+    auto mixed_routes = actual_range_proof(11);
+    mixed_routes.k15_w10_b8_u32_hash_kernel_calls = 1;
+    mixed_routes.k15_w10_b8_u32_hash_candidate_blocks =
+        mixed_routes.generic_u64_candidate_blocks;
+    mixed_routes.k15_w10_b8_u32_hash_lane_visits =
+        mixed_routes.generic_u64_lane_visits;
+    mixed_routes.generic_u64_candidate_blocks = 0;
+    mixed_routes.generic_u64_lane_visits = 0;
+    MatchResultCollection mixed;
+    mixed.record_exact_simd_query_execution_proof(mixed_routes);
+    REQUIRE_FALSE(mixed.exact_simd_query_execution_accepted(false));
+
+    auto missing_packed22 = actual_range_proof(11);
+    missing_packed22.k15_w10_b8_u32_hash_kernel_calls = 1;
+    missing_packed22.k15_w10_b8_u32_hash_candidate_blocks =
+        missing_packed22.generic_u64_candidate_blocks;
+    missing_packed22.k15_w10_b8_u32_hash_lane_visits =
+        missing_packed22.generic_u64_lane_visits;
+    missing_packed22.generic_u64_kernel_calls = 0;
+    missing_packed22.generic_u64_candidate_blocks = 0;
+    missing_packed22.generic_u64_lane_visits = 0;
+    MatchResultCollection missing_packed;
+    missing_packed.record_exact_simd_query_execution_proof(
+        missing_packed22);
+    REQUIRE_FALSE(
+        missing_packed.exact_simd_query_execution_accepted(false));
+
+    auto packed22 = missing_packed22;
+    packed22.k15_w10_b8_packed22_groups =
+        packed22.k15_w10_b8_u32_hash_candidate_blocks;
+    packed22.k15_w10_b8_packed22_lane_visits =
+        packed22.k15_w10_b8_u32_hash_lane_visits;
+    MatchResultCollection packed;
+    packed.record_exact_simd_query_execution_proof(packed22);
+    REQUIRE(packed.exact_simd_query_execution_accepted(false));
+
+    ++packed22.k15_w10_b8_packed22_lane_visits;
+    MatchResultCollection tampered_packed;
+    tampered_packed.record_exact_simd_query_execution_proof(packed22);
+    REQUIRE_FALSE(
+        tampered_packed.exact_simd_query_execution_accepted(false));
+}
+
+TEST_CASE("partial Vulkan proof requires the exact positive stage mask",
+          "[pipe][vulkan][proof][stage-mask][fail-closed]") {
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
+
+    MatchResultCollection tiled_chain;
+    PartialVulkanExecutionProof chain_only{};
+    chain_only.chain_score_dispatches = 1;
+    tiled_chain.record_partial_vulkan_execution_proof(chain_only);
+    REQUIRE(tiled_chain.partial_vulkan_execution_proof
+                .exact_stage_mask_accepted(
+                    false, false, false, false, true));
+
+    MatchResultCollection phase_c;
+    PartialVulkanExecutionProof frontend{};
+    frontend.query_sketch_dispatches = 1;
+    frontend.target_sketch_dispatches = 1;
+    frontend.target_index_build_dispatches = 1;
+    frontend.seed_lookup_dispatches = 1;
+    frontend.chain_score_dispatches = 1;
+    phase_c.record_partial_vulkan_execution_proof(frontend);
+    REQUIRE(phase_c.partial_vulkan_execution_proof
+                .exact_stage_mask_accepted(true, true, true, true, true));
+    REQUIRE_FALSE(phase_c.partial_vulkan_execution_proof
+                      .exact_stage_mask_accepted(
+                          true, true, false, true, true));
+
+    MatchResultCollection combined;
+    combined.combine_execution_proof(tiled_chain);
+    REQUIRE(combined.has_any_algorithm_execution_proof());
+}
+
+TEST_CASE("Phase C batch target-build proof is not inflated by query count",
+          "[pipe][vulkan][phase-c][proof][batch][fail-closed]") {
+    using ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
+    using ::bioseq::simd::HWY_NAMESPACE::
+        phase_c_target_build_proof_owner_query;
+
+    PartialVulkanExecutionProof aggregate{};
+    for (std::size_t query_index = 0; query_index < 3u; ++query_index) {
+        PartialVulkanExecutionProof per_query{};
+        per_query.query_sketch_dispatches = 1u;
+        per_query.seed_lookup_dispatches = 1u;
+        per_query.chain_score_dispatches = 1u;
+        if (phase_c_target_build_proof_owner_query(query_index)) {
+            per_query.target_sketch_dispatches = 1u;
+            per_query.target_index_build_dispatches = 1u;
+            per_query.gpu_index_count_phase_admissions = 1u;
+            per_query.gpu_index_main_peak_admissions = 1u;
+            per_query.gpu_index_resident_transfers = 1u;
+            per_query.gpu_index_adoption_successes = 1u;
+            per_query.gpu_index_owned_resident_bytes = 4096u;
+            per_query.gpu_index_ungated_emit_dispatches = 1u;
+            per_query.gpu_index_retained_minimizer_count = 53u;
+            per_query.gpu_index_distinct_minimizer_count = 17u;
+        }
+        aggregate.combine(per_query);
+    }
+
+    REQUIRE(aggregate.query_sketch_dispatches == 3u);
+    REQUIRE(aggregate.seed_lookup_dispatches == 3u);
+    REQUIRE(aggregate.chain_score_dispatches == 3u);
+    REQUIRE(aggregate.target_sketch_dispatches == 1u);
+    REQUIRE(aggregate.target_index_build_dispatches == 1u);
+    REQUIRE(aggregate.gpu_index_count_phase_admissions == 1u);
+    REQUIRE(aggregate.gpu_index_main_peak_admissions == 1u);
+    REQUIRE(aggregate.gpu_index_resident_transfers == 1u);
+    REQUIRE(aggregate.gpu_index_adoption_successes == 1u);
+    REQUIRE(aggregate.gpu_index_gate_enabled == 0u);
+    REQUIRE(aggregate.gpu_index_gate_count_dispatches == 0u);
+    REQUIRE(aggregate.gpu_index_gate_word_count == 0u);
+    REQUIRE(aggregate.gpu_index_gate_mask == 0u);
+    REQUIRE(aggregate.gpu_index_gate_set_bits == 0u);
+    REQUIRE(aggregate.gpu_index_gated_emit_dispatches == 0u);
+    REQUIRE(aggregate.gpu_index_ungated_emit_dispatches == 1u);
+    REQUIRE(aggregate.gpu_index_retained_minimizer_count == 53u);
+    REQUIRE(aggregate.gpu_index_distinct_minimizer_count == 17u);
+}
+
+TEST_CASE("Phase C query gate becomes immutable after publication",
+          "[pipe][vulkan][phase-c][gate][freeze][fail-closed]") {
+    using Minimizer =
+        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
+    using Storage = ::bioseq::simd::HWY_NAMESPACE::pipe::
+        PhaseCQueryGateStorage;
+
+    Storage storage;
+    const std::array<Minimizer, 1> minimizers{
+        Minimizer{17u, 0u, 0u}};
+    storage.add(std::span<const Minimizer>{minimizers});
+    const auto identity = storage.identity();
+    const auto gate = storage.vulkan_gate();
+
+    REQUIRE(identity.enabled);
+    REQUIRE(identity.word_count
+            == bioseq::gpu::vulkan::kPhaseCQueryGateWordCount);
+    REQUIRE(identity.mask == bioseq::gpu::vulkan::kPhaseCQueryGateMask);
+    REQUIRE(gate.identity_valid);
+    REQUIRE(gate.words.data() == gate.identity.canonical_words->data());
+    REQUIRE(gate.canonical_identity().exact_equals(gate.identity));
+    REQUIRE_THROWS_AS(
+        storage.add(std::span<const Minimizer>{minimizers}),
+        bioseq::gpu::vulkan::VulkanRuntimeError);
+}
+
+TEST_CASE("segmented GPU adoption key preserves the exact frozen gate",
+          "[pipe][vulkan][phase-c][segment][gate][adoption][fail-closed]") {
+    using GateIdentity = bioseq::gpu::vulkan::GpuBuiltIndexGateIdentity;
+    using Key = bioseq::indexing::GpuMinimizerIndexCacheKey;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        bind_verified_gpu_segment_gate_identity;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::freeze_phase_c_query_gate;
+
+    std::vector<std::uint32_t> mutable_words(
+        bioseq::gpu::vulkan::kPhaseCQueryGateWordCount, 0u);
+    mutable_words.front() = 1u;
+    const auto frozen_gate = freeze_phase_c_query_gate(
+        bioseq::gpu::vulkan::VulkanSketchQueryGate{
+            std::span<const std::uint32_t>{mutable_words},
+            bioseq::gpu::vulkan::kPhaseCQueryGateMask});
+    const GateIdentity expected = frozen_gate.canonical_identity();
+    REQUIRE(expected.canonical_words);
+    REQUIRE(frozen_gate.words.data() == expected.canonical_words->data());
+    REQUIRE(frozen_gate.words.data() != mutable_words.data());
+
+    std::size_t segment_bind_calls = 0u;
+    Key key{};
+    for (std::size_t segment = 0; segment < 3u; ++segment) {
+        const GateIdentity built = frozen_gate.canonical_identity();
+        REQUIRE(built.canonical_words.get()
+                == expected.canonical_words.get());
+        key = Key{
+            .source_id = 7u,
+            .caller_identity = 11u + segment,
+            .target_len = 101u,
+            .table_size = 13u,
+            .position_count = 17u,
+        };
+        bind_verified_gpu_segment_gate_identity(key, expected, built);
+        ++segment_bind_calls;
+        REQUIRE(key.gate_enabled);
+        REQUIRE(key.gate_word_count == expected.word_count);
+        REQUIRE(key.gate_mask == expected.mask);
+        REQUIRE(key.gate_digest_lo == expected.digest_lo);
+        REQUIRE(key.gate_digest_hi == expected.digest_hi);
+        REQUIRE(key.gate_canonical_words.get()
+                == expected.canonical_words.get());
+    }
+    REQUIRE(segment_bind_calls == 3u);
+
+    auto mismatched_build = expected;
+    mismatched_build.digest_hi ^= 1u;
+    REQUIRE_THROWS_AS(
+        bind_verified_gpu_segment_gate_identity(
+            key, expected, mismatched_build),
+        bioseq::gpu::vulkan::VulkanRuntimeError);
+}
+
+TEST_CASE("Vulkan sketch dispatch token requires an operation-completed roundtrip",
+          "[pipe][vulkan][proof][operation-token][fail-closed]") {
+    using bioseq::gpu::vulkan::VulkanSketchDispatchRoute;
+    using bioseq::gpu::vulkan::VulkanSketchDispatchToken;
+
+    REQUIRE_FALSE(VulkanSketchDispatchToken{}.accepted());
+
+    const auto completed =
+        VulkanSketchDispatchToken::completed_collect_minimizers_roundtrip();
+    REQUIRE(completed.accepted());
+
+    auto no_roundtrip = completed;
+    no_roundtrip.completed_roundtrips = 0;
+    REQUIRE_FALSE(no_roundtrip.accepted());
+
+    auto wrong_count = completed;
+    wrong_count.completed_roundtrips = 2;
+    REQUIRE_FALSE(wrong_count.accepted());
+
+    auto wrong_route = completed;
+    wrong_route.route = VulkanSketchDispatchRoute::none;
+    REQUIRE_FALSE(wrong_route.accepted());
+}
+
+TEST_CASE("Vulkan sketch proof rejects an absent or default operation token",
+          "[pipe][vulkan][proof][operation-token][absent][fail-closed]") {
+    using MA = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using Proof = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        MinimizerSketchExecutionProof;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        MinimizerSketchRole;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        minimizer_sketch_proof_matches_selected_route;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        record_minimizer_sketch_execution_proof;
+
+    const Proof absent{};
+    REQUIRE(absent.empty());
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, absent));
+
+    Proof already_promoted_without_token{};
+    already_promoted_without_token.partial_vulkan.query_sketch_dispatches = 1;
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, already_promoted_without_token));
+
+    Proof metadata_without_token{};
+    metadata_without_token.partial_vulkan.gpu_index_unique_keys = 1;
+    REQUIRE_FALSE(metadata_without_token.partial_vulkan.has_any_dispatch());
+    REQUIRE_FALSE(metadata_without_token.empty());
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::SCALAR, metadata_without_token));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::TWO_STACK_NTHASH, metadata_without_token));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::PAPER_NTHASH_SIMD, metadata_without_token));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, metadata_without_token));
+
+    MatchResultCollection destination;
+    record_minimizer_sketch_execution_proof(
+        destination, absent, MinimizerSketchRole::query);
+    record_minimizer_sketch_execution_proof(
+        destination, already_promoted_without_token,
+        MinimizerSketchRole::query);
+    record_minimizer_sketch_execution_proof(
+        destination, metadata_without_token, MinimizerSketchRole::query);
+    REQUIRE_FALSE(destination.partial_vulkan_execution_proof
+                      .has_any_dispatch());
+}
+
+TEST_CASE("Vulkan sketch proof cannot promote a token across a tampered route",
+          "[pipe][vulkan][proof][operation-token][route-tamper][fail-closed]") {
+    using MA = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using Proof = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        MinimizerSketchExecutionProof;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        MinimizerSketchRole;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        minimizer_sketch_proof_matches_selected_route;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        record_minimizer_sketch_execution_proof;
+
+    using VulkanToken = bioseq::gpu::vulkan::VulkanSketchDispatchToken;
+    const auto token = VulkanToken::completed_collect_minimizers_roundtrip();
+    Proof vulkan_sketch{};
+    vulkan_sketch.partial_vulkan.sketch_dispatches =
+        token.completed_roundtrips;
+    REQUIRE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, vulkan_sketch));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::SCALAR, vulkan_sketch));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::TWO_STACK_NTHASH, vulkan_sketch));
+
+    Proof mixed_route = vulkan_sketch;
+    mixed_route.exact_simd_present = true;
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, mixed_route));
+
+    Proof token_with_metadata = vulkan_sketch;
+    token_with_metadata.partial_vulkan.gpu_index_unique_keys = 1;
+    REQUIRE_FALSE(token_with_metadata.partial_vulkan
+                      .exact_sketch_token_accepted());
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, token_with_metadata));
+
+    Proof repeated_roundtrip = vulkan_sketch;
+    repeated_roundtrip.partial_vulkan.sketch_dispatches = 2;
+    REQUIRE_FALSE(repeated_roundtrip.partial_vulkan
+                      .exact_sketch_token_accepted());
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, repeated_roundtrip));
+
+    MatchResultCollection repeated_roundtrip_destination;
+    record_minimizer_sketch_execution_proof(
+        repeated_roundtrip_destination, repeated_roundtrip,
+        MinimizerSketchRole::query);
+    REQUIRE(repeated_roundtrip_destination.partial_vulkan_execution_proof
+                == ::bioseq::simd::HWY_NAMESPACE::
+                    PartialVulkanExecutionProof{});
+
+    MatchResultCollection tampered_destination;
+    record_minimizer_sketch_execution_proof(
+        tampered_destination, token_with_metadata,
+        MinimizerSketchRole::query);
+    REQUIRE(tampered_destination.partial_vulkan_execution_proof
+                == ::bioseq::simd::HWY_NAMESPACE::
+                    PartialVulkanExecutionProof{});
+
+    MatchResultCollection query_destination;
+    record_minimizer_sketch_execution_proof(
+        query_destination, vulkan_sketch, MinimizerSketchRole::query);
+    REQUIRE(query_destination.partial_vulkan_execution_proof
+                .exact_stage_mask_accepted(
+                    true, false, false, false, false));
+
+    MatchResultCollection target_destination;
+    record_minimizer_sketch_execution_proof(
+        target_destination, vulkan_sketch, MinimizerSketchRole::target);
+    REQUIRE(target_destination.partial_vulkan_execution_proof
+                .exact_stage_mask_accepted(
+                    false, true, false, false, false));
+}
+
+TEST_CASE("Paper ntHash sketch proof is distinct and cannot be promoted across routes",
+          "[pipe][paper-nthash][proof][fail-closed]") {
+    using MA = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using Backend = ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using PaperProof = ::bioseq::simd::HWY_NAMESPACE::
+        PackedPaperNthashExecutionProof;
+    using RangeProof = ::bioseq::simd::HWY_NAMESPACE::pipe::
+        MinimizerRangeExecutionProof;
+    using Proof = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        MinimizerSketchExecutionProof;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        MinimizerSketchRole;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        minimizer_sketch_proof_matches_selected_route;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        record_minimizer_sketch_execution_proof;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        minimizer_range_proof_matches_backend;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        target_index_sketch_backend_from_params;
+
+    PaperProof operation{};
+    operation.scheme_id = ::bioseq::simd::HWY_NAMESPACE::
+        packed_paper_nthash_scheme_id;
+    operation.kmer_size = 15;
+    operation.window_size = 10;
+    operation.nthash_rotation = 7;
+    operation.source_storage_unit_bytes = 4;
+    operation.input_symbols = 128;
+    operation.input_storage_units = 8;
+    operation.segments_combined = 1;
+    operation.logical_streams = 8;
+    operation.physical_vector_lanes = 4;
+    operation.vector_registers_per_step = 2;
+    operation.packed_decode_batches = 1;
+    operation.packed_decode_lane_visits = 8;
+    operation.hash_initialization_batches = 1;
+    operation.hash_table_lookup_batches = 2;
+    operation.canonical_sum_batches = 1;
+    operation.window_update_batches = 1;
+    operation.emission_decision_batches = 1;
+    operation.emission_mask_store_batches = 1;
+    operation.minimizers_emitted = 1;
+    operation.scalar_collector_appends = 1;
+    operation.positions_are_segment_local = true;
+    REQUIRE(operation.accepted(true));
+
+    Proof paper{};
+    paper.paper_nthash = operation;
+    paper.paper_nthash_present = true;
+    REQUIRE(minimizer_sketch_proof_matches_selected_route(
+        MA::PAPER_NTHASH_SIMD, paper));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::SCALAR, paper));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::TWO_STACK_NTHASH, paper));
+    REQUIRE_FALSE(minimizer_sketch_proof_matches_selected_route(
+        MA::VULKAN_MINIMAP_INT, paper));
+
+    MatchResultCollection destination;
+    record_minimizer_sketch_execution_proof(
+        destination, paper, MinimizerSketchRole::query);
+    record_minimizer_sketch_execution_proof(
+        destination, paper, MinimizerSketchRole::target);
+    REQUIRE(destination.paper_nthash_query_execution_accepted(true));
+    REQUIRE(destination.paper_nthash_target_execution_accepted(true));
+    REQUIRE_FALSE(destination.exact_simd_query_execution_proof_present);
+    REQUIRE_FALSE(destination.partial_vulkan_execution_proof.has_any_dispatch());
+
+    RangeProof paper_range{};
+    paper_range.paper_nthash = operation;
+    paper_range.paper_nthash_present = true;
+    REQUIRE(minimizer_range_proof_matches_backend(
+        Backend::PaperNtHashSimd,
+        paper_range,
+        /*require_nonempty_vector_work=*/true));
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::ExactSimd, paper_range));
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::Scalar, paper_range));
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::VulkanSegment, paper_range));
+
+    auto hidden_exact_payload = paper_range;
+    hidden_exact_payload.exact_simd.bp_consumed = 1;
+    REQUIRE_FALSE(hidden_exact_payload.exact_simd_present);
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::PaperNtHashSimd, hidden_exact_payload));
+
+    auto cleared_paper_flag = paper_range;
+    cleared_paper_flag.paper_nthash_present = false;
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::PaperNtHashSimd, cleared_paper_flag));
+
+    RangeProof scalar_range{};
+    REQUIRE(minimizer_range_proof_matches_backend(
+        Backend::Scalar, scalar_range));
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::VulkanSegment, scalar_range));
+    scalar_range.paper_nthash.scheme_id = 1;
+    REQUIRE_FALSE(scalar_range.paper_nthash_present);
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        Backend::Scalar, scalar_range));
+
+    Minimap2Params params{};
+    params.minimizer_algorithm = MA::PAPER_NTHASH_SIMD;
+    REQUIRE(target_index_sketch_backend_from_params(params)
+        == Backend::PaperNtHashSimd);
+    params.minimizer_algorithm = MA::TWO_STACK_NTHASH;
+    params.chaining_algorithm =
+        ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2;
+    params.base_alignment_algorithm =
+        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
+    REQUIRE(target_index_sketch_backend_from_params(params)
+        == Backend::ExactSimd);
 }
 
 TEST_CASE("DOC0256 — enum_dispatch_pack falls back to DefaultValue",
@@ -812,12 +2826,496 @@ using range_t  = compact_sequence_range<dna4_u64>;
 
 }  // namespace doc0307_e2e
 
-TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
-          "[vulkan][phase-b][pipe]") {
+template <class StorageUnit>
+void check_fragmented_paper_range_materialization() {
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::PaperNtHashRuntimeError;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::minimizer_dispatch_range;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        minimizer_range_proof_matches_backend;
+    using packed_sequence =
+        sequence_custom_alphabet<seq::dna4, StorageUnit>;
+    using range_type = compact_sequence_range<packed_sequence>;
+    using chunked_scanner = bioseq::storage::sequence_scanner_test_chunked<
+        StorageUnit, 2>;
+    using minimizer_type =
+        ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using collector_type =
+        ::bioseq::simd::HWY_NAMESPACE::sketch_collector_t<minimizer_type>;
+
+    auto data = doc0307_e2e::make_dna4(
+        4'123, 0xF12A6E57u + sizeof(StorageUnit));
+    range_type range(data);
+    REQUIRE(range.size() > 12u);
+    REQUIRE(range.padding() != 0u);
+    using sequence_size_type = bioseq::storage::sequence_size_t;
+    const auto check_slice = [&](sequence_size_type lo_unit,
+                                 sequence_size_type hi_unit) {
+        CAPTURE(lo_unit, hi_unit, sizeof(StorageUnit));
+        collector_type resident_collector;
+        const auto resident_proof = minimizer_dispatch_range<minimizer_type>(
+            resident_collector,
+            range,
+            lo_unit,
+            hi_unit,
+            10u,
+            15u,
+            MinimizerSketchBackend::PaperNtHashSimd);
+        REQUIRE(minimizer_range_proof_matches_backend(
+            MinimizerSketchBackend::PaperNtHashSimd,
+            resident_proof,
+            /*require_nonempty_vector_work=*/true));
+
+        auto& admission =
+            bioseq::parallelism::MemoryAdmissionController::instance();
+        const std::uint64_t reserved_before = admission.reserved_bytes();
+        collector_type fragmented_collector;
+        {
+            bioseq::storage::lazy_compact_sequence<
+                packed_sequence, chunked_scanner> fragmented{
+                    chunked_scanner::from_range(range)};
+            const auto fragmented_proof =
+                minimizer_dispatch_range<minimizer_type>(
+                    fragmented_collector,
+                    fragmented,
+                    lo_unit,
+                    hi_unit,
+                    10u,
+                    15u,
+                    MinimizerSketchBackend::PaperNtHashSimd);
+            REQUIRE(minimizer_range_proof_matches_backend(
+                MinimizerSketchBackend::PaperNtHashSimd,
+                fragmented_proof,
+                /*require_nonempty_vector_work=*/true));
+            REQUIRE(fragmented_proof.paper_nthash.source_storage_unit_bytes
+                    == sizeof(StorageUnit));
+            REQUIRE(fragmented_proof.paper_nthash
+                    == resident_proof.paper_nthash);
+
+            collector_type rejected_collector;
+            REQUIRE_THROWS_AS(
+                minimizer_dispatch_range<minimizer_type>(
+                    rejected_collector,
+                    fragmented,
+                    lo_unit,
+                    hi_unit,
+                    9u,
+                    15u,
+                    MinimizerSketchBackend::PaperNtHashSimd),
+                PaperNtHashRuntimeError);
+        }
+        REQUIRE(admission.reserved_bytes() == reserved_before);
+
+        const auto& resident_records =
+            resident_collector.extract_sketches_data();
+        const auto& fragmented_records =
+            fragmented_collector.extract_sketches_data();
+        REQUIRE_FALSE(resident_records.empty());
+        REQUIRE(fragmented_records.size() == resident_records.size());
+        for (std::size_t i = 0; i < resident_records.size(); ++i) {
+            CAPTURE(i);
+            REQUIRE(fragmented_records[i].kmer()
+                    == resident_records[i].kmer());
+            REQUIRE(fragmented_records[i].last_pos()
+                    == resident_records[i].last_pos());
+            REQUIRE(fragmented_records[i].strand()
+                    == resident_records[i].strand());
+            REQUIRE(fragmented_records[i].raw_value()
+                    == resident_records[i].raw_value());
+        }
+    };
+
+    // Exercise both an interior slice (zero local padding) and a tail slice
+    // that must inherit the source range's final packed-unit padding.
+    check_slice(3u, static_cast<sequence_size_type>(range.size() - 5u));
+    check_slice(5u, static_cast<sequence_size_type>(range.size()));
+}
+
+TEST_CASE("Paper ntHash fragmented ranges materialize only their packed slice with local coordinates",
+          "[paper-nthash][simd][pipe][fragmented][range][fail-closed]") {
+    check_fragmented_paper_range_materialization<std::uint32_t>();
+    check_fragmented_paper_range_materialization<std::uint64_t>();
+
+    using noncanonical_packing =
+        sequence_custom_alphabet<seq::dna4, std::uint32_t, 4>;
+    using noncanonical_range = compact_sequence_range<noncanonical_packing>;
+    using noncanonical_scanner =
+        bioseq::storage::sequence_scanner_test_chunked<std::uint32_t, 2>;
+    using noncanonical_lazy = bioseq::storage::lazy_compact_sequence<
+        noncanonical_packing, noncanonical_scanner>;
+    static_assert(!::bioseq::simd::HWY_NAMESPACE::pipe::
+        paper_nthash_has_canonical_two_bit_packing<noncanonical_range>);
+    static_assert(!::bioseq::simd::HWY_NAMESPACE::pipe::
+        paper_nthash_has_canonical_two_bit_packing<noncanonical_lazy>);
+}
+
+enum class InjectedScannerLeaf {
+    row_read,
+    palloc,
+    interrupt,
+};
+
+class InjectedScannerLeafError final : public std::runtime_error {
+public:
+    explicit InjectedScannerLeafError(InjectedScannerLeaf point)
+        : std::runtime_error(point == InjectedScannerLeaf::row_read
+              ? "injected scanner row-read failure"
+              : point == InjectedScannerLeaf::palloc
+                  ? "injected scanner palloc failure"
+                  : "injected scanner interrupt failure")
+    {}
+};
+
+template <class StorageUnit>
+struct InjectedFailureScanner final {
+    using storage_unit = StorageUnit;
+    using base_container = std::span<const storage_unit>;
+    static constexpr std::size_t fragment_storage_units = 2u;
+
+    base_container backing{};
+    bioseq::storage::sequence_size_t bp_size = 0;
+    std::size_t padding = 0;
+    InjectedScannerLeaf point = InjectedScannerLeaf::row_read;
+    std::size_t* reads = nullptr;
+
+    [[nodiscard]] static constexpr bool supports_fragments() noexcept {
+        return true;
+    }
+    [[nodiscard]] bioseq::storage::sequence_size_t total_bp_size() const noexcept {
+        return bp_size;
+    }
+    [[nodiscard]] bioseq::storage::sequence_size_t total_size() const noexcept {
+        return static_cast<bioseq::storage::sequence_size_t>(backing.size());
+    }
+    [[nodiscard]] bioseq::storage::sequence_size_t total_byte_size() const noexcept {
+        return static_cast<bioseq::storage::sequence_size_t>(
+            backing.size() * sizeof(storage_unit));
+    }
+    [[nodiscard]] std::size_t number_of_fragments() const noexcept {
+        return (backing.size() + fragment_storage_units - 1u)
+            / fragment_storage_units;
+    }
+    [[nodiscard]] bioseq::storage::sequence_size_t
+    estimated_total_bp_size() const noexcept {
+        return bp_size;
+    }
+    [[nodiscard]] std::size_t last_fragment_padding_letters() const noexcept {
+        return padding;
+    }
+    [[nodiscard]] base_container read_fragment(std::size_t) const {
+        if (reads != nullptr) {
+            ++*reads;
+        }
+        throw InjectedScannerLeafError{point};
+    }
+    void release_fragment(std::size_t) const noexcept {}
+
+    using fragment_read_callback = void (*)(void*);
+    static void run_fragment_reads_with_error_cleanup(
+            void* context,
+            fragment_read_callback body,
+            fragment_read_callback) {
+        body(context);
+    }
+
+};
+
+static_assert(bioseq::storage::is_active_sequence_scanner<
+    InjectedFailureScanner<std::uint64_t>>);
+
+TEST_CASE("fragmented Paper ntHash unwinds its vector and memory permit for every scanner PostgreSQL leaf failure",
+          "[paper-nthash][pipe][fragmented][pg-error][memory-admission]") {
+    using StorageUnit = std::uint64_t;
+    using packed_sequence = sequence_custom_alphabet<seq::dna4, StorageUnit>;
+    using range_type = compact_sequence_range<packed_sequence>;
+    using scanner_type = InjectedFailureScanner<StorageUnit>;
+    using lazy_type = bioseq::storage::lazy_compact_sequence<
+        packed_sequence, scanner_type>;
+    using minimizer_type =
+        ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using collector_type =
+        ::bioseq::simd::HWY_NAMESPACE::sketch_collector_t<minimizer_type>;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::minimizer_dispatch_range;
+
+    auto bases = doc0307_e2e::make_dna4(4'123, 0x51A9E5u);
+    range_type range(bases);
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+
+    for (const InjectedScannerLeaf point : {
+             InjectedScannerLeaf::row_read,
+             InjectedScannerLeaf::palloc,
+             InjectedScannerLeaf::interrupt}) {
+        CAPTURE(static_cast<unsigned>(point));
+        std::size_t reads = 0;
+        scanner_type scanner{
+            .backing = std::span<const StorageUnit>{
+                range.read_cptr(range.cbegin()),
+                static_cast<std::size_t>(range.size())},
+            .bp_size = static_cast<bioseq::storage::sequence_size_t>(
+                range.bp_size()),
+            .padding = static_cast<std::size_t>(range.padding()),
+            .point = point,
+            .reads = &reads,
+        };
+        lazy_type fragmented{std::move(scanner)};
+        collector_type collector;
+        const std::uint64_t reserved_before = admission.reserved_bytes();
+
+        REQUIRE_THROWS_AS(
+            minimizer_dispatch_range<minimizer_type>(
+                collector,
+                fragmented,
+                2u,
+                static_cast<bioseq::storage::sequence_size_t>(range.size() - 2u),
+                10u,
+                15u,
+                MinimizerSketchBackend::PaperNtHashSimd),
+            InjectedScannerLeafError);
+        REQUIRE(reads == 1u);
+        REQUIRE(admission.reserved_bytes() == reserved_before);
+    }
+}
+
+TEST_CASE("Paper ntHash SIMD pipe executes distinct sketch proof without fallback",
+          "[paper-nthash][simd][pipe][proof][fail-closed]") {
     using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
     using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
     using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+
+    auto target = doc0307_e2e::make_dna4(4000, 0x51A7C0DEu);
+    constexpr std::size_t truth_start = 700;
+    std::vector<seq::dna4> query(
+        target.begin() + truth_start,
+        target.begin() + truth_start + 900);
+
+    Minimap2Params params{};
+    params.minimizer_algorithm =
+        MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
+    params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+    params.base_alignment_algorithm =
+        BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    params.do_cigar = true;
+
+    const auto result = doc0307_e2e::run(query, target, params);
+    REQUIRE(result.paper_nthash_query_execution_accepted(true));
+    REQUIRE(result.paper_nthash_target_execution_accepted(true));
+    REQUIRE(result.simd_chaining_execution_accepted(true));
+    REQUIRE(result.block_aligner_execution_accepted(true));
+    REQUIRE(result.all_simd_execution_accepted(
+        MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+        /*require_target_sketch=*/true,
+        /*require_nonempty_vector_work=*/true));
+    REQUIRE_FALSE(result.all_simd_execution_accepted(
+        MinimizerAlgorithmType::TWO_STACK_NTHASH,
+        /*require_target_sketch=*/true,
+        /*require_nonempty_vector_work=*/true));
+    auto mixed_proof = result;
+    mixed_proof.exact_simd_query_execution_proof_present = true;
+    REQUIRE_FALSE(mixed_proof.all_simd_execution_accepted(
+        MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+        /*require_target_sketch=*/true,
+        /*require_nonempty_vector_work=*/true));
+    REQUIRE_FALSE(result.exact_simd_query_execution_proof_present);
+    REQUIRE_FALSE(result.exact_simd_target_execution_proof_present);
+    REQUIRE_FALSE(result.partial_vulkan_execution_proof.has_any_dispatch());
+    REQUIRE(result.partial_vulkan_execution_proof
+            == ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof{});
+
+    auto vulkan_dispatch_tamper = result;
+    vulkan_dispatch_tamper.partial_vulkan_execution_proof
+        .query_sketch_dispatches = 1;
+    REQUIRE_FALSE(vulkan_dispatch_tamper
+        .selected_simd_sketch_execution_accepted(
+            MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+            /*require_target_sketch=*/true,
+            /*require_nonempty_vector_work=*/true));
+
+    auto vulkan_metadata_tamper = result;
+    vulkan_metadata_tamper.partial_vulkan_execution_proof
+        .gpu_index_unique_keys = 1;
+    REQUIRE_FALSE(vulkan_metadata_tamper.partial_vulkan_execution_proof
+        .has_any_dispatch());
+    REQUIRE_FALSE(vulkan_metadata_tamper
+        .selected_simd_sketch_execution_accepted(
+            MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+            /*require_target_sketch=*/true,
+            /*require_nonempty_vector_work=*/true));
+
+    auto hidden_opposite_payload = result;
+    hidden_opposite_payload.exact_simd_query_execution_proof.bp_consumed = 1;
+    REQUIRE_FALSE(hidden_opposite_payload
+        .exact_simd_query_execution_proof_present);
+    REQUIRE_FALSE(hidden_opposite_payload
+        .selected_simd_sketch_execution_accepted(
+            MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+            /*require_target_sketch=*/true,
+            /*require_nonempty_vector_work=*/true));
+
+    auto persisted_proof = result;
+    persisted_proof.paper_nthash_target_execution_proof = {};
+    persisted_proof.paper_nthash_target_execution_proof_present = false;
+    REQUIRE(persisted_proof.selected_simd_sketch_execution_accepted(
+        MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+        /*require_target_sketch=*/false,
+        /*require_nonempty_vector_work=*/true));
+
+    auto hidden_persisted_target_payload = persisted_proof;
+    hidden_persisted_target_payload.paper_nthash_target_execution_proof =
+        result.paper_nthash_target_execution_proof;
+    REQUIRE_FALSE(hidden_persisted_target_payload
+        .paper_nthash_target_execution_proof_present);
+    REQUIRE_FALSE(hidden_persisted_target_payload
+        .selected_simd_sketch_execution_accepted(
+            MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+            /*require_target_sketch=*/false,
+            /*require_nonempty_vector_work=*/true));
+
+    auto target_presence_only = persisted_proof;
+    target_presence_only.paper_nthash_target_execution_proof_present = true;
+    REQUIRE_FALSE(target_presence_only
+        .selected_simd_sketch_execution_accepted(
+            MinimizerAlgorithmType::PAPER_NTHASH_SIMD,
+            /*require_target_sketch=*/false,
+            /*require_nonempty_vector_work=*/true));
+
+    const auto primary = std::ranges::find_if(
+        result.results,
+        [](const auto& match) { return match.is_primary; });
+    REQUIRE(primary != result.results.end());
+    REQUIRE(std::abs(
+        static_cast<std::int64_t>(primary->target_start)
+        - static_cast<std::int64_t>(truth_start)) < 15);
+}
+
+TEST_CASE("Paper ntHash segmented pipe globalizes local coordinates without fallback",
+          "[paper-nthash][simd][pipe][segmented][proof][coordinates]") {
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+
+    // Force the production geometry to its 32-Mbp floor, then place the truth
+    // strictly inside the second core. This exercises two real target-range
+    // sketches without introducing a test-only segmentation implementation.
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t value;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(value); }
+    } restore_cap{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(192'000'000u);
+
+    constexpr std::size_t target_length = 33'000'000;
+    constexpr std::size_t truth_start = 32'250'000;
+    constexpr std::size_t query_length = 40'000;
+    auto target = doc0307_e2e::make_dna4(
+        target_length, 0x5E6A3E17u);
+    std::vector<seq::dna4> query;
+    query.reserve(query_length);
+    for (auto iterator = target.begin() + truth_start + query_length;
+         iterator != target.begin() + truth_start;) {
+        --iterator;
+        seq::dna4 complement{};
+        complement.assign_rank(static_cast<std::uint8_t>(
+            3u - iterator->to_rank()));
+        query.push_back(complement);
+    }
+
+    doc0307_e2e::range_t query_range(query);
+    doc0307_e2e::range_t target_range(target);
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
+    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+
+    Minimap2Params params{};
+    params.minimizer_algorithm =
+        MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
+    params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+    params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+    params.do_cigar = false;
+
+    const auto result = ::bioseq::simd::HWY_NAMESPACE::
+        minimap_port_segmented(lazy_query, lazy_target, params);
+    REQUIRE(result.paper_nthash_query_execution_accepted(true));
+    REQUIRE(result.paper_nthash_target_execution_accepted(true));
+    REQUIRE(result.paper_nthash_target_execution_proof.segments_combined >= 2);
+    REQUIRE(result.simd_chaining_execution_accepted(true));
+    REQUIRE_FALSE(result.exact_simd_query_execution_proof_present);
+    REQUIRE_FALSE(result.exact_simd_target_execution_proof_present);
+    REQUIRE_FALSE(result.partial_vulkan_execution_proof.has_any_dispatch());
+
+    const auto primary = std::ranges::find_if(
+        result.results,
+        [](const auto& match) { return match.is_primary; });
+    REQUIRE(primary != result.results.end());
+    REQUIRE(primary->is_reverse);
+    REQUIRE(std::abs(
+        static_cast<std::int64_t>(primary->target_start)
+        - static_cast<std::int64_t>(truth_start)) < 15);
+}
+
+TEST_CASE("canonical Vulkan selection separates capability from a complete all-GPU tuple",
+          "[vulkan][pipe][routing][fail-closed]") {
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        complete_all_gpu_tuple_selected;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested;
+
+    Minimap2Params params{};
+    params.vulkan_enabled = true;
+    params.vulkan_index_cache_enabled = true;
+    REQUIRE_FALSE(vulkan_components_requested(params));
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+
+    params.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    REQUIRE(vulkan_components_requested(params));
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+
+    params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    params.vulkan_seed_hits_enabled = true;
+    params.vulkan_fused_frontend_enabled = true;
+    params.vulkan_gpu_index_build_enabled = true;
+    params.vulkan_extend_enabled = true;
+    params.compute_divergence = false;
+    params.compute_mapq = false;
+    params.max_occ = 500;
+    REQUIRE(complete_all_gpu_tuple_selected(params));
+
+    params.vulkan_enabled = false;
+    REQUIRE(vulkan_components_requested(params));
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+    params.vulkan_enabled = true;
+
+    params.vulkan_extend_enabled = false;
+    params.do_cigar = true;
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+    params.vulkan_extend_enabled = true;
+    REQUIRE(complete_all_gpu_tuple_selected(params));
+
+    params.compute_mapq = true;
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+    params.compute_mapq = false;
+    params.base_alignment_algorithm =
+        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+}
+
+TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
+          "[vulkan][phase-b][pipe]") {
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        MinimizerRangeExecutionProof;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        minimizer_range_proof_matches_backend;
 
     auto target = doc0307_e2e::make_dna4(4000, 0xC0FFEEu);
     // Query = a forward sub-region of the target (a guaranteed match).
@@ -828,6 +3326,35 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
     cpu.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
     cpu.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
     const auto cpu_res = doc0307_e2e::run(query, target, cpu);
+    REQUIRE(cpu.do_cigar);
+    REQUIRE(cpu_res.exact_simd_query_execution_accepted(true));
+    REQUIRE(cpu_res.exact_simd_target_execution_accepted(true));
+    REQUIRE(cpu_res.simd_chaining_execution_accepted(true));
+    REQUIRE(cpu_res.block_aligner_execution_accepted(
+        /*require_nonempty_simd_work=*/true));
+    REQUIRE(cpu_res.partial_vulkan_execution_proof
+            == ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof{});
+    REQUIRE(cpu_res.all_simd_execution_accepted(
+        MinimizerAlgorithmType::TWO_STACK_NTHASH,
+        /*require_target_sketch=*/true,
+        /*require_nonempty_vector_work=*/true));
+
+    MinimizerRangeExecutionProof exact_range{};
+    exact_range.exact_simd = cpu_res.exact_simd_query_execution_proof;
+    exact_range.exact_simd_present = true;
+    REQUIRE(minimizer_range_proof_matches_backend(
+        MinimizerSketchBackend::ExactSimd,
+        exact_range,
+        /*require_nonempty_vector_work=*/true));
+    auto hidden_paper_payload = exact_range;
+    hidden_paper_payload.paper_nthash.scheme_id = 1;
+    REQUIRE_FALSE(hidden_paper_payload.paper_nthash_present);
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        MinimizerSketchBackend::ExactSimd, hidden_paper_payload));
+    auto paper_presence_only = exact_range;
+    paper_presence_only.paper_nthash_present = true;
+    REQUIRE_FALSE(minimizer_range_proof_matches_backend(
+        MinimizerSketchBackend::ExactSimd, paper_presence_only));
 
     Minimap2Params gpu = cpu;
     gpu.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
@@ -844,6 +3371,19 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
 
     REQUIRE_FALSE(cpu_res.results.empty());
     REQUIRE_FALSE(gpu_res.results.empty());
+    REQUIRE(gpu.do_cigar);
+    REQUIRE_FALSE(gpu_res.exact_simd_query_execution_proof_present);
+    REQUIRE_FALSE(gpu_res.exact_simd_target_execution_proof_present);
+    REQUIRE_FALSE(gpu_res.simd_chaining_execution_proof_present);
+    REQUIRE(gpu_res.partial_vulkan_execution_proof
+                .exact_stage_mask_accepted(
+                    /*query_sketch=*/true,
+                    /*target_sketch=*/true,
+                    /*target_index_build=*/false,
+                    /*seed_lookup=*/true,
+                    /*chain_score=*/true));
+    REQUIRE(gpu_res.block_aligner_execution_accepted(
+        /*require_nonempty_simd_work=*/true));
     REQUIRE(doc0307_e2e::coords(cpu_res) == doc0307_e2e::coords(gpu_res));
 }
 
@@ -864,6 +3404,256 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
     REQUIRE_THROWS_AS(
         doc0307_e2e::run(query, target, disabled),
         bioseq::gpu::vulkan::VulkanRuntimeError);
+}
+
+TEST_CASE("post-seed owned lifetime releases only after the final seed user",
+          "[pipeline][seed][lifetime]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    std::vector<Sketch> sketches{
+        Sketch{/*kmer*/ 7, /*pos*/ 1, /*strand*/ 0},
+        Sketch{/*kmer*/ 7, /*pos*/ 3, /*strand*/ 1},
+        Sketch{/*kmer*/ 9, /*pos*/ 5, /*strand*/ 0},
+    };
+    bioseq::indexing::MinimizerHashmapFragmentIndex index;
+    index.build(sketches, 100);
+    const std::uint64_t position_capacity_bytes =
+        index.positions.capacity() * sizeof(std::uint64_t);
+    REQUIRE(position_capacity_bytes != 0u);
+
+    PostSeedOwnedLifetime lifetime{
+        /*seed_users=*/2u,
+        /*owned_gpu_cache=*/nullptr,
+        /*owned_cpu_index=*/&index};
+    const auto first = lifetime.complete_seed_user();
+    REQUIRE(first.cpu_index_releases == 0u);
+    REQUIRE_FALSE(index.table_empty());
+
+    const auto last = lifetime.complete_seed_user();
+    REQUIRE(last.cpu_index_releases == 1u);
+    REQUIRE(last.cpu_position_bytes_released == position_capacity_bytes);
+    REQUIRE(last.gpu_cache_evictions == 0u);
+    REQUIRE(index.table_empty());
+    REQUIRE(index.positions.capacity() == 0u);
+}
+
+TEST_CASE("seed lookup applies max_occ once across every borrowed position span",
+          "[pipeline][seed][lookup-spans]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using ::bioseq::indexing::MinimizerLookupSpans;
+    using ::bioseq::indexing::MinimizerPositionSpan;
+    struct SegmentedSeedIndex {
+        std::array<std::uint64_t, 2> first{
+            (std::uint64_t{100} << 1u),
+            (std::uint64_t{200} << 1u) | 1u,
+        };
+        std::array<std::uint64_t, 1> second{
+            (std::uint64_t{300} << 1u),
+        };
+        std::array<MinimizerPositionSpan, 2> spans{
+            MinimizerPositionSpan{first},
+            MinimizerPositionSpan{second},
+        };
+        bool positions_available = true;
+        std::uint64_t reported_count = 3;
+
+        [[nodiscard]] MinimizerLookupSpans lookup_spans(
+                std::uint64_t hash) const noexcept {
+            if (hash != 7u) {
+                return MinimizerLookupSpans::segmented(
+                    {}, /*global_occurrence_count=*/0);
+            }
+            if (!positions_available) {
+                return MinimizerLookupSpans::positions_unavailable(
+                    reported_count);
+            }
+            return MinimizerLookupSpans::segmented(
+                spans, reported_count);
+        }
+
+        [[nodiscard]] bioseq::storage::sequence_size_t target_length()
+                const noexcept {
+            return 1'000;
+        }
+    };
+    STATIC_REQUIRE(::bioseq::indexing::MinimizerLookupIndex<
+        SegmentedSeedIndex>);
+
+    const std::array<Sketch, 1> query{
+        Sketch{/*kmer=*/7, /*pos=*/10, /*strand=*/0},
+    };
+
+    SECTION("all spans emit when their global count is admitted") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::Arena::Chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<
+            ::bioseq::chaining::Anchor>();
+        SegmentedSeedIndex index;
+        ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+            std::span<const Sketch>{query},
+            index,
+            /*query_len=*/100,
+            /*max_occ=*/3,
+            /*kmer_size=*/15,
+            anchors);
+        REQUIRE(anchors.size() == 3);
+        REQUIRE(anchors.data()[0].ref_position == 100);
+        REQUIRE(anchors.data()[1].ref_position == 300);
+        REQUIRE(anchors.data()[2].ref_position == 200);
+        REQUIRE(anchors.data()[2].is_reverse == 1u);
+    }
+
+    SECTION("global count prunes although every available span is individually admissible") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::Arena::Chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<
+            ::bioseq::chaining::Anchor>();
+        SegmentedSeedIndex index;
+        ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+            std::span<const Sketch>{query},
+            index,
+            /*query_len=*/100,
+            /*max_occ=*/2,
+            /*kmer_size=*/15,
+            anchors);
+        REQUIRE(anchors.size() == 0);
+    }
+
+    SECTION("global pruning does not require deliberately unloaded positions") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::Arena::Chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<
+            ::bioseq::chaining::Anchor>();
+        SegmentedSeedIndex index;
+        index.positions_available = false;
+        ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+            std::span<const Sketch>{query},
+            index,
+            /*query_len=*/100,
+            /*max_occ=*/2,
+            /*kmer_size=*/15,
+            anchors);
+        REQUIRE(anchors.size() == 0);
+    }
+
+    SECTION("a surviving hash without positions fails closed") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::Arena::Chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<
+            ::bioseq::chaining::Anchor>();
+        SegmentedSeedIndex index;
+        index.positions_available = false;
+        REQUIRE_THROWS_AS(
+            ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+                std::span<const Sketch>{query},
+                index,
+                /*query_len=*/100,
+                /*max_occ=*/3,
+                /*kmer_size=*/15,
+                anchors),
+            ::bioseq::indexing::PersistedMinimizerLookupError);
+    }
+
+    SECTION("an admitted malformed global count fails closed") {
+        context::context ctx;
+        context::installed_context_scope installed{ctx};
+        auto scope = ctx.push<context::Arena::Chain>();
+        auto anchors = ::bioseq::chaining::make_arena_slab<
+            ::bioseq::chaining::Anchor>();
+        SegmentedSeedIndex index;
+        index.reported_count = 2;
+        REQUIRE_THROWS_AS(
+            ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+                std::span<const Sketch>{query},
+                index,
+                /*query_len=*/100,
+                /*max_occ=*/2,
+                /*kmer_size=*/15,
+                anchors),
+            ::bioseq::indexing::PersistedMinimizerLookupError);
+        REQUIRE(anchors.size() == 0);
+    }
+}
+
+TEST_CASE("Vulkan chaining mapped plan phases report89 GPU and CPU scratch peaks",
+          "[vulkan][chaining][memory][diagnostics]") {
+    const auto plan = ::bioseq::chaining::make_vulkan_chaining_memory_plan(
+        /*anchor_count=*/1'520'944u,
+        /*range_count=*/32'035u);
+    REQUIRE(plan.device_anchor_bytes == 36'502'656u);
+    REQUIRE(plan.device_score_bytes == 6'083'776u);
+    REQUIRE(plan.device_predecessor_bytes == 12'167'552u);
+    REQUIRE(plan.device_range_bytes == 256'280u);
+    REQUIRE(plan.host_range_bytes == 256'280u);
+    REQUIRE(plan.compacted_host_anchor_bytes == 0u);
+    REQUIRE(plan.host_scored_index_bytes == 24'335'104u);
+    REQUIRE(plan.host_visited_bytes == 6'083'776u);
+    REQUIRE(plan.host_chain_index_bytes == 12'167'552u);
+    REQUIRE(plan.coordinate_device_trace_bytes == 0u);
+    REQUIRE(plan.coordinate_host_trace_bytes == 0u);
+    REQUIRE(plan.gpu_phase_bytes == 55'266'544u);
+    REQUIRE(plan.cpu_backtrack_phase_bytes == 61'094'040u);
+    REQUIRE(plan.total_bytes == 61'094'040u);
+
+    bioseq::parallelism::MemoryAdmissionFailure failure{
+        .reason = bioseq::parallelism::MemoryAdmissionFailureReason::system_pressure,
+        .requested_bytes = plan.total_bytes,
+        .reserved_bytes = 17u,
+        .budget_ceiling_bytes = 19u,
+        .allocatable_after_reservations_bytes = 2u,
+        .process_footprint_bytes = 23u,
+        .system_available_bytes = 29u,
+        .system_total_bytes = 31u,
+        .process_soft_cap_bytes = 37u,
+    };
+    const ::bioseq::chaining::VulkanChainingAdmissionError error{
+        plan, failure};
+    REQUIRE(error.plan.total_bytes == plan.total_bytes);
+    REQUIRE(error.admission.reason
+            == bioseq::parallelism::MemoryAdmissionFailureReason::system_pressure);
+    REQUIRE(std::string_view{error.what()}.find("admission_reason=system_pressure")
+            != std::string_view::npos);
+    REQUIRE(std::string_view{error.what()}.find("range_count=32035")
+            != std::string_view::npos);
+}
+
+TEST_CASE("Vulkan chaining shape preflight exactly matches in-place range compaction",
+          "[vulkan][chaining][memory][compaction]") {
+    constexpr std::size_t anchor_count =
+        ::bioseq::chaining::detail::kGpuChainCompactRangeThreshold + 2u;
+    std::vector<::bioseq::chaining::Anchor> anchors(anchor_count);
+    for (std::size_t i = 0; i < anchors.size(); ++i) {
+        anchors[i].ref_position = i;
+        anchors[i].query_position = i;
+        anchors[i].query_span = 15u;
+    }
+
+    const auto shape =
+        ::bioseq::chaining::detail::analyze_gpu_chaining_shape(
+            anchors, /*max_ref_dist=*/10u);
+    REQUIRE(shape.range_count == 1u);
+    REQUIRE(shape.compaction_required);
+    REQUIRE(shape.device_anchor_count < anchors.size());
+
+    context::context ctx;
+    context::installed_context_scope installed{ctx};
+    auto scope = ctx.push<context::Arena::Chain>();
+    auto ranges = ::bioseq::chaining::detail::build_gpu_chain_ranges(
+        anchors, /*max_ref_dist=*/10u, shape.range_count);
+    auto compacted = ::bioseq::chaining::make_arena_slab<
+        ::bioseq::chaining::Anchor>();
+    REQUIRE(::bioseq::chaining::detail::compact_long_gpu_chain_ranges(
+        anchors, ranges, compacted, ranges));
+    REQUIRE(compacted.size() == shape.device_anchor_count);
+    REQUIRE(ranges.size() == shape.range_count);
+    REQUIRE(ranges[0].begin == 0u);
+    REQUIRE(ranges[0].length == shape.device_anchor_count);
+    REQUIRE(compacted.data()[0].ref_position == anchors.front().ref_position);
+    REQUIRE(compacted.data()[compacted.size() - 1u].ref_position
+            == anchors.back().ref_position);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE::pipe
