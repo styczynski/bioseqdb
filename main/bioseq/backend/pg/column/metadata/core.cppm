@@ -29,8 +29,10 @@ module;
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <optional>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 export module bioseq.storage.metadata:core;
@@ -224,52 +226,96 @@ export struct FormDataBioseqOptions
 	// ReadBioseqColumnOptions(Oid, BioseqColumnOptions*).
 	[[nodiscard]] static std::optional<BioseqColumnOptions> read_options(Oid regclass) {
 		ScanKeyData scanKey[1];
-		ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass, BTEqualStrategyNumber,
-		            F_OIDEQ, ObjectIdGetDatum(regclass));
+		bioseq::pg_utils::invoke_pg_as_cpp([&] {
+			ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass,
+			            BTEqualStrategyNumber, F_OIDEQ,
+			            ObjectIdGetDatum(regclass));
+		});
 
-		Relation bioseqColumnOptions =
-			try_safe_relation_open(BioseqColumnOptionsRelationId(), AccessShareLock);
+		Relation bioseqColumnOptions = bioseq::pg_utils::invoke_pg_as_cpp([] {
+			return try_safe_relation_open(
+				BioseqColumnOptionsRelationId(), AccessShareLock);
+		});
 		if (bioseqColumnOptions == NULL)
 		{
 			/* Extension has been dropped (e.g. during DROP EXTENSION/DATABASE). */
 			return std::nullopt;
 		}
-		Relation index =
-			try_safe_relation_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
-		if (index == NULL)
-		{
-			table_close(bioseqColumnOptions, AccessShareLock);
-			return std::nullopt;
+
+		Relation index = nullptr;
+		SysScanDesc scanDescriptor = nullptr;
+		std::optional<BioseqColumnOptions> result;
+		std::exception_ptr failure;
+		try {
+			index = bioseq::pg_utils::invoke_pg_as_cpp([] {
+				return try_safe_relation_open(
+					BioseqColumnOptionsIndexRegclass(), AccessShareLock);
+			});
+			if (index != nullptr) {
+				scanDescriptor = bioseq::pg_utils::invoke_pg_as_cpp(
+					[bioseqColumnOptions, index, &scanKey] {
+						return systable_beginscan_ordered(
+							bioseqColumnOptions, index, NULL, 1, scanKey);
+					});
+				HeapTuple heapTuple = bioseq::pg_utils::invoke_pg_as_cpp(
+					[scanDescriptor] {
+						return systable_getnext_ordered(
+							scanDescriptor, ForwardScanDirection);
+					});
+				if (HeapTupleIsValid(heapTuple)) {
+					// Snapshot the fixed-width tuple by value while the buffer is
+					// pinned, then translate outside the checked PG leaf.
+					const FormDataBioseqOptions raw =
+						bioseq::pg_utils::invoke_pg_as_cpp([heapTuple] {
+							return *reinterpret_cast<FormDataBioseqOptions *>(
+								GETSTRUCT(heapTuple));
+						});
+					result = raw.to_options();
+				} else {
+					/* populate options with system defaults */
+					result = BioseqColumnOptions{
+						.stripeRowCount = static_cast<uint32_t>(
+							bioseq_stripe_row_limit),
+						.chunkRowCount = static_cast<uint32_t>(
+							bioseq_chunk_group_row_limit),
+						.compressionType = static_cast<CompressionType>(
+							bioseq_compression),
+						.compressionLevel = bioseq_compression_level,
+					};
+				}
+			}
+		} catch (...) {
+			failure = std::current_exception();
 		}
 
-		SysScanDesc scanDescriptor =
-			systable_beginscan_ordered(bioseqColumnOptions, index, NULL, 1, scanKey);
-		HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
-
-		BioseqColumnOptions options;
-		if (HeapTupleIsValid(heapTuple))
-		{
-			// Snapshot the fixed-width tuple by value while the buffer is pinned,
-			// then translate. Isolates the only ABI-sensitive line.
-			FormDataBioseqOptions raw =
-				*reinterpret_cast<FormDataBioseqOptions *>(GETSTRUCT(heapTuple));
-			options = raw.to_options();
+		const auto cleanup = [&failure](auto&& operation) {
+			try {
+				operation();
+			} catch (...) {
+				if (failure == nullptr) failure = std::current_exception();
+			}
+		};
+		if (scanDescriptor != nullptr) {
+			cleanup([scanDescriptor] {
+				bioseq::pg_utils::invoke_pg_as_cpp([scanDescriptor] {
+					systable_endscan_ordered(scanDescriptor);
+				});
+			});
 		}
-		else
-		{
-			/* populate options with system defaults */
-			options = BioseqColumnOptions{
-				.stripeRowCount   = static_cast<uint32_t>(bioseq_stripe_row_limit),
-				.chunkRowCount    = static_cast<uint32_t>(bioseq_chunk_group_row_limit),
-				.compressionType  = static_cast<CompressionType>(bioseq_compression),
-				.compressionLevel = bioseq_compression_level,
-			};
+		if (index != nullptr) {
+			cleanup([index] {
+				bioseq::pg_utils::invoke_pg_as_cpp([index] {
+					index_close(index, AccessShareLock);
+				});
+			});
 		}
-
-		systable_endscan_ordered(scanDescriptor);
-		index_close(index, AccessShareLock);
-		relation_close(bioseqColumnOptions, AccessShareLock);
-		return options;
+		cleanup([bioseqColumnOptions] {
+			bioseq::pg_utils::invoke_pg_as_cpp([bioseqColumnOptions] {
+				relation_close(bioseqColumnOptions, AccessShareLock);
+			});
+		});
+		if (failure != nullptr) std::rethrow_exception(failure);
+		return result;
 	}
 };
 
@@ -796,6 +842,11 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 				 MemoryContext cxt,
 				 uint64_t stripeFirstRowNumber, int rowCount)
 {
+	if (snapshot == nullptr)
+	{
+		bioseq_log<ERR, PG>(
+			"ReadChunkRowMask requires the caller's registered snapshot");
+	}
 	HeapTuple heapTuple = NULL;
 	ScanKeyData scanKey[3];
 
@@ -825,9 +876,9 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
 					BTLessEqualStrategyNumber, F_INT8LE, UInt64GetDatum(stripeFirstRowNumber + rowCount - 1));
 
-		scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
-													index,
-													SnapshotSelf, 3, scanKey);
+			scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
+												index,
+												snapshot, 3, scanKey);
 
 		int pos = 0;
 		while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
@@ -1229,17 +1280,14 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 	*chunkGroupDeletedRows = make_array<uint32_t>(chunkGroupCount);
 
 	/*
-	 * Since we have now updates of `chunk_group`, there could be multiple tuples
-	 * retrieved with changed only deleted_row count. We expect that last modified
-	 * version will be retrieved last so it we just update information based on tuple
-	 * chunk group index.
+	 * The caller's snapshot selects the one visible version of each chunk-group
+	 * row.  A tuple that is HOT-updated can still be exactly the version visible
+	 * to an older REPEATABLE READ snapshot; filtering it by the physical
+	 * HEAP_HOT_UPDATED flag would incorrectly hide pre-update source rows.
 	 */
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		if (HeapTupleHeaderIsHotUpdated(heapTuple->t_data))
-			continue;
-
 		Datum datumArray[Natts_bioseq_chunkgroup];
 		bool isNullArray[Natts_bioseq_chunkgroup];
 
@@ -2485,28 +2533,71 @@ export struct SubTableManager {
 	list_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode)
 	{
 		std::vector<SubTableRow> out;
-		const Oid rel_oid = relid();
+		const Oid rel_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+			[] { return relid(); });
 		if (!OidIsValid(rel_oid)) {
 			return out;
 		}
-		Relation rel = safe_relation_open(rel_oid, AccessShareLock);
+		Relation rel = bioseq::pg_utils::invoke_pg_as_cpp(
+			[rel_oid] {
+				return try_safe_relation_open(rel_oid, AccessShareLock);
+			});
+		if (rel == nullptr) {
+			return out;
+		}
 		TupleDesc td = RelationGetDescr(rel);
 
 		ScanKeyData keys[3];
-		ScanKeyInit(&keys[0], anum_seq_sub_table::field<"database_oid">,
-		            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
-		ScanKeyInit(&keys[1], anum_seq_sub_table::field<"tablespace_oid">,
-		            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
-		ScanKeyInit(&keys[2], anum_seq_sub_table::field<"main_relfilenode">,
-		            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
-
-		SysScanDesc scan = systable_beginscan(rel, InvalidOid, false, nullptr, 3, keys);
-		HeapTuple tup = nullptr;
-		while (HeapTupleIsValid(tup = systable_getnext(scan))) {
-			out.push_back(SubTableRow(tup, td));
+		SysScanDesc scan = nullptr;
+		std::exception_ptr failure;
+		try {
+			bioseq::pg_utils::invoke_pg_as_cpp([&] {
+				ScanKeyInit(&keys[0],
+				            anum_seq_sub_table::field<"database_oid">,
+				            BTEqualStrategyNumber, F_OIDEQ,
+				            ObjectIdGetDatum(database_oid));
+				ScanKeyInit(&keys[1],
+				            anum_seq_sub_table::field<"tablespace_oid">,
+				            BTEqualStrategyNumber, F_OIDEQ,
+				            ObjectIdGetDatum(tablespace_oid));
+				ScanKeyInit(&keys[2],
+				            anum_seq_sub_table::field<"main_relfilenode">,
+				            BTEqualStrategyNumber, F_OIDEQ,
+				            ObjectIdGetDatum(main_relfilenode));
+			});
+			scan = bioseq::pg_utils::invoke_pg_as_cpp([rel, &keys] {
+				return systable_beginscan(
+					rel, InvalidOid, false, nullptr, 3, keys);
+			});
+			for (;;) {
+				HeapTuple tuple = bioseq::pg_utils::invoke_pg_as_cpp(
+					[scan] { return systable_getnext(scan); });
+				if (!HeapTupleIsValid(tuple)) break;
+				SubTableRow row = bioseq::pg_utils::invoke_pg_as_cpp(
+					[tuple, td] { return SubTableRow(tuple, td); });
+				out.push_back(std::move(row));
+			}
+		} catch (...) {
+			failure = std::current_exception();
 		}
-		systable_endscan(scan);
-		table_close(rel, AccessShareLock);
+		const auto cleanup = [&failure](auto&& operation) {
+			try {
+				operation();
+			} catch (...) {
+				if (failure == nullptr) failure = std::current_exception();
+			}
+		};
+		if (scan != nullptr) {
+			cleanup([scan] {
+				bioseq::pg_utils::invoke_pg_as_cpp(
+					[scan] { systable_endscan(scan); });
+			});
+		}
+		cleanup([rel] {
+			bioseq::pg_utils::invoke_pg_as_cpp(
+				[rel] { table_close(rel, AccessShareLock); });
+		});
+		if (failure != nullptr) std::rethrow_exception(failure);
 		return out;
 	}
 
@@ -2517,7 +2608,10 @@ export struct SubTableManager {
 		if (!OidIsValid(rel_oid)) {
 			return;
 		}
-		Relation rel = safe_relation_open(rel_oid, RowExclusiveLock);
+		Relation rel = try_safe_relation_open(rel_oid, RowExclusiveLock);
+		if (rel == nullptr) {
+			return;
+		}
 
 		ScanKeyData keys[3];
 		ScanKeyInit(&keys[0], anum_seq_sub_table::field<"database_oid">,

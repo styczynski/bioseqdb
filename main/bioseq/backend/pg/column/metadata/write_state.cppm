@@ -93,11 +93,18 @@ PopWriteStateEntryIfCurrent(WriteStateMapEntry* entry,
 							SubTransactionId parent_sub_xid,
 							bool commit)
 {
-	if (entry == nullptr || entry->writeStateStack == nullptr)
+	if (entry == nullptr)
 	{
 		return;
 	}
 
+	/*
+	 * A relation can be dropped after its last write frame was popped by an
+	 * earlier commit.  The drop marker is still transactional state and must be
+	 * elevated or reverted even when there is no current write frame.  Checking
+	 * writeStateStack first strands dropped=true after a failed DROP, making the
+	 * restored relation appear permanently empty in this backend.
+	 */
 	if (entry->dropped)
 	{
 		if (entry->dropSubXid == current_sub_xid)
@@ -111,6 +118,11 @@ PopWriteStateEntryIfCurrent(WriteStateMapEntry* entry,
 				entry->dropped = false;
 			}
 		}
+		return;
+	}
+
+	if (entry->writeStateStack == nullptr)
+	{
 		return;
 	}
 
@@ -176,16 +188,17 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 	bioseq_column_options = FormDataBioseqOptions::read_options(tuple_slot_relation_id).value_or(BioseqColumnOptions{});
 
 	BioseqColumnWriteState* fresh_write_state = nullptr;
-	{
-		MemoryContextScope context_guard(WriteStateCache.context());
-		fresh_write_state = g_begin_write(relation->rd_locator,
-										  bioseq_column_options,
-										  tuple_descriptor);
-		// DOC0260 Phase A — seq_caches is initialised lazily by the
-		// TAM-side rewrite helper (rewrite_seq_columns_to_stubs in
-		// access_method.cppm).
-		fresh_write_state->seq_caches = nullptr;
-	}
+	fresh_write_state = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+		const MemoryContext previous =
+			MemoryContextSwitchTo(WriteStateCache.context());
+		BioseqColumnWriteState* result = g_begin_write(
+			relation->rd_locator, bioseq_column_options, tuple_descriptor);
+		MemoryContextSwitchTo(previous);
+		return result;
+	});
+	// DOC0260 Phase A — seq_caches is initialised lazily by the TAM-side
+	// rewrite helper (rewrite_seq_columns_to_stubs in access_method.cppm).
+	fresh_write_state->seq_caches = nullptr;
 
 	BioseqColumnSubXidWriteFrame* stack_entry = WriteStateCache.alloc_in_context<BioseqColumnSubXidWriteFrame>();
 	stack_entry->writeState = fresh_write_state;

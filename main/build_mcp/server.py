@@ -14,8 +14,8 @@ Concurrency rules:
     - "tests"  group covers unit+integration.
     - "bench"  group covers bench and bench-fast (they share the binary and
       the reporting/ output directory, so concurrent runs would race).
-    - Different lock groups can run in parallel
-      (e.g. unit+integration alongside bench).
+    - Different lock groups can run in parallel unless both runs install/restart
+      the shared PostgreSQL extension (unit+integration conflicts with bench-e2e).
 
 Architecture:
     - Run with no args → MCP server on stdin/stdout.
@@ -72,11 +72,12 @@ import bootstrap  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 
-# DOC0270 — two parallel build trees:
+# DOC0270 plus test-hook isolation — parallel production/test build families:
 #
-#   "bench-opt"        — default, fast. -O3 + NDEBUG, no -g, no -save-temps.
-#                        Used by every normal start_build call. Lives under
-#                        build/bench-opt/.
+#   "bench-opt"        — default production/benchmark fast tree. -O3 + NDEBUG,
+#                        no -g, no -save-temps. Lives under build/bench-opt/.
+#   "test-opt"         — matching isolated unit/integration tree, with guarded
+#                        failure hooks and test-only indexes enabled.
 #   "bench-opt-debug"  — heavier, slower. Same -O3 + NDEBUG, plus -g (DWARF)
 #                        and -save-temps=obj (per-TU .s/.ii/.bc artifacts).
 #                        Selected with debug=true on start_build. Required by
@@ -85,11 +86,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 #                        pre-LTO assembly view (needs the per-TU .s files).
 #                        Lives under build/bench-opt-debug/ so it does not
 #                        invalidate the default tree's ninja graph.
+#   "test-opt-debug"   — matching isolated test debug/inspect tree.
 #
-# Both presets share the rest of the toolchain (vcpkg, arm64-osx target).
-# The build dir is selected per-call from `debug`; the state file records
-# which mode each run used so `status` and `inspect` can find the right
-# artifacts.
+# The preset families share the rest of the toolchain (vcpkg, arm64-osx target).
+# The build dir is selected per-call from mode + `debug`; state records which
+# preset each run used so `status` and `inspect` can find the right artifacts.
 # The preset names are overridable via environment so the SAME server.py can
 # drive different toolchains depending on where it runs. This is what lets the
 # remote-run tool reuse this exact build worker on the x86_64 AWS box: there the
@@ -101,7 +102,55 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 # preset name (every CMakePresets entry uses binaryDir ${sourceDir}/build/${presetName}),
 # so overriding the preset name is sufficient — no separate dir override needed.
 DEFAULT_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET", "bench-opt")
-DEBUG_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET_DEBUG", "bench-opt-debug")
+
+
+def _default_debug_preset(production_preset: str) -> str:
+    mapped = {
+        "bench-opt": "bench-opt-debug",
+        "aws-x64-linux": "aws-x64-linux-debug",
+        "aws-x64-linux-gcc161": "aws-x64-linux-gcc161-debug",
+    }.get(production_preset)
+    if mapped is not None:
+        return mapped
+    if production_preset.endswith("-debug"):
+        return production_preset
+    return f"{production_preset}-debug"
+
+
+DEBUG_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_BUILD_PRESET_DEBUG",
+    _default_debug_preset(DEFAULT_BUILD_PRESET),
+)
+
+
+def _default_test_preset(production_preset: str) -> str:
+    mapped = {
+        "bench-opt": "test-opt",
+        "bench-opt-debug": "test-opt-debug",
+        "aws-x64-linux": "test-aws-x64-linux",
+        "aws-x64-linux-debug": "test-aws-x64-linux-debug",
+        "aws-x64-linux-gcc161": "test-aws-x64-linux-gcc161",
+        "aws-x64-linux-gcc161-debug":
+            "test-aws-x64-linux-gcc161-debug",
+    }.get(production_preset)
+    if mapped is not None:
+        return mapped
+    if production_preset.startswith("test-"):
+        return production_preset
+    # Custom production presets follow the same fail-closed naming contract.
+    # If test-<preset> is not declared, configure fails instead of silently
+    # compiling guarded tests against the production tree.
+    return f"test-{production_preset}"
+
+
+TEST_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_TEST_BUILD_PRESET",
+    _default_test_preset(DEFAULT_BUILD_PRESET),
+)
+TEST_DEBUG_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
+    _default_test_preset(DEBUG_BUILD_PRESET),
+)
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
@@ -117,6 +166,28 @@ def build_dir_for(debug: bool) -> Path:
 
 def bin_dir_for(debug: bool) -> Path:
     return build_dir_for(debug) / "bioseq"
+
+
+def preset_for_mode(mode: str, debug: bool) -> str:
+    if mode == "unit+integration":
+        selected = TEST_DEBUG_BUILD_PRESET if debug else TEST_BUILD_PRESET
+        production = preset_for(debug)
+        if selected == production:
+            raise RuntimeError(
+                "unit+integration requires an isolated test preset; "
+                f"selected test preset equals production preset {production!r}. "
+                "Set BIOSEQ_TEST_BUILD_PRESET[_DEBUG] to a distinct preset "
+                "whose BIOSEQ_TEST_INDEXES cache value is ON.")
+        return selected
+    return preset_for(debug)
+
+
+def build_dir_for_mode(mode: str, debug: bool) -> Path:
+    return PROJECT_ROOT / "build" / preset_for_mode(mode, debug)
+
+
+def bin_dir_for_mode(mode: str, debug: bool) -> Path:
+    return build_dir_for_mode(mode, debug) / "bioseq"
 
 
 # Backwards-compatible aliases — the old module-level constants are still
@@ -189,6 +260,18 @@ def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
     return None
 
 
+def _cmake_cache_bool(build_dir: Path, key: str) -> bool | None:
+    value = _cmake_cache_value(build_dir, key)
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if normalized in {"1", "ON", "TRUE", "YES", "Y"}:
+        return True
+    if normalized in {"0", "OFF", "FALSE", "NO", "N", "IGNORE", "NOTFOUND"}:
+        return False
+    return None
+
+
 def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
     cache = build_dir / "CMakeCache.txt"
     if not cache.exists():
@@ -199,8 +282,37 @@ def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
         return False
 
 
+def _ensure_local_toolchain_environment(
+        env: dict[str, str], active_build_dir: Path) -> None:
+    """Make a fresh local preset configurable from a detached MCP worker.
+
+    MCP servers are commonly launched without the interactive shell's
+    ``VCPKG_ROOT`` even though an existing build tree was configured with it.
+    Reuse that recorded toolchain location first, then fall back to the usual
+    ``~/vcpkg`` checkout.  AWS presets provision their own environment and do
+    not use this local repair.
+    """
+    if env.get("VCPKG_ROOT"):
+        return
+
+    candidates: list[Path] = []
+    for build_dir in (active_build_dir, DEFAULT_BUILD_DIR):
+        configured_toolchain = _cmake_cache_value(
+            build_dir, "CMAKE_TOOLCHAIN_FILE")
+        if configured_toolchain:
+            toolchain = Path(configured_toolchain).expanduser()
+            if toolchain.name == "vcpkg.cmake" and len(toolchain.parents) >= 3:
+                candidates.append(toolchain.parents[2])
+    candidates.append(Path.home() / "vcpkg")
+
+    for candidate in candidates:
+        if (candidate / "scripts" / "buildsystems" / "vcpkg.cmake").is_file():
+            env["VCPKG_ROOT"] = str(candidate)
+            return
+
+
 def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
-    log_handle.write(f"# AWS cache repair: clearing CMake configure cache ({reason}).\n")
+    log_handle.write(f"# CMake cache repair: clearing configure cache ({reason}).\n")
     log_handle.flush()
     for path in (build_dir / "CMakeCache.txt", build_dir / "CMakeFiles"):
         try:
@@ -337,7 +449,9 @@ class ModeDefinition:
     """
     Two runs with the same lock group cannot run in parallel. bench and
     bench-fast share the same binary + reporting/ directory, so they're
-    grouped together; unit+integration is its own group.
+    grouped together; unit+integration is its own group. Runtime modes that
+    install/restart the shared PostgreSQL instance also conflict across lock
+    groups, while build-only runs remain independent.
     """
     lock_group: str
     """
@@ -357,9 +471,9 @@ class ModeDefinition:
     """
     Commands we want to run. First element of each command is the binary
     basename — resolved against the active build tree's `bioseq/` directory
-    at run time (see `bin_dir_for(debug)`). This lets the same MODE definition
-    drive both the fast (build/bench-opt/) and the debug (build/bench-opt-debug/)
-    binaries; the worker decides which by reading the run's `debug` flag.
+    at run time (see `bin_dir_for_mode(mode, debug)`). This lets the same MODE
+    definition drive isolated production and test preset families, including
+    their debug/inspect variants.
     """
     commands: List[List[str]]
     """Extra documentation"""
@@ -678,8 +792,25 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
                 pass
 
 
+def _is_aws_clang_preset(preset: str) -> bool:
+    normalized = preset.removeprefix("test-")
+    return (
+        normalized.startswith("aws-x64-linux")
+        and "gcc161" not in normalized
+    )
+
+
+def _is_aws_gcc_preset(preset: str) -> bool:
+    normalized = preset.removeprefix("test-")
+    return normalized.startswith("aws-x64-linux-gcc161")
+
+
 def _is_aws_preset(preset: str) -> bool:
-    return preset.startswith("aws-x64-linux")
+    return _is_aws_clang_preset(preset) or _is_aws_gcc_preset(preset)
+
+
+def _is_debug_preset(preset: str) -> bool:
+    return preset.removeprefix("test-").endswith("-debug")
 
 
 def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
@@ -945,10 +1076,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     run, updating `step`/`status` as it goes. The hard timeout is enforced
     by `_stream_subprocess` against `started_at + HARD_TIMEOUT_SEC`.
 
-    `debug=True` routes the build into `build/bench-opt-debug/` using the
-    `bench-opt-debug` preset — the per-TU `.s`/`.bc` + DWARF artefacts the
-    `inspect` tool consumes. `debug=False` (default) uses the lean
-    `bench-opt` preset that DOC0270 split out for everyday builds.
+    Unit/integration mode resolves to the isolated test preset family; benchmark
+    modes resolve to the production preset family. `debug=True` selects that
+    family's debug/inspect tree with per-TU `.s`/`.bc` and DWARF artefacts;
+    `debug=False` selects its lean everyday tree.
 
     `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
     '--debug']) appended only to bench-mode commands (§5.4).
@@ -964,9 +1095,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     log_path = Path(entry["log_file"])
     deadline = started_at + HARD_TIMEOUT_SEC
 
-    active_preset = preset_for(debug)
-    active_build_dir = build_dir_for(debug)
-    active_bin_dir = bin_dir_for(debug)
+    active_preset = preset_for_mode(mode, debug)
+    active_build_dir = build_dir_for_mode(mode, debug)
+    active_bin_dir = bin_dir_for_mode(mode, debug)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", buffering=1)
@@ -989,9 +1120,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     env = os.environ.copy()
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
-    if active_preset == "aws-x64-linux":
+    if not _is_aws_preset(active_preset):
+        _ensure_local_toolchain_environment(env, active_build_dir)
+    if _is_aws_clang_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
-    elif active_preset == "aws-x64-linux-gcc161":
+    elif _is_aws_gcc_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
     if _is_aws_preset(active_preset):
         env.setdefault("BIOSEQ_TEST_PGUSER", "postgres")
@@ -1012,7 +1145,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
         # when CMakeLists / cache / vcpkg manifest actually change, so a later
         # `cmake --build` still picks up genuine configuration changes.
-        if not (active_build_dir / "build.ninja").exists():
+        build_ninja = active_build_dir / "build.ninja"
+        expected_test_indexes = mode == "unit+integration"
+        if not build_ninja.exists():
+            if (active_build_dir / "CMakeCache.txt").exists():
+                _clear_cmake_configure_cache(
+                    active_build_dir,
+                    log_handle,
+                    "previous configure did not produce build.ninja",
+                )
             rc = _stream_subprocess(
                 ["cmake", "--preset", active_preset],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
@@ -1020,15 +1161,39 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if rc != 0:
                 raise RuntimeError(f"cmake configure exited with code {rc}")
         else:
-            log_handle.write(
-                f"# build tree already configured ({active_build_dir / 'build.ninja'}); "
-                "skipping redundant `cmake --preset` to avoid a full C++-module "
-                "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
-            log_handle.flush()
+            cached_test_indexes = _cmake_cache_bool(
+                active_build_dir, "BIOSEQ_TEST_INDEXES")
+            if cached_test_indexes != expected_test_indexes:
+                expected_text = "ON" if expected_test_indexes else "OFF"
+                observed_text = (
+                    "missing/invalid"
+                    if cached_test_indexes is None
+                    else ("ON" if cached_test_indexes else "OFF")
+                )
+                log_handle.write(
+                    "# BIOSEQ_TEST_INDEXES cache invariant mismatch: "
+                    f"expected={expected_text} observed={observed_text}; "
+                    f"reconfiguring with preset {active_preset}.\n")
+                log_handle.flush()
+                rc = _stream_subprocess(
+                    ["cmake", "--preset", active_preset],
+                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        "CMake hook-isolation repair exited with code "
+                        f"{rc}")
+            else:
+                log_handle.write(
+                    f"# build tree already configured ({build_ninja}); "
+                    "BIOSEQ_TEST_INDEXES invariant is correct; skipping "
+                    "redundant `cmake --preset` to avoid a full C++-module "
+                    "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
+                log_handle.flush()
 
-        if active_preset.startswith("aws-x64-linux"):
+        if _is_aws_preset(active_preset):
             if (
-                active_preset == "aws-x64-linux"
+                _is_aws_clang_preset(active_preset)
                 and _cmake_cache_contains(
                     active_build_dir,
                     f"/vcpkg_installed/{AWS_LEGACY_VCPKG_TRIPLET}/",
@@ -1057,7 +1222,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 repair_reasons.append(
                     f"BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
                     f"(was {current_heavy_jobs or 'unset'})")
-            if active_preset == "aws-x64-linux":
+            if _is_aws_clang_preset(active_preset):
                 current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
                 current_overlay = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_TRIPLETS")
                 current_overlay_ports = _cmake_cache_value(active_build_dir, "VCPKG_OVERLAY_PORTS")
@@ -1095,7 +1260,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         f"from {AWS_LEGACY_VCPKG_TRIPLET}")
                     repair_unset_args.extend(
                         f"-U{pattern}" for pattern in AWS_LIBCXX_FIND_CACHE_UNSET_PATTERNS)
-            elif active_preset == "aws-x64-linux-gcc161":
+            elif _is_aws_gcc_preset(active_preset):
+                expected_gcc_cxx_flags = AWS_GCC161_CXX_FLAGS
+                if _is_debug_preset(active_preset):
+                    expected_gcc_cxx_flags += " -save-temps=obj -g"
                 current_cxx_flags = _cmake_cache_value(active_build_dir, "CMAKE_CXX_FLAGS")
                 current_typed_dispatch_opt = _cmake_cache_value(
                     active_build_dir,
@@ -1105,16 +1273,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     active_build_dir,
                     "BIOSEQ_GCC_TYPED_DISPATCH_JOBS",
                 )
-                repair_args.append(f"-DCMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS}")
+                repair_args.append(
+                    f"-DCMAKE_CXX_FLAGS={expected_gcc_cxx_flags}")
                 repair_args.append(
                     "-DBIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL="
                     f"{AWS_GCC_TYPED_DISPATCH_OPT_LEVEL}")
                 repair_args.append(
                     "-DBIOSEQ_GCC_TYPED_DISPATCH_JOBS="
                     f"{AWS_GCC_TYPED_DISPATCH_JOBS}")
-                if current_cxx_flags != AWS_GCC161_CXX_FLAGS:
+                if current_cxx_flags != expected_gcc_cxx_flags:
                     repair_reasons.append(
-                        f"CMAKE_CXX_FLAGS={AWS_GCC161_CXX_FLAGS!r} "
+                        f"CMAKE_CXX_FLAGS={expected_gcc_cxx_flags!r} "
                         f"(was {current_cxx_flags or 'unset'})")
                 if current_typed_dispatch_opt != AWS_GCC_TYPED_DISPATCH_OPT_LEVEL:
                     repair_reasons.append(
@@ -1139,8 +1308,29 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     raise RuntimeError(
                         f"AWS cache repair exited with code {rc}")
 
+        configured_test_indexes = _cmake_cache_bool(
+            active_build_dir, "BIOSEQ_TEST_INDEXES")
+        if configured_test_indexes != expected_test_indexes:
+            expected_text = "ON" if expected_test_indexes else "OFF"
+            observed_text = (
+                "missing/invalid"
+                if configured_test_indexes is None
+                else ("ON" if configured_test_indexes else "OFF")
+            )
+            raise RuntimeError(
+                "BIOSEQ_TEST_INDEXES cache invariant failed closed: "
+                f"mode={mode} preset={active_preset} expected={expected_text} "
+                f"observed={observed_text}. Test modes require an isolated "
+                "ON preset; benchmark modes require an explicit OFF preset.")
+        verified_test_indexes = "ON" if configured_test_indexes else "OFF"
+        log_handle.write(
+            "# verified BIOSEQ_TEST_INDEXES="
+            f"{verified_test_indexes} preset={active_preset}.\n")
+        log_handle.flush()
+
         _update_entry(mode, step="building", build_only=build_only,
-                      debug=debug)
+                      debug=debug,
+                      bioseq_test_indexes=verified_test_indexes)
         for tgt in mode_details.targets:
             rc = _stream_subprocess(
                 ["cmake", "--build", str(active_build_dir), "--target", tgt,
@@ -1299,12 +1489,14 @@ def _format_minutes(minutes: float, *, plural_int: bool = False) -> str:
     return f"{minutes:.2f} min"
 
 
-def _running_in_same_group(state: dict, mode: str) -> tuple[str | None, dict | None]:
+def _running_in_same_group(
+        state: dict, mode: str, build_only: bool) -> tuple[str | None, dict | None]:
     """Find any currently-running run that conflicts with `mode`.
 
     Returns (running_mode, entry) or (None, None). Conflicts are decided by
-    LOCK_GROUPS — bench and bench-fast share a group so starting bench while
-    bench-fast is running is rejected.
+    lock groups, plus the shared PostgreSQL install/restart resource. bench and
+    bench-fast share a group; runtime unit+integration and runtime bench-e2e
+    also conflict because both replace and restart the same extension.
     """
     mode_details = MODES[mode]
     for other_mode in VALID_MODES:
@@ -1313,7 +1505,15 @@ def _running_in_same_group(state: dict, mode: str) -> tuple[str | None, dict | N
             continue
         if entry.get("status") != "running":
             continue
-        if MODES[other_mode].lock_group == mode_details.lock_group:
+        other_details = MODES[other_mode]
+        same_lock_group = other_details.lock_group == mode_details.lock_group
+        shared_postgresql_runtime = (
+            not build_only
+            and not bool(entry.get("build_only", False))
+            and mode_details.install_extension
+            and other_details.install_extension
+        )
+        if same_lock_group or shared_postgresql_runtime:
             return other_mode, entry
     return None, None
 
@@ -1359,6 +1559,10 @@ def tool_start_build(mode: str, build_only: bool = False,
                 f"{', '.join(VALID_MODES)}.")
 
     mode_details = MODES[mode]
+    try:
+        selected_preset = preset_for_mode(mode, debug)
+    except RuntimeError as exc:
+        return f"Build preset isolation error: {exc}"
 
     # Bench-only knobs: reject on non-bench modes, validate + translate the
     # filter, and enforce debug-requires-filter — all BEFORE spawning the
@@ -1380,7 +1584,8 @@ def tool_start_build(mode: str, build_only: bool = False,
 
     with _global_lock():
         state = _load_state()
-        running_mode, running_entry = _running_in_same_group(state, mode)
+        running_mode, running_entry = _running_in_same_group(
+            state, mode, build_only)
         if running_entry:
             elapsed_min = (time.time() - running_entry["started_at"]) / 60.0
             eta_min = max(
@@ -1428,8 +1633,9 @@ def tool_start_build(mode: str, build_only: bool = False,
             "report_file": None,
             "notes": None,
             "debug": debug,
-            "preset": preset_for(debug),
-            "build_dir": str(build_dir_for(debug)),
+            "build_only": build_only,
+            "preset": selected_preset,
+            "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
             "bench_flags": bench_flags,
         }
         _save_state(state)
@@ -1437,7 +1643,7 @@ def tool_start_build(mode: str, build_only: bool = False,
              f"bench_flags={bench_flags} log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
-            f"(preset={preset_for(debug)})"
+            f"(preset={selected_preset})"
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
             + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
@@ -1467,10 +1673,16 @@ def _run_build_inline(mode: str, build_only: bool = False,
     if mode not in VALID_MODES:
         _log(f"--run-build-sync: invalid mode '{mode}'")
         return 2
+    try:
+        selected_preset = preset_for_mode(mode, debug)
+    except RuntimeError as exc:
+        _log(f"--run-build-sync: build preset isolation error: {exc}")
+        return 2
 
     with _global_lock():
         state = _load_state()
-        running_mode, running_entry = _running_in_same_group(state, mode)
+        running_mode, running_entry = _running_in_same_group(
+            state, mode, build_only)
         if running_entry:
             _log(f"--run-build-sync: a conflicting build ({running_mode}) is "
                  f"already running on this host (pid={running_entry.get('pid')}); "
@@ -1495,13 +1707,14 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "report_file": None,
             "notes": None,
             "debug": debug,
-            "preset": preset_for(debug),
-            "build_dir": str(build_dir_for(debug)),
+            "build_only": build_only,
+            "preset": selected_preset,
+            "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
             "bench_flags": list(bench_flags or []),
         }
         _save_state(state)
         _log(f"--run-build-sync: running {mode} inline (pid={os.getpid()}, "
-             f"preset={preset_for(debug)}, build_only={build_only}, "
+             f"preset={selected_preset}, build_only={build_only}, "
              f"bench_flags={bench_flags or []}, log={log_path})")
 
     return _run_build_worker(mode, build_only=build_only, debug=debug,
@@ -1515,12 +1728,12 @@ def tool_inspect(arguments: dict) -> str:
     All errors come back as JSON `{"error": "...", ...}` rather than
     raising, so the AI agent always gets a structured result.
 
-    The DOC0270 split means the inspect tool needs DWARF and per-TU temps,
-    which only exist in the `build/bench-opt-debug/` tree. We auto-detect:
-    if the debug tree has a build.ninja we use it; otherwise we fall back
-    to `build/bench-opt/` (which may produce an "no per-TU `.s` files"
-    warning if the binary was built without -save-temps). The caller can
-    force one or the other via `debug=true|false`.
+    The DOC0270 split means the inspect tool needs DWARF and per-TU temps.
+    Benchmark targets resolve against the production preset family; unit and
+    integration executables resolve against the isolated test preset family so
+    guarded symbols are never inspected from a hook-free production binary.
+    We auto-detect the matching debug tree and accept `debug=true|false` as an
+    explicit override.
     """
     function_name = arguments.get("function_name")
     if not isinstance(function_name, str) or not function_name:
@@ -1559,21 +1772,25 @@ def tool_inspect(arguments: dict) -> str:
         # contract) instead of bubbling up as a JSON-RPC -32000.
         return json.dumps({"error": str(e)}, indent=2)
 
-    # Resolve which build tree to inspect. `debug` is an explicit override;
-    # without it, prefer the debug tree if it's been built, otherwise fall
-    # back to the fast tree. The fast tree does NOT carry per-TU .s/.bc
-    # artefacts (DOC0270 dropped -save-temps from bench-opt), so inspecting
-    # the fast tree omits the pre-LTO listing and may surface as a
-    # top-level warning in the inspect output.
+    # Resolve which preset family owns the requested binary. `debug` is an
+    # explicit override; without it, prefer that family's debug tree if built.
+    test_targets = {
+        "bioseq_aligner_tests_exec",
+        "bioseq_aligner_int_tests_exec",
+    }
+    inspect_mode = "unit+integration" if target in test_targets else "bench"
     debug_raw = arguments.get("debug")
-    if debug_raw is None:
-        debug_chosen = (DEBUG_BUILD_DIR / "build.ninja").exists()
-    else:
-        try:
+    try:
+        if debug_raw is None:
+            debug_chosen = (
+                build_dir_for_mode(inspect_mode, True) / "build.ninja"
+            ).exists()
+        else:
             debug_chosen = parse_bool("debug", debug_raw)
-        except RuntimeError as e:
-            return json.dumps({"error": str(e)}, indent=2)
-    inspect_build_dir = build_dir_for(debug_chosen)
+        inspect_build_dir = build_dir_for_mode(inspect_mode, debug_chosen)
+        inspect_preset = preset_for_mode(inspect_mode, debug_chosen)
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
     out = _run_inspect_impl(
         function_name=function_name,
@@ -1588,7 +1805,9 @@ def tool_inspect(arguments: dict) -> str:
     # Surface which tree was inspected so the AI agent can act on
     # "no .s files" results by re-running with debug=true.
     out.setdefault("build_metadata", {})["debug_tree_used"] = debug_chosen
-    out["build_metadata"]["preset_used"] = preset_for(debug_chosen)
+    out["build_metadata"]["preset_used"] = inspect_preset
+    out["build_metadata"]["test_indexes_expected"] = (
+        inspect_mode == "unit+integration")
     return json.dumps(out, indent=2)
 
 
@@ -1609,10 +1828,9 @@ def tool_status(mode: str) -> str:
     status = entry.get("status")
     build_only: bool = entry.get("build_only", False)
     debug_used: bool = bool(entry.get("debug", False))
-    preset_suffix = (
-        f" preset={entry.get('preset', preset_for(debug_used))}"
-        if debug_used else ""
-    )
+    selected_preset = entry.get(
+        "preset", preset_for_mode(mode, debug_used))
+    preset_suffix = f" preset={selected_preset}"
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -1637,9 +1855,9 @@ def tool_status(mode: str) -> str:
         if entry.get("build_only", False):
             msg += f". This was build-only job so targets were built, but not run (for faster iteration)."
         if debug_used:
-            msg += (". This was a debug build (preset=bench-opt-debug); "
+            msg += (f". This was a debug build (preset={selected_preset}); "
                     "DWARF + per-TU .s/.bc artefacts are available under "
-                    f"{entry.get('build_dir', str(DEBUG_BUILD_DIR))} for the "
+                    f"{entry.get('build_dir', str(build_dir_for_mode(mode, True)))} for the "
                     "`inspect` tool.")
         return msg
 
@@ -1770,6 +1988,10 @@ def tool_subagent(prompt: str, timeout_sec: int = 3600,
     the result.  At most one subagent runs at a time; a second call while one
     is running returns the current status instead of starting a duplicate.
     """
+
+    # DO NOT EDIT THIS!
+    return "Error: subagent is disabled for now. Use native subagents!"
+
     if not prompt or not prompt.strip():
         return "Error: prompt must be a non-empty string."
 
@@ -1913,8 +2135,9 @@ PROVISIONER = INFRA_DIR / "provisioner.py"
 # Layout on the box (set by main/infra/testing_infra/scripts/{fetch_repo,verify}.sh):
 # the repo is cloned to ~/bioseqdb and built with the aws-x64-linux CMake preset
 # (x64-linux vcpkg triplet, clang/libc++ 22), so the box-side build worker must be
-# told to use that preset instead of the local macOS/arm64 bench-opt default. We do
-# that by exporting BIOSEQ_BUILD_PRESET when we invoke the box-side server.py.
+# told to use that preset family instead of the local macOS/arm64 defaults. We
+# export production, test, and both debug preset names when invoking the box-side
+# server so unit/integration never reuses the production benchmark tree.
 REMOTE_REPO_PATH = "~/bioseqdb"
 REMOTE_BUILD_PRESET = "aws-x64-linux"
 REMOTE_BUILD_PRESETS = {
@@ -2383,7 +2606,18 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
                 f"branch pushed to origin? Use remote-git / remote-ssh to inspect.")
 
     active_preset = payload.get("preset", REMOTE_BUILD_PRESET)
-    env_prefix = f"BIOSEQ_BUILD_PRESET={shlex.quote(active_preset)} "
+    remote_debug_preset = _default_debug_preset(active_preset)
+    remote_test_preset = _default_test_preset(active_preset)
+    remote_test_debug_preset = _default_test_preset(remote_debug_preset)
+    env_prefix = (
+        f"BIOSEQ_BUILD_PRESET={shlex.quote(active_preset)} "
+        "BIOSEQ_BUILD_PRESET_DEBUG="
+        f"{shlex.quote(remote_debug_preset)} "
+        "BIOSEQ_TEST_BUILD_PRESET="
+        f"{shlex.quote(remote_test_preset)} "
+        "BIOSEQ_TEST_BUILD_PRESET_DEBUG="
+        f"{shlex.quote(remote_test_debug_preset)} "
+    )
     server_dir = f"{REMOTE_REPO_PATH}/main/build_mcp"
     if operation == "build":
         mode = payload["mode"]
@@ -3114,17 +3348,21 @@ TOOL_DEFINITIONS = [
         "description": (
             "Schedule a build/test/benchmark run. The build runs detached so "
             "it survives MCP server restarts. If a run of the same lock group "
-            "is already in progress (can run benchmark together with tests at the same time, but not two benchmarks) "
+            "is already in progress (non-SQL benchmarks may run with tests; "
+            "unit+integration and bench-e2e serialize because both install "
+            "and restart the shared PostgreSQL extension) "
             "returns the current status instead of starting a duplicate. "
             f"{get_modes_short_documentation()} "
             f"\nNote: If you want to iterate quickly then use build_only parameter."
             f"\n\nBuild tree selection (`debug` parameter, DOC0270):"
-            f"\n  - debug=false (DEFAULT): uses the `bench-opt` CMake preset → "
-            f"`build/bench-opt/`. -O3 + NDEBUG only, no debug info, no "
+            f"\n  - debug=false (DEFAULT): uses the mode's fast preset "
+            f"(`test-opt` for unit+integration, `bench-opt` for benchmarks). "
+            f"-O3 + NDEBUG only, no debug info, no "
             f"per-TU temps. This is the fast everyday build — preferred for "
             f"every normal iteration, including running tests and benches."
-            f"\n  - debug=true: uses the `bench-opt-debug` CMake preset → "
-            f"`build/bench-opt-debug/`. Same -O3 + NDEBUG, plus -g (DWARF "
+            f"\n  - debug=true: uses the corresponding isolated debug preset "
+            f"(`test-opt-debug` or `bench-opt-debug`). Same -O3 + NDEBUG, "
+            f"plus -g (DWARF "
             f"symbols) and -save-temps=obj (writes per-TU .s/.ii/.bc beside "
             f"each .o). REQUIRED by the `inspect` tool: it pulls disassembly "
             f"from objdump --line-numbers (needs DWARF) and pre-LTO "
@@ -3152,14 +3390,16 @@ TOOL_DEFINITIONS = [
                 "debug": {
                    "type": "boolean",
                    "description": (
-                       "Select the debug build tree (preset=bench-opt-debug, "
-                       "dir=build/bench-opt-debug/). Adds -g + -save-temps=obj "
+                       "Select the mode's isolated debug build tree "
+                       "(test-opt-debug for unit+integration, "
+                       "bench-opt-debug for benchmarks). Adds -g + "
+                       "-save-temps=obj "
                        "so the `inspect` tool can extract per-function "
                        "disassembly and pre-LTO assembly listings. ~2x slower "
                        "and uses ~3x more memory per TU than the default "
                        "fast build — only set this when you actually need "
                        "the inspect artefacts. Default false (uses the "
-                       "everyday `bench-opt` preset)."
+                       "corresponding fast preset)."
                    ),
                    "default": False,
                 },
@@ -3232,11 +3472,10 @@ TOOL_DEFINITIONS = [
             "no standalone symbol). All large outputs are written to "
             "/tmp/bioseq_inspect/ and pointed at via paths so the AI can "
             "Read them on demand.\n\n"
-            "DOC0270 — build-tree selection: the default `bench-opt` build "
-            "tree does NOT carry per-TU .s/.bc files or DWARF (DOC0270 "
-            "dropped -g + -save-temps from that preset to halve per-TU "
-            "compile memory). Call `start_build` with debug=true first to "
-            "produce a `bench-opt-debug` tree that has both. If you pass "
+            "DOC0270 — build-tree selection: fast production/test trees do "
+            "NOT carry per-TU .s/.bc files or DWARF. Call `start_build` for "
+            "the requested target's mode with debug=true first to produce "
+            "the matching isolated debug tree. If you pass "
             "no `debug` argument here, the tool auto-detects: the debug "
             "tree wins when its build.ninja exists, otherwise we fall "
             "back to the fast tree (the response's "
@@ -3258,7 +3497,7 @@ TOOL_DEFINITIONS = [
             "to retry with a tighter prefix; a top-level warning fires "
             f"when the count exceeds {MATCHES_WARN_THRESHOLD}.\n\n"
             "Latency: lazy disk-cached llc fallback. First call after a "
-            "fresh bench-opt build is ~25-100s (one llc per relevant .bc, "
+            "fresh debug build is ~25-100s (one llc per relevant .bc, "
             "capped at 4). Subsequent calls reuse the cached .s and "
             "complete in ~6-9s. Cache invalidates on .bc mtime; rebuilds "
             "cleanly reset it.\n\n"
@@ -3298,8 +3537,9 @@ TOOL_DEFINITIONS = [
                              "bioseq_aligner_int_tests_exec"],
                     "default": "bioseq_bench",
                     "description":
-                        "Which target binary to inspect under "
-                        "main/build/bench-opt/bioseq/.",
+                        "Which target binary to inspect. Test executables "
+                        "resolve under test-opt[-debug]; benchmark executables "
+                        "resolve under bench-opt[-debug].",
                 },
                 "max_matches": {
                     "type": "integer",
@@ -3350,11 +3590,11 @@ TOOL_DEFINITIONS = [
                 "debug": {
                     "type": "boolean",
                     "description":
-                        "Force the inspect tool to read from a specific "
-                        "build tree (DOC0270). true → build/bench-opt-debug/ "
-                        "(needs `start_build debug=true` to have populated "
-                        "it). false → build/bench-opt/ (the everyday tree; "
-                        "no per-TU .s/.bc, no DWARF). Omit to auto-detect: "
+                        "Force the inspect tool to read from the requested "
+                        "target's matching tree (DOC0270). Test executables "
+                        "use test-opt[-debug]; benchmark executables use "
+                        "bench-opt[-debug]. true selects the debug tree, "
+                        "false the fast tree. Omit to auto-detect: "
                         "prefer the debug tree when available, fall back "
                         "to fast. Set this explicitly only when you need "
                         "to pin the tree (e.g. compare debug vs fast).",
@@ -4211,7 +4451,7 @@ def main() -> int:
             "(synchronous, not detached) for the given mode. Used by the "
             "remote-run tool over SSH so the build verdict is the SSH exit "
             "status and output streams back live. Honours --build-only/--debug "
-            "and BIOSEQ_BUILD_PRESET."
+            "and the production/test BIOSEQ_*_BUILD_PRESET variables."
         ),
     )
     parser.add_argument(
@@ -4221,7 +4461,8 @@ def main() -> int:
         help=(
             "(internal) run the inspect tool with the given JSON argument object "
             "and print the JSON result to stdout. Used by remote-run over SSH to "
-            "inspect a binary on the box. Honours BIOSEQ_BUILD_PRESET."
+            "inspect a binary on the box. Honours the production/test "
+            "BIOSEQ_*_BUILD_PRESET variables."
         ),
     )
     parser.add_argument(
@@ -4245,10 +4486,10 @@ def main() -> int:
         choices=['true', 'false'],
         default='false',
         help=(
-            "(internal) if 'true' then build under build/bench-opt-debug/ "
-            "with the `bench-opt-debug` CMake preset (adds -g + "
-            "-save-temps=obj). Required for the `inspect` tool. Default "
-            "'false' uses the lean `bench-opt` preset (DOC0270)."
+            "(internal) if 'true' then use the selected mode's debug preset "
+            "(test family for unit/integration, production family for "
+            "benchmarks), adding -g + -save-temps=obj. Required for the "
+            "inspect tool. Default 'false' uses that mode's lean preset."
         ),
     )
     parser.add_argument(

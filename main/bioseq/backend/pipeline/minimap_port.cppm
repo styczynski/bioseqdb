@@ -34,6 +34,7 @@ module;
 
 #include "common.h"
 
+#include <cstdlib>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
@@ -46,6 +47,7 @@ module;
 #include <unordered_map>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 
 export module bioseq.sequences.minimap_port;
@@ -103,7 +105,10 @@ using bioseq::chaining::backtrack_chains;
 // DOC0279 §9 / §7.1 — the relocated minimizer index + its concept. Highway-
 // namespace consumers reference them cross-namespace (POD value type + concept).
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
-using bioseq::indexing::MinimizerIndex;
+using bioseq::indexing::MinimizerLookupIndex;
+using bioseq::indexing::MinimizerLookupSpans;
+using bioseq::indexing::MinimizerPositionSpan;
+using bioseq::indexing::lookup_minimizer_spans;
 
 // ============================================================================
 // Algorithm selection enums
@@ -167,6 +172,12 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// through fused tiled Phase C for every supported alphabet. Requires a
     /// usable Vulkan runtime when selected by the pipeline.
     VULKAN_MINIMAP_INT = 3,
+    /// Bounded-memory SIMD implementation of the u32 seq-hash ntHash scheme
+    /// used by the SIMD-Minimizers work: R=7 rolling hashes, wrapping
+    /// forward+reverse canonical sum, and an eight-logical-stream two-stack
+    /// window. This has a distinct persisted scheme identity from the legacy
+    /// minimap-int/ExactSimd paths and must never consume their indexes.
+    PAPER_NTHASH_SIMD = 4,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -194,6 +205,7 @@ enum class MinimizerAlgorithmType : uint8_t {
         case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW: return "SIMD Minimap2 (slow reference)";
         case MinimizerAlgorithmType::TWO_STACK_NTHASH:   return "Two-Stack nthash SIMD Minimizers";
         case MinimizerAlgorithmType::VULKAN_MINIMAP_INT: return "Vulkan minimap-int minimizers";
+        case MinimizerAlgorithmType::PAPER_NTHASH_SIMD:  return "Paper u32 ntHash SIMD Minimizers";
     }
     return "unknown";
 }
@@ -479,6 +491,36 @@ struct AlignRegion {
 // Phase 2: Collect seed hits — look up query minimizers in target index
 // ============================================================================
 
+/** Append one borrowed target-position run for a single query minimizer. */
+inline void append_seed_hits_from_position_span(
+    std::span<const std::uint64_t> target_hits,
+    std::uint32_t query_strand_bit,
+    sequence_size_t forward_query_pos,
+    sequence_size_t reverse_query_pos,
+    std::uint32_t query_span_value,
+    ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
+{
+    for (const std::uint64_t target_hit : target_hits) {
+        const sequence_size_t ref_position =
+            static_cast<sequence_size_t>(target_hit >> 1u);
+        const std::uint32_t target_strand_bit =
+            static_cast<std::uint32_t>(target_hit & 1u);
+        const std::uint32_t is_reverse_bit =
+            target_strand_bit ^ query_strand_bit;
+        const sequence_size_t selected_query_pos =
+            is_reverse_bit ? reverse_query_pos : forward_query_pos;
+
+        Anchor anchor;
+        anchor.ref_position = ref_position;
+        anchor.is_reverse = is_reverse_bit;
+        anchor.query_position = selected_query_pos;
+        anchor.query_span = static_cast<std::uint8_t>(query_span_value);
+        anchor.flags = 0;
+        anchor.segment_id = 0;
+        anchors_out.push_back(anchor);
+    }
+}
+
 /**
  * @brief Collect seed anchors by looking up query minimizers in the target index.
  *
@@ -506,7 +548,7 @@ struct AlignRegion {
  *                          place before returning (DOC0249 §13 follow-up:
  *                          output-side kernel-to-arena refactor).
  */
-template <class MinimizerT, MinimizerIndex IndexT>
+template <class MinimizerT, MinimizerLookupIndex IndexT>
 void collect_seed_hits(
     std::span<const MinimizerT> query_minimizers,
     const IndexT& target_index,
@@ -546,10 +588,24 @@ void collect_seed_hits(
     // Hoisting this addition out of the inner loop lets the compiler keep
     // (sub fwd) as the only per-hit op for the reverse branch.
     const sequence_size_t reverse_pos_base = query_len - 2 + query_span_value;
+    if (max_occ < 0) [[unlikely]] {
+        throw std::invalid_argument(
+            "collect_seed_hits requires a nonnegative max_occ");
+    }
     for (const auto& query_minimizer : query_minimizers) {
-        const auto target_hits = target_index.lookup(query_minimizer.kmer());
-        if (target_hits.empty() || static_cast<int32_t>(target_hits.size()) > max_occ) {
+        const MinimizerLookupSpans target_hits = lookup_minimizer_spans(
+            target_index, query_minimizer.kmer());
+        const std::uint64_t global_occurrence_count =
+            target_hits.global_occurrence_count();
+        if (global_occurrence_count == 0
+            || global_occurrence_count
+                > static_cast<std::uint64_t>(max_occ)) {
             continue;
+        }
+        if (!target_hits.positions_complete() || !target_hits.well_formed()) {
+            throw bioseq::indexing::PersistedMinimizerLookupError(
+                "persisted minimizer positions unavailable or inconsistent "
+                "after global occurrence pruning");
         }
 
         // `pos_strand_encoded()` returns `(last_pos << 1) | strand` — the
@@ -573,46 +629,26 @@ void collect_seed_hits(
         // so reverse_pos_base - forward_query_pos never underflows.)
         const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
 
-        for (const uint64_t target_hit : target_hits) {
-            // DOC0274 §1.9 — `target_hit` is the index-stored
-            // `pos_strand_encoded()` = `(ref_pos << 1) | strand`, a full
-            // (pos_bits + 1)-bit value (`pos_bits == ceil(log2(target_len))`,
-            // up to 32 for a 4 Gbp target ⇒ up to 33 bits). The previous
-            // `static_cast<uint32_t>(target_hit) >> 1` truncated to the low 32
-            // bits, dropping bit 32 of `ref_pos << 1` for any ref_pos >= 2^31
-            // (~2.15 Gbp). The corrupted anchor coordinate then indexed the
-            // target buffer out of bounds → SIGSEGV. Shift the full 64-bit
-            // word instead. There is no reference_id in the encoding
-            // (single-target; `pos_strand_encoded()` masks the hash out), so
-            // bits above the position are part of the position, not an rid —
-            // hence the former `target_hit >> 32` "rid" read is gone.
-            const sequence_size_t ref_position =
-                static_cast<sequence_size_t>(target_hit >> 1);
-
-            // Goal C — branchless strand select.  The two arms of the old
-            // if/else differed only in `is_reverse` (0 vs 1) and
-            // `query_position` (fwd vs reverse formula).  Compute both,
-            // select via the strand-mismatch XOR.  Clang lowers the
-            // ternary to `csel` on AArch64, eliminating the branch
-            // mispredict on mixed-strand hot loops.
-            const uint32_t target_strand_bit = static_cast<uint32_t>(target_hit & 1ULL);
-            const uint32_t is_reverse_bit    = target_strand_bit ^ query_strand_bit;
-            const sequence_size_t selected_query_pos =
-                is_reverse_bit ? reverse_query_pos : forward_query_pos;
-
-            // DOC0263 anchor flat layout: ref/query sub-objects removed.
-            // `reference_id` field removed (single-target codebase). DOC0274
-            // §1.9 also removed the `target_hit >> 32` "rid" read: it was only
-            // ever 0 because positions stayed < 2^31; past that it aliases the
-            // high bit of `ref_pos << 1`, so it never was a reference id.
-            Anchor anchor;
-            anchor.ref_position    = ref_position;
-            anchor.is_reverse      = is_reverse_bit;
-            anchor.query_position  = selected_query_pos;
-            anchor.query_span      = static_cast<std::uint8_t>(query_span_value);
-            anchor.flags           = 0;
-            anchor.segment_id      = 0;
-            anchors_out.push_back(anchor);
+        const auto contiguous = target_hits.contiguous_positions();
+        if (!contiguous.empty()) {
+            append_seed_hits_from_position_span(
+                contiguous,
+                query_strand_bit,
+                forward_query_pos,
+                reverse_query_pos,
+                query_span_value,
+                anchors_out);
+        } else {
+            for (const MinimizerPositionSpan& target_span
+                 : target_hits.segmented_positions()) {
+                append_seed_hits_from_position_span(
+                    target_span.positions,
+                    query_strand_bit,
+                    forward_query_pos,
+                    reverse_query_pos,
+                    query_span_value,
+                    anchors_out);
+            }
         }
     }
     }  // end target_index_lookup scope
@@ -1082,6 +1118,292 @@ void classify_primary_secondary(
 // KSW2 alignment wrapper
 // ============================================================================
 
+/// Operation-local evidence emitted only by the scalar minimizer entry point.
+/// The selected enum is deliberately not part of this value: a caller receives
+/// evidence only after the scalar collector returned successfully.
+struct ScalarMinimizerExecutionProof {
+    std::uint64_t calls = 0;
+    std::uint64_t input_symbols = 0;
+    bool saturated = false;
+
+    static constexpr void add(
+            std::uint64_t& destination,
+            const std::uint64_t increment,
+            bool& saturated_flag) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                            - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            saturated_flag = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    constexpr void record(const std::uint64_t symbols) noexcept {
+        add(calls, 1u, saturated);
+        add(input_symbols, symbols, saturated);
+    }
+
+    constexpr void combine(
+            const ScalarMinimizerExecutionProof& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        add(calls, other.calls, overflow);
+        add(input_symbols, other.input_symbols, overflow);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool accepted(
+            const bool require_nonempty_work = true) const noexcept {
+        return !saturated
+            && calls > 0
+            && (!require_nonempty_work || input_symbols > 0);
+    }
+
+    constexpr bool operator==(
+        const ScalarMinimizerExecutionProof&) const noexcept = default;
+};
+
+enum class ScalarKsw2Phase : std::uint8_t {
+    left,
+    gap,
+    right,
+};
+
+/// Positive, operation-originated proof for scalar CPU dimensions in a route:
+/// scalar minimizers, CPU seed lookup, scalar chaining/backtracking, and KSW2
+/// extension. Hybrid routes may populate only the scalar dimensions they
+/// execute; SIMD/Block/Vulkan proof objects remain separate.
+struct ScalarPipelineExecutionProof {
+    ScalarMinimizerExecutionProof query_minimizers{};
+    ScalarMinimizerExecutionProof target_minimizers{};
+    std::uint64_t seed_lookup_calls = 0;
+    std::uint64_t seed_query_minimizers = 0;
+    std::uint64_t chain_score_calls = 0;
+    std::uint64_t chain_backtrack_calls = 0;
+    std::uint64_t chain_anchor_inputs = 0;
+    std::uint64_t ksw2_left_calls = 0;
+    std::uint64_t ksw2_gap_calls = 0;
+    std::uint64_t ksw2_right_calls = 0;
+    // Rectangle area admitted to real KSW2 calls. This is not a claim that a
+    // banded/z-drop kernel visited every cell; it proves positive DP input.
+    std::uint64_t ksw2_input_cell_area = 0;
+    bool saturated = false;
+
+    static constexpr void add(
+            std::uint64_t& destination,
+            const std::uint64_t increment,
+            bool& saturated_flag) noexcept {
+        ScalarMinimizerExecutionProof::add(
+            destination, increment, saturated_flag);
+    }
+
+    constexpr void record_seed_lookup(
+            const std::uint64_t query_minimizer_count) noexcept {
+        add(seed_lookup_calls, 1u, saturated);
+        add(seed_query_minimizers, query_minimizer_count, saturated);
+    }
+
+    constexpr void record_scalar_chain(
+            const std::uint64_t anchor_count) noexcept {
+        add(chain_score_calls, 1u, saturated);
+        add(chain_backtrack_calls, 1u, saturated);
+        add(chain_anchor_inputs, anchor_count, saturated);
+    }
+
+    constexpr void record_ksw2_call(
+            const ScalarKsw2Phase phase,
+            const std::uint64_t query_symbols,
+            const std::uint64_t target_symbols) noexcept {
+        switch (phase) {
+            case ScalarKsw2Phase::left:
+                add(ksw2_left_calls, 1u, saturated);
+                break;
+            case ScalarKsw2Phase::gap:
+                add(ksw2_gap_calls, 1u, saturated);
+                break;
+            case ScalarKsw2Phase::right:
+                add(ksw2_right_calls, 1u, saturated);
+                break;
+        }
+        if (query_symbols != 0
+            && target_symbols
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    / query_symbols) {
+            ksw2_input_cell_area =
+                (std::numeric_limits<std::uint64_t>::max)();
+            saturated = true;
+            return;
+        }
+        add(ksw2_input_cell_area,
+            query_symbols * target_symbols, saturated);
+    }
+
+    constexpr void combine(
+            const ScalarPipelineExecutionProof& other) noexcept {
+        query_minimizers.combine(other.query_minimizers);
+        target_minimizers.combine(other.target_minimizers);
+        bool overflow = saturated || other.saturated
+            || query_minimizers.saturated
+            || target_minimizers.saturated;
+        add(seed_lookup_calls, other.seed_lookup_calls, overflow);
+        add(seed_query_minimizers, other.seed_query_minimizers, overflow);
+        add(chain_score_calls, other.chain_score_calls, overflow);
+        add(chain_backtrack_calls, other.chain_backtrack_calls, overflow);
+        add(chain_anchor_inputs, other.chain_anchor_inputs, overflow);
+        add(ksw2_left_calls, other.ksw2_left_calls, overflow);
+        add(ksw2_gap_calls, other.ksw2_gap_calls, overflow);
+        add(ksw2_right_calls, other.ksw2_right_calls, overflow);
+        add(ksw2_input_cell_area, other.ksw2_input_cell_area, overflow);
+        saturated = overflow;
+    }
+
+    /// Validate the complete all-scalar tuple. Hybrid routes validate only the
+    /// scalar dimensions they selected at their route-proof boundary.
+    [[nodiscard]] constexpr bool accepted(
+            const bool require_target_sketch,
+            const bool require_alignment) const noexcept {
+        const bool target_valid = require_target_sketch
+            ? target_minimizers.accepted()
+            : target_minimizers == ScalarMinimizerExecutionProof{};
+        const bool alignment_valid = !require_alignment
+            || ((ksw2_left_calls != 0
+                 || ksw2_gap_calls != 0
+                 || ksw2_right_calls != 0)
+                && ksw2_input_cell_area > 0);
+        return !saturated
+            && query_minimizers.accepted()
+            && target_valid
+            && seed_lookup_calls > 0
+            && seed_query_minimizers > 0
+            && chain_score_calls > 0
+            && chain_backtrack_calls > 0
+            && chain_anchor_inputs > 0
+            && alignment_valid;
+    }
+
+    constexpr bool operator==(
+        const ScalarPipelineExecutionProof&) const noexcept = default;
+};
+
+/// Operation-local evidence for the selected KSW2_BATCHED alignment stage.
+/// The proof is populated by the real fill collector and bucket executor; it
+/// never infers execution from the enum selected by the caller.  The current
+/// implementation deliberately calls the counters "short bucket" rather than
+/// "SIMD" because short fills still execute the KSW2 kernel lane by lane.
+struct Ksw2BatchedExecutionProof {
+    std::uint64_t align_region_invocations = 0;
+    std::uint64_t regions_seen = 0;
+    std::uint64_t fills_collected = 0;
+    std::uint64_t nonempty_fill_calls = 0;
+    std::uint64_t short_bucket_dispatches = 0;
+    std::uint64_t short_bucket_lanes = 0;
+    std::uint64_t long_fill_calls = 0;
+    std::uint64_t input_cell_area = 0;
+    bool saturated = false;
+
+    static constexpr void add(
+            std::uint64_t& destination,
+            const std::uint64_t increment,
+            bool& saturated_flag) noexcept {
+        ScalarMinimizerExecutionProof::add(
+            destination, increment, saturated_flag);
+    }
+
+    constexpr void record_invocation(
+            const std::uint64_t region_count) noexcept {
+        add(align_region_invocations, 1u, saturated);
+        add(regions_seen, region_count, saturated);
+    }
+
+    constexpr void record_collected_fills(
+            const std::uint64_t fill_count) noexcept {
+        add(fills_collected, fill_count, saturated);
+    }
+
+    constexpr void record_short_bucket_dispatch(
+            const std::uint64_t lane_count) noexcept {
+        add(short_bucket_dispatches, 1u, saturated);
+        add(short_bucket_lanes, lane_count, saturated);
+    }
+
+    constexpr void record_nonempty_fill(
+            const std::uint64_t query_symbols,
+            const std::uint64_t target_symbols,
+            const bool long_fill) noexcept {
+        add(nonempty_fill_calls, 1u, saturated);
+        if (long_fill) {
+            add(long_fill_calls, 1u, saturated);
+        }
+        if (query_symbols != 0u
+            && target_symbols
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    / query_symbols) {
+            input_cell_area =
+                (std::numeric_limits<std::uint64_t>::max)();
+            saturated = true;
+            return;
+        }
+        add(input_cell_area,
+            query_symbols * target_symbols, saturated);
+    }
+
+    constexpr void combine(
+            const Ksw2BatchedExecutionProof& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        add(align_region_invocations,
+            other.align_region_invocations, overflow);
+        add(regions_seen, other.regions_seen, overflow);
+        add(fills_collected, other.fills_collected, overflow);
+        add(nonempty_fill_calls, other.nonempty_fill_calls, overflow);
+        add(short_bucket_dispatches,
+            other.short_bucket_dispatches, overflow);
+        add(short_bucket_lanes, other.short_bucket_lanes, overflow);
+        add(long_fill_calls, other.long_fill_calls, overflow);
+        add(input_cell_area, other.input_cell_area, overflow);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool accepted(
+            const bool require_nonempty_work) const noexcept {
+        const bool short_route_coherent =
+            (short_bucket_dispatches == 0u)
+                == (short_bucket_lanes == 0u);
+        const bool calls_coherent = short_bucket_lanes
+                <= (std::numeric_limits<std::uint64_t>::max)()
+                    - long_fill_calls
+            && nonempty_fill_calls
+                == short_bucket_lanes + long_fill_calls
+            && short_bucket_dispatches <= short_bucket_lanes
+            && nonempty_fill_calls == fills_collected
+            && (nonempty_fill_calls == 0u)
+                == (input_cell_area == 0u)
+            && input_cell_area >= nonempty_fill_calls;
+        return !saturated
+            && align_region_invocations > 0u
+            && short_route_coherent
+            && calls_coherent
+            && (!require_nonempty_work
+                || (regions_seen > 0u
+                    && fills_collected > 0u
+                    && nonempty_fill_calls > 0u));
+    }
+
+    constexpr bool operator==(
+        const Ksw2BatchedExecutionProof&) const noexcept = default;
+};
+
+static_assert([] {
+    Ksw2BatchedExecutionProof proof{};
+    proof.record_invocation(1u);
+    proof.record_collected_fills(2u);
+    proof.record_short_bucket_dispatch(1u);
+    proof.record_nonempty_fill(8u, 9u, false);
+    proof.record_nonempty_fill(300u, 400u, true);
+    return proof.accepted(true)
+        && proof.nonempty_fill_calls == 2u
+        && proof.input_cell_area == 120'072u;
+}());
+
 /**
  * @brief Dispatch to KSW2's dual-affine or affine gap alignment.
  *
@@ -1111,8 +1433,20 @@ template<
     size_t target_end,
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params,
-    int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags)
+    int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags,
+    BlockAlignerExecutionProof* forbidden_block_proof = nullptr,
+    ScalarPipelineExecutionProof* scalar_execution_proof = nullptr,
+    ScalarKsw2Phase scalar_phase = ScalarKsw2Phase::gap)
 {
+    if (forbidden_block_proof != nullptr) {
+        block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
+    }
+    if (scalar_execution_proof != nullptr) {
+        scalar_execution_proof->record_ksw2_call(
+            scalar_phase,
+            static_cast<std::uint64_t>(query_end - query_start),
+            static_cast<std::uint64_t>(target_end - target_start));
+    }
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         const KswZ2Params z2_params{
             .gap_open   = static_cast<int8_t>(params.gap_open1),
@@ -1144,10 +1478,23 @@ template<
 }
 
 /**
- * @brief Dispatch to block aligner for single-affine gap alignment.
+ * @brief Project the native Block Aligner contract for one minimap phase.
  *
- * Uses the first gap penalty pair (gap_open1, gap_ext1) only.
- * Block aligner does not support dual-affine gaps.
+ * This is deliberately not a KSW2-compatible adapter. The reference Block
+ * Aligner has a single affine recurrence, adaptive block geometry, global
+ * mode, and its own two-confirmation X-drop mode. Consequently only the
+ * short affine pair and the Block tunables are projected from Minimap2Params:
+ *
+ *   - gap fill: reference Global mode, forward input;
+ *   - left extension: reference XDrop mode, reversed input;
+ *   - right extension: reference XDrop mode, forward input.
+ *
+ * Dormant KSW-only defaults in the shared parameter object (bandwidth,
+ * right-align, end-bonus, the second affine pair, and approximate-max) do not
+ * invalidate a native Block run and are not included in its proof identity.
+ * They are intentionally absent from this function's call surface, so a
+ * caller that claims those semantics gets a compile-time contract error
+ * instead of a KSW2 or scalar fallback.
  */
 template<
     bool is_reversed,
@@ -1164,23 +1511,48 @@ template<
     size_t target_end,
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params,
-    [[maybe_unused]] int align_bandwidth,
-    [[maybe_unused]] int end_bonus,
-    int zdrop,
-    KswFlags ksw_flags)
+    BlockAlignerPhase phase,
+    BlockAlignerExecutionProof* execution_proof)
 {
+    const bool is_extension = phase != BlockAlignerPhase::GapExtension;
+    const bool native_penalties_representable = params.gap_open1 > 0
+        && params.gap_ext1 > 0
+        && params.gap_open1 <= std::numeric_limits<int8_t>::max()
+        && params.gap_ext1 <= std::numeric_limits<int8_t>::max()
+        && params.gap_open1 + params.gap_ext1
+            <= -static_cast<int>(std::numeric_limits<int8_t>::min());
+    if (!native_penalties_representable
+        || (is_extension && params.zdrop < 0)) {
+        if (execution_proof != nullptr) {
+            execution_proof->add(
+                execution_proof->unsupported_contract_rejections);
+        }
+        bioseq_log<ERR>(
+            "Block Aligner native parameter projection rejected: q={}, e={}, "
+            "zdrop={}, phase={}",
+            params.gap_open1, params.gap_ext1, params.zdrop,
+            static_cast<unsigned>(phase));
+        std::abort();
+    }
     BlockAlignerParams ba_params{
         .gap_open   = static_cast<int8_t>(params.gap_open1),
         .gap_extend = static_cast<int8_t>(params.gap_ext1),
         .min_size   = params.block_min_size,
         .max_size   = params.block_max_size,
-        .x_drop     = ksw_flags.extz_only ? zdrop : -1,
-        .flags      = ksw_flags,
+        .x_drop     = is_extension ? params.zdrop : 0,
+        .mode       = is_extension
+            ? BlockAlignmentMode::XDrop
+            : BlockAlignmentMode::Global,
+        .input_order = phase == BlockAlignerPhase::LeftExtension
+            ? BlockInputOrder::Reversed
+            : BlockInputOrder::Forward,
+        .phase      = phase,
+        .trace      = params.do_cigar,
     };
     return HwyBlockAligner::align<is_reversed>(
         query_seq, target_seq,
         query_start, query_end, target_start, target_end,
-        scoring_matrix, ba_params);
+        scoring_matrix, ba_params, execution_proof);
 }
 
 // append_cigar is now in bioseq_cigar module.
@@ -1196,8 +1568,8 @@ template<
  *   3. Right extension: query/target from last seed to extended boundary
  *
  * Sequences are passed as compact_sequence_range references with sub-region
- * indices — no pre-encoding into uint8_t vectors is needed. The KSW2 core
- * kernel handles encoding of the specific regions it needs.
+ * indices — no pre-encoding into uint8_t vectors is needed. The selected
+ * base-alignment kernel encodes only the admitted sub-regions.
  *
  * @tparam base_alignment_algorithm  Compile-time selector between KSW2 and
  *                                   block aligner. Templated so the inner
@@ -1215,9 +1587,70 @@ template<
  * Inlines to the same instructions at -O3.
  *
  * `run<strand_reversed>` is templated on the strand because the alignment
- * kernels are themselves templated on the reverse-complement encoding bit
- * (left-extension still flips the CIGAR independently via `reverse_cigar`).
+ * kernels are themselves templated on the reverse-complement encoding bit.
+ * Native Block left extension additionally emits reversed compact input and
+ * reverses its traced operations back to source order.
  */
+struct BlockPhaseEligibility {
+    std::uint64_t left = 0;
+    std::uint64_t gap = 0;
+    std::uint64_t right = 0;
+};
+
+/// Derive the complete native-Block phase contract before dispatch from only
+/// immutable region geometry. These values are deliberately recorded outside
+/// the call branches they attest, so deleting or bypassing a phase cannot
+/// delete both the expectation and execution evidence.
+[[nodiscard]] inline BlockPhaseEligibility derive_block_phase_eligibility(
+        const AlignRegion& region,
+        std::span<const Anchor> anchors,
+        std::int32_t anchor_begin,
+        std::int64_t seed_ref_start,
+        std::int64_t seed_query_start,
+        std::int64_t seed_ref_end,
+        std::int64_t seed_query_end,
+        std::int64_t outer_ref_start,
+        std::int64_t outer_query_start,
+        std::int64_t outer_ref_end,
+        std::int64_t outer_query_end,
+        const Minimap2Params& params) noexcept {
+    BlockPhaseEligibility expected{
+        .left = seed_query_start > outer_query_start
+                && seed_ref_start > outer_ref_start ? 1u : 0u,
+        .gap = 0,
+        .right = seed_query_end < outer_query_end
+                 && seed_ref_end < outer_ref_end ? 1u : 0u,
+    };
+    if (region.seed_count <= 1) return expected;
+
+    std::int64_t qs = seed_query_start;
+    std::int64_t rs = seed_ref_start;
+    for (std::int32_t index = 1; index < region.seed_count; ++index) {
+        const Anchor& current = anchors[anchor_begin + index];
+        const std::int64_t qe =
+            static_cast<std::int64_t>(current.query_position) + 1;
+        const std::int64_t re =
+            static_cast<std::int64_t>(current.ref_position) + 1;
+        const bool is_last = index == region.seed_count - 1;
+        const std::int64_t gap_query = qe - qs;
+        const std::int64_t gap_ref = re - rs;
+        if (!is_last
+            && (gap_query < params.min_ksw_len
+                || gap_ref < params.min_ksw_len)) {
+            continue;
+        }
+        if (gap_query <= 0 || gap_ref <= 0) {
+            qs = qe;
+            rs = re;
+            continue;
+        }
+        ++expected.gap;
+        qs = qe;
+        rs = re;
+    }
+    return expected;
+}
+
 template <BaseAlignmentAlgorithmType base_alignment_algorithm,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
@@ -1243,7 +1676,9 @@ struct AlignOnePhase {
         std::int64_t            outer_query_start,
         std::int64_t            outer_ref_end,
         std::int64_t            outer_query_end,
-        std::int64_t            query_length) const
+        std::int64_t            query_length,
+        BlockAlignerExecutionProof* block_execution_proof,
+        ScalarPipelineExecutionProof* scalar_execution_proof) const
     {
         bool prior_phase_zdropped = false;
 
@@ -1251,15 +1686,33 @@ struct AlignOnePhase {
         std::int64_t final_ref_start = seed_ref_start;
         std::int64_t final_query_start = seed_query_start;
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-            const KswAlignResult left_result = ksw2_align_pair<strand_reversed>(
-                query_seq, target_seq,
-                static_cast<size_t>(outer_query_start),
-                static_cast<size_t>(seed_query_start),
-                static_cast<size_t>(outer_ref_start),
-                static_cast<size_t>(seed_ref_start),
-                scoring_matrix, params,
-                align_bandwidth, params.end_bonus, params.zdrop,
-                KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
+            KswAlignResult left_result;
+            if constexpr (base_alignment_algorithm
+                    == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+                left_result = block_aligner_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(outer_query_start),
+                    static_cast<size_t>(seed_query_start),
+                    static_cast<size_t>(outer_ref_start),
+                    static_cast<size_t>(seed_ref_start),
+                    scoring_matrix, params,
+                    BlockAlignerPhase::LeftExtension,
+                    block_execution_proof);
+            } else {
+                left_result = ksw2_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(outer_query_start),
+                    static_cast<size_t>(seed_query_start),
+                    static_cast<size_t>(outer_ref_start),
+                    static_cast<size_t>(seed_ref_start),
+                    scoring_matrix, params,
+                    align_bandwidth, params.end_bonus, params.zdrop,
+                    KswFlags{.right_align = true, .extz_only = true,
+                             .reverse_cigar = true},
+                    block_execution_proof,
+                    scalar_execution_proof,
+                    ScalarKsw2Phase::left);
+            }
             if (!left_result.cigar.empty()) {
                 append_cigar(region.cigar, left_result.cigar);
                 region.dp_score += left_result.max;
@@ -1309,8 +1762,8 @@ struct AlignOnePhase {
                         static_cast<size_t>(rs),
                         static_cast<size_t>(re),
                         scoring_matrix, params,
-                        align_bandwidth, -1, params.zdrop,
-                        KswFlags{.approx_max = true});
+                        BlockAlignerPhase::GapExtension,
+                        block_execution_proof);
                 } else {
                     fill_result = ksw2_align_pair<strand_reversed>(
                         query_seq, target_seq,
@@ -1320,7 +1773,10 @@ struct AlignOnePhase {
                         static_cast<size_t>(re),
                         scoring_matrix, params,
                         align_bandwidth, -1, params.zdrop,
-                        KswFlags{.approx_max = true});
+                        KswFlags{.approx_max = true},
+                        block_execution_proof,
+                        scalar_execution_proof,
+                        ScalarKsw2Phase::gap);
                 }
                 if (!fill_result.cigar.empty()) {
                     append_cigar(region.cigar, fill_result.cigar);
@@ -1345,19 +1801,38 @@ struct AlignOnePhase {
         }
 
         // === 3. Right extension ===
-        if (!prior_phase_zdropped
+        if ((base_alignment_algorithm
+                == BaseAlignmentAlgorithmType::BLOCK_ALIGNER
+                || !prior_phase_zdropped)
             && seed_query_end < outer_query_end
             && seed_ref_end < outer_ref_end)
         {
-            const KswAlignResult right_result = ksw2_align_pair<strand_reversed>(
-                query_seq, target_seq,
-                static_cast<size_t>(seed_query_end),
-                static_cast<size_t>(outer_query_end),
-                static_cast<size_t>(seed_ref_end),
-                static_cast<size_t>(outer_ref_end),
-                scoring_matrix, params,
-                align_bandwidth, params.end_bonus, params.zdrop,
-                KswFlags{.extz_only = true});
+            KswAlignResult right_result;
+            if constexpr (base_alignment_algorithm
+                    == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+                right_result = block_aligner_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(seed_query_end),
+                    static_cast<size_t>(outer_query_end),
+                    static_cast<size_t>(seed_ref_end),
+                    static_cast<size_t>(outer_ref_end),
+                    scoring_matrix, params,
+                    BlockAlignerPhase::RightExtension,
+                    block_execution_proof);
+            } else {
+                right_result = ksw2_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(seed_query_end),
+                    static_cast<size_t>(outer_query_end),
+                    static_cast<size_t>(seed_ref_end),
+                    static_cast<size_t>(outer_ref_end),
+                    scoring_matrix, params,
+                    align_bandwidth, params.end_bonus, params.zdrop,
+                    KswFlags{.extz_only = true},
+                    block_execution_proof,
+                    scalar_execution_proof,
+                    ScalarKsw2Phase::right);
+            }
             if (!right_result.cigar.empty()) {
                 append_cigar(region.cigar, right_result.cigar);
                 region.dp_score += right_result.max;
@@ -1397,7 +1872,9 @@ void align_regions(
     const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
     const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     const ScoringMatrix<QueryRange>& scoring_matrix,
-    const Minimap2Params& params)
+    const Minimap2Params& params,
+    BlockAlignerExecutionProof* block_execution_proof = nullptr,
+    ScalarPipelineExecutionProof* scalar_execution_proof = nullptr)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_align_skeleton");
@@ -1417,8 +1894,27 @@ void align_regions(
     const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange, Scanner> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
+    // Proof collection is opt-in, so the normal benchmark path allocates no
+    // diagnostic storage. When enabled, each worker writes one disjoint slot;
+    // the deterministic reduction below avoids atomics in the DP hot path.
+    std::vector<BlockAlignerExecutionProof> per_region_block_proofs;
+    if constexpr (base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+        if (block_execution_proof != nullptr) {
+            per_region_block_proofs.resize(regions.size());
+        }
+    }
+    std::vector<ScalarPipelineExecutionProof> per_region_scalar_proofs;
+    if constexpr (base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::KSW2) {
+        if (scalar_execution_proof != nullptr) {
+            per_region_scalar_proofs.resize(regions.size());
+        }
+    }
+
     auto align_one_region_by_index =
-        [query_length, target_length, &regions, &anchors, &params, &aligner](
+        [query_length, target_length, &regions, &anchors, &params, &aligner,
+         &per_region_block_proofs, &per_region_scalar_proofs](
                 std::size_t region_index) {
         AlignRegion& region = regions[region_index];
         if (region.seed_count <= 0) {
@@ -1503,6 +1999,41 @@ void align_regions(
         region.cigar.clear();
         region.dp_score = 0;
 
+        BlockAlignerExecutionProof* region_block_proof = nullptr;
+        if constexpr (base_alignment_algorithm
+                == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+            if (!per_region_block_proofs.empty()) {
+                region_block_proof = &per_region_block_proofs[region_index];
+                region_block_proof->add(
+                    region_block_proof->routed_region_scopes);
+                const BlockPhaseEligibility expected =
+                    derive_block_phase_eligibility(
+                        region, anchors, anchor_begin,
+                        seed_ref_start, seed_query_start,
+                        seed_ref_end, seed_query_end,
+                        outer_ref_start, outer_query_start,
+                        outer_ref_end, outer_query_end,
+                        params);
+                region_block_proof->add(
+                    region_block_proof->left_route_candidates,
+                    expected.left);
+                region_block_proof->add(
+                    region_block_proof->gap_route_candidates,
+                    expected.gap);
+                region_block_proof->add(
+                    region_block_proof->right_route_candidates,
+                    expected.right);
+            }
+        }
+        ScalarPipelineExecutionProof* region_scalar_proof = nullptr;
+        if constexpr (base_alignment_algorithm
+                == BaseAlignmentAlgorithmType::KSW2) {
+            if (!per_region_scalar_proofs.empty()) {
+                region_scalar_proof =
+                    &per_region_scalar_proofs[region_index];
+            }
+        }
+
         // Per-region diagnostic logs were previously emitted on every region
         // boundary (left-extension skipped, gap-fill skipped, right-extension
         // skipped, "determine actions" entry). Each fmtlog enqueue + format
@@ -1523,7 +2054,7 @@ void align_regions(
                 seed_ref_end, seed_query_end,
                 outer_ref_start, outer_query_start,
                 outer_ref_end, outer_query_end,
-                query_length);
+                query_length, region_block_proof, region_scalar_proof);
         } else {
             aligner.template run<false>(
                 region, anchors, anchor_begin,
@@ -1531,7 +2062,7 @@ void align_regions(
                 seed_ref_end, seed_query_end,
                 outer_ref_start, outer_query_start,
                 outer_ref_end, outer_query_end,
-                query_length);
+                query_length, region_block_proof, region_scalar_proof);
         }
 
         // Compute dp_max_score from CIGAR (simplified mm_update_extra)
@@ -1616,6 +2147,47 @@ void align_regions(
                 }
             }
             align_one_region_by_index(region_index);
+        }
+    }
+
+    if constexpr (base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+        if (block_execution_proof != nullptr) {
+            *block_execution_proof = {};
+            for (const BlockAlignerExecutionProof& region_proof
+                    : per_region_block_proofs) {
+                block_execution_proof->combine(region_proof);
+            }
+            block_execution_proof->add(
+                block_execution_proof->align_region_invocations);
+            if (may_parallel) {
+                block_execution_proof->add(
+                    block_execution_proof->parallel_align_region_dispatches);
+            } else {
+                block_execution_proof->add(
+                    block_execution_proof->serial_align_region_dispatches);
+            }
+            if (!block_execution_proof->accepted()) {
+                bioseq_log<ERR>(
+                    "Block Aligner execution proof rejected: eligible={}, "
+                    "executed={}, ksw2={}, scalar_fallbacks={}",
+                    block_execution_proof->eligible_calls(),
+                    block_execution_proof->executed_calls(),
+                    block_execution_proof->forbidden_ksw2_calls,
+                    block_execution_proof
+                        ->forbidden_scalar_biological_fallbacks);
+                std::abort();
+            }
+        }
+    }
+    if constexpr (base_alignment_algorithm
+            == BaseAlignmentAlgorithmType::KSW2) {
+        if (scalar_execution_proof != nullptr) {
+            *scalar_execution_proof = {};
+            for (const ScalarPipelineExecutionProof& region_proof
+                    : per_region_scalar_proofs) {
+                scalar_execution_proof->combine(region_proof);
+            }
         }
     }
 
@@ -2018,6 +2590,412 @@ void compute_mapping_quality(
 
 // CIGAR_OP_CHAR and format_cigar are now in bioseq_cigar module.
 
+/// Positive execution evidence for Vulkan stages used by the historical
+/// partial-GPU benchmark rows. Counters are incremented only after a selected
+/// fail-loud Vulkan operation returns successfully; selector flags alone never
+/// populate this proof.
+struct PartialVulkanExecutionProof {
+    /// Role-neutral token emitted by a minimizer leaf. It must be consumed as
+    /// either query_sketch or target_sketch before a MatchResultCollection is
+    /// returned to callers.
+    std::uint64_t sketch_dispatches = 0;
+    std::uint64_t query_sketch_dispatches = 0;
+    std::uint64_t target_sketch_dispatches = 0;
+    std::uint64_t target_index_build_dispatches = 0;
+    std::uint64_t seed_lookup_dispatches = 0;
+    // Operation-originated representation branch from the completed seed
+    // shader. Their sum must equal seed_lookup_dispatches for strict rows.
+    std::uint64_t seed_open_addressed_lookup_dispatches = 0;
+    std::uint64_t seed_sorted_dense_lookup_dispatches = 0;
+    std::uint64_t chain_score_dispatches = 0;
+    // Operation-local seed-sort evidence. A selected mode flag never writes
+    // these counters; they are copied only from a completed runtime result.
+    std::uint64_t seed_bitonic_sort_dispatches = 0;
+    std::uint64_t seed_radix_sort_operations = 0;
+    std::uint64_t seed_radix_anchor_count = 0;
+    std::uint64_t seed_radix_passes = 0;
+    std::uint64_t seed_radix_histogram_dispatches = 0;
+    std::uint64_t seed_radix_scan_dispatches = 0;
+    std::uint64_t seed_radix_scatter_dispatches = 0;
+    std::uint64_t seed_host_sort_fallbacks = 0;
+    // Operation-originated legacy Phase-B index materialization evidence.
+    // Additive fields describe actual upload operations, never cache hits;
+    // max fields preserve the worst collision/load observation across them.
+    std::uint64_t gpu_index_materializations = 0;
+    std::uint64_t gpu_index_open_addressed_materializations = 0;
+    std::uint64_t gpu_index_sorted_dense_materializations = 0;
+    std::uint64_t gpu_index_unique_keys = 0;
+    std::uint64_t gpu_index_slot_capacity = 0;
+    std::uint64_t gpu_index_logical_resident_bytes = 0;
+    std::uint64_t gpu_index_actual_allocation_bytes = 0;
+    std::uint64_t gpu_index_fully_touched_bytes = 0;
+    std::uint64_t gpu_index_staging_bytes = 0;
+    std::uint64_t gpu_index_permit_releases = 0;
+    std::uint64_t gpu_index_process_footprint_reflections = 0;
+    std::uint64_t gpu_index_reflected_footprint_bytes = 0;
+    std::uint64_t gpu_index_max_load_ppm = 0;
+    std::uint64_t gpu_index_max_probe = 0;
+    std::uint64_t gpu_index_count_phase_admissions = 0;
+    std::uint64_t gpu_index_main_peak_admissions = 0;
+    std::uint64_t gpu_index_resident_transfers = 0;
+    std::uint64_t gpu_index_adoption_rereserve_attempts = 0;
+    std::uint64_t gpu_index_adoption_successes = 0;
+    std::uint64_t gpu_index_owned_resident_bytes = 0;
+    std::uint64_t gpu_index_gate_enabled = 0;
+    std::uint64_t gpu_index_gate_word_count = 0;
+    std::uint64_t gpu_index_gate_mask = 0;
+    std::uint64_t gpu_index_gate_set_bits = 0;
+    std::uint64_t gpu_index_gate_digest_lo = 0;
+    std::uint64_t gpu_index_gate_digest_hi = 0;
+    // Operation-originated Phase-C target-index kernel/shape evidence. These
+    // fields are attached to the one query that owns the shared target build,
+    // never to every query that subsequently consumes the resident index.
+    std::uint64_t gpu_index_gate_count_dispatches = 0;
+    std::uint64_t gpu_index_gated_emit_dispatches = 0;
+    std::uint64_t gpu_index_ungated_emit_dispatches = 0;
+    std::uint64_t gpu_index_exact_count_dispatches = 0;
+    std::uint64_t gpu_index_exact_count_prefix_scan_dispatches = 0;
+    std::uint64_t gpu_index_exact_count_control_readbacks = 0;
+    std::uint64_t gpu_index_deterministic_tile_emit_dispatches = 0;
+    std::uint64_t gpu_index_atomic_append_dispatches = 0;
+    std::uint64_t gpu_index_emit_validation_control_readbacks = 0;
+    std::uint64_t gpu_index_counted_minimizer_count = 0;
+    std::uint64_t gpu_index_verified_emit_count = 0;
+    std::uint64_t gpu_index_count_emit_parity_verified = 0;
+    std::uint64_t gpu_index_target_minimizer_capacity_estimate = 0;
+    std::uint64_t gpu_index_capacity_estimate_underestimated = 0;
+    std::uint64_t gpu_index_arena_trimmed_before_permit_shrink = 0;
+    std::uint64_t gpu_index_retained_minimizer_count = 0;
+    std::uint64_t gpu_index_distinct_minimizer_count = 0;
+    // Owned-only last-seed retirement evidence. These counters are populated
+    // only after the completed seed operation has dropped its local resident
+    // handle and the operation-owned lifetime coordinator has actually
+    // released storage before chaining.
+    std::uint64_t post_seed_owned_gpu_cache_evictions = 0;
+    std::uint64_t post_seed_owned_gpu_resident_bytes_released = 0;
+    std::uint64_t post_seed_owned_cpu_index_releases = 0;
+    std::uint64_t post_seed_owned_cpu_position_bytes_released = 0;
+    bool saturated = false;
+
+    static constexpr void add(std::uint64_t& destination,
+                              std::uint64_t increment,
+                              bool& saturated_flag) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                            - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            saturated_flag = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    constexpr void combine(
+        const PartialVulkanExecutionProof& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        add(sketch_dispatches, other.sketch_dispatches, overflow);
+        add(query_sketch_dispatches, other.query_sketch_dispatches, overflow);
+        add(target_sketch_dispatches, other.target_sketch_dispatches, overflow);
+        add(target_index_build_dispatches,
+            other.target_index_build_dispatches, overflow);
+        add(seed_lookup_dispatches, other.seed_lookup_dispatches, overflow);
+        add(seed_open_addressed_lookup_dispatches,
+            other.seed_open_addressed_lookup_dispatches, overflow);
+        add(seed_sorted_dense_lookup_dispatches,
+            other.seed_sorted_dense_lookup_dispatches, overflow);
+        add(chain_score_dispatches, other.chain_score_dispatches, overflow);
+        add(seed_bitonic_sort_dispatches,
+            other.seed_bitonic_sort_dispatches, overflow);
+        add(seed_radix_sort_operations,
+            other.seed_radix_sort_operations, overflow);
+        add(seed_radix_anchor_count,
+            other.seed_radix_anchor_count, overflow);
+        add(seed_radix_passes, other.seed_radix_passes, overflow);
+        add(seed_radix_histogram_dispatches,
+            other.seed_radix_histogram_dispatches, overflow);
+        add(seed_radix_scan_dispatches,
+            other.seed_radix_scan_dispatches, overflow);
+        add(seed_radix_scatter_dispatches,
+            other.seed_radix_scatter_dispatches, overflow);
+        add(seed_host_sort_fallbacks,
+            other.seed_host_sort_fallbacks, overflow);
+        add(gpu_index_materializations,
+            other.gpu_index_materializations, overflow);
+        add(gpu_index_open_addressed_materializations,
+            other.gpu_index_open_addressed_materializations, overflow);
+        add(gpu_index_sorted_dense_materializations,
+            other.gpu_index_sorted_dense_materializations, overflow);
+        add(gpu_index_unique_keys, other.gpu_index_unique_keys, overflow);
+        add(gpu_index_slot_capacity, other.gpu_index_slot_capacity, overflow);
+        add(gpu_index_logical_resident_bytes,
+            other.gpu_index_logical_resident_bytes, overflow);
+        add(gpu_index_actual_allocation_bytes,
+            other.gpu_index_actual_allocation_bytes, overflow);
+        add(gpu_index_fully_touched_bytes,
+            other.gpu_index_fully_touched_bytes, overflow);
+        add(gpu_index_staging_bytes,
+            other.gpu_index_staging_bytes, overflow);
+        add(gpu_index_permit_releases,
+            other.gpu_index_permit_releases, overflow);
+        add(gpu_index_process_footprint_reflections,
+            other.gpu_index_process_footprint_reflections, overflow);
+        add(gpu_index_reflected_footprint_bytes,
+            other.gpu_index_reflected_footprint_bytes, overflow);
+        add(gpu_index_count_phase_admissions,
+            other.gpu_index_count_phase_admissions, overflow);
+        add(gpu_index_main_peak_admissions,
+            other.gpu_index_main_peak_admissions, overflow);
+        add(gpu_index_resident_transfers,
+            other.gpu_index_resident_transfers, overflow);
+        add(gpu_index_adoption_rereserve_attempts,
+            other.gpu_index_adoption_rereserve_attempts, overflow);
+        add(gpu_index_adoption_successes,
+            other.gpu_index_adoption_successes, overflow);
+        add(gpu_index_owned_resident_bytes,
+            other.gpu_index_owned_resident_bytes, overflow);
+        add(gpu_index_gate_enabled, other.gpu_index_gate_enabled, overflow);
+        add(gpu_index_gate_word_count,
+            other.gpu_index_gate_word_count, overflow);
+        add(gpu_index_gate_mask, other.gpu_index_gate_mask, overflow);
+        add(gpu_index_gate_set_bits,
+            other.gpu_index_gate_set_bits, overflow);
+        add(gpu_index_gate_digest_lo,
+            other.gpu_index_gate_digest_lo, overflow);
+        add(gpu_index_gate_digest_hi,
+            other.gpu_index_gate_digest_hi, overflow);
+        add(gpu_index_gate_count_dispatches,
+            other.gpu_index_gate_count_dispatches, overflow);
+        add(gpu_index_gated_emit_dispatches,
+            other.gpu_index_gated_emit_dispatches, overflow);
+        add(gpu_index_ungated_emit_dispatches,
+            other.gpu_index_ungated_emit_dispatches, overflow);
+        add(gpu_index_exact_count_dispatches,
+            other.gpu_index_exact_count_dispatches, overflow);
+        add(gpu_index_exact_count_prefix_scan_dispatches,
+            other.gpu_index_exact_count_prefix_scan_dispatches, overflow);
+        add(gpu_index_exact_count_control_readbacks,
+            other.gpu_index_exact_count_control_readbacks, overflow);
+        add(gpu_index_deterministic_tile_emit_dispatches,
+            other.gpu_index_deterministic_tile_emit_dispatches, overflow);
+        add(gpu_index_atomic_append_dispatches,
+            other.gpu_index_atomic_append_dispatches, overflow);
+        add(gpu_index_emit_validation_control_readbacks,
+            other.gpu_index_emit_validation_control_readbacks, overflow);
+        add(gpu_index_counted_minimizer_count,
+            other.gpu_index_counted_minimizer_count, overflow);
+        add(gpu_index_verified_emit_count,
+            other.gpu_index_verified_emit_count, overflow);
+        add(gpu_index_count_emit_parity_verified,
+            other.gpu_index_count_emit_parity_verified, overflow);
+        add(gpu_index_target_minimizer_capacity_estimate,
+            other.gpu_index_target_minimizer_capacity_estimate, overflow);
+        add(gpu_index_capacity_estimate_underestimated,
+            other.gpu_index_capacity_estimate_underestimated, overflow);
+        add(gpu_index_arena_trimmed_before_permit_shrink,
+            other.gpu_index_arena_trimmed_before_permit_shrink, overflow);
+        add(gpu_index_retained_minimizer_count,
+            other.gpu_index_retained_minimizer_count, overflow);
+        add(gpu_index_distinct_minimizer_count,
+            other.gpu_index_distinct_minimizer_count, overflow);
+        add(post_seed_owned_gpu_cache_evictions,
+            other.post_seed_owned_gpu_cache_evictions, overflow);
+        add(post_seed_owned_gpu_resident_bytes_released,
+            other.post_seed_owned_gpu_resident_bytes_released, overflow);
+        add(post_seed_owned_cpu_index_releases,
+            other.post_seed_owned_cpu_index_releases, overflow);
+        add(post_seed_owned_cpu_position_bytes_released,
+            other.post_seed_owned_cpu_position_bytes_released, overflow);
+        gpu_index_max_load_ppm = std::max(
+            gpu_index_max_load_ppm, other.gpu_index_max_load_ppm);
+        gpu_index_max_probe = std::max(
+            gpu_index_max_probe, other.gpu_index_max_probe);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool has_any_dispatch() const noexcept {
+        return saturated
+            || sketch_dispatches != 0
+            || query_sketch_dispatches != 0
+            || target_sketch_dispatches != 0
+            || target_index_build_dispatches != 0
+            || seed_lookup_dispatches != 0
+            || seed_open_addressed_lookup_dispatches != 0
+            || seed_sorted_dense_lookup_dispatches != 0
+            || chain_score_dispatches != 0
+            || seed_bitonic_sort_dispatches != 0
+            || seed_radix_sort_operations != 0
+            || seed_radix_anchor_count != 0
+            || seed_radix_passes != 0
+            || seed_radix_histogram_dispatches != 0
+            || seed_radix_scan_dispatches != 0
+            || seed_radix_scatter_dispatches != 0
+            || seed_host_sort_fallbacks != 0
+            || gpu_index_gate_count_dispatches != 0
+            || gpu_index_gated_emit_dispatches != 0
+            || gpu_index_ungated_emit_dispatches != 0
+            || gpu_index_exact_count_dispatches != 0
+            || gpu_index_exact_count_prefix_scan_dispatches != 0
+            || gpu_index_exact_count_control_readbacks != 0
+            || gpu_index_deterministic_tile_emit_dispatches != 0
+            || gpu_index_atomic_append_dispatches != 0
+            || gpu_index_emit_validation_control_readbacks != 0
+            || gpu_index_counted_minimizer_count != 0
+            || gpu_index_verified_emit_count != 0
+            || gpu_index_count_emit_parity_verified != 0
+            || gpu_index_target_minimizer_capacity_estimate != 0
+            || gpu_index_capacity_estimate_underestimated != 0
+            || gpu_index_arena_trimmed_before_permit_shrink != 0;
+    }
+
+    [[nodiscard]] constexpr bool exact_target_index_route_accepted()
+        const noexcept
+    {
+        const std::uint64_t builds = target_index_build_dispatches;
+        if (builds == 0u) {
+            return gpu_index_exact_count_dispatches == 0u
+                && gpu_index_exact_count_prefix_scan_dispatches == 0u
+                && gpu_index_exact_count_control_readbacks == 0u
+                && gpu_index_deterministic_tile_emit_dispatches == 0u
+                && gpu_index_atomic_append_dispatches == 0u
+                && gpu_index_emit_validation_control_readbacks == 0u
+                && gpu_index_counted_minimizer_count == 0u
+                && gpu_index_verified_emit_count == 0u
+                && gpu_index_count_emit_parity_verified == 0u
+                && gpu_index_target_minimizer_capacity_estimate == 0u
+                && gpu_index_capacity_estimate_underestimated == 0u
+                && gpu_index_arena_trimmed_before_permit_shrink == 0u
+                && gpu_index_gate_enabled == 0u
+                && gpu_index_gate_count_dispatches == 0u
+                && gpu_index_gated_emit_dispatches == 0u
+                && gpu_index_ungated_emit_dispatches == 0u
+                && gpu_index_retained_minimizer_count == 0u
+                && gpu_index_distinct_minimizer_count == 0u;
+        }
+        // A Phase-C batch owns exactly one shared target build and attaches its
+        // proof to query zero. More than one build is not an accepted strict row.
+        if (builds != 1u) {
+            return false;
+        }
+        const bool empty = gpu_index_retained_minimizer_count == 0u;
+        return target_sketch_dispatches == builds
+            && gpu_index_exact_count_dispatches == builds
+            && gpu_index_exact_count_prefix_scan_dispatches == builds * 3u
+            && gpu_index_exact_count_control_readbacks == builds
+            && gpu_index_deterministic_tile_emit_dispatches
+                == (empty ? 0u : builds)
+            && gpu_index_atomic_append_dispatches == 0u
+            && gpu_index_emit_validation_control_readbacks
+                == (empty ? 0u : builds)
+            && gpu_index_counted_minimizer_count
+                == gpu_index_retained_minimizer_count
+            && gpu_index_verified_emit_count
+                == gpu_index_retained_minimizer_count
+            && gpu_index_count_emit_parity_verified == builds
+            && gpu_index_target_minimizer_capacity_estimate > 0u
+            && gpu_index_capacity_estimate_underestimated
+                == (gpu_index_retained_minimizer_count
+                        > gpu_index_target_minimizer_capacity_estimate
+                    ? 1u : 0u)
+            && gpu_index_arena_trimmed_before_permit_shrink == builds
+            && (gpu_index_gate_enabled == 1u
+                ? gpu_index_gate_count_dispatches == 1u
+                    && gpu_index_gated_emit_dispatches
+                        == gpu_index_deterministic_tile_emit_dispatches
+                    && gpu_index_ungated_emit_dispatches == 0u
+                : gpu_index_gate_enabled == 0u
+                    && gpu_index_gate_count_dispatches == 0u
+                    && gpu_index_gated_emit_dispatches == 0u
+                    && gpu_index_ungated_emit_dispatches
+                        == gpu_index_deterministic_tile_emit_dispatches);
+    }
+
+    [[nodiscard]] constexpr bool exact_stage_mask_accepted(
+        bool expect_query_sketch,
+        bool expect_target_sketch,
+        bool expect_target_index_build,
+        bool expect_seed_lookup,
+        bool expect_chain_score) const noexcept {
+        const auto matches = [](std::uint64_t count, bool expected) noexcept {
+            return expected ? count > 0 : count == 0;
+        };
+        return !saturated
+            && sketch_dispatches == 0
+            && exact_target_index_route_accepted()
+            && matches(query_sketch_dispatches, expect_query_sketch)
+            && matches(target_sketch_dispatches, expect_target_sketch)
+            && matches(target_index_build_dispatches,
+                       expect_target_index_build)
+            && matches(seed_lookup_dispatches, expect_seed_lookup)
+            && matches(chain_score_dispatches, expect_chain_score);
+    }
+
+    [[nodiscard]] constexpr bool exact_sketch_token_accepted() const noexcept {
+        if (sketch_dispatches != 1) {
+            return false;
+        }
+        PartialVulkanExecutionProof expected{};
+        expected.sketch_dispatches = 1;
+        return *this == expected;
+    }
+
+    constexpr bool operator==(
+        const PartialVulkanExecutionProof&) const noexcept = default;
+};
+
+/// A batch constructs one Phase-C target index and shares it with every query.
+/// Query zero is the sole owner of the build/ownership proof so additive batch
+/// aggregation cannot turn one target build into N apparent builds.
+[[nodiscard]] constexpr bool phase_c_target_build_proof_owner_query(
+    std::size_t query_index) noexcept
+{
+    return query_index == 0u;
+}
+
+static_assert([] {
+    PartialVulkanExecutionProof proof{};
+    proof.chain_score_dispatches = 1;
+    return proof.exact_stage_mask_accepted(
+        false, false, false, false, true);
+}());
+static_assert([] {
+    PartialVulkanExecutionProof proof{};
+    proof.query_sketch_dispatches = 1;
+    proof.target_sketch_dispatches = 1;
+    proof.target_index_build_dispatches = 1;
+    proof.gpu_index_exact_count_dispatches = 1;
+    proof.gpu_index_exact_count_prefix_scan_dispatches = 3;
+    proof.gpu_index_exact_count_control_readbacks = 1;
+    proof.gpu_index_deterministic_tile_emit_dispatches = 1;
+    proof.gpu_index_emit_validation_control_readbacks = 1;
+    proof.gpu_index_counted_minimizer_count = 53;
+    proof.gpu_index_verified_emit_count = 53;
+    proof.gpu_index_count_emit_parity_verified = 1;
+    proof.gpu_index_target_minimizer_capacity_estimate = 100;
+    proof.gpu_index_arena_trimmed_before_permit_shrink = 1;
+    proof.gpu_index_ungated_emit_dispatches = 1;
+    proof.gpu_index_retained_minimizer_count = 53;
+    proof.seed_lookup_dispatches = 1;
+    proof.chain_score_dispatches = 1;
+    return proof.exact_stage_mask_accepted(true, true, true, true, true)
+        && !proof.exact_stage_mask_accepted(true, true, false, true, true);
+}());
+static_assert([] {
+    PartialVulkanExecutionProof lhs{};
+    lhs.gpu_index_materializations = 1;
+    lhs.gpu_index_open_addressed_materializations = 1;
+    lhs.gpu_index_unique_keys = 3;
+    lhs.gpu_index_max_probe = 7;
+    PartialVulkanExecutionProof rhs{};
+    rhs.gpu_index_materializations = 1;
+    rhs.gpu_index_open_addressed_materializations = 1;
+    rhs.gpu_index_unique_keys = 5;
+    rhs.gpu_index_max_probe = 4;
+    lhs.combine(rhs);
+    return lhs.gpu_index_materializations == 2
+        && lhs.gpu_index_open_addressed_materializations == 2
+        && lhs.gpu_index_unique_keys == 8
+        && lhs.gpu_index_max_probe == 7;
+}());
+
 /**
  * @brief Owning container of alignment results with PAF output formatting.
  *
@@ -2027,10 +3005,344 @@ void compute_mapping_quality(
  */
 struct MatchResultCollection {
     std::vector<MatchResult> results;
+    TwoStackExecutionProof exact_simd_query_execution_proof{};
+    TwoStackExecutionProof exact_simd_target_execution_proof{};
+    PackedPaperNthashExecutionProof paper_nthash_query_execution_proof{};
+    PackedPaperNthashExecutionProof paper_nthash_target_execution_proof{};
+    SimdChainingExecutionProof simd_chaining_execution_proof{};
+    BlockAlignerExecutionProof block_aligner_execution_proof{};
+    ScalarPipelineExecutionProof scalar_pipeline_execution_proof{};
+    Ksw2BatchedExecutionProof ksw2_batched_execution_proof{};
+    PartialVulkanExecutionProof partial_vulkan_execution_proof{};
+    bool exact_simd_query_execution_proof_present = false;
+    bool exact_simd_target_execution_proof_present = false;
+    bool paper_nthash_query_execution_proof_present = false;
+    bool paper_nthash_target_execution_proof_present = false;
+    bool simd_chaining_execution_proof_present = false;
+    bool block_aligner_execution_proof_present = false;
+    bool scalar_pipeline_execution_proof_present = false;
+    bool ksw2_batched_execution_proof_present = false;
 
     MatchResultCollection() = default;
     explicit MatchResultCollection(std::vector<MatchResult>&& results_vec)
         : results(std::move(results_vec)) {}
+
+    void record_exact_simd_query_execution_proof(
+            const TwoStackExecutionProof& proof) noexcept {
+        exact_simd_query_execution_proof.combine(proof);
+        exact_simd_query_execution_proof_present = true;
+    }
+
+    void record_exact_simd_target_execution_proof(
+            const TwoStackExecutionProof& proof) noexcept {
+        exact_simd_target_execution_proof.combine(proof);
+        exact_simd_target_execution_proof_present = true;
+    }
+
+    void record_paper_nthash_query_execution_proof(
+            const PackedPaperNthashExecutionProof& proof) noexcept {
+        paper_nthash_query_execution_proof.combine(proof);
+        paper_nthash_query_execution_proof_present = true;
+    }
+
+    void record_paper_nthash_target_execution_proof(
+            const PackedPaperNthashExecutionProof& proof) noexcept {
+        paper_nthash_target_execution_proof.combine(proof);
+        paper_nthash_target_execution_proof_present = true;
+    }
+
+    void record_simd_chaining_execution_proof(
+            const SimdChainingExecutionProof& proof) noexcept {
+        simd_chaining_execution_proof.combine(proof);
+        simd_chaining_execution_proof_present = true;
+    }
+
+    void record_block_aligner_execution_proof(
+            const BlockAlignerExecutionProof& proof) noexcept {
+        block_aligner_execution_proof.combine(proof);
+        block_aligner_execution_proof_present = true;
+    }
+
+    void record_scalar_pipeline_execution_proof(
+            const ScalarPipelineExecutionProof& proof) noexcept {
+        scalar_pipeline_execution_proof.combine(proof);
+        scalar_pipeline_execution_proof_present = true;
+    }
+
+    void record_ksw2_batched_execution_proof(
+            const Ksw2BatchedExecutionProof& proof) noexcept {
+        ksw2_batched_execution_proof.combine(proof);
+        ksw2_batched_execution_proof_present = true;
+    }
+
+    void record_scalar_query_minimizer_execution_proof(
+            const ScalarMinimizerExecutionProof& proof) noexcept {
+        ScalarPipelineExecutionProof routed{};
+        routed.query_minimizers = proof;
+        record_scalar_pipeline_execution_proof(routed);
+    }
+
+    void record_scalar_target_minimizer_execution_proof(
+            const ScalarMinimizerExecutionProof& proof) noexcept {
+        ScalarPipelineExecutionProof routed{};
+        routed.target_minimizers = proof;
+        record_scalar_pipeline_execution_proof(routed);
+    }
+
+    void record_partial_vulkan_execution_proof(
+            const PartialVulkanExecutionProof& proof) noexcept {
+        partial_vulkan_execution_proof.combine(proof);
+    }
+
+    void combine_execution_proof(
+            const MatchResultCollection& other) noexcept {
+        if (other.exact_simd_query_execution_proof_present) {
+            record_exact_simd_query_execution_proof(
+                other.exact_simd_query_execution_proof);
+        }
+        if (other.exact_simd_target_execution_proof_present) {
+            record_exact_simd_target_execution_proof(
+                other.exact_simd_target_execution_proof);
+        }
+        if (other.paper_nthash_query_execution_proof_present) {
+            record_paper_nthash_query_execution_proof(
+                other.paper_nthash_query_execution_proof);
+        }
+        if (other.paper_nthash_target_execution_proof_present) {
+            record_paper_nthash_target_execution_proof(
+                other.paper_nthash_target_execution_proof);
+        }
+        if (other.simd_chaining_execution_proof_present) {
+            record_simd_chaining_execution_proof(
+                other.simd_chaining_execution_proof);
+        }
+        if (other.block_aligner_execution_proof_present) {
+            record_block_aligner_execution_proof(
+                other.block_aligner_execution_proof);
+        }
+        if (other.scalar_pipeline_execution_proof_present) {
+            record_scalar_pipeline_execution_proof(
+                other.scalar_pipeline_execution_proof);
+        }
+        if (other.ksw2_batched_execution_proof_present) {
+            record_ksw2_batched_execution_proof(
+                other.ksw2_batched_execution_proof);
+        }
+        partial_vulkan_execution_proof.combine(
+            other.partial_vulkan_execution_proof);
+    }
+
+    [[nodiscard]] bool exact_simd_query_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return exact_simd_query_execution_proof_present
+            && exact_simd_query_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool exact_simd_target_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return exact_simd_target_execution_proof_present
+            && exact_simd_target_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool paper_nthash_query_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return paper_nthash_query_execution_proof_present
+            && paper_nthash_query_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool paper_nthash_target_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return paper_nthash_target_execution_proof_present
+            && paper_nthash_target_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool simd_chaining_execution_accepted(
+            bool require_nonempty_vector_work) const noexcept {
+        return simd_chaining_execution_proof_present
+            && simd_chaining_execution_proof.accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool ksw2_batched_execution_accepted(
+            const bool require_nonempty_work) const noexcept {
+        return ksw2_batched_execution_proof_present
+            && ksw2_batched_execution_proof.accepted(
+                require_nonempty_work);
+    }
+
+    [[nodiscard]] bool selected_simd_sketch_execution_accepted(
+            MinimizerAlgorithmType selected,
+            bool require_target_sketch,
+            bool require_nonempty_vector_work) const noexcept {
+        if (partial_vulkan_execution_proof
+                != PartialVulkanExecutionProof{}) {
+            return false;
+        }
+
+        const bool exact_query_absent =
+            !exact_simd_query_execution_proof_present
+            && exact_simd_query_execution_proof == TwoStackExecutionProof{};
+        const bool exact_target_absent =
+            !exact_simd_target_execution_proof_present
+            && exact_simd_target_execution_proof == TwoStackExecutionProof{};
+        const bool paper_query_absent =
+            !paper_nthash_query_execution_proof_present
+            && paper_nthash_query_execution_proof
+                == PackedPaperNthashExecutionProof{};
+        const bool paper_target_absent =
+            !paper_nthash_target_execution_proof_present
+            && paper_nthash_target_execution_proof
+                == PackedPaperNthashExecutionProof{};
+
+        switch (selected) {
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH:
+                return paper_query_absent
+                    && paper_target_absent
+                    && exact_simd_query_execution_accepted(
+                        require_nonempty_vector_work)
+                    && (require_target_sketch
+                        ? exact_simd_target_execution_accepted(
+                            require_nonempty_vector_work)
+                        : exact_target_absent);
+            case MinimizerAlgorithmType::PAPER_NTHASH_SIMD:
+                return exact_query_absent
+                    && exact_target_absent
+                    && paper_nthash_query_execution_accepted(
+                        require_nonempty_vector_work)
+                    && (require_target_sketch
+                        ? paper_nthash_target_execution_accepted(
+                            require_nonempty_vector_work)
+                        : paper_target_absent);
+            default:
+                return false;
+        }
+    }
+
+    /// Validate the SIMD sketch/chaining/Block tuple plus its real CPU seed
+    /// lookup. All other scalar biological dimensions remain forbidden.
+    [[nodiscard]] bool all_simd_execution_accepted(
+            MinimizerAlgorithmType selected,
+            bool require_target_sketch,
+            bool require_nonempty_vector_work) const noexcept {
+        const auto& scalar = scalar_pipeline_execution_proof;
+        const bool scalar_seed_only_accepted =
+            scalar_pipeline_execution_proof_present
+            && !scalar.saturated
+            && scalar.query_minimizers == ScalarMinimizerExecutionProof{}
+            && scalar.target_minimizers == ScalarMinimizerExecutionProof{}
+            && scalar.seed_lookup_calls > 0u
+            && (!require_nonempty_vector_work
+                || scalar.seed_query_minimizers > 0u)
+            && scalar.chain_score_calls == 0u
+            && scalar.chain_backtrack_calls == 0u
+            && scalar.chain_anchor_inputs == 0u
+            && scalar.ksw2_left_calls == 0u
+            && scalar.ksw2_gap_calls == 0u
+            && scalar.ksw2_right_calls == 0u
+            && scalar.ksw2_input_cell_area == 0u;
+        return scalar_seed_only_accepted
+            && !ksw2_batched_execution_proof_present
+            && ksw2_batched_execution_proof
+                == Ksw2BatchedExecutionProof{}
+            && selected_simd_sketch_execution_accepted(
+                selected,
+                require_target_sketch,
+                require_nonempty_vector_work)
+            && simd_chaining_execution_accepted(
+                require_nonempty_vector_work)
+            && block_aligner_execution_accepted(
+                require_nonempty_vector_work);
+    }
+
+    [[nodiscard]] bool all_scalar_execution_accepted(
+            const bool require_target_sketch,
+            const bool require_alignment) const noexcept {
+        const bool simd_chain_absent =
+            !simd_chaining_execution_proof_present
+            && simd_chaining_execution_proof
+                == SimdChainingExecutionProof{};
+        const bool block_absent =
+            !block_aligner_execution_proof_present
+            && block_aligner_execution_proof
+                == BlockAlignerExecutionProof{};
+        const bool batched_absent =
+            !ksw2_batched_execution_proof_present
+            && ksw2_batched_execution_proof
+                == Ksw2BatchedExecutionProof{};
+        return selected_scalar_sketch_execution_accepted(
+                require_target_sketch,
+                /*require_nonempty_work=*/true)
+            && scalar_pipeline_execution_proof.accepted(
+                require_target_sketch, require_alignment)
+            && simd_chain_absent
+            && block_absent
+            && batched_absent
+            && partial_vulkan_execution_proof
+                == PartialVulkanExecutionProof{};
+    }
+
+    [[nodiscard]] bool selected_scalar_sketch_execution_accepted(
+            const bool require_target_sketch,
+            const bool require_nonempty_work) const noexcept {
+        const bool exact_absent =
+            !exact_simd_query_execution_proof_present
+            && !exact_simd_target_execution_proof_present
+            && exact_simd_query_execution_proof == TwoStackExecutionProof{}
+            && exact_simd_target_execution_proof == TwoStackExecutionProof{};
+        const bool paper_absent =
+            !paper_nthash_query_execution_proof_present
+            && !paper_nthash_target_execution_proof_present
+            && paper_nthash_query_execution_proof
+                == PackedPaperNthashExecutionProof{}
+            && paper_nthash_target_execution_proof
+                == PackedPaperNthashExecutionProof{};
+        const bool target_valid = require_target_sketch
+            ? scalar_pipeline_execution_proof.target_minimizers.accepted(
+                require_nonempty_work)
+            : scalar_pipeline_execution_proof.target_minimizers
+                == ScalarMinimizerExecutionProof{};
+        return scalar_pipeline_execution_proof_present
+            && scalar_pipeline_execution_proof.query_minimizers.accepted(
+                require_nonempty_work)
+            && target_valid
+            && exact_absent
+            && paper_absent
+            && partial_vulkan_execution_proof
+                == PartialVulkanExecutionProof{};
+    }
+
+    [[nodiscard]] bool has_any_algorithm_execution_proof() const noexcept {
+        return exact_simd_query_execution_proof_present
+            || exact_simd_target_execution_proof_present
+            || paper_nthash_query_execution_proof_present
+            || paper_nthash_target_execution_proof_present
+            || simd_chaining_execution_proof_present
+            || block_aligner_execution_proof_present
+            || scalar_pipeline_execution_proof_present
+            || ksw2_batched_execution_proof_present
+            || partial_vulkan_execution_proof.has_any_dispatch();
+    }
+
+    [[nodiscard]] bool block_aligner_execution_accepted(
+            bool require_nonempty_simd_work) const noexcept {
+        if (!block_aligner_execution_proof_present
+            || !block_aligner_execution_proof.accepted()) {
+            return false;
+        }
+        if (!require_nonempty_simd_work) {
+            return true;
+        }
+        const auto& proof = block_aligner_execution_proof;
+        return proof.executed_calls() > 0
+            && proof.nonempty_calls > 0
+            && proof.nonempty_calls_with_simd == proof.nonempty_calls
+            && proof.simd_dp_vector_batches > 0
+            && proof.simd_dp_cells > 0;
+    }
 
     [[nodiscard]] size_t size() const { return results.size(); }
     [[nodiscard]] bool empty() const { return results.empty(); }
