@@ -404,12 +404,41 @@ struct owning_sequence_retrieval_plan {
 // Erased owning-message protocol (spec 1971-1998).
 // ===========================================================================
 
+// Terminal per-asset validation/statistics event (spec §3179-3213, test #29).
+// Emitted exactly once, after a sequence asset (e.g. a hydrated archive member)
+// is fully decoded and its decoded-member MD5 verified; a verification FAILURE
+// emits a terminal external_error instead, never this event. It produces no row
+// slot — the PG access callback consumes it and continues (spec §3875-3877).
+struct sequence_asset_id {
+    external_execution_key execution{};  // 256-bit execution identity
+    std::uint64_t index{};               // per-execution monotonic asset ordinal
+
+    [[nodiscard]] std::size_t deep_size_bytes() const noexcept {
+        return sizeof(*this);
+    }
+};
+
+struct owning_sequence_asset_end {
+    sequence_asset_id asset_id;
+    std::uint64_t record_count{};
+    std::uint64_t decoded_bytes{};
+    // The MD5 is recorded as provider integrity metadata, not a signature (§3316).
+    owning_integrity_result integrity;
+
+    [[nodiscard]] std::size_t deep_size_bytes() const noexcept {
+        std::size_t total = sizeof(*this);
+        total += integrity.deep_size_bytes() - sizeof(integrity);
+        return total;
+    }
+};
+
 using owning_provider_message = std::variant<
     owning_taxonomy_row,
     owning_catalog_row,
     owning_sequence_payload,
     owning_sequence_retrieval_plan,
-    owning_provider_diagnostic>;
+    owning_provider_diagnostic,
+    owning_sequence_asset_end>;
 
 // Charged-memory footprint of an owning message: visits the active alternative.
 [[nodiscard]] inline std::size_t deep_size_bytes(

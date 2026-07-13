@@ -36,14 +36,19 @@ extern "C" {
 #include "utils/array.h"
 }
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <expected>
+#include <memory>
 #include <new>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <variant>
 #include <vector>
@@ -61,6 +66,9 @@ import bioseq.external.provider.messages;
 import bioseq.external.provider.errors;
 import bioseq.external.provider.runtime_services;
 import bioseq.external.provider.budget;
+import bioseq.external.provider.bounded_channel;
+import bioseq.external.io.sequence_stream;
+import bioseq.external.io.datasets_stream;
 import bioseq.common.context;
 import bioseq.parallelism.pool;
 
@@ -72,6 +80,7 @@ namespace {
 
 namespace ext = bioseq::external;
 namespace prov = bioseq::external::provider;
+namespace exio = bioseq::external::io;
 
 /* Forward declarations of the callbacks referenced by the method tables, so the
  * tables can be defined before the callback bodies (which in turn reference the
@@ -119,6 +128,8 @@ const CustomExecMethods BioseqExternalExecMethods = {
 /* ---- C++ runtime state (heap; freed by the es_query_cxt reset callback) ---- */
 
 struct external_scan_runtime {
+    using stream_channel = prov::bounded_channel<prov::owning_provider_message>;
+
     BioseqExternalEntityKind entity{EXTERNAL_ENTITY_UNSPECIFIED};
     std::vector<std::string> providers;    /* resolved provider set (>=1)       */
     prov::normalized_external_query query;  /* target + limit + pushed predicates */
@@ -126,6 +137,31 @@ struct external_scan_runtime {
     std::size_t msg_cursor{0};
     std::size_t sub_cursor{0};
     bool executed{false};
+
+    /* Streaming sequence path (NCBI): a producer task fills a bounded channel
+     * that scan_next drains with backpressure, so a multi-megabase record never
+     * materializes in full. `channel` is declared before `producer` so on
+     * destruction the jthread joins BEFORE the channel it drains is freed; the
+     * destructor cancels the channel first to wake a producer blocked in push. */
+    bool streaming{false};
+    std::unique_ptr<stream_channel> channel;
+    std::jthread producer;
+
+    ~external_scan_runtime()
+    {
+        if (channel != nullptr)
+            channel->cancel();
+    }
+
+    /* ReScan: stop and join the producer, drop the channel, revert to unexecuted. */
+    void reset_stream()
+    {
+        if (channel != nullptr)
+            channel->cancel();
+        producer = std::jthread{};  /* joins the previous producer */
+        channel.reset();
+        streaming = false;
+    }
 };
 
 /* Join the resolved provider set into a stable label for error/EXPLAIN text. */
@@ -140,6 +176,108 @@ providers_label(const external_scan_runtime *rt)
         label += p;
     }
     return label;
+}
+
+/* Deep byte size of a message for bounded-channel accounting. The streaming
+ * producer emits only sequence payloads; other variants (not produced here) are
+ * charged their fixed size. */
+std::size_t
+message_stream_bytes(const prov::owning_provider_message &msg)
+{
+    if (const auto *payload = std::get_if<prov::owning_sequence_payload>(&msg))
+        return payload->deep_size_bytes();
+    return sizeof(msg);
+}
+
+/* Producer-side sink: pushes owning messages into the bounded channel, blocking
+ * under backpressure until the consumer drains. Runs only on the producer thread
+ * and touches no PostgreSQL API (the DOC0321 boundary). */
+struct channel_producer_sink {
+    external_scan_runtime::stream_channel *channel;
+    std::stop_token stop;
+
+    static std::expected<void, prov::external_error>
+    push(void *self, prov::owning_provider_message &&msg)
+    {
+        auto *sink = static_cast<channel_producer_sink *>(self);
+        const std::size_t bytes = message_stream_bytes(msg);
+        return sink->channel->push(std::move(msg), bytes, sink->stop);
+    }
+};
+
+/* Streaming is used for NCBI sequence / sequence_chunk targets with an accession:
+ * the bounded-memory libcurl path replaces the whole-body efetch download. Other
+ * providers/targets keep the bulk collect path. */
+bool
+is_streaming_query(const external_scan_runtime *rt)
+{
+    if (rt->entity != EXTERNAL_ENTITY_SEQUENCE &&
+        rt->entity != EXTERNAL_ENTITY_SEQUENCE_CHUNK)
+        return false;
+    if (rt->providers.size() != 1 || rt->providers.front() != "ncbi")
+        return false;
+    return exio::accession_from_query(rt->query).has_value();
+}
+
+/* Launch the producer task streaming NCBI FASTA into the bounded channel. The
+ * jthread owns a stop_token; the runtime destructor cancels the channel and joins
+ * it. The captured channel pointer outlives the task (destroyed after the join). */
+void
+start_streaming(external_scan_runtime *rt)
+{
+    const std::optional<std::string> accession =
+        exio::accession_from_query(rt->query);
+    const prov::query_target target =
+        (rt->entity == EXTERNAL_ENTITY_SEQUENCE_CHUNK)
+            ? prov::query_target::sequence_chunk
+            : prov::query_target::sequence;
+
+    /* A handful of chunk payloads (each up to ~1 MiB) plus item slack; the
+     * producer blocks when full, bounding peak queued memory. */
+    constexpr std::size_t kChannelBytes = 8u * 1024u * 1024u;
+    constexpr std::size_t kChannelItems = 4;
+    rt->channel = std::make_unique<external_scan_runtime::stream_channel>(
+        kChannelBytes, kChannelItems);
+    rt->streaming = true;
+
+    external_scan_runtime::stream_channel *channel = rt->channel.get();
+    std::string captured_accession = *accession;
+    rt->producer = std::jthread(
+        [channel, captured_accession = std::move(captured_accession),
+         target](std::stop_token stop) {
+            channel_producer_sink sink_ctx{channel, stop};
+            prov::provider_message_sink_ref sink{&sink_ctx,
+                                                 &channel_producer_sink::push};
+            try
+            {
+                /* GCF_/GCA_ assembly accessions stream from the NCBI Datasets
+                 * ZIP (libarchive reader); nucleotide accessions use the efetch
+                 * text path. The efetch path is byte-for-byte unchanged. */
+                auto result =
+                    exio::accession_is_datasets_package(captured_accession)
+                        ? exio::run_ncbi_datasets_stream(
+                              captured_accession, target,
+                              exio::kDefaultChunkBases, sink, stop)
+                        : exio::run_ncbi_sequence_stream(
+                              captured_accession, target,
+                              exio::kDefaultChunkBases, sink, stop);
+                if (result.has_value())
+                    channel->close_done();
+                else
+                    channel->close_error(std::move(result.error()));
+            }
+            catch (const std::exception &error)
+            {
+                channel->close_error(prov::make_external_error(
+                    prov::external_error_kind::transport, error.what()));
+            }
+            catch (...)
+            {
+                channel->close_error(prov::make_external_error(
+                    prov::external_error_kind::transport,
+                    "external sequence producer failed"));
+            }
+        });
 }
 
 /* Standard-layout scan state: CustomScanState MUST be first (offset 0) for the
@@ -679,10 +817,19 @@ bioseq_external_scan_next(CustomScanState *node)
     {
         if (!rt->executed)
         {
-            run_provider(rt);
             rt->executed = true;
             rt->msg_cursor = 0;
             rt->sub_cursor = 0;
+
+            if (is_streaming_query(rt))
+            {
+                /* NCBI sequence/sequence_chunk: bounded-memory streaming via a
+                 * producer task feeding a backpressured channel (below). */
+                start_streaming(rt);
+            }
+            else
+            {
+            run_provider(rt);
 
             /* A planning/transport error is reported by the provider as data,
              * not an exception; surface it as a SQL error here. */
@@ -709,6 +856,67 @@ bioseq_external_scan_next(CustomScanState *node)
                                 label),
                          errdetail("%.*s", static_cast<int>(detail.size()),
                                    detail.data())));
+            }
+            }
+        }
+
+        /* Streaming drain: pop one payload per row with backpressure; poll
+         * interrupts on timeout (no C++ mutex is held across CHECK_FOR_INTERRUPTS
+         * because pop_for releases it before returning). */
+        if (rt->streaming)
+        {
+            for (;;)
+            {
+                prov::pop_result<prov::owning_provider_message> popped =
+                    rt->channel->pop_for(std::chrono::milliseconds(100));
+                if (popped.status == prov::pop_status::timed_out)
+                {
+                    CHECK_FOR_INTERRUPTS();
+                    continue;
+                }
+                if (popped.status == prov::pop_status::closed_done ||
+                    popped.status == prov::pop_status::cancelled)
+                    return ExecClearTuple(slot);
+                if (popped.status == prov::pop_status::closed_error)
+                {
+                    const std::optional<prov::external_error> stream_error =
+                        rt->channel->error();
+                    const prov::external_error_kind kind =
+                        stream_error.has_value()
+                            ? stream_error->kind
+                            : prov::external_error_kind::provider_contract;
+                    const int sqlstate =
+                        (kind ==
+                             prov::external_error_kind::unsupported_capability ||
+                         kind == prov::external_error_kind::not_implemented)
+                            ? ERRCODE_FEATURE_NOT_SUPPORTED
+                            : ERRCODE_EXTERNAL_ROUTINE_EXCEPTION;
+                    /* pstrdup from temporaries that die at the ';', so no live
+                     * C++ std::string destructor is skipped by ereport's longjmp
+                     * (matches the non-streaming error path above). */
+                    char *label = pstrdup(providers_label(rt).c_str());
+                    char *detail = pstrdup(
+                        stream_error.has_value()
+                            ? std::string(stream_error->message.view()).c_str()
+                            : "external sequence stream failed");
+                    ereport(ERROR,
+                            (errcode(sqlstate),
+                             errmsg("bioseq_external: provider \"%s\" request "
+                                    "failed",
+                                    label),
+                             errdetail("%s", detail)));
+                }
+                /* pop_status::item: one sequence payload -> one row. */
+                ExecClearTuple(slot);
+                const bool stored = bioseq_external_fill_slot(
+                    rt->entity, popped.item->value(), 0, slot);
+                popped.item->release();  /* Datum copied; free channel space. */
+                if (stored)
+                {
+                    ExecStoreVirtualTuple(slot);
+                    return slot;
+                }
+                /* message did not match the entity — skip and continue */
             }
         }
 
@@ -796,6 +1004,7 @@ bioseq_external_rescan(CustomScanState *node)
         reinterpret_cast<BioseqExternalScanState *>(node);
     if (state->runtime != nullptr)
     {
+        state->runtime->reset_stream();  /* cancel+join producer, drop channel */
         state->runtime->executed = false;
         state->runtime->msg_cursor = 0;
         state->runtime->sub_cursor = 0;

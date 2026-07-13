@@ -428,6 +428,51 @@ if(_bioseq_provider_adapter_modules)
   endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# DOC0372 — external streaming IO/transfer bundle. Owns the libcurl pull source,
+# the locator SSRF firewall, the serial gzip decode source, the bounded channel
+# glue, and the provider-neutral sequence streaming executor. It links the
+# non-PostgreSQL IO modules (io_source concept + shared FASTA/stream parser) and
+# curl/c-ares/libarchive/zlib. It never links PostgreSQL; the PG custom scan calls
+# its `run_external_sequence_stream` entry point for sequence targets.
+# ---------------------------------------------------------------------------
+find_package(CURL REQUIRED)
+find_package(c-ares CONFIG REQUIRED)
+find_package(LibArchive REQUIRED)
+
+add_library(bioseq_external_io STATIC)
+set_target_properties(bioseq_external_io PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_external_io PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_external_io
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+    FILES
+      "${CMAKE_CURRENT_SOURCE_DIR}/transport/locator.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/transport/remote_source.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/transport/transfer_service.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/io/gzip_decode_source.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/io/sequence_stream.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/io/datasets_stream.cppm")
+# Classic (non-module) TU: owns all OpenSSL usage so <openssl/evp.h> never enters
+# a module global module fragment (would clash with import std). See archive_md5.h.
+target_sources(bioseq_external_io PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_md5.cpp")
+target_link_libraries(bioseq_external_io PUBLIC
+  bioseq_external_provider_core
+  bioseq_modules_nopg
+  CURL::libcurl
+  c-ares::cares
+  LibArchive::LibArchive
+  OpenSSL::Crypto
+  ZLIB::ZLIB)
+
 # Provider-core + adapter tests run inside the existing external integration exec
 # so the `external-api` MCP mode builds and runs them without a sequence/PG target.
 if(TARGET bioseq_external_integration_tests_exec)
@@ -436,7 +481,8 @@ if(TARGET bioseq_external_integration_tests_exec)
   target_sources(bioseq_external_integration_tests_exec PRIVATE
     ${_bioseq_provider_test_sources})
   target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
-    bioseq_external_provider_core)
+    bioseq_external_provider_core
+    bioseq_external_io)
   if(TARGET bioseq_external_provider_adapters)
     target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
       bioseq_external_provider_adapters)

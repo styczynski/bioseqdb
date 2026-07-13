@@ -143,9 +143,16 @@ set(BIOSEQ_SINK_CONTROL_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/sink_control.cppm")
 set(BIOSEQ_CHECKED_ARITHMETIC_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/checked_arithmetic.cppm")
+# DOC0372 §369-374 — read_result + io_source protocol as a lightweight leaf so
+# external transfer / generated clients depend on the byte-source protocol
+# without the sequences/alphabets graph. The io/*.cppm glob captures it, so it
+# must leave BIOSEQ_NOPG_OWNED_MODULES to be compiled exactly once in its target.
+set(BIOSEQ_IO_SOURCE_CORE_MODULE
+  "${CMAKE_CURRENT_LIST_DIR}/io/source_core.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
   "${BIOSEQ_SINK_CONTROL_MODULE}"
-  "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}")
+  "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}"
+  "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
 
 add_library(bioseq_sink_control_core STATIC)
 set_target_properties(bioseq_sink_control_core PROPERTIES
@@ -166,6 +173,39 @@ target_compile_definitions(bioseq_checked_arithmetic_core PRIVATE NO_POSTGRES=1)
 target_sources(bioseq_checked_arithmetic_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}")
+
+add_library(bioseq_io_source_core STATIC)
+set_target_properties(bioseq_io_source_core PROPERTIES
+  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_io_source_core PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_io_source_core
+  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
+
+# DOC0372 §413-424 — memory-admission controller + its sysinfo memory probe as a
+# single-owner leaf, so a metadata/live target can reserve memory without
+# scheduling dna4_w8. sysinfo.cppm imports nothing (POSIX/std only) and
+# memory_admission.cppm now imports only the sysinfo partition (its sibling in
+# this target), so the leaf carries no edge back into bioseq_modules_nopg. Both
+# stay in BIOSEQ_NOPG_MODULES (PG glob still excludes them) but leave
+# BIOSEQ_NOPG_OWNED_MODULES so they compile exactly once, here.
+set(BIOSEQ_MEMORY_ADMISSION_CORE_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/sysinfo.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/memory_admission.cppm")
+list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
+  ${BIOSEQ_MEMORY_ADMISSION_CORE_MODULES})
+
+add_library(bioseq_memory_admission_core STATIC)
+set_target_properties(bioseq_memory_admission_core PROPERTIES
+  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_memory_admission_core PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_memory_admission_core
+  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES ${BIOSEQ_MEMORY_ADMISSION_CORE_MODULES})
 
 # DOC0372 — lightweight templating core: value sequence, compile-time string,
 # pack iterate/search, and one-time runtime dispatch. Links Highway (required by
@@ -298,6 +338,8 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   bioseq_runtime_core
   bioseq_sink_control_core
   bioseq_checked_arithmetic_core
+  bioseq_io_source_core
+  bioseq_memory_admission_core
   bioseq_common_templating_core
   safestring_static
   fmt
@@ -417,6 +459,24 @@ option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
 if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   list(FILTER SRC_MOD_FILES EXCLUDE
     REGEX "/backend/pg/external/(scan|row_writer)\\.cppm$")
+else()
+  # DOC0372 streaming data plane — the external CustomScan's producer task
+  # (scan.cppm) imports the libcurl pull source, locator SSRF firewall, serial
+  # gzip decode source, and NCBI sequence stream. Compile those non-PG transfer/IO
+  # modules directly into the extension (like scan/row_writer) so there is one
+  # copy of the shared Domain-N module objects (nopg arrives via SHARED_MODULE_LIBS)
+  # rather than a second copy through a static library.
+  list(APPEND SRC_MOD_FILES
+    "${CMAKE_CURRENT_LIST_DIR}/external/transport/locator.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/external/transport/remote_source.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/external/io/gzip_decode_source.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/external/io/sequence_stream.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/external/io/archive_source.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/external/io/datasets_stream.cppm")
+  # archive_md5.cpp is a classic (non-module) TU: it owns the OpenSSL include so
+  # <openssl/evp.h> never enters a module global module fragment.
+  list(APPEND SRC_FILES
+    "${CMAKE_CURRENT_LIST_DIR}/external/io/archive_md5.cpp")
 endif()
 
 # GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
@@ -733,9 +793,20 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   # module compiles. BIOSEQ_EXTERNAL_PG gates the _PG_init registration and the
   # conditional import of the scan module in backend/pg/column/column.cppm.
   if(TARGET bioseq_external_provider_adapters)
+    # DOC0372 streaming data plane transfer/archive dependencies (see the
+    # SRC_MOD_FILES append above for the transport/IO modules compiled in).
+    find_package(CURL REQUIRED)
+    find_package(c-ares CONFIG REQUIRED)
+    find_package(LibArchive REQUIRED)
+    find_package(OpenSSL REQUIRED)
     target_link_libraries(postgresql_bioseq PRIVATE
       bioseq_external_provider_core
-      bioseq_external_provider_adapters)
+      bioseq_external_provider_adapters
+      CURL::libcurl
+      c-ares::cares
+      LibArchive::LibArchive
+      OpenSSL::Crypto
+      ZLIB::ZLIB)
     target_compile_definitions(postgresql_bioseq PRIVATE BIOSEQ_EXTERNAL_PG=1)
   endif()
 endif()

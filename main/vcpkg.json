@@ -6,6 +6,17 @@
     "boost-serialization",
     "boost-system",
     "catch2",
+    "c-ares",
+    {
+      "name": "curl",
+      "features": [
+        "c-ares",
+        "http2",
+        "non-http",
+        "openssl"
+      ]
+    },
+    "libarchive",
     "foonathan-memory",
     "ftxui",
     "highway",

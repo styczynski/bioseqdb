@@ -4,8 +4,10 @@
  *        and index residency features.
  */
 module;
-#include "common.h"
-
+// DOC0372 §413-424 — the controller lives in the single-owner
+// bioseq_memory_admission_core leaf and imports only the sysinfo partition it
+// uses (bioseq::memory::default_budget), not the bioseq.instr umbrella, so the
+// leaf carries no edge back into the broad non-PG target. common.h was unused.
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -14,7 +16,7 @@ module;
 #include <utility>
 
 export module bioseq.parallelism.memory_admission;
-import bioseq.instr;
+import bioseq.instr.detail.sysinfo;
 
 export namespace bioseq::parallelism {
 

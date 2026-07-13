@@ -79,12 +79,25 @@ struct external_execution_budget {
         budget.queue_items = request.requested_queue_items;
         budget.metadata_page_bytes = 4U * 1024U * 1024U;
         budget.error_body_bytes = 64U * 1024U;
+        const bool sequence_delivery =
+            request.delivery != sequence_delivery_mode::not_applicable;
         budget.transfer_carry_bytes =
-            request.delivery == sequence_delivery_mode::not_applicable
-                ? 0U
-                : 1U * 1024U * 1024U;
+            sequence_delivery ? 1U * 1024U * 1024U : 0U;
         budget.producer_staging_bytes = 1U * 1024U * 1024U;
         budget.private_context_bytes = 2U * 1024U * 1024U;
+        // Previously-unset simultaneous-peak terms (DOC0372 lines 3006-3010).
+        // The spec fixes no numbers (all "conservative defaults"); these are
+        // upper bounds over the real runtime buffers. parser scratch covers the
+        // bounded rechunk buffer's full capacity (chunk_bases ~1 MiB + one fed
+        // block, line 3740); decoder state covers the zlib inflate window plus
+        // input page; archive metadata covers the libarchive manifest/index
+        // spool. Metadata-only (not_applicable) scans decode/archive nothing and
+        // parse only a bounded JSON page.
+        budget.parser_scratch_bytes =
+            sequence_delivery ? 2U * 1024U * 1024U : 1U * 1024U * 1024U;
+        budget.decoder_bytes = sequence_delivery ? 512U * 1024U : 0U;
+        budget.archive_metadata_bytes =
+            sequence_delivery ? 1U * 1024U * 1024U : 0U;
         budget.in_flight_transfers = request.requested_in_flight_transfers;
         budget.maximum_wire_bytes = request.maximum_wire_bytes;
         budget.maximum_decoded_bytes = request.maximum_decoded_bytes;
@@ -95,21 +108,43 @@ struct external_execution_budget {
             budget.materialized_record_bytes = request.maximum_record_bytes;
         }
 
-        // Simultaneous-peak lower bound (per provider one context + page + one
-        // staging message + queue capacity + error reserve).
-        const std::size_t producers =
-            request.selected_providers.empty() ? 1U
-                                               : request.selected_providers.size();
-        std::uint64_t peak = budget.queue_bytes;
-        for (const auto add : {static_cast<std::uint64_t>(budget.error_body_bytes),
-                               bioseq::common::saturating_mul(
-                                   producers,
-                                   static_cast<std::uint64_t>(
-                                       budget.private_context_bytes +
-                                       budget.metadata_page_bytes +
-                                       budget.producer_staging_bytes)),
-                               static_cast<std::uint64_t>(
-                                   budget.materialized_record_bytes)}) {
+        // Simultaneous-peak equation (DOC0372 "Context and memory ownership",
+        // lines 2999-3012). Multipliers are exactly as the spec writes them:
+        // private context + metadata page + staging scale by producer_count;
+        // curl carry scales by transfer_count; the canonical/plan snapshot, the
+        // channel capacity (including fixed per-item overhead), parser scratch,
+        // decoder state, archive metadata, the error reserve, and the
+        // materialized-record datum are each counted once. All arithmetic is
+        // checked/saturating.
+        const std::uint64_t producers =
+            request.selected_providers.empty()
+                ? 1U
+                : static_cast<std::uint64_t>(request.selected_providers.size());
+        const std::uint64_t transfers =
+            budget.in_flight_transfers == 0
+                ? 1U
+                : static_cast<std::uint64_t>(budget.in_flight_transfers);
+        constexpr std::uint64_t kQueueItemOverheadBytes = 64U;
+        constexpr std::uint64_t kControlSnapshotBytes = 256U * 1024U;
+        const std::uint64_t queue_effective = bioseq::common::saturating_add(
+            static_cast<std::uint64_t>(budget.queue_bytes),
+            bioseq::common::saturating_mul(
+                static_cast<std::uint64_t>(budget.queue_items),
+                kQueueItemOverheadBytes));
+        const std::uint64_t per_provider = bioseq::common::saturating_mul(
+            producers, static_cast<std::uint64_t>(budget.private_context_bytes +
+                                                  budget.metadata_page_bytes +
+                                                  budget.producer_staging_bytes));
+        const std::uint64_t per_transfer = bioseq::common::saturating_mul(
+            transfers, static_cast<std::uint64_t>(budget.transfer_carry_bytes));
+        std::uint64_t peak = 0;
+        for (const std::uint64_t add :
+             {kControlSnapshotBytes, queue_effective, per_provider, per_transfer,
+              static_cast<std::uint64_t>(budget.parser_scratch_bytes),
+              static_cast<std::uint64_t>(budget.decoder_bytes),
+              static_cast<std::uint64_t>(budget.archive_metadata_bytes),
+              static_cast<std::uint64_t>(budget.error_body_bytes),
+              static_cast<std::uint64_t>(budget.materialized_record_bytes)}) {
             peak = bioseq::common::saturating_add(peak, add);
         }
         budget.reserved_capacity_bytes = peak;
@@ -334,36 +369,59 @@ public:
         if (!aggregate.has_value()) {
             return std::unexpected(aggregate.error());
         }
+        // Per-slot honest fixed floor (DOC0372 lines 3024-3033): private context
+        // + one metadata page + one staging message + one transfer carry, plus
+        // the provider's plan estimate. Build the slots and accumulate the fixed
+        // reserve first; the shared byte gate then draws ONLY from the headroom
+        // left under the permit, so the disjoint-reserve invariant
+        //   sum(slot.fixed_reserved_bytes) + gate.capacity <= admitted_bytes
+        // holds by construction (the gate no longer defaults to the whole
+        // permit, which would have made the invariant unsatisfiable).
+        std::vector<external_slot_budget> slots;
+        slots.reserve(request.selected_providers.size());
+        std::uint64_t sum_fixed = 0;
+        std::size_t index = 0;
+        for (const provider_id provider : request.selected_providers) {
+            external_slot_budget slot;
+            slot.provider = provider;
+            slot.queue_bytes = aggregate->queue_bytes;
+            slot.queue_items = aggregate->queue_items;
+            slot.metadata_page_bytes = aggregate->metadata_page_bytes;
+            slot.staging_message_bytes = aggregate->producer_staging_bytes;
+            slot.transfer_carry_bytes = aggregate->transfer_carry_bytes;
+            std::uint64_t fixed =
+                static_cast<std::uint64_t>(aggregate->private_context_bytes) +
+                static_cast<std::uint64_t>(aggregate->metadata_page_bytes) +
+                static_cast<std::uint64_t>(aggregate->producer_staging_bytes) +
+                static_cast<std::uint64_t>(aggregate->transfer_carry_bytes);
+            if (index < estimates.size()) {
+                fixed = bioseq::common::saturating_add(
+                    fixed, estimates[index].plan_bytes);
+            }
+            slot.fixed_reserved_bytes = fixed;
+            sum_fixed = bioseq::common::saturating_add(sum_fixed, fixed);
+            slots.push_back(slot);
+            ++index;
+        }
+        if (sum_fixed > aggregate->admitted_bytes) {
+            return std::unexpected(make_external_error(
+                external_error_kind::response_too_large,
+                "external per-slot fixed reserves exceed admitted bytes"));
+        }
+        const std::uint64_t headroom = aggregate->admitted_bytes - sum_fixed;
         const std::uint64_t gate_capacity =
-            aggregate->maximum_decoded_bytes == 0
-                ? aggregate->admitted_bytes
+            (aggregate->maximum_decoded_bytes == 0 ||
+             aggregate->maximum_decoded_bytes > headroom)
+                ? headroom
                 : aggregate->maximum_decoded_bytes;
         const std::uint32_t transfer_capacity = static_cast<std::uint32_t>(
             aggregate->in_flight_transfers == 0 ? 1
                                                 : aggregate->in_flight_transfers);
         auto gates = std::make_unique<shared_external_gate_state>(
             gate_capacity, transfer_capacity);
-
-        std::vector<external_slot_budget> slots;
-        slots.reserve(request.selected_providers.size());
-        std::size_t index = 0;
-        for (const provider_id provider : request.selected_providers) {
-            external_slot_budget slot;
-            slot.provider = provider;
-            slot.fixed_reserved_bytes = aggregate->private_context_bytes;
-            slot.queue_bytes = aggregate->queue_bytes;
-            slot.queue_items = aggregate->queue_items;
-            slot.metadata_page_bytes = aggregate->metadata_page_bytes;
-            slot.staging_message_bytes = aggregate->producer_staging_bytes;
-            slot.transfer_carry_bytes = aggregate->transfer_carry_bytes;
+        for (external_slot_budget& slot : slots) {
             slot.dynamic_bytes = gates->byte_ref();
             slot.transfer_slots = gates->transfer_ref();
-            if (index < estimates.size()) {
-                slot.fixed_reserved_bytes = bioseq::common::saturating_add(
-                    slot.fixed_reserved_bytes, estimates[index].plan_bytes);
-            }
-            slots.push_back(slot);
-            ++index;
         }
         return owning_external_budget_allocation(*aggregate, std::move(gates),
                                                  std::move(slots));
