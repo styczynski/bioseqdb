@@ -36,6 +36,7 @@ inline constexpr std::uint32_t kDefaultReusableRegistryPartitionsV1 = 16;
 inline constexpr std::uint32_t kDefaultReusableRegistryArenaBytesV1 = 16U << 20;
 inline constexpr std::uint32_t kMaximumReusableRegistryGenerationsV1 = 65'536;
 inline constexpr std::uint32_t kMaximumReusableJanitorBatchV1 = 64;
+inline constexpr std::uint32_t kMaximumReusableInvalidationScanV1 = 64;
 inline constexpr std::uint32_t kReusableReferenceOwnersPerGenerationV1 = 64;
 inline constexpr std::uint32_t kInvalidReusableRegistrySlotV1 =
     (std::numeric_limits<std::uint32_t>::max)();
@@ -947,6 +948,63 @@ struct ReusablePublishRequestV1 {
   std::uint64_t stored_bytes = 0;
 };
 
+/**
+ * One bounded commit-time invalidation selector. Database scope is mandatory;
+ * every other equality gate is opt-in. Database-wide coarse fallback is
+ * mutually exclusive with every precise gate.
+ */
+struct ReusableInvalidationSelectorV1 {
+  std::uint32_t database_oid = 0;
+  std::uint32_t provider_id = 0;
+  ReusableSecurityNamespaceV1 security_namespace{};
+  PhysicalIdentityV1 physical_identity{};
+  CacheDigest256 dependency_fingerprint{};
+  CacheDigest256 schema_fingerprint{};
+  CacheDigest256 mapping_fingerprint{};
+  CacheDigest256 lineage_fingerprint{};
+  WriteObservability observability = WriteObservability::DatabaseWideFallback;
+  std::uint32_t cursor = 0;
+  std::uint32_t maximum_scan = kMaximumReusableInvalidationScanV1;
+  bool match_security_namespace = false;
+  bool match_provider_id = false;
+  bool match_physical_identity = false;
+  bool match_dependency_fingerprint = false;
+  bool match_schema_fingerprint = false;
+  bool match_mapping_fingerprint = false;
+  bool match_lineage_fingerprint = false;
+  bool match_observability = false;
+  bool coarse_database_fallback = false;
+  std::array<std::uint8_t, 7> reserved{};
+};
+
+/**
+ * Deterministic bounded invalidation output. Affected manifests are identities
+ * only; this operation never retires, frees, or otherwise mutates storage.
+ */
+struct ReusableInvalidationResultV1 {
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  std::uint32_t next_cursor = 0;
+  std::uint32_t scanned_generations = 0;
+  std::uint32_t matched_generations = 0;
+  std::uint32_t invalidated_complete = 0;
+  std::uint32_t failed_inflight = 0;
+  std::uint32_t already_invalidated = 0;
+  std::uint32_t already_failed = 0;
+  std::uint32_t referenced_generations = 0;
+  std::uint32_t waiter_references = 0;
+  std::uint32_t planner_pins = 0;
+  std::uint32_t reader_pins = 0;
+  std::array<ReusableGenerationReferenceV1,
+             kMaximumReusableInvalidationScanV1>
+      affected_references{};
+  std::array<ReusableManifestHandleV1, kMaximumReusableInvalidationScanV1>
+      affected_manifests{};
+  std::array<CacheEntryState, kMaximumReusableInvalidationScanV1>
+      previous_states{};
+  std::size_t affected_count = 0;
+  bool done = false;
+};
+
 struct ReusableRegistrySnapshotV1 {
   std::uint64_t boot_nonce = 0;
   std::uint32_t indexed_generations = 0;
@@ -1813,6 +1871,91 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
 }
 
 [[nodiscard]] inline bool
+write_observability_valid(WriteObservability observability) noexcept {
+  return observability == WriteObservability::None ||
+         observability == WriteObservability::ProviderComplete ||
+         observability == WriteObservability::ExecutorUtilityOnly ||
+         observability == WriteObservability::DatabaseWideFallback;
+}
+
+[[nodiscard]] inline bool invalidation_selector_valid(
+    const ReusableInvalidationSelectorV1 &selector) noexcept {
+  const bool reserved_clear = std::all_of(
+      selector.reserved.begin(), selector.reserved.end(),
+      [](std::uint8_t value) noexcept { return value == 0; });
+  if (selector.database_oid == 0 || selector.maximum_scan == 0 ||
+      !reserved_clear) {
+    return false;
+  }
+  if (selector.match_security_namespace &&
+      (selector.security_namespace.database_oid != selector.database_oid ||
+       selector.security_namespace.current_role_oid == 0 ||
+       selector.security_namespace.session_user_oid == 0 ||
+       selector.security_namespace.reserved != 0)) {
+    return false;
+  }
+  if (selector.match_provider_id && selector.provider_id == 0) {
+    return false;
+  }
+  const bool physical_kind_valid =
+      selector.physical_identity.kind ==
+          PhysicalIdentityKind::PgRelFileLocator ||
+      selector.physical_identity.kind == PhysicalIdentityKind::ProviderOpaque;
+  if (selector.match_physical_identity &&
+      (!physical_kind_valid ||
+       selector.physical_identity.length == 0 ||
+       selector.physical_identity.length >
+           selector.physical_identity.bytes.size())) {
+    return false;
+  }
+  if (selector.match_observability &&
+      !write_observability_valid(selector.observability)) {
+    return false;
+  }
+  const bool precise_metadata_match =
+      selector.match_provider_id || selector.match_physical_identity ||
+      selector.match_dependency_fingerprint ||
+      selector.match_schema_fingerprint || selector.match_mapping_fingerprint ||
+      selector.match_lineage_fingerprint || selector.match_observability;
+  if (selector.coarse_database_fallback) {
+    return !selector.match_security_namespace && !precise_metadata_match;
+  }
+  return selector.match_security_namespace || precise_metadata_match;
+}
+
+[[nodiscard]] inline bool generation_matches_invalidation(
+    const ReusableSharedGenerationV1 &generation,
+    const ReusableInvalidationSelectorV1 &selector) noexcept {
+  const ReusableSecurityNamespaceV1 &security_namespace =
+      generation.coverage_directory_key.security_namespace;
+  if (security_namespace.database_oid != selector.database_oid ||
+      (selector.match_security_namespace &&
+       security_namespace != selector.security_namespace)) {
+    return false;
+  }
+  if (selector.coarse_database_fallback) {
+    return true;
+  }
+  const ReusableGenerationMetadataV1 &metadata = generation.metadata;
+  return (!selector.match_provider_id ||
+          metadata.provider_id == selector.provider_id) &&
+         (!selector.match_physical_identity ||
+          physical_identity_equal(metadata.physical_identity,
+                                  selector.physical_identity)) &&
+         (!selector.match_dependency_fingerprint ||
+          metadata.dependency_fingerprint ==
+              selector.dependency_fingerprint) &&
+         (!selector.match_schema_fingerprint ||
+          metadata.schema_fingerprint == selector.schema_fingerprint) &&
+         (!selector.match_mapping_fingerprint ||
+          metadata.mapping_fingerprint == selector.mapping_fingerprint) &&
+         (!selector.match_lineage_fingerprint ||
+          metadata.lineage_fingerprint == selector.lineage_fingerprint) &&
+         (!selector.match_observability ||
+          metadata.observability == selector.observability);
+}
+
+[[nodiscard]] inline bool
 completed_generation_expired(const ReusableSharedGenerationV1 &generation,
                              std::uint64_t consumer_ttl_ms,
                              std::uint64_t now_ns) noexcept {
@@ -2590,6 +2733,113 @@ snapshot_reusable_candidates(
 }
 
 /**
+ * Scan a bounded slot interval and invalidate matching reusable generations.
+ * The caller holds membership EXCLUSIVE. Matching uses only immutable fields;
+ * no manifest is retired or freed, so existing pins may finish normally.
+ */
+[[nodiscard]] inline ReusableInvalidationResultV1
+invalidate_reusable_generations(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableInvalidationSelectorV1 &selector,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+  using namespace reusable_registry_detail;
+  ReusableInvalidationResultV1 result{
+      .next_cursor = selector.cursor,
+  };
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None ||
+      !callbacks.valid() || !invalidation_selector_valid(selector)) {
+    result.error = attachment_error != ReusableRegistryErrorV1::None
+                       ? attachment_error
+                       : ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+  ReusableRegistryHeaderV1 &shared = header(attachment);
+  if (selector.cursor > shared.config.max_generations) {
+    result.error = ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+  if (selector.cursor == shared.config.max_generations) {
+    result.done = true;
+    return result;
+  }
+  const std::uint32_t maximum_scan = std::min(
+      selector.maximum_scan, kMaximumReusableInvalidationScanV1);
+  const std::uint32_t scan_count = std::min(
+      maximum_scan, shared.config.max_generations - selector.cursor);
+  const std::uint32_t scan_end = selector.cursor + scan_count;
+  ReusableSharedGenerationV1 *records = generations(attachment);
+  for (std::uint32_t slot = selector.cursor; slot < scan_end; ++slot) {
+    result.next_cursor = slot + 1U;
+    ++result.scanned_generations;
+    ReusableSharedGenerationV1 &generation = records[slot];
+    if (generation.membership != ReusableRecordMembershipV1::Indexed ||
+        !generation_matches_invalidation(generation, selector)) {
+      continue;
+    }
+    ++result.matched_generations;
+    result.waiter_references += generation.waiter_count;
+    result.planner_pins += generation.planner_pin_count;
+    result.reader_pins += generation.reader_pin_count;
+    if (generation.waiter_count != 0 || generation.planner_pin_count != 0 ||
+        generation.reader_pin_count != 0) {
+      ++result.referenced_generations;
+    }
+
+    const ReusableGenerationReferenceV1 reference =
+        make_reference(generation, slot);
+    const CacheEntryState previous_state = generation.state;
+    ReusableRegistryErrorV1 transition_error =
+        ReusableRegistryErrorV1::None;
+    bool affected = false;
+    if (previous_state == CacheEntryState::Claimed ||
+        previous_state == CacheEntryState::Building) {
+      transition_error = fail_reusable_generation(
+          attachment, reference, CacheFailureCode::DependencyChanged,
+          callbacks);
+      if (transition_error == ReusableRegistryErrorV1::None) {
+        ++shared.invalidations;
+        ++result.failed_inflight;
+        affected = true;
+      }
+    } else if (previous_state == CacheEntryState::Complete) {
+      transition_error = invalidate_reusable_generation(
+          attachment, reference, CacheFailureCode::DependencyChanged,
+          callbacks);
+      if (transition_error == ReusableRegistryErrorV1::None) {
+        ++result.invalidated_complete;
+        affected = true;
+      }
+    } else if (previous_state == CacheEntryState::Invalidated) {
+      ++result.already_invalidated;
+    } else if (previous_state == CacheEntryState::Failed) {
+      ++result.already_failed;
+    } else {
+      result.error = ReusableRegistryErrorV1::CorruptGeneration;
+      return result;
+    }
+    if (transition_error != ReusableRegistryErrorV1::None) {
+      result.error = transition_error;
+      return result;
+    }
+    if (!affected) {
+      continue;
+    }
+    if (result.affected_count >= result.affected_references.size()) {
+      result.error = ReusableRegistryErrorV1::CorruptLayout;
+      return result;
+    }
+    result.affected_references[result.affected_count] = reference;
+    result.affected_manifests[result.affected_count] = generation.manifest;
+    result.previous_states[result.affected_count] = previous_state;
+    ++result.affected_count;
+  }
+  result.done = result.next_cursor == shared.config.max_generations;
+  return result;
+}
+
+/**
  * Unlink both public indexes and move one unreferenced terminal generation to
  * the bounded retired list. The manifest handle remains valid for storage.
  */
@@ -3331,5 +3581,7 @@ static_assert(std::is_trivially_copyable_v<ReusableManifestHandleV1>);
 static_assert(std::is_trivially_copyable_v<ReusableGenerationReferenceV1>);
 static_assert(std::is_trivially_copyable_v<ReusableSharedReferenceOwnerV1>);
 static_assert(std::is_trivially_copyable_v<ReusableReferenceTokenV1>);
+static_assert(std::is_trivially_copyable_v<ReusableInvalidationSelectorV1>);
+static_assert(std::is_trivially_copyable_v<ReusableInvalidationResultV1>);
 
 } // namespace bioseq::cache

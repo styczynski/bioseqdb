@@ -49,6 +49,14 @@ coverage_key(std::uint32_t role, std::uint8_t domain_seed = 90) noexcept {
   };
 }
 
+[[nodiscard]] ReusableCoverageDirectoryKeyV1 coverage_key(
+    std::uint32_t role, std::uint8_t domain_seed,
+    std::uint32_t database_oid) noexcept {
+  ReusableCoverageDirectoryKeyV1 result = coverage_key(role, domain_seed);
+  result.security_namespace.database_oid = database_oid;
+  return result;
+}
+
 [[nodiscard]] ReusableGenerationMetadataV1
 metadata(std::uint64_t producer_ttl_ms = 60'000) noexcept {
   return ReusableGenerationMetadataV1{
@@ -76,6 +84,18 @@ producer(std::uint32_t ordinal) noexcept {
       .backend_nonce = 20'000 + ordinal,
       .backend_started_at_us = 30'000 + ordinal,
   };
+}
+
+[[nodiscard]] PhysicalIdentityV1
+physical_identity(std::uint8_t seed) noexcept {
+  PhysicalIdentityV1 result{
+      .kind = PhysicalIdentityKind::ProviderOpaque,
+      .length = 4,
+  };
+  for (std::size_t index = 0; index < result.length; ++index) {
+    result.bytes[index] = std::byte{static_cast<std::uint8_t>(seed + index)};
+  }
+  return result;
 }
 
 [[nodiscard]] ReusableReferenceOwnerV1
@@ -120,23 +140,35 @@ public:
 };
 
 [[nodiscard]] ReusableClaimResultV1
-claim(RegistryFixture &fixture, const ReusableCoverageDirectoryKeyV1 &key,
-      const CacheDigest256 &generation_digest, std::string_view domain,
-      std::string_view generation, std::uint32_t producer_ordinal,
-      std::uint64_t started_ns = 100,
-      std::uint64_t producer_ttl_ms = 60'000) noexcept {
+claim_with_metadata(
+    RegistryFixture &fixture, const ReusableCoverageDirectoryKeyV1 &key,
+    const CacheDigest256 &generation_digest, std::string_view domain,
+    std::string_view generation, std::uint32_t producer_ordinal,
+    const ReusableGenerationMetadataV1 &generation_metadata,
+    std::uint64_t started_ns = 100) noexcept {
   return claim_reusable_generation(
       fixture.attachment, ReusableClaimRequestV1{
                               .coverage_directory_key = key,
                               .generation_digest = generation_digest,
                               .canonical_domain_key = byte_view(domain),
                               .canonical_generation_key = byte_view(generation),
-                              .metadata = metadata(producer_ttl_ms),
+                              .metadata = generation_metadata,
                               .producer = producer(producer_ordinal),
                               .reference_owner =
                                   reference_owner(producer_ordinal),
                               .started_monotonic_ns = started_ns,
                           });
+}
+
+[[nodiscard]] ReusableClaimResultV1
+claim(RegistryFixture &fixture, const ReusableCoverageDirectoryKeyV1 &key,
+      const CacheDigest256 &generation_digest, std::string_view domain,
+      std::string_view generation, std::uint32_t producer_ordinal,
+      std::uint64_t started_ns = 100,
+      std::uint64_t producer_ttl_ms = 60'000) noexcept {
+  return claim_with_metadata(fixture, key, generation_digest, domain,
+                             generation, producer_ordinal,
+                             metadata(producer_ttl_ms), started_ns);
 }
 
 [[nodiscard]] ReusableManifestHandleV1
@@ -471,6 +503,248 @@ TEST_CASE("janitor reaps exact dead waiter planner and reader owners") {
       janitor_reusable_registry(fixture.attachment, 1'001);
   REQUIRE(retirement.error == ReusableRegistryErrorV1::None);
   REQUIRE(retirement.retired_invalidated == 1);
+}
+
+TEST_CASE("bounded reusable invalidation is collision and ABA safe") {
+  RegistryFixture fixture{8, 32U << 10, 1};
+  const auto key = coverage_key(60);
+  const auto other_security_key = coverage_key(61);
+  const auto other_database_key = coverage_key(60, 90, 12);
+  const CacheDigest256 forced_digest = digest(70);
+
+  ReusableGenerationMetadataV1 shard_a_metadata = metadata();
+  shard_a_metadata.physical_identity = physical_identity(10);
+  ReusableGenerationMetadataV1 shard_b_metadata = shard_a_metadata;
+  shard_b_metadata.physical_identity = physical_identity(11);
+  ReusableGenerationMetadataV1 other_provider_metadata = shard_a_metadata;
+  other_provider_metadata.provider_id = 8;
+
+  auto shard_a = claim_with_metadata(fixture, key, forced_digest, "domain",
+                                     "shard-a", 1, shard_a_metadata);
+  auto shard_b = claim_with_metadata(fixture, key, forced_digest, "domain",
+                                     "shard-b", 2, shard_b_metadata);
+  auto other_security = claim_with_metadata(
+      fixture, other_security_key, forced_digest, "domain", "other-security",
+      3, shard_a_metadata);
+  auto other_database = claim_with_metadata(
+      fixture, other_database_key, forced_digest, "domain", "other-database",
+      4, shard_a_metadata);
+  auto other_provider = claim_with_metadata(
+      fixture, key, forced_digest, "domain", "other-provider", 5,
+      other_provider_metadata);
+  auto inflight = claim_with_metadata(fixture, key, forced_digest, "domain",
+                                      "inflight", 6, shard_a_metadata);
+  REQUIRE(shard_a);
+  REQUIRE(shard_b);
+  REQUIRE(other_security);
+  REQUIRE(other_database);
+  REQUIRE(other_provider);
+  REQUIRE(inflight);
+  REQUIRE(static_cast<bool>(publish(fixture, shard_a.reference)));
+  REQUIRE(static_cast<bool>(publish(fixture, shard_b.reference)));
+  REQUIRE(static_cast<bool>(publish(fixture, other_security.reference)));
+  REQUIRE(static_cast<bool>(publish(fixture, other_database.reference)));
+  REQUIRE(static_cast<bool>(publish(fixture, other_provider.reference)));
+  REQUIRE(begin_reusable_build(fixture.attachment, inflight.reference) ==
+          ReusableRegistryErrorV1::None);
+
+  auto pinned_reader = lookup_reusable_current(
+      fixture.attachment, key, byte_view("domain"), forced_digest,
+      byte_view("shard-a"), ReusableLookupModeV1::PinComplete,
+      reference_owner(500));
+  REQUIRE(pinned_reader.error == ReusableRegistryErrorV1::None);
+
+  ReusableInvalidationSelectorV1 selector{
+      .database_oid = key.security_namespace.database_oid,
+      .provider_id = shard_a_metadata.provider_id,
+      .security_namespace = key.security_namespace,
+      .physical_identity = shard_a_metadata.physical_identity,
+      .dependency_fingerprint = shard_a_metadata.dependency_fingerprint,
+      .schema_fingerprint = shard_a_metadata.schema_fingerprint,
+      .mapping_fingerprint = shard_a_metadata.mapping_fingerprint,
+      .lineage_fingerprint = shard_a_metadata.lineage_fingerprint,
+      .observability = WriteObservability::ProviderComplete,
+      .maximum_scan = 2,
+      .match_security_namespace = true,
+      .match_provider_id = true,
+      .match_physical_identity = true,
+      .match_dependency_fingerprint = true,
+      .match_schema_fingerprint = true,
+      .match_mapping_fingerprint = true,
+      .match_lineage_fingerprint = true,
+      .match_observability = true,
+  };
+  std::vector<ReusableGenerationReferenceV1> affected;
+  std::vector<ReusableManifestHandleV1> affected_manifests;
+  std::vector<CacheEntryState> previous_states;
+  std::uint32_t scanned = 0;
+  std::uint32_t matched = 0;
+  std::uint32_t invalidated_complete = 0;
+  std::uint32_t failed_inflight = 0;
+  std::uint32_t referenced = 0;
+  std::uint32_t reader_pins = 0;
+  bool done = false;
+  while (!done) {
+    const auto batch =
+        invalidate_reusable_generations(fixture.attachment, selector);
+    REQUIRE(batch.error == ReusableRegistryErrorV1::None);
+    REQUIRE(batch.scanned_generations <= 2);
+    REQUIRE(batch.next_cursor > selector.cursor);
+    for (std::size_t index = 0; index < batch.affected_count; ++index) {
+      affected.push_back(batch.affected_references[index]);
+      affected_manifests.push_back(batch.affected_manifests[index]);
+      previous_states.push_back(batch.previous_states[index]);
+    }
+    scanned += batch.scanned_generations;
+    matched += batch.matched_generations;
+    invalidated_complete += batch.invalidated_complete;
+    failed_inflight += batch.failed_inflight;
+    referenced += batch.referenced_generations;
+    reader_pins += batch.reader_pins;
+    selector.cursor = batch.next_cursor;
+    done = batch.done;
+  }
+  REQUIRE(scanned == 8);
+  REQUIRE(matched == 2);
+  REQUIRE(invalidated_complete == 1);
+  REQUIRE(failed_inflight == 1);
+  REQUIRE(referenced == 1);
+  REQUIRE(reader_pins == 1);
+  REQUIRE(affected.size() == 2);
+  REQUIRE(affected[0] == shard_a.reference);
+  REQUIRE(affected[1] == inflight.reference);
+  REQUIRE(affected_manifests[0].id == shard_a.reference.id);
+  REQUIRE_FALSE(static_cast<bool>(affected_manifests[1]));
+  REQUIRE(previous_states[0] == CacheEntryState::Complete);
+  REQUIRE(previous_states[1] == CacheEntryState::Building);
+
+  auto shard_a_after =
+      snapshot_reusable_generation(fixture.attachment, shard_a.reference);
+  auto inflight_after =
+      snapshot_reusable_generation(fixture.attachment, inflight.reference);
+  REQUIRE(shard_a_after->state == CacheEntryState::Invalidated);
+  REQUIRE(shard_a_after->failure == CacheFailureCode::DependencyChanged);
+  REQUIRE(inflight_after->state == CacheEntryState::Failed);
+  REQUIRE(inflight_after->failure == CacheFailureCode::DependencyChanged);
+  REQUIRE(snapshot_reusable_generation(fixture.attachment, shard_b.reference)
+              ->state == CacheEntryState::Complete);
+  REQUIRE(snapshot_reusable_generation(fixture.attachment,
+                                       other_security.reference)
+              ->state == CacheEntryState::Complete);
+  REQUIRE(snapshot_reusable_generation(fixture.attachment,
+                                       other_database.reference)
+              ->state == CacheEntryState::Complete);
+  REQUIRE(snapshot_reusable_generation(fixture.attachment,
+                                       other_provider.reference)
+              ->state == CacheEntryState::Complete);
+
+  selector.cursor = 0;
+  selector.maximum_scan = kMaximumReusableInvalidationScanV1;
+  const auto repeated =
+      invalidate_reusable_generations(fixture.attachment, selector);
+  REQUIRE(repeated.error == ReusableRegistryErrorV1::None);
+  REQUIRE(repeated.done);
+  REQUIRE(repeated.matched_generations == 2);
+  REQUIRE(repeated.already_invalidated == 1);
+  REQUIRE(repeated.already_failed == 1);
+  REQUIRE(repeated.affected_count == 0);
+  REQUIRE(repeated.reader_pins == 1);
+
+  auto pinned_retirement =
+      retire_reusable_generation(fixture.attachment, shard_a.reference);
+  REQUIRE_FALSE(pinned_retirement.has_value());
+  REQUIRE(pinned_retirement.error() == ReusableRegistryErrorV1::InvalidState);
+  REQUIRE(release_reusable_reference(fixture.attachment, pinned_reader.token) ==
+          ReusableRegistryErrorV1::None);
+  auto retired =
+      retire_reusable_generation(fixture.attachment, shard_a.reference);
+  REQUIRE(retired.has_value());
+  REQUIRE(retired->id == shard_a.reference.id);
+  auto reclaimed = reclaim_retired_reusable_generations(fixture.attachment, 1);
+  REQUIRE(reclaimed.has_value());
+  REQUIRE(*reclaimed == 1);
+  auto replacement = claim_with_metadata(
+      fixture, key, digest(71), "domain", "replacement", 7,
+      shard_a_metadata);
+  REQUIRE(replacement);
+  REQUIRE(replacement.reference.generation_slot ==
+          shard_a.reference.generation_slot);
+  REQUIRE(replacement.reference.slot_sequence !=
+          shard_a.reference.slot_sequence);
+  auto stale =
+      snapshot_reusable_generation(fixture.attachment, affected.front());
+  REQUIRE_FALSE(stale.has_value());
+  REQUIRE(stale.error() == ReusableRegistryErrorV1::StaleReference);
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
+}
+
+TEST_CASE("reusable invalidation observability and coarse scope are explicit") {
+  RegistryFixture fixture{4, 16U << 10, 1};
+  const auto key = coverage_key(70, 91, 70);
+  const auto other_database_key = coverage_key(70, 91, 71);
+  ReusableGenerationMetadataV1 precise_metadata = metadata();
+  precise_metadata.physical_identity = physical_identity(20);
+  ReusableGenerationMetadataV1 other_provider_metadata = precise_metadata;
+  other_provider_metadata.provider_id = 8;
+
+  auto precise = claim_with_metadata(fixture, key, digest(80), "domain",
+                                     "precise", 1, precise_metadata);
+  auto other_provider = claim_with_metadata(
+      fixture, key, digest(81), "domain", "other-provider", 2,
+      other_provider_metadata);
+  auto other_database = claim_with_metadata(
+      fixture, other_database_key, digest(82), "domain", "other-database", 3,
+      precise_metadata);
+  REQUIRE(static_cast<bool>(publish(fixture, precise.reference)));
+  REQUIRE(static_cast<bool>(publish(fixture, other_provider.reference)));
+  REQUIRE(static_cast<bool>(publish(fixture, other_database.reference)));
+
+  REQUIRE(invalidate_reusable_generations(
+              fixture.attachment,
+              ReusableInvalidationSelectorV1{.database_oid = 70})
+              .error == ReusableRegistryErrorV1::InvalidArgument);
+
+  const auto precise_result = invalidate_reusable_generations(
+      fixture.attachment,
+      ReusableInvalidationSelectorV1{
+          .database_oid = 70,
+          .provider_id = 7,
+          .observability = WriteObservability::ProviderComplete,
+          .match_provider_id = true,
+          .match_observability = true,
+      });
+  REQUIRE(precise_result.error == ReusableRegistryErrorV1::None);
+  REQUIRE(precise_result.invalidated_complete == 1);
+  REQUIRE(precise_result.affected_references[0] == precise.reference);
+  REQUIRE(snapshot_reusable_generation(fixture.attachment,
+                                       other_provider.reference)
+              ->state == CacheEntryState::Complete);
+
+  ReusableInvalidationSelectorV1 ambiguous{
+      .database_oid = 70,
+      .provider_id = 7,
+      .match_provider_id = true,
+      .coarse_database_fallback = true,
+  };
+  REQUIRE(invalidate_reusable_generations(fixture.attachment, ambiguous)
+              .error == ReusableRegistryErrorV1::InvalidArgument);
+
+  const auto coarse_result = invalidate_reusable_generations(
+      fixture.attachment,
+      ReusableInvalidationSelectorV1{
+          .database_oid = 70,
+          .coarse_database_fallback = true,
+      });
+  REQUIRE(coarse_result.error == ReusableRegistryErrorV1::None);
+  REQUIRE(coarse_result.matched_generations == 2);
+  REQUIRE(coarse_result.invalidated_complete == 1);
+  REQUIRE(coarse_result.already_invalidated == 1);
+  REQUIRE(snapshot_reusable_generation(fixture.attachment,
+                                       other_database.reference)
+              ->state == CacheEntryState::Complete);
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
 }
 
 TEST_CASE("janitor fails dead owners and retires expired manifests") {
