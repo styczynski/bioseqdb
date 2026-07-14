@@ -51,6 +51,8 @@ class BenchmarkError(RuntimeError):
 @dataclasses.dataclass(frozen=True)
 class QueryOutput:
     elapsed_ns: int
+    first_row_ns: int | None
+    completed_at_ns: int
     rows: int
     ordered_sha256: str
     multiset_sha256: str
@@ -179,7 +181,46 @@ def _run_sql(cluster: Any, sql: str) -> tuple[str, int]:
     return completed.stdout, elapsed
 
 
-def _digest_output(stdout: str, elapsed_ns: int) -> QueryOutput:
+def _run_query_streaming(cluster: Any, sql: str) -> tuple[str, int, int | None, int]:
+    """Capture client-observed first output without buffering the full result first."""
+    started = time.perf_counter_ns()
+    with tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(
+            _psql_command(cluster, sql),
+            env=cluster.environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+        )
+        if process.stdout is None:
+            process.kill()
+            raise BenchmarkError("psql streaming stdout pipe was not created")
+        first_byte = process.stdout.read(1)
+        first_row_ns = (
+            time.perf_counter_ns() - started if first_byte != b"" else None
+        )
+        stdout_bytes = first_byte + process.stdout.read()
+        returncode = process.wait()
+        completed_at_ns = time.perf_counter_ns()
+        elapsed_ns = completed_at_ns - started
+        stderr.seek(0)
+        error_bytes = stderr.read()
+    stdout = stdout_bytes.decode("utf-8")
+    error = error_bytes.decode("utf-8", errors="replace")
+    if returncode != 0:
+        raise BenchmarkError(
+            f"SQL benchmark command failed ({returncode}):\n"
+            f"{error}\nSQL:\n{sql}"
+        )
+    return stdout, elapsed_ns, first_row_ns, completed_at_ns
+
+
+def _digest_output(
+    stdout: str,
+    elapsed_ns: int,
+    first_row_ns: int | None,
+    completed_at_ns: int,
+) -> QueryOutput:
     normalized = stdout.replace("\r\n", "\n")
     if normalized.endswith("\n"):
         normalized = normalized[:-1]
@@ -194,6 +235,8 @@ def _digest_output(stdout: str, elapsed_ns: int) -> QueryOutput:
         multiset.update(b"\n")
     return QueryOutput(
         elapsed_ns=elapsed_ns,
+        first_row_ns=first_row_ns,
+        completed_at_ns=completed_at_ns,
         rows=len(rows),
         ordered_sha256=ordered.hexdigest(),
         multiset_sha256=multiset.hexdigest(),
@@ -202,11 +245,11 @@ def _digest_output(stdout: str, elapsed_ns: int) -> QueryOutput:
 
 
 def _execute_query(cluster: Any, *, mode: str, sql: str) -> QueryOutput:
-    stdout, elapsed = _run_sql(
+    stdout, elapsed, first_row_ns, completed_at_ns = _run_query_streaming(
         cluster,
         f"SET bioseq.query_cache_optimisation_mode = '{mode}';\n{sql}",
     )
-    return _digest_output(stdout, elapsed)
+    return _digest_output(stdout, elapsed, first_row_ns, completed_at_ns)
 
 
 def _percentile(samples: Sequence[int], percentile: float) -> float:
@@ -230,6 +273,87 @@ def _sample_summary(samples_ns: Sequence[int]) -> dict[str, Any]:
         "p50_ns": int(_percentile(samples_ns, 0.50)),
         "p95_ns": int(_percentile(samples_ns, 0.95)),
         "p99_ns": int(_percentile(samples_ns, 0.99)),
+    }
+
+
+def _unavailable_metric(detail: str) -> dict[str, Any]:
+    return {"status": "unavailable", "value": None, "detail": detail}
+
+
+def _first_row_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
+    samples = [
+        output.first_row_ns
+        for output in outputs
+        if output.first_row_ns is not None
+    ]
+    if not samples:
+        return {
+            "status": "not_applicable",
+            "raw_samples_ns": [],
+            "detail": "The query returned no rows, so it has no first-row timestamp.",
+        }
+    return {
+        "status": "measured",
+        **_sample_summary(samples),
+        "detail": (
+            "Client-observed time to the first psql result byte; it includes "
+            "planning, execution, cache prevalidation, decoding, and transport."
+        ),
+    }
+
+
+def _entry_runtime_snapshot(cluster: Any) -> dict[str, Any]:
+    stdout, _ = _run_sql(
+        cluster,
+        "SELECT COALESCE(jsonb_agg(to_jsonb(entry)), '[]'::jsonb) "
+        "FROM bioseq_cache.entries() AS entry",
+    )
+    entries = json.loads(stdout.strip() or "[]")
+    if not isinstance(entries, list):
+        raise BenchmarkError(f"unexpected entries JSON: {stdout!r}")
+
+    def aggregate(names: Sequence[str], detail: str) -> dict[str, Any]:
+        selected = next(
+            (name for name in names if any(name in entry for entry in entries)),
+            None,
+        )
+        if selected is None:
+            return _unavailable_metric(detail)
+        values = [entry.get(selected) for entry in entries]
+        if any(not isinstance(value, (int, float)) for value in values):
+            return _unavailable_metric(
+                f"Admin field {selected!r} is present but is not wholly numeric."
+            )
+        return {
+            "status": "measured",
+            "value": sum(values),
+            "source_field": selected,
+        }
+
+    return {
+        "entry_count": len(entries),
+        "logical_bytes": aggregate(
+            ("logical_bytes",), "bioseq_cache.entries() exposes no logical bytes"
+        ),
+        "stored_bytes": aggregate(
+            ("stored_bytes",), "bioseq_cache.entries() exposes no stored bytes"
+        ),
+        "dsa_hot_bytes": aggregate(
+            ("dsa_bytes", "hot_bytes"),
+            "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+        ),
+        "file_bytes": aggregate(
+            ("file_bytes",),
+            "No file-tier byte counter is exposed by the generic admin API.",
+        ),
+        "prevalidation_duration_ns": aggregate(
+            ("prevalidation_ns", "prevalidation_duration_ns"),
+            "No isolated prevalidation duration is exposed by the generic admin API.",
+        ),
+        "child_executions": aggregate(
+            ("child_executions", "child_execution_count"),
+            "No executor child-Begin/execution count is exposed by the generic admin API.",
+        ),
     }
 
 
@@ -309,6 +433,7 @@ def _measure_case(
     ]
     same_explain = _measure_explain(cluster, mode="same", sql=sql)
     case_stats = _stats(cluster)
+    runtime = _entry_runtime_snapshot(cluster)
     correctness = _same_result(reference, producer, ordered) and all(
         _same_result(reference, sample, ordered) for sample in hit_samples
     )
@@ -324,6 +449,14 @@ def _measure_case(
     digest_value = (
         reference.ordered_sha256 if ordered else reference.multiset_sha256
     )
+    planning_overhead = (
+        ((same_explain["planning_ms"] - disabled_explain["planning_ms"])
+         / disabled_explain["planning_ms"])
+        * 100.0
+        if disabled_explain["planning_ms"] > 0.0
+        else None
+    )
+    hit_first_row = _first_row_summary(hit_samples)
     return {
         "key": str(case["key"]),
         "category": str(case["category"]),
@@ -336,22 +469,37 @@ def _measure_case(
         },
         "disabled": {
             **_sample_summary([reference.elapsed_ns]),
+            "time_to_first_row": _first_row_summary([reference]),
             **disabled_explain,
         },
         "producer": {
             **_sample_summary([producer.elapsed_ns]),
+            "time_to_first_row": _first_row_summary([producer]),
             "baseline_delta_percent": producer_delta,
         },
         "completed_hit": {
             **_sample_summary([sample.elapsed_ns for sample in hit_samples]),
+            "time_to_first_row": hit_first_row,
             "speedup_vs_disabled": speedup,
             **same_explain,
         },
+        "same_mode_planning_overhead_percent": planning_overhead,
+        "prevalidation": {
+            "isolated_duration": runtime["prevalidation_duration_ns"],
+            "client_first_row_inclusive": hit_first_row,
+            "detail": (
+                "Completed-hit first-row time includes mandatory full-store "
+                "prevalidation, but is not reported as an isolated duration."
+            ),
+        },
+        "runtime_storage": runtime,
         "stats": case_stats,
     }
 
 
-def _wait_for_waiters(cluster: Any, count: int, timeout_seconds: float = 30.0) -> None:
+def _wait_for_waiters(
+    cluster: Any, count: int, timeout_seconds: float = 30.0
+) -> int:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         stdout, _ = _run_sql(
@@ -360,7 +508,7 @@ def _wait_for_waiters(cluster: Any, count: int, timeout_seconds: float = 30.0) -
             "FROM bioseq_cache_test.entry_states()",
         )
         if int(stdout.strip()) >= count:
-            return
+            return time.perf_counter_ns()
         time.sleep(0.02)
     raise BenchmarkError(f"waiter count did not reach {count}")
 
@@ -381,14 +529,29 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
             "SELECT bioseq_cache_test.wait_until_paused('after_building_publish')",
         )
         waiters = [executor.submit(execute) for _ in range(clients - 1)]
-        _wait_for_waiters(cluster, clients - 1)
+        waiters_observed_at = _wait_for_waiters(cluster, clients - 1)
         released_at = time.perf_counter_ns()
         _run_sql(cluster, "SELECT bioseq_cache_test.release_pause('after_building_publish')")
-        outputs = [producer.result(), *(waiter.result() for waiter in waiters)]
+        producer_output = producer.result()
+        waiter_outputs = [waiter.result() for waiter in waiters]
+        outputs = [producer_output, *waiter_outputs]
         completed_at = time.perf_counter_ns()
 
     fanout_stats = _stats(cluster)
+    runtime = _entry_runtime_snapshot(cluster)
     correct = all(_same_result(reference, output, False) for output in outputs)
+    measured_children = runtime["child_executions"]
+    child_executions = measured_children
+    if measured_children["status"] != "measured":
+        child_executions = {
+            "status": "inferred",
+            "value": fanout_stats["produced"],
+            "detail": (
+                "The admin API exposes successful publications, not child Begin "
+                "or source execution counts; this value cannot prove that a "
+                "waiter never initialized its child."
+            ),
+        }
     return {
         "key": f"inflight_fanout_{clients}",
         "clients": clients,
@@ -398,9 +561,26 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
             "multiset_sha256": reference.multiset_sha256,
         },
         **_sample_summary([output.elapsed_ns for output in outputs]),
+        "time_to_first_row": _first_row_summary(outputs),
+        "producer_time_to_first_row": _first_row_summary([producer_output]),
+        "waiter_time_to_first_row": _first_row_summary(waiter_outputs),
+        "wait_duration": {
+            "status": "partially_measured",
+            "waiters_observed_to_release_ns": released_at - waiters_observed_at,
+            "release_to_waiter_completion": _sample_summary(
+                [
+                    max(0, output.completed_at_ns - released_at)
+                    for output in waiter_outputs
+                ]
+            ),
+            "server_condition_variable_duration": _unavailable_metric(
+                "The runtime exposes waiter counts but no per-waiter CV timestamps."
+            ),
+        },
         "release_to_all_complete_ns": completed_at - released_at,
+        "runtime_storage": runtime,
         "stats": fanout_stats,
-        "exactly_one_child_execution": fanout_stats["produced"] == 1,
+        "child_execution_count": child_executions,
     }
 
 
@@ -414,20 +594,167 @@ def _measure_invalidation(cluster: Any) -> list[dict[str, Any]]:
     query = "SELECT id, group_id, payload FROM cache_bench_mutable ORDER BY id"
     for key, operation in operations:
         _reset_case(cluster)
-        _execute_query(cluster, mode="same", sql=query)
+        producer = _execute_query(cluster, mode="same", sql=query)
+        before = _stats(cluster)
         started = time.perf_counter_ns()
         _run_sql(cluster, operation)
         invalidation_ns = time.perf_counter_ns() - started
+        reference = _execute_query(cluster, mode="disabled", sql=query)
         output = _execute_query(cluster, mode="same", sql=query)
+        after = _stats(cluster)
         results.append(
             {
                 "key": f"{key}_invalidation",
                 "operation_ns": invalidation_ns,
-                "post_write_rows": output.rows,
-                "stats": _stats(cluster),
+                "correctness": {
+                    "passed": _same_result(reference, output, True),
+                    "row_count": reference.rows,
+                    "ordered_sha256": reference.ordered_sha256,
+                    "multiset_sha256": reference.multiset_sha256,
+                },
+                "producer_time_to_first_row": _first_row_summary([producer]),
+                "post_write_time_to_first_row": _first_row_summary([output]),
+                "invalidation_observed": after["produced"] > before["produced"],
+                "stats_before_write": before,
+                "stats_after_write": after,
+                "runtime_storage": _entry_runtime_snapshot(cluster),
             }
         )
     return results
+
+
+def _measure_unrelated_commit(cluster: Any, sql: str) -> dict[str, Any]:
+    _reset_case(cluster)
+    reference = _execute_query(cluster, mode="disabled", sql=sql)
+    producer = _execute_query(cluster, mode="same", sql=sql)
+    before = _stats(cluster)
+    started = time.perf_counter_ns()
+    _run_sql(cluster, "INSERT INTO cache_bench_unrelated VALUES (1)")
+    commit_ns = time.perf_counter_ns() - started
+    after_commit = _execute_query(cluster, mode="same", sql=sql)
+    after = _stats(cluster)
+    return {
+        "key": "conservative_unrelated_commit",
+        "correctness": {
+            "passed": (
+                _same_result(reference, producer, False)
+                and _same_result(reference, after_commit, False)
+            ),
+            "row_count": reference.rows,
+            "multiset_sha256": reference.multiset_sha256,
+        },
+        "unrelated_commit_ns": commit_ns,
+        "producer_time_to_first_row": _first_row_summary([producer]),
+        "post_commit_time_to_first_row": _first_row_summary([after_commit]),
+        "conservative_rejection_observed": (
+            after["produced"] > before["produced"]
+            and after["completed_hits"] == before["completed_hits"]
+        ),
+        "stats_before_commit": before,
+        "stats_after_commit": after,
+        "runtime_storage": _entry_runtime_snapshot(cluster),
+    }
+
+
+def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
+    _reset_case(cluster)
+    maximum_requests = 1_152
+    minimum_requests = 96
+    batch_size = 32
+    request_latencies: list[int] = []
+    request_first_rows: list[QueryOutput] = []
+    all_correct = True
+    first_sql = ""
+    last_sql = ""
+    request_count = 0
+
+    for index in range(maximum_requests):
+        sql = (
+            "SELECT id, payload FROM cache_bench_narrow "
+            f"WHERE id >= {index + 1} ORDER BY id LIMIT 4"
+        )
+        if index == 0:
+            first_sql = sql
+        last_sql = sql
+        reference = _execute_query(cluster, mode="disabled", sql=sql)
+        candidate = _execute_query(cluster, mode="same", sql=sql)
+        all_correct = all_correct and _same_result(reference, candidate, True)
+        request_latencies.append(candidate.elapsed_ns)
+        request_first_rows.append(candidate)
+        request_count = index + 1
+        if request_count % batch_size == 0:
+            snapshot = _stats(cluster)
+            if request_count >= minimum_requests and snapshot["evictions"] > 0:
+                break
+
+    fill_stats = _stats(cluster)
+    fill_runtime = _entry_runtime_snapshot(cluster)
+
+    trigger_index = request_count + 1
+    trigger_sql = (
+        "SELECT id, payload FROM cache_bench_narrow "
+        f"WHERE id >= {trigger_index} ORDER BY id LIMIT 4"
+    )
+    trigger_reference = _execute_query(cluster, mode="disabled", sql=trigger_sql)
+    before_trigger = _stats(cluster)
+    trigger_output = _execute_query(cluster, mode="same", sql=trigger_sql)
+    after_trigger = _stats(cluster)
+    all_correct = all_correct and _same_result(
+        trigger_reference, trigger_output, True
+    )
+
+    first_reference = _execute_query(cluster, mode="disabled", sql=first_sql)
+    before_first_revisit = _stats(cluster)
+    first_revisit = _execute_query(cluster, mode="same", sql=first_sql)
+    after_first_revisit = _stats(cluster)
+    all_correct = all_correct and _same_result(
+        first_reference, first_revisit, True
+    )
+
+    last_reference = _execute_query(cluster, mode="disabled", sql=last_sql)
+    before_last_revisit = _stats(cluster)
+    last_revisit = _execute_query(cluster, mode="same", sql=last_sql)
+    after_last_revisit = _stats(cluster)
+    all_correct = all_correct and _same_result(last_reference, last_revisit, True)
+
+    return {
+        "key": "eviction_pressure",
+        "requests_until_observation": request_count,
+        "maximum_requests": maximum_requests,
+        "correctness": {
+            "passed": all_correct,
+            "row_count_per_request": 4,
+            "first_ordered_sha256": first_reference.ordered_sha256,
+            "last_ordered_sha256": last_reference.ordered_sha256,
+        },
+        "fill_latency": _sample_summary(request_latencies),
+        "fill_time_to_first_row": _first_row_summary(request_first_rows),
+        "eviction_observed": fill_stats["evictions"] > 0,
+        "trigger_query": {
+            **_sample_summary([trigger_output.elapsed_ns]),
+            "time_to_first_row": _first_row_summary([trigger_output]),
+            "eviction_counter_advanced": (
+                after_trigger["evictions"] > before_trigger["evictions"]
+            ),
+        },
+        "oldest_revisit": {
+            "was_miss": (
+                after_first_revisit["produced"]
+                > before_first_revisit["produced"]
+            ),
+            "time_to_first_row": _first_row_summary([first_revisit]),
+        },
+        "newest_revisit": {
+            "was_hit": (
+                after_last_revisit["completed_hits"]
+                > before_last_revisit["completed_hits"]
+            ),
+            "time_to_first_row": _first_row_summary([last_revisit]),
+        },
+        "runtime_storage_at_pressure": fill_runtime,
+        "stats_after_fill": fill_stats,
+        "stats_after_revisits": after_last_revisit,
+    }
 
 
 def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
@@ -451,6 +778,7 @@ def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
         "entries_remaining": remaining,
         "stats_before": before,
         "stats_after": _stats(cluster),
+        "runtime_storage_after": _entry_runtime_snapshot(cluster),
     }
 
 
@@ -528,6 +856,9 @@ def _evaluate_thresholds(
     core: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
     fanout: Sequence[Mapping[str, Any]],
+    invalidation: Sequence[Mapping[str, Any]],
+    eviction_pressure: Mapping[str, Any],
+    unrelated_commit: Mapping[str, Any],
     ttl: Mapping[str, Any],
     disk_free_bytes: int,
 ) -> list[dict[str, Any]]:
@@ -574,19 +905,42 @@ def _evaluate_thresholds(
             detail="Threshold is conditional on source execution duration.",
         )
     )
-    fanout_passed = all(bool(item["exactly_one_child_execution"]) for item in fanout)
+    child_counts_measured = all(
+        item["child_execution_count"]["status"] == "measured"
+        for item in fanout
+    )
+    fanout_passed = (
+        all(item["child_execution_count"]["value"] == 1 for item in fanout)
+        if child_counts_measured
+        else None
+    )
     thresholds.append(
         _threshold(
             "one_child_execution_under_fanout",
-            actual={item["clients"]: item["stats"]["produced"] for item in fanout},
+            actual={
+                item["clients"]: item["child_execution_count"] for item in fanout
+            },
             limit="exactly 1 for 2/8/32 clients",
             passed=fanout_passed,
-            detail="Deterministic BUILDING pause guarantees all other clients register as waiters.",
+            detail=(
+                "Successful publication counts are not treated as direct child "
+                "execution measurements. The threshold becomes applicable only "
+                "when the runtime exposes an executor counter."
+            ),
         )
     )
     correctness_passed = all(bool(case["correctness"]["passed"]) for case in cases)
     correctness_passed = correctness_passed and all(
         bool(item["correctness"]["passed"]) for item in fanout
+    )
+    correctness_passed = correctness_passed and all(
+        bool(item["correctness"]["passed"]) for item in invalidation
+    )
+    correctness_passed = correctness_passed and bool(
+        eviction_pressure["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        unrelated_commit["correctness"]["passed"]
     )
     thresholds.append(
         _threshold(
@@ -599,11 +953,63 @@ def _evaluate_thresholds(
     )
     thresholds.append(
         _threshold(
+            "insert_update_delete_invalidation",
+            actual={
+                item["key"]: item["invalidation_observed"]
+                for item in invalidation
+            },
+            limit="every write forces a miss/new production",
+            passed=all(bool(item["invalidation_observed"]) for item in invalidation),
+            detail="Each post-write result is also checksum-checked against disabled mode.",
+        )
+    )
+    thresholds.append(
+        _threshold(
+            "eviction_under_pressure",
+            actual={
+                "requests": eviction_pressure["requests_until_observation"],
+                "eviction_observed": eviction_pressure["eviction_observed"],
+                "trigger_advanced": eviction_pressure["trigger_query"][
+                    "eviction_counter_advanced"
+                ],
+            },
+            limit="bounded entries and a later request advances evictions",
+            passed=(
+                bool(eviction_pressure["eviction_observed"])
+                and bool(
+                    eviction_pressure["trigger_query"][
+                        "eviction_counter_advanced"
+                    ]
+                )
+            ),
+            detail=(
+                "Unique tiny exact results are inserted in bounded batches until "
+                "pressure is observed."
+            ),
+        )
+    )
+    thresholds.append(
+        _threshold(
+            "conservative_unrelated_commit_rejection",
+            actual=unrelated_commit["conservative_rejection_observed"],
+            limit="post-commit execution is a miss, not a completed hit",
+            passed=bool(unrelated_commit["conservative_rejection_observed"]),
+            detail=(
+                "An unadapted generic dependency must conservatively reject a "
+                "completed entry after an unrelated committed write."
+            ),
+        )
+    )
+    thresholds.append(
+        _threshold(
             "ttl_cleanup_bounded",
             actual=ttl["entries_remaining"],
             limit=0,
             passed=int(ttl["entries_remaining"]) == 0,
-            detail="Actual janitor sweep after TTL expiry.",
+            detail=(
+                "The test API requests cleanup and the benchmark waits for bounded "
+                "entry disappearance; worker-side duration is not inferred."
+            ),
         )
     )
     minimum_free = int(os.environ.get("BIOSEQ_CACHE_BENCH_MIN_FREE_BYTES", 1 << 30))
@@ -614,6 +1020,22 @@ def _evaluate_thresholds(
             limit=f">={minimum_free}",
             passed=disk_free_bytes >= minimum_free,
             detail="Free space at report creation; cache internal policy remains authoritative.",
+        )
+    )
+    compact_runtime = compact["runtime_storage"]
+    thresholds.append(
+        _threshold(
+            "internal_storage_tier_metrics",
+            actual={
+                "dsa_hot_bytes": compact_runtime["dsa_hot_bytes"],
+                "file_bytes": compact_runtime["file_bytes"],
+            },
+            limit="runtime exposes bounded DSA and file byte counters",
+            passed=None,
+            detail=(
+                "No pass/fail threshold is claimed until the runtime exposes both "
+                "tier counters and its configured internal ceilings."
+            ),
         )
     )
     decode_bandwidth = _core_metric(core, "fixed_decode_bytes_per_second")
@@ -727,9 +1149,20 @@ def run(argv: Sequence[str]) -> int:
             for clients in (2, 8, 32)
         ]
         invalidation = _measure_invalidation(cluster)
+        eviction_pressure = _measure_eviction_pressure(cluster)
+        unrelated_commit = _measure_unrelated_commit(cluster, fanout_sql)
         ttl = _measure_ttl_and_eviction(cluster, fanout_sql)
         disk = shutil.disk_usage(cluster.run_dir)
-        thresholds = _evaluate_thresholds(core, cases, fanout, ttl, disk.free)
+        thresholds = _evaluate_thresholds(
+            core,
+            cases,
+            fanout,
+            invalidation,
+            eviction_pressure,
+            unrelated_commit,
+            ttl,
+            disk.free,
+        )
         violations = [item for item in thresholds if item["status"] == "fail"]
         report = {
             "schema_version": 1,
@@ -746,11 +1179,14 @@ def run(argv: Sequence[str]) -> int:
             "cases": cases,
             "fanout": fanout,
             "invalidation": invalidation,
+            "eviction_pressure": eviction_pressure,
+            "unrelated_commit": unrelated_commit,
             "ttl_eviction": ttl,
             "storage": {
                 "filesystem_total_bytes": disk.total,
                 "filesystem_used_bytes": disk.used,
                 "filesystem_free_bytes": disk.free,
+                "runtime_admin": cases[0]["runtime_storage"],
             },
             "thresholds": thresholds,
             "violations": violations,

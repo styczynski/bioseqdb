@@ -332,11 +332,27 @@ int main(int argc, char** argv) {
                 finished - started).count()));
     }
 
-    std::vector<std::uint64_t> decode_samples;
-    decode_samples.reserve(options->samples);
     const std::uint64_t expected_digest = expected_row_digest(options->rows);
     std::uint64_t decoded_digest = 0;
     std::size_t row_group_count = 0;
+    std::vector<std::uint64_t> prevalidation_samples;
+    prevalidation_samples.reserve(options->samples);
+    for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
+        const auto started = Clock::now();
+        auto view = validate_column_store(blob, kIdentity, schema, checksums);
+        const auto finished = Clock::now();
+        if (!view.has_value() || view->row_count() != options->rows) {
+            std::cerr << "column prevalidation failed\n";
+            return 1;
+        }
+        row_group_count = view->row_group_count();
+        prevalidation_samples.push_back(static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                finished - started).count()));
+    }
+
+    std::vector<std::uint64_t> decode_samples;
+    decode_samples.reserve(options->samples);
     for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
         const auto started = Clock::now();
         auto view = validate_column_store(
@@ -476,6 +492,12 @@ int main(int argc, char** argv) {
          << "    \"row_group_count\": " << row_group_count << ",\n"
          << "    \"full_block_prevalidation_bytes\": " << blob.size()
          << ",\n"
+         << "    \"full_block_prevalidation_p50_ns\": "
+         << percentile(prevalidation_samples, 50, 100) << ",\n"
+         << "    \"full_block_prevalidation_p95_ns\": "
+         << percentile(prevalidation_samples, 95, 100) << ",\n"
+         << "    \"full_block_prevalidation_p99_ns\": "
+         << percentile(prevalidation_samples, 99, 100) << ",\n"
          << "    \"fixed_decode_bytes_per_second\": "
          << fixed_decode_bytes_per_second << ",\n"
          << "    \"memory_copy_bytes_per_second\": "
@@ -488,6 +510,16 @@ int main(int argc, char** argv) {
          << ", \"p95_ns\": " << percentile(encode_samples, 95, 100)
          << ", \"p99_ns\": " << percentile(encode_samples, 99, 100)
          << ", \"operations\": " << options->rows << "},\n"
+         << "    {\"name\": \"column_full_prevalidation\", "
+            "\"raw_samples_ns\": ";
+    append_samples_json(json, prevalidation_samples);
+    json << ", \"p50_ns\": "
+         << percentile(prevalidation_samples, 50, 100)
+         << ", \"p95_ns\": "
+         << percentile(prevalidation_samples, 95, 100)
+         << ", \"p99_ns\": "
+         << percentile(prevalidation_samples, 99, 100)
+         << ", \"operations\": " << blob.size() << "},\n"
          << "    {\"name\": \"column_validate_decode\", "
             "\"raw_samples_ns\": ";
     append_samples_json(json, decode_samples);
