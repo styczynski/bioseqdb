@@ -98,6 +98,28 @@ enum class CacheExecutionMode : std::uint32_t {
     ExplainOnly = 4,
 };
 
+/** Disclosure level for one producer-owned administrative cache row. */
+enum class CacheDiagnosticDisclosure : std::uint8_t {
+    SummaryOnly = 0,
+    FullText = 1,
+};
+
+/**
+ * Decide whether one caller may see SQL and producer-plan text for one row.
+ * Explicit monitoring grants alone expose bounded scalar summaries; the
+ * producing role, a superuser, or the policy monitoring role may see text.
+ */
+[[nodiscard]] constexpr CacheDiagnosticDisclosure
+cache_diagnostic_disclosure(
+        bool caller_is_superuser,
+        bool caller_is_producing_role,
+        bool caller_is_policy_monitor) noexcept {
+    return caller_is_superuser || caller_is_producing_role
+            || caller_is_policy_monitor
+        ? CacheDiagnosticDisclosure::FullText
+        : CacheDiagnosticDisclosure::SummaryOnly;
+}
+
 enum class DependencyKind : std::uint16_t {
     RelationContent = 1,
     RelationTopology = 2,

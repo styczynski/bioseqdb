@@ -22,6 +22,7 @@ extern "C" {
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_authid_d.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_namespace_d.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "common/cryptohash.h"
@@ -8129,14 +8130,43 @@ void install_cache_hooks() {
     return g_shared == nullptr ? 0 : pg_atomic_read_u64(&counter);
 }
 
-/** Match SQL grants with a C-side diagnostics authorization boundary. */
-void require_cache_diagnostics_reader() {
-    if (!superuser()
-        && !has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS)) {
+/** Enforce the documented schema-USAGE plus function-EXECUTE boundary. */
+void require_cache_diagnostics_reader(FunctionCallInfo function_call) {
+    const Oid user_id = GetUserId();
+    const Oid function_oid = function_call != nullptr
+            && function_call->flinfo != nullptr
+        ? function_call->flinfo->fn_oid
+        : InvalidOid;
+    const Oid namespace_oid = OidIsValid(function_oid)
+        ? get_func_namespace(function_oid)
+        : InvalidOid;
+    if (!superuser_arg(user_id)
+        && (!OidIsValid(function_oid) || !OidIsValid(namespace_oid)
+            || object_aclcheck(
+                ProcedureRelationId,
+                function_oid,
+                user_id,
+                ACL_EXECUTE) != ACLCHECK_OK
+            || object_aclcheck(
+                NamespaceRelationId,
+                namespace_oid,
+                user_id,
+                ACL_USAGE) != ACLCHECK_OK)) {
         ereport(ERROR,
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-             errmsg("must have privileges of pg_read_all_stats to inspect bioseq_cache")));
+             errmsg("permission denied to inspect bioseq_cache"),
+             errhint("Grant USAGE on schema bioseq_cache and EXECUTE on the monitoring function.")));
     }
+}
+
+/** Apply the per-row producer/superuser/policy-monitor text rule. */
+[[nodiscard]] CacheDiagnosticDisclosure diagnostic_disclosure_for_role(
+        Oid producer_role_oid) noexcept {
+    const Oid user_id = GetUserId();
+    return cache_diagnostic_disclosure(
+        superuser_arg(user_id),
+        OidIsValid(producer_role_oid) && user_id == producer_role_oid,
+        has_privs_of_role(user_id, ROLE_PG_READ_ALL_STATS));
 }
 
 struct EntrySnapshot {
@@ -8812,7 +8842,7 @@ Datum bioseq_cache_version(PG_FUNCTION_ARGS) {
 PG_FUNCTION_INFO_V1(bioseq_cache_stats);
 Datum bioseq_cache_stats(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache::pg;
-    require_cache_diagnostics_reader();
+    require_cache_diagnostics_reader(fcinfo);
     Tuplestorestate* tuple_store = nullptr;
     TupleDesc tuple_descriptor = initialize_srf(fcinfo, &tuple_store);
     Datum values[9]{};
@@ -8845,7 +8875,7 @@ PG_FUNCTION_INFO_V1(bioseq_cache_entries);
 Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache;
     using namespace bioseq::cache::pg;
-    require_cache_diagnostics_reader();
+    require_cache_diagnostics_reader(fcinfo);
     Tuplestorestate* tuple_store = nullptr;
     TupleDesc tuple_descriptor = initialize_srf(fcinfo, &tuple_store);
     if (tuple_descriptor->natts != 20) {
@@ -8859,6 +8889,9 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
     const TimestampTz now = GetCurrentTimestamp();
     for (int index = 0; index < count; ++index) {
         const EntrySnapshot& entry = snapshots[index];
+        const bool full_disclosure = diagnostic_disclosure_for_role(
+                entry.current_role_oid)
+            == CacheDiagnosticDisclosure::FullText;
         Datum values[20]{};
         bool nulls[20]{};
         char* key = psprintf(
@@ -8868,8 +8901,13 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
         values[2] = CStringGetTextDatum("ExactFinalResult");
         values[3] = CStringGetTextDatum(entry_state_name(entry.state));
         values[4] = ObjectIdGetDatum(entry.database_oid);
-        values[5] = ObjectIdGetDatum(entry.current_role_oid);
-        values[6] = Int32GetDatum(entry.producer_pid);
+        if (full_disclosure) {
+            values[5] = ObjectIdGetDatum(entry.current_role_oid);
+            values[6] = Int32GetDatum(entry.producer_pid);
+        } else {
+            nulls[5] = true;
+            nulls[6] = true;
+        }
         values[7] = TimestampTzGetDatum(entry.created_at);
         if (entry.completed_at != 0) {
             values[8] = TimestampTzGetDatum(entry.completed_at);
@@ -8890,7 +8928,11 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
         values[14] = Int32GetDatum(static_cast<int32>(entry.waiter_count));
         values[15] = Int32GetDatum(static_cast<int32>(entry.reader_count));
         values[16] = Int64GetDatum(static_cast<int64>(entry.hits));
-        values[17] = CStringGetTextDatum(entry.display_sql);
+        if (full_disclosure) {
+            values[17] = CStringGetTextDatum(entry.display_sql);
+        } else {
+            nulls[17] = true;
+        }
         nulls[18] = true; /* V1 does not persist a producer Plan snapshot. */
         StringInfoData dependencies{};
         initStringInfo(&dependencies);
@@ -8909,8 +8951,12 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
         }
         appendStringInfoChar(&dependencies, ']');
         appendStringInfoChar(&dependencies, '}');
-        values[19] = DirectFunctionCall1(
-            jsonb_in, CStringGetDatum(dependencies.data));
+        if (full_disclosure) {
+            values[19] = DirectFunctionCall1(
+                jsonb_in, CStringGetDatum(dependencies.data));
+        } else {
+            nulls[19] = true;
+        }
         tuplestore_putvalues(tuple_store, tuple_descriptor, values, nulls);
         pfree(key);
         pfree(age);
@@ -8939,6 +8985,9 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
              ++index) {
             const ReusableGenerationDiagnosticsRowV1& entry =
                 reusable_rows[index];
+            const bool full_disclosure = diagnostic_disclosure_for_role(
+                    static_cast<Oid>(entry.current_role_oid))
+                == CacheDiagnosticDisclosure::FullText;
             Datum values[20]{};
             bool nulls[20]{};
             const auto key = reusable_digest_hex(entry.reference.id.digest);
@@ -8955,12 +9004,12 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
             } else {
                 nulls[4] = true;
             }
-            if (entry.current_role_oid != 0) {
+            if (entry.current_role_oid != 0 && full_disclosure) {
                 values[5] = ObjectIdGetDatum(entry.current_role_oid);
             } else {
                 nulls[5] = true;
             }
-            if (entry.producer_pid > 0) {
+            if (entry.producer_pid > 0 && full_disclosure) {
                 values[6] = Int32GetDatum(entry.producer_pid);
             } else {
                 nulls[6] = true;
@@ -9035,8 +9084,12 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
                 appendStringInfoString(&dependencies, ",\"manifest\":null");
             }
             appendStringInfoChar(&dependencies, '}');
-            values[19] = DirectFunctionCall1(
-                jsonb_in, CStringGetDatum(dependencies.data));
+            if (full_disclosure) {
+                values[19] = DirectFunctionCall1(
+                    jsonb_in, CStringGetDatum(dependencies.data));
+            } else {
+                nulls[19] = true;
+            }
             tuplestore_putvalues(
                 tuple_store, tuple_descriptor, values, nulls);
             pfree(age);

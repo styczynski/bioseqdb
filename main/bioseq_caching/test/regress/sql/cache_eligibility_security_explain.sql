@@ -255,6 +255,90 @@ BEGIN
 END
 $$;
 
+-- SQL ACLs authorize monitoring calls; C-side row disclosure remains scoped
+-- to the producer, superusers, and the policy monitoring role.
+CREATE ROLE qc_cache_producer;
+CREATE ROLE qc_cache_monitor;
+CREATE ROLE qc_cache_stats_monitor;
+GRANT pg_read_all_stats TO qc_cache_stats_monitor;
+GRANT SELECT ON qc_elig TO qc_cache_producer;
+
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SET ROLE qc_cache_producer;
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT id, value, 'qc-cache-private-literal-7f13'::text AS private_marker
+FROM qc_elig
+WHERE id = 1;
+RESET ROLE;
+
+GRANT USAGE ON SCHEMA bioseq_cache
+TO qc_cache_producer, qc_cache_monitor;
+GRANT EXECUTE ON FUNCTION bioseq_cache.entries(), bioseq_cache.stats()
+TO qc_cache_producer, qc_cache_monitor;
+
+SET ROLE qc_cache_monitor;
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM bioseq_cache.entries()) <> 1
+       OR EXISTS (
+            SELECT 1
+            FROM bioseq_cache.entries()
+            WHERE kind = 'ExactFinalResult'
+              AND (owner_role IS NOT NULL
+                   OR producer_pid IS NOT NULL
+                   OR sql IS NOT NULL
+                   OR producer_plan IS NOT NULL
+                   OR dependencies IS NOT NULL))
+       OR NOT EXISTS (
+            SELECT 1
+            FROM bioseq_cache.entries()
+            WHERE kind = 'ExactFinalResult'
+              AND state = 'COMPLETE'
+              AND rows = 1
+              AND logical_bytes > 0
+              AND stored_bytes > 0)
+       OR (SELECT count(*) FROM bioseq_cache.stats()) <> 1 THEN
+        RAISE EXCEPTION 'explicit monitor did not receive a redacted scalar summary';
+    END IF;
+END
+$$;
+RESET ROLE;
+
+SET ROLE qc_cache_producer;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM bioseq_cache.entries()
+        WHERE owner_role = 'qc_cache_producer'::regrole
+          AND producer_pid IS NOT NULL
+          AND sql LIKE '%qc-cache-private-literal-7f13%'
+          AND dependencies IS NOT NULL)
+    THEN
+        RAISE EXCEPTION 'producer cannot inspect its authorized cache text';
+    END IF;
+END
+$$;
+RESET ROLE;
+
+SET ROLE qc_cache_stats_monitor;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM bioseq_cache.entries()
+        WHERE owner_role = 'qc_cache_producer'::regrole
+          AND producer_pid IS NOT NULL
+          AND sql LIKE '%qc-cache-private-literal-7f13%'
+          AND dependencies IS NOT NULL)
+    THEN
+        RAISE EXCEPTION 'pg_read_all_stats policy monitor cannot inspect cache text';
+    END IF;
+END
+$$;
+RESET ROLE;
+
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache.reset_stats();
 SELECT id, value FROM qc_elig ORDER BY id;

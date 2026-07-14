@@ -9,6 +9,21 @@ import bioseq.cache.core;
 
 using namespace bioseq::cache;
 
+TEST_CASE("cache diagnostic text follows producer and monitor policy") {
+    REQUIRE(
+        cache_diagnostic_disclosure(true, false, false)
+        == CacheDiagnosticDisclosure::FullText);
+    REQUIRE(
+        cache_diagnostic_disclosure(false, true, false)
+        == CacheDiagnosticDisclosure::FullText);
+    REQUIRE(
+        cache_diagnostic_disclosure(false, false, true)
+        == CacheDiagnosticDisclosure::FullText);
+    REQUIRE(
+        cache_diagnostic_disclosure(false, false, false)
+        == CacheDiagnosticDisclosure::SummaryOnly);
+}
+
 TEST_CASE("SQL boolean helpers implement WHERE and IS NOT TRUE") {
     REQUIRE_FALSE(passes_where(SqlBool::FalseValue));
     REQUIRE(passes_where(SqlBool::TrueValue));
