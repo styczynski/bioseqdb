@@ -210,8 +210,8 @@ digest_plan_nodes(const List* nodes) noexcept {
     AttrNumber occurrence_attno,
     AttrNumber capability_attno) {
     List* nodes = list_make3(
-        makeInteger(kPlanMagic),
         makeInteger(kPlanVersion),
+        makeInteger(kPlanMagic),
         makeInteger(static_cast<std::int32_t>(relation_oid)));
     nodes = append_integer_pair(nodes, g_requested_capabilities);
     nodes = lappend(nodes, makeInteger(
@@ -240,8 +240,8 @@ digest_plan_nodes(const List* nodes) noexcept {
             return false;
         }
     }
-    if (intVal(list_nth(nodes, 0)) != kPlanMagic
-        || intVal(list_nth(nodes, 1)) != kPlanVersion) {
+    if (intVal(list_nth(nodes, 0)) != kPlanVersion
+        || intVal(list_nth(nodes, 1)) != kPlanMagic) {
         return false;
     }
     const auto relation = static_cast<Oid>(

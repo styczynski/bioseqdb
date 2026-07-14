@@ -327,8 +327,14 @@ void set_diagnostic(
 [[nodiscard]] bool provider_private_version(
         const List* nodes,
         std::uint32_t* version) noexcept {
-    if (nodes == nullptr || version == nullptr || list_length(nodes) <= 0
-        || !IsA(list_nth(nodes, 0), Integer)) {
+    if (version == nullptr) {
+        return false;
+    }
+    *version = 0;
+    if (nodes == nullptr) {
+        return true;
+    }
+    if (list_length(nodes) <= 0 || !IsA(list_nth(nodes, 0), Integer)) {
         return false;
     }
     const int value = intVal(list_nth(nodes, 0));
@@ -339,7 +345,7 @@ void set_diagnostic(
     return true;
 }
 
-/** Mapping-private v1 is NIL or one bounded canonical flat Integer list. */
+/** Mapping-private v1 is NIL or a bounded opaque list with a version head. */
 [[nodiscard]] bool mapping_private_nodes_valid(
         const List* nodes,
         std::uint32_t expected_version) noexcept {
@@ -352,13 +358,9 @@ void set_diagnostic(
             > kMaxProviderBoundaryColumns) {
         return false;
     }
-    for (int index = 0; index < count; ++index) {
-        if (!IsA(list_nth(nodes, index), Integer)) {
-            return false;
-        }
-    }
     std::uint32_t version = 0;
     return provider_private_version(nodes, &version)
+        && expected_version != 0
         && version == expected_version;
 }
 
