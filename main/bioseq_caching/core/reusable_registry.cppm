@@ -2111,7 +2111,9 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
   const bool analyzed_state_valid =
       generation.plan_snapshot_status !=
           ReusablePlanSnapshotStatusV1::Analyzed ||
+      generation.state == CacheEntryState::Building ||
       generation.state == CacheEntryState::Complete ||
+      generation.state == CacheEntryState::Failed ||
       generation.state == CacheEntryState::Invalidated ||
       generation.state == CacheEntryState::Evicting;
   if ((!has_sql && generation.display_sql_truncated) ||
@@ -2990,6 +2992,7 @@ store_reusable_diagnostic_text(
       generation.state == CacheEntryState::Complete;
   const bool analyzed_state_valid =
       update.plan_status != ReusablePlanSnapshotStatusV1::Analyzed ||
+      generation.state == CacheEntryState::Building ||
       generation.state == CacheEntryState::Complete;
   const bool no_status_downgrade =
       generation.plan_snapshot_status !=

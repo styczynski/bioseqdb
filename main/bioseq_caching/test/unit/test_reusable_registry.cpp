@@ -847,6 +847,62 @@ TEST_CASE("reusable legacy begin publishes unavailable plan statuses") {
       == ReusableRegistryErrorV1::None);
 }
 
+TEST_CASE("reusable analyzed diagnostics may refresh a live producer") {
+  RegistryFixture fixture{2};
+  auto claimed = claim(
+      fixture, coverage_key(50), digest(74), "analyzed-domain",
+      "analyzed-generation", 10);
+  REQUIRE(claimed);
+
+  const std::string_view sql = "SELECT payload FROM provider_rows";
+  const std::string_view canonical = "{CUSTOMSCAN :provider 10}";
+  const std::string_view planned = "Custom Scan (GenericProvider)";
+  ReusableDiagnosticTextUpdateV1 update{
+      .reference = claimed.reference,
+      .producer = producer(10),
+      .display_sql = char_view(sql),
+      .canonical_plan = char_view(canonical),
+      .producer_plan = char_view(planned),
+      .canonical_plan_status = ReusablePlanSnapshotStatusV1::Planned,
+      .plan_status = ReusablePlanSnapshotStatusV1::Planned,
+  };
+  REQUIRE(
+      begin_reusable_build_with_diagnostics(fixture.attachment, update)
+      == ReusableRegistryErrorV1::None);
+
+  const std::string_view analyzed =
+      "Custom Scan (GenericProvider) (actual rows=3 loops=1)";
+  auto analyzed_update = update;
+  analyzed_update.producer_plan = char_view(analyzed);
+  analyzed_update.plan_status = ReusablePlanSnapshotStatusV1::Analyzed;
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, analyzed_update)
+      == ReusableRegistryErrorV1::None);
+  const auto building = snapshot_reusable_generation(
+      fixture.attachment, claimed.reference);
+  REQUIRE(building.has_value());
+  REQUIRE(building->state == CacheEntryState::Building);
+  REQUIRE(
+      building->plan_snapshot_status
+      == ReusablePlanSnapshotStatusV1::Analyzed);
+  REQUIRE(
+      validate_reusable_registry(fixture.attachment)
+      == ReusableRegistryErrorV1::None);
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, update)
+      == ReusableRegistryErrorV1::InvalidState);
+
+  REQUIRE(
+      fail_reusable_generation(
+          fixture.attachment,
+          claimed.reference,
+          CacheFailureCode::CaptureFailure)
+      == ReusableRegistryErrorV1::None);
+  REQUIRE(
+      validate_reusable_registry(fixture.attachment)
+      == ReusableRegistryErrorV1::None);
+}
+
 TEST_CASE("reusable SQL and plan captures fail independently") {
   RegistryFixture fixture{4};
   const std::string_view sql = "SELECT payload FROM provider_rows";
