@@ -2,7 +2,7 @@
  * DOC0260 §4 / §5.3 / §12.1 — PG-free bucket math + locator POD.
  *
  * The length-bucket cut-point table, the log2 helper, the branchless
- * L->bucket LUT, and the 24-byte `seq_locator` POD are pure, Postgres-free
+ * L->bucket LUT, and the `seq_locator` POD are pure, Postgres-free
  * code. They used to live inside `bioseq_storage:sequence_storage_manager`,
  * but that module imports the Postgres catalog/relation machinery, so a
  * unit-test TU could not link it. DOC0260 §12.1 requires a unit-test TU for
@@ -30,13 +30,13 @@ export module bioseq.storage.bucket_math;
 export namespace bioseq::storage {
 
 // ---------------------------------------------------------------------------
-// DOC0264 §5 — Phase C v2 locator POD. Replaces the Phase A v1 24-byte
+// DOC0371 — Phase C v3 locator POD. Replaces the Phase C v2 32-byte
 // (version, bucket_idx, _pad_2, shard_idx, total_bp_size, sub_row_no) layout.
 // Standard-layout so it can be memcpy'd in and out of the pgseq_t stub `data[]`
 // region by the encode/decode helpers (which live in sequence_storage_manager).
 //
-// Layout (32 bytes):
-//   offset 0  version          (1 byte)  = kLocatorVersion = 2
+// Layout (40 bytes):
+//   offset 0  version          (1 byte)  = kLocatorVersion = 3
 //   offset 1  bucket_idx       (1 byte)
 //   offset 2  _pad_2           (2 bytes) — always 0
 //   offset 4  shard_idx        (4 bytes)
@@ -44,9 +44,10 @@ export namespace bioseq::storage {
 //   offset 12 _pad_4           (4 bytes) — always 0
 //   offset 16 total_bp_size    (8 bytes) — full sequence bp count
 //   offset 24 first_sub_row_no (8 bytes) — row no of fragment[0] in the shard
+//   offset 32 source_epoch     (8 bytes) — immutable PostgreSQL-owned content epoch
 // ---------------------------------------------------------------------------
 
-constexpr std::uint8_t kLocatorVersion = 2;
+constexpr std::uint8_t kLocatorVersion = 3;
 
 struct seq_locator {
     std::uint8_t    version = kLocatorVersion;
@@ -57,9 +58,10 @@ struct seq_locator {
     std::uint32_t   _pad_4 = 0;
     std::uint64_t   total_bp_size = 0;
     std::uint64_t   first_sub_row_no = 0;
+    std::uint64_t   source_epoch = 0;
 };
-static_assert(sizeof(seq_locator) == 32,
-              "DOC0264 §5: seq_locator v2 layout must stay 32 bytes.");
+static_assert(sizeof(seq_locator) == 40,
+              "DOC0371: seq_locator v3 layout must stay 40 bytes.");
 static_assert(std::is_standard_layout_v<seq_locator>,
               "seq_locator must be standard-layout (memcpy'd in/out of pgseq_t).");
 static_assert(offsetof(seq_locator, num_fragments) == 8,
@@ -69,6 +71,8 @@ static_assert(offsetof(seq_locator, total_bp_size) == 16,
               "(pg_compact_sequence.cppm reads at this offset).");
 static_assert(offsetof(seq_locator, first_sub_row_no) == 24,
               "DOC0264 §5: seq_locator::first_sub_row_no offset must stay 24 bytes.");
+static_assert(offsetof(seq_locator, source_epoch) == 32,
+              "DOC0371: seq_locator::source_epoch offset must stay 32 bytes.");
 // DOC0264 R13 — guarantee num_fragments (uint32) × max-fragment-bp covers the
 // 1 Tbp project pessimistic ceiling.
 static_assert((static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())

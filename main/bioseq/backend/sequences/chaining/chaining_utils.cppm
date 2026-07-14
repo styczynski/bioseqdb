@@ -22,6 +22,8 @@ module;
 #include <bit>
 #include <new>
 #include <span>
+#include <stdexcept>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -206,11 +208,41 @@ struct ArenaSlab {
             "growth; only trivially-copyable element types are supported on "
             "this path.  Non-trivial types must size the slab once via "
             "reserve_for_placement_new() and never call reserve a second time.");
+        constexpr std::size_t max_elements =
+            (std::numeric_limits<std::size_t>::max)() / sizeof(E);
+        if (expected_capacity > max_elements) {
+            throw std::length_error{"ArenaSlab capacity exceeds addressable bytes"};
+        }
         if (cap_ >= expected_capacity) return;
         auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(expected_capacity);
         if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
         ptr_ = allocated_span.data();
         cap_ = expected_capacity;
+    }
+
+    /// Grow to at least @p required_capacity using an overflow-safe geometric
+    /// policy.  This is the append-loop form of reserve: arena allocations
+    /// cannot resize in place, so exact `old_size + batch_size` growth would
+    /// retain and recopy every superseded prefix until scope unwind.
+    void reserve_geometric(std::size_t required_capacity) {
+        static_assert(std::is_trivially_copyable_v<E>,
+            "ArenaSlab::reserve_geometric relocates live elements with memcpy");
+        if (cap_ >= required_capacity) return;
+
+        constexpr std::size_t max_capacity =
+            (std::numeric_limits<std::size_t>::max)() / sizeof(E);
+        if (required_capacity > max_capacity) {
+            throw std::length_error{"ArenaSlab capacity exceeds addressable bytes"};
+        }
+        std::size_t new_capacity = cap_ == 0 ? std::size_t{64} : cap_;
+        while (new_capacity < required_capacity) {
+            if (new_capacity > max_capacity / 2) {
+                new_capacity = required_capacity;
+                break;
+            }
+            new_capacity *= 2;
+        }
+        reserve(new_capacity);
     }
 
     /// Allocate exactly @p capacity uninitialised slots in the arena.
@@ -251,11 +283,12 @@ struct ArenaSlab {
             "growth; non-trivially-copyable element types must use the "
             "reserve_for_placement_new + construct_at_back pattern.");
         if (len_ == cap_) {
-            const std::size_t new_cap = cap_ ? cap_ * 2 : 64;
-            auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(new_cap);
-            if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
-            ptr_ = allocated_span.data();
-            cap_ = new_cap;
+            constexpr std::size_t max_elements =
+                (std::numeric_limits<std::size_t>::max)() / sizeof(E);
+            if (len_ == max_elements) {
+                throw std::length_error{"ArenaSlab size exceeds addressable bytes"};
+            }
+            reserve_geometric(len_ + 1);
         }
         ptr_[len_++] = std::move(element);
     }
@@ -301,6 +334,30 @@ enum class ChainingMode : uint8_t {
     RMQ,         ///< AVL+RMQ tree-based O(n log n)
 };
 
+/// Forward-search semantics used by the authentic SIMD chaining backend.
+///
+/// The exact policy preserves minimap2's visited-generation/max-skip control.
+/// The bounded policy is an explicitly selected throughput policy: it scores
+/// predecessor batches with Highway and may stop after a bounded run of
+/// non-improving batches.  Neither value permits a scalar implementation.
+enum class SimdChainingPolicy : std::uint8_t {
+    exact_visited = 0,
+    bounded_batch_approximate = 1,
+};
+
+/// Stable diagnostic spelling for a selected SIMD chaining policy.
+[[nodiscard]] constexpr std::string_view simd_chaining_policy_name(
+    SimdChainingPolicy policy) noexcept
+{
+    switch (policy) {
+        case SimdChainingPolicy::exact_visited:
+            return "exact_visited";
+        case SimdChainingPolicy::bounded_batch_approximate:
+            return "bounded_batch_approximate";
+    }
+    return "unknown";
+}
+
 /// Parameters controlling anchor chaining behavior.
 ///
 /// Extracted from Minimap2Params -- only the chaining-relevant subset.
@@ -317,6 +374,10 @@ struct ChainingParams {
     float   chain_skip_scale  = 0.0f;
 
     ChainingMode chaining_mode = ChainingMode::SIMD_DP;
+
+    /// Named SIMD forward-search policy. Exact is the permanent default and
+    /// oracle; accelerated execution must always be requested explicitly.
+    SimdChainingPolicy simd_policy = SimdChainingPolicy::exact_visited;
 
     /// Enable Vulkan execution for the VULKAN_TILED_DP chaining backend. When
     /// false and the Vulkan backend is selected, the backend raises an error.
@@ -518,6 +579,23 @@ struct ChainingParams {
 /// `Arena::Chain` scope (DOC0249 §13 output-side refactor); no intermediate
 /// `std::vector` is allocated, so the caller's pipeline stage avoids a
 /// per-stage memcpy on the chaining-output hot path.
+struct ScoredAnchorIndex {
+    int32_t score;
+    int64_t anchor_index;
+};
+static_assert(sizeof(ScoredAnchorIndex) == 16u);
+
+struct ScoreAscending {
+    [[nodiscard, gnu::always_inline]] inline bool operator()(
+        const ScoredAnchorIndex& left,
+        const ScoredAnchorIndex& right) const noexcept
+    {
+        return left.score != right.score
+            ? left.score < right.score
+            : left.anchor_index < right.anchor_index;
+    }
+};
+
 inline void backtrack_chains(
     std::span<const Anchor> anchors,
     std::span<const int32_t> best_scores,
@@ -536,19 +614,6 @@ inline void backtrack_chains(
     // is sized exactly to `anchor_count` (filter produces at most that many
     // rows) and the per-rank-iteration chain index slab is reused via an
     // explicit length counter instead of `clear()`.
-    struct ScoredAnchorIndex {
-        int32_t score;
-        int64_t anchor_index;
-    };
-    struct ScoreAscending {
-        [[nodiscard, gnu::always_inline]] inline bool operator()(
-            const ScoredAnchorIndex& left,
-            const ScoredAnchorIndex& right) const noexcept
-        {
-            return left.score < right.score;
-        }
-    };
-
     auto& bt_ctx = context::current();
 
     auto scored = bt_ctx.alloc_chain_array<ScoredAnchorIndex>(
