@@ -93,6 +93,8 @@ inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr std::size_t kRegistryCapacity = 64;
 inline constexpr std::size_t kMaximumKeyBytes = 64U * 1024U;
 inline constexpr std::uint64_t kMaximumStoredResultBytes = 256ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kRelationEpochCapacity = 1024;
+inline constexpr std::size_t kMaximumRelationDependencies = 256;
 
 /** PostgreSQL-backed checksums for the shared generic column-store format. */
 struct PostgreSqlColumnChecksumPolicy {
@@ -242,10 +244,21 @@ struct CacheEntry {
     std::uint64_t logical_bytes;
     std::uint64_t stored_bytes;
     std::uint64_t hits;
+    std::uint16_t relation_count;
+    std::uint16_t reserved;
+    Oid relation_oids[kMaximumRelationDependencies];
     char final_path[MAXPGPATH];
     char display_sql[4096];
     ConditionVariable changed;
     unsigned char key[kMaximumKeyBytes];
+};
+
+/** Collision-checked bounded dependency epoch; protected by registry lock. */
+struct RelationEpochSlot {
+    Oid database_oid;
+    Oid relation_oid;
+    std::uint64_t committed_epoch;
+    bool used;
 };
 
 /** Bounded postmaster-lifetime header. Variable cache state is added via DSA. */
@@ -256,6 +269,7 @@ struct CacheSharedState {
     pg_atomic_uint32 bootstrap_failure;
     pg_atomic_uint64 boot_nonce;
     pg_atomic_uint64 database_write_epoch;
+    pg_atomic_uint64 coarse_dependency_epoch;
     pg_atomic_uint32 last_committed_write_xid;
     pg_atomic_uint32 database_transition_count;
     ConditionVariable database_changed;
@@ -265,6 +279,7 @@ struct CacheSharedState {
     pg_atomic_uint64 next_injected_generation;
     InjectedCoverage injected_coverage[kInjectedCoverageCapacity];
 #endif
+    RelationEpochSlot relation_epochs[kRelationEpochCapacity];
     CacheEntry entries[kRegistryCapacity];
 };
 
@@ -292,11 +307,15 @@ struct DirtyFrame {
     DirtyFrame* next;
     SubTransactionId subtransaction_id;
     bool dirty;
+    bool coarse;
+    std::uint16_t relation_count;
+    Oid relation_oids[kMaximumRelationDependencies];
 };
 
 inline DirtyFrame* g_dirty_frames = nullptr;
 inline bool g_database_transition_published = false;
 inline TransactionId g_database_transition_xid = InvalidTransactionId;
+inline bool g_force_coarse_transition = false;
 
 /** Per-planner invocation frame; PostgreSQL backends are single-threaded. */
 struct PlannerFrame {
@@ -305,6 +324,7 @@ struct PlannerFrame {
     char* canonical_query = nullptr;
     char* display_sql = nullptr;
     List* referenced_parameter_ids = NIL;
+    List* referenced_relation_oids = NIL;
     bool eligible = false;
 };
 
@@ -322,6 +342,7 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
         ^ (static_cast<std::uint64_t>(MyProcPid) << 32U);
     pg_atomic_init_u64(&shared.boot_nonce, nonce == 0 ? 1 : nonce);
     pg_atomic_init_u64(&shared.database_write_epoch, 1);
+    pg_atomic_init_u64(&shared.coarse_dependency_epoch, 1);
     pg_atomic_init_u32(
         &shared.last_committed_write_xid, InvalidTransactionId);
     pg_atomic_init_u32(&shared.database_transition_count, 0);
@@ -370,16 +391,38 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
 /** Remember a possible result-changing write until its transaction outcome. */
 void mark_current_transaction_dirty() {
     if (IsTransactionState()) {
-        dirty_frame(GetCurrentSubTransactionId())->dirty = true;
+        DirtyFrame* frame = dirty_frame(GetCurrentSubTransactionId());
+        frame->dirty = true;
+        frame->coarse = true;
     }
+}
+
+/** Record one precise relation dependency, falling back when the set is full. */
+void mark_current_transaction_relation_dirty(Oid relation_oid) {
+    if (!IsTransactionState() || !OidIsValid(relation_oid)) {
+        return;
+    }
+    DirtyFrame* frame = dirty_frame(GetCurrentSubTransactionId());
+    frame->dirty = true;
+    for (std::uint16_t index = 0; index < frame->relation_count; ++index) {
+        if (frame->relation_oids[index] == relation_oid) {
+            return;
+        }
+    }
+    if (frame->relation_count >= kMaximumRelationDependencies) {
+        frame->coarse = true;
+        return;
+    }
+    frame->relation_oids[frame->relation_count++] = relation_oid;
 }
 
 /** Provider write observations join the same savepoint-aware epoch ledger. */
 void observe_provider_relation_write(
-        std::uint32_t database_oid, std::uint32_t,
+        std::uint32_t database_oid, std::uint32_t relation_oid,
         const provider_registry::PhysicalIdentityV1*) noexcept {
     if (database_oid == static_cast<std::uint32_t>(MyDatabaseId)) {
-        mark_current_transaction_dirty();
+        mark_current_transaction_relation_dirty(
+            static_cast<Oid>(relation_oid));
     }
 }
 
@@ -417,9 +460,117 @@ void finish_dirty_subtransaction(
     DirtyFrame* child = *link;
     *link = child->next;
     if (committed && child->dirty) {
-        dirty_frame(parent_id)->dirty = true;
+        DirtyFrame* parent = dirty_frame(parent_id);
+        parent->dirty = true;
+        parent->coarse = parent->coarse || child->coarse;
+        for (std::uint16_t index = 0;
+             index < child->relation_count; ++index) {
+            const Oid relation_oid = child->relation_oids[index];
+            bool present = false;
+            for (std::uint16_t parent_index = 0;
+                 parent_index < parent->relation_count; ++parent_index) {
+                present = present
+                    || parent->relation_oids[parent_index] == relation_oid;
+            }
+            if (present) {
+                continue;
+            }
+            if (parent->relation_count >= kMaximumRelationDependencies) {
+                parent->coarse = true;
+                break;
+            }
+            parent->relation_oids[parent->relation_count++] = relation_oid;
+        }
     }
     pfree(child);
+}
+
+[[nodiscard]] constexpr std::size_t relation_epoch_start(
+        Oid database_oid, Oid relation_oid) noexcept {
+    const std::uint64_t mixed =
+        static_cast<std::uint64_t>(database_oid) * 0x9e3779b185ebca87ULL
+        ^ static_cast<std::uint64_t>(relation_oid) * 0xc2b2ae3d27d4eb4fULL;
+    return static_cast<std::size_t>(mixed % kRelationEpochCapacity);
+}
+
+/** Read the current precise epoch; unseen relations begin at epoch one. */
+[[nodiscard]] std::uint64_t relation_dependency_epoch(Oid relation_oid) noexcept {
+    if (g_shared == nullptr || !OidIsValid(relation_oid)) {
+        return 0;
+    }
+    std::uint64_t epoch = 1;
+    LWLockAcquire(g_registry_lock, LW_SHARED);
+    const std::size_t start = relation_epoch_start(MyDatabaseId, relation_oid);
+    for (std::size_t probe = 0; probe < kRelationEpochCapacity; ++probe) {
+        const RelationEpochSlot& slot =
+            g_shared->relation_epochs[(start + probe) % kRelationEpochCapacity];
+        if (!slot.used) {
+            break;
+        }
+        if (slot.database_oid == MyDatabaseId
+            && slot.relation_oid == relation_oid) {
+            epoch = slot.committed_epoch;
+            break;
+        }
+    }
+    LWLockRelease(g_registry_lock);
+    return epoch;
+}
+
+/** Advance one precise dependency under the registry lock; false means full. */
+[[nodiscard]] bool bump_relation_epoch_locked(Oid relation_oid) noexcept {
+    const std::size_t start = relation_epoch_start(MyDatabaseId, relation_oid);
+    for (std::size_t probe = 0; probe < kRelationEpochCapacity; ++probe) {
+        RelationEpochSlot& slot =
+            g_shared->relation_epochs[(start + probe) % kRelationEpochCapacity];
+        if (!slot.used) {
+            slot.used = true;
+            slot.database_oid = MyDatabaseId;
+            slot.relation_oid = relation_oid;
+            slot.committed_epoch = 2;
+            return true;
+        }
+        if (slot.database_oid == MyDatabaseId
+            && slot.relation_oid == relation_oid) {
+            ++slot.committed_epoch;
+            if (slot.committed_epoch == 0) {
+                slot.committed_epoch = 1;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Publish savepoint-filtered precise dependencies, returning coarse fallback. */
+[[nodiscard]] bool publish_dirty_dependency_epochs() noexcept {
+    bool coarse = g_force_coarse_transition;
+    Oid published[kMaximumRelationDependencies]{};
+    std::size_t published_count = 0;
+    LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
+    for (const DirtyFrame* frame = g_dirty_frames;
+         frame != nullptr; frame = frame->next) {
+        coarse = coarse || frame->coarse;
+        for (std::uint16_t index = 0;
+             index < frame->relation_count; ++index) {
+            const Oid relation_oid = frame->relation_oids[index];
+            bool duplicate = false;
+            for (std::size_t prior = 0; prior < published_count; ++prior) {
+                duplicate = duplicate || published[prior] == relation_oid;
+            }
+            if (duplicate) {
+                continue;
+            }
+            if (published_count >= kMaximumRelationDependencies
+                || !bump_relation_epoch_locked(relation_oid)) {
+                coarse = true;
+                continue;
+            }
+            published[published_count++] = relation_oid;
+        }
+    }
+    LWLockRelease(g_registry_lock);
+    return coarse;
 }
 
 /** Announce a commit transition so concurrent captures cannot race visibility. */
@@ -438,9 +589,14 @@ void finish_database_transition(bool committed) noexcept {
     if (!g_database_transition_published || g_shared == nullptr) {
         g_database_transition_published = false;
         g_database_transition_xid = InvalidTransactionId;
+        g_force_coarse_transition = false;
         return;
     }
     if (committed) {
+        if (publish_dirty_dependency_epochs()) {
+            pg_atomic_fetch_add_u64(
+                &g_shared->coarse_dependency_epoch, 1);
+        }
         if (TransactionIdIsValid(g_database_transition_xid)) {
             pg_atomic_write_u32(
                 &g_shared->last_committed_write_xid,
@@ -452,6 +608,7 @@ void finish_database_transition(bool committed) noexcept {
     pg_atomic_fetch_sub_u32(&g_shared->database_transition_count, 1);
     g_database_transition_published = false;
     g_database_transition_xid = InvalidTransactionId;
+    g_force_coarse_transition = false;
     ConditionVariableBroadcast(&g_shared->database_changed);
 }
 
@@ -613,6 +770,18 @@ struct VisibilityTicket {
     return ticket;
 }
 
+/** Recheck the ticket after dependency-key construction closes commit races. */
+[[nodiscard]] bool visibility_ticket_still_bound(
+        const VisibilityTicket& ticket) noexcept {
+    if (!ticket.valid || g_shared == nullptr
+        || pg_atomic_read_u32(&g_shared->database_transition_count) != 0) {
+        return false;
+    }
+    pg_read_barrier();
+    return pg_atomic_read_u64(&g_shared->database_write_epoch)
+        == ticket.database_epoch;
+}
+
 /** Reject non-disabled use when the library was not preloaded. */
 bool check_query_cache_mode(int* new_value, void**, GucSource) {
     if (*new_value == static_cast<int>(QueryCacheMode::Disabled)) {
@@ -759,6 +928,52 @@ bool collect_external_parameter_walker(Node* node, void* context) {
     }
     bms_free(parameters);
     return result;
+}
+
+struct RelationCollector {
+    List* relation_oids = NIL;
+    bool overflow = false;
+};
+
+bool collect_relation_oid_walker(Node* node, void* context) {
+    if (node == nullptr) {
+        return false;
+    }
+    auto* collector = static_cast<RelationCollector*>(context);
+    if (IsA(node, RangeTblEntry)) {
+        const auto* range = reinterpret_cast<const RangeTblEntry*>(node);
+        if (range->rtekind == RTE_RELATION
+            && OidIsValid(range->relid)
+            && !list_member_oid(collector->relation_oids, range->relid)) {
+            if (list_length(collector->relation_oids)
+                >= static_cast<int>(kMaximumRelationDependencies)) {
+                collector->overflow = true;
+                return true;
+            }
+            collector->relation_oids = lappend_oid(
+                collector->relation_oids, range->relid);
+        }
+        return false;
+    }
+    if (IsA(node, Query)) {
+        return query_tree_walker(
+            reinterpret_cast<Query*>(node),
+            collect_relation_oid_walker,
+            context,
+            QTW_EXAMINE_RTES_BEFORE);
+    }
+    return expression_tree_walker(node, collect_relation_oid_walker, context);
+}
+
+[[nodiscard]] List* collect_relation_oids(Query& query, bool& overflow) {
+    RelationCollector collector{};
+    static_cast<void>(query_tree_walker(
+        &query,
+        collect_relation_oid_walker,
+        &collector,
+        QTW_EXAMINE_RTES_BEFORE));
+    overflow = collector.overflow;
+    return collector.relation_oids;
 }
 
 /** Conservative v1 exact-cache eligibility before path decoration. */
@@ -1041,7 +1256,7 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
 [[nodiscard]] StringInfo build_runtime_key(
         const CustomScan& scan, EState* estate, TupleDesc descriptor) {
     StringInfo key = makeStringInfo();
-    const std::uint32_t key_format = 1;
+    const std::uint32_t key_format = 2;
     Oid effective_user = InvalidOid;
     int security_context = 0;
     GetUserIdAndSecContext(&effective_user, &security_context);
@@ -1078,6 +1293,34 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
             return nullptr;
         }
         pfree(value);
+    }
+
+    const std::uint64_t coarse_epoch = pg_atomic_read_u64(
+        &g_shared->coarse_dependency_epoch);
+    List* referenced_relations = scan.custom_private != NIL
+            && list_length(scan.custom_private) > 4
+        ? static_cast<List*>(list_nth(scan.custom_private, 4))
+        : NIL;
+    const int relation_count = list_length(referenced_relations);
+    if (relation_count > static_cast<int>(kMaximumRelationDependencies)
+        || !append_key_scalar(key, coarse_epoch)
+        || !append_key_scalar(key, relation_count)) {
+        pfree(key->data);
+        pfree(key);
+        return nullptr;
+    }
+    ListCell* relation_cell = nullptr;
+    foreach(relation_cell, referenced_relations) {
+        const Oid relation_oid = lfirst_oid(relation_cell);
+        const std::uint64_t relation_epoch = relation_dependency_epoch(
+            relation_oid);
+        if (!OidIsValid(relation_oid)
+            || !append_key_scalar(key, relation_oid)
+            || !append_key_scalar(key, relation_epoch)) {
+            pfree(key->data);
+            pfree(key);
+            return nullptr;
+        }
     }
 
     ParamListInfo parameters = estate == nullptr
@@ -1262,10 +1505,8 @@ struct RegistryDecision {
 
 /** Complete entries are usable only in their captured database epoch. */
 [[nodiscard]] bool entry_is_current(
-        const CacheEntry& entry, std::uint64_t database_epoch,
-        TimestampTz now) noexcept {
+        const CacheEntry& entry, TimestampTz now) noexcept {
     return entry.state == SharedEntryState::Complete
-        && entry.database_epoch == database_epoch
         && entry.expires_at > now;
 }
 
@@ -1279,8 +1520,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
 
 /** Wait for a matching producer; pre-existing waiters may consume TTL-zero. */
 [[nodiscard]] RegistryDecision wait_for_producer(
-        int index, std::uint64_t generation,
-        std::uint64_t database_epoch) {
+        int index, std::uint64_t generation) {
     RegistryDecision decision{};
     CacheEntry& entry = g_shared->entries[index];
     ConditionVariablePrepareToSleep(&entry.changed);
@@ -1304,16 +1544,14 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 if (entry.waiter_count > 0) {
                     --entry.waiter_count;
                 }
-                if (entry.database_epoch == database_epoch) {
-                    ++entry.reader_count;
-                    ++entry.hits;
-                    decision.role = RuntimeRole::Consumer;
-                    decision.index = index;
-                    decision.generation = generation;
-                    strlcpy(
-                        decision.final_path, entry.final_path,
-                        sizeof(decision.final_path));
-                }
+                ++entry.reader_count;
+                ++entry.hits;
+                decision.role = RuntimeRole::Consumer;
+                decision.index = index;
+                decision.generation = generation;
+                strlcpy(
+                    decision.final_path, entry.final_path,
+                    sizeof(decision.final_path));
                 LWLockRelease(g_registry_lock);
                 break;
             }
@@ -1352,7 +1590,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
 /** Select an exact hit, wait on its producer, or claim one bounded slot. */
 [[nodiscard]] RegistryDecision acquire_registry_entry(
         const StringInfo key, std::uint64_t database_epoch,
-        const char* display_sql) {
+        const char* display_sql, List* relation_oids) {
     RegistryDecision decision{};
     const std::uint64_t key_hash = hash_any_extended(
         reinterpret_cast<const unsigned char*>(key->data), key->len,
@@ -1368,7 +1606,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
     for (std::size_t offset = 0; offset < kRegistryCapacity; ++offset) {
         CacheEntry& entry = g_shared->entries[offset];
         if (entry_key_matches(entry, key_hash, key)) {
-            if (entry_is_current(entry, database_epoch, now)) {
+            if (entry_is_current(entry, now)) {
                 ++entry.reader_count;
                 ++entry.hits;
                 decision.role = RuntimeRole::Consumer;
@@ -1390,7 +1628,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                         &g_shared->stats.inflight_waits, 1);
                 }
                 return wait_for_producer(
-                    static_cast<int>(offset), generation, database_epoch);
+                    static_cast<int>(offset), generation);
             }
         }
 
@@ -1407,7 +1645,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
             }
             continue;
         }
-        if ((entry.database_epoch != database_epoch || entry.expires_at <= now)
+        if (entry.expires_at <= now
             && (reusable_index < 0
                 || entry.completed_at < oldest_completion)) {
             reusable_index = static_cast<int>(offset);
@@ -1450,6 +1688,17 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         entry.logical_bytes = 0;
         entry.stored_bytes = 0;
         entry.hits = 0;
+        entry.relation_count = 0;
+        entry.reserved = 0;
+        std::memset(entry.relation_oids, 0, sizeof(entry.relation_oids));
+        ListCell* relation_cell = nullptr;
+        foreach(relation_cell, relation_oids) {
+            if (entry.relation_count >= kMaximumRelationDependencies) {
+                break;
+            }
+            entry.relation_oids[entry.relation_count++] =
+                lfirst_oid(relation_cell);
+        }
         entry.final_path[0] = '\0';
         strlcpy(
             entry.display_sql,
@@ -1965,9 +2214,21 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         }
         PG_END_TRY();
 
+        if (key != nullptr
+            && !visibility_ticket_still_bound(visibility)) {
+            pfree(key->data);
+            pfree(key);
+            key = nullptr;
+        }
+
         if (key != nullptr) {
+            List* referenced_relations = scan->custom_private != NIL
+                    && list_length(scan->custom_private) > 4
+                ? static_cast<List*>(list_nth(scan->custom_private, 4))
+                : NIL;
             RegistryDecision decision = acquire_registry_entry(
-                key, visibility.database_epoch, private_string(*scan, 1));
+                key, visibility.database_epoch, private_string(*scan, 1),
+                referenced_relations);
             state->runtime_role = decision.role;
             state->registry_index = decision.index;
             state->generation = decision.generation;
@@ -2255,6 +2516,9 @@ const CustomPathMethods& cache_path_methods() {
     path->custom_private = lappend(
         path->custom_private,
         copyObject(frame.referenced_parameter_ids));
+    path->custom_private = lappend(
+        path->custom_private,
+        copyObject(frame.referenced_relation_oids));
     path->custom_restrictinfo = NIL;
     path->methods = &cache_path_methods();
     return path;
@@ -2331,6 +2595,7 @@ PlannedStmt* cache_planner(
         .canonical_query = nullptr,
         .display_sql = nullptr,
         .referenced_parameter_ids = NIL,
+        .referenced_relation_oids = NIL,
         .eligible = false,
     };
     g_planner_frame = &frame;
@@ -2340,9 +2605,13 @@ PlannedStmt* cache_planner(
         MemoryContextSwitchTo(planner_context);
         frame.eligible = query_is_exact_cache_eligible(*query);
         if (frame.eligible) {
+            bool relation_overflow = false;
             frame.canonical_query = canonicalize_query(*query);
             frame.display_sql = copy_display_sql(query_string);
             frame.referenced_parameter_ids = collect_external_parameter_ids(*query);
+            frame.referenced_relation_oids = collect_relation_oids(
+                *query, relation_overflow);
+            frame.eligible = !relation_overflow;
         }
         result = g_previous_planner_hook != nullptr
             ? g_previous_planner_hook(
@@ -2361,12 +2630,36 @@ PlannedStmt* cache_planner(
 }
 
 /** Preserve write observability even when a writer session disables caching. */
+void mark_planned_result_relations(PlannedStmt& statement) {
+    bool precise = false;
+    ListCell* relation_cell = nullptr;
+    foreach(relation_cell, statement.resultRelations) {
+        const int range_index = lfirst_int(relation_cell);
+        if (range_index <= 0 || range_index > list_length(statement.rtable)) {
+            mark_current_transaction_dirty();
+            return;
+        }
+        const auto* range = static_cast<const RangeTblEntry*>(
+            list_nth(statement.rtable, range_index - 1));
+        if (range == nullptr || range->rtekind != RTE_RELATION
+            || !OidIsValid(range->relid)) {
+            mark_current_transaction_dirty();
+            return;
+        }
+        mark_current_transaction_relation_dirty(range->relid);
+        precise = true;
+    }
+    if (!precise) {
+        mark_current_transaction_dirty();
+    }
+}
+
 void cache_executor_start(QueryDesc* query_description, int eflags) {
     if (query_description != nullptr
         && query_description->plannedstmt != nullptr
         && (query_description->plannedstmt->commandType != CMD_SELECT
             || query_description->plannedstmt->hasModifyingCTE)) {
-        mark_current_transaction_dirty();
+        mark_planned_result_relations(*query_description->plannedstmt);
     }
     if (g_previous_executor_start_hook != nullptr) {
         g_previous_executor_start_hook(query_description, eflags);
@@ -2424,6 +2717,7 @@ void cache_process_utility(
             environment, destination, completion);
     }
     if (outside_transaction) {
+        g_force_coarse_transition = true;
         begin_database_transition();
         finish_database_transition(true);
     }
@@ -2568,8 +2862,68 @@ struct EntrySnapshot {
     std::size_t path_count = 0;
     std::uint64_t invalidated = 0;
     pg_atomic_fetch_add_u64(&g_shared->database_write_epoch, 1);
+    pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (CacheEntry& entry : g_shared->entries) {
+        if (entry.state == SharedEntryState::Producing) {
+            fail_abandoned_producer(entry);
+            ++invalidated;
+            continue;
+        }
+        if (entry.state != SharedEntryState::Complete) {
+            continue;
+        }
+        entry.state = SharedEntryState::Retired;
+        ++invalidated;
+        if (entry.reader_count == 0 && entry.final_path[0] != '\0') {
+            strlcpy(paths[path_count++], entry.final_path, MAXPGPATH);
+            entry.final_path[0] = '\0';
+        }
+        ConditionVariableBroadcast(&entry.changed);
+    }
+    LWLockRelease(g_registry_lock);
+    for (std::size_t index = 0; index < path_count; ++index) {
+        static_cast<void>(::unlink(paths[index]));
+    }
+    if (invalidated != 0) {
+        pg_atomic_fetch_add_u64(
+            &g_shared->stats.invalidations, invalidated);
+    }
+    ConditionVariableBroadcast(&g_shared->database_changed);
+    return invalidated;
+}
+
+[[nodiscard]] bool entry_depends_on_relation(
+        const CacheEntry& entry, Oid relation_oid) noexcept {
+    if (entry.database_oid != MyDatabaseId) {
+        return false;
+    }
+    for (std::uint16_t index = 0; index < entry.relation_count; ++index) {
+        if (entry.relation_oids[index] == relation_oid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Advance and retire only generations that reference one relation. */
+[[nodiscard]] std::uint64_t invalidate_relation_registry(
+        Oid relation_oid) noexcept {
+    if (g_shared == nullptr || !OidIsValid(relation_oid)) {
+        return 0;
+    }
+    char paths[kRegistryCapacity][MAXPGPATH]{};
+    std::size_t path_count = 0;
+    std::uint64_t invalidated = 0;
+    pg_atomic_fetch_add_u64(&g_shared->database_write_epoch, 1);
+    LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
+    if (!bump_relation_epoch_locked(relation_oid)) {
+        pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
+    }
+    for (CacheEntry& entry : g_shared->entries) {
+        if (!entry_depends_on_relation(entry, relation_oid)) {
+            continue;
+        }
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
             ++invalidated;
@@ -2747,8 +3101,9 @@ Datum bioseq_cache_invalidate_relation(PG_FUNCTION_ARGS) {
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("must be superuser to invalidate bioseq_cache")));
     }
-    (void)PG_GETARG_OID(0);
-    const std::uint64_t invalidated = invalidate_registry();
+    const Oid relation_oid = PG_GETARG_OID(0);
+    const std::uint64_t invalidated = invalidate_relation_registry(
+        relation_oid);
     PG_RETURN_INT64(static_cast<int64>(invalidated));
 }
 
