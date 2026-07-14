@@ -32,9 +32,9 @@ option(BIOSEQ_BUILD_PAPERS
 # CMAKE_NAMED_ENV_TYPE selects the per-machine toolchain block below. Resolution
 # order: an environment variable (set e.g. by a CMake preset's `environment`
 # field or `export CMAKE_NAMED_ENV_TYPE=...`) wins; then any pre-set cache/normal
-# value; otherwise it defaults to "H" (the arm64 macOS "home" box). This keeps a
-# single checked-in default while letting the AWS x86_64 reference box select its
-# own toolchain via the `aws-x64-linux` preset. Supported: "W", "H",
+# value; otherwise it selects the installed Linux toolchain on Linux and "H"
+# (the arm64 macOS "home" box) elsewhere. Presets can still select their own
+# toolchain explicitly. Supported: "W", "H",
 # "AWS_MACHINE_X64", "AWS_MACHINE_X64_GCC16".
 if(DEFINED ENV{CMAKE_NAMED_ENV_TYPE})
   set(CMAKE_NAMED_ENV_TYPE "$ENV{CMAKE_NAMED_ENV_TYPE}")
