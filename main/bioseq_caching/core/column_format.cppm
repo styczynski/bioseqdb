@@ -126,6 +126,18 @@ struct RowGroupLimits {
     return bytes;
 }
 
+/** Support the standard packed-bool container used by boundary fixtures. */
+[[nodiscard]] inline std::vector<std::byte> encode_validity(
+    const std::vector<bool>& valid) {
+    std::vector<std::byte> bytes((valid.size() + 7u) / 8u, std::byte{0});
+    for (std::size_t index = 0; index < valid.size(); ++index) {
+        if (valid[index]) {
+            bytes[index / 8u] |= static_cast<std::byte>(1u << (index % 8u));
+        }
+    }
+    return bytes;
+}
+
 /** Decode exactly the requested number of validity bits. */
 [[nodiscard]] inline std::expected<std::vector<bool>, FormatError>
 decode_validity(
@@ -295,6 +307,10 @@ serialize_schema(std::span<const ColumnSchema> schema) {
         const bool fixed_encoding =
             descriptor.encoding == ColumnEncoding::FixedByValue
             || descriptor.encoding == ColumnEncoding::FixedByReference;
+        const bool supported_by_value_width = descriptor.type_length == 1
+            || descriptor.type_length == 2
+            || descriptor.type_length == 4
+            || descriptor.type_length == 8;
         if (column.name.size() > kMaxCanonicalKeyBytes
             || descriptor.type_alignment == 0
             || (descriptor.type_alignment & (descriptor.type_alignment - 1))
@@ -316,9 +332,16 @@ serialize_schema(std::span<const ColumnSchema> schema) {
             || (descriptor.encoding == ColumnEncoding::BooleanBits
                 && (descriptor.type_length != 1 || descriptor.by_value != 1))
             || (descriptor.encoding == ColumnEncoding::FixedByValue
-                && descriptor.by_value != 1)
+                && (descriptor.by_value != 1 || !supported_by_value_width))
             || (descriptor.encoding == ColumnEncoding::FixedByReference
-                && descriptor.by_value != 0)) {
+                && descriptor.by_value != 0)
+            || (descriptor.encoding == ColumnEncoding::FlatVarlena
+                && (descriptor.by_value != 0
+                    || descriptor.type_length != -1))
+            || (descriptor.encoding == ColumnEncoding::BinarySend
+                && (descriptor.by_value != 0
+                    || descriptor.send_function_oid == 0
+                    || descriptor.receive_function_oid == 0))) {
             return std::unexpected(FormatError::InvalidFixedWidth);
         }
         const std::uint64_t name_offset = bytes.size() + 64u;
@@ -466,14 +489,16 @@ public:
                         value.bytes.begin(), value.bytes.end()),
             });
         }
+        bool group_value_limit_exceeded = false;
+        if (!groups_.empty() && !groups_.back().rows.empty()) {
+            const auto next_group_bytes = checked_add(
+                groups_.back().value_bytes, row_bytes);
+            group_value_limit_exceeded = !next_group_bytes.has_value()
+                || *next_group_bytes > limits_.value_bytes;
+        }
         if (groups_.empty()
             || groups_.back().rows.size() >= limits_.rows
-            || (!groups_.back().rows.empty() && [&] {
-                const auto next_group_bytes = checked_add(
-                    groups_.back().value_bytes, row_bytes);
-                return !next_group_bytes.has_value()
-                    || *next_group_bytes > limits_.value_bytes;
-            }())) {
+            || group_value_limit_exceeded) {
             groups_.push_back(detail::PendingGroup{
                 .first_row_ordinal = row_count_,
             });
@@ -1149,6 +1174,10 @@ validate_column_store(
         const bool fixed_encoding =
             *encoding == ColumnEncoding::FixedByValue
             || *encoding == ColumnEncoding::FixedByReference;
+        const bool supported_by_value_width = *type_length == 1
+            || *type_length == 2
+            || *type_length == 4
+            || *type_length == 8;
         if (!supported_encoding) {
             return std::unexpected(
                 *encoding == ColumnEncoding::Dictionary
@@ -1167,9 +1196,14 @@ validate_column_store(
         if ((fixed_encoding && *type_length <= 0)
             || (*encoding == ColumnEncoding::BooleanBits
                 && (*type_length != 1 || *by_value != 1))
-            || (*encoding == ColumnEncoding::FixedByValue && *by_value != 1)
+            || (*encoding == ColumnEncoding::FixedByValue
+                && (*by_value != 1 || !supported_by_value_width))
             || (*encoding == ColumnEncoding::FixedByReference
-                && *by_value != 0)) {
+                && *by_value != 0)
+            || (*encoding == ColumnEncoding::FlatVarlena
+                && (*by_value != 0 || *type_length != -1))
+            || (*encoding == ColumnEncoding::BinarySend
+                && (*by_value != 0 || *send_oid == 0 || *receive_oid == 0))) {
             return std::unexpected(FormatError::InvalidFixedWidth);
         }
         column.name.reserve(*name_length);
@@ -1430,7 +1464,7 @@ validate_column_store(
              column_index < schema.size();
              ++column_index) {
             ColumnChunkV1 chunk{};
-            auto read_u64 = [&]() {
+            auto read_u64 = [&group, &chunk_cursor]() {
                 return read_little_endian<std::uint64_t>(*group, chunk_cursor);
             };
             auto null_offset = read_u64();
