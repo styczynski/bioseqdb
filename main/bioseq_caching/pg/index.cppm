@@ -8322,7 +8322,11 @@ snapshot_reusable_entries(
                  ++index) {
                 const std::uint32_t database_oid =
                     diagnostics[index].database_oid;
-                bool duplicate = database_oid == 0;
+                if (database_oid == 0) {
+                    complete = false;
+                    break;
+                }
+                bool duplicate = false;
                 for (std::size_t prior = 0; prior < index; ++prior) {
                     duplicate = duplicate
                         || diagnostics[prior].database_oid == database_oid;
@@ -8384,7 +8388,8 @@ snapshot_reusable_entries(
             == RelationPhysicalIdentityStatusV1::Precise) {
         return invalidate_reusable_registry(physical_identity);
     }
-    if (!g_reusable_registry || g_reusable_membership_lock == nullptr) {
+    if (!g_reusable_registry || g_reusable_membership_lock == nullptr
+        || g_reusable_wait_slot_count == 0) {
         return 0;
     }
     const std::size_t capacity = g_reusable_wait_slot_count;
@@ -8393,16 +8398,34 @@ snapshot_reusable_entries(
     std::size_t affected_count = 0;
     std::uint64_t invalidated = 0;
     bool complete = true;
-    LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
-    complete = invalidate_reusable_selector_locked(
-        ReusableInvalidationSelectorV1{
-            .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
-            .coarse_database_fallback = true,
-        },
-        std::span<ReusableGenerationReferenceV1>{affected, capacity},
-        affected_count,
-        invalidated);
-    LWLockRelease(g_reusable_membership_lock);
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
+        membership_owned = true;
+        complete = invalidate_reusable_selector_locked(
+            ReusableInvalidationSelectorV1{
+                .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
+                .coarse_database_fallback = true,
+            },
+            std::span<ReusableGenerationReferenceV1>{affected, capacity},
+            affected_count,
+            invalidated);
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        pfree(affected);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
     for (std::size_t index = 0; index < affected_count; ++index) {
         broadcast_reusable_generation(affected[index]);
     }
@@ -8610,6 +8633,7 @@ Datum bioseq_cache_stats(PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(bioseq_cache_entries);
 Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache;
     using namespace bioseq::cache::pg;
     require_cache_diagnostics_reader();
     Tuplestorestate* tuple_store = nullptr;
@@ -8683,6 +8707,134 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
         pfree(ttl);
         pfree(dependencies.data);
     }
+
+    if (g_reusable_wait_slot_count != 0) {
+        const std::size_t reusable_capacity = g_reusable_wait_slot_count;
+        auto* reusable_rows =
+            static_cast<ReusableGenerationDiagnosticsRowV1*>(palloc0(
+                sizeof(ReusableGenerationDiagnosticsRowV1)
+                    * reusable_capacity));
+        const auto reusable_snapshot = snapshot_reusable_entries(
+            std::span<ReusableGenerationDiagnosticsRowV1>{
+                reusable_rows, reusable_capacity});
+        if (reusable_snapshot.error != ReusableRegistryErrorV1::None
+            || reusable_snapshot.truncated) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq_cache reusable diagnostics are inconsistent")));
+        }
+        const std::uint64_t now_monotonic_ns = reusable_monotonic_now_ns();
+        for (std::size_t index = 0;
+             index < reusable_snapshot.count;
+             ++index) {
+            const ReusableGenerationDiagnosticsRowV1& entry =
+                reusable_rows[index];
+            Datum values[20]{};
+            bool nulls[20]{};
+            const auto key = reusable_digest_hex(entry.reference.id.digest);
+            const auto dependency = reusable_digest_hex(
+                entry.dependency_fingerprint);
+            values[0] = CStringGetTextDatum(key.data());
+            values[1] = Int64GetDatum(static_cast<int64>(
+                entry.reference.id.generation));
+            values[2] = CStringGetTextDatum("ReusableCoverage");
+            values[3] = CStringGetTextDatum(
+                reusable_entry_state_name(entry.state));
+            if (entry.database_oid != 0) {
+                values[4] = ObjectIdGetDatum(entry.database_oid);
+            } else {
+                nulls[4] = true;
+            }
+            if (entry.current_role_oid != 0) {
+                values[5] = ObjectIdGetDatum(entry.current_role_oid);
+            } else {
+                nulls[5] = true;
+            }
+            if (entry.producer_pid > 0) {
+                values[6] = Int32GetDatum(entry.producer_pid);
+            } else {
+                nulls[6] = true;
+            }
+            const auto created_at = reusable_wall_timestamp(
+                now, now_monotonic_ns, entry.started_monotonic_ns);
+            if (created_at.has_value()) {
+                values[7] = TimestampTzGetDatum(*created_at);
+            } else {
+                nulls[7] = true;
+            }
+            const auto completed_at = reusable_wall_timestamp(
+                now, now_monotonic_ns, entry.completed_monotonic_ns);
+            if (completed_at.has_value()) {
+                values[8] = TimestampTzGetDatum(*completed_at);
+            } else {
+                nulls[8] = true;
+            }
+            auto* age = static_cast<Interval*>(palloc0(sizeof(Interval)));
+            age->time = reusable_age_us(
+                now_monotonic_ns, entry.started_monotonic_ns);
+            values[9] = IntervalPGetDatum(age);
+            auto* ttl = static_cast<Interval*>(palloc0(sizeof(Interval)));
+            ttl->time = reusable_ttl_us(entry.producer_ttl_ms);
+            values[10] = IntervalPGetDatum(ttl);
+            values[11] = Int64GetDatum(static_cast<int64>(entry.row_count));
+            values[12] = Int64GetDatum(static_cast<int64>(
+                entry.logical_bytes));
+            values[13] = Int64GetDatum(static_cast<int64>(
+                entry.stored_bytes));
+            values[14] = Int32GetDatum(static_cast<int32>(
+                entry.waiter_count));
+            values[15] = Int32GetDatum(static_cast<int32>(
+                entry.reader_pin_count));
+            values[16] = Int64GetDatum(0); /* Per-generation hits are absent. */
+            nulls[17] = true; /* Canonical query and predicate bytes stay redacted. */
+            nulls[18] = true; /* No reusable producer Plan bytes are exposed. */
+            StringInfoData dependencies{};
+            initStringInfo(&dependencies);
+            appendStringInfo(
+                &dependencies,
+                "{\"action\":\"%s\",\"failure\":\"%s\","
+                "\"provider_id\":%u,\"provider_abi_version\":%u,"
+                "\"provider_domain_abi_version\":%u,"
+                "\"compatibility_family_id\":%llu,"
+                "\"capability_mask\":%llu,\"dependency_count\":%u,"
+                "\"dependency_fingerprint\":\"%s\","
+                "\"observability\":\"%s\",\"planner_pins\":%u",
+                reusable_entry_action_name(entry.state),
+                reusable_failure_name(entry.failure),
+                entry.provider_id,
+                entry.provider_abi_version,
+                entry.provider_domain_abi_version,
+                static_cast<unsigned long long>(
+                    entry.compatibility_family_id),
+                static_cast<unsigned long long>(entry.capability_mask),
+                entry.dependency_count,
+                dependency.data(),
+                reusable_observability_name(entry.observability),
+                entry.planner_pin_count);
+            if (entry.manifest) {
+                appendStringInfo(
+                    &dependencies,
+                    ",\"manifest\":{\"slot\":%u,"
+                    "\"slot_sequence\":%llu,\"generation\":%llu}",
+                    entry.manifest.slot,
+                    static_cast<unsigned long long>(
+                        entry.manifest.slot_sequence),
+                    static_cast<unsigned long long>(
+                        entry.manifest.id.generation));
+            } else {
+                appendStringInfoString(&dependencies, ",\"manifest\":null");
+            }
+            appendStringInfoChar(&dependencies, '}');
+            values[19] = DirectFunctionCall1(
+                jsonb_in, CStringGetDatum(dependencies.data));
+            tuplestore_putvalues(
+                tuple_store, tuple_descriptor, values, nulls);
+            pfree(age);
+            pfree(ttl);
+            pfree(dependencies.data);
+        }
+        pfree(reusable_rows);
+    }
     pfree(snapshots);
     PG_RETURN_NULL();
 }
@@ -8695,7 +8847,8 @@ Datum bioseq_cache_invalidate_all(PG_FUNCTION_ARGS) {
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("must be superuser to invalidate bioseq_cache")));
     }
-    const std::uint64_t invalidated = invalidate_registry();
+    const std::uint64_t invalidated = invalidate_registry()
+        + invalidate_reusable_registry(std::nullopt);
     PG_RETURN_INT64(static_cast<int64>(invalidated));
 }
 
@@ -8708,8 +8861,9 @@ Datum bioseq_cache_invalidate_relation(PG_FUNCTION_ARGS) {
              errmsg("must be superuser to invalidate bioseq_cache")));
     }
     const Oid relation_oid = PG_GETARG_OID(0);
-    const std::uint64_t invalidated = invalidate_relation_registry(
-        relation_oid);
+    const std::uint64_t invalidated =
+        invalidate_relation_registry(relation_oid)
+        + invalidate_reusable_relation_registry(relation_oid);
     PG_RETURN_INT64(static_cast<int64>(invalidated));
 }
 

@@ -635,6 +635,8 @@ TEST_CASE("reusable diagnostics copy bounded redacted generation rows") {
   REQUIRE(claimed_row->provider_abi_version == 2);
   REQUIRE(claimed_row->provider_domain_abi_version == 3);
   REQUIRE(claimed_row->dependency_count == 2);
+  REQUIRE(claimed_row->database_oid == 11);
+  REQUIRE(claimed_row->current_role_oid == 47);
   REQUIRE(claimed_row->dependency_fingerprint == digest(104));
   REQUIRE(claimed_row->compatibility_family_id == 41);
   REQUIRE(claimed_row->capability_mask == 0b1111);

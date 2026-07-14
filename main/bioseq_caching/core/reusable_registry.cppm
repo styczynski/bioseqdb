@@ -1037,6 +1037,8 @@ struct ReusableGenerationDiagnosticsRowV1 {
   std::uint32_t provider_abi_version = 0;
   std::uint32_t provider_domain_abi_version = 0;
   std::uint32_t dependency_count = 0;
+  std::uint32_t database_oid = 0;
+  std::uint32_t current_role_oid = 0;
   std::int32_t producer_pid = 0;
   std::uint32_t waiter_count = 0;
   std::uint32_t planner_pin_count = 0;
@@ -1469,6 +1471,10 @@ make_diagnostics_row(const ReusableSharedGenerationV1 &generation,
       .provider_domain_abi_version =
           generation.metadata.provider_domain_abi_version,
       .dependency_count = generation.metadata.dependency_count,
+      .database_oid =
+          generation.coverage_directory_key.security_namespace.database_oid,
+      .current_role_oid = generation.coverage_directory_key
+                              .security_namespace.current_role_oid,
       .producer_pid = generation.producer.pid,
       .waiter_count = generation.waiter_count,
       .planner_pin_count = generation.planner_pin_count,
