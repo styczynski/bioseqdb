@@ -339,6 +339,14 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
         provider_security_digest(domain)
         == kProviderIndependentSecurityDigestV1);
 
+    domain.struct_size = offsetof(
+        BioseqCachePathDomainV1,
+        provider_security_digest_format_version);
+    REQUIRE(
+        validate_path_domain(7, &domain).error()
+        == ProviderContractErrorV1::StructSize);
+    domain.struct_size = sizeof(BioseqCachePathDomainV1);
+
     BioseqCacheDecoratedPathV1 decorated{
         .struct_size = sizeof(BioseqCacheDecoratedPathV1),
         .flags = 0,
