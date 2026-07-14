@@ -22,8 +22,8 @@ is(
 	$node->safe_psql(
 		'postgres',
 		q{SET bioseq.query_cache_optimisation_mode = 'same';
-		  SELECT count(*) || '|' || sum(id) FROM file_rows}),
-	'128|8256',
+		  SELECT id FROM file_rows WHERE id <= 10 ORDER BY id}),
+	join("\n", 1 .. 10),
 	'producer returns complete source result after ENOSPC');
 is(
 	$node->safe_psql(
