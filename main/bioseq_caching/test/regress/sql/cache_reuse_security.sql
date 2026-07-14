@@ -61,6 +61,104 @@ BEGIN
 END
 $$;
 
+-- C-side row filtering applies before reusable SQL and Plan text are copied.
+CREATE ROLE cache_security_monitor;
+GRANT USAGE ON SCHEMA bioseq_cache
+TO cache_security_alice, cache_security_monitor;
+GRANT EXECUTE ON FUNCTION bioseq_cache.entries()
+TO cache_security_alice, cache_security_monitor;
+
+SET ROLE cache_security_alice;
+DO $$
+DECLARE
+    own_rows integer;
+    leaked_rows integer;
+BEGIN
+    SELECT count(*) INTO own_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND owner_role = 'cache_security_alice'::regrole
+      AND producer_pid IS NOT NULL
+      AND sql IS NOT NULL
+      AND producer_plan IS NOT NULL
+      AND dependencies->>'canonical_plan_status' = 'Planned'
+      AND dependencies->>'producer_plan_status' = 'Planned';
+    SELECT count(*) INTO leaked_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND owner_role IS NULL
+      AND (producer_pid IS NOT NULL OR sql IS NOT NULL
+           OR producer_plan IS NOT NULL OR dependencies IS NOT NULL);
+    IF own_rows <> 1 OR leaked_rows <> 0 THEN
+        RAISE EXCEPTION
+            'producer row-level diagnostic filtering failed: %, %',
+            own_rows, leaked_rows;
+    END IF;
+END
+$$;
+RESET ROLE;
+
+SET ROLE cache_security_monitor;
+DO $$
+DECLARE
+    scalar_rows integer;
+    leaked_rows integer;
+BEGIN
+    SELECT count(*) INTO scalar_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND entry_key IS NOT NULL
+      AND age IS NOT NULL
+      AND rows IS NOT NULL
+      AND logical_bytes IS NOT NULL
+      AND stored_bytes IS NOT NULL;
+    SELECT count(*) INTO leaked_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND (owner_role IS NOT NULL OR producer_pid IS NOT NULL
+           OR sql IS NOT NULL OR producer_plan IS NOT NULL
+           OR dependencies IS NOT NULL);
+    IF scalar_rows <> 2 OR leaked_rows <> 0 THEN
+        RAISE EXCEPTION
+            'explicit monitor reusable redaction failed: %, %',
+            scalar_rows, leaked_rows;
+    END IF;
+END
+$$;
+RESET ROLE;
+
+SET ROLE pg_read_all_stats;
+DO $$
+DECLARE
+    full_rows integer;
+BEGIN
+    SELECT count(*) INTO full_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND owner_role IS NOT NULL
+      AND producer_pid IS NOT NULL
+      AND sql IS NOT NULL
+      AND producer_plan IS NOT NULL
+      AND dependencies IS NOT NULL;
+    IF full_rows <> 2 THEN
+        RAISE EXCEPTION
+            'pg_read_all_stats reusable disclosure failed: %', full_rows;
+    END IF;
+END
+$$;
+RESET ROLE;
+
+REVOKE EXECUTE ON FUNCTION bioseq_cache.entries()
+FROM cache_security_alice, cache_security_monitor;
+REVOKE USAGE ON SCHEMA bioseq_cache
+FROM cache_security_alice, cache_security_monitor;
+DROP ROLE cache_security_monitor;
+
 -- row_security is an explicit namespace field even for a non-RLS fixture.
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache_test.request_janitor_sweep();
