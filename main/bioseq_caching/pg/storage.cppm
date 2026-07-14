@@ -48,9 +48,10 @@ import bioseq.cache.core;
 
 export namespace bioseq::cache::pg::storage {
 
-inline constexpr std::uint32_t kStorageAbiVersion = 1;
+inline constexpr std::uint32_t kStorageAbiVersion = 2;
 inline constexpr std::size_t kManifestCapacity = 256;
 inline constexpr std::size_t kBlocksPerManifest = 32;
+inline constexpr std::size_t kWaitersPerManifest = 64;
 inline constexpr std::size_t kBlockLedgerCapacity =
     kManifestCapacity * kBlocksPerManifest + 256;
 inline constexpr std::uint64_t kDefaultDsaInitialBytes = 256ULL << 10;
@@ -79,6 +80,7 @@ enum class StorageError : std::uint32_t {
     BlockTooLarge,
     LedgerFull,
     ManifestFull,
+    WaiterFull,
     DuplicateGeneration,
     MemoryPressure,
     HotTierFull,
@@ -149,7 +151,7 @@ struct ManifestDescriptor {
     std::uint64_t row_count = 0;
     std::int64_t created_at_us = 0;
     std::int64_t expires_at_us = 0;
-    std::uint32_t initial_waiter_references = 0;
+    std::uint32_t reserved_waiter_count = 0;
     std::uint32_t reserved = 0;
 };
 
@@ -170,6 +172,36 @@ struct PublishManifestResult {
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return error == StorageError::None && static_cast<bool>(handle);
+    }
+};
+
+/** One ABA-safe, owner-bound entitlement to consume a manifest once. */
+struct ManifestWaiterToken {
+    ManifestHandle handle{};
+    std::uint32_t waiter_slot =
+        (std::numeric_limits<std::uint32_t>::max)();
+    std::uint32_t owner_proc_number =
+        (std::numeric_limits<std::uint32_t>::max)();
+    int owner_pid = 0;
+    std::uint32_t reserved = 0;
+    std::uint64_t owner_sequence = 0;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(handle)
+            && waiter_slot < kWaitersPerManifest
+            && owner_proc_number
+                != (std::numeric_limits<std::uint32_t>::max)()
+            && owner_pid > 0
+            && owner_sequence != 0;
+    }
+};
+
+struct RegisterManifestWaiterResult {
+    StorageError error = StorageError::None;
+    ManifestWaiterToken token{};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return error == StorageError::None && static_cast<bool>(token);
     }
 };
 
@@ -202,6 +234,7 @@ struct JanitorSweepResult {
     std::uint32_t expired_manifests = 0;
     std::uint32_t lru_manifests = 0;
     std::uint32_t abandoned_blocks = 0;
+    std::uint32_t reaped_waiters = 0;
     std::uint32_t reclaimed_blocks = 0;
     std::uint64_t reclaimed_hot_bytes = 0;
     std::uint64_t reclaimed_file_bytes = 0;
@@ -221,6 +254,7 @@ struct StorageRuntimeSnapshot {
     std::uint64_t hot_ceiling_bytes = 0;
     std::uint64_t file_ceiling_bytes = 0;
     std::uint64_t manifest_count = 0;
+    std::uint64_t waiter_reference_count = 0;
     std::uint64_t completed_sweeps = 0;
     std::int64_t last_sweep_at_us = 0;
     std::int64_t worker_heartbeat_at_us = 0;
@@ -263,20 +297,22 @@ void request_storage_resources(const StorageConfig& config = {});
     std::int64_t now_us = 0);
 
 /** Register a pre-expiry waiter whose entitlement can survive TTL expiry. */
-[[nodiscard]] StorageError register_manifest_waiter(
+[[nodiscard]] RegisterManifestWaiterResult register_manifest_waiter(
     const ManifestHandle& handle,
-    std::int64_t now_us = 0);
+    int owner_pid,
+    std::uint32_t owner_proc_number,
+    std::int64_t registered_at_us = 0);
 
 /** Convert one registered waiter to a reader pin even after expiry. */
 [[nodiscard]] PinManifestResult convert_waiter_to_pin(
-    const ManifestHandle& handle);
+    const ManifestWaiterToken& token);
 
 /** Release one reader pin exactly once. */
 [[nodiscard]] StorageError unpin_manifest(const ManifestPin& pin) noexcept;
 
 /** Release one waiter reference without pinning. */
 [[nodiscard]] StorageError unregister_manifest_waiter(
-    const ManifestHandle& handle) noexcept;
+    const ManifestWaiterToken& token) noexcept;
 
 /** Copy and checksum-verify one block from a pinned generation. */
 [[nodiscard]] StorageError read_pinned_block(
@@ -317,7 +353,7 @@ namespace bioseq::cache::pg::storage {
 namespace {
 
 inline constexpr std::uint32_t kStorageMagic = 0x42535452U; /* BSTR */
-inline constexpr char kStorageSharedName[] = "bioseq_cache storage v1";
+inline constexpr char kStorageSharedName[] = "bioseq_cache storage v2";
 inline constexpr char kStorageLockTranche[] = "bioseq_cache storage";
 inline constexpr char kStoreSubdirectory[] = "storage-v1";
 inline constexpr std::uint32_t kInvalidSlot =
@@ -347,6 +383,15 @@ struct BlockLedgerEntry {
     BlockReferenceV1 reference;
 };
 
+struct SharedManifestWaiter {
+    bool active;
+    std::uint8_t reserved8[3];
+    int owner_pid;
+    std::uint32_t owner_proc_number;
+    std::uint32_t reserved32;
+    std::uint64_t owner_sequence;
+};
+
 struct SharedManifestEntry {
     ManifestState state;
     CacheEntryKind kind;
@@ -364,6 +409,7 @@ struct SharedManifestEntry {
     pg_atomic_uint64 last_access_at_us;
     pg_atomic_uint32 reader_pins;
     pg_atomic_uint32 waiter_references;
+    std::array<SharedManifestWaiter, kWaitersPerManifest> waiters;
     std::array<std::uint32_t, kBlocksPerManifest> ledger_slots;
     std::array<BlockReferenceV1, kBlocksPerManifest> blocks;
 };
@@ -387,10 +433,12 @@ struct StorageSharedState {
     pg_atomic_uint64 boot_nonce;
     pg_atomic_uint64 next_block_sequence;
     pg_atomic_uint64 next_manifest_sequence;
+    pg_atomic_uint64 next_waiter_sequence;
     pg_atomic_uint64 next_file_id;
     pg_atomic_uint64 reserved_hot_bytes;
     pg_atomic_uint64 reserved_file_bytes;
     pg_atomic_uint64 manifest_count;
+    pg_atomic_uint64 waiter_reference_count;
     pg_atomic_uint64 completed_sweeps;
     pg_atomic_uint64 last_sweep_at_us;
     pg_atomic_uint64 worker_heartbeat_at_us;
@@ -746,6 +794,52 @@ void clean_orphaned_store_files() noexcept {
     return process != nullptr && process->pid == pid;
 }
 
+[[nodiscard]] bool deactivate_waiter_locked(
+        SharedManifestEntry& manifest,
+        SharedManifestWaiter& waiter) noexcept {
+    if (!waiter.active) {
+        return false;
+    }
+    waiter.active = false;
+    const std::uint32_t references = pg_atomic_read_u32(
+        &manifest.waiter_references);
+    if (references != 0) {
+        static_cast<void>(pg_atomic_fetch_sub_u32(
+            &manifest.waiter_references, 1));
+        static_cast<void>(pg_atomic_fetch_sub_u64(
+            &g_shared->waiter_reference_count, 1));
+    }
+    return true;
+}
+
+[[nodiscard]] std::uint32_t reap_backend_waiters(
+        int owner_pid,
+        std::uint32_t owner_proc_number) noexcept {
+    if (g_shared == nullptr || g_storage_lock == nullptr
+        || owner_pid <= 0
+        || owner_proc_number
+            == static_cast<std::uint32_t>(INVALID_PROC_NUMBER)) {
+        return 0;
+    }
+    std::uint32_t reaped = 0;
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    for (SharedManifestEntry& manifest : g_shared->manifests) {
+        if (manifest.state == ManifestState::Empty) {
+            continue;
+        }
+        for (SharedManifestWaiter& waiter : manifest.waiters) {
+            if (waiter.active
+                && waiter.owner_pid == owner_pid
+                && waiter.owner_proc_number == owner_proc_number
+                && deactivate_waiter_locked(manifest, waiter)) {
+                ++reaped;
+            }
+        }
+    }
+    LWLockRelease(g_storage_lock);
+    return reaped;
+}
+
 [[nodiscard]] bool acquire_sweep_ownership() noexcept {
     const std::uint32_t my_proc_number =
         static_cast<std::uint32_t>(MyProcNumber);
@@ -810,10 +904,12 @@ void initialize_shared_state(
     pg_atomic_init_u64(&shared.boot_nonce, boot_nonce == 0 ? 1 : boot_nonce);
     pg_atomic_init_u64(&shared.next_block_sequence, 1);
     pg_atomic_init_u64(&shared.next_manifest_sequence, 1);
+    pg_atomic_init_u64(&shared.next_waiter_sequence, 1);
     pg_atomic_init_u64(&shared.next_file_id, 1);
     pg_atomic_init_u64(&shared.reserved_hot_bytes, 0);
     pg_atomic_init_u64(&shared.reserved_file_bytes, 0);
     pg_atomic_init_u64(&shared.manifest_count, 0);
+    pg_atomic_init_u64(&shared.waiter_reference_count, 0);
     pg_atomic_init_u64(&shared.completed_sweeps, 0);
     pg_atomic_init_u64(&shared.last_sweep_at_us, 0);
     pg_atomic_init_u64(&shared.worker_heartbeat_at_us, 0);
@@ -838,6 +934,8 @@ void initialize_shared_state(
 }
 
 void storage_backend_exit(int, Datum) {
+    static_cast<void>(reap_backend_waiters(
+        MyProcPid, static_cast<std::uint32_t>(MyProcNumber)));
     if (g_dsa != nullptr) {
         dsa_detach(g_dsa);
         if (g_shared != nullptr) {
@@ -881,6 +979,15 @@ void storage_backend_exit(int, Datum) {
         && entry.state != ManifestState::Empty
         && entry.slot_sequence == handle.slot_sequence
         && same_id(entry.id, handle.id);
+}
+
+[[nodiscard]] bool waiter_token_matches(
+        const SharedManifestWaiter& waiter,
+        const ManifestWaiterToken& token) noexcept {
+    return token.waiter_slot < kWaitersPerManifest
+        && waiter.owner_pid == token.owner_pid
+        && waiter.owner_proc_number == token.owner_proc_number
+        && waiter.owner_sequence == token.owner_sequence;
 }
 
 [[nodiscard]] StorageError allocate_ledger_slot(
@@ -1728,6 +1835,7 @@ PublishManifestResult publish_manifest(
         || (descriptor.kind != CacheEntryKind::ExactFinalResult
             && descriptor.kind != CacheEntryKind::ReusableCoverage)
         || descriptor.reserved != 0
+        || descriptor.reserved_waiter_count != 0
         || descriptor.flags != 0
         || blocks.empty()
         || blocks.size() > kBlocksPerManifest) {
@@ -1826,9 +1934,7 @@ PublishManifestResult publish_manifest(
     manifest.ledger_slots.fill(kInvalidSlot);
     pg_atomic_init_u64(&manifest.last_access_at_us, manifest.created_at_us);
     pg_atomic_init_u32(&manifest.reader_pins, 0);
-    pg_atomic_init_u32(
-        &manifest.waiter_references,
-        descriptor.initial_waiter_references);
+    pg_atomic_init_u32(&manifest.waiter_references, 0);
     for (std::size_t index = 0; index < blocks.size(); ++index) {
         const StoredBlockToken& token = blocks[index];
         manifest.ledger_slots[index] = token.ledger_slot;
@@ -1907,55 +2013,110 @@ PinManifestResult pin_manifest(
     return result;
 }
 
-StorageError register_manifest_waiter(
+RegisterManifestWaiterResult register_manifest_waiter(
         const ManifestHandle& handle,
-        std::int64_t now_us) {
-    if (!storage_ready() || !handle) {
-        return StorageError::InvalidArgument;
+        int owner_pid,
+        std::uint32_t owner_proc_number,
+        std::int64_t registered_at_us) {
+    RegisterManifestWaiterResult result{};
+    if (!storage_ready() || !handle || owner_pid <= 0
+        || owner_proc_number
+            == static_cast<std::uint32_t>(INVALID_PROC_NUMBER)) {
+        result.error = StorageError::InvalidArgument;
+        return result;
     }
-    const std::int64_t now = current_time_us(now_us);
+    const std::int64_t now = current_time_us();
+    const bool preexisting = registered_at_us != 0;
+    const std::int64_t registered_at = preexisting
+        ? registered_at_us
+        : now;
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[handle.slot];
+    const bool expired_registration = manifest.expires_at_us != 0
+        && (preexisting
+            ? registered_at > manifest.expires_at_us
+            : registered_at >= manifest.expires_at_us);
     if (!handle_matches(manifest, handle)
         || manifest.state != ManifestState::Complete
-        || (manifest.expires_at_us != 0 && now >= manifest.expires_at_us)) {
+        || registered_at < manifest.created_at_us
+        || registered_at > now
+        || expired_registration
+        || !process_alive(owner_pid, owner_proc_number)) {
         LWLockRelease(g_storage_lock);
-        return StorageError::NotFound;
+        result.error = StorageError::NotFound;
+        return result;
     }
-    const std::uint32_t waiters = pg_atomic_read_u32(
-        &manifest.waiter_references);
-    if (waiters == (std::numeric_limits<std::uint32_t>::max)()) {
+    std::uint32_t waiter_slot = kInvalidSlot;
+    for (std::uint32_t index = 0; index < kWaitersPerManifest; ++index) {
+        if (!manifest.waiters[index].active) {
+            waiter_slot = index;
+            break;
+        }
+    }
+    if (waiter_slot == kInvalidSlot) {
         LWLockRelease(g_storage_lock);
-        return StorageError::InvalidState;
+        result.error = StorageError::WaiterFull;
+        return result;
     }
+    std::uint64_t owner_sequence = pg_atomic_fetch_add_u64(
+        &g_shared->next_waiter_sequence, 1);
+    if (owner_sequence == 0) {
+        owner_sequence = pg_atomic_fetch_add_u64(
+            &g_shared->next_waiter_sequence, 1);
+    }
+    if (owner_sequence == 0) {
+        owner_sequence = 1;
+    }
+    SharedManifestWaiter& waiter = manifest.waiters[waiter_slot];
+    waiter = SharedManifestWaiter{
+        .active = true,
+        .owner_pid = owner_pid,
+        .owner_proc_number = owner_proc_number,
+        .owner_sequence = owner_sequence,
+    };
     static_cast<void>(pg_atomic_fetch_add_u32(
         &manifest.waiter_references, 1));
+    static_cast<void>(pg_atomic_fetch_add_u64(
+        &g_shared->waiter_reference_count, 1));
+    result.token = ManifestWaiterToken{
+        .handle = handle,
+        .waiter_slot = waiter_slot,
+        .owner_proc_number = owner_proc_number,
+        .owner_pid = owner_pid,
+        .owner_sequence = owner_sequence,
+    };
     LWLockRelease(g_storage_lock);
-    return StorageError::None;
+    return result;
 }
 
-PinManifestResult convert_waiter_to_pin(const ManifestHandle& handle) {
+PinManifestResult convert_waiter_to_pin(
+        const ManifestWaiterToken& token) {
     PinManifestResult result{};
-    if (!storage_ready() || !handle) {
+    if (!storage_ready() || !token
+        || token.owner_pid != MyProcPid
+        || token.owner_proc_number
+            != static_cast<std::uint32_t>(MyProcNumber)) {
         result.error = StorageError::InvalidArgument;
         return result;
     }
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
-    SharedManifestEntry& manifest = g_shared->manifests[handle.slot];
-    if (!handle_matches(manifest, handle)
+    SharedManifestEntry& manifest =
+        g_shared->manifests[token.handle.slot];
+    SharedManifestWaiter& waiter = manifest.waiters[token.waiter_slot];
+    if (!handle_matches(manifest, token.handle)
         || manifest.state != ManifestState::Complete
-        || pg_atomic_read_u32(&manifest.waiter_references) == 0
+        || !waiter_token_matches(waiter, token)
+        || !waiter.active
         || pg_atomic_read_u32(&manifest.reader_pins)
             == (std::numeric_limits<std::uint32_t>::max)()) {
         LWLockRelease(g_storage_lock);
         result.error = StorageError::NotFound;
         return result;
     }
-    static_cast<void>(pg_atomic_fetch_sub_u32(
-        &manifest.waiter_references, 1));
+    static_cast<void>(deactivate_waiter_locked(manifest, waiter));
     static_cast<void>(pg_atomic_fetch_add_u32(&manifest.reader_pins, 1));
     pg_atomic_write_u64(&manifest.last_access_at_us, current_time_us());
-    result.pin.handle = handle;
+    result.pin.handle = token.handle;
     result.pin.kind = manifest.kind;
     result.pin.flags = manifest.flags;
     result.pin.logical_bytes = manifest.logical_bytes;
@@ -1985,19 +2146,22 @@ StorageError unpin_manifest(const ManifestPin& pin) noexcept {
 }
 
 StorageError unregister_manifest_waiter(
-        const ManifestHandle& handle) noexcept {
-    if (!storage_ready() || !handle) {
+        const ManifestWaiterToken& token) noexcept {
+    if (!storage_ready() || !token) {
         return StorageError::InvalidArgument;
     }
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
-    SharedManifestEntry& manifest = g_shared->manifests[handle.slot];
-    if (!handle_matches(manifest, handle)
-        || pg_atomic_read_u32(&manifest.waiter_references) == 0) {
+    SharedManifestEntry& manifest =
+        g_shared->manifests[token.handle.slot];
+    SharedManifestWaiter& waiter = manifest.waiters[token.waiter_slot];
+    if (!handle_matches(manifest, token.handle)
+        || !waiter_token_matches(waiter, token)) {
         LWLockRelease(g_storage_lock);
         return StorageError::StaleToken;
     }
-    static_cast<void>(pg_atomic_fetch_sub_u32(
-        &manifest.waiter_references, 1));
+    if (waiter.active) {
+        static_cast<void>(deactivate_waiter_locked(manifest, waiter));
+    }
     LWLockRelease(g_storage_lock);
     return StorageError::None;
 }
@@ -2077,6 +2241,28 @@ JanitorSweepResult janitor_sweep(
     const std::uint32_t requested = pg_atomic_exchange_u32(
         &g_shared->sweep_requested, 0);
     aggressive = aggressive || requested > 1;
+
+    /* Owner tokens make waiter recovery exact: only a dead PID+ProcNumber
+     * pair can release an entitlement that its backend did not consume. */
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    for (SharedManifestEntry& manifest : g_shared->manifests) {
+        if (manifest.state == ManifestState::Empty
+            || result.reaped_waiters >= g_shared->reclaim_batch) {
+            continue;
+        }
+        for (SharedManifestWaiter& waiter : manifest.waiters) {
+            if (result.reaped_waiters >= g_shared->reclaim_batch) {
+                break;
+            }
+            if (waiter.active
+                && !process_alive(
+                    waiter.owner_pid, waiter.owner_proc_number)
+                && deactivate_waiter_locked(manifest, waiter)) {
+                ++result.reaped_waiters;
+            }
+        }
+    }
+    LWLockRelease(g_storage_lock);
 
     /* First reclaim abandoned, never-published producer blocks. */
     for (std::uint32_t index = 0;
@@ -2314,6 +2500,8 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
     snapshot.hot_ceiling_bytes = g_shared->hot_ceiling_bytes;
     snapshot.file_ceiling_bytes = g_shared->file_ceiling_bytes;
     snapshot.manifest_count = pg_atomic_read_u64(&g_shared->manifest_count);
+    snapshot.waiter_reference_count = pg_atomic_read_u64(
+        &g_shared->waiter_reference_count);
     snapshot.completed_sweeps = pg_atomic_read_u64(
         &g_shared->completed_sweeps);
     snapshot.last_sweep_at_us = static_cast<std::int64_t>(
