@@ -856,7 +856,7 @@ void register_cache_gucs() {
     if (!HeapTupleIsValid(tuple)) {
         return true;
     }
-    const auto* metadata = static_cast<const FormData_pg_aggregate*>(
+    const auto* metadata = reinterpret_cast<const FormData_pg_aggregate*>(
         GETSTRUCT(tuple));
     const std::array<Oid, 8> functions{
         metadata->aggtransfn,
