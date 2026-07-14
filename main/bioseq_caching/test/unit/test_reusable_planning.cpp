@@ -70,7 +70,148 @@ void reactivate_once_release(
     }
 }
 
+[[nodiscard]] CoverageSecurityNamespaceV1 security_namespace() noexcept {
+    CoverageSecurityNamespaceV1 result{
+        .database_oid = 0x01020304U,
+        .current_role_oid = 0x11121314U,
+        .session_user_oid = 0x21222324U,
+        .security_context_flags = 0x31323334U,
+        .row_security_mode = 1,
+    };
+    for (std::size_t index = 0;
+         index < result.provider_security_digest.bytes.size();
+         ++index) {
+        result.provider_security_digest.bytes[index] =
+            static_cast<std::uint8_t>(index);
+    }
+    return result;
+}
+
 } // namespace
+
+TEST_CASE("coverage canonical keys frame every security field") {
+    const CoverageSecurityNamespaceV1 security = security_namespace();
+    const std::array provider_bytes{
+        std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3}};
+    std::array<std::byte, kCoverageCanonicalKeyFixedBytesV1 + 3> encoded{};
+
+    const auto size = write_coverage_canonical_key(
+        CoverageCanonicalKeyKindV1::Domain,
+        security,
+        provider_bytes,
+        encoded);
+    REQUIRE(size.has_value());
+    REQUIRE(*size == encoded.size());
+
+    const std::array<std::byte, kCoverageCanonicalKeyFixedBytesV1 + 3>
+        expected{
+            std::byte{0x42}, std::byte{0x43}, std::byte{0x4b},
+            std::byte{0x31}, std::byte{0x01}, std::byte{0x01},
+            std::byte{0x02}, std::byte{0x01}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x10},
+            std::byte{0x04}, std::byte{0x03}, std::byte{0x02},
+            std::byte{0x01}, std::byte{0x11}, std::byte{0x14},
+            std::byte{0x13}, std::byte{0x12}, std::byte{0x11},
+            std::byte{0x12}, std::byte{0x24}, std::byte{0x23},
+            std::byte{0x22}, std::byte{0x21}, std::byte{0x13},
+            std::byte{0x34}, std::byte{0x33}, std::byte{0x32},
+            std::byte{0x31}, std::byte{0x14}, std::byte{0x01},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x15}, std::byte{0x00}, std::byte{0x01},
+            std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+            std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+            std::byte{0x08}, std::byte{0x09}, std::byte{0x0a},
+            std::byte{0x0b}, std::byte{0x0c}, std::byte{0x0d},
+            std::byte{0x0e}, std::byte{0x0f}, std::byte{0x10},
+            std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+            std::byte{0x14}, std::byte{0x15}, std::byte{0x16},
+            std::byte{0x17}, std::byte{0x18}, std::byte{0x19},
+            std::byte{0x1a}, std::byte{0x1b}, std::byte{0x1c},
+            std::byte{0x1d}, std::byte{0x1e}, std::byte{0x1f},
+            std::byte{0x20}, std::byte{0x03}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3},
+        };
+    REQUIRE(encoded == expected);
+
+    auto generation = encoded;
+    REQUIRE(write_coverage_canonical_key(
+        CoverageCanonicalKeyKindV1::Generation,
+        security,
+        provider_bytes,
+        generation).has_value());
+    REQUIRE(generation != encoded);
+    REQUIRE(generation[5] == std::byte{0x02});
+
+    auto changed_security = security;
+    changed_security.provider_security_digest =
+        kProviderIndependentSecurityDigestV1;
+    std::array<std::byte, kCoverageCanonicalKeyFixedBytesV1 + 3>
+        provider_independent{};
+    REQUIRE(write_coverage_canonical_key(
+        CoverageCanonicalKeyKindV1::Domain,
+        changed_security,
+        provider_bytes,
+        provider_independent).has_value());
+    REQUIRE(provider_independent != encoded);
+    REQUIRE(std::all_of(
+        provider_independent.begin() + 37,
+        provider_independent.begin() + 69,
+        [](std::byte value) noexcept { return value == std::byte{0}; }));
+}
+
+TEST_CASE("coverage canonical keys reject omitted or malformed namespaces") {
+    const std::array provider_bytes{std::byte{0x55}};
+    std::array<std::byte, kCoverageCanonicalKeyFixedBytesV1 + 1> output{};
+    const auto valid = security_namespace();
+
+    auto require_namespace_error =
+        [&output, &provider_bytes](CoverageSecurityNamespaceV1 value) {
+        const auto result = write_coverage_canonical_key(
+            CoverageCanonicalKeyKindV1::Domain,
+            value,
+            provider_bytes,
+            output);
+        REQUIRE_FALSE(result.has_value());
+        REQUIRE(
+            result.error()
+            == CoverageCanonicalKeyErrorV1::InvalidSecurityNamespace);
+    };
+
+    auto invalid = valid;
+    invalid.database_oid = 0;
+    require_namespace_error(invalid);
+    invalid = valid;
+    invalid.current_role_oid = 0;
+    require_namespace_error(invalid);
+    invalid = valid;
+    invalid.session_user_oid = 0;
+    require_namespace_error(invalid);
+    invalid = valid;
+    invalid.row_security_mode = -1;
+    require_namespace_error(invalid);
+    invalid.row_security_mode = 2;
+    require_namespace_error(invalid);
+    invalid = valid;
+    invalid.reserved = 1;
+    require_namespace_error(invalid);
+
+    output.fill(std::byte{0x7f});
+    const auto short_output = write_coverage_canonical_key(
+        CoverageCanonicalKeyKindV1::Domain,
+        valid,
+        provider_bytes,
+        std::span<std::byte>{output}.first(output.size() - 1));
+    REQUIRE_FALSE(short_output.has_value());
+    REQUIRE(
+        short_output.error()
+        == CoverageCanonicalKeyErrorV1::OutputTooSmall);
+    REQUIRE(std::all_of(
+        output.begin(),
+        output.end(),
+        [](std::byte value) noexcept { return value == std::byte{0x7f}; }));
+}
 
 TEST_CASE("coverage discovery collision-checks and bounds candidate buckets") {
     const std::array<std::byte, 3> requested_key{
@@ -120,6 +261,7 @@ TEST_CASE("coverage discovery collision-checks and bounds candidate buckets") {
     }
     candidates[3].canonical_domain_key = collision_key;
     candidates[4].security_namespace.current_role_oid = 999;
+    candidates[5].security_namespace.row_security_mode = 2;
 
     const auto selected = select_candidates(probe, candidates);
     REQUIRE(selected.visited_count == kMaxCoverageGenerationsPerDomain);
@@ -127,6 +269,7 @@ TEST_CASE("coverage discovery collision-checks and bounds candidate buckets") {
     REQUIRE(selected.selected_count == kMaxSourcesPerCoverageNode);
     REQUIRE(selected.result_truncated);
     REQUIRE(selected.digest_collision_count == 1);
+    REQUIRE(selected.invalid_namespace_count == 1);
     REQUIRE(selected.indices[0] == 0);
     REQUIRE(selected.indices[1] == 1);
 
@@ -187,8 +330,14 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
         .required_boundary_attno_count = required_boundary.size(),
         .required_lineage_attnos = required_lineage.data(),
         .required_lineage_attno_count = required_lineage.size(),
+        .provider_security_digest_format_version =
+            BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1,
+        .provider_security_flags = 0,
     };
     REQUIRE(validate_path_domain(7, &domain).has_value());
+    REQUIRE(
+        provider_security_digest(domain)
+        == kProviderIndependentSecurityDigestV1);
 
     BioseqCacheDecoratedPathV1 decorated{
         .struct_size = sizeof(BioseqCacheDecoratedPathV1),
@@ -212,6 +361,21 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
     REQUIRE(
         validate_path_domain(7, &domain).error()
         == ProviderContractErrorV1::InvalidCompatibilityFamily);
+    domain.compatibility_family_id = 11;
+    domain.provider_security_digest_format_version = 0;
+    REQUIRE(
+        validate_path_domain(7, &domain).error()
+        == ProviderContractErrorV1::SecurityNamespace);
+    domain.provider_security_digest_format_version =
+        BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1;
+    domain.provider_security_flags = 1;
+    REQUIRE(
+        validate_path_domain(7, &domain).error()
+        == ProviderContractErrorV1::SecurityNamespace);
+    domain.provider_security_flags = 0;
+    domain.provider_security_digest[31] = 0xa5;
+    REQUIRE(validate_path_domain(7, &domain).has_value());
+    REQUIRE(provider_security_digest(domain).bytes[31] == 0xa5);
 }
 
 TEST_CASE("runtime recipe and digest sink reject malformed or oversized data") {

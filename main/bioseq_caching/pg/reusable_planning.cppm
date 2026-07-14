@@ -29,19 +29,159 @@ export namespace bioseq::cache::pg::reuse {
 inline constexpr std::uint32_t kReusablePlanFormatVersionV1 = 1;
 inline constexpr std::uint8_t kLateFetchStatusUnsetV1 = 0xffU;
 
-/** Explicit namespace fields retained alongside the domain digest. */
-struct CoverageSecurityNamespaceV1 {
-    std::uint32_t database_oid = 0;
-    std::uint32_t current_role_oid = 0;
-    std::uint32_t session_user_oid = 0;
-    std::uint32_t security_context_flags = 0;
-    std::uint8_t row_security_mode = 0;
-    std::array<std::uint8_t, 7> reserved{};
-    CacheDigest256 provider_security_digest{};
+/** Planning and shared-registry code use one padding-independent contract. */
+using CoverageSecurityNamespaceV1 = ReusableSecurityNamespaceV1;
 
-    [[nodiscard]] bool operator==(
-        const CoverageSecurityNamespaceV1&) const noexcept = default;
+/** Provider callback payload being framed into one canonical reusable key. */
+enum class CoverageCanonicalKeyKindV1 : std::uint8_t {
+    Domain = 1,
+    Generation = 2,
 };
+
+/** Fail-closed canonical framing errors; callers retain the provider path. */
+enum class CoverageCanonicalKeyErrorV1 : std::uint8_t {
+    InvalidKind = 1,
+    InvalidSecurityNamespace,
+    EmptyProviderSemanticBytes,
+    KeyTooLarge,
+    OutputTooSmall,
+};
+
+inline constexpr std::array<std::byte, 4> kCoverageCanonicalKeyMagicV1{
+    std::byte{0x42}, std::byte{0x43}, std::byte{0x4b}, std::byte{0x31}};
+inline constexpr std::size_t kCoverageCanonicalKeyFixedBytesV1 = 78;
+
+namespace canonical_key_detail {
+
+inline constexpr std::uint8_t kKindTagV1 = 0x01;
+inline constexpr std::uint8_t kFormatVersionTagV1 = 0x02;
+inline constexpr std::uint8_t kDatabaseOidTagV1 = 0x10;
+inline constexpr std::uint8_t kCurrentRoleOidTagV1 = 0x11;
+inline constexpr std::uint8_t kSessionUserOidTagV1 = 0x12;
+inline constexpr std::uint8_t kSecurityContextFlagsTagV1 = 0x13;
+inline constexpr std::uint8_t kRowSecurityModeTagV1 = 0x14;
+inline constexpr std::uint8_t kProviderSecurityDigestTagV1 = 0x15;
+inline constexpr std::uint8_t kProviderSemanticBytesTagV1 = 0x20;
+
+[[nodiscard]] constexpr bool valid_kind(
+    CoverageCanonicalKeyKindV1 kind) noexcept {
+    return kind == CoverageCanonicalKeyKindV1::Domain
+        || kind == CoverageCanonicalKeyKindV1::Generation;
+}
+
+constexpr void append_u8(
+    std::span<std::byte> output,
+    std::size_t& offset,
+    std::uint8_t value) noexcept {
+    output[offset++] = std::byte{value};
+}
+
+constexpr void append_u32_le(
+    std::span<std::byte> output,
+    std::size_t& offset,
+    std::uint32_t value) noexcept {
+    for (std::size_t byte_index = 0; byte_index < sizeof(value); ++byte_index) {
+        append_u8(
+            output,
+            offset,
+            static_cast<std::uint8_t>(value >> (byte_index * 8U)));
+    }
+}
+
+constexpr void append_u64_le(
+    std::span<std::byte> output,
+    std::size_t& offset,
+    std::uint64_t value) noexcept {
+    for (std::size_t byte_index = 0; byte_index < sizeof(value); ++byte_index) {
+        append_u8(
+            output,
+            offset,
+            static_cast<std::uint8_t>(value >> (byte_index * 8U)));
+    }
+}
+
+} // namespace canonical_key_detail
+
+/** Copy the provider-owned fixed digest after validate_path_domain succeeds. */
+[[nodiscard]] inline CacheDigest256 provider_security_digest(
+    const BioseqCachePathDomainV1& domain) noexcept {
+    CacheDigest256 result{};
+    std::copy_n(
+        domain.provider_security_digest,
+        result.bytes.size(),
+        result.bytes.begin());
+    return result;
+}
+
+/**
+ * Frame security fields and provider semantic bytes in a fixed tagged order.
+ * Integers are normalized to little endian and struct padding is never read.
+ */
+[[nodiscard]] inline std::expected<std::size_t, CoverageCanonicalKeyErrorV1>
+write_coverage_canonical_key(
+    CoverageCanonicalKeyKindV1 kind,
+    const CoverageSecurityNamespaceV1& security_namespace,
+    std::span<const std::byte> provider_semantic_bytes,
+    std::span<std::byte> output) noexcept {
+    using namespace canonical_key_detail;
+    if (!valid_kind(kind)) {
+        return std::unexpected(CoverageCanonicalKeyErrorV1::InvalidKind);
+    }
+    if (!valid_reusable_security_namespace(security_namespace)) {
+        return std::unexpected(
+            CoverageCanonicalKeyErrorV1::InvalidSecurityNamespace);
+    }
+    if (provider_semantic_bytes.empty()) {
+        return std::unexpected(
+            CoverageCanonicalKeyErrorV1::EmptyProviderSemanticBytes);
+    }
+    const std::uint64_t limit =
+        kind == CoverageCanonicalKeyKindV1::Domain
+        ? kMaxCoverageDomainKeyBytes
+        : kMaxCanonicalKeyBytes;
+    if (provider_semantic_bytes.size()
+        > limit - kCoverageCanonicalKeyFixedBytesV1) {
+        return std::unexpected(CoverageCanonicalKeyErrorV1::KeyTooLarge);
+    }
+    const std::size_t required =
+        kCoverageCanonicalKeyFixedBytesV1 + provider_semantic_bytes.size();
+    if (output.size() < required) {
+        return std::unexpected(CoverageCanonicalKeyErrorV1::OutputTooSmall);
+    }
+
+    std::size_t offset = 0;
+    for (const std::byte value : kCoverageCanonicalKeyMagicV1) {
+        output[offset++] = value;
+    }
+    append_u8(output, offset, kKindTagV1);
+    append_u8(output, offset, static_cast<std::uint8_t>(kind));
+    append_u8(output, offset, kFormatVersionTagV1);
+    append_u32_le(output, offset, kReusablePlanFormatVersionV1);
+    append_u8(output, offset, kDatabaseOidTagV1);
+    append_u32_le(output, offset, security_namespace.database_oid);
+    append_u8(output, offset, kCurrentRoleOidTagV1);
+    append_u32_le(output, offset, security_namespace.current_role_oid);
+    append_u8(output, offset, kSessionUserOidTagV1);
+    append_u32_le(output, offset, security_namespace.session_user_oid);
+    append_u8(output, offset, kSecurityContextFlagsTagV1);
+    append_u32_le(output, offset, security_namespace.security_context_flags);
+    append_u8(output, offset, kRowSecurityModeTagV1);
+    append_u32_le(
+        output,
+        offset,
+        static_cast<std::uint32_t>(security_namespace.row_security_mode));
+    append_u8(output, offset, kProviderSecurityDigestTagV1);
+    for (const std::uint8_t value :
+         security_namespace.provider_security_digest.bytes) {
+        append_u8(output, offset, value);
+    }
+    append_u8(output, offset, kProviderSemanticBytesTagV1);
+    append_u64_le(output, offset, provider_semantic_bytes.size());
+    for (const std::byte value : provider_semantic_bytes) {
+        output[offset++] = value;
+    }
+    return offset;
+}
 
 /** One collision bucket request. Canonical bytes remain the equality proof. */
 struct CoverageCandidateProbeV1 {
@@ -77,6 +217,7 @@ struct BoundedCandidateSelectionV1 {
     std::size_t qualified_count = 0;
     std::size_t digest_collision_count = 0;
     std::size_t invalid_key_count = 0;
+    std::size_t invalid_namespace_count = 0;
     bool bucket_truncated = false;
     bool result_truncated = false;
 };
@@ -133,6 +274,7 @@ struct BoundedCandidateSelectionV1 {
 
     if (probe.provider_id == 0
         || probe.compatibility_family_id == 0
+        || !valid_reusable_security_namespace(probe.security_namespace)
         || !bounded_canonical_key(
             probe.canonical_domain_key, kMaxCoverageDomainKeyBytes)) {
         return result;
@@ -143,6 +285,11 @@ struct BoundedCandidateSelectionV1 {
          ++candidate_index) {
         const CoverageCandidateViewV1& candidate =
             candidates[candidate_index];
+        if (!valid_reusable_security_namespace(
+                candidate.security_namespace)) {
+            ++result.invalid_namespace_count;
+            continue;
+        }
         if (!bounded_canonical_key(
                 candidate.canonical_domain_key,
                 kMaxCoverageDomainKeyBytes)
@@ -220,6 +367,7 @@ enum class ProviderContractErrorV1 : std::uint16_t {
     DecoratedLineageMismatch,
     RecipeShape,
     CoverageDigestMismatch,
+    SecurityNamespace,
 };
 
 [[nodiscard]] constexpr std::expected<void, ProviderContractErrorV1>
@@ -280,6 +428,11 @@ validate_path_domain(
     }
     if (domain->coverage_predicate == nullptr) {
         return std::unexpected(ProviderContractErrorV1::MissingPredicate);
+    }
+    if (domain->provider_security_digest_format_version
+            != BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1
+        || domain->provider_security_flags != 0) {
+        return std::unexpected(ProviderContractErrorV1::SecurityNamespace);
     }
     if (!validate_provider_schema(boundary_schema_view(*domain)).has_value()) {
         return std::unexpected(ProviderContractErrorV1::BoundarySchema);

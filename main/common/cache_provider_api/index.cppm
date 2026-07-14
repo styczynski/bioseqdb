@@ -39,6 +39,18 @@ enum BioseqCacheProviderFlagsV1 {
     BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION = 1U << 2,
 };
 
+/**
+ * Version of the fixed-width provider security namespace digest.
+ *
+ * A provider that has no provider-specific security state still writes this
+ * version and leaves all digest bytes zero.  Version zero means the provider
+ * omitted the contract and is rejected; it is not the provider-independent
+ * sentinel.
+ */
+enum BioseqCacheProviderSecurityDigestFormatV1 {
+    BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1 = 1,
+};
+
 struct BioseqCacheDigestSinkV1 {
     std::uint32_t struct_size;
     void* opaque;
@@ -101,6 +113,9 @@ struct BioseqCachePathDomainV1 {
     std::size_t required_lineage_attno_count;
     List* dependency_nodes;
     List* provider_private_nodes;
+    std::uint32_t provider_security_digest_format_version;
+    std::uint32_t provider_security_flags;
+    std::uint8_t provider_security_digest[32];
 };
 
 struct BioseqCachePathDescriptionV1 {
@@ -285,6 +300,8 @@ inline constexpr std::size_t kProviderDigestBytes = 32;
 
 using BioseqCacheStatusV1 = ::BioseqCacheStatusV1;
 using BioseqCacheProviderFlagsV1 = ::BioseqCacheProviderFlagsV1;
+using BioseqCacheProviderSecurityDigestFormatV1 =
+    ::BioseqCacheProviderSecurityDigestFormatV1;
 using BioseqCacheDigestSinkV1 = ::BioseqCacheDigestSinkV1;
 using BioseqCachePhysicalIdentityV1 = ::BioseqCachePhysicalIdentityV1;
 using BioseqCacheQueryIntentV1 = ::BioseqCacheQueryIntentV1;

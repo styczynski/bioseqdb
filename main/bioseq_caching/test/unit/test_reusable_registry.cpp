@@ -403,6 +403,85 @@ TEST_CASE("security namespaces own independent bounded 64 member domains") {
           ReusableRegistryErrorV1::None);
 }
 
+TEST_CASE("every reusable security field partitions discovery") {
+  RegistryFixture fixture{8, 1U << 20, 1};
+  const auto base = coverage_key(33, 81);
+  std::array<ReusableCoverageDirectoryKeyV1, 7> keys{};
+  keys.fill(base);
+  ++keys[1].security_namespace.database_oid;
+  ++keys[2].security_namespace.current_role_oid;
+  ++keys[3].security_namespace.session_user_oid;
+  ++keys[4].security_namespace.security_context_flags;
+  keys[5].security_namespace.row_security_mode = 0;
+  keys[6].security_namespace.provider_security_digest =
+      kProviderIndependentSecurityDigestV1;
+
+  std::array<ReusableGenerationReferenceV1, 7> references{};
+  for (std::size_t index = 0; index < keys.size(); ++index) {
+    const std::string generation = "security-generation-" +
+                                   std::to_string(index);
+    auto claimed = claim(
+        fixture, keys[index], digest(static_cast<std::uint8_t>(120 + index)),
+        "one-domain", generation, static_cast<std::uint32_t>(index + 1));
+    REQUIRE(claimed.disposition ==
+            ReusableClaimDispositionV1::ClaimedProducer);
+    references[index] = claimed.reference;
+  }
+
+  for (std::size_t index = 0; index < keys.size(); ++index) {
+    auto candidates = snapshot_reusable_candidates(
+        fixture.attachment, candidate_request(keys[index], "one-domain"));
+    REQUIRE(candidates.has_value());
+    REQUIRE(candidates->visited_count == 1);
+    REQUIRE(candidates->candidate_count == 1);
+    REQUIRE(candidates->candidates[0].generation.reference ==
+            references[index]);
+    REQUIRE(release_reusable_candidate_batch(
+                fixture.attachment, *candidates) ==
+            ReusableRegistryErrorV1::None);
+  }
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
+}
+
+TEST_CASE("reusable security namespace rejects invalid sentinels") {
+  RegistryFixture fixture{2};
+  const auto valid = coverage_key(34, 82);
+  auto require_rejected = [&fixture](ReusableCoverageDirectoryKeyV1 key) {
+    const auto result = claim(
+        fixture, key, digest(140), "domain", "generation", 1);
+    REQUIRE(result.error == ReusableRegistryErrorV1::InvalidArgument);
+    REQUIRE(result.disposition == ReusableClaimDispositionV1::Rejected);
+  };
+
+  auto invalid = valid;
+  invalid.security_namespace.database_oid = 0;
+  require_rejected(invalid);
+  invalid = valid;
+  invalid.security_namespace.current_role_oid = 0;
+  require_rejected(invalid);
+  invalid = valid;
+  invalid.security_namespace.session_user_oid = 0;
+  require_rejected(invalid);
+  invalid = valid;
+  invalid.security_namespace.row_security_mode = -1;
+  require_rejected(invalid);
+  invalid.security_namespace.row_security_mode = 2;
+  require_rejected(invalid);
+  invalid = valid;
+  invalid.security_namespace.reserved = 1;
+  require_rejected(invalid);
+
+  auto provider_independent = valid;
+  provider_independent.security_namespace.provider_security_digest =
+      kProviderIndependentSecurityDigestV1;
+  REQUIRE(claim(
+              fixture, provider_independent, digest(141), "domain",
+              "provider-independent", 2)
+              .disposition ==
+          ReusableClaimDispositionV1::ClaimedProducer);
+}
+
 TEST_CASE("two index retirement and reclaim reject stale ABA references") {
   RegistryFixture fixture{1, 4U << 10, 1};
   const auto key = coverage_key(40);

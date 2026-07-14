@@ -116,6 +116,21 @@ struct ReusableSecurityNamespaceV1 {
   operator==(const ReusableSecurityNamespaceV1 &) const noexcept = default;
 };
 
+/** Explicit provider-independent namespace value; it is still serialized. */
+inline constexpr CacheDigest256 kProviderIndependentSecurityDigestV1{};
+
+/**
+ * Validate every fixed security field before hashing or directory access.
+ * OID zero and a non-Boolean row-security value are invalid sentinels.
+ */
+[[nodiscard]] constexpr bool valid_reusable_security_namespace(
+    const ReusableSecurityNamespaceV1 &value) noexcept {
+  return value.database_oid != 0 && value.current_role_oid != 0 &&
+         value.session_user_oid != 0 &&
+         (value.row_security_mode == 0 || value.row_security_mode == 1) &&
+         value.reserved == 0;
+}
+
 /** Fixed coverage-directory key; digest collisions still compare domain bytes.
  */
 struct ReusableCoverageDirectoryKeyV1 {
@@ -1946,10 +1961,7 @@ increment_reference(ReusableRegistryAttachmentV1 &attachment,
 claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
   const ReusableSecurityNamespaceV1 &security_namespace =
       request.coverage_directory_key.security_namespace;
-  return security_namespace.database_oid != 0 &&
-         security_namespace.current_role_oid != 0 &&
-         security_namespace.session_user_oid != 0 &&
-         security_namespace.reserved == 0 &&
+  return valid_reusable_security_namespace(security_namespace) &&
          !request.canonical_domain_key.empty() &&
          !request.canonical_generation_key.empty() &&
          request.metadata.provider_id != 0 &&
@@ -1986,9 +1998,7 @@ write_observability_valid(WriteObservability observability) noexcept {
   }
   if (selector.match_security_namespace &&
       (selector.security_namespace.database_oid != selector.database_oid ||
-       selector.security_namespace.current_role_oid == 0 ||
-       selector.security_namespace.session_user_oid == 0 ||
-       selector.security_namespace.reserved != 0)) {
+       !valid_reusable_security_namespace(selector.security_namespace))) {
     return false;
   }
   if (selector.match_provider_id && selector.provider_id == 0) {
@@ -2092,10 +2102,7 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   }
   const ReusableSecurityNamespaceV1 &security_namespace =
       coverage_key.security_namespace;
-  if (security_namespace.database_oid == 0 ||
-      security_namespace.current_role_oid == 0 ||
-      security_namespace.session_user_oid == 0 ||
-      security_namespace.reserved != 0 ||
+  if (!valid_reusable_security_namespace(security_namespace) ||
       domain_key.size() > kMaxCoverageDomainKeyBytes ||
       generation_key.size() > kMaxCanonicalKeyBytes) {
     result.error = ReusableRegistryErrorV1::InvalidArgument;
@@ -2515,10 +2522,7 @@ snapshot_reusable_candidates(
   }
   const ReusableSecurityNamespaceV1 &security_namespace =
       request.coverage_directory_key.security_namespace;
-  if (security_namespace.database_oid == 0 ||
-      security_namespace.current_role_oid == 0 ||
-      security_namespace.session_user_oid == 0 ||
-      security_namespace.reserved != 0) {
+  if (!valid_reusable_security_namespace(security_namespace)) {
     return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
   }
 
@@ -3462,13 +3466,8 @@ snapshot_reusable_generation_diagnostics(
         generation.id.boot_nonce != shared.boot_nonce ||
         generation.id.generation == 0 || generation.id.claim_sequence == 0 ||
         !generation.producer.valid() ||
-        generation.coverage_directory_key.security_namespace.database_oid ==
-            0 ||
-        generation.coverage_directory_key.security_namespace.current_role_oid ==
-            0 ||
-        generation.coverage_directory_key.security_namespace.session_user_oid ==
-            0 ||
-        generation.coverage_directory_key.security_namespace.reserved != 0 ||
+        !valid_reusable_security_namespace(
+            generation.coverage_directory_key.security_namespace) ||
         generation.metadata.provider_id == 0 ||
         generation.metadata.provider_abi_version == 0 ||
         generation.metadata.provider_domain_abi_version == 0 ||
