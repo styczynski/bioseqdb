@@ -48,6 +48,91 @@ BEGIN
 END
 $$;
 
+-- Prove a current reusable generation is produced once and replayed without
+-- entering the provider's gated executor on the identical second request.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache_test.request_janitor_sweep();
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
+DO $$
+DECLARE
+    query_text constant text :=
+        'SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask '
+        'FROM cache_provider_rows WHERE nullable_value <= 10 ORDER BY row_id';
+    expected_bag constant jsonb := '[
+        {"row_id":2,"base_id":11,"occurrence_no":0,"nullable_value":0,"payload":"zero","capability_mask":3},
+        {"row_id":3,"base_id":12,"occurrence_no":0,"nullable_value":5,"payload":"first match","capability_mask":3},
+        {"row_id":4,"base_id":12,"occurrence_no":1,"nullable_value":5,"payload":"second match","capability_mask":3},
+        {"row_id":5,"base_id":13,"occurrence_no":0,"nullable_value":10,"payload":"ten","capability_mask":3}
+    ]'::jsonb;
+    attempt integer;
+    observed record;
+    observed_bag jsonb;
+    plan_line text;
+    plan_text text := '';
+    first_cache_stats record;
+    second_cache_stats record;
+    first_provider_stats jsonb;
+    second_provider_stats jsonb;
+BEGIN
+    FOR plan_line IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF) ' || query_text
+    LOOP
+        plan_text := plan_text || plan_line || E'\n';
+    END LOOP;
+    IF position('BioseqReusableCoverageScan' in plan_text) = 0
+       OR position('Cache Entry Kind: ReusableCoverage' in plan_text) = 0 THEN
+        RAISE EXCEPTION 'reusable-current plan proof is absent: %', plan_text;
+    END IF;
+
+    FOR attempt IN 1..2 LOOP
+        observed_bag := '[]'::jsonb;
+        FOR observed IN EXECUTE query_text LOOP
+            observed_bag := observed_bag || jsonb_build_array(to_jsonb(observed));
+        END LOOP;
+        IF observed_bag IS DISTINCT FROM expected_bag THEN
+            RAISE EXCEPTION 'reusable-current bag mismatch on run %: %',
+                attempt, observed_bag;
+        END IF;
+
+        IF attempt = 1 THEN
+            SELECT * INTO first_cache_stats FROM bioseq_cache.stats();
+            first_provider_stats := bioseq_cache_test.provider_stats();
+            IF first_cache_stats.produced <> 1
+               OR first_cache_stats.reuse_hits <> 0
+               OR (first_provider_stats->>'extract_occurrence')::bigint = 0
+               OR (first_provider_stats->>'executor_rows')::bigint = 0
+               OR (first_provider_stats->>'gated_expensive_rows')::bigint = 0 THEN
+                RAISE EXCEPTION
+                    'first reusable-current run did not produce coverage: %, %',
+                    row_to_json(first_cache_stats), first_provider_stats;
+            END IF;
+        ELSE
+            SELECT * INTO second_cache_stats FROM bioseq_cache.stats();
+            second_provider_stats := bioseq_cache_test.provider_stats();
+            IF second_cache_stats.produced <> first_cache_stats.produced
+               OR second_cache_stats.reuse_hits
+                    <> first_cache_stats.reuse_hits + 1
+               OR (second_provider_stats->>'executor_rows')::bigint
+                    <> (first_provider_stats->>'executor_rows')::bigint
+               OR (second_provider_stats->>'gated_expensive_rows')::bigint
+                    <> (first_provider_stats->>'gated_expensive_rows')::bigint THEN
+                RAISE EXCEPTION
+                    'reusable-current hit performed provider work: %, %, %, %',
+                    row_to_json(first_cache_stats), first_provider_stats,
+                    row_to_json(second_cache_stats), second_provider_stats;
+            END IF;
+        END IF;
+    END LOOP;
+END
+$$;
+
+-- Keep the remaining provider-contract cases independent of the hit proof.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache_test.request_janitor_sweep();
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
+
 DO $$
 DECLARE
     ids bigint[];
