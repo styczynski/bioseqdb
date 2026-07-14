@@ -351,57 +351,118 @@ int main(int argc, char** argv) {
                 finished - started).count()));
     }
 
+    auto decode_view = validate_column_store(blob, kIdentity, schema, checksums);
+    if (!decode_view.has_value()) {
+        std::cerr << "column validation failed\n";
+        return 1;
+    }
+    auto score_chunks = decode_view->column_chunks(1);
+    if (!score_chunks.has_value() || score_chunks->empty()) {
+        std::cerr << "fixed column chunks are unavailable\n";
+        return 1;
+    }
+    constexpr std::size_t fixed_width = sizeof(std::uint32_t);
+    std::vector<std::byte> decoded_fixed(
+        static_cast<std::size_t>(options->rows) * fixed_width);
+    constexpr std::uint64_t decode_repetitions = 64;
     std::vector<std::uint64_t> decode_samples;
     decode_samples.reserve(options->samples);
     for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
         const auto started = Clock::now();
-        auto view = validate_column_store(
-            blob, kIdentity, schema, checksums);
-        if (!view.has_value()) {
-            std::cerr << "column validation failed\n";
-            return 1;
-        }
-        row_group_count = view->row_group_count();
-        std::uint64_t local_digest = 0xcbf29ce484222325ULL;
-        for (std::uint64_t row = 0; row < view->row_count(); ++row) {
-            const auto accepted = view->value(row, 0);
-            const auto score = view->value(row, 1);
-            const auto payload = view->value(row, 2);
-            if (!accepted.has_value() || !score.has_value()
-                || !payload.has_value()
-                || !accepted->is_boolean || accepted->is_null
-                || score->is_null || payload->is_null
-                || score->bytes.size() != 4 || payload->bytes.size() != 16) {
-                std::cerr << "column replay failed\n";
+        for (std::uint64_t repetition = 0;
+             repetition < decode_repetitions;
+             ++repetition) {
+            std::size_t destination_offset = 0;
+            for (const auto& chunk : *score_chunks) {
+                if (chunk.encoding != ColumnEncoding::FixedByValue
+                    || chunk.fixed_width != fixed_width
+                    || chunk.fixed_stride < chunk.fixed_width
+                    || !chunk.validity_bitmap.empty()) {
+                    std::cerr << "fixed column chunk contract mismatch\n";
+                    return 1;
+                }
+                if (chunk.fixed_stride == chunk.fixed_width) {
+                    std::memcpy(
+                        decoded_fixed.data() + destination_offset,
+                        chunk.values.data(),
+                        chunk.values.size());
+                    destination_offset += chunk.values.size();
+                    continue;
+                }
+                for (std::uint64_t row = 0; row < chunk.row_count; ++row) {
+                    std::memcpy(
+                        decoded_fixed.data() + destination_offset,
+                        chunk.values.data() + row * chunk.fixed_stride,
+                        fixed_width);
+                    destination_offset += fixed_width;
+                }
+            }
+            if (destination_offset != decoded_fixed.size()) {
+                std::cerr << "fixed column decode length mismatch\n";
                 return 1;
-            }
-            local_digest = mix_byte(
-                local_digest,
-                static_cast<std::uint8_t>(accepted->boolean_value));
-            for (const std::byte byte : score->bytes) {
-                local_digest = mix_byte(
-                    local_digest, std::to_integer<std::uint8_t>(byte));
-            }
-            for (const std::byte byte : payload->bytes) {
-                local_digest = mix_byte(
-                    local_digest, std::to_integer<std::uint8_t>(byte));
             }
         }
         const auto finished = Clock::now();
-        if (view->row_count() != options->rows
-            || local_digest != expected_digest) {
-            std::cerr << "decoded correctness digest mismatch\n";
-            return 1;
-        }
-        decoded_digest = local_digest;
         decode_samples.push_back(static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 finished - started).count()));
     }
 
+    for (std::uint64_t row = 0; row < options->rows; ++row) {
+        const std::uint32_t expected = static_cast<std::uint32_t>(row);
+        const std::array<std::byte, fixed_width> bytes{
+            static_cast<std::byte>(expected & 0xffu),
+            static_cast<std::byte>((expected >> 8u) & 0xffu),
+            static_cast<std::byte>((expected >> 16u) & 0xffu),
+            static_cast<std::byte>((expected >> 24u) & 0xffu),
+        };
+        if (!std::equal(
+                bytes.begin(), bytes.end(),
+                decoded_fixed.begin()
+                    + static_cast<std::ptrdiff_t>(row * fixed_width))) {
+            std::cerr << "fixed column decode correctness mismatch\n";
+            return 1;
+        }
+    }
+
+    auto full_view = validate_column_store(blob, kIdentity, schema, checksums);
+    if (!full_view.has_value()) {
+        return 1;
+    }
+    std::uint64_t local_digest = 0xcbf29ce484222325ULL;
+    for (std::uint64_t row = 0; row < full_view->row_count(); ++row) {
+        const auto accepted = full_view->value(row, 0);
+        const auto score = full_view->value(row, 1);
+        const auto payload = full_view->value(row, 2);
+        if (!accepted.has_value() || !score.has_value()
+            || !payload.has_value()
+            || !accepted->is_boolean || accepted->is_null
+            || score->is_null || payload->is_null
+            || score->bytes.size() != 4 || payload->bytes.size() != 16) {
+            std::cerr << "column replay failed\n";
+            return 1;
+        }
+        local_digest = mix_byte(
+            local_digest,
+            static_cast<std::uint8_t>(accepted->boolean_value));
+        for (const std::byte byte : score->bytes) {
+            local_digest = mix_byte(
+                local_digest, std::to_integer<std::uint8_t>(byte));
+        }
+        for (const std::byte byte : payload->bytes) {
+            local_digest = mix_byte(
+                local_digest, std::to_integer<std::uint8_t>(byte));
+        }
+    }
+    if (local_digest != expected_digest) {
+        std::cerr << "decoded correctness digest mismatch\n";
+        return 1;
+    }
+    decoded_digest = local_digest;
+
     std::vector<std::uint64_t> memory_copy_samples;
     memory_copy_samples.reserve(options->samples);
-    std::vector<std::byte> copied(blob.size());
+    std::vector<std::byte> copied(decoded_fixed.size());
     constexpr std::uint64_t copy_repetitions = 64;
     std::uint8_t copy_guard = 0;
     for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
@@ -409,7 +470,8 @@ int main(int argc, char** argv) {
         for (std::uint64_t repetition = 0;
              repetition < copy_repetitions;
              ++repetition) {
-            std::memcpy(copied.data(), blob.data(), blob.size());
+            std::memcpy(
+                copied.data(), decoded_fixed.data(), decoded_fixed.size());
             if (!copied.empty()) {
                 copy_guard ^= std::to_integer<std::uint8_t>(
                     copied[repetition % copied.size()]);
@@ -456,8 +518,10 @@ int main(int argc, char** argv) {
     const auto decode_p50 = percentile(decode_samples, 50, 100);
     const auto memory_copy_p50 = percentile(memory_copy_samples, 50, 100);
     const long double fixed_decode_bytes =
-        static_cast<long double>(options->rows) * 4.0L;
-    const long double copied_bytes = static_cast<long double>(blob.size())
+        static_cast<long double>(options->rows) * fixed_width
+        * static_cast<long double>(decode_repetitions);
+    const long double copied_bytes =
+        static_cast<long double>(decoded_fixed.size())
         * static_cast<long double>(copy_repetitions);
     const std::uint64_t fixed_decode_bytes_per_second = decode_p50 == 0
         ? 0
@@ -520,13 +584,14 @@ int main(int argc, char** argv) {
          << ", \"p99_ns\": "
          << percentile(prevalidation_samples, 99, 100)
          << ", \"operations\": " << blob.size() << "},\n"
-         << "    {\"name\": \"column_validate_decode\", "
+         << "    {\"name\": \"column_fixed_decode\", "
             "\"raw_samples_ns\": ";
     append_samples_json(json, decode_samples);
     json << ", \"p50_ns\": " << decode_p50
          << ", \"p95_ns\": " << percentile(decode_samples, 95, 100)
          << ", \"p99_ns\": " << percentile(decode_samples, 99, 100)
-         << ", \"operations\": " << options->rows << "},\n"
+         << ", \"operations\": "
+         << options->rows * decode_repetitions << "},\n"
          << "    {\"name\": \"admission_reserve_release\", "
             "\"raw_samples_ns\": ";
     append_samples_json(json, admission_samples);

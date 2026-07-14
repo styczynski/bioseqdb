@@ -878,6 +878,36 @@ private:
 /** Fully prevalidated, non-owning view over a caller-owned sealed blob. */
 class ColumnStoreView {
 public:
+    /**
+     * One already-validated column chunk.  The spans borrow from the sealed
+     * store owned by the caller of validate_column_store().
+     *
+     * Consumers that process a column at a time should use this view instead
+     * of repeatedly resolving a global row ordinal through value().  All
+     * offsets, lengths, padding, bitmaps, and checksums have been validated
+     * before a chunk can be returned.
+     */
+    struct ColumnChunkView {
+        std::uint64_t first_row_ordinal = 0;
+        std::uint64_t row_count = 0;
+        std::uint64_t fixed_width = 0;
+        std::uint64_t fixed_stride = 0;
+        ColumnEncoding encoding = ColumnEncoding::BinarySend;
+        std::span<const std::byte> validity_bitmap{};
+        std::span<const std::byte> offsets{};
+        std::span<const std::byte> values{};
+
+        [[nodiscard]] bool valid(std::uint64_t local_row) const noexcept {
+            if (local_row >= row_count) {
+                return false;
+            }
+            return validity_bitmap.empty()
+                || (std::to_integer<unsigned int>(
+                        validity_bitmap[local_row / 8u])
+                    & (1u << (local_row % 8u))) != 0;
+        }
+    };
+
     ColumnStoreView() = default;
 
     ColumnStoreView(
@@ -910,6 +940,81 @@ public:
 
     [[nodiscard]] const ColumnStoreIdentity& identity() const noexcept {
         return identity_;
+    }
+
+    /**
+     * Resolve one column into row-group chunks once.  This is the streaming
+     * replay interface: callers retain row-group order while avoiding a
+     * linear group lookup for every cell.
+     */
+    [[nodiscard]] std::expected<std::vector<ColumnChunkView>, FormatError>
+    column_chunks(std::size_t column_index) const {
+        if (column_index >= schema_.size()) {
+            return std::unexpected(FormatError::OffsetOutOfBounds);
+        }
+        const ColumnDescriptorV1& descriptor =
+            schema_[column_index].descriptor;
+        const bool fixed =
+            descriptor.encoding == ColumnEncoding::FixedByValue
+            || descriptor.encoding == ColumnEncoding::FixedByReference;
+        const auto fixed_stride = fixed
+            ? detail::fixed_value_stride(descriptor)
+            : std::expected<std::uint64_t, FormatError>{std::uint64_t{0}};
+        if (!fixed_stride.has_value()) {
+            return std::unexpected(fixed_stride.error());
+        }
+
+        std::vector<ColumnChunkView> result;
+        result.reserve(groups_.size());
+        for (const detail::ParsedGroup& group : groups_) {
+            if (column_index >= group.chunks.size()) {
+                return std::unexpected(FormatError::ColumnCountMismatch);
+            }
+            auto group_bytes = checked_subspan(
+                bytes_, group.offset, group.length);
+            if (!group_bytes.has_value()) {
+                return std::unexpected(FormatError::OffsetOutOfBounds);
+            }
+            const ColumnChunkV1& chunk = group.chunks[column_index].wire;
+            std::span<const std::byte> validity{};
+            std::span<const std::byte> offsets{};
+            if (chunk.null_bitmap_bytes != 0) {
+                auto selected = checked_subspan(
+                    *group_bytes,
+                    chunk.null_bitmap_offset,
+                    chunk.null_bitmap_bytes);
+                if (!selected.has_value()) {
+                    return std::unexpected(FormatError::OffsetOutOfBounds);
+                }
+                validity = *selected;
+            }
+            if (chunk.offsets_bytes != 0) {
+                auto selected = checked_subspan(
+                    *group_bytes, chunk.offsets_offset, chunk.offsets_bytes);
+                if (!selected.has_value()) {
+                    return std::unexpected(FormatError::OffsetOutOfBounds);
+                }
+                offsets = *selected;
+            }
+            auto values = checked_subspan(
+                *group_bytes, chunk.values_offset, chunk.values_bytes);
+            if (!values.has_value()) {
+                return std::unexpected(FormatError::OffsetOutOfBounds);
+            }
+            result.push_back(ColumnChunkView{
+                .first_row_ordinal = group.first_row_ordinal,
+                .row_count = group.row_count,
+                .fixed_width = fixed
+                    ? static_cast<std::uint64_t>(descriptor.type_length)
+                    : 0,
+                .fixed_stride = *fixed_stride,
+                .encoding = descriptor.encoding,
+                .validity_bitmap = validity,
+                .offsets = offsets,
+                .values = *values,
+            });
+        }
+        return result;
     }
 
     /** Return one encoded cell without invoking PostgreSQL receive functions. */

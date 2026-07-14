@@ -271,6 +271,57 @@ TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
     REQUIRE_FALSE(view->value(0, 3).has_value());
 }
 
+TEST_CASE("prevalidated column chunks preserve row-group order and nulls") {
+    auto schema = mixed_schema();
+    ColumnStoreBuilder builder(
+        kIdentity, schema, {.rows = 2, .value_bytes = 1'024});
+    append_mixed_rows(builder);
+    TestChecksums checksums;
+    const auto sealed = builder.seal(checksums);
+    REQUIRE(sealed.has_value());
+    const auto view = validate_column_store(
+        *sealed, kIdentity, schema, checksums);
+    REQUIRE(view.has_value());
+
+    const auto score_chunks = view->column_chunks(1);
+    REQUIRE(score_chunks.has_value());
+    REQUIRE(score_chunks->size() == 2);
+    REQUIRE((*score_chunks)[0].first_row_ordinal == 0);
+    REQUIRE((*score_chunks)[1].first_row_ordinal == 2);
+    for (const auto& chunk : *score_chunks) {
+        REQUIRE(chunk.row_count == 2);
+        REQUIRE(chunk.encoding == ColumnEncoding::FixedByValue);
+        REQUIRE(chunk.fixed_width == 4);
+        REQUIRE(chunk.fixed_stride == 4);
+        REQUIRE(chunk.offsets.empty());
+        REQUIRE(chunk.values.size() == 8);
+    }
+    REQUIRE((*score_chunks)[0].valid(0));
+    REQUIRE_FALSE((*score_chunks)[0].valid(1));
+    REQUIRE((*score_chunks)[1].valid(0));
+    REQUIRE((*score_chunks)[1].valid(1));
+    REQUIRE_FALSE((*score_chunks)[1].valid(2));
+    REQUIRE((*score_chunks)[0].values[0] == std::byte{10});
+    REQUIRE((*score_chunks)[0].values[4] == std::byte{0});
+    REQUIRE((*score_chunks)[1].values[0] == std::byte{20});
+    REQUIRE((*score_chunks)[1].values[4] == std::byte{30});
+
+    const auto boolean_chunks = view->column_chunks(0);
+    REQUIRE(boolean_chunks.has_value());
+    REQUIRE(boolean_chunks->size() == 2);
+    REQUIRE((*boolean_chunks)[0].encoding == ColumnEncoding::BooleanBits);
+    REQUIRE((*boolean_chunks)[0].fixed_width == 0);
+    REQUIRE((*boolean_chunks)[0].values.size() == 1);
+
+    const auto payload_chunks = view->column_chunks(2);
+    REQUIRE(payload_chunks.has_value());
+    REQUIRE(payload_chunks->size() == 2);
+    REQUIRE((*payload_chunks)[0].encoding == ColumnEncoding::BinarySend);
+    REQUIRE((*payload_chunks)[0].offsets.size()
+        == 3 * sizeof(std::uint64_t));
+    REQUIRE_FALSE(view->column_chunks(3).has_value());
+}
+
 TEST_CASE("binary-send encoding accepts PostgreSQL pass-by-value types") {
     const std::array<ColumnSchema, 1> schema{{
         {
