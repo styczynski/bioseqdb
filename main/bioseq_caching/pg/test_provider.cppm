@@ -91,6 +91,22 @@ enum class MappingFault : std::uint16_t {
     DecoratedBoundarySchemaMismatch,
     DecoratedLineageSchemaMismatch,
     ProviderError,
+    PersistedWrongTopTag,
+    PersistedShortTop,
+    PersistedLongTop,
+    PersistedBadMagic,
+    PersistedBadVersion,
+    PersistedCountOverflow,
+    PersistedWrongEntryTag,
+    PersistedShortEntry,
+    PersistedLongEntry,
+    PersistedBadSemanticSize,
+    PersistedBadFingerprintSize,
+    PersistedBadEntryMetadata,
+    PersistedSourceFingerprintMismatch,
+    PersistedConsumerFingerprintMismatch,
+    PersistedDecoratedFingerprintMismatch,
+    PersistedMapFingerprintMismatch,
 };
 
 enum class DigestFault : std::uint16_t {
@@ -1023,7 +1039,7 @@ void shutdown_provider() noexcept {
         const char* name;
         MappingFault value;
     };
-    static constexpr std::array<NamedFault, 23> faults{{
+    static constexpr std::array<NamedFault, 39> faults{{
         {"none", MappingFault::None},
         {"null_pointer_nonzero_count", MappingFault::NullPointerNonzeroCount},
         {"short_boundary_map", MappingFault::ShortBoundaryMap},
@@ -1047,6 +1063,22 @@ void shutdown_provider() noexcept {
         {"decorated_boundary_schema_mismatch", MappingFault::DecoratedBoundarySchemaMismatch},
         {"decorated_lineage_schema_mismatch", MappingFault::DecoratedLineageSchemaMismatch},
         {"provider_error", MappingFault::ProviderError},
+        {"persisted_wrong_top_tag", MappingFault::PersistedWrongTopTag},
+        {"persisted_short_top", MappingFault::PersistedShortTop},
+        {"persisted_long_top", MappingFault::PersistedLongTop},
+        {"persisted_bad_magic", MappingFault::PersistedBadMagic},
+        {"persisted_bad_version", MappingFault::PersistedBadVersion},
+        {"persisted_count_overflow", MappingFault::PersistedCountOverflow},
+        {"persisted_wrong_entry_tag", MappingFault::PersistedWrongEntryTag},
+        {"persisted_short_entry", MappingFault::PersistedShortEntry},
+        {"persisted_long_entry", MappingFault::PersistedLongEntry},
+        {"persisted_bad_semantic_size", MappingFault::PersistedBadSemanticSize},
+        {"persisted_bad_fingerprint_size", MappingFault::PersistedBadFingerprintSize},
+        {"persisted_bad_entry_metadata", MappingFault::PersistedBadEntryMetadata},
+        {"persisted_source_fingerprint_mismatch", MappingFault::PersistedSourceFingerprintMismatch},
+        {"persisted_consumer_fingerprint_mismatch", MappingFault::PersistedConsumerFingerprintMismatch},
+        {"persisted_decorated_fingerprint_mismatch", MappingFault::PersistedDecoratedFingerprintMismatch},
+        {"persisted_map_fingerprint_mismatch", MappingFault::PersistedMapFingerprintMismatch},
     }};
     for (const auto& fault : faults) {
         if (std::strcmp(name, fault.name) == 0) {
@@ -1527,12 +1559,210 @@ void provider_explain_domain(
 
 namespace bioseq::cache::pg::test_provider {
 
+[[nodiscard]] bool persisted_mapping_fault_active() noexcept {
+    return g_mapping_fault >= MappingFault::PersistedWrongTopTag
+        && g_mapping_fault <= MappingFault::PersistedMapFingerprintMismatch;
+}
+
+[[nodiscard]] CustomScan* find_reusable_coverage_plan(
+        Plan* plan,
+        std::uint32_t depth = 0) noexcept {
+    if (plan == nullptr || depth > 64) {
+        return nullptr;
+    }
+    if (IsA(plan, CustomScan)) {
+        auto* custom = reinterpret_cast<CustomScan*>(plan);
+        if (custom->methods != nullptr
+            && custom->methods->CustomName != nullptr
+            && std::strcmp(
+                custom->methods->CustomName,
+                "BioseqReusableCoverageScan") == 0) {
+            return custom;
+        }
+        ListCell* cell = nullptr;
+        foreach(cell, custom->custom_plans) {
+            if (CustomScan* found = find_reusable_coverage_plan(
+                    static_cast<Plan*>(lfirst(cell)), depth + 1U)) {
+                return found;
+            }
+        }
+    }
+    if (CustomScan* found = find_reusable_coverage_plan(
+            outerPlan(plan), depth + 1U)) {
+        return found;
+    }
+    return find_reusable_coverage_plan(innerPlan(plan), depth + 1U);
+}
+
+[[nodiscard]] Const* make_fault_bytea_node(std::size_t byte_count) {
+    auto* value = static_cast<bytea*>(palloc0(VARHDRSZ + byte_count));
+    SET_VARSIZE(value, VARHDRSZ + byte_count);
+    return makeConst(
+        BYTEAOID,
+        -1,
+        InvalidOid,
+        -1,
+        PointerGetDatum(value),
+        false,
+        false);
+}
+
+void replace_list_node(List* list, int index, void* node) noexcept {
+    if (list == nullptr || index < 0 || index >= list_length(list)) {
+        return;
+    }
+    ListCell* cell = list_nth_cell(list, index);
+    lfirst(cell) = node;
+}
+
+[[nodiscard]] bool flip_mapping_fingerprint(
+        List* mapping_plan,
+        int fingerprint_ordinal) noexcept {
+    if (mapping_plan == nullptr || list_length(mapping_plan) < 8
+        || !IsA(list_nth(mapping_plan, 2), Integer)
+        || !IsA(list_nth(mapping_plan, 3), Integer)) {
+        return false;
+    }
+    const int boundary_count = intVal(list_nth(mapping_plan, 2));
+    const int lineage_count = intVal(list_nth(mapping_plan, 3));
+    const int index = 4 + boundary_count + lineage_count
+        + fingerprint_ordinal;
+    if (boundary_count < 0 || lineage_count < 0 || index < 0
+        || index >= list_length(mapping_plan)
+        || !IsA(list_nth(mapping_plan, index), Const)) {
+        return false;
+    }
+    auto* constant = static_cast<Const*>(list_nth(mapping_plan, index));
+    if (constant->constisnull || constant->consttype != BYTEAOID
+        || constant->constbyval) {
+        return false;
+    }
+    auto* value = reinterpret_cast<bytea*>(
+        DatumGetPointer(constant->constvalue));
+    if (value == nullptr || VARSIZE_ANY_EXHDR(value) != kDigestBytes) {
+        return false;
+    }
+    reinterpret_cast<std::uint8_t*>(VARDATA_ANY(value))[0] ^= 0x80U;
+    return true;
+}
+
+/** Corrupt one frozen cache-owned plan only after PREPARE has cached it. */
+[[nodiscard]] bool mutate_persisted_mapping_plan(EState* estate) {
+    if (!persisted_mapping_fault_active() || estate == nullptr
+        || estate->es_plannedstmt == nullptr) {
+        return false;
+    }
+    CustomScan* coverage = find_reusable_coverage_plan(
+        estate->es_plannedstmt->planTree);
+    if (coverage == nullptr || coverage->custom_private == NIL
+        || list_length(coverage->custom_private) < 4) {
+        return false;
+    }
+    void* candidates_node = list_nth(coverage->custom_private, 3);
+    if (candidates_node == nullptr || !IsA(candidates_node, List)) {
+        return false;
+    }
+    auto* candidates = static_cast<List*>(candidates_node);
+    if (candidates == NIL || !IsA(linitial(candidates), List)) {
+        return false;
+    }
+    auto* candidate = static_cast<List*>(linitial(candidates));
+    if (list_length(candidate) != 7) {
+        return false;
+    }
+    ListCell* plan_cell = list_nth_cell(candidate, 3);
+    if (g_mapping_fault == MappingFault::PersistedWrongTopTag) {
+        lfirst(plan_cell) = makeInteger(0);
+        return true;
+    }
+    if (!IsA(lfirst(plan_cell), List)) {
+        return false;
+    }
+    auto* mapping_plan = static_cast<List*>(lfirst(plan_cell));
+    if (list_length(mapping_plan) < 8) {
+        return false;
+    }
+    if (g_mapping_fault == MappingFault::PersistedShortTop) {
+        lfirst(plan_cell) = list_truncate(
+            mapping_plan, list_length(mapping_plan) - 1);
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedLongTop) {
+        lfirst(plan_cell) = lappend(mapping_plan, makeInteger(0));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedBadMagic) {
+        replace_list_node(mapping_plan, 0, makeInteger(0));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedBadVersion) {
+        replace_list_node(mapping_plan, 1, makeInteger(999));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedCountOverflow) {
+        replace_list_node(mapping_plan, 2, makeInteger(1025));
+        return true;
+    }
+    if (!IsA(list_nth(mapping_plan, 4), List)) {
+        return false;
+    }
+    auto* entry = static_cast<List*>(list_nth(mapping_plan, 4));
+    if (g_mapping_fault == MappingFault::PersistedWrongEntryTag) {
+        replace_list_node(mapping_plan, 4, makeInteger(0));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedShortEntry) {
+        replace_list_node(mapping_plan, 4,
+            list_truncate(entry, list_length(entry) - 1));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedLongEntry) {
+        replace_list_node(mapping_plan, 4, lappend(entry, makeInteger(0)));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedBadSemanticSize) {
+        replace_list_node(entry, 4, make_fault_bytea_node(15));
+        return true;
+    }
+    if (g_mapping_fault == MappingFault::PersistedBadEntryMetadata) {
+        replace_list_node(entry, 0, makeInteger(1));
+        return true;
+    }
+    const int boundary_count = intVal(list_nth(mapping_plan, 2));
+    const int lineage_count = intVal(list_nth(mapping_plan, 3));
+    const int fingerprint_index = 4 + boundary_count + lineage_count;
+    if (g_mapping_fault == MappingFault::PersistedBadFingerprintSize) {
+        if (fingerprint_index < 4
+            || fingerprint_index >= list_length(mapping_plan)) {
+            return false;
+        }
+        replace_list_node(
+            mapping_plan, fingerprint_index, make_fault_bytea_node(31));
+        return true;
+    }
+    const int ordinal =
+        g_mapping_fault == MappingFault::PersistedSourceFingerprintMismatch
+            ? 0
+            : g_mapping_fault
+                    == MappingFault::PersistedConsumerFingerprintMismatch
+                ? 1
+                : g_mapping_fault
+                        == MappingFault::PersistedDecoratedFingerprintMismatch
+                    ? 2
+                    : 3;
+    return flip_mapping_fingerprint(mapping_plan, ordinal);
+}
+
 /** Runtime digest validates only the immutable Node recipe. */
 [[nodiscard]] BioseqCacheStatusV1 provider_append_runtime_digest(
     const List* plan_domain_nodes,
-    EState*,
+    EState* estate,
     BioseqCacheDigestSinkV1* sink) {
     ++g_counters.runtime_digest;
+    if (persisted_mapping_fault_active()
+        && !mutate_persisted_mapping_plan(estate)) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
     if (!parse_plan_nodes(
             plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
@@ -1617,6 +1847,22 @@ void apply_mapping_fault(
         case MappingFault::None:
         case MappingFault::DecoratedBoundarySchemaMismatch:
         case MappingFault::DecoratedLineageSchemaMismatch:
+        case MappingFault::PersistedWrongTopTag:
+        case MappingFault::PersistedShortTop:
+        case MappingFault::PersistedLongTop:
+        case MappingFault::PersistedBadMagic:
+        case MappingFault::PersistedBadVersion:
+        case MappingFault::PersistedCountOverflow:
+        case MappingFault::PersistedWrongEntryTag:
+        case MappingFault::PersistedShortEntry:
+        case MappingFault::PersistedLongEntry:
+        case MappingFault::PersistedBadSemanticSize:
+        case MappingFault::PersistedBadFingerprintSize:
+        case MappingFault::PersistedBadEntryMetadata:
+        case MappingFault::PersistedSourceFingerprintMismatch:
+        case MappingFault::PersistedConsumerFingerprintMismatch:
+        case MappingFault::PersistedDecoratedFingerprintMismatch:
+        case MappingFault::PersistedMapFingerprintMismatch:
             break;
         case MappingFault::NullPointerNonzeroCount:
             mapping.boundary_map = nullptr;
