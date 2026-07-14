@@ -240,6 +240,7 @@ using bioseq::pipeline_stats::OptionalProofBool;
 using bioseq::pipeline_stats::PipelineCachePolicy;
 using bioseq::pipeline_stats::PipelineJobExecutionStats;
 using bioseq::pipeline_stats::PipelineStage;
+using bioseq::pipeline_stats::SimdChainingPolicyIdentity;
 using bioseq::pipeline_stats::TargetIndexSource;
 
 [[nodiscard]] ExecutionEnvironmentProof make_cpu_environment(
@@ -272,6 +273,12 @@ using bioseq::pipeline_stats::TargetIndexSource;
     PipelineJobExecutionStats job{};
     job.requested_backend = backend;
     job.actual_backend = backend;
+    if (backend == ExecutedBackend::simd_cpu) {
+        job.requested_simd_chaining_policy =
+            SimdChainingPolicyIdentity::bounded_batch_approximate;
+        job.observed_simd_chaining_policy =
+            SimdChainingPolicyIdentity::bounded_batch_approximate;
+    }
     job.requested_target_index_source = source;
     job.actual_target_index_source = source;
     job.environment = backend == ExecutedBackend::vulkan_gpu
@@ -457,6 +464,14 @@ TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
     REQUIRE(merge_target_index_identity(TargetIndexSource::recomputed,
                                         TargetIndexSource::persisted)
             == TargetIndexSource::mixed_invalid);
+    REQUIRE(merge_simd_chaining_policy_identity(
+                SimdChainingPolicyIdentity::none,
+                SimdChainingPolicyIdentity::bounded_batch_approximate)
+            == SimdChainingPolicyIdentity::bounded_batch_approximate);
+    REQUIRE(merge_simd_chaining_policy_identity(
+                SimdChainingPolicyIdentity::exact_visited,
+                SimdChainingPolicyIdentity::bounded_batch_approximate)
+            == SimdChainingPolicyIdentity::mixed_invalid);
 
     ExecutionEnvironmentProof merged{};
     const ExecutionEnvironmentProof cpu = make_cpu_environment(3);
@@ -470,6 +485,104 @@ TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
     ExecutionEnvironmentProof missing{};
     missing.merge(ExecutionEnvironmentProof{});
     REQUIRE(missing.mixed_invalid);
+}
+
+TEST_CASE("DOC0372 pipeline stats retain policy identity and distinct vector activity",
+          "[pipe][pipeline-stats][doc0372][simd-chaining][policy][proof]") {
+    using namespace bioseq::pipeline_stats;
+
+    auto bounded = make_attested_job(
+        ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+    REQUIRE(validate_job_execution_stats(bounded));
+
+    auto mismatched = bounded;
+    mismatched.observed_simd_chaining_policy =
+        SimdChainingPolicyIdentity::exact_visited;
+    REQUIRE_FALSE(validate_job_execution_stats(mismatched));
+
+    auto scalar_with_leaked_policy = make_attested_job(
+        ExecutedBackend::scalar_cpu, TargetIndexSource::recomputed);
+    scalar_with_leaked_policy.requested_simd_chaining_policy =
+        SimdChainingPolicyIdentity::bounded_batch_approximate;
+    scalar_with_leaked_policy.observed_simd_chaining_policy =
+        SimdChainingPolicyIdentity::bounded_batch_approximate;
+    REQUIRE_FALSE(validate_job_execution_stats(scalar_with_leaked_policy));
+
+    PipelineExecutionStats aggregate{};
+    aggregate.merge_job(bounded);
+    REQUIRE(aggregate.fully_attested_alignment_jobs == 1);
+    REQUIRE(aggregate.requested_simd_chaining_policy
+            == SimdChainingPolicyIdentity::bounded_batch_approximate);
+    REQUIRE(aggregate.observed_simd_chaining_policy
+            == SimdChainingPolicyIdentity::bounded_batch_approximate);
+
+    auto exact = bounded;
+    exact.logical_target_row = 1;
+    exact.requested_simd_chaining_policy =
+        SimdChainingPolicyIdentity::exact_visited;
+    exact.observed_simd_chaining_policy =
+        SimdChainingPolicyIdentity::exact_visited;
+    REQUIRE(validate_job_execution_stats(exact));
+    aggregate.merge_job(exact);
+    REQUIRE(aggregate.requested_simd_chaining_policy
+            == SimdChainingPolicyIdentity::mixed_invalid);
+    REQUIRE(aggregate.observed_simd_chaining_policy
+            == SimdChainingPolicyIdentity::mixed_invalid);
+    REQUIRE(aggregate.attempted_alignment_jobs == 2);
+    REQUIRE(aggregate.fully_attested_alignment_jobs == 0);
+    REQUIRE(aggregate.unattested_alignment_jobs == 2);
+
+    PipelineExecutionStats bounded_group{};
+    bounded_group.merge_job(bounded);
+    PipelineExecutionStats exact_group{};
+    exact_group.merge_job(exact);
+    bounded_group.merge(exact_group);
+    REQUIRE(bounded_group.requested_simd_chaining_policy
+            == SimdChainingPolicyIdentity::mixed_invalid);
+    REQUIRE(bounded_group.observed_simd_chaining_policy
+            == SimdChainingPolicyIdentity::mixed_invalid);
+    REQUIRE(bounded_group.fully_attested_alignment_jobs == 0);
+    REQUIRE(bounded_group.unattested_alignment_jobs == 2);
+
+    PipelineOperationalStats continuation{};
+    continuation.nthash_vector_batches = 7;
+    continuation.simd_chaining_exact_policy_calls = 1;
+    PipelineOperationalStats resident{};
+    resident.nthash_resident_vector_stream_kernel_calls = 2;
+    resident.simd_chaining_bounded_policy_calls = 2;
+    resident.simd_chaining_bounded_score_batches = 11;
+    resident.simd_chaining_bounded_cutoff_stops = 3;
+    resident.simd_chaining_bounded_candidates_skipped = 29;
+    continuation.merge(resident);
+
+    REQUIRE(continuation.has_nthash_vector_activity());
+    REQUIRE(continuation.nthash_vector_batches == 7);
+    REQUIRE(continuation.nthash_resident_vector_stream_kernel_calls == 2);
+    REQUIRE(continuation.simd_chaining_exact_policy_calls == 1);
+    REQUIRE(continuation.simd_chaining_bounded_policy_calls == 2);
+    REQUIRE(continuation.simd_chaining_bounded_score_batches == 11);
+    REQUIRE(continuation.simd_chaining_bounded_cutoff_stops == 3);
+    REQUIRE(continuation.simd_chaining_bounded_candidates_skipped == 29);
+
+    PipelineOperationalStats resident_only{};
+    resident_only.nthash_resident_vector_stream_kernel_calls = 1;
+    REQUIRE(resident_only.has_nthash_vector_activity());
+    REQUIRE(resident_only.nthash_vector_batches == 0);
+
+    for (const bool saturated_policy : {false, true}) {
+        PipelineExecutionStats rejected{};
+        rejected.merge_job(bounded);
+        PipelineOperationalStats invalid_policy{};
+        invalid_policy.simd_chaining_policy_rejections =
+            saturated_policy ? 0 : 1;
+        invalid_policy.simd_chaining_policy_evidence_saturated =
+            saturated_policy;
+        rejected.merge_operational(invalid_policy);
+        REQUIRE(rejected.fully_attested_alignment_jobs == 0);
+        REQUIRE(rejected.unattested_alignment_jobs == 1);
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            rejected));
+    }
 }
 
 TEST_CASE("DOC0371 prepared CRC identities preserve all u64 bits and publish once",
@@ -864,6 +977,10 @@ TEST_CASE("DOC0371 aggregate merge cannot launder absent environments",
         PipelineExecutionStats stats{};
         stats.requested_backend = ExecutedBackend::simd_cpu;
         stats.actual_backend = ExecutedBackend::simd_cpu;
+        stats.requested_simd_chaining_policy =
+            SimdChainingPolicyIdentity::bounded_batch_approximate;
+        stats.observed_simd_chaining_policy =
+            SimdChainingPolicyIdentity::bounded_batch_approximate;
         stats.requested_target_index_source = TargetIndexSource::recomputed;
         stats.actual_target_index_source = TargetIndexSource::recomputed;
         stats.attempted_alignment_jobs = 1;
@@ -900,6 +1017,10 @@ TEST_CASE("DOC0371 aggregate merge cannot launder absent environments",
     PipelineExecutionStats zero_job_nonempty{};
     zero_job_nonempty.requested_backend = ExecutedBackend::simd_cpu;
     zero_job_nonempty.actual_backend = ExecutedBackend::simd_cpu;
+    zero_job_nonempty.requested_simd_chaining_policy =
+        SimdChainingPolicyIdentity::bounded_batch_approximate;
+    zero_job_nonempty.observed_simd_chaining_policy =
+        SimdChainingPolicyIdentity::bounded_batch_approximate;
     zero_job_nonempty.requested_target_index_source = TargetIndexSource::recomputed;
     zero_job_nonempty.actual_target_index_source = TargetIndexSource::recomputed;
     zero_job_nonempty.environment = make_cpu_environment();
@@ -1489,6 +1610,9 @@ TEST_CASE("DOC0371 persisted request cannot be laundered by recompute outcome",
     PipelineJobExecutionStats job{};
     job.requested_backend = ExecutedBackend::simd_cpu;
     job.actual_backend = ExecutedBackend::mixed_invalid;
+    job.requested_simd_chaining_policy =
+        SimdChainingPolicyIdentity::bounded_batch_approximate;
+    job.observed_simd_chaining_policy = SimdChainingPolicyIdentity::none;
     job.requested_target_index_source = TargetIndexSource::persisted;
     job.actual_target_index_source = TargetIndexSource::recomputed;
     job.logical_target_row = 19;

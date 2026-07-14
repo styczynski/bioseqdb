@@ -952,8 +952,16 @@ inline constexpr std::uint64_t kMinimizerPreferredSegmentSpanBp = 8u * 1024u * 1
 /// Deterministic hash-partition payload target used by the initial encoder POC.
 inline constexpr std::uint64_t kMinimizerPartitionTargetBytes = 256u * 1024u;
 
-/// Page-fitting payload bytes per seqidx row (record-aligned for both arrays).
-inline constexpr std::uint32_t kMinimizerExtentPayloadBytes = 6u * 1024u;
+/// Frozen page quantum used by persisted wire formats 3 and 4.
+inline constexpr std::uint32_t kMinimizerLegacyExtentPayloadBytes =
+    6u * 1024u;
+
+/// PostgreSQL S1 page-dense quantum selected semantically by wire format 5.
+inline constexpr std::uint32_t kMinimizerFormat5ExtentPayloadBytes = 8064u;
+
+/// Compatibility spelling retained for format-3/4-only code and goldens.
+inline constexpr std::uint32_t kMinimizerExtentPayloadBytes =
+    kMinimizerLegacyExtentPayloadBytes;
 
 /// Return whether a non-negative unsigned key fits a PostgreSQL BIGINT key.
 [[nodiscard]] constexpr bool sql_bigint_can_represent(
@@ -1015,6 +1023,28 @@ enum class MinimizerGenerationWireFormat : std::uint16_t {
     grouped_hash32_segment_local32 = 4u,
     grouped_shape_soa_segment_local = 5u,
 };
+
+/// Return the immutable physical row quantum selected by the wire version.
+/// It is deliberately semantic rather than another manifest field, preserving
+/// the frozen 128-byte format-3/4 and 160-byte format-5 images.
+[[nodiscard]] constexpr std::uint32_t minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat wire_format) noexcept {
+    return wire_format
+            == MinimizerGenerationWireFormat::grouped_shape_soa_segment_local
+        ? kMinimizerFormat5ExtentPayloadBytes
+        : wire_format == MinimizerGenerationWireFormat::sorted_dense_global64
+                || wire_format == MinimizerGenerationWireFormat::
+                    grouped_hash32_segment_local32
+            ? kMinimizerLegacyExtentPayloadBytes
+            : 0u;
+}
+
+static_assert(minimizer_extent_payload_bytes(
+    MinimizerGenerationWireFormat::sorted_dense_global64) == 6144u);
+static_assert(minimizer_extent_payload_bytes(
+    MinimizerGenerationWireFormat::grouped_hash32_segment_local32) == 6144u);
+static_assert(minimizer_extent_payload_bytes(
+    MinimizerGenerationWireFormat::grouped_shape_soa_segment_local) == 8064u);
 
 /// Return whether a persisted format selector has a canonical local profile.
 [[nodiscard]] constexpr bool is_supported_minimizer_generation_wire_format(
@@ -2949,9 +2979,14 @@ validate_minimizer_generation_metadata(
             != crc64_ecma182(directory.encoded_bytes())) {
         return std::unexpected(MinimizerGenerationWireError::checksum);
     }
+    const std::uint32_t extent_payload_bytes =
+        minimizer_extent_payload_bytes(manifest.wire_format);
+    if (extent_payload_bytes == 0) {
+        return std::unexpected(MinimizerGenerationWireError::version);
+    }
     const std::uint64_t expected_directory_chunks =
-        manifest.directory_bytes / kMinimizerExtentPayloadBytes
-        + (manifest.directory_bytes % kMinimizerExtentPayloadBytes != 0 ? 1u : 0u);
+        manifest.directory_bytes / extent_payload_bytes
+        + (manifest.directory_bytes % extent_payload_bytes != 0 ? 1u : 0u);
     if (expected_directory_chunks != manifest.directory_chunk_count) {
         return std::unexpected(MinimizerGenerationWireError::chunk_range);
     }
@@ -2965,12 +3000,12 @@ validate_minimizer_generation_metadata(
             return std::unexpected(MinimizerGenerationWireError::position_segment);
         }
         const std::uint64_t expected_control_chunks =
-            entry.control_encoded_bytes / kMinimizerExtentPayloadBytes
-            + (entry.control_encoded_bytes % kMinimizerExtentPayloadBytes != 0
+            entry.control_encoded_bytes / extent_payload_bytes
+            + (entry.control_encoded_bytes % extent_payload_bytes != 0
                 ? 1u : 0u);
         const std::uint64_t expected_position_chunks =
-            entry.position_encoded_bytes / kMinimizerExtentPayloadBytes
-            + (entry.position_encoded_bytes % kMinimizerExtentPayloadBytes != 0
+            entry.position_encoded_bytes / extent_payload_bytes
+            + (entry.position_encoded_bytes % extent_payload_bytes != 0
                 ? 1u : 0u);
         if (entry.control_first_chunk != 0
             || entry.control_chunk_count != expected_control_chunks
@@ -5176,15 +5211,18 @@ protected:
             return protocol_poison<void>(
                 MinimizerGenerationWireError::row_order);
         }
+        constexpr std::uint32_t extent_payload_bytes =
+            minimizer_extent_payload_bytes(Traits::wire_format);
+        static_assert(extent_payload_bytes != 0);
         const std::uint64_t byte_offset =
             static_cast<std::uint64_t>(session.next_chunk)
-            * kMinimizerExtentPayloadBytes;
+            * extent_payload_bytes;
         if (byte_offset >= encoded_bytes) {
             return protocol_poison<void>(
                 MinimizerGenerationWireError::row_order);
         }
         const std::uint64_t expected_size = std::min<std::uint64_t>(
-            kMinimizerExtentPayloadBytes, encoded_bytes - byte_offset);
+            extent_payload_bytes, encoded_bytes - byte_offset);
         const std::uint32_t first_chunk = positions
             ? entry.position_first_chunk : entry.control_first_chunk;
         const index_sub_key_t expected_sub_key = positions
@@ -5714,14 +5752,19 @@ private:
             || load.next_chunk_no >= wanted_chunks) {
             return poison<void>(MinimizerGenerationWireError::chunk_range);
         }
+        constexpr std::uint32_t extent_payload_bytes =
+            minimizer_extent_payload_bytes(
+                MinimizerGenerationWireFormat::
+                    grouped_hash32_segment_local32);
+        static_assert(extent_payload_bytes != 0);
         const std::uint64_t byte_offset =
             static_cast<std::uint64_t>(load.next_chunk_no)
-            * kMinimizerExtentPayloadBytes;
+            * extent_payload_bytes;
         if (byte_offset >= wanted_bytes) {
             return poison<void>(MinimizerGenerationWireError::chunk_range);
         }
         const std::uint64_t expected_bytes = std::min<std::uint64_t>(
-            kMinimizerExtentPayloadBytes, wanted_bytes - byte_offset);
+            extent_payload_bytes, wanted_bytes - byte_offset);
         if (payload.size() != expected_bytes
             || byte_offset != load.encoded_size
             || byte_offset > load.encoded_capacity
@@ -7965,10 +8008,14 @@ checked_payload_byte_count(
     return element_count * encoded_byte_width;
 }
 
+template <MinimizerGenerationWireFormat WireFormat>
 [[nodiscard]] constexpr std::uint64_t payload_chunk_count(
         std::uint64_t encoded_bytes) noexcept {
-    return encoded_bytes / kMinimizerExtentPayloadBytes
-        + (encoded_bytes % kMinimizerExtentPayloadBytes != 0 ? 1u : 0u);
+    constexpr std::uint32_t extent_payload_bytes =
+        minimizer_extent_payload_bytes(WireFormat);
+    static_assert(extent_payload_bytes != 0);
+    return encoded_bytes / extent_payload_bytes
+        + (encoded_bytes % extent_payload_bytes != 0 ? 1u : 0u);
 }
 
 template <MinimizerGenerationWireFormat WireFormat>
@@ -8014,8 +8061,10 @@ struct PlanPass {
         if (!control_bytes || !position_bytes) {
             return std::unexpected(MinimizerGenerationWireError::arithmetic_overflow);
         }
-        const std::uint64_t control_chunks = payload_chunk_count(*control_bytes);
-        const std::uint64_t position_chunks = payload_chunk_count(*position_bytes);
+        const std::uint64_t control_chunks =
+            payload_chunk_count<WireFormat>(*control_bytes);
+        const std::uint64_t position_chunks =
+            payload_chunk_count<WireFormat>(*position_bytes);
         if (control_chunks
                 > (std::numeric_limits<std::uint64_t>::max)() - position_chunks
             || !sql_integer_can_represent(control_chunks + position_chunks)) {
@@ -8256,9 +8305,9 @@ struct PlanPass<
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
         const std::uint64_t control_chunks =
-            payload_chunk_count(layout->encoded_bytes);
+            payload_chunk_count<WireFormat>(layout->encoded_bytes);
         const std::uint64_t position_chunks =
-            payload_chunk_count(*position_bytes);
+            payload_chunk_count<WireFormat>(*position_bytes);
         if (control_chunks
                 > (std::numeric_limits<std::uint32_t>::max)()
             || position_chunks
@@ -8439,6 +8488,9 @@ template <MinimizerGenerationEventProducer Producer>
 
 template <MinimizerGenerationWireFormat WireFormat>
 struct EmitPass {
+    static constexpr std::uint32_t extent_payload_bytes =
+        minimizer_extent_payload_bytes(WireFormat);
+
     struct EncodedElement {
         std::array<std::byte, 16> storage{};
         std::uint16_t byte_count = 0;
@@ -8473,7 +8525,7 @@ struct EmitPass {
     std::uint64_t cached_core_segment =
         (std::numeric_limits<std::uint64_t>::max)();
     MinimizerPositionSegmentCore cached_core{};
-    std::array<std::byte, kMinimizerExtentPayloadBytes> heavy_page{};
+    std::array<std::byte, extent_payload_bytes> heavy_page{};
     std::size_t heavy_page_bytes = 0;
     std::uint32_t heavy_position_chunk = 0;
     Crc64Ecma182 heavy_position_crc{};
@@ -8481,11 +8533,11 @@ struct EmitPass {
     std::uint64_t canonical_event_count = 0;
     Crc64Ecma182 canonical_event_checksum{};
 
-    static_assert(kMinimizerExtentPayloadBytes % 16u == 0u);
-    static_assert(kMinimizerExtentPayloadBytes
+    static_assert(extent_payload_bytes % 16u == 0u);
+    static_assert(extent_payload_bytes
         % kMinimizerGrouped32ControlEncodedBytes == 0u);
-    static_assert(kMinimizerExtentPayloadBytes % 8u == 0u);
-    static_assert(kMinimizerExtentPayloadBytes
+    static_assert(extent_payload_bytes % 8u == 0u);
+    static_assert(extent_payload_bytes
         % kMinimizerGrouped32PositionEncodedBytes == 0u);
 
     [[nodiscard]] std::expected<
@@ -8614,7 +8666,7 @@ struct EmitPass {
             bool position_extent,
             std::uint32_t chunk_no,
             std::span<const std::byte> bytes) {
-        if (bytes.empty() || bytes.size() > kMinimizerExtentPayloadBytes) {
+        if (bytes.empty() || bytes.size() > extent_payload_bytes) {
             return std::unexpected(MinimizerGenerationWireError::byte_count);
         }
         const auto position_sub_key =
@@ -8656,7 +8708,7 @@ struct EmitPass {
         std::uint32_t chunk = first_chunk;
         while (offset < bytes.size()) {
             const std::size_t count = std::min<std::size_t>(
-                kMinimizerExtentPayloadBytes, bytes.size() - offset);
+                extent_payload_bytes, bytes.size() - offset);
             if (auto emitted = emit_payload_row(
                     entry, position_extent, chunk,
                     bytes.subspan(offset, count)); !emitted) {
@@ -9005,12 +9057,17 @@ struct EmitPass {
 /// Emit one Format-5 extent through a single bounded PostgreSQL-row page.
 /// Encoded extents are never materialized as full byte vectors.
 struct ShapeV5ExtentPageWriter {
+    static constexpr std::uint32_t extent_payload_bytes =
+        minimizer_extent_payload_bytes(
+            MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+
     MinimizerGenerationEncodeOptions options{};
     MinimizerGenerationRowSinkRef sink{};
     MinimizerBucketDirEntry* entry = nullptr;
     Crc64Ecma182* payload_row_checksums = nullptr;
     bool position_extent = false;
-    std::array<std::byte, kMinimizerExtentPayloadBytes> page{};
+    std::array<std::byte, extent_payload_bytes> page{};
     std::size_t page_size = 0;
     std::uint64_t encoded_size = 0;
     std::uint32_t chunk_no = 0;
@@ -9658,7 +9715,10 @@ template <
         }
         return MinimizerGenerationPlan{
             .profile = empty_profile,
-            .position_segment_span_bp = 1u,
+            /* Empty generations have no physical position geometry.  Replay
+             * still uses the non-zero sentinel passed to scan_sorted_events
+             * below, but the frozen manifest contract publishes span zero. */
+            .position_segment_span_bp = 0u,
         };
     }
 
@@ -9971,10 +10031,17 @@ encode_minimizer_generation(
             options.minimizer_scheme_version)) {
         return std::unexpected(MinimizerGenerationWireError::compatibility_mismatch);
     }
-    static_assert(kMinimizerExtentPayloadBytes
+    static_assert(kMinimizerLegacyExtentPayloadBytes
         % MinimizerBucketDirEntry::encoded_bytes == 0);
-    static_assert(kMinimizerExtentPayloadBytes
+    static_assert(kMinimizerFormat5ExtentPayloadBytes
         % MinimizerBucketDirEntry::format5_encoded_bytes == 0);
+    if constexpr (requires {
+            producer.bind_generation_wire_format(options.wire_format);
+        }) {
+        /* Evidence-bearing producers freeze their successful replay count
+         * before the planning scan.  Generic/vector producers need no hook. */
+        producer.bind_generation_wire_format(options.wire_format);
+    }
     auto plan = plan_minimizer_generation(producer, options, limits);
     if (!plan) {
         return std::unexpected(plan.error());
@@ -10045,9 +10112,14 @@ encode_minimizer_generation(
     if (!directory) {
         return std::unexpected(directory.error());
     }
+    const std::uint32_t extent_payload_bytes =
+        minimizer_extent_payload_bytes(options.wire_format);
+    if (extent_payload_bytes == 0) {
+        return std::unexpected(MinimizerGenerationWireError::version);
+    }
     const std::uint64_t directory_chunk_count = directory_bytes->size()
-            / kMinimizerExtentPayloadBytes
-        + (directory_bytes->size() % kMinimizerExtentPayloadBytes != 0 ? 1u : 0u);
+            / extent_payload_bytes
+        + (directory_bytes->size() % extent_payload_bytes != 0 ? 1u : 0u);
     if (!sql_integer_can_represent(directory_chunk_count)) {
         return std::unexpected(MinimizerGenerationWireError::chunk_range);
     }
@@ -10149,9 +10221,9 @@ encode_minimizer_generation(
     // reread validates this complete generation.
     for (std::size_t offset = 0, chunk = 1;
          offset < directory_bytes->size();
-         offset += kMinimizerExtentPayloadBytes, ++chunk) {
+         offset += extent_payload_bytes, ++chunk) {
         const std::size_t count = std::min<std::size_t>(
-            kMinimizerExtentPayloadBytes, directory_bytes->size() - offset);
+            extent_payload_bytes, directory_bytes->size() - offset);
         const auto bytes = std::span<const std::byte>{*directory_bytes}
             .subspan(offset, count);
         const IndexChunkAddress address{
@@ -10288,6 +10360,11 @@ public:
         if (ready_validated_ || manifest_seen_) {
             return std::unexpected(MinimizerGenerationWireError::row_count);
         }
+        const std::uint32_t extent_payload_bytes =
+            minimizer_extent_payload_bytes(generation_.manifest.wire_format);
+        if (extent_payload_bytes == 0) {
+            return std::unexpected(MinimizerGenerationWireError::version);
+        }
         if (entry_index_ < generation_.directory.entries().size()) {
             const MinimizerBucketDirEntry& entry =
                 generation_.directory.entries()[entry_index_];
@@ -10324,18 +10401,18 @@ public:
                 ? entry.control_encoded_bytes : entry.position_encoded_bytes;
             if (extent_chunk
                     > (std::numeric_limits<std::uint64_t>::max)()
-                        / kMinimizerExtentPayloadBytes) {
+                        / extent_payload_bytes) {
                 return std::unexpected(
                     MinimizerGenerationWireError::arithmetic_overflow);
             }
             const std::uint64_t offset =
                 static_cast<std::uint64_t>(extent_chunk)
-                * kMinimizerExtentPayloadBytes;
+                * extent_payload_bytes;
             if (offset >= extent_bytes) {
                 return std::unexpected(MinimizerGenerationWireError::byte_count);
             }
             const std::uint64_t expected_bytes = std::min<std::uint64_t>(
-                kMinimizerExtentPayloadBytes, extent_bytes - offset);
+                extent_payload_bytes, extent_bytes - offset);
             if (row.address.generation_id != generation_.manifest.generation_id
                 || row.address.position_segment != entry.position_segment
                 || row.address.sub_key != (control
@@ -10387,12 +10464,12 @@ public:
                 static_cast<std::uint64_t>(directory_chunk_ - 1u);
             if (chunk_index
                     > (std::numeric_limits<std::uint64_t>::max)()
-                        / kMinimizerExtentPayloadBytes) {
+                        / extent_payload_bytes) {
                 return std::unexpected(
                     MinimizerGenerationWireError::arithmetic_overflow);
             }
             const std::uint64_t offset64 =
-                chunk_index * kMinimizerExtentPayloadBytes;
+                chunk_index * extent_payload_bytes;
             if (offset64 >= generation_.directory.encoded_bytes().size()
                 || offset64
                     > (std::numeric_limits<std::size_t>::max)()) {
@@ -10400,7 +10477,7 @@ public:
             }
             const std::size_t offset = static_cast<std::size_t>(offset64);
             const std::size_t count = std::min<std::size_t>(
-                kMinimizerExtentPayloadBytes,
+                extent_payload_bytes,
                 generation_.directory.encoded_bytes().size() - offset);
             const auto expected_bytes = generation_.directory.encoded_bytes()
                 .subspan(offset, count);
@@ -10659,6 +10736,8 @@ public:
     std::uint16_t kmer_size = 0;
     std::uint64_t producer_scan_count = 0;
     std::uint64_t geometry_retry_count = 0;
+    MinimizerGenerationWireFormat generation_wire_format =
+        MinimizerGenerationWireFormat::invalid;
     std::uint64_t short_core_runs = 0;
     std::uint64_t scalar_core_runs = 0;
     std::uint64_t exact_simd_core_runs = 0;
@@ -10674,15 +10753,33 @@ public:
     bool backend_bound = false;
     bool saturated = false;
 
+    [[nodiscard]] std::uint64_t
+    required_successful_scan_count() const noexcept {
+        if (generation_wire_format
+                == MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
+            return 3u;
+        }
+        /* An unbound producer can still attest two explicit direct replays.
+         * Publication additionally requires a concrete matching wire format. */
+        return generation_wire_format == MinimizerGenerationWireFormat::invalid
+                || is_supported_minimizer_generation_wire_format(
+                    generation_wire_format)
+            ? 2u : 0u;
+    }
+
     [[nodiscard]] bool accepted() const noexcept {
-        // The encoder performs one successful planning scan and one replay
-        // scan. A fixed-width geometry retry contributes exactly one additional
-        // planning scan, so this equation admits retries without weakening the
-        // ordinary exact-two-pass contract.
-        if (!backend_bound || saturated
+        // A fixed-width geometry retry contributes exactly one additional
+        // planning scan.  The successful-pass count is bound from the wire
+        // format before the first encoder scan.
+        const std::uint64_t required_scans =
+            required_successful_scan_count();
+        if (!backend_bound || saturated || required_scans == 0u
             || geometry_retry_count
-                > (std::numeric_limits<std::uint64_t>::max)() - 2u
-            || producer_scan_count != geometry_retry_count + 2u
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - required_scans
+            || producer_scan_count
+                != geometry_retry_count + required_scans
             || target_length == 0 || window_size == 0 || kmer_size == 0
             || minimizer_scheme
                 != minimizer_scheme_identity_for_backend(selected_backend)) {
@@ -10747,22 +10844,135 @@ public:
     [[nodiscard]] bool publication_accepted(
             const MinimizerGenerationPublicationBinding& expected)
             const noexcept {
-        return accepted() && publication_binding_present_
+        return accepted() && route_snapshot_matches_()
+            && publication_binding_present_
+            && generation_wire_format != MinimizerGenerationWireFormat::invalid
+            && generation_wire_format == expected.wire_format
             && expected.valid() && publication_binding_ == expected;
     }
 
 private:
     template <class>
     friend struct MinimizersPerFragmentIndex;
+    template <class, class>
+    friend class MpfFragmentGenerationReplayProducer;
+
+    struct RouteSnapshot {
+        MinimizerSketchBackend selected_backend =
+            MinimizerSketchBackend::Scalar;
+        MinimizerSchemeIdentity minimizer_scheme{};
+        std::uint64_t target_length = 0;
+        std::uint16_t window_size = 0;
+        std::uint16_t kmer_size = 0;
+        std::uint64_t producer_scan_count = 0;
+        std::uint64_t geometry_retry_count = 0;
+        MinimizerGenerationWireFormat generation_wire_format =
+            MinimizerGenerationWireFormat::invalid;
+        std::uint64_t short_core_runs = 0;
+        std::uint64_t scalar_core_runs = 0;
+        std::uint64_t exact_simd_core_runs = 0;
+        std::uint64_t paper_nthash_core_runs = 0;
+        std::uint64_t vulkan_core_runs = 0;
+        ExactSimdIndexExecutionProof exact_simd_proof{};
+        bool exact_simd_proof_present = false;
+        PackedPaperNthashIndexStatus packed_paper_status =
+            PackedPaperNthashIndexStatus::invalid_state;
+        PackedPaperNthashIndexExecutionProof packed_paper_proof{};
+        bool packed_paper_proof_present = false;
+        bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof vulkan_proof{};
+        bool backend_bound = false;
+        bool saturated = false;
+    } route_snapshot_{};
+    bool route_snapshot_present_ = false;
 
     MinimizerGenerationPublicationBinding publication_binding_{};
     bool publication_binding_present_ = false;
 
+    [[nodiscard]] static bool same_vulkan_proof_(
+            const bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof& left,
+            const bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof& right)
+            noexcept {
+        return left.completed_roundtrips == right.completed_roundtrips
+            && left.downloaded_minimizers == right.downloaded_minimizers
+            && left.gpu_window_splits == right.gpu_window_splits
+            && left.saturated == right.saturated;
+    }
+
+    void capture_route_snapshot_() noexcept {
+        route_snapshot_ = RouteSnapshot{
+            .selected_backend = selected_backend,
+            .minimizer_scheme = minimizer_scheme,
+            .target_length = target_length,
+            .window_size = window_size,
+            .kmer_size = kmer_size,
+            .producer_scan_count = producer_scan_count,
+            .geometry_retry_count = geometry_retry_count,
+            .generation_wire_format = generation_wire_format,
+            .short_core_runs = short_core_runs,
+            .scalar_core_runs = scalar_core_runs,
+            .exact_simd_core_runs = exact_simd_core_runs,
+            .paper_nthash_core_runs = paper_nthash_core_runs,
+            .vulkan_core_runs = vulkan_core_runs,
+            .exact_simd_proof = exact_simd_proof,
+            .exact_simd_proof_present = exact_simd_proof_present,
+            .packed_paper_status = packed_paper_status,
+            .packed_paper_proof = packed_paper_proof,
+            .packed_paper_proof_present = packed_paper_proof_present,
+            .vulkan_proof = vulkan_proof,
+            .backend_bound = backend_bound,
+            .saturated = saturated,
+        };
+        route_snapshot_present_ = true;
+    }
+
+    [[nodiscard]] bool route_snapshot_matches_() const noexcept {
+        const RouteSnapshot& value = route_snapshot_;
+        return route_snapshot_present_
+            && selected_backend == value.selected_backend
+            && minimizer_scheme == value.minimizer_scheme
+            && target_length == value.target_length
+            && window_size == value.window_size
+            && kmer_size == value.kmer_size
+            && producer_scan_count == value.producer_scan_count
+            && geometry_retry_count == value.geometry_retry_count
+            && generation_wire_format == value.generation_wire_format
+            && short_core_runs == value.short_core_runs
+            && scalar_core_runs == value.scalar_core_runs
+            && exact_simd_core_runs == value.exact_simd_core_runs
+            && paper_nthash_core_runs == value.paper_nthash_core_runs
+            && vulkan_core_runs == value.vulkan_core_runs
+            && exact_simd_proof == value.exact_simd_proof
+            && exact_simd_proof_present == value.exact_simd_proof_present
+            && packed_paper_status == value.packed_paper_status
+            && packed_paper_proof == value.packed_paper_proof
+            && packed_paper_proof_present
+                == value.packed_paper_proof_present
+            && same_vulkan_proof_(vulkan_proof, value.vulkan_proof)
+            && backend_bound == value.backend_bound
+            && saturated == value.saturated;
+    }
+
     void bind_publication_(
             const EncodedMinimizerGeneration& generation) noexcept {
+        const MinimizerProducerBackendIdentity backend =
+            minimizer_producer_backend_identity_for_backend(
+                selected_backend);
         publication_binding_ =
             minimizer_generation_publication_binding(generation);
-        publication_binding_present_ = publication_binding_.valid();
+        publication_binding_present_ = publication_binding_.valid()
+            && route_snapshot_matches_()
+            && generation_wire_format
+                == generation.manifest.wire_format
+            && target_length == generation.manifest.target_length
+            && window_size == generation.manifest.window_size
+            && kmer_size == generation.manifest.kmer_size
+            && minimizer_scheme.id
+                == generation.manifest.minimizer_scheme_id
+            && minimizer_scheme.version
+                == generation.manifest.minimizer_scheme_version
+            && backend.id == generation.manifest.producer_backend_id
+            && backend.version
+                == generation.manifest.producer_backend_identity_version;
     }
 };
 
@@ -10782,6 +10992,8 @@ private:
     std::uint16_t kmer_size_ = 15;
     std::uint64_t scan_count_ = 0;
     std::uint64_t geometry_retry_count_ = 0;
+    MinimizerGenerationWireFormat generation_wire_format_ =
+        MinimizerGenerationWireFormat::invalid;
     std::uint64_t last_scan_span_ = 0;
     bool has_last_scan_span_ = false;
     std::uint64_t peak_buffered_events_ = 0;
@@ -10972,6 +11184,24 @@ public:
           window_size_(window_size),
           kmer_size_(kmer_size) {}
 
+    void bind_generation_wire_format(
+            MinimizerGenerationWireFormat wire_format) noexcept {
+        const std::uint64_t required = wire_format
+                == MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local
+            ? 3u
+            : is_supported_minimizer_generation_wire_format(wire_format)
+                ? 2u : 0u;
+        if (required == 0u || scan_count_ != 0u
+            || (generation_wire_format_
+                    != MinimizerGenerationWireFormat::invalid
+                && generation_wire_format_ != wire_format)) {
+            route_evidence_saturated_ = true;
+            return;
+        }
+        generation_wire_format_ = wire_format;
+    }
+
     [[nodiscard]] MinimizerSchemeIdentity
     minimizer_scheme_identity() const noexcept {
         return minimizer_scheme_identity_for_backend(backend_);
@@ -11138,6 +11368,7 @@ public:
         evidence.kmer_size = kmer_size_;
         evidence.producer_scan_count = scan_count_;
         evidence.geometry_retry_count = geometry_retry_count_;
+        evidence.generation_wire_format = generation_wire_format_;
         evidence.short_core_runs = short_core_runs_;
         evidence.scalar_core_runs = scalar_core_runs_;
         evidence.exact_simd_core_runs = exact_simd_core_runs_;
@@ -11152,6 +11383,7 @@ public:
         evidence.backend_bound = true;
         evidence.saturated = route_evidence_saturated_
             || vulkan_proof_.saturated;
+        evidence.capture_route_snapshot_();
         return evidence;
     }
 };

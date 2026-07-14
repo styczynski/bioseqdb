@@ -109,7 +109,7 @@
 
   "bench_e2e": {
     "tags": ["e2e", "main", "accelerator-comparison", "cold-index"],
-    "description": "Default three-repeat 2/4 Gbp E2E comparison: explicit scalar CPU, all-SIMD CPU, all-GPU, and minimap2 cells in both cold no-index and cold just-index modes. Bioseq no_index loads base target data untimed with every minimizer sidecar absent, restarts PostgreSQL, then times transient index construction + mapping only. just_index prebuilds the index untimed, restarts PostgreSQL, then times cold index read + mapping. minimap2 keeps its CLI build+map/map-only semantics.",
+    "description": "Default three-repeat 2/4 Gbp E2E comparison: all-SIMD CPU, all-GPU, and minimap2 cells in both cold no-index and cold just-index modes. Bioseq no_index loads base target data untimed with every minimizer sidecar absent, restarts PostgreSQL, then times transient index construction + mapping only. just_index prebuilds the index untimed, restarts PostgreSQL, then times cold index read + mapping. minimap2 keeps its CLI build+map/map-only semantics.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "iteration_order": { "mode": "interleaved_seeded", "seed": 370 },
@@ -117,8 +117,6 @@
       "for": { "E2E_2GBP_DNA4": 3, "E2E_2GBP_DNA5": 3,
                "E2E_4GBP_DNA4": 3, "E2E_4GBP_DNA5": 3 },
       "over": {
-        "bioseq_ksw2_scalar_dp_scalar_mm_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
-        "bioseq_ksw2_scalar_dp_scalar_mm_just_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
         "bioseq_block_simd_dp_two_stack_nthash_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
         "bioseq_block_simd_dp_two_stack_nthash_just_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
         "bioseq_block_gpu_dp_gpu_seed_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
@@ -128,8 +126,6 @@
       },
       "acceptance": {
         "exact_algorithm_rows": [
-          "bioseq_ksw2_scalar_dp_scalar_mm_no_index",
-          "bioseq_ksw2_scalar_dp_scalar_mm_just_index",
           "bioseq_block_simd_dp_two_stack_nthash_no_index",
           "bioseq_block_simd_dp_two_stack_nthash_just_index",
           "bioseq_block_gpu_dp_gpu_seed_no_index",
@@ -142,7 +138,9 @@
           "E2E_2GBP_DNA5": 3,
           "E2E_4GBP_DNA4": 3,
           "E2E_4GBP_DNA5": 3
-        }
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
       },
       "by_regions": true,
       "metrics": {
@@ -188,6 +186,24 @@
         "actual_target_index_source_recomputed": { "type": "evaluation", "rules": [] },
         "actual_target_index_source_persisted": { "type": "evaluation", "rules": [] },
         "actual_target_index_source_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "simd_evidence_schema_valid": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "nthash_vector_batches": { "type": "evaluation", "rules": [] },
+        "nthash_resident_vector_stream_kernel_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_exact_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_candidates_skipped": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_evidence_saturated": { "type": "evaluation", "rules": [] },
         "attempted_alignment_jobs": { "type": "evaluation", "rules": [] },
         "fully_attested_alignment_jobs": { "type": "evaluation", "rules": [] },
         "unattested_alignment_jobs": { "type": "evaluation", "rules": [] },
@@ -201,6 +217,17 @@
         "persisted_index_rows": { "type": "evaluation", "rules": [] },
         "missing_persisted_index_rows": { "type": "evaluation", "rules": [] },
         "recomputed_target_index_rows": { "type": "evaluation", "rules": [] },
+        "cold_index_schema_valid": { "type": "evaluation", "rules": [] },
+        "cold_index_route_empty": { "type": "evaluation", "rules": [] },
+        "cold_index_route_selective": { "type": "evaluation", "rules": [] },
+        "cold_index_route_full": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_scanned": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_skipped": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_scanned": { "type": "evaluation", "rules": [] },
         "gpu_seed_dispatches": { "type": "evaluation", "rules": [] },
         "gpu_chain_dispatches": { "type": "evaluation", "rules": [] },
         "gpu_chain_backtrack_dispatches": { "type": "evaluation", "rules": [] },
@@ -254,7 +281,7 @@
       "accelerator-comparison",
       "cold-index"
     ],
-    "description": "Five-repeat sign-off 2/4 Gbp E2E comparison with the same exact scalar CPU, all-SIMD CPU, all-GPU, and minimap2 cells and cold-index semantics as bench_e2e.",
+    "description": "Five-repeat sign-off 2/4 Gbp E2E comparison with the same exact all-SIMD CPU, all-GPU, and minimap2 cells and cold-index semantics as bench_e2e.",
     "fast": false,
     "concurrency": {
       "bench_lock": true,
@@ -272,22 +299,6 @@
         "E2E_4GBP_DNA5": 5
       },
       "over": {
-        "bioseq_ksw2_scalar_dp_scalar_mm_no_index": {
-          "minimizer_index": [
-            "minimizers_per_fragment"
-          ],
-          "pipeline_mode": [
-            "task_parallel"
-          ]
-        },
-        "bioseq_ksw2_scalar_dp_scalar_mm_just_index": {
-          "minimizer_index": [
-            "minimizers_per_fragment"
-          ],
-          "pipeline_mode": [
-            "task_parallel"
-          ]
-        },
         "bioseq_block_simd_dp_two_stack_nthash_no_index": {
           "minimizer_index": [
             "minimizers_per_fragment"
@@ -333,8 +344,6 @@
       },
       "acceptance": {
         "exact_algorithm_rows": [
-          "bioseq_ksw2_scalar_dp_scalar_mm_no_index",
-          "bioseq_ksw2_scalar_dp_scalar_mm_just_index",
           "bioseq_block_simd_dp_two_stack_nthash_no_index",
           "bioseq_block_simd_dp_two_stack_nthash_just_index",
           "bioseq_block_gpu_dp_gpu_seed_no_index",
@@ -347,7 +356,9 @@
           "E2E_2GBP_DNA5": 5,
           "E2E_4GBP_DNA4": 5,
           "E2E_4GBP_DNA5": 5
-        }
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
       },
       "by_regions": true,
       "metrics": {
@@ -517,6 +528,24 @@
           "type": "evaluation",
           "rules": []
         },
+        "simd_evidence_schema_valid": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "nthash_vector_batches": { "type": "evaluation", "rules": [] },
+        "nthash_resident_vector_stream_kernel_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_exact_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_candidates_skipped": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_evidence_saturated": { "type": "evaluation", "rules": [] },
         "attempted_alignment_jobs": {
           "type": "evaluation",
           "rules": []
@@ -569,6 +598,17 @@
           "type": "evaluation",
           "rules": []
         },
+        "cold_index_schema_valid": { "type": "evaluation", "rules": [] },
+        "cold_index_route_empty": { "type": "evaluation", "rules": [] },
+        "cold_index_route_selective": { "type": "evaluation", "rules": [] },
+        "cold_index_route_full": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_scanned": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_skipped": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_scanned": { "type": "evaluation", "rules": [] },
         "gpu_seed_dispatches": {
           "type": "evaluation",
           "rules": []

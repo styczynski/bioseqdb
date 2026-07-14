@@ -150,12 +150,15 @@ TEST_CASE("DOC0371 payload-row checksum pins LE metadata order and relocation id
         std::span<const std::byte>{blob}));
 }
 
-TEST_CASE("DOC0371 revision-3 PostgreSQL tuple batching is bounded and genuinely multi-row",
-          "[indexing][chunk-io][rev3][postgres-batch]") {
+TEST_CASE("DOC0373 Format-5 PostgreSQL tuple batching flushes before row nine",
+          "[indexing][chunk-io][rev3][postgres-batch][doc0373]") {
     using bioseq::indexing::plan_revision3_tuple_batch_append;
     constexpr std::uint64_t max_rows = 4096;
     constexpr std::uint64_t max_bytes = 65'535;
-    constexpr std::uint64_t tuple_bytes = 7'000;
+    constexpr std::uint64_t formed_tuple_bytes = 8'140;
+    constexpr std::uint64_t tuple_bytes = formed_tuple_bytes
+        + sizeof(TupleTableSlot*) + sizeof(HeapTupleData);
+    STATIC_REQUIRE(tuple_bytes == 8'172);
 
     std::uint64_t pending_rows = 0;
     std::uint64_t pending_bytes = 0;
@@ -190,8 +193,14 @@ TEST_CASE("DOC0371 revision-3 PostgreSQL tuple batching is bounded and genuinely
 
     REQUIRE(flush_count < 250);
     REQUIRE(multirow_flush_count == flush_count);
-    REQUIRE(maximum_observed_rows == 9);
-    REQUIRE(maximum_observed_bytes == 63'000);
+    REQUIRE(maximum_observed_rows == 8);
+    REQUIRE(maximum_observed_bytes == 65'376);
+
+    const auto ninth = plan_revision3_tuple_batch_append(
+        8, 8 * tuple_bytes, tuple_bytes, max_rows, max_bytes);
+    REQUIRE(ninth.valid);
+    REQUIRE(ninth.flush_before);
+    REQUIRE_FALSE(ninth.flush_after);
 
     REQUIRE_FALSE(plan_revision3_tuple_batch_append(
         0, 0, 0, max_rows, max_bytes).valid);

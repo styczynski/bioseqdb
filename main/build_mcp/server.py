@@ -1069,7 +1069,8 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
 
 
 def _run_build_worker(mode: str, build_only: bool = False,
-                      debug: bool = False, bench_flags=None) -> int:
+                      debug: bool = False, bench_flags=None,
+                      test_flags=None) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
@@ -1082,9 +1083,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
     `debug=False` selects its lean everyday tree.
 
     `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
-    '--debug']) appended only to bench-mode commands (§5.4).
+    '--debug']) appended only to bench-mode commands (§5.4). `test_flags` is a
+    validated Catch2 argument list appended identically to both unit and
+    integration test executables for a focused test run.
     """
     bench_flags = bench_flags or []
+    test_flags = test_flags or []
     state = _load_state()
     entry = state.get(mode)
     if not entry:
@@ -1108,6 +1112,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# build_dir={active_build_dir}\n"
         f"# preset={active_preset}\n"
         f"# debug={debug}\n"
+        f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
+        f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
         f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
     )
     log_handle.flush()
@@ -1407,6 +1413,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 full_cmd = [str(active_bin_dir / cmd[0]), *cmd[1:]]
                 if mode_details.is_bench_mode and bench_flags:
                     full_cmd += bench_flags          # e.g. --filter tags=gpu --debug
+                elif mode == "unit+integration" and test_flags:
+                    # The same test-spec + allow-no-tests policy must reach both
+                    # executables. One binary legitimately may have zero matches.
+                    full_cmd += test_flags
                 rc = _stream_subprocess(
                     full_cmd, log_handle, deadline,
                     cwd=active_build_dir, env=env,
@@ -1523,6 +1533,14 @@ def _running_in_same_group(
 # FilterConditions.benchmarks) but the bench CLI key is the singular `benchmark`.
 _FILTER_AXES = (("tags", "tags"), ("benchmarks", "benchmark"), ("cases", "cases"))
 
+# Focused unit/integration runs use Catch2's positional test-spec syntax, not
+# the benchmark runner's repeatable ``--filter`` option.  Keep the limits here
+# as well as in the MCP JSON schemas because the remote/CLI entry points can be
+# called without a schema-validating client.
+_MAX_CATCH2_TEST_SPECS = 32
+_MAX_CATCH2_TEST_SPEC_LENGTH = 512
+_MAX_CATCH2_COMBINED_TEST_SPEC_LENGTH = 4096
+
 
 def _filter_to_cli_args(bench_filter):
     """Translate the structured `filter` object into bench CLI tokens.
@@ -1551,9 +1569,84 @@ def _filter_to_cli_args(bench_filter):
     return extra, None
 
 
+def _unit_test_filter_to_cli_args(test_filter):
+    """Translate ``filter.tags`` into one safe Catch2 OR test-spec.
+
+    Catch2 treats commas inside one positional test-spec as OR.  We therefore
+    append the same deterministic argument to both unit and integration test
+    executables.  ``--allow-running-no-tests`` is also appended because a tag
+    commonly exists in only one of those binaries; absence from the other is
+    not a failure of the focused workflow.
+
+    Returns ``(extra_argv, error)``.  An omitted/empty filter deliberately
+    returns no argv so the historical full-suite command lines are unchanged.
+    """
+    if test_filter is None or test_filter == {}:
+        return [], None
+    if not isinstance(test_filter, dict):
+        return [], "filter must be an object"
+
+    unknown = sorted(set(test_filter) - {"tags", "benchmarks", "cases"})
+    if unknown:
+        return [], "filter contains unknown field(s): " + ", ".join(unknown)
+    disallowed = [axis for axis in ("benchmarks", "cases") if axis in test_filter]
+    if disallowed:
+        return [], (
+            "unit+integration accepts only filter.tags Catch2 test-spec "
+            "expressions; unsupported field(s): " + ", ".join(disallowed)
+        )
+    if "tags" not in test_filter:
+        return [], None
+
+    values = test_filter["tags"]
+    if not isinstance(values, list) or not values:
+        return [], "filter.tags must be a non-empty array"
+    if len(values) > _MAX_CATCH2_TEST_SPECS:
+        return [], (
+            f"filter.tags accepts at most {_MAX_CATCH2_TEST_SPECS} Catch2 "
+            "test-spec expressions"
+        )
+
+    # Stable first-occurrence de-duplication keeps the effective argv compact
+    # without reordering user-written Catch2 expressions.
+    expressions: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            return [], "filter.tags entries must be non-empty strings"
+        if value != value.strip():
+            return [], (
+                f"filter.tags[{index}] may not have leading or trailing whitespace"
+            )
+        if len(value) > _MAX_CATCH2_TEST_SPEC_LENGTH:
+            return [], (
+                f"filter.tags[{index}] exceeds the "
+                f"{_MAX_CATCH2_TEST_SPEC_LENGTH}-character limit"
+            )
+        if value.startswith("-"):
+            return [], (
+                f"filter.tags[{index}] may not begin with '-' (Catch2 option "
+                "injection is not allowed)"
+            )
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+            return [], f"filter.tags[{index}] may not contain control characters"
+        if value not in seen:
+            seen.add(value)
+            expressions.append(value)
+
+    combined = ",".join(expressions)
+    if len(combined) > _MAX_CATCH2_COMBINED_TEST_SPEC_LENGTH:
+        return [], (
+            "combined Catch2 test-spec exceeds the "
+            f"{_MAX_CATCH2_COMBINED_TEST_SPEC_LENGTH}-character limit"
+        )
+    return ["--allow-running-no-tests", combined], None
+
+
 def tool_start_build(mode: str, build_only: bool = False,
                      debug: bool = False, bench_filter=None,
-                     debug_report: bool = False) -> str:
+                     debug_report: bool = False,
+                     debug_report_supplied: bool = False) -> str:
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
@@ -1564,23 +1657,28 @@ def tool_start_build(mode: str, build_only: bool = False,
     except RuntimeError as exc:
         return f"Build preset isolation error: {exc}"
 
-    # Bench-only knobs: reject on non-bench modes, validate + translate the
-    # filter, and enforce debug-requires-filter — all BEFORE spawning the
-    # long-running detached worker (fast feedback).
-    if (bench_filter or debug_report) and not mode_details.is_bench_mode:
-        return (f"`filter`/`debug_report` are only valid for bench modes "
-                f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
-    filter_args, ferr = _filter_to_cli_args(bench_filter)
-    if ferr is not None:
-        return f"Invalid filter: {ferr}"
-    if debug_report and not filter_args:
-        return ("`debug_report` requires a non-empty `filter` — debug is for targeted "
-                "runs, not for instrumenting an entire benchmark sweep.")
-
-    # Encode the bench flags appended to the bench binary by the worker.
-    bench_flags = list(filter_args)
-    if debug_report:
-        bench_flags.append("--debug")
+    # Validate + translate runtime selection before spawning the long-running
+    # worker. Bench modes retain their existing filter CLI. Test mode accepts
+    # only filter.tags, interpreted as Catch2 test-spec expressions.
+    bench_flags: list[str] = []
+    test_flags: list[str] = []
+    if mode == "unit+integration":
+        if debug_report_supplied or debug_report:
+            return ("`debug_report` is bench-only and is not accepted for "
+                    "unit+integration runs.")
+        test_flags, ferr = _unit_test_filter_to_cli_args(bench_filter)
+        if ferr is not None:
+            return f"Invalid unit+integration filter: {ferr}"
+    else:
+        filter_args, ferr = _filter_to_cli_args(bench_filter)
+        if ferr is not None:
+            return f"Invalid filter: {ferr}"
+        if debug_report and not filter_args:
+            return ("`debug_report` requires a non-empty `filter` — debug is for targeted "
+                    "runs, not for instrumenting an entire benchmark sweep.")
+        bench_flags = list(filter_args)
+        if debug_report:
+            bench_flags.append("--debug")
 
     with _global_lock():
         state = _load_state()
@@ -1613,7 +1711,8 @@ def tool_start_build(mode: str, build_only: bool = False,
              "--run-build", mode,
              "--build-only", ("true" if build_only else "false"),
              "--debug", ("true" if debug else "false"),
-             "--bench-flags", json.dumps(bench_flags)],
+             "--bench-flags", json.dumps(bench_flags),
+             "--test-flags", json.dumps(test_flags)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1637,19 +1736,25 @@ def tool_start_build(mode: str, build_only: bool = False,
             "preset": selected_preset,
             "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
             "bench_flags": bench_flags,
+            "focused_test_args": test_flags,
+            "effective_run_args": test_flags if mode == "unit+integration" else bench_flags,
         }
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
-             f"bench_flags={bench_flags} log={log_path}")
+             f"bench_flags={bench_flags} focused_test_args={test_flags} "
+             f"log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
             f"(preset={selected_preset})"
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
+            + (f" with focused Catch2 args {shlex.join(test_flags)}"
+               if test_flags else "")
             + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
 def _run_build_inline(mode: str, build_only: bool = False,
-                      debug: bool = False, bench_flags=None) -> int:
+                      debug: bool = False, bench_flags=None,
+                      test_flags=None) -> int:
     """Reserve the per-mode state slot and run the build worker INLINE
     (synchronously, in this very process) instead of detaching it.
 
@@ -1711,14 +1816,20 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "preset": selected_preset,
             "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
             "bench_flags": list(bench_flags or []),
+            "focused_test_args": list(test_flags or []),
+            "effective_run_args": (
+                list(test_flags or []) if mode == "unit+integration"
+                else list(bench_flags or [])
+            ),
         }
         _save_state(state)
         _log(f"--run-build-sync: running {mode} inline (pid={os.getpid()}, "
              f"preset={selected_preset}, build_only={build_only}, "
-             f"bench_flags={bench_flags or []}, log={log_path})")
+             f"bench_flags={bench_flags or []}, "
+             f"focused_test_args={test_flags or []}, log={log_path})")
 
     return _run_build_worker(mode, build_only=build_only, debug=debug,
-                             bench_flags=bench_flags)
+                             bench_flags=bench_flags, test_flags=test_flags)
 
 
 def tool_inspect(arguments: dict) -> str:
@@ -1831,6 +1942,11 @@ def tool_status(mode: str) -> str:
     selected_preset = entry.get(
         "preset", preset_for_mode(mode, debug_used))
     preset_suffix = f" preset={selected_preset}"
+    focused_test_args = entry.get("focused_test_args") or []
+    focus_suffix = (
+        f" Focused Catch2 args: {shlex.join(focused_test_args)}."
+        if focused_test_args else ""
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -1840,6 +1956,7 @@ def tool_status(mode: str) -> str:
                 f"{preset_suffix}. "
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
+                f"{focus_suffix} "
                 f"Log: {log_path}")
 
     completed_at = entry.get("completed_at") or time.time()
@@ -1849,6 +1966,7 @@ def tool_status(mode: str) -> str:
         msg = (f"{mode_details.label} {mode_details.verb_was} already completed"
                f"{preset_suffix} "
                f"(total time: {_format_minutes(duration_min, plural_int=True)}). "
+               f"{focus_suffix} "
                f"Log: {log_path}")
         if entry.get("report_file"):
             msg += f". Report: {entry['report_file']}"
@@ -1863,20 +1981,24 @@ def tool_status(mode: str) -> str:
 
     if status == "killed_timeout":
         return ("Last run was forcefully killed due to timeout. "
+                f"{focus_suffix} "
                 f"Logs for inspection are available here: {log_path}")
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
         return (f"{mode_details.label} run failed after "
                 f"{_format_minutes(duration_min)}: {notes}. "
+                f"{focus_suffix} "
                 f"Log: {log_path}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "
                 f"unexpectedly after {_format_minutes(duration_min)}). "
+                f"{focus_suffix} "
                 f"Log: {log_path}")
 
-    return f"{mode_details.label} status: {status}. Log: {log_path}"
+    return (f"{mode_details.label} status: {status}."
+            f"{focus_suffix} Log: {log_path}")
 
 
 # --------------------------- subagent worker ----------------------------------
@@ -2624,12 +2746,14 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
         build_only = bool(payload.get("build_only", False))
         debug = bool(payload.get("debug", False))
         bench_flags = payload.get("bench_flags") or []   # parity with local path
+        test_flags = payload.get("focused_test_args") or []
         remote_cmd = (
             f"cd {server_dir} && {env_prefix}python3 server.py "
             f"--run-build-sync {shlex.quote(mode)} "
             f"--build-only {'true' if build_only else 'false'} "
             f"--debug {'true' if debug else 'false'} "
-            f"--bench-flags {shlex.quote(json.dumps(bench_flags))}"
+            f"--bench-flags {shlex.quote(json.dumps(bench_flags))} "
+            f"--test-flags {shlex.quote(json.dumps(test_flags))}"
         )
     elif operation == "inspect":
         inspect_args = payload.get("inspect_args") or {}
@@ -3294,28 +3418,37 @@ def tool_remote_run(arguments: dict) -> str:
         bench_filter = arguments.get("filter")
         debug_report = parse_bool("debug_report",
                                   arguments.get("debug_report", False))
-        mode_details = MODES[mode]
-        if (bench_filter or debug_report) and not mode_details.is_bench_mode:
-            return (f"`filter`/`debug_report` are only valid for bench modes "
-                    f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
-        filter_args, ferr = _filter_to_cli_args(bench_filter)
-        if ferr is not None:
-            return f"Invalid filter: {ferr}"
-        if debug_report and not filter_args:
-            return ("`debug_report` requires a non-empty `filter` — debug is for "
-                    "targeted runs, not for instrumenting an entire benchmark sweep.")
-        bench_flags = list(filter_args)
-        if debug_report:
-            bench_flags.append("--debug")
+        bench_flags: list[str] = []
+        test_flags: list[str] = []
+        if mode == "unit+integration":
+            if "debug_report" in arguments or debug_report:
+                return ("`debug_report` is bench-only and is not accepted for "
+                        "unit+integration runs.")
+            test_flags, ferr = _unit_test_filter_to_cli_args(bench_filter)
+            if ferr is not None:
+                return f"Invalid unit+integration filter: {ferr}"
+        else:
+            filter_args, ferr = _filter_to_cli_args(bench_filter)
+            if ferr is not None:
+                return f"Invalid filter: {ferr}"
+            if debug_report and not filter_args:
+                return ("`debug_report` requires a non-empty `filter` — debug is for "
+                        "targeted runs, not for instrumenting an entire benchmark sweep.")
+            bench_flags = list(filter_args)
+            if debug_report:
+                bench_flags.append("--debug")
         payload = {"operation": "build", "mode": mode, "build_only": build_only,
                    "debug": debug, "branch": branch, "sync": sync,
                    "auto_provision": auto_provision,
                    "from_scratch": from_scratch,
-                   "bench_flags": bench_flags, "preset": preset}
+                   "bench_flags": bench_flags,
+                   "focused_test_args": test_flags, "preset": preset}
         label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
                  f"(branch={branch}, preset={preset}, from_scratch={from_scratch})")
         if bench_flags:
             label += f" bench_flags={' '.join(bench_flags)}"
+        if test_flags:
+            label += f" focused_test_args={shlex.join(test_flags)}"
     elif operation == "inspect":
         function_name = arguments.get("function_name")
         if not isinstance(function_name, str) or not function_name:
@@ -3372,6 +3505,10 @@ TOOL_DEFINITIONS = [
             f"The two build trees are kept on separate disk paths so "
             f"toggling `debug` does not invalidate the other tree's ninja "
             f"graph — switching is cheap once both have been populated once."
+            f"\n\nFocused tests: for mode=unit+integration, pass Catch2 "
+            f"test-spec expressions in filter.tags. They are OR-combined and "
+            f"applied to both test executables; a binary with no matching test "
+            f"is allowed so tags local to one executable work as intended."
             f"\nHard timeout: ~{int(HARD_TIMEOUT_MIN)} min."
         ),
         "inputSchema": {
@@ -3407,14 +3544,17 @@ TOOL_DEFINITIONS = [
                     "type": "object",
                     "additionalProperties": False,
                     "description": (
-                        "Bench-only. Subset selection for bench/bench-fast/bench-io/bench-e2e, "
-                        "translated to the bench binary's repeatable --filter flag. Each present "
-                        "array is an OR-set; the three arrays AND together. Omit an array to leave "
-                        "that axis unconstrained. Values may not contain ',' or '='."
+                        "Mode-dependent subset selection. For unit+integration, only tags is "
+                        "accepted: each value is a Catch2 test-spec expression, the values are "
+                        "OR-combined into one positional argument, and the exact focused args "
+                        "are applied to both test executables. Test specs are bounded and may "
+                        "not begin with '-'. For bench modes, the existing tags/benchmarks/cases "
+                        "arrays map to repeatable --filter flags; arrays are OR-sets and axes "
+                        "AND together. Omit filter entirely for the full test/benchmark sweep."
                     ),
                     "properties": {
                         "tags":       {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
-                                       "description": "Run only benchmarks whose `tags` intersect this set."},
+                                       "description": "Unit mode: Catch2 test-spec expressions. Bench modes: benchmark tag OR-set."},
                         "cases":      {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
                                        "description": "Within selected benchmarks, run only these matrix.over cases (algorithm names)."},
                         "benchmarks": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
@@ -3428,10 +3568,43 @@ TOOL_DEFINITIONS = [
                         "Bench-only. Pass --debug to the bench binary: stream a crash-resilient "
                         "report_debug_<N>.jsonl (one JSON event per case) next to report_<N>.json. "
                         "Requires a non-empty `filter` (debug is for targeted runs). NOTE: this is "
-                        "NOT the build-tree `debug` flag above."
+                        "NOT the build-tree `debug` flag above. Supplying this property, even "
+                        "as false, is rejected for unit+integration mode."
                     )
                 }
             },
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"mode": {"const": "unit+integration"}},
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "not": {"required": ["debug_report"]},
+                        "properties": {
+                            "filter": {
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["benchmarks"]},
+                                        {"required": ["cases"]},
+                                    ]
+                                },
+                                "properties": {
+                                    "tags": {
+                                        "maxItems": _MAX_CATCH2_TEST_SPECS,
+                                        "items": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": _MAX_CATCH2_TEST_SPEC_LENGTH,
+                                            "pattern": "^(?!-)[^\\u0000-\\u001F\\u007F]+$",
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                    },
+                }
+            ],
             "required": ["mode"],
         },
     },
@@ -3442,7 +3615,8 @@ TOOL_DEFINITIONS = [
             "While running, returns current step + predicted finish. After "
             "completion, returns total duration, log file path, and (for "
             "bench modes) the path to the new report_build_<N>.json under "
-            "main/reporting/."
+            "main/reporting/. Focused unit/integration runs also display the "
+            "exact Catch2 args persisted for both executables."
         ),
         "inputSchema": {
             "type": "object",
@@ -3984,7 +4158,8 @@ TOOL_DEFINITIONS += [
             "Two operation shapes (oneOf):\n"
             "  operation='build' — runs one start_build mode (unit+integration, "
             "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
-            "filter/debug_report semantics as the local start_build tool.\n"
+            "filter/debug_report semantics as the local start_build tool, including "
+            "focused Catch2 filter.tags for unit+integration.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
             "same parameters as the local inspect tool.\n\n"
             "IMPORTANT CAVEATS:\n"
@@ -4028,19 +4203,18 @@ TOOL_DEFINITIONS += [
                             "type": "object",
                             "additionalProperties": False,
                             "description": (
-                                "Bench-only. Subset selection for bench/bench-fast/"
-                                "bench-io/bench-e2e, translated to the bench binary's "
-                                "repeatable --filter flag. Each present array is an "
-                                "OR-set; the three arrays AND together. Omit an array "
-                                "to leave that axis unconstrained. Values may not "
-                                "contain ',' or '='."
+                                "Mode-dependent subset selection, identical to local "
+                                "start_build. unit+integration accepts only tags as "
+                                "bounded Catch2 test-spec expressions and applies their "
+                                "OR expression to both test executables. Bench modes keep "
+                                "the tags/benchmarks/cases repeatable --filter behavior."
                             ),
                             "properties": {
                                 "tags": {
                                     "type": "array",
                                     "items": {"type": "string", "minLength": 1},
                                     "minItems": 1,
-                                    "description": "Run only benchmarks whose `tags` intersect this set.",
+                                    "description": "Unit mode: Catch2 test-spec expressions. Bench modes: benchmark tag OR-set.",
                                 },
                                 "cases": {
                                     "type": "array",
@@ -4062,11 +4236,44 @@ TOOL_DEFINITIONS += [
                             "description": (
                                 "Bench-only. Pass --debug to the bench binary and "
                                 "stream report_debug_<N>.jsonl next to report_<N>.json. "
-                                "Requires a non-empty filter."
+                                "Requires a non-empty filter. Supplying this property is "
+                                "rejected for unit+integration mode."
                             ),
                         },
                         **_REMOTE_RUN_COMMON_PROPS,
                     },
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {"mode": {"const": "unit+integration"}},
+                                "required": ["mode"],
+                            },
+                            "then": {
+                                "not": {"required": ["debug_report"]},
+                                "properties": {
+                                    "filter": {
+                                        "not": {
+                                            "anyOf": [
+                                                {"required": ["benchmarks"]},
+                                                {"required": ["cases"]},
+                                            ]
+                                        },
+                                        "properties": {
+                                            "tags": {
+                                                "maxItems": _MAX_CATCH2_TEST_SPECS,
+                                                "items": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": _MAX_CATCH2_TEST_SPEC_LENGTH,
+                                                    "pattern": "^(?!-)[^\\u0000-\\u001F\\u007F]+$",
+                                                },
+                                            }
+                                        },
+                                    }
+                                },
+                            },
+                        }
+                    ],
                 },
                 {
                     "title": "inspect",
@@ -4345,7 +4552,9 @@ def _handle_tools_call(params: dict) -> dict:
         bench_filter = args.get("filter")                       # dict | None
         debug_report: bool = parse_bool("debug_report", args.get("debug_report", False))
         text = tool_start_build(mode, build_only=build_only, debug=debug,
-                                bench_filter=bench_filter, debug_report=debug_report)
+                                bench_filter=bench_filter,
+                                debug_report=debug_report,
+                                debug_report_supplied="debug_report" in args)
     elif name == "status":
         mode = args.get("mode", "")
         text = tool_status(mode)
@@ -4502,6 +4711,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--test-flags",
+        default="[]",
+        metavar="JSON",
+        help=(
+            "(internal) JSON array of already-validated Catch2 argv tokens "
+            "appended to both unit and integration test executables (for "
+            "example [\"--allow-running-no-tests\",\"[index],[postgres]\"]). "
+            "unit+integration mode only."
+        ),
+    )
+    parser.add_argument(
         "--run-subagent",
         action="store_true",
         default=False,
@@ -4522,11 +4742,15 @@ def main() -> int:
             bench_flags = json.loads(args.bench_flags)
             if not isinstance(bench_flags, list) or not all(isinstance(x, str) for x in bench_flags):
                 raise ValueError("must be a JSON array of strings")
+            test_flags = json.loads(args.test_flags)
+            if not isinstance(test_flags, list) or not all(isinstance(x, str) for x in test_flags):
+                raise ValueError("--test-flags must be a JSON array of strings")
         except (ValueError, json.JSONDecodeError) as e:
-            _log(f"--bench-flags invalid: {e}")
+            _log(f"runtime flags invalid: {e}")
             return 2
         return _run_build_worker(args.run_build, build_only=build_only,
-                                 debug=debug, bench_flags=bench_flags)
+                                 debug=debug, bench_flags=bench_flags,
+                                 test_flags=test_flags)
     if args.run_build_sync is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)
@@ -4534,11 +4758,15 @@ def main() -> int:
             bench_flags = json.loads(args.bench_flags)
             if not isinstance(bench_flags, list) or not all(isinstance(x, str) for x in bench_flags):
                 raise ValueError("must be a JSON array of strings")
+            test_flags = json.loads(args.test_flags)
+            if not isinstance(test_flags, list) or not all(isinstance(x, str) for x in test_flags):
+                raise ValueError("--test-flags must be a JSON array of strings")
         except (ValueError, json.JSONDecodeError) as e:
-            _log(f"--bench-flags invalid: {e}")
+            _log(f"runtime flags invalid: {e}")
             return 2
         return _run_build_inline(args.run_build_sync, build_only=build_only,
-                                 debug=debug, bench_flags=bench_flags)
+                                 debug=debug, bench_flags=bench_flags,
+                                 test_flags=test_flags)
     if args.run_inspect is not None:
         try:
             inspect_args = json.loads(args.run_inspect)

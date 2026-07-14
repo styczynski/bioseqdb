@@ -159,6 +159,12 @@ public:
     return query_rows(ctx, "SELECT * FROM bioseq.last_alignment_execution_stats();");
 }
 
+[[nodiscard]] rowset_t last_alignment_stats_v2(
+        const connection_test_context& ctx) {
+    return query_rows(
+        ctx, "SELECT * FROM bioseq.last_alignment_execution_stats_v2();");
+}
+
 [[nodiscard]] long long stats_i64(
         const row_t& row,
         const std::size_t column) {
@@ -215,7 +221,29 @@ void require_no_current_compatible_persisted_index(
         seq_typmod{.alphabet = "dna4", .width = 32});
 }
 
-void seed_batch_join_target(connection_test_context& ctx) {
+[[nodiscard]] std::string batch_join_wide_target_sequence() {
+    /* A reproducible high-entropy target large enough to produce several
+     * 256-KiB Format-4 directory partitions.  Repeating the small hoe fixture
+     * would make the prefix minimizer recur in every partition and therefore
+     * exercise the full route instead of selective loading. */
+    constexpr std::size_t target_bp = 512u * 1024u;
+    constexpr std::string_view bases = "ACGT";
+    std::string sequence(target_bp, 'A');
+    std::uint64_t state = 0x6a09e667f3bcc909ull;
+    for (char& base : sequence) {
+        state = state * 6364136223846793005ull
+            + 1442695040888963407ull;
+        base = bases[static_cast<std::size_t>(state >> 62u)];
+    }
+    return sequence;
+}
+
+void seed_batch_join_target(
+        connection_test_context& ctx,
+        std::string_view target_sequence = {}) {
+    const std::string target = target_sequence.empty()
+        ? hoe_seed_rows().front().sequences.front()
+        : std::string{target_sequence};
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -226,7 +254,7 @@ void seed_batch_join_target(connection_test_context& ctx) {
         },
         {seq_row{
             .pk = 1,
-            .sequences = {hoe_seed_rows().front().sequences.front()},
+            .sequences = {target},
         }});
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
@@ -269,6 +297,22 @@ void load_batch_join_queries(
         kBatchJoinQueries,
         query_expression,
         count - 1);
+}
+
+void load_batch_join_query(
+        const connection_test_context& ctx,
+        std::string_view sequence) {
+    exec_sqlf(
+        ctx,
+        "CREATE TEMP TABLE {} "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 32));",
+        kBatchJoinQueries);
+    exec_sqlf(
+        ctx,
+        "INSERT INTO {} VALUES (0, {});",
+        kBatchJoinQueries,
+        format_literal(
+            sequence, seq_typmod{.alphabet = "dna4", .width = 32}));
 }
 
 [[nodiscard]] std::string batch_join_sql(
@@ -443,8 +487,10 @@ TEST_CASE("alignment execution SRF is empty before the first published root",
           "[mmsearch][pipeline-stats][statement][srf]") {
     connection_test_context ctx;
     REQUIRE(last_alignment_stats(ctx).empty());
+    REQUIRE(last_alignment_stats_v2(ctx).empty());
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(last_alignment_stats(ctx).empty());
+    REQUIRE(last_alignment_stats_v2(ctx).empty());
 }
 
 TEST_CASE("alignment execution SRF publishes one exact stage row set",
@@ -499,6 +545,98 @@ TEST_CASE("alignment execution SRF publishes one exact stage row set",
         for (std::size_t gpu_column = 4; gpu_column <= 10; ++gpu_column) {
             REQUIRE_FALSE(row[gpu_column].has_value());
         }
+    }
+}
+
+TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proof",
+          "[mmsearch][pipeline-stats][statement][srf][v2][doc0372]") {
+    auto ctx = fresh_context({kBatchJoinTarget});
+    seed_batch_join_target(ctx);
+    load_batch_join_queries(ctx, 2);
+    require_batch_join_aligned_query_rows(
+        ctx,
+        batch_join_sql(1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
+        2,
+        "t");
+
+    const rowset_t v1 = last_alignment_stats(ctx);
+    const rowset_t v2 = last_alignment_stats_v2(ctx);
+    REQUIRE(v1.size() == 20u);
+    REQUIRE(v2.size() == 20u);
+    for (std::size_t stage = 0; stage < v1.size(); ++stage) {
+        REQUIRE(v1[stage].size() == 150u);
+        REQUIRE(v2[stage].size() == 151u);
+        REQUIRE(std::equal(v1[stage].begin(), v1[stage].end(),
+            v2[stage].begin()));
+        REQUIRE(v2[stage][150] == v2.front()[150]);
+    }
+    /* Reading either version is observational: no new executor root is
+     * published, and repeated v2 reads return the same immutable snapshot. */
+    REQUIRE(last_alignment_stats_v2(ctx) == v2);
+
+    const row_t schema = query_one(ctx,
+        "WITH s AS ("
+        " SELECT cold_index_preparation AS cold, simd_execution_evidence AS simd"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(simd)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(simd))=13, "
+        "simd ?& ARRAY["
+        " 'schema','version','requested_policy','observed_policy',"
+        " 'nthash_vector_batches',"
+        " 'nthash_resident_vector_stream_kernel_calls',"
+        " 'simd_chaining_exact_policy_calls',"
+        " 'simd_chaining_bounded_policy_calls',"
+        " 'simd_chaining_bounded_score_batches',"
+        " 'simd_chaining_bounded_cutoff_stops',"
+        " 'simd_chaining_bounded_candidates_skipped',"
+        " 'simd_chaining_policy_rejections',"
+        " 'simd_chaining_policy_evidence_saturated'], "
+        "simd->>'schema'='bioseq.simd_execution_evidence' "
+        " AND jsonb_typeof(simd->'schema')='string' "
+        " AND (simd->>'version')::bigint=1 "
+        " AND jsonb_typeof(simd->'version')='number', "
+        "simd->>'requested_policy'='bounded_batch_approximate' "
+        " AND simd->>'observed_policy'='bounded_batch_approximate' "
+        " AND jsonb_typeof(simd->'requested_policy')='string' "
+        " AND jsonb_typeof(simd->'observed_policy')='string', "
+        "(simd->>'nthash_vector_batches')::bigint > 0 "
+        " OR (simd->>'nthash_resident_vector_stream_kernel_calls')::bigint > 0, "
+        "(simd->>'simd_chaining_exact_policy_calls')::bigint=0 "
+        " AND (simd->>'simd_chaining_bounded_policy_calls')::bigint>0 "
+        " AND (simd->>'simd_chaining_bounded_score_batches')::bigint>0 "
+        " AND (simd->>'simd_chaining_policy_rejections')::bigint=0 "
+        " AND jsonb_typeof(simd->'simd_chaining_policy_evidence_saturated')="
+        "     'boolean' "
+        " AND NOT (simd->>'simd_chaining_policy_evidence_saturated')::boolean, "
+        "jsonb_typeof(cold)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(cold))=56, "
+        "cold ?& ARRAY["
+        " 'schema','version','timing_semantics','decode_timing_available',"
+        " 'transfer_timing_available','target_relation_reuses',"
+        " 'target_relation_extra_opens','parent_random_reads',"
+        " 'policy_heap_opens','policy_index_opens','source_heap_opens',"
+        " 'source_index_opens','fragment_heap_opens','sidecar_heap_opens',"
+        " 'sidecar_index_opens','policy_schema_validations',"
+        " 'source_schema_validations','sidecar_schema_validations',"
+        " 'lock_acquires','lock_releases','snapshot_registers',"
+        " 'route_empty','route_selective','route_full',"
+        " 'route_candidate_rows','route_full_rows','route_candidate_bytes',"
+        " 'route_full_bytes','route_selective_cost','route_full_cost',"
+        " 'memory_reroutes','payload_bytes_requested',"
+        " 'payload_bytes_delivered','payload_rows_requested',"
+        " 'payload_rows_delivered','payload_rows_scanned',"
+        " 'payload_bytes_scanned','payload_rows_skipped',"
+        " 'heap_tid_adjacent','heap_tid_forward_gap',"
+        " 'heap_tid_backward_jump','extent_crc_bytes','row_crc_bytes',"
+        " 'tuple_form_bytes','policy_ns','source_ns','bind_ns','head_ns',"
+        " 'directory_ns','payload_ns','decode_ns','transfer_ns','close_ns',"
+        " 'shared_blks_hit','shared_blks_read','stats_saturated'] "
+        "FROM s;");
+    REQUIRE(schema.size() == 10u);
+    for (const auto& assertion : schema) {
+        REQUIRE(assertion.value_or("") == "t");
     }
 }
 
@@ -859,9 +997,238 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
 
+TEST_CASE("ordinal-2 BatchJoin executes Format-4 empty and selective cold routes",
+				  "[mmsearch][batch-join][just-index][rev3][grouped32][simd]"
+				  "[cold-route][empty][selective][zero-work-authenticity]") {
+	struct RouteCase {
+		std::string_view name;
+		std::string query;
+		bool empty = false;
+	};
+	const std::string target = batch_join_wide_target_sequence();
+	/* A high-entropy exact interior subsequence is long enough to create multiple
+	 * real anchors and alignment work, while remaining sparse relative to the
+	 * 512-Kibp target.  Route identity and all three SIMD stages are asserted
+	 * from runtime evidence below; length alone is never treated as proof. */
+	constexpr std::size_t selective_query_offset = 193u * 1024u + 17u;
+	constexpr std::size_t selective_query_bp = 48u;
+	REQUIRE(target.size()
+		>= selective_query_offset + selective_query_bp);
+	const std::array<RouteCase, 2> routes{{
+		RouteCase{
+			.name = "empty query union",
+			.query = std::string(14u, 'A'),
+			.empty = true,
+		},
+		RouteCase{
+			.name = "long sparse high-entropy selective intersection",
+			.query = target.substr(
+				selective_query_offset, selective_query_bp),
+			.empty = false,
+		},
+	}};
+
+	for (const std::string_view index_name : {
+			std::string_view{"minimizers_per_fragment"},
+			std::string_view{"minimizers_per_sequence"}}) {
+		DYNAMIC_SECTION(index_name) {
+			auto ctx = fresh_context({kBatchJoinTarget});
+			seed_batch_join_target(ctx, target);
+			exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
+			exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+			exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+			exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+			/* The runtime capability gate alone is not a GPU request. */
+			exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
+			const auto rowno = static_cast<std::uint64_t>(query_scalar_int(
+				ctx,
+				fmt::format(
+					"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+					"FROM {} ORDER BY pk LIMIT 1;",
+					kBatchJoinTarget, kBatchJoinTarget)));
+			if (index_name == "minimizers_per_sequence") {
+				exec_sqlf(ctx,
+					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+					kBatchJoinTarget, index_name);
+			}
+			const row_t publication = query_one(ctx, fmt::format(
+				"SELECT * FROM bioseq_internal.rev3_test_build_ready_{}_generation("
+				"'{}'::regclass, '{}', {}, 'exact_simd');",
+				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
+				kBatchJoinTarget, index_name, rowno));
+			REQUIRE(publication.size() > 25u);
+			REQUIRE(publication[8].value_or("") == "t");
+			REQUIRE(publication[9].value_or("") == "t");
+			REQUIRE(std::stoull(publication[14].value()) == target.size());
+			REQUIRE(std::stoull(publication[24].value()) > 10u);
+
+			for (const RouteCase& route : routes) {
+				INFO(fmt::format(
+					"route={} query_bp={}", route.name, route.query.size()));
+				exec_sqlf(ctx, "DROP TABLE IF EXISTS {};", kBatchJoinQueries);
+				load_batch_join_query(ctx, route.query);
+				const rowset_t aligned = query_rows(
+					ctx,
+					batch_join_sql(
+						2, "q.id, bioseq.has_cigar(t.pk) AS has_cigar")
+						+ ";");
+				if (route.empty) {
+					REQUIRE(aligned.empty());
+				} else {
+					REQUIRE(aligned.size() == 1u);
+					REQUIRE(aligned.front().size() == 2u);
+					REQUIRE(aligned.front()[0].value_or("") == "0");
+					REQUIRE(aligned.front()[1].value_or("") == "t");
+				}
+				const auto stage_stats = last_alignment_stats(ctx);
+				REQUIRE(stage_stats.size() == 20u);
+				const row_t proof = query_one(ctx,
+					"SELECT requested_backend, actual_backend, "
+					"requested_target_index_source, actual_target_index_source, "
+					"persisted_generation_id::text, backend_fallbacks::text, "
+					"recomputed_target_index_rows::text, "
+					"persisted_hash_build_calls::text, "
+					"persisted_generation_read_sessions::text, "
+					"persisted_relation_opens::text, persisted_index_scans::text, "
+					"persisted_bulk_read_calls::text, "
+					"persisted_planned_request_groups::text, "
+					"persisted_executed_request_groups::text, "
+					"persisted_range_scan_calls::text, "
+					"cold_index_preparation->>'route_empty', "
+					"cold_index_preparation->>'route_selective', "
+					"cold_index_preparation->>'route_full', "
+					"cold_index_preparation->>'route_candidate_rows', "
+					"cold_index_preparation->>'route_full_rows', "
+					"cold_index_preparation->>'route_candidate_bytes', "
+					"cold_index_preparation->>'route_full_bytes', "
+					"cold_index_preparation->>'route_selective_cost', "
+					"cold_index_preparation->>'route_full_cost', "
+					"cold_index_preparation->>'payload_rows_requested', "
+					"cold_index_preparation->>'payload_bytes_requested', "
+					"NOT (cold_index_preparation->>'stats_saturated')::boolean, "
+					"cold_index_preparation->>'memory_reroutes', "
+					"executed_scalar_cpu_jobs::text, "
+					"executed_simd_cpu_jobs::text, "
+					"executed_vulkan_gpu_jobs::text, fallback_jobs::text "
+					"FROM bioseq.last_alignment_execution_stats() "
+					"WHERE stage='query_sketch';");
+				REQUIRE(proof.size() == 32u);
+				for (const auto& field : proof) REQUIRE(field.has_value());
+				const auto number = [&proof](std::size_t field) {
+					return std::stoll(proof[field].value());
+				};
+				REQUIRE(proof[0].value() == "simd_cpu");
+				INFO(fmt::format(
+					"requested_backend={} actual_backend={} empty={} "
+					"route_bits={}/{}/{} query_simd={} chain_score_simd={} "
+					"chain_backtrack_simd={}",
+					proof[0].value(), proof[1].value(), route.empty,
+					proof[15].value(), proof[16].value(), proof[17].value(),
+					stats_i64(stage_stats[0], 27),
+					stats_i64(stage_stats[7], 27),
+					stats_i64(stage_stats[8], 27)));
+				/* The 14-bp query has no complete k=15 minimizer and therefore
+				 * executes no biological backend. Keep the requested SIMD intent,
+				 * but do not manufacture a SIMD execution claim from configuration.
+				 * The selective route below still requires real SIMD evidence. */
+				REQUIRE(proof[1].value()
+					== (route.empty ? "mixed_invalid" : "simd_cpu"));
+				REQUIRE(proof[2].value() == "persisted");
+				REQUIRE(proof[3].value() == "persisted");
+				REQUIRE(number(4) > 0);
+				for (const std::size_t zero : {5u, 6u, 7u, 27u}) {
+					REQUIRE(number(zero) == 0);
+				}
+				REQUIRE(number(8) == 1);
+				REQUIRE(number(9) == 1);
+				REQUIRE(number(11) == 2);
+				REQUIRE(number(12) == number(13));
+				REQUIRE(number(15) + number(16) + number(17) == 1);
+				REQUIRE(number(19) > 0);
+				REQUIRE(number(21) > 0);
+				REQUIRE(proof[26].value() == "t");
+
+				if (route.empty) {
+					for (const std::size_t zero : {28u, 29u, 30u, 31u}) {
+						REQUIRE(number(zero) == 0);
+					}
+					REQUIRE(number(10) == 2);
+					for (const std::size_t zero : {
+							12u, 13u, 14u, 16u, 17u, 18u, 20u, 22u,
+							24u, 25u}) {
+						REQUIRE(number(zero) == 0);
+					}
+					REQUIRE(number(15) == 1);
+				} else {
+					REQUIRE(number(28) == 0);
+					REQUIRE(number(29) > 0);
+					REQUIRE(number(30) == 0);
+					REQUIRE(number(31) == 0);
+					REQUIRE(number(15) == 0);
+					REQUIRE(number(16) == 1);
+					REQUIRE(number(17) == 0);
+					REQUIRE(number(13) > 0);
+					REQUIRE(number(10) == 2 + number(13));
+					REQUIRE(number(14) == number(13));
+					REQUIRE(number(18) > 0);
+					REQUIRE(number(18) < number(19));
+					REQUIRE(number(20) > 0);
+					REQUIRE(number(20) < number(21));
+					REQUIRE(number(22) < number(23));
+					REQUIRE(number(24) > 0);
+					REQUIRE(number(24) <= number(18));
+					REQUIRE(number(25) > 0);
+					REQUIRE(number(25) <= number(20));
+
+					/* The aggregate identity is accepted only after real
+					 * algorithm-local proofs.  Inspect the complete 20-row SRF
+					 * as an independent regression: ntHash, chaining score and
+					 * backtrack all ran SIMD, and at least one Block Aligner
+					 * extension performed nonempty SIMD work. */
+					REQUIRE(stage_stats.front()[16].value_or("") == "simd_cpu");
+					REQUIRE(stage_stats.front()[17].value_or("") == "simd_cpu");
+					REQUIRE(stage_stats.front()[18].value_or("") == "persisted");
+					REQUIRE(stage_stats.front()[19].value_or("") == "persisted");
+					REQUIRE(stats_i64(stage_stats.front(), 94) > 0);
+					REQUIRE(stats_i64(stage_stats.front(), 95) == 0);
+					REQUIRE(stats_i64(stage_stats.front(), 96) == 0);
+					REQUIRE(stats_i64(stage_stats.front(), 98) > 0);
+					REQUIRE(stats_i64(stage_stats.front(), 99) > 0);
+					REQUIRE(stats_i64(stage_stats.front(), 100) == 0);
+					REQUIRE(stats_i64(stage_stats.front(), 101) == 0);
+					for (const std::size_t stage_no : {
+							std::size_t{0}, std::size_t{7}, std::size_t{8}}) {
+						REQUIRE(stats_i64(stage_stats[stage_no], 24) == 1);
+						REQUIRE(stats_i64(stage_stats[stage_no], 25) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 26) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 27) == 1);
+						REQUIRE(stats_i64(stage_stats[stage_no], 28) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 29) == 0);
+					}
+					long long block_simd_executions = 0;
+					for (std::size_t stage_no = 17; stage_no <= 19; ++stage_no) {
+						REQUIRE(stats_i64(stage_stats[stage_no], 25) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 26) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 27)
+							== stats_i64(stage_stats[stage_no], 24));
+						REQUIRE(stats_i64(stage_stats[stage_no], 28) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 29) == 0);
+						block_simd_executions +=
+							stats_i64(stage_stats[stage_no], 27);
+					}
+					INFO(fmt::format(
+						"Block Aligner SIMD extension executions={}",
+						block_simd_executions));
+					REQUIRE(block_simd_executions >= 1);
+				}
+			}
+		}
+	}
+}
+
 TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 			  "[mmsearch][batch-join][just-index][rev3][grouped32][simd]"
-			  "[doc0373][p1][one-open]") {
+			  "[doc0373][p1][one-open][cold-route][full]") {
 	for (const std::string_view index_name : {
 			std::string_view{"minimizers_per_fragment"},
 			std::string_view{"minimizers_per_sequence"}}) {
@@ -952,7 +1319,8 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"WITH stats AS ("
 				" SELECT cold_index_preparation AS cold,"
 				" persisted_head_scans, persisted_manifest_directory_scans,"
-				" persisted_range_scan_calls, persisted_toast_values_read,"
+				" persisted_range_scan_calls, persisted_bulk_read_calls,"
+				" persisted_toast_values_read,"
 				" persisted_detoast_bytes, stats_saturated AS scalar_saturated"
 				" FROM bioseq.last_alignment_execution_stats()"
 				" WHERE stage='query_sketch'"
@@ -1032,12 +1400,18 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"(cold->>'route_empty')::bigint = 0 "
 				" AND (cold->>'route_selective')::bigint = 0 "
 				" AND (cold->>'route_full')::bigint = 1, "
-				"(cold->>'route_candidate_rows')::bigint = 0 "
-				" AND (cold->>'route_candidate_bytes')::bigint = 0, "
+				"(cold->>'route_candidate_rows')::bigint > 0 "
+				" AND (cold->>'route_candidate_rows')::bigint "
+				" <= (cold->>'route_full_rows')::bigint "
+				" AND (cold->>'route_candidate_bytes')::bigint > 0 "
+				" AND (cold->>'route_candidate_bytes')::bigint "
+				" <= (cold->>'route_full_bytes')::bigint, "
 				"(cold->>'route_full_rows')::bigint > 0 "
 				" AND (cold->>'route_full_bytes')::bigint > 0 "
 				" AND (cold->>'route_full_cost')::bigint "
-				" > (cold->>'route_full_rows')::bigint, "
+				" > (cold->>'route_full_rows')::bigint "
+				" AND (cold->>'route_selective_cost')::bigint "
+				" >= (cold->>'route_full_cost')::bigint, "
 				"(cold->>'memory_reroutes')::bigint = 0, "
 				"(cold->>'payload_bytes_requested')::bigint "
 				" = (cold->>'payload_bytes_delivered')::bigint "
@@ -1073,6 +1447,7 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"AND persisted_head_scans = 1 "
 				"AND persisted_manifest_directory_scans = 1 "
 				"AND persisted_range_scan_calls = 1 "
+				"AND persisted_bulk_read_calls = 1 "
 				"AND persisted_toast_values_read = 0 "
 				"AND persisted_detoast_bytes = 0 "
 				"AND (cold->>'stats_saturated')::boolean = scalar_saturated "

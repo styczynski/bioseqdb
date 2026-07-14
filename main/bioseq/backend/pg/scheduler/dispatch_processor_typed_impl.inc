@@ -532,6 +532,50 @@ backend_from_selected_params(const Minimap2Params& params) noexcept {
     return ::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid;
 }
 
+[[nodiscard]] inline ::bioseq::pipeline_stats::SimdChainingPolicyIdentity
+requested_simd_chaining_policy_identity(
+        const Minimap2Params& params) noexcept {
+    using Identity =
+        ::bioseq::pipeline_stats::SimdChainingPolicyIdentity;
+    if (params.chaining_algorithm != ChainingAlgorithmType::SIMD_MM2) {
+        return Identity::none;
+    }
+    switch (params.simd_chaining_policy) {
+        case SimdChainingPolicy::exact_visited:
+            return Identity::exact_visited;
+        case SimdChainingPolicy::bounded_batch_approximate:
+            return Identity::bounded_batch_approximate;
+    }
+    return Identity::mixed_invalid;
+}
+
+[[nodiscard]] inline ::bioseq::pipeline_stats::SimdChainingPolicyIdentity
+observed_simd_chaining_policy_identity(
+        const MatchResultCollection* execution_proof) noexcept {
+    using Identity =
+        ::bioseq::pipeline_stats::SimdChainingPolicyIdentity;
+    if (execution_proof == nullptr
+        || !execution_proof->simd_chaining_execution_proof_present) {
+        return Identity::none;
+    }
+    const auto& policy =
+        execution_proof->simd_chaining_execution_proof.policy;
+    // Identity answers only which named policy emitted operation calls.
+    // Rejections, saturation, forbidden scalar work, and missing vector work
+    // are retained as separate fail-closed evidence below; folding them into
+    // identity would mislabel a rejected exact (or bounded) execution as a
+    // mixed-policy execution and hide the actual reason for rejection.
+    const bool exact = policy.exact_visited_calls != 0;
+    const bool bounded = policy.bounded_batch_approximate_calls != 0;
+    if (exact == bounded) {
+        // Neither identity, or an impossible proof accepting both identities,
+        // is not a policy absence. Preserve it as mixed-invalid evidence.
+        return Identity::mixed_invalid;
+    }
+    return exact ? Identity::exact_visited
+                 : Identity::bounded_batch_approximate;
+}
+
 inline void add_operational_counter(
         ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         std::uint64_t& destination,
@@ -564,6 +608,10 @@ inline void record_unattested_job(
         bool& cached_query_minimizer_proof_operation_accounted) noexcept {
     ::bioseq::pipeline_stats::PipelineJobExecutionStats job{};
     job.requested_backend = backend_from_selected_params(params);
+    job.requested_simd_chaining_policy =
+        requested_simd_chaining_policy_identity(params);
+    job.observed_simd_chaining_policy =
+        observed_simd_chaining_policy_identity(execution_proof);
     const bool selected_all_simd =
         job.requested_backend
             == ::bioseq::pipeline_stats::ExecutedBackend::simd_cpu;
@@ -585,6 +633,52 @@ inline void record_unattested_job(
         && execution_proof->all_scalar_execution_accepted(
             require_target_sketch,
             /*require_alignment=*/params.do_cigar);
+    if (execution_proof != nullptr
+        && execution_proof->simd_chaining_execution_proof_present) {
+        const auto& policy =
+            execution_proof->simd_chaining_execution_proof.policy;
+        add_operational_counter(
+            stats,
+            stats.operational.simd_chaining_exact_policy_calls,
+            policy.exact_visited_calls);
+        add_operational_counter(
+            stats,
+            stats.operational.simd_chaining_bounded_policy_calls,
+            policy.bounded_batch_approximate_calls);
+        add_operational_counter(
+            stats,
+            stats.operational.simd_chaining_bounded_score_batches,
+            policy.bounded_score_batches);
+        add_operational_counter(
+            stats,
+            stats.operational.simd_chaining_bounded_cutoff_stops,
+            policy.bounded_cutoff_stops);
+        add_operational_counter(
+            stats,
+            stats.operational.simd_chaining_bounded_candidates_skipped,
+            policy.bounded_candidates_skipped);
+        add_operational_counter(
+            stats,
+            stats.operational.simd_chaining_policy_rejections,
+            policy.policy_rejections);
+        stats.operational.simd_chaining_policy_evidence_saturated =
+            stats.operational.simd_chaining_policy_evidence_saturated
+            || policy.saturated;
+    }
+    const auto record_exact_nthash_vector_activity = [&stats](
+            const auto& proof) noexcept {
+        // Continuation batches and whole-range resident vector_stream calls
+        // remain separate evidence. A resident call is authentic vector work,
+        // but it is not one continuation batch.
+        add_operational_counter(
+            stats,
+            stats.operational.nthash_vector_batches,
+            proof.vector_batches);
+        add_operational_counter(
+            stats,
+            stats.operational.nthash_resident_vector_stream_kernel_calls,
+            proof.resident_vector_stream_kernel_calls);
+    };
     // A broadcast persisted-query sketch is one physical operation shared by
     // logical jobs. Account it at its first proof-valid consumer even when
     // that job later has no chain/alignment; downstream route attestation is
@@ -606,11 +700,8 @@ inline void record_unattested_job(
     if (accepted_shared_query_sketch) {
         if (params.minimizer_algorithm
                 == MinimizerAlgorithmType::TWO_STACK_NTHASH) {
-            add_operational_counter(
-                stats,
-                stats.operational.nthash_vector_batches,
-                execution_proof->exact_simd_query_execution_proof
-                    .vector_batches);
+            record_exact_nthash_vector_activity(
+                execution_proof->exact_simd_query_execution_proof);
         } else if (params.minimizer_algorithm
                     == MinimizerAlgorithmType::PAPER_NTHASH_SIMD) {
             add_operational_counter(
@@ -713,15 +804,12 @@ inline void record_unattested_job(
             && params.minimizer_algorithm
                 == MinimizerAlgorithmType::TWO_STACK_NTHASH) {
             if (!consumed_shared_cached_query_proof) {
-                add_operational_counter(
-                    stats, stats.operational.nthash_vector_batches,
-                    execution_proof->exact_simd_query_execution_proof
-                        .vector_batches);
+                record_exact_nthash_vector_activity(
+                    execution_proof->exact_simd_query_execution_proof);
             }
             if (execution_proof->exact_simd_target_execution_proof_present) {
-                add_operational_counter(
-                    stats, stats.operational.nthash_vector_batches,
-                    execution_proof->exact_simd_target_execution_proof.vector_batches);
+                record_exact_nthash_vector_activity(
+                    execution_proof->exact_simd_target_execution_proof);
             }
         } else if (accepted_all_simd
                    && params.minimizer_algorithm

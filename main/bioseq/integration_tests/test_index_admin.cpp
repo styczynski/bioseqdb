@@ -1159,6 +1159,76 @@ TEST_CASE("DOC0371 READY inspection rejects legacy schema in read-only mode and 
     REQUIRE(query_scalar_int(ctx, "SELECT pg_backend_pid();") == backend_pid);
 }
 
+TEST_CASE("DOC0373 normal generation ensure is non-destructive and OID stable",
+          "[index_admin][doc0373][generation-storage][schema][oid]") {
+    constexpr std::string_view table = "doc0373_generation_ensure";
+    auto ctx = fresh_context({table});
+    exec_sqlf(ctx,
+        "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        table);
+    exec_sqlf(ctx,
+        "INSERT INTO {} VALUES "
+        "(1, repeat('ACGT', 2048)::bioseq.seq('dna4', 64));",
+        table);
+    exec_sqlf(ctx,
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');",
+        table);
+    const auto rowno = only_column_row_number(ctx, table);
+
+    const auto legacy = query_one(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "'{}'::regclass, 'minimizers_per_fragment', {}, "
+        "'warm_legacy_residency');",
+        table, rowno));
+    REQUIRE(legacy.size() == 7);
+    const long long legacy_oid = std::stoll(legacy[0].value());
+    const auto legacy_error = sql_error(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "'{}'::regclass, 'minimizers_per_fragment', {}, "
+        "'ensure_generation_without_clear');",
+        table, rowno));
+    REQUIRE(legacy_error.sqlstate == "55000");
+    REQUIRE(legacy_error.contains("explicit clear/reset"));
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM pg_class WHERE oid={}::oid;",
+        legacy_oid)) == 1);
+
+    const auto built = query_one(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "'{}'::regclass, 'minimizers_per_fragment', {}, "
+        "15::smallint, 10::smallint, 3::smallint);",
+        table, rowno));
+    const std::string sidecar = built[0].value();
+    const long long exact_oid = query_scalar_int(ctx, fmt::format(
+        "SELECT 'bioseq_internal.{}'::regclass::oid::bigint;",
+        sidecar));
+    const auto reused = query_one(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "'{}'::regclass, 'minimizers_per_fragment', {}, "
+        "'ensure_generation');",
+        table, rowno));
+    REQUIRE(reused.size() == 7);
+    REQUIRE(std::stoll(reused[0].value()) == exact_oid);
+    REQUIRE(std::stoll(reused[1].value()) == exact_oid);
+    REQUIRE(std::stoll(reused[2].value()) == exact_oid);
+
+    exec_sqlf(ctx,
+        "ALTER TABLE bioseq_internal.{} SET (fillfactor=99);",
+        sidecar);
+    const auto malformed_error = sql_error(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "'{}'::regclass, 'minimizers_per_fragment', {}, "
+        "'ensure_generation_without_clear');",
+        table, rowno));
+    REQUIRE(malformed_error.sqlstate == "55000");
+    REQUIRE(malformed_error.contains("explicit clear/reset"));
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT 'bioseq_internal.{}'::regclass::oid::bigint;",
+        sidecar)) == exact_oid);
+    exec_sqlf(ctx, "DROP TABLE bioseq_internal.{};", sidecar);
+}
+
 TEST_CASE("DOC0371 generation storage rebinds one handle after speculative reset rollback",
           "[index_admin][doc0371][generation-storage][savepoint][oid]") {
     constexpr std::string_view table = "doc0371_generation_savepoint";
@@ -2203,7 +2273,8 @@ TEST_CASE("DOC0371 bridged PostgreSQL build and publication leaves preserve READ
 }
 
 TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical storage",
-          "[index_admin][doc0371][rev3][rev4][fixture][writer][reader]") {
+          "[index_admin][doc0371][rev3][rev4][fixture][writer][reader]"
+          "[selective-telemetry]") {
     auto ctx = fresh_context({"doc0371_rev3_live"});
     exec_sql(ctx,
         "CREATE TABLE doc0371_rev3_live "
@@ -2230,6 +2301,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
     for (std::size_t format_index = 0;
          format_index < wire_formats.size(); ++format_index) {
         const std::int16_t wire_format = wire_formats[format_index];
+        INFO(fmt::format("selective telemetry wire_format={}", wire_format));
         FormatObservation& sample = observed[format_index];
         sample.build = query_one(ctx, fmt::format(
             "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
@@ -2279,6 +2351,13 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
                 "'minimizers_per_fragment', {}, 15::smallint, "
                 "10::smallint, {}::smallint);",
                 rowno, wire_format));
+            REQUIRE(sample.read.size() == 36);
+            INFO(fmt::format(
+                "cold telemetry wire_format={} directory_entries={} proof={}",
+                wire_format, sample.build[14].value_or("NULL"),
+                sample.read[35].value_or("NULL")));
+            const bool expected_full_probe =
+                std::stoull(sample.build[14].value()) == 1u;
             const row_t selective_proof = query_one(reader, fmt::format(
                 "WITH fixture AS (SELECT "
                 "selective_cold_index_preparation AS cold FROM "
@@ -2316,19 +2395,19 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
                 "'decode_ns','transfer_ns','stats_saturated') AND "
                 "jsonb_typeof(entry.value)<>'number'), "
                 "(cold->>'route_empty')::bigint=0 AND "
-                "(cold->>'route_selective')::bigint=1 AND "
-                "(cold->>'route_full')::bigint=0, "
+                "(cold->>'route_selective')::bigint={} AND "
+                "(cold->>'route_full')::bigint={}, "
                 "(cold->>'payload_rows_requested')::bigint="
                 "(cold->>'payload_rows_delivered')::bigint AND "
                 "(cold->>'payload_rows_delivered')::bigint>0, "
                 "(cold->>'payload_rows_scanned')::bigint="
                 "(cold->>'payload_rows_delivered')::bigint+"
                 "(cold->>'payload_rows_skipped')::bigint AND "
-                "(cold->>'payload_rows_skipped')::bigint>0, "
+                "(cold->>'payload_rows_skipped')::bigint=0, "
                 "(cold->>'payload_bytes_requested')::bigint="
                 "(cold->>'payload_bytes_delivered')::bigint AND "
                 "(cold->>'payload_bytes_delivered')::bigint>0 AND "
-                "(cold->>'payload_bytes_scanned')::bigint>"
+                "(cold->>'payload_bytes_scanned')::bigint>="
                 "(cold->>'payload_bytes_delivered')::bigint, "
                 "(cold->>'heap_tid_adjacent')::bigint+"
                 "(cold->>'heap_tid_forward_gap')::bigint+"
@@ -2339,13 +2418,14 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
                 "(cold->>'extent_crc_bytes')::bigint="
                 "(cold->>'payload_bytes_delivered')::bigint, "
                 "(cold->>'payload_ns')::bigint>=0 FROM fixture;",
-                rowno, wire_format));
+                rowno, wire_format,
+                expected_full_probe ? 0 : 1,
+                expected_full_probe ? 1 : 0));
             REQUIRE(selective_proof.size() == 18);
             for (const auto& assertion : selective_proof) {
                 REQUIRE(assertion.value_or("") == "t");
             }
         }
-        REQUIRE(sample.read.size() == 36);
         for (std::size_t identity_column = 0;
              identity_column <= 8; ++identity_column) {
             REQUIRE(sample.read[identity_column] ==
@@ -2401,14 +2481,41 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
             "i.indisunique AND i.indimmediate AND i.indisvalid AND "
             "i.indisready AND i.indislive AND i.indpred IS NULL AND "
             "i.indexprs IS NULL)::text, max(i.indkey::text), "
-            "max(am.amname) FROM pg_index i JOIN pg_class ic "
+            "max(am.amname), bool_and(hc.relpersistence='u' AND "
+            "ic.relpersistence='u' AND "
+            "hc.reltablespace=ic.reltablespace AND "
+            "hc.reltablespace=sc.reltablespace)::text, "
+            "bool_and(coalesce(hc.reloptions,'{{}}'::text[]) "
+            "@> ARRAY['fillfactor=100'])::text, "
+            "bool_and(coalesce(ic.reloptions,'{{}}'::text[]) "
+            "@> ARRAY['fillfactor=90'])::text, "
+            "bool_and(i.indnkeyatts=5 AND i.indnatts=5)::text "
+            "FROM pg_index i JOIN pg_class ic "
             "ON ic.oid=i.indexrelid JOIN pg_am am ON am.oid=ic.relam "
+            "JOIN pg_class hc ON hc.oid=i.indrelid "
+            "JOIN pg_class sc ON sc.oid='doc0371_rev3_live'::regclass "
             "WHERE i.indrelid='bioseq_internal.{}'::regclass;",
             sample.sidecar));
+        REQUIRE(index_shape.size() == 8);
         REQUIRE(index_shape[0].value() == "1");
         REQUIRE(index_shape[1].value() == "true");
-        REQUIRE(index_shape[2].value() == "1 2 3 4 5");
+        REQUIRE(index_shape[2].value() == "2 1 4 3 5");
         REQUIRE(index_shape[3].value() == "btree");
+        REQUIRE(index_shape[4].value() == "true");
+        REQUIRE(index_shape[5].value() == "true");
+        REQUIRE(index_shape[6].value() == "true");
+        REQUIRE(index_shape[7].value() == "true");
+        const auto opclasses = query_one(ctx, fmt::format(
+            "SELECT string_agg(opc.opcname,',' ORDER BY keys.ordinality) "
+            "FROM pg_index i CROSS JOIN LATERAL "
+            "unnest(i.indclass::oid[]) WITH ORDINALITY "
+            "AS keys(opclass_oid,ordinality) "
+            "JOIN pg_opclass opc ON opc.oid=keys.opclass_oid "
+            "WHERE i.indrelid='bioseq_internal.{}'::regclass "
+            "AND i.indisprimary;",
+            sample.sidecar));
+        REQUIRE(opclasses[0].value()
+            == "int8_ops,int8_ops,int8_ops,int4_ops,int4_ops");
 
         const auto physical = query_one(ctx, fmt::format(
             "SELECT pg_relation_size(c.oid)::text, "
@@ -2524,7 +2631,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
 }
 
 TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner invocation",
-          "[index_admin][doc0371][rev3][schema][acl][cleanup]") {
+          "[index_admin][doc0371][rev3][schema][acl][cleanup][primary-shape]") {
     auto ctx = fresh_context({"doc0371_rev3_adversarial"});
     exec_sql(ctx,
         "CREATE TABLE doc0371_rev3_adversarial "
@@ -2601,8 +2708,13 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "SELECT * FROM bioseq.inspect_ready_minimizer_generation("
         "'doc0371_rev3_adversarial'::regclass, "
         "'minimizers_per_fragment', {});", rowno));
+    INFO(err.message);
     REQUIRE(err.sqlstate == "55000");
-    REQUIRE(err.contains("partial"));
+    REQUIRE(err.contains("schema mismatch"));
+    /* PG17 does not expose a predicate-bearing primary through the exact
+     * primary-index lookup used by the production one-open binder.  Rejection
+     * therefore occurs deterministically before descriptor inspection. */
+    REQUIRE(err.contains("primary index count"));
     exec_sql(ctx, "ROLLBACK;");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 
@@ -2621,8 +2733,12 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "SELECT * FROM bioseq.inspect_ready_minimizer_generation("
         "'doc0371_rev3_adversarial'::regclass, "
         "'minimizers_per_fragment', {});", rowno));
+    INFO(err.message);
     REQUIRE(err.sqlstate == "55000");
-    REQUIRE(err.contains("expression"));
+    REQUIRE(err.contains("schema mismatch"));
+    /* Unlike the predicate case, PG17 still returns this primary to the exact
+     * binder; descriptor validation then rejects its expression key. */
+    REQUIRE(err.contains("primary index has expressions"));
     exec_sql(ctx, "ROLLBACK;");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 
@@ -2786,7 +2902,8 @@ TEST_CASE("DOC0371 revision-3 read session fails closed and restores backend res
 }
 
 TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopenable format 4",
-          "[index_admin][doc0371][update][rev4][locator][reopen]") {
+          "[index_admin][doc0371][update][rev4][locator][reopen]"
+          "[selective-telemetry]") {
     constexpr std::array<std::pair<std::string_view, std::string_view>, 2>
         cases{{
             {"doc0371_update_ready_mpf", "minimizers_per_fragment"},
@@ -2803,6 +2920,7 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
         "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
 
     for (const auto& [table, index_name] : cases) {
+        INFO(fmt::format("table={} index={}", table, index_name));
         exec_sqlf(ctx,
             "CREATE TABLE {} "
             "(id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
@@ -2841,11 +2959,18 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
         REQUIRE(inspected[7].value() == "65565");
 
         const row_t read = query_one(reopened, fmt::format(
-            "SELECT * FROM bioseq_internal.rev3_test_read_fixture("
+            "SELECT fixture.*, "
+            "fixture.selective_cold_index_preparation->>'route_empty', "
+            "fixture.selective_cold_index_preparation->>'route_selective', "
+            "fixture.selective_cold_index_preparation->>'route_full' "
+            "FROM bioseq_internal.rev3_test_read_fixture("
             "'{}'::regclass, '{}', {}, 15::smallint, 10::smallint, "
-            "4::smallint);",
+            "4::smallint) AS fixture;",
             table, index_name, rowno));
-        REQUIRE(read.size() == 36);
+        REQUIRE(read.size() == 39);
+        INFO(fmt::format(
+            "reopened table={} index={} cold_proof={}",
+            table, index_name, read[35].value_or("NULL")));
         REQUIRE(read[1].value() == "4");
         REQUIRE(std::stoll(read[2].value()) > 0);
         REQUIRE(read[2] == inspected[0]);
@@ -2863,11 +2988,15 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
         REQUIRE(read[32].value() == "0");
         REQUIRE(read[33].value() == "0");
         REQUIRE(read[34].value() == "0");
+        REQUIRE(read[36].value() == "0");
+        REQUIRE(read[37].value() == "0");
+        REQUIRE(read[38].value() == "1");
     }
 }
 
 TEST_CASE("ordinary locator-backed Paper update publishes proof-bound format 4 without fallback",
-          "[index_admin][doc0371][update][rev4][locator][paper][route-proof]") {
+          "[index_admin][doc0371][update][rev4][locator][paper][route-proof]"
+          "[selective-telemetry]") {
     constexpr std::string_view table = "doc0371_update_ready_paper";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -2914,11 +3043,17 @@ TEST_CASE("ordinary locator-backed Paper update publishes proof-bound format 4 w
 		"READY generation minimizer compatibility disagrees"));
 	REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 	const row_t read = query_one(ctx, fmt::format(
-		"SELECT * FROM bioseq_internal.rev3_test_read_fixture("
+		"SELECT fixture.*, "
+        "fixture.selective_cold_index_preparation->>'route_empty', "
+        "fixture.selective_cold_index_preparation->>'route_selective', "
+        "fixture.selective_cold_index_preparation->>'route_full' "
+        "FROM bioseq_internal.rev3_test_read_fixture("
 		"'{}'::regclass,'minimizers_per_fragment',{},15::smallint,"
-		"10::smallint,4::smallint,'paper_nthash_simd');",
+		"10::smallint,4::smallint,'paper_nthash_simd') AS fixture;",
 		table, rowno));
-    REQUIRE(read.size() == 36);
+    REQUIRE(read.size() == 39);
+    INFO(fmt::format(
+        "Paper READY reopen cold_proof={}", read[35].value_or("NULL")));
     REQUIRE(read[2] == inspected[0]);
     REQUIRE(std::stoll(read[13].value()) > 0);
     REQUIRE(std::stoll(read[14].value()) < 65565);
@@ -2927,6 +3062,9 @@ TEST_CASE("ordinary locator-backed Paper update publishes proof-bound format 4 w
     REQUIRE(read[32].value() == "0");
     REQUIRE(read[33].value() == "0");
     REQUIRE(read[34].value() == "0");
+    REQUIRE(read[36].value() == "0");
+    REQUIRE(read[37].value() == "0");
+    REQUIRE(read[38].value() == "1");
 }
 
 TEST_CASE("grouped32 persistence rejects asynchronous and INSERT-time legacy writers",

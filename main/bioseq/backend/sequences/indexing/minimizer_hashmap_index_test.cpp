@@ -3362,6 +3362,46 @@ TEST_CASE("format-4 MPF execution evidence is sealed to one publication identity
     spliced = binding;
     spliced.source_identity ^= 1u;
     REQUIRE_FALSE(execution.publication_accepted(spliced));
+
+    auto mutated = execution;
+    mutated.selected_backend = MinimizerSketchBackend::ExactSimd;
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    /* Scalar and Vulkan intentionally share the legacy minimizer scheme, so
+     * forge every public route field into a structurally accepted Vulkan
+     * claim.  The private operation snapshot must still reject publication. */
+    mutated = execution;
+    mutated.selected_backend = MinimizerSketchBackend::VulkanSegment;
+    mutated.scalar_core_runs = 0u;
+    mutated.vulkan_core_runs = 1u;
+    mutated.vulkan_proof.completed_roundtrips = 1u;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.scalar_core_runs;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.geometry_retry_count;
+    ++mutated.producer_scan_count;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.target_length;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.vulkan_proof.completed_roundtrips;
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    mutated.generation_wire_format =
+        MinimizerGenerationWireFormat::sorted_dense_global64;
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
     require_complete_generation_rows(*encoded, sink.rows);
 }
 
@@ -3413,6 +3453,9 @@ TEST_CASE("inactive format-4 MPS accepts real empty and shorter-than-window spil
             test_grouped32_generation_options(length),
             {},
             &execution);
+        INFO("MPS encode wire_error="
+            << (encoded.has_value()
+                ? 0u : static_cast<unsigned>(encoded.error())));
         REQUIRE(encoded.has_value());
         REQUIRE(execution.accepted());
         REQUIRE(execution.replay_scan_count == 2);
@@ -7782,9 +7825,13 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
         kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 65'534u);
     STATIC_REQUIRE(profile.has_value());
     constexpr auto chunks = [](std::uint64_t bytes) {
+        constexpr std::uint32_t extent_payload_bytes =
+            minimizer_extent_payload_bytes(
+                MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local);
         return static_cast<std::uint32_t>(
-            bytes / kMinimizerExtentPayloadBytes
-            + (bytes % kMinimizerExtentPayloadBytes != 0u ? 1u : 0u));
+            bytes / extent_payload_bytes
+            + (bytes % extent_payload_bytes != 0u ? 1u : 0u));
     };
     constexpr auto make_wide_entry = [chunks](std::uint64_t positions) {
         const auto control_layout = minimizer_shape_v5_control_layout(
@@ -8067,11 +8114,49 @@ TEST_CASE("DOC0373 Format-5 fixed records reject every extension corruption clas
             decode_minimizer_generation_manifest(corrupt),
             MinimizerGenerationWireError::reserved_nonzero);
     }
-    for (const std::size_t offset : {144u, 152u}) {
-        INFO("Format-5 derived bound offset " << offset);
+    {
+        INFO("Format-5 derived hash bound offset 144");
         auto corrupt = good_manifest;
-        corrupt[offset] ^= std::byte{1};
+        corrupt[144] ^= std::byte{1};
         REQUIRE_FALSE(decode_minimizer_generation_manifest(corrupt));
+    }
+    {
+        /* max_occ_cap is a caller-selected compatibility parameter, not a
+         * bound derivable from K/span.  A same-width value remains a valid
+         * standalone manifest but must fail the reader's expected identity. */
+        const auto expected = expected_minimizer_compatibility_for_backend(
+            MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local,
+            MinimizerSketchBackend::Scalar,
+            manifest.alphabet_code,
+            manifest.storage_unit_byte_width,
+            manifest.kmer_size,
+            manifest.window_size,
+            shape->max_occ_cap);
+        REQUIRE(expected.has_value());
+        REQUIRE(validate_minimizer_generation_compatibility(
+            manifest, *expected).has_value());
+        auto changed_cap = good_manifest;
+        changed_cap[152] ^= std::byte{1};
+        const auto decoded = decode_minimizer_generation_manifest(changed_cap);
+        REQUIRE(decoded.has_value());
+        REQUIRE(decoded->shape_v5.has_value());
+        REQUIRE(decoded->shape_v5->max_occ_cap
+            == (shape->max_occ_cap ^ 1u));
+        require_wire_error(
+            validate_minimizer_generation_compatibility(
+                *decoded, *expected),
+            MinimizerGenerationWireError::compatibility_mismatch);
+    }
+    {
+        /* Crossing the u16/u32 count-width boundary while retaining the
+         * encoded u16 shape is intrinsically inconsistent and fails decode. */
+        auto incompatible_cap_width = good_manifest;
+        test_write_le<std::uint64_t>(
+            incompatible_cap_width, 152u, 65'535u);
+        require_wire_error(
+            decode_minimizer_generation_manifest(incompatible_cap_width),
+            MinimizerGenerationWireError::compatibility_mismatch);
     }
 
     constexpr MinimizerBucketDirEntry entry{
@@ -8358,6 +8443,50 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
                 10u),
             MinimizerGenerationWireError::compatibility_mismatch);
     }
+}
+
+TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
+          "[indexing][minimizer-hashmap][wire][v5][chunk-equation]") {
+    using namespace bioseq::indexing;
+    STATIC_REQUIRE(minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat::sorted_dense_global64) == 6144u);
+    STATIC_REQUIRE(minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat::grouped_hash32_segment_local32)
+        == 6144u);
+    STATIC_REQUIRE(minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat::grouped_shape_soa_segment_local)
+        == 8064u);
+
+    constexpr std::uint64_t position_count = 5000u;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
+    minimizers.reserve(position_count);
+    for (std::uint64_t position = 0; position < position_count; ++position) {
+        minimizers.emplace_back(7u, position << 1u);
+    }
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink,
+        test_shape_v5_generation_options(position_count + 1u, 65'534u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest_row.byte_count == 160u);
+    REQUIRE(generation->directory.entries().size() == 1u);
+    const MinimizerBucketDirEntry& entry =
+        generation->directory.entries().front();
+    REQUIRE(entry.position_encoded_bytes == position_count * 2u);
+    REQUIRE(entry.position_chunk_count == 2u);
+    const auto position_sub_key =
+        derive_minimizer_position_extent_sub_key(entry.sub_key);
+    REQUIRE(position_sub_key.has_value());
+    const auto first_position = std::ranges::find_if(
+        sink.rows, [position_sub_key](const CollectedMinimizerRow& row) {
+            return row.address.sub_key == *position_sub_key
+                && row.address.chunk_no == 0u;
+        });
+    REQUIRE(first_position != sink.rows.end());
+    REQUIRE(first_position->bytes.size() == 8064u);
+    REQUIRE(sink.max_callback_bytes == 8064u);
+    require_complete_generation_rows(*generation, sink.rows);
 }
 
 TEST_CASE("DOC0373 Format-5 authenticates global controls then global positions",
@@ -8667,6 +8796,17 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         REQUIRE(mpf_generation.has_value());
         REQUIRE(mpf_producer.scan_count() == 3u);
         const auto mpf_execution = mpf_producer.execution_evidence();
+        INFO("Format-5 MPF evidence scans="
+            << mpf_execution.producer_scan_count
+            << " required_successful="
+            << mpf_execution.required_successful_scan_count()
+            << " geometry_retries="
+            << mpf_execution.geometry_retry_count
+            << " saturated=" << mpf_execution.saturated);
+        REQUIRE(mpf_execution.generation_wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+        REQUIRE(mpf_execution.required_successful_scan_count() == 3u);
         REQUIRE(mpf_execution.accepted());
         REQUIRE(mpf_execution.selected_backend
             == MinimizerSketchBackend::ExactSimd);
@@ -8707,6 +8847,19 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         REQUIRE(mps_generation.has_value());
         REQUIRE(mps_producer.scan_count() == 3u);
         REQUIRE(mps_producer.merge_pass_count() == 3u);
+        const auto mps_replay_evidence =
+            mps_producer.execution_evidence();
+        REQUIRE(mps_replay_evidence.generation_wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+        REQUIRE(mps_replay_evidence.required_successful_replay_count()
+            == 3u);
+        REQUIRE(mps_replay_evidence.replay_scan_count == 3u);
+        REQUIRE(mps_replay_evidence.replay_completed_scan_count == 3u);
+        REQUIRE(mps_replay_evidence.replay_failed_scan_count == 0u);
+        REQUIRE(mps_replay_evidence.replay_reroute_pass_count == 0u);
+        REQUIRE(mps_replay_evidence.replay_visited_event_count
+            == 3u * mps_replay_evidence.spilled_event_count);
         require_encoded_generations_equal_normalized(
             *mpf_generation,
             mpf_sink.rows,
@@ -8729,6 +8882,24 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
                         == MinimizerScalarWidth::u32;
                 }));
         }
+
+        const auto fourth_replay = mps_producer.scan_sorted_events(
+            mps_generation->manifest.position_segment_span_bp,
+            CanonicalMinimizerEventReceiver{
+                .context = nullptr,
+                .emit_fn = [](
+                        void*, const CanonicalMinimizerEvent&)
+                        -> std::expected<
+                            void, MinimizerGenerationWireError> {
+                    return {};
+                },
+            });
+        require_wire_error(
+            fourth_replay, MinimizerGenerationWireError::segment_span);
+        const auto terminal_evidence = mps_producer.execution_evidence();
+        REQUIRE(terminal_evidence.replay_scan_count == 4u);
+        REQUIRE(terminal_evidence.replay_completed_scan_count == 3u);
+        REQUIRE(terminal_evidence.replay_failed_scan_count == 1u);
     };
 
     SECTION("random fragmented sequence") {

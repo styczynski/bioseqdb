@@ -619,7 +619,8 @@ void bioseq_pg_sink_report(const BioseqReportView& report)
 	}
 }
 
-inline constexpr int alignment_stats_column_count = 150;
+inline constexpr int alignment_stats_v1_column_count = 150;
+inline constexpr int alignment_stats_v2_column_count = 151;
 
 [[nodiscard]] std::string fixed_hex_u64(std::uint64_t value)
 {
@@ -739,6 +740,63 @@ template<std::size_t N>
 	return result;
 }
 
+[[nodiscard]] std::string simd_execution_evidence_json(
+		const bioseq::pipeline_stats::PipelineExecutionStats& stats)
+{
+	/*
+	 * Version 2 adds one compact, exact-schema proof object without changing
+	 * any v1 column or the frozen cold-index object. Every value comes from the
+	 * single immutable AlignmentExecutionSnapshot copied by the SRF before it
+	 * emits its twenty stage rows.
+	 */
+	const auto& operational = stats.operational;
+	std::string result =
+		R"({"schema":"bioseq.simd_execution_evidence","version":1)";
+	result.reserve(768);
+	result += R"(,"requested_policy":")";
+	result.append(bioseq::pipeline_stats::simd_chaining_policy_identity_name(
+		stats.requested_simd_chaining_policy));
+	result += R"(","observed_policy":")";
+	result.append(bioseq::pipeline_stats::simd_chaining_policy_identity_name(
+		stats.observed_simd_chaining_policy));
+	result += '"';
+	const auto append = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	append("nthash_vector_batches", operational.nthash_vector_batches);
+	append(
+		"nthash_resident_vector_stream_kernel_calls",
+		operational.nthash_resident_vector_stream_kernel_calls);
+	append(
+		"simd_chaining_exact_policy_calls",
+		operational.simd_chaining_exact_policy_calls);
+	append(
+		"simd_chaining_bounded_policy_calls",
+		operational.simd_chaining_bounded_policy_calls);
+	append(
+		"simd_chaining_bounded_score_batches",
+		operational.simd_chaining_bounded_score_batches);
+	append(
+		"simd_chaining_bounded_cutoff_stops",
+		operational.simd_chaining_bounded_cutoff_stops);
+	append(
+		"simd_chaining_bounded_candidates_skipped",
+		operational.simd_chaining_bounded_candidates_skipped);
+	append(
+		"simd_chaining_policy_rejections",
+		operational.simd_chaining_policy_rejections);
+	result += R"(,"simd_chaining_policy_evidence_saturated":)";
+	result += operational.simd_chaining_policy_evidence_saturated
+		? "true" : "false";
+	result += '}';
+	return result;
+}
+
 [[nodiscard]] std::string cold_index_selective_probe_json(
 		const bioseq::storage::indexing::ColdIndexPreparationStatsPg& stats)
 {
@@ -776,8 +834,9 @@ template<std::size_t N>
 	return result;
 }
 
+template<int ColumnCount>
 struct AlignmentStatsRowBuilder {
-	bioseq::pg_utils::pg_datum_list<alignment_stats_column_count> row{};
+	bioseq::pg_utils::pg_datum_list<ColumnCount> row{};
 	int next_attnum = 1;
 
 	void null_value() noexcept
@@ -852,12 +911,12 @@ struct AlignmentStatsRowBuilder {
 
 	void finish() const
 	{
-		if (next_attnum != alignment_stats_column_count + 1) {
+		if (next_attnum != ColumnCount + 1) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("bioseq alignment SRF column mapping is incomplete"),
 				 errdetail("mapped=%d expected=%d",
-					next_attnum - 1, alignment_stats_column_count)));
+					next_attnum - 1, ColumnCount)));
 		}
 	}
 };
@@ -923,12 +982,16 @@ validate_alignment_snapshot_environment(
 	return environment_backend;
 }
 
-[[nodiscard]] bioseq::pg_utils::pg_datum_list<alignment_stats_column_count>
+template<int ColumnCount>
+[[nodiscard]] bioseq::pg_utils::pg_datum_list<ColumnCount>
 make_alignment_stats_row(
 		const alignment_exec::AlignmentExecutionSnapshot& snapshot,
 		bioseq::pipeline_stats::PipelineStage stage)
 {
-	AlignmentStatsRowBuilder out{};
+	static_assert(
+		ColumnCount == alignment_stats_v1_column_count
+		|| ColumnCount == alignment_stats_v2_column_count);
+	AlignmentStatsRowBuilder<ColumnCount> out{};
 	const auto& stats = snapshot.pipeline;
 	const auto& environment = stats.environment;
 	const auto& operational = stats.operational;
@@ -1139,8 +1202,79 @@ make_alignment_stats_row(
 	out.bigint(operational.persisted_legacy_globalize_calls);        // 148
 	out.bigint(operational.persisted_legacy_rebase_calls);           // 149
 	out.jsonb(cold_index_preparation_json(operational));             // 150
+	if constexpr (ColumnCount == alignment_stats_v2_column_count) {
+		out.jsonb(simd_execution_evidence_json(stats));                // 151
+	}
 	out.finish();
 	return out.row;
+}
+
+template<int ColumnCount>
+Datum materialize_alignment_execution_stats(
+		FunctionCallInfo fcinfo,
+		const char* function_name)
+{
+	static_assert(
+		ColumnCount == alignment_stats_v1_column_count
+		|| ColumnCount == alignment_stats_v2_column_count);
+	ReturnSetInfo* rsinfo = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
+	if (rsinfo == nullptr
+		|| !pg_node_view{pg_as_node(rsinfo)}.is<ReturnSetInfo>()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("%s must be called in a set-returning context", function_name)));
+	}
+	if ((rsinfo->allowedModes & SFRM_Materialize) == 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("materialize mode required for %s", function_name)));
+	}
+	TupleDesc tuple_desc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tuple_desc)
+		!= TYPEFUNC_COMPOSITE) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("%s return type is not composite", function_name)));
+	}
+	if (tuple_desc == nullptr || tuple_desc->natts != ColumnCount) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("%s has an invalid row shape", function_name),
+			 errdetail("columns=%d expected=%d",
+				tuple_desc == nullptr ? -1 : tuple_desc->natts,
+				ColumnCount)));
+	}
+	if (rsinfo->econtext == nullptr
+		|| rsinfo->econtext->ecxt_per_query_memory == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq alignment stats SRF has no per-query memory context")));
+	}
+
+	MemoryContext old_context = MemoryContextSwitchTo(
+		rsinfo->econtext->ecxt_per_query_memory);
+	Tuplestorestate* tuple_store = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tuple_store;
+	rsinfo->setDesc = tuple_desc;
+
+	if (last_alignment_execution_snapshot.has_value()) {
+		/* One value copy is the immutable source for all twenty rows, including
+		 * both versioned JSON objects. */
+		const alignment_exec::AlignmentExecutionSnapshot snapshot =
+			*last_alignment_execution_snapshot;
+		(void)validate_alignment_snapshot_environment(snapshot);
+		for (std::size_t stage_no = 0;
+			 stage_no < bioseq::pipeline_stats::pipeline_stage_count;
+			 ++stage_no) {
+			auto row = make_alignment_stats_row<ColumnCount>(
+				snapshot,
+				static_cast<bioseq::pipeline_stats::PipelineStage>(stage_no));
+			row.put_values(tuple_store, tuple_desc);
+		}
+	}
+	MemoryContextSwitchTo(old_context);
+	return static_cast<Datum>(0);
 }
 
 } // namespace
@@ -1772,63 +1906,17 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
 /* DOC0371: same-backend, same-invocation alignment proof. */
 CXX_PG_FUNCTION_INFO_V1(bioseq_last_alignment_execution_stats);
 Datum bioseq_last_alignment_execution_stats(PG_FUNCTION_ARGS) {
-	ReturnSetInfo* rsinfo = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
-	if (rsinfo == nullptr
-		|| !pg_node_view{pg_as_node(rsinfo)}.is<ReturnSetInfo>()) {
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("bioseq.last_alignment_execution_stats() must be called in a set-returning context")));
-	}
-	if ((rsinfo->allowedModes & SFRM_Materialize) == 0) {
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("materialize mode required for bioseq.last_alignment_execution_stats()")));
-	}
-	TupleDesc tuple_desc = nullptr;
-	if (get_call_result_type(fcinfo, nullptr, &tuple_desc)
-		!= TYPEFUNC_COMPOSITE) {
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("bioseq.last_alignment_execution_stats() return type is not composite")));
-	}
-	if (tuple_desc == nullptr
-		|| tuple_desc->natts != alignment_stats_column_count) {
-		ereport(ERROR,
-			(errcode(ERRCODE_DATATYPE_MISMATCH),
-			 errmsg("bioseq.last_alignment_execution_stats() has an invalid row shape"),
-			 errdetail("columns=%d expected=%d",
-				tuple_desc == nullptr ? -1 : tuple_desc->natts,
-				alignment_stats_column_count)));
-	}
-	if (rsinfo->econtext == nullptr
-		|| rsinfo->econtext->ecxt_per_query_memory == nullptr) {
-		ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("bioseq alignment stats SRF has no per-query memory context")));
-	}
+	return materialize_alignment_execution_stats<
+		alignment_stats_v1_column_count>(
+			fcinfo, "bioseq.last_alignment_execution_stats()");
+}
 
-	MemoryContext old_context = MemoryContextSwitchTo(
-		rsinfo->econtext->ecxt_per_query_memory);
-	Tuplestorestate* tuple_store = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tuple_store;
-	rsinfo->setDesc = tuple_desc;
-
-	if (last_alignment_execution_snapshot.has_value()) {
-		const alignment_exec::AlignmentExecutionSnapshot snapshot =
-			*last_alignment_execution_snapshot;
-		(void)validate_alignment_snapshot_environment(snapshot);
-		for (std::size_t stage_no = 0;
-			 stage_no < bioseq::pipeline_stats::pipeline_stage_count;
-			 ++stage_no) {
-			auto row = make_alignment_stats_row(
-				snapshot,
-				static_cast<bioseq::pipeline_stats::PipelineStage>(stage_no));
-			row.put_values(tuple_store, tuple_desc);
-		}
-	}
-	MemoryContextSwitchTo(old_context);
-	return static_cast<Datum>(0);
+/* DOC0372: backward-compatible v2 appends one versioned SIMD proof object. */
+CXX_PG_FUNCTION_INFO_V1(bioseq_last_alignment_execution_stats_v2);
+Datum bioseq_last_alignment_execution_stats_v2(PG_FUNCTION_ARGS) {
+	return materialize_alignment_execution_stats<
+		alignment_stats_v2_column_count>(
+			fcinfo, "bioseq.last_alignment_execution_stats_v2()");
 }
 
 /*

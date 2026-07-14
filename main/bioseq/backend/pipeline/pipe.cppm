@@ -163,6 +163,37 @@ enum class TargetIndexSource : std::uint8_t {
     mixed_invalid,
 };
 
+/// Statement-stable identity for the requested and operation-observed SIMD
+/// chaining policy. This deliberately has its own none/mixed sentinels rather
+/// than overloading the algorithm enum: pipeline aggregation must distinguish
+/// "no SIMD policy applies" from "two concrete policy identities were mixed".
+enum class SimdChainingPolicyIdentity : std::uint8_t {
+    none,
+    exact_visited,
+    bounded_batch_approximate,
+    mixed_invalid,
+};
+
+/// Stable public spelling used by PostgreSQL/report evidence. Keep this on the
+/// aggregate identity rather than translating through the algorithm-local enum:
+/// `none` and `mixed_invalid` are statement-level states that the local policy
+/// type deliberately cannot represent.
+[[nodiscard]] constexpr std::string_view simd_chaining_policy_identity_name(
+    SimdChainingPolicyIdentity policy) noexcept
+{
+    switch (policy) {
+        case SimdChainingPolicyIdentity::none:
+            return "none";
+        case SimdChainingPolicyIdentity::exact_visited:
+            return "exact_visited";
+        case SimdChainingPolicyIdentity::bounded_batch_approximate:
+            return "bounded_batch_approximate";
+        case SimdChainingPolicyIdentity::mixed_invalid:
+            return "mixed_invalid";
+    }
+    return "mixed_invalid";
+}
+
 /// Mutually exclusive engine credited with executing one pipeline stage.
 enum class ExecutionEngine : std::uint8_t {
     host_io,
@@ -451,7 +482,12 @@ struct PipelineOperationalStats {
     std::uint64_t persisted_skip_budget_rows = 0;
     std::uint64_t persisted_hash_build_calls = 0;
     std::uint64_t persisted_assembly_ns = 0;
+    // Continuation-kernel vector batches and resident vector_stream calls are
+    // distinct execution units. Keep both truthful; callers that only need an
+    // authenticity witness use has_nthash_vector_activity() instead of
+    // relabelling one resident kernel call as one continuation batch.
     std::uint64_t nthash_vector_batches = 0;
+    std::uint64_t nthash_resident_vector_stream_kernel_calls = 0;
     std::uint64_t nthash_scalar_backend_branches = 0;
     std::uint64_t nthash_scalar_tail_symbols = 0;
     std::uint64_t nthash_masked_tail_lanes = 0;
@@ -459,6 +495,13 @@ struct PipelineOperationalStats {
     std::uint64_t simd_chain_backtrack_vector_batches = 0;
     std::uint64_t simd_chain_scalar_backend_branches = 0;
     std::uint64_t simd_chain_backtrack_scalar_branches = 0;
+    std::uint64_t simd_chaining_exact_policy_calls = 0;
+    std::uint64_t simd_chaining_bounded_policy_calls = 0;
+    std::uint64_t simd_chaining_bounded_score_batches = 0;
+    std::uint64_t simd_chaining_bounded_cutoff_stops = 0;
+    std::uint64_t simd_chaining_bounded_candidates_skipped = 0;
+    std::uint64_t simd_chaining_policy_rejections = 0;
+    bool simd_chaining_policy_evidence_saturated = false;
     std::uint64_t cpu_seed_positions_rejected_outside_collection = 0;
     std::uint64_t gpu_partition_select_dispatches = 0;
     std::uint64_t gpu_partition_anchor_merge_dispatches = 0;
@@ -579,6 +622,14 @@ struct PipelineOperationalStats {
     [[nodiscard]] constexpr bool operator==(
         const PipelineOperationalStats&) const noexcept = default;
 
+    /// Authentic vector activity may originate from the continuation kernel
+    /// or the whole-range resident vector_stream kernel. The two counts remain
+    /// separately interpretable above.
+    [[nodiscard]] constexpr bool has_nthash_vector_activity() const noexcept {
+        return nthash_vector_batches != 0
+            || nthash_resident_vector_stream_kernel_calls != 0;
+    }
+
     /// Merge one operational delta without multiplying it by logical jobs.
     void merge(const PipelineOperationalStats& rhs) noexcept {
         bool saturated = stats_saturated || rhs.stats_saturated;
@@ -669,6 +720,8 @@ struct PipelineOperationalStats {
         add(persisted_hash_build_calls, rhs.persisted_hash_build_calls);
         add(persisted_assembly_ns, rhs.persisted_assembly_ns);
         add(nthash_vector_batches, rhs.nthash_vector_batches);
+        add(nthash_resident_vector_stream_kernel_calls,
+            rhs.nthash_resident_vector_stream_kernel_calls);
         add(nthash_scalar_backend_branches, rhs.nthash_scalar_backend_branches);
         add(nthash_scalar_tail_symbols, rhs.nthash_scalar_tail_symbols);
         add(nthash_masked_tail_lanes, rhs.nthash_masked_tail_lanes);
@@ -679,6 +732,21 @@ struct PipelineOperationalStats {
             rhs.simd_chain_scalar_backend_branches);
         add(simd_chain_backtrack_scalar_branches,
             rhs.simd_chain_backtrack_scalar_branches);
+        add(simd_chaining_exact_policy_calls,
+            rhs.simd_chaining_exact_policy_calls);
+        add(simd_chaining_bounded_policy_calls,
+            rhs.simd_chaining_bounded_policy_calls);
+        add(simd_chaining_bounded_score_batches,
+            rhs.simd_chaining_bounded_score_batches);
+        add(simd_chaining_bounded_cutoff_stops,
+            rhs.simd_chaining_bounded_cutoff_stops);
+        add(simd_chaining_bounded_candidates_skipped,
+            rhs.simd_chaining_bounded_candidates_skipped);
+        add(simd_chaining_policy_rejections,
+            rhs.simd_chaining_policy_rejections);
+        simd_chaining_policy_evidence_saturated =
+            simd_chaining_policy_evidence_saturated
+            || rhs.simd_chaining_policy_evidence_saturated;
         add(cpu_seed_positions_rejected_outside_collection,
             rhs.cpu_seed_positions_rejected_outside_collection);
         add(gpu_partition_select_dispatches,
@@ -969,6 +1037,10 @@ struct ExecutionEnvironmentProof {
 struct PipelineJobExecutionStats {
     ExecutedBackend requested_backend = ExecutedBackend::none;
     ExecutedBackend actual_backend = ExecutedBackend::none;
+    SimdChainingPolicyIdentity requested_simd_chaining_policy =
+        SimdChainingPolicyIdentity::none;
+    SimdChainingPolicyIdentity observed_simd_chaining_policy =
+        SimdChainingPolicyIdentity::none;
     TargetIndexSource requested_target_index_source = TargetIndexSource::none;
     TargetIndexSource actual_target_index_source = TargetIndexSource::none;
     std::uint64_t persisted_generation_id = 0;
@@ -1011,6 +1083,40 @@ struct PipelineJobExecutionStats {
     if (rhs == TargetIndexSource::none) return lhs;
     if (lhs == rhs) return lhs;
     return TargetIndexSource::mixed_invalid;
+}
+
+/// True only for one concrete, operation-attestable SIMD chaining policy.
+[[nodiscard]] constexpr bool is_concrete_simd_chaining_policy_identity(
+    SimdChainingPolicyIdentity policy) noexcept {
+    return policy == SimdChainingPolicyIdentity::exact_visited
+        || policy
+            == SimdChainingPolicyIdentity::bounded_batch_approximate;
+}
+
+/// Merge policy identities; a concrete disagreement remains visible and
+/// revokes aggregate attestation instead of silently choosing either policy.
+[[nodiscard]] constexpr SimdChainingPolicyIdentity
+merge_simd_chaining_policy_identity(
+    SimdChainingPolicyIdentity lhs,
+    SimdChainingPolicyIdentity rhs) noexcept {
+    if (lhs == SimdChainingPolicyIdentity::none) return rhs;
+    if (rhs == SimdChainingPolicyIdentity::none) return lhs;
+    if (lhs == rhs) return lhs;
+    return SimdChainingPolicyIdentity::mixed_invalid;
+}
+
+/// A concrete all-SIMD job must retain the same requested and observed
+/// policy. Scalar/GPU jobs must carry no SIMD-policy identity at all.
+[[nodiscard]] constexpr bool simd_chaining_policy_identity_valid_for_backend(
+    ExecutedBackend backend,
+    SimdChainingPolicyIdentity requested,
+    SimdChainingPolicyIdentity observed) noexcept {
+    if (backend == ExecutedBackend::simd_cpu) {
+        return is_concrete_simd_chaining_policy_identity(requested)
+            && requested == observed;
+    }
+    return requested == SimdChainingPolicyIdentity::none
+        && observed == SimdChainingPolicyIdentity::none;
 }
 
 /// Validate nonempty UTF-8 followed by one NUL and canonical zero padding.
@@ -1234,6 +1340,10 @@ struct PipelineJobExecutionStats {
     const PipelineJobExecutionStats& job) noexcept {
     if (!is_concrete_backend(job.requested_backend)
         || job.requested_backend != job.actual_backend
+        || !simd_chaining_policy_identity_valid_for_backend(
+            job.actual_backend,
+            job.requested_simd_chaining_policy,
+            job.observed_simd_chaining_policy)
         || !is_concrete_target_index_source(job.requested_target_index_source)
         || job.requested_target_index_source != job.actual_target_index_source
         || !environment_is_valid_for_backend(job.environment, job.actual_backend)) {
@@ -1275,6 +1385,10 @@ struct PipelineJobExecutionStats {
 struct PipelineExecutionStats {
     ExecutedBackend requested_backend = ExecutedBackend::none;
     ExecutedBackend actual_backend = ExecutedBackend::none;
+    SimdChainingPolicyIdentity requested_simd_chaining_policy =
+        SimdChainingPolicyIdentity::none;
+    SimdChainingPolicyIdentity observed_simd_chaining_policy =
+        SimdChainingPolicyIdentity::none;
     TargetIndexSource requested_target_index_source = TargetIndexSource::none;
     TargetIndexSource actual_target_index_source = TargetIndexSource::none;
     std::uint64_t persisted_generation_id = 0;
@@ -1316,6 +1430,14 @@ struct PipelineExecutionStats {
                 && requested_backend != job.requested_backend)
             || (actual_backend != ExecutedBackend::none
                 && actual_backend != job.actual_backend)
+            || (requested_simd_chaining_policy
+                    != SimdChainingPolicyIdentity::none
+                && requested_simd_chaining_policy
+                    != job.requested_simd_chaining_policy)
+            || (observed_simd_chaining_policy
+                    != SimdChainingPolicyIdentity::none
+                && observed_simd_chaining_policy
+                    != job.observed_simd_chaining_policy)
             || (requested_target_index_source != TargetIndexSource::none
                 && requested_target_index_source != job.requested_target_index_source)
             || (actual_target_index_source != TargetIndexSource::none
@@ -1349,6 +1471,12 @@ struct PipelineExecutionStats {
 
         requested_backend = merge_backend_identity(requested_backend, job.requested_backend);
         actual_backend = merge_backend_identity(actual_backend, job.actual_backend);
+        requested_simd_chaining_policy = merge_simd_chaining_policy_identity(
+            requested_simd_chaining_policy,
+            job.requested_simd_chaining_policy);
+        observed_simd_chaining_policy = merge_simd_chaining_policy_identity(
+            observed_simd_chaining_policy,
+            job.observed_simd_chaining_policy);
         requested_target_index_source = merge_target_index_identity(
             requested_target_index_source, job.requested_target_index_source);
         actual_target_index_source = merge_target_index_identity(
@@ -1376,7 +1504,9 @@ struct PipelineExecutionStats {
             || operational.stats_saturated
             || operational.operational_identity_conflict
             || operational.backend_declines != 0
-            || operational.backend_fallbacks != 0) {
+            || operational.backend_fallbacks != 0
+            || operational.simd_chaining_policy_rejections != 0
+            || operational.simd_chaining_policy_evidence_saturated) {
             reclassify_all_attempted_jobs();
         }
     }
@@ -1388,7 +1518,9 @@ struct PipelineExecutionStats {
         if (operational.stats_saturated
             || operational.operational_identity_conflict
             || operational.backend_declines != 0
-            || operational.backend_fallbacks != 0) {
+            || operational.backend_fallbacks != 0
+            || operational.simd_chaining_policy_rejections != 0
+            || operational.simd_chaining_policy_evidence_saturated) {
             reclassify_all_attempted_jobs();
         }
     }
@@ -1539,6 +1671,10 @@ struct PipelineExecutionStats {
             && stats.unattested_alignment_jobs == 0
             && stats.requested_backend == ExecutedBackend::none
             && stats.actual_backend == ExecutedBackend::none
+            && stats.requested_simd_chaining_policy
+                == SimdChainingPolicyIdentity::none
+            && stats.observed_simd_chaining_policy
+                == SimdChainingPolicyIdentity::none
             && stats.requested_target_index_source == TargetIndexSource::none
             && stats.actual_target_index_source == TargetIndexSource::none
             && stats.persisted_generation_id == 0
@@ -1569,6 +1705,10 @@ struct PipelineExecutionStats {
             || stats.first_unattested_query_ordinal != unset_job_ordinal
             || stats.requested_backend != stats.actual_backend
             || !is_concrete_backend(stats.actual_backend)
+            || !simd_chaining_policy_identity_valid_for_backend(
+                stats.actual_backend,
+                stats.requested_simd_chaining_policy,
+                stats.observed_simd_chaining_policy)
             || stats.requested_target_index_source
                 != stats.actual_target_index_source
             || !is_concrete_target_index_source(
@@ -1578,6 +1718,8 @@ struct PipelineExecutionStats {
             || stats.operational.stats_saturated
             || stats.operational.backend_declines != 0
             || stats.operational.backend_fallbacks != 0
+            || stats.operational.simd_chaining_policy_rejections != 0
+            || stats.operational.simd_chaining_policy_evidence_saturated
             || !environment_is_valid_for_backend(
                 stats.environment, stats.actual_backend)
             || !aggregate_stage_coverage_is_valid(stats)) {
@@ -1611,6 +1753,11 @@ struct PipelineExecutionStats {
         const bool backend_identity_compatible = lhs_empty || rhs_empty
             || (requested_backend == rhs.requested_backend
                 && actual_backend == rhs.actual_backend);
+        const bool simd_policy_identity_compatible = lhs_empty || rhs_empty
+            || (requested_simd_chaining_policy
+                    == rhs.requested_simd_chaining_policy
+                && observed_simd_chaining_policy
+                    == rhs.observed_simd_chaining_policy);
         const bool source_identity_compatible = lhs_empty || rhs_empty
             || (requested_target_index_source
                     == rhs.requested_target_index_source
@@ -1627,6 +1774,7 @@ struct PipelineExecutionStats {
             && rhs_environment_valid
             && !environment_drift
             && backend_identity_compatible
+            && simd_policy_identity_compatible
             && source_identity_compatible
             && persisted_identity_compatible;
 
@@ -1688,6 +1836,12 @@ struct PipelineExecutionStats {
         }
         requested_backend = merge_backend_identity(requested_backend, rhs.requested_backend);
         actual_backend = merge_backend_identity(actual_backend, rhs.actual_backend);
+        requested_simd_chaining_policy = merge_simd_chaining_policy_identity(
+            requested_simd_chaining_policy,
+            rhs.requested_simd_chaining_policy);
+        observed_simd_chaining_policy = merge_simd_chaining_policy_identity(
+            observed_simd_chaining_policy,
+            rhs.observed_simd_chaining_policy);
         requested_target_index_source = merge_target_index_identity(
             requested_target_index_source, rhs.requested_target_index_source);
         actual_target_index_source = merge_target_index_identity(
@@ -1738,7 +1892,13 @@ struct PipelineExecutionStats {
         if (operational.stats_saturated
             || operational.operational_identity_conflict
             || operational.backend_declines != 0
-            || operational.backend_fallbacks != 0) {
+            || operational.backend_fallbacks != 0
+            || operational.simd_chaining_policy_rejections != 0
+            || operational.simd_chaining_policy_evidence_saturated
+            || requested_simd_chaining_policy
+                == SimdChainingPolicyIdentity::mixed_invalid
+            || observed_simd_chaining_policy
+                == SimdChainingPolicyIdentity::mixed_invalid) {
             reclassify_all_attempted_jobs();
         }
     }

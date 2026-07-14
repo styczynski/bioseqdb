@@ -125,6 +125,8 @@ module;
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <expected>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -720,6 +722,132 @@ void dispatch_append_cpu_prepared_query_sketch(
 	pg_unreachable();
 }
 
+using Grouped32ColdPlan =
+	bioseq::indexing::MinimizerGrouped32ColdRoutePlan;
+using Grouped32PayloadGroup =
+	bioseq::storage::indexing::MinimizerGenerationPayloadReadGroup;
+
+[[nodiscard]] bool grouped32_requests_are_adjacent(
+		const bioseq::indexing::IndexSubKeyRequest& previous,
+		const bioseq::indexing::IndexSubKeyRequest& current) noexcept {
+	return previous.generation_id == current.generation_id
+		&& previous.position_segment == current.position_segment
+		&& previous.sub_key
+			!= (std::numeric_limits<bioseq::indexing::index_sub_key_t>::max)()
+		&& previous.sub_key + 1 == current.sub_key;
+}
+
+[[nodiscard]] std::expected<
+	std::vector<Grouped32PayloadGroup>,
+	bioseq::indexing::MinimizerGenerationWireError>
+group_grouped32_cold_requests(
+		std::span<const bioseq::indexing::IndexSubKeyRequest> requests) {
+	using bioseq::indexing::MinimizerGenerationWireError;
+	std::vector<Grouped32PayloadGroup> groups;
+	groups.reserve(requests.size());
+	std::optional<bioseq::indexing::IndexSubKeyRequest> previous;
+	for (const bioseq::indexing::IndexSubKeyRequest& request : requests) {
+		if (request.generation_id == 0 || request.position_segment < 0
+			|| request.sub_key < 0
+			|| request.sub_key
+				== (std::numeric_limits<
+					bioseq::indexing::index_sub_key_t>::max)()
+			|| request.expected_chunk_count == 0
+			|| request.expected_total_bytes == 0) {
+			return std::unexpected(MinimizerGenerationWireError::chunk_range);
+		}
+		if (previous) {
+			if (previous->generation_id != request.generation_id) {
+				return std::unexpected(
+					MinimizerGenerationWireError::identity_mismatch);
+			}
+			const auto previous_key = std::pair{
+				previous->position_segment, previous->sub_key};
+			const auto current_key = std::pair{
+				request.position_segment, request.sub_key};
+			if (!(previous_key < current_key)) {
+				return std::unexpected(
+					MinimizerGenerationWireError::control_order);
+			}
+		}
+		if (!previous
+			|| !grouped32_requests_are_adjacent(*previous, request)) {
+			groups.push_back(Grouped32PayloadGroup{
+				.range = bioseq::indexing::IndexSubKeyRange{
+					.generation_id = request.generation_id,
+					.position_segment = request.position_segment,
+					.begin = request.sub_key,
+					.end = request.sub_key + 1,
+				},
+			});
+		} else {
+			groups.back().range.end = request.sub_key + 1;
+		}
+		groups.back().requests.push_back(request);
+		previous = request;
+	}
+	return groups;
+}
+
+[[nodiscard]] bool grouped32_group_authority_equals(
+		std::span<const Grouped32PayloadGroup> groups,
+		std::span<const bioseq::indexing::IndexSubKeyRequest> authority)
+		noexcept {
+	std::size_t cursor = 0;
+	for (const Grouped32PayloadGroup& group : groups) {
+		for (const bioseq::indexing::IndexSubKeyRequest& request
+			 : group.requests) {
+			if (cursor >= authority.size()
+				|| !bioseq::indexing::
+					minimizer_grouped32_cold_request_equal(
+						request, authority[cursor])) {
+				return false;
+			}
+			++cursor;
+		}
+	}
+	return cursor == authority.size();
+}
+
+[[nodiscard]] std::expected<
+	std::vector<Grouped32PayloadGroup>,
+	bioseq::indexing::MinimizerGenerationWireError>
+group_retained_grouped32_position_requests(
+		const Grouped32ColdPlan& plan,
+		std::span<const std::uint32_t> retained_ordinals) {
+	using bioseq::indexing::MinimizerGenerationWireError;
+	std::vector<bioseq::indexing::IndexSubKeyRequest> retained_requests;
+	retained_requests.reserve(retained_ordinals.size());
+	std::size_t candidate_cursor = 0;
+	std::optional<std::uint32_t> previous_retained;
+	for (const std::uint32_t retained : retained_ordinals) {
+		if (previous_retained && *previous_retained >= retained) {
+			return std::unexpected(
+				MinimizerGenerationWireError::partition_id);
+		}
+		while (candidate_cursor
+				< plan.candidate_directory_ordinals.size()
+			&& plan.candidate_directory_ordinals[candidate_cursor]
+				< retained) {
+			++candidate_cursor;
+		}
+		if (candidate_cursor
+				== plan.candidate_directory_ordinals.size()
+			|| plan.candidate_directory_ordinals[candidate_cursor]
+				!= retained
+			|| candidate_cursor
+				>= plan.position_upper_bound_requests.size()) {
+			return std::unexpected(
+				MinimizerGenerationWireError::partition_id);
+		}
+		retained_requests.push_back(
+			plan.position_upper_bound_requests[candidate_cursor]);
+		++candidate_cursor;
+		previous_retained = retained;
+	}
+	return group_grouped32_cold_requests(retained_requests);
+}
+
 } // namespace
 
 void BatchProcessor::prepare_cpu_shared_query_unions(
@@ -1118,45 +1246,185 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	for (const MinimapSketchData& minimizer : group.query_hash_union) {
 		query_hashes.push_back(minimizer.kmer());
 	}
-	auto reader =
-		bioseq::indexing::PreparedGrouped32QueryReader::
-			begin_full_generation_stream(
-				bioseq::parallelism::MemoryAdmissionController::instance(),
-				head, manifest, *expected, group.sketch_backend,
-				metadata.directory.encoded_bytes(), query_hashes,
-				static_cast<std::uint64_t>(group.max_occ));
-	if (!reader) {
-		fail(fmt::format("grouped32 reader begin rejected wire_error={}",
-			static_cast<unsigned>(reader.error())));
+	auto planned = bioseq::indexing::plan_minimizer_grouped32_cold_route(
+		head, manifest, metadata.directory, query_hashes);
+	if (!planned) {
+		fail(fmt::format("grouped32 cold route rejected wire_error={}",
+			static_cast<unsigned>(planned.error())));
 		return;
 	}
-	const auto accept_or_throw = [](auto result, std::string_view phase) {
-		if (!result) {
-			throw bioseq::indexing::PersistedMinimizerLookupError(
-				fmt::format("{} wire_error={}", phase,
-					static_cast<unsigned>(result.error())));
-		}
+	Grouped32ColdPlan route_plan = std::move(*planned);
+	session.bind_grouped32_cold_route_once(route_plan);
+
+	using Grouped32Reader =
+		bioseq::indexing::PreparedGrouped32QueryReader;
+	std::optional<Grouped32Reader> reader;
+	std::vector<Grouped32PayloadGroup> control_groups;
+	std::vector<Grouped32PayloadGroup> position_groups;
+	std::optional<MinimizerGenerationWireError> callback_error;
+	std::exception_ptr callback_exception;
+	const auto invoke_reader_callback =
+		[&callback_error, &callback_exception](auto&& callback) noexcept {
+			if (callback_error || callback_exception) return;
+			try {
+				auto result = callback();
+				if (!result) callback_error = result.error();
+			} catch (...) {
+				callback_exception = std::current_exception();
+			}
+		};
+	const auto callback_failed = [&]() noexcept {
+		return callback_error.has_value()
+			|| static_cast<bool>(callback_exception);
 	};
-	(void)session.read_full_generation_payload_once(
-		[&](const bioseq::indexing::IndexChunkAddress& address,
-			const char* bytes, std::size_t byte_count) {
-			accept_or_throw(
-				reader->accept_full_generation_control_chunk(
-					address, std::as_bytes(
-						std::span<const char>{bytes, byte_count})),
-				"grouped32 control ingest");
-		},
-		[&](const bioseq::indexing::IndexChunkAddress& address,
-			const char* bytes, std::size_t byte_count) {
-			accept_or_throw(
-				reader->accept_full_generation_position_chunk(
-					address, std::as_bytes(
-						std::span<const char>{bytes, byte_count})),
-				"grouped32 position ingest");
-		});
-	accept_or_throw(
-		reader->finish_full_generation_stream(),
-		"grouped32 final validation");
+	const auto fail_callback = [&](std::string_view phase) {
+		if (callback_exception) {
+			std::rethrow_exception(callback_exception);
+		}
+		fail(fmt::format("{} wire_error={}", phase,
+			callback_error
+				? static_cast<unsigned>(*callback_error)
+				: 0u));
+	};
+
+	if (route_plan.route
+			== bioseq::indexing::MinimizerGrouped32ColdLoadRoute::full) {
+		auto made = Grouped32Reader::begin_full_generation_stream(
+			bioseq::parallelism::MemoryAdmissionController::instance(),
+			head, manifest, *expected, group.sketch_backend,
+			metadata.directory.encoded_bytes(), query_hashes,
+			static_cast<std::uint64_t>(group.max_occ));
+		if (!made) {
+			fail(fmt::format("grouped32 full reader begin rejected wire_error={}",
+				static_cast<unsigned>(made.error())));
+			return;
+		}
+		reader.emplace(std::move(*made));
+		(void)session.read_full_generation_payload_once(
+			[&](const bioseq::indexing::IndexChunkAddress& address,
+				const char* bytes, std::size_t byte_count) {
+				invoke_reader_callback([&] {
+					return
+					reader->accept_full_generation_control_chunk(
+						address, std::as_bytes(
+							std::span<const char>{bytes, byte_count}));
+				});
+			},
+			[&](const bioseq::indexing::IndexChunkAddress& address,
+				const char* bytes, std::size_t byte_count) {
+				invoke_reader_callback([&] {
+					return
+					reader->accept_full_generation_position_chunk(
+						address, std::as_bytes(
+							std::span<const char>{bytes, byte_count}));
+				});
+			});
+		if (callback_failed()) {
+			fail_callback("grouped32 full payload ingest failed");
+			return;
+		}
+		invoke_reader_callback(
+			[&] { return reader->finish_full_generation_stream(); });
+		if (callback_failed()) {
+			fail_callback("grouped32 full final validation failed");
+			return;
+		}
+	} else {
+		auto made = Grouped32Reader::begin(
+			bioseq::parallelism::MemoryAdmissionController::instance(),
+			head, manifest, *expected, group.sketch_backend,
+			metadata.directory.encoded_bytes(), query_hashes,
+			static_cast<std::uint64_t>(group.max_occ));
+		if (!made) {
+			fail(fmt::format("grouped32 selective reader begin rejected wire_error={}",
+				static_cast<unsigned>(made.error())));
+			return;
+		}
+		reader.emplace(std::move(*made));
+		if (!route_plan.candidate_authority_equals(
+				reader->control_ordinals(),
+				route_plan.control_requests,
+				route_plan.position_upper_bound_requests)) {
+			fail("grouped32 reader candidate authority disagrees with the cold route");
+			return;
+		}
+		auto grouped_controls = group_grouped32_cold_requests(
+			route_plan.control_requests);
+		if (!grouped_controls) {
+			fail(fmt::format("grouped32 control grouping rejected wire_error={}",
+				static_cast<unsigned>(grouped_controls.error())));
+			return;
+		}
+		control_groups = std::move(*grouped_controls);
+		if (control_groups.size() != route_plan.control_groups
+			|| !grouped32_group_authority_equals(
+				control_groups, route_plan.control_requests)) {
+			fail("grouped32 control groups do not exactly preserve planner authority");
+			return;
+		}
+		session.plan_control_groups(control_groups);
+		for (std::size_t group_index = 0;
+			 group_index < control_groups.size(); ++group_index) {
+			(void)session.read_chunks_in_range(
+				group_index,
+				bioseq::indexing::IndexChunkCachePolicy::bypass_one_shot,
+				[&](const bioseq::indexing::IndexChunkAddress& address,
+					const char* bytes, std::size_t byte_count) {
+					invoke_reader_callback([&] {
+						return reader->accept_control_chunk(
+							address, std::as_bytes(
+								std::span<const char>{bytes, byte_count}));
+					});
+				});
+			if (callback_failed()) {
+				fail_callback("grouped32 selective control ingest failed");
+				return;
+			}
+		}
+		invoke_reader_callback([&] { return reader->finish_controls(); });
+		if (callback_failed()) {
+			fail_callback("grouped32 selective control validation failed");
+			return;
+		}
+		auto grouped_positions =
+			group_retained_grouped32_position_requests(
+				route_plan, reader->retained_position_ordinals());
+		if (!grouped_positions) {
+			fail(fmt::format("grouped32 position grouping rejected wire_error={}",
+				static_cast<unsigned>(grouped_positions.error())));
+			return;
+		}
+		position_groups = std::move(*grouped_positions);
+		if (position_groups.size()
+			> route_plan.position_groups_upper_bound) {
+			fail("grouped32 retained position groups exceed the planner bound");
+			return;
+		}
+		session.plan_position_groups(position_groups);
+		for (std::size_t group_index = 0;
+			 group_index < position_groups.size(); ++group_index) {
+			(void)session.read_chunks_in_range(
+				group_index,
+				bioseq::indexing::IndexChunkCachePolicy::bypass_one_shot,
+				[&](const bioseq::indexing::IndexChunkAddress& address,
+					const char* bytes, std::size_t byte_count) {
+					invoke_reader_callback([&] {
+						return reader->accept_position_chunk(
+							address, std::as_bytes(
+								std::span<const char>{bytes, byte_count}));
+					});
+				});
+			if (callback_failed()) {
+				fail_callback("grouped32 selective position ingest failed");
+				return;
+			}
+		}
+		invoke_reader_callback([&] { return reader->finish_load(); });
+		if (callback_failed()) {
+			fail_callback("grouped32 selective final validation failed");
+			return;
+		}
+	}
 	const MinimizerGenerationReadStats read_stats = session.finish();
 	const auto scheme =
 		bioseq::indexing::minimizer_scheme_identity_for_backend(
@@ -1164,7 +1432,70 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	const auto producer_backend =
 		bioseq::indexing::minimizer_producer_backend_identity_for_backend(
 			group.sketch_backend);
-	if (!reader->ready()
+	const auto cold_sql_value = [](std::uint64_t value) noexcept {
+		return std::min(
+			value,
+			bioseq::storage::indexing::ColdIndexPreparationStatsPg::
+				sql_bigint_max);
+	};
+	const auto selected_route = route_plan.route;
+	const bool empty_route = selected_route
+		== bioseq::indexing::MinimizerGrouped32ColdLoadRoute::empty;
+	const bool selective_route = selected_route
+		== bioseq::indexing::MinimizerGrouped32ColdLoadRoute::selective;
+	const bool full_route = selected_route
+		== bioseq::indexing::MinimizerGrouped32ColdLoadRoute::full;
+	const bool route_stats_match =
+		read_stats.cold.route_empty == (empty_route ? 1u : 0u)
+		&& read_stats.cold.route_selective == (selective_route ? 1u : 0u)
+		&& read_stats.cold.route_full == (full_route ? 1u : 0u)
+		&& read_stats.cold.route_candidate_rows
+			== cold_sql_value(route_plan.candidate_rows_upper_bound)
+		&& read_stats.cold.route_candidate_bytes
+			== cold_sql_value(route_plan.candidate_bytes_upper_bound)
+		&& read_stats.cold.route_full_rows
+			== cold_sql_value(route_plan.full_payload_rows)
+		&& read_stats.cold.route_full_bytes
+			== cold_sql_value(route_plan.full_payload_bytes)
+		&& read_stats.cold.route_selective_cost
+			== cold_sql_value(route_plan.selective_cost)
+		&& read_stats.cold.route_full_cost
+			== cold_sql_value(route_plan.full_cost);
+	const bool common_read_stats_match =
+		read_stats.relation_opens == 1
+		&& read_stats.head_scans == 1
+		&& read_stats.manifest_directory_scans == 1
+		&& read_stats.metadata_repeated_reads == 0
+		&& read_stats.index_scans == 2u + read_stats.range_scan_calls
+		&& read_stats.planned_request_groups
+			== read_stats.executed_request_groups
+		&& read_stats.executed_request_groups
+			== read_stats.range_scan_calls
+		&& read_stats.cache_lookups == 0
+		&& read_stats.cache_populations == 0
+		&& read_stats.cold.memory_reroutes == 0;
+	const bool selected_read_stats_match = !full_route
+		&& read_stats.full_generation.scan_calls == 0
+		&& read_stats.bulk_read_calls == 2
+		&& read_stats.controls.plan_calls == 1
+		&& read_stats.positions.plan_calls == 1
+		&& read_stats.controls.planned_request_groups
+			== control_groups.size()
+		&& read_stats.positions.planned_request_groups
+			== position_groups.size()
+		&& (!empty_route
+			|| (read_stats.range_scan_calls == 0
+				&& read_stats.payload_heap_rows_read == 0
+				&& read_stats.payload_bytes_read == 0));
+	const bool full_read_stats_match = !full_route
+		|| (read_stats.full_generation.scan_calls == 1
+			&& read_stats.bulk_read_calls == 1
+			&& read_stats.range_scan_calls == 1
+			&& read_stats.payload.delivered_chunks
+				== route_plan.full_payload_rows
+			&& read_stats.payload.delivered_bytes
+				== route_plan.full_payload_bytes);
+	if (!reader || !reader->ready()
 		|| reader->qualified_sketch_backend() != group.sketch_backend
 		|| reader->target_length() != prepared_target.target_bp_size
 		|| manifest.kmer_size != group.kmer_size
@@ -1175,11 +1506,10 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		|| manifest.producer_backend_identity_version
 			!= producer_backend.version
 		|| head.generation_id == 0 || head.source_identity == 0
-		|| read_stats.relation_opens != 1
-		|| read_stats.index_scans != 3
-		|| read_stats.head_scans != 1
-		|| read_stats.manifest_directory_scans != 1
-		|| read_stats.full_generation.scan_calls != 1
+		|| !route_stats_match
+		|| !common_read_stats_match
+		|| (!full_route && !selected_read_stats_match)
+		|| !full_read_stats_match
 		|| read_stats.source_parent_rows_read != 1
 		|| read_stats.source_catalog_rows_read != 1
 		|| read_stats.source_catalog_index_scans != 1
