@@ -30,7 +30,7 @@ import :wire;
 export namespace bioseq::cache {
 
 inline constexpr std::uint32_t kReusableRegistryMagicV1 = 0x42524347U;
-inline constexpr std::uint32_t kReusableRegistryAbiVersionV1 = 3;
+inline constexpr std::uint32_t kReusableRegistryAbiVersionV1 = 4;
 inline constexpr std::uint32_t kDefaultReusableRegistryGenerationsV1 = 256;
 inline constexpr std::uint32_t kDefaultReusableRegistryPartitionsV1 = 16;
 inline constexpr std::uint32_t kDefaultReusableRegistryArenaBytesV1 = 16U << 20;
@@ -39,6 +39,7 @@ inline constexpr std::uint32_t kMaximumReusableJanitorBatchV1 = 64;
 inline constexpr std::uint32_t kMaximumReusableInvalidationScanV1 = 64;
 inline constexpr std::uint32_t kReusableReferenceOwnersPerGenerationV1 = 64;
 inline constexpr std::uint32_t kReusableDisplaySqlCapacityV1 = 4U << 10;
+inline constexpr std::uint32_t kReusableCanonicalPlanCapacityV1 = 16U << 10;
 inline constexpr std::uint32_t kReusableProducerPlanCapacityV1 = 16U << 10;
 inline constexpr std::uint32_t kInvalidReusableRegistrySlotV1 =
     (std::numeric_limits<std::uint32_t>::max)();
@@ -238,22 +239,30 @@ struct ReusableDiagnosticTextUpdateV1 {
   ReusableGenerationReferenceV1 reference{};
   ReusableProducerIdentityV1 producer{};
   std::span<const char> display_sql{};
+  std::span<const char> canonical_plan{};
   std::span<const char> producer_plan{};
+  ReusablePlanSnapshotStatusV1 canonical_plan_status =
+      ReusablePlanSnapshotStatusV1::Unavailable;
   ReusablePlanSnapshotStatusV1 plan_status =
       ReusablePlanSnapshotStatusV1::Unavailable;
   bool display_sql_truncated = false;
+  bool canonical_plan_truncated = false;
   bool producer_plan_truncated = false;
-  std::array<std::uint8_t, 5> reserved{};
+  std::array<std::uint8_t, 3> reserved{};
 };
 
 /** Metadata returned before caller-owned buffers receive authorized text. */
 struct ReusableDiagnosticTextCopyV1 {
+  ReusablePlanSnapshotStatusV1 canonical_plan_status =
+      ReusablePlanSnapshotStatusV1::Unavailable;
   ReusablePlanSnapshotStatusV1 plan_status =
       ReusablePlanSnapshotStatusV1::Unavailable;
   bool display_sql_truncated = false;
+  bool canonical_plan_truncated = false;
   bool producer_plan_truncated = false;
-  std::uint8_t reserved = 0;
+  std::array<std::uint8_t, 3> reserved{};
   std::uint32_t display_sql_bytes = 0;
+  std::uint32_t canonical_plan_bytes = 0;
   std::uint32_t producer_plan_bytes = 0;
 };
 
@@ -350,14 +359,19 @@ struct ReusableSharedGenerationV1 {
   std::uint64_t row_count = 0;
   ReusableGenerationMetadataV1 metadata{};
   ReusableManifestHandleV1 manifest{};
+  ReusablePlanSnapshotStatusV1 canonical_plan_snapshot_status =
+      ReusablePlanSnapshotStatusV1::Unavailable;
   ReusablePlanSnapshotStatusV1 plan_snapshot_status =
       ReusablePlanSnapshotStatusV1::Unavailable;
   bool display_sql_truncated = false;
+  bool canonical_plan_truncated = false;
   bool producer_plan_truncated = false;
-  std::uint8_t reserved_diagnostic = 0;
+  std::array<std::uint8_t, 3> reserved_diagnostic{};
   std::uint32_t display_sql_bytes = 0;
+  std::uint32_t canonical_plan_bytes = 0;
   std::uint32_t producer_plan_bytes = 0;
   std::array<char, kReusableDisplaySqlCapacityV1> display_sql{};
+  std::array<char, kReusableCanonicalPlanCapacityV1> canonical_plan{};
   std::array<char, kReusableProducerPlanCapacityV1> producer_plan{};
 };
 
@@ -1110,11 +1124,14 @@ struct ReusableGenerationDiagnosticsRowV1 {
   std::uint64_t started_monotonic_ns = 0;
   std::uint64_t completed_monotonic_ns = 0;
   std::uint64_t last_access_monotonic_ns = 0;
+  ReusablePlanSnapshotStatusV1 canonical_plan_snapshot_status =
+      ReusablePlanSnapshotStatusV1::Unavailable;
   ReusablePlanSnapshotStatusV1 plan_snapshot_status =
       ReusablePlanSnapshotStatusV1::Unavailable;
   bool display_sql_truncated = false;
+  bool canonical_plan_truncated = false;
   bool producer_plan_truncated = false;
-  std::uint8_t reserved_diagnostic = 0;
+  std::array<std::uint8_t, 3> reserved_diagnostic{};
 };
 
 /** Counts for one caller-bounded diagnostics copy. */
@@ -1551,8 +1568,11 @@ make_diagnostics_row(const ReusableSharedGenerationV1 &generation,
       .started_monotonic_ns = generation.started_monotonic_ns,
       .completed_monotonic_ns = generation.completed_monotonic_ns,
       .last_access_monotonic_ns = generation.last_access_monotonic_ns,
+      .canonical_plan_snapshot_status =
+          generation.canonical_plan_snapshot_status,
       .plan_snapshot_status = generation.plan_snapshot_status,
       .display_sql_truncated = generation.display_sql_truncated,
+      .canonical_plan_truncated = generation.canonical_plan_truncated,
       .producer_plan_truncated = generation.producer_plan_truncated,
   };
 }
@@ -2038,47 +2058,80 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
 
 [[nodiscard]] inline bool diagnostic_text_valid(
     std::span<const char> text, std::size_t capacity) noexcept {
-  return !text.empty() && text.size() <= capacity &&
-         std::memchr(text.data(), 0, text.size()) == nullptr;
+  return text.size() <= capacity &&
+         (text.empty() ||
+          std::memchr(text.data(), 0, text.size()) == nullptr);
+}
+
+[[nodiscard]] inline bool diagnostic_capture_valid(
+    std::span<const char> text, std::size_t capacity,
+    ReusablePlanSnapshotStatusV1 status, bool truncated,
+    bool analyzed_allowed) noexcept {
+  return diagnostic_status_valid(status) &&
+         (analyzed_allowed ||
+          status != ReusablePlanSnapshotStatusV1::Analyzed) &&
+         diagnostic_text_valid(text, capacity) &&
+         (!text.empty() ||
+          (status == ReusablePlanSnapshotStatusV1::Unavailable &&
+           !truncated));
 }
 
 [[nodiscard]] inline bool diagnostic_update_valid(
     const ReusableDiagnosticTextUpdateV1 &update) noexcept {
   return update.reference && update.producer.valid() &&
-         diagnostic_status_valid(update.plan_status) &&
          diagnostic_text_valid(update.display_sql,
                                kReusableDisplaySqlCapacityV1) &&
-         diagnostic_text_valid(update.producer_plan,
-                               kReusableProducerPlanCapacityV1) &&
+         !update.display_sql.empty() &&
+         diagnostic_capture_valid(
+             update.canonical_plan, kReusableCanonicalPlanCapacityV1,
+             update.canonical_plan_status,
+             update.canonical_plan_truncated, false) &&
+         diagnostic_capture_valid(
+             update.producer_plan, kReusableProducerPlanCapacityV1,
+             update.plan_status, update.producer_plan_truncated, true) &&
          std::all_of(update.reserved.begin(), update.reserved.end(),
                      [](std::uint8_t value) noexcept { return value == 0; });
 }
 
 [[nodiscard]] inline bool shared_diagnostic_text_valid(
     const ReusableSharedGenerationV1 &generation) noexcept {
-  if (!diagnostic_status_valid(generation.plan_snapshot_status) ||
-      generation.reserved_diagnostic != 0 ||
+  if (!std::all_of(generation.reserved_diagnostic.begin(),
+                   generation.reserved_diagnostic.end(),
+                   [](std::uint8_t value) noexcept { return value == 0; }) ||
       generation.display_sql_bytes > generation.display_sql.size() ||
+      generation.canonical_plan_bytes > generation.canonical_plan.size() ||
       generation.producer_plan_bytes > generation.producer_plan.size()) {
     return false;
   }
   const bool has_sql = generation.display_sql_bytes != 0;
-  const bool has_plan = generation.producer_plan_bytes != 0;
-  if (has_sql != has_plan ||
-      (!has_sql &&
-       (generation.plan_snapshot_status !=
-            ReusablePlanSnapshotStatusV1::Unavailable ||
-        generation.display_sql_truncated ||
-        generation.producer_plan_truncated)) ||
-      (has_sql &&
-       (std::memchr(generation.display_sql.data(), 0,
-                    generation.display_sql_bytes) != nullptr ||
-        std::memchr(generation.producer_plan.data(), 0,
-                    generation.producer_plan_bytes) != nullptr)) ||
+  const std::span<const char> canonical_plan{
+      generation.canonical_plan.data(), generation.canonical_plan_bytes};
+  const std::span<const char> producer_plan{
+      generation.producer_plan.data(), generation.producer_plan_bytes};
+  const bool analyzed_state_valid =
+      generation.plan_snapshot_status !=
+          ReusablePlanSnapshotStatusV1::Analyzed ||
+      generation.state == CacheEntryState::Complete ||
+      generation.state == CacheEntryState::Invalidated ||
+      generation.state == CacheEntryState::Evicting;
+  if ((!has_sql && generation.display_sql_truncated) ||
+      (has_sql && std::memchr(generation.display_sql.data(), 0,
+                             generation.display_sql_bytes) != nullptr) ||
+      !diagnostic_capture_valid(
+          canonical_plan, generation.canonical_plan.size(),
+          generation.canonical_plan_snapshot_status,
+          generation.canonical_plan_truncated, false) ||
+      !diagnostic_capture_valid(
+          producer_plan, generation.producer_plan.size(),
+          generation.plan_snapshot_status,
+          generation.producer_plan_truncated, true) ||
       (generation.plan_snapshot_status ==
            ReusablePlanSnapshotStatusV1::Analyzed &&
-       generation.state != CacheEntryState::Complete) ||
-      (generation.state == CacheEntryState::Claimed && has_sql)) {
+       !analyzed_state_valid) ||
+      (generation.state == CacheEntryState::Claimed &&
+       (has_sql || !canonical_plan.empty() || !producer_plan.empty())) ||
+      ((generation.state == CacheEntryState::Building ||
+        generation.state == CacheEntryState::Complete) && !has_sql)) {
     return false;
   }
   return true;
@@ -2089,18 +2142,27 @@ inline void assign_diagnostic_text_unchecked(
     ReusableSharedGenerationV1 &generation,
     const ReusableDiagnosticTextUpdateV1 &update) noexcept {
   std::fill(generation.display_sql.begin(), generation.display_sql.end(), 0);
+  std::fill(generation.canonical_plan.begin(),
+            generation.canonical_plan.end(), 0);
   std::fill(generation.producer_plan.begin(), generation.producer_plan.end(),
             0);
   std::copy(update.display_sql.begin(), update.display_sql.end(),
             generation.display_sql.begin());
+  std::copy(update.canonical_plan.begin(), update.canonical_plan.end(),
+            generation.canonical_plan.begin());
   std::copy(update.producer_plan.begin(), update.producer_plan.end(),
             generation.producer_plan.begin());
   generation.display_sql_bytes =
       static_cast<std::uint32_t>(update.display_sql.size());
+  generation.canonical_plan_bytes =
+      static_cast<std::uint32_t>(update.canonical_plan.size());
   generation.producer_plan_bytes =
       static_cast<std::uint32_t>(update.producer_plan.size());
   generation.display_sql_truncated = update.display_sql_truncated;
+  generation.canonical_plan_truncated = update.canonical_plan_truncated;
   generation.producer_plan_truncated = update.producer_plan_truncated;
+  generation.canonical_plan_snapshot_status =
+      update.canonical_plan_status;
   generation.plan_snapshot_status = update.plan_status;
 }
 
@@ -2808,7 +2870,7 @@ snapshot_reusable_candidates(
 }
 
 /**
- * Transition CLAIMED to BUILDING with an explicit bounded unavailable marker.
+ * Transition CLAIMED to BUILDING with explicit unavailable plan statuses.
  * New producer paths should use the diagnostic overload below so BUILDING is
  * first published with the initialized child's planned snapshot.
  */
@@ -2840,14 +2902,11 @@ snapshot_reusable_candidates(
     return ReusableRegistryErrorV1::InvalidState;
   }
   constexpr char unavailable_sql[] = "SQL capture unavailable";
-  constexpr char unavailable_plan[] = "plan capture unavailable";
   const ReusableDiagnosticTextUpdateV1 unavailable{
       .reference = reference,
       .producer = generation.producer,
       .display_sql = std::span<const char>{
           unavailable_sql, sizeof(unavailable_sql) - 1},
-      .producer_plan = std::span<const char>{
-          unavailable_plan, sizeof(unavailable_plan) - 1},
   };
   assign_diagnostic_text_unchecked(generation, unavailable);
   generation.state = CacheEntryState::Building;
@@ -2936,8 +2995,14 @@ store_reusable_diagnostic_text(
       generation.plan_snapshot_status !=
           ReusablePlanSnapshotStatusV1::Analyzed ||
       update.plan_status == ReusablePlanSnapshotStatusV1::Analyzed;
+  const bool no_canonical_status_downgrade =
+      generation.canonical_plan_snapshot_status !=
+          ReusablePlanSnapshotStatusV1::Planned ||
+      update.canonical_plan_status ==
+          ReusablePlanSnapshotStatusV1::Planned;
   if (!state_allows_update || !analyzed_state_valid ||
-      !no_status_downgrade || generation.producer != update.producer) {
+      !no_status_downgrade || !no_canonical_status_downgrade ||
+      generation.producer != update.producer) {
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::InvalidState;
   }
@@ -2956,6 +3021,7 @@ copy_reusable_diagnostic_text(
     ReusableRegistryAttachmentV1 &attachment,
     const ReusableGenerationReferenceV1 &reference,
     std::span<char> display_sql,
+    std::span<char> canonical_plan,
     std::span<char> producer_plan,
     const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
   using namespace reusable_registry_detail;
@@ -2983,19 +3049,25 @@ copy_reusable_diagnostic_text(
     return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
   }
   if (display_sql.size() < generation.display_sql_bytes ||
+      canonical_plan.size() < generation.canonical_plan_bytes ||
       producer_plan.size() < generation.producer_plan_bytes) {
     release_exact(callbacks, partition);
     return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
   }
   std::copy_n(generation.display_sql.begin(), generation.display_sql_bytes,
               display_sql.begin());
+  std::copy_n(generation.canonical_plan.begin(),
+              generation.canonical_plan_bytes, canonical_plan.begin());
   std::copy_n(generation.producer_plan.begin(),
               generation.producer_plan_bytes, producer_plan.begin());
   const ReusableDiagnosticTextCopyV1 result{
+      .canonical_plan_status = generation.canonical_plan_snapshot_status,
       .plan_status = generation.plan_snapshot_status,
       .display_sql_truncated = generation.display_sql_truncated,
+      .canonical_plan_truncated = generation.canonical_plan_truncated,
       .producer_plan_truncated = generation.producer_plan_truncated,
       .display_sql_bytes = generation.display_sql_bytes,
+      .canonical_plan_bytes = generation.canonical_plan_bytes,
       .producer_plan_bytes = generation.producer_plan_bytes,
   };
   release_exact(callbacks, partition);

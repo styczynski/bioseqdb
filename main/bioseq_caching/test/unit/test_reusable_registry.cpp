@@ -122,6 +122,7 @@ static_assert(!exposes_reusable_shared_byte_ranges<
 template <class Row>
 concept exposes_reusable_diagnostic_text = requires(Row row) {
   row.display_sql;
+  row.canonical_plan;
   row.producer_plan;
 };
 
@@ -662,14 +663,19 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
 
   const std::string_view sql =
       "SELECT payload FROM provider_rows WHERE private_value = 17";
+  const std::string_view canonical =
+      "{CUSTOMSCAN :methods BioseqReusableCoverageScan}";
   const std::string_view planned =
       "Custom Scan (GenericProvider)\n  Provider Workers: 4";
   ReusableDiagnosticTextUpdateV1 update{
       .reference = claimed.reference,
       .producer = producer(8),
       .display_sql = char_view(sql),
+      .canonical_plan = char_view(canonical),
       .producer_plan = char_view(planned),
+      .canonical_plan_status = ReusablePlanSnapshotStatusV1::Planned,
       .plan_status = ReusablePlanSnapshotStatusV1::Planned,
+      .canonical_plan_truncated = true,
       .producer_plan_truncated = true,
   };
   REQUIRE(
@@ -722,20 +728,35 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
   REQUIRE(
       redacted_rows[0].plan_snapshot_status
       == ReusablePlanSnapshotStatusV1::Planned);
+  REQUIRE(
+      redacted_rows[0].canonical_plan_snapshot_status
+      == ReusablePlanSnapshotStatusV1::Planned);
   REQUIRE_FALSE(redacted_rows[0].display_sql_truncated);
+  REQUIRE(redacted_rows[0].canonical_plan_truncated);
   REQUIRE(redacted_rows[0].producer_plan_truncated);
 
   std::array<char, kReusableDisplaySqlCapacityV1> sql_copy{};
+  std::array<char, kReusableCanonicalPlanCapacityV1> canonical_copy{};
   std::array<char, kReusableProducerPlanCapacityV1> plan_copy{};
   const auto copied = copy_reusable_diagnostic_text(
-      fixture.attachment, claimed.reference, sql_copy, plan_copy);
+      fixture.attachment, claimed.reference, sql_copy, canonical_copy,
+      plan_copy);
   REQUIRE(copied.has_value());
   REQUIRE(copied->display_sql_bytes == sql.size());
+  REQUIRE(copied->canonical_plan_bytes == canonical.size());
   REQUIRE(copied->producer_plan_bytes == planned.size());
+  REQUIRE(
+      copied->canonical_plan_status
+      == ReusablePlanSnapshotStatusV1::Planned);
   REQUIRE(copied->plan_status == ReusablePlanSnapshotStatusV1::Planned);
+  REQUIRE(copied->canonical_plan_truncated);
   REQUIRE(copied->producer_plan_truncated);
   REQUIRE(
       std::string_view(sql_copy.data(), copied->display_sql_bytes) == sql);
+  REQUIRE(
+      std::string_view(
+          canonical_copy.data(), copied->canonical_plan_bytes)
+      == canonical);
   REQUIRE(
       std::string_view(plan_copy.data(), copied->producer_plan_bytes)
       == planned);
@@ -743,7 +764,8 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
   std::array<char, 1> undersized{};
   REQUIRE(
       copy_reusable_diagnostic_text(
-          fixture.attachment, claimed.reference, undersized, plan_copy)
+          fixture.attachment, claimed.reference, undersized,
+          canonical_copy, plan_copy)
           .error()
       == ReusableRegistryErrorV1::InvalidArgument);
   std::string oversized(kReusableProducerPlanCapacityV1 + 1U, 'x');
@@ -787,12 +809,13 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
   ++stale_reference.slot_sequence;
   REQUIRE(
       copy_reusable_diagnostic_text(
-          fixture.attachment, stale_reference, sql_copy, plan_copy)
+          fixture.attachment, stale_reference, sql_copy, canonical_copy,
+          plan_copy)
           .error()
       == ReusableRegistryErrorV1::StaleReference);
 }
 
-TEST_CASE("reusable legacy begin publishes a bounded unavailable marker") {
+TEST_CASE("reusable legacy begin publishes unavailable plan statuses") {
   RegistryFixture fixture{2};
   auto claimed = claim(
       fixture, coverage_key(48), digest(71), "legacy-domain",
@@ -803,18 +826,91 @@ TEST_CASE("reusable legacy begin publishes a bounded unavailable marker") {
       == ReusableRegistryErrorV1::None);
 
   std::array<char, kReusableDisplaySqlCapacityV1> sql_copy{};
+  std::array<char, kReusableCanonicalPlanCapacityV1> canonical_copy{};
   std::array<char, kReusableProducerPlanCapacityV1> plan_copy{};
   const auto copied = copy_reusable_diagnostic_text(
-      fixture.attachment, claimed.reference, sql_copy, plan_copy);
+      fixture.attachment, claimed.reference, sql_copy, canonical_copy,
+      plan_copy);
   REQUIRE(copied.has_value());
   REQUIRE(
       copied->plan_status == ReusablePlanSnapshotStatusV1::Unavailable);
   REQUIRE(
+      copied->canonical_plan_status
+      == ReusablePlanSnapshotStatusV1::Unavailable);
+  REQUIRE(copied->canonical_plan_bytes == 0);
+  REQUIRE(
       std::string_view(sql_copy.data(), copied->display_sql_bytes)
       == "SQL capture unavailable");
+  REQUIRE(copied->producer_plan_bytes == 0);
   REQUIRE(
-      std::string_view(plan_copy.data(), copied->producer_plan_bytes)
-      == "plan capture unavailable");
+      validate_reusable_registry(fixture.attachment)
+      == ReusableRegistryErrorV1::None);
+}
+
+TEST_CASE("reusable SQL and plan captures fail independently") {
+  RegistryFixture fixture{4};
+  const std::string_view sql = "SELECT payload FROM provider_rows";
+  const std::string_view canonical = "{CUSTOMSCAN :provider 7}";
+  const std::string_view human = "Custom Scan (GenericProvider)";
+
+  auto human_unavailable = claim(
+      fixture, coverage_key(49), digest(72), "capture-domain",
+      "human-unavailable", 8);
+  REQUIRE(human_unavailable);
+  REQUIRE(
+      begin_reusable_build_with_diagnostics(
+          fixture.attachment,
+          ReusableDiagnosticTextUpdateV1{
+              .reference = human_unavailable.reference,
+              .producer = producer(8),
+              .display_sql = char_view(sql),
+              .canonical_plan = char_view(canonical),
+              .canonical_plan_status =
+                  ReusablePlanSnapshotStatusV1::Planned,
+          })
+      == ReusableRegistryErrorV1::None);
+
+  auto canonical_unavailable = claim(
+      fixture, coverage_key(49), digest(73), "capture-domain",
+      "canonical-unavailable", 9);
+  REQUIRE(canonical_unavailable);
+  REQUIRE(
+      begin_reusable_build_with_diagnostics(
+          fixture.attachment,
+          ReusableDiagnosticTextUpdateV1{
+              .reference = canonical_unavailable.reference,
+              .producer = producer(9),
+              .display_sql = char_view(sql),
+              .producer_plan = char_view(human),
+              .plan_status = ReusablePlanSnapshotStatusV1::Planned,
+          })
+      == ReusableRegistryErrorV1::None);
+
+  std::array<char, kReusableDisplaySqlCapacityV1> sql_copy{};
+  std::array<char, kReusableCanonicalPlanCapacityV1> canonical_copy{};
+  std::array<char, kReusableProducerPlanCapacityV1> plan_copy{};
+  const auto first = copy_reusable_diagnostic_text(
+      fixture.attachment, human_unavailable.reference, sql_copy,
+      canonical_copy, plan_copy);
+  REQUIRE(first.has_value());
+  REQUIRE(first->display_sql_bytes == sql.size());
+  REQUIRE(first->canonical_plan_bytes == canonical.size());
+  REQUIRE(first->producer_plan_bytes == 0);
+  REQUIRE(first->plan_status == ReusablePlanSnapshotStatusV1::Unavailable);
+
+  sql_copy.fill(0);
+  canonical_copy.fill(0);
+  plan_copy.fill(0);
+  const auto second = copy_reusable_diagnostic_text(
+      fixture.attachment, canonical_unavailable.reference, sql_copy,
+      canonical_copy, plan_copy);
+  REQUIRE(second.has_value());
+  REQUIRE(second->display_sql_bytes == sql.size());
+  REQUIRE(second->canonical_plan_bytes == 0);
+  REQUIRE(second->producer_plan_bytes == human.size());
+  REQUIRE(
+      second->canonical_plan_status
+      == ReusablePlanSnapshotStatusV1::Unavailable);
   REQUIRE(
       validate_reusable_registry(fixture.attachment)
       == ReusableRegistryErrorV1::None);
