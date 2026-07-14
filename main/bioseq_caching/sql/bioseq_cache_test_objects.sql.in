@@ -82,6 +82,11 @@ RETURNS TABLE (
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_plan_build_stats'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 
+CREATE FUNCTION bioseq_cache_test.set_exact_plan_fault(text)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_set_exact_plan_fault'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
 CREATE FUNCTION bioseq_cache_test.set_mapping_fault(text)
 RETURNS void
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_set_mapping_fault'

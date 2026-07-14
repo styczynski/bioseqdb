@@ -5166,6 +5166,15 @@ PlannedStmt* cache_planner(
     {
         MemoryContextSwitchTo(planner_context);
         frame.eligible = query_is_exact_cache_eligible(*query);
+        const bool current_statement_text = query_string != nullptr
+            && (debug_query_string == nullptr
+                || query_string == debug_query_string
+                || std::strcmp(query_string, debug_query_string) == 0);
+        if (frame.eligible && query->rtable == NIL
+            && !current_statement_text) {
+            /* PL/pgSQL simple-expression plans must retain a Result root. */
+            frame.eligible = false;
+        }
         if (frame.eligible) {
             bool relation_overflow = false;
             frame.canonical_query = canonicalize_query(*query);
