@@ -1292,6 +1292,292 @@ struct PlannerDecodedCoverageV1 {
     return true;
 }
 
+struct PlannerSemanticKeysV1 {
+    bytea* canonical_domain_key = nullptr;
+    bytea* canonical_generation_key = nullptr;
+    CacheDigest256 domain_digest{};
+    CacheDigest256 generation_digest{};
+};
+
+/** Capture both provider-defined canonical keys and their SHA-256 directories. */
+[[nodiscard]] bool capture_planner_semantic_keys_fail_open(
+        const provider_registry::ProviderV1* provider,
+        const BioseqCachePathDomainV1& domain,
+        MemoryContext planner_context,
+        PlannerSemanticKeysV1* output) noexcept {
+    if (provider == nullptr || planner_context == nullptr || output == nullptr) {
+        return false;
+    }
+    MemoryContext old_context = CurrentMemoryContext;
+    volatile PlannerSemanticKeysV1* accepted = nullptr;
+    PG_TRY();
+    {
+        MemoryContextSwitchTo(planner_context);
+        auto* keys = static_cast<PlannerSemanticKeysV1*>(
+            palloc0(sizeof(PlannerSemanticKeysV1)));
+        auto* domain_key = static_cast<bytea*>(palloc(
+            VARHDRSZ + static_cast<std::size_t>(kMaxCoverageDomainKeyBytes)));
+        auto* generation_key = static_cast<bytea*>(palloc(
+            VARHDRSZ + static_cast<std::size_t>(kMaxCanonicalKeyBytes)));
+        std::size_t domain_size = 0;
+        std::size_t generation_size = 0;
+        reuse::ProviderCallDiagnosticV1 diagnostic{};
+        if (!reuse::invoke_semantic_digest_fail_open(
+                provider,
+                &domain,
+                reuse::SemanticDigestKindV1::Domain,
+                std::span<std::byte>{
+                    reinterpret_cast<std::byte*>(VARDATA(domain_key)),
+                    static_cast<std::size_t>(kMaxCoverageDomainKeyBytes)},
+                &domain_size,
+                planner_context,
+                &diagnostic)
+            || !reuse::invoke_semantic_digest_fail_open(
+                provider,
+                &domain,
+                reuse::SemanticDigestKindV1::Generation,
+                std::span<std::byte>{
+                    reinterpret_cast<std::byte*>(VARDATA(generation_key)),
+                    static_cast<std::size_t>(kMaxCanonicalKeyBytes)},
+                &generation_size,
+                planner_context,
+                &diagnostic)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("bioseq cache provider semantic key is unavailable")));
+        }
+        SET_VARSIZE(domain_key, VARHDRSZ + domain_size);
+        SET_VARSIZE(generation_key, VARHDRSZ + generation_size);
+        PostgreSqlColumnChecksumPolicy checksum_policy;
+        const auto domain_digest = checksum_policy.sha256(
+            std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(VARDATA(domain_key)),
+                domain_size});
+        const auto generation_digest = checksum_policy.sha256(
+            std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(VARDATA(generation_key)),
+                generation_size});
+        if (!domain_digest.has_value() || !generation_digest.has_value()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq cache semantic digest is unavailable")));
+        }
+        keys->canonical_domain_key = domain_key;
+        keys->canonical_generation_key = generation_key;
+        keys->domain_digest = *domain_digest;
+        keys->generation_digest = *generation_digest;
+        accepted = keys;
+        MemoryContextSwitchTo(old_context);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(old_context);
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        accepted = nullptr;
+    }
+    PG_END_TRY();
+    if (accepted == nullptr) {
+        return false;
+    }
+    *output = *const_cast<PlannerSemanticKeysV1*>(accepted);
+    return true;
+}
+
+[[nodiscard]] ReusableSecurityNamespaceV1
+current_reusable_security_namespace() noexcept {
+    Oid current_role = InvalidOid;
+    int security_context = 0;
+    GetUserIdAndSecContext(&current_role, &security_context);
+    return ReusableSecurityNamespaceV1{
+        .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
+        .current_role_oid = static_cast<std::uint32_t>(current_role),
+        .session_user_oid = static_cast<std::uint32_t>(GetSessionUserId()),
+        .security_context_flags = static_cast<std::uint32_t>(security_context),
+        .row_security_mode = row_security ? 1 : 0,
+        .provider_security_digest = {},
+    };
+}
+
+[[nodiscard]] reuse::CoverageSecurityNamespaceV1
+planner_security_namespace(
+        const ReusableSecurityNamespaceV1& source) noexcept {
+    return reuse::CoverageSecurityNamespaceV1{
+        .database_oid = source.database_oid,
+        .current_role_oid = source.current_role_oid,
+        .session_user_oid = source.session_user_oid,
+        .security_context_flags = source.security_context_flags,
+        .row_security_mode = static_cast<std::uint8_t>(
+            source.row_security_mode != 0),
+        .provider_security_digest = source.provider_security_digest,
+    };
+}
+
+inline constexpr std::uint32_t kCoverageCurrentPlanMagicV1 = 0x42435031U;
+
+/** Fixed prefix of executor metadata embedded as one bytea Const Node. */
+struct CoverageCurrentPlanHeaderV1 {
+    std::uint32_t magic = kCoverageCurrentPlanMagicV1;
+    std::uint32_t format_version = reuse::kReusablePlanFormatVersionV1;
+    std::uint32_t provider_id = 0;
+    std::uint32_t provider_abi_version = 0;
+    std::uint64_t compatibility_family_id = 0;
+    std::uint64_t capability_mask = 0;
+    ReusableCoverageDirectoryKeyV1 coverage_directory_key{};
+    CacheDigest256 generation_digest{};
+    std::uint32_t canonical_domain_key_bytes = 0;
+    std::uint32_t canonical_generation_key_bytes = 0;
+    std::uint32_t coverage_descriptor_bytes = 0;
+    std::uint32_t reserved = 0;
+};
+
+static_assert(std::is_standard_layout_v<CoverageCurrentPlanHeaderV1>);
+static_assert(std::is_trivially_copyable_v<CoverageCurrentPlanHeaderV1>);
+
+[[nodiscard]] Const* make_binary_node(
+        std::span<const std::byte> bytes) {
+    if (bytes.empty() || bytes.size() > static_cast<std::size_t>(MaxAllocSize)) {
+        return nullptr;
+    }
+    auto* value = static_cast<bytea*>(palloc(VARHDRSZ + bytes.size()));
+    SET_VARSIZE(value, VARHDRSZ + bytes.size());
+    std::memcpy(VARDATA(value), bytes.data(), bytes.size());
+    return makeConst(
+        BYTEAOID,
+        -1,
+        InvalidOid,
+        -1,
+        PointerGetDatum(value),
+        false,
+        false);
+}
+
+[[nodiscard]] std::span<const std::byte> bytea_payload(
+        const bytea* value) noexcept {
+    if (value == nullptr || VARSIZE_ANY_EXHDR(value) == 0) {
+        return {};
+    }
+    return std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(VARDATA_ANY(value)),
+        static_cast<std::size_t>(VARSIZE_ANY_EXHDR(value)),
+    };
+}
+
+/** Persist current exact-generation identity for executor-time claiming. */
+[[nodiscard]] Const* make_current_coverage_plan_node(
+        const provider_registry::ProviderV1& provider,
+        const BioseqCachePathDomainV1& domain,
+        const PlannerSemanticKeysV1& keys,
+        const bytea* descriptor) {
+    const std::span<const std::byte> domain_key =
+        bytea_payload(keys.canonical_domain_key);
+    const std::span<const std::byte> generation_key =
+        bytea_payload(keys.canonical_generation_key);
+    const std::span<const std::byte> descriptor_bytes =
+        bytea_payload(descriptor);
+    if (domain_key.empty() || generation_key.empty()
+        || descriptor_bytes.empty()
+        || domain_key.size() > (std::numeric_limits<std::uint32_t>::max)()
+        || generation_key.size() > (std::numeric_limits<std::uint32_t>::max)()
+        || descriptor_bytes.size()
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+        return nullptr;
+    }
+    const CoverageCurrentPlanHeaderV1 header{
+        .provider_id = provider.provider_id,
+        .provider_abi_version = provider.abi_version,
+        .compatibility_family_id = domain.compatibility_family_id,
+        .capability_mask = domain.capability_mask,
+        .coverage_directory_key = {
+            .security_namespace = current_reusable_security_namespace(),
+            .coverage_domain_digest = keys.domain_digest,
+        },
+        .generation_digest = keys.generation_digest,
+        .canonical_domain_key_bytes = static_cast<std::uint32_t>(
+            domain_key.size()),
+        .canonical_generation_key_bytes = static_cast<std::uint32_t>(
+            generation_key.size()),
+        .coverage_descriptor_bytes = static_cast<std::uint32_t>(
+            descriptor_bytes.size()),
+    };
+    std::uint64_t total = sizeof(header);
+    if (!add_coverage_descriptor_size(total, 1, domain_key.size())
+        || !add_coverage_descriptor_size(total, 1, generation_key.size())
+        || !add_coverage_descriptor_size(total, 1, descriptor_bytes.size())) {
+        return nullptr;
+    }
+    auto* packed = static_cast<std::byte*>(palloc(total));
+    std::size_t offset = 0;
+    const auto append = [&](const void* source, std::size_t size) {
+        std::memcpy(packed + offset, source, size);
+        offset += size;
+    };
+    append(&header, sizeof(header));
+    append(domain_key.data(), domain_key.size());
+    append(generation_key.data(), generation_key.size());
+    append(descriptor_bytes.data(), descriptor_bytes.size());
+    return make_binary_node(
+        std::span<const std::byte>{packed, static_cast<std::size_t>(total)});
+}
+
+inline constexpr std::uint32_t kCoverageMappingMagicV1 = 0x42434d31U;
+
+struct CoverageMappingHeaderV1 {
+    std::uint32_t magic = kCoverageMappingMagicV1;
+    std::uint32_t format_version = reuse::kReusablePlanFormatVersionV1;
+    std::uint32_t boundary_count = 0;
+    std::uint32_t lineage_count = 0;
+};
+
+/** Persist validated source-column maps as POD; private Nodes stay separate. */
+[[nodiscard]] Const* make_source_mapping_node(
+        const BioseqCacheSourceMappingV1& mapping) {
+    if (mapping.boundary_map_count > kMaxProviderBoundaryColumns
+        || mapping.lineage_map_count > kMaxProviderBoundaryColumns
+        || (mapping.boundary_map_count != 0
+            && mapping.boundary_map == nullptr)
+        || (mapping.lineage_map_count != 0
+            && mapping.lineage_map == nullptr)) {
+        return nullptr;
+    }
+    const CoverageMappingHeaderV1 header{
+        .boundary_count = static_cast<std::uint32_t>(
+            mapping.boundary_map_count),
+        .lineage_count = static_cast<std::uint32_t>(
+            mapping.lineage_map_count),
+    };
+    std::uint64_t total = sizeof(header);
+    if (!add_coverage_descriptor_size(
+            total, mapping.boundary_map_count,
+            sizeof(BioseqCacheColumnMapEntryV1))
+        || !add_coverage_descriptor_size(
+            total, mapping.lineage_map_count,
+            sizeof(BioseqCacheColumnMapEntryV1))) {
+        return nullptr;
+    }
+    auto* packed = static_cast<std::byte*>(palloc(total));
+    std::size_t offset = 0;
+    std::memcpy(packed + offset, &header, sizeof(header));
+    offset += sizeof(header);
+    const std::size_t boundary_bytes = mapping.boundary_map_count
+        * sizeof(BioseqCacheColumnMapEntryV1);
+    const std::size_t lineage_bytes = mapping.lineage_map_count
+        * sizeof(BioseqCacheColumnMapEntryV1);
+    if (boundary_bytes != 0) {
+        std::memcpy(packed + offset, mapping.boundary_map, boundary_bytes);
+        offset += boundary_bytes;
+    }
+    if (lineage_bytes != 0) {
+        std::memcpy(packed + offset, mapping.lineage_map, lineage_bytes);
+        offset += lineage_bytes;
+    }
+    return make_binary_node(
+        std::span<const std::byte>{packed, static_cast<std::size_t>(total)});
+}
+
 struct VisibilityTicket {
     std::uint64_t database_epoch = 0;
     TransactionId last_committed_write_xid = InvalidTransactionId;
