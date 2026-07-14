@@ -913,6 +913,81 @@ inline void record_unattested_job(
     stats.merge_job(job);
 }
 
+/// Consume one runtime-sealed persisted Shape-V5 coordinate proof.  This is a
+/// dedicated GPU recorder: MatchResultCollection and CPU/SIMD route labels are
+/// deliberately absent, and a missing/tampered/second consume publishes only
+/// mixed-invalid identities with no stage evidence.
+inline void record_persisted_shape_v5_coordinate_job(
+        ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
+        const Minimap2Params& params,
+        const ::bioseq::pipeline_stats::TargetIndexSource requested_source,
+        bioseq::gpu::vulkan::PersistedShapeV5CoordinateOperationProof& proof,
+        const bioseq::gpu::vulkan::
+            PersistedShapeV5CoordinateJobExpectation& expectation) noexcept {
+    ::bioseq::pipeline_stats::PipelineJobExecutionStats job{};
+    job.requested_backend = backend_from_selected_params(params);
+    job.requested_target_index_source = requested_source;
+    const auto evidence = proof.consume(expectation);
+    const bool accepted =
+        job.requested_backend
+            == ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
+        && selected_vulkan_execution(params)
+        && !params.do_cigar
+        && pipe::phase_c_coordinate_only_active(params)
+        && pipe::phase_c_index_build_active(params)
+        && requested_source
+            == ::bioseq::pipeline_stats::TargetIndexSource::persisted
+        && evidence.has_value()
+        && evidence->accepted();
+    job.actual_backend = accepted
+        ? ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
+        : ::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid;
+    job.actual_target_index_source = accepted
+        ? ::bioseq::pipeline_stats::TargetIndexSource::persisted
+        : ::bioseq::pipeline_stats::TargetIndexSource::mixed_invalid;
+    if (accepted) {
+        job.persisted_generation_id = evidence->audit().generation_id;
+        job.persisted_source_identity = evidence->audit().source_identity;
+    }
+    const std::size_t effective_workers =
+        bioseq::parallelism::GlobalPool::instance().max_concurrency();
+    job.environment.effective_cpu_workers = effective_workers
+            > static_cast<std::size_t>(
+                (std::numeric_limits<std::uint32_t>::max)())
+        ? (std::numeric_limits<std::uint32_t>::max)()
+        : static_cast<std::uint32_t>(effective_workers);
+    job.logical_target_row = expectation.logical_target_row;
+    job.query_ordinal = expectation.logical_query_ordinal;
+    if (accepted) {
+        const auto mark = [&job](
+                const ::bioseq::pipeline_stats::PipelineStage stage,
+                const ::bioseq::pipeline_stats::ExecutionEngine engine) {
+            auto& coverage = job.stages.coverage[
+                ::bioseq::pipeline_stats::stage_index(stage)];
+            coverage.eligible_jobs = 1u;
+            coverage.executed_jobs[
+                ::bioseq::pipeline_stats::engine_index(engine)] = 1u;
+        };
+        using Stage = ::bioseq::pipeline_stats::PipelineStage;
+        using Engine = ::bioseq::pipeline_stats::ExecutionEngine;
+        mark(Stage::query_sketch, Engine::vulkan_gpu);
+        mark(Stage::persisted_index_decode, Engine::host_io);
+        if (evidence->audit().query_record.minimizer_count != 0u) {
+            mark(Stage::partition_selection, Engine::vulkan_gpu);
+            mark(Stage::seed_lookup, Engine::vulkan_gpu);
+        }
+        if (evidence->audit().range_count != 0u) {
+            mark(Stage::chain_score, Engine::vulkan_gpu);
+            mark(Stage::chain_backtrack, Engine::vulkan_gpu);
+            mark(Stage::region_generation, Engine::vulkan_gpu);
+        }
+    }
+    /* Immutable device/driver and pipeline-cache evidence intentionally stays
+     * absent.  The canonical validator therefore keeps this coordinate-only
+     * milestone unattested until that independent proof is implemented. */
+    stats.merge_job(job);
+}
+
 inline void record_target_row(
         ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         const std::uint64_t rows = 1) noexcept {
@@ -4304,6 +4379,8 @@ template <class S>
                         query_records;
                     bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>
                         query_minimizer_device_span{};
+                    bioseq::gpu::vulkan::DeviceQuerySketchAuthority
+                        query_sketch_authority{};
                     std::vector<GpuBatchQuerySidecar> query_sidecars;
                     std::vector<std::uint32_t> row_to_query_index(
                         batch_size,
@@ -4368,6 +4445,8 @@ template <class S>
                             gpu_batch_sketch->memory_retention;
                         query_minimizer_device_span =
                             gpu_batch_sketch->device_span();
+                        query_sketch_authority =
+                            std::move(gpu_batch_sketch->query_authority);
                     }
                     add_stage_host_time(
                         stats,
@@ -4431,6 +4510,15 @@ template <class S>
 									.bucket_count = 0u,
 									.target_position_offset = 0u,
 									.query_index = query_index,
+									.logical_target_row =
+										static_cast<std::uint64_t>(
+											scanner_pg_ctx->target_rownos[row]),
+									.logical_query_ordinal =
+										scanner_pg_ctx->explicit_query_ordinals
+											? scanner_pg_ctx->query_ordinals[row]
+											: per_row_query_mode
+												? static_cast<std::uint64_t>(row)
+												: broadcast_query_ordinal,
 									.shape_v5 =
 										&prepared_gpu_target->resident_view,
 								});
@@ -4463,6 +4551,8 @@ template <class S>
 								MinimizerT>::hash_shift,
 							.pos_bits = bioseq::gpu::vulkan::minimizer_wire_traits<
 								MinimizerT>::pos_bits,
+							.window_size = static_cast<std::uint32_t>(
+								dispatch_params.window_size),
 							.host_query_records = std::span<const
 								bioseq::gpu::vulkan::PhaseCSeedQueryRecordWire>{
 								query_records.data(), query_records.size()},
@@ -4476,7 +4566,34 @@ template <class S>
 						const auto chain_key =
 							bioseq::chaining::choose_vulkan_chaining_pipeline(
 								runtime.features());
-						const auto coord_run = runtime.
+						constexpr auto coordinate_algorithm = bioseq::gpu::vulkan::
+							PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp;
+						const std::int32_t max_iter =
+							std::min<std::int32_t>(cp.max_chain_iter, 3000);
+						constexpr std::uint32_t probe_limit = 16u;
+						const auto coordinate_configuration =
+							bioseq::gpu::vulkan::
+								persisted_shape_v5_coordinate_config_identity(
+									static_cast<std::uint32_t>(
+										dispatch_params.kmer_size),
+									dispatch_params.max_occ,
+									coordinate_algorithm,
+									chain_key,
+									max_dist_x,
+									max_dist_y,
+									cp.bandwidth,
+									max_iter,
+									cp.gap_penalty,
+									cp.skip_penalty,
+									cp.max_chain_skip,
+									cp.min_chain_score,
+									cp.min_seed_count,
+									probe_limit);
+						const std::uint64_t query_authority_identity =
+							query_sketch_authority.identity();
+						const auto* const query_minimizer_buffer_identity =
+							query_inputs.device_minimizer_words;
+						auto coord_run = runtime.
 							run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
 								query_inputs,
 								std::span<const bioseq::gpu::vulkan::
@@ -4485,19 +4602,19 @@ template <class S>
 								static_cast<std::uint32_t>(
 									dispatch_params.kmer_size),
 								dispatch_params.max_occ,
-								bioseq::gpu::vulkan::
-									PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp,
+								coordinate_algorithm,
 								chain_key,
 								max_dist_x,
 								max_dist_y,
 								cp.bandwidth,
-								std::min<std::int32_t>(cp.max_chain_iter, 3000),
+								max_iter,
 								cp.gap_penalty,
 								cp.skip_penalty,
 								cp.max_chain_skip,
 								cp.min_chain_score,
 								cp.min_seed_count,
-								16u);
+								probe_limit,
+								std::move(query_sketch_authority));
 
 						const auto& direct = coord_run.shape_v5_direct;
 						const bool direct_proof_valid = direct.selected
@@ -4519,7 +4636,10 @@ template <class S>
 							&& direct.emit_status_checks == direct.emit_dispatches
 							&& direct.status_or == 0u
 							&& direct.cpu_or_simd_fallbacks == 0u
-							&& coord_run.stats.coordinate_vote_dispatches == 0u;
+							&& coord_run.stats.coordinate_vote_dispatches == 0u
+							&& coord_run.operation_proof.sealed()
+							&& coord_run.operation_proof.job_count()
+								== direct_jobs.size();
 						if (!direct_proof_valid) {
 							throw bioseq::gpu::vulkan::VulkanRuntimeError(
 								"persisted GPU Format-5 direct-route proof is incomplete or inconsistent");
@@ -4567,18 +4687,69 @@ template <class S>
 										static_cast<sequence_size_t>(
 											prepared_gpu_target->target_bp_size)));
 							}
-							record_unattested_job(
+							const auto& query_record =
+								query_records[direct_jobs[problem_index].query_index];
+							record_persisted_shape_v5_coordinate_job(
 								stats,
 								dispatch_params,
 								requested_source,
-								::bioseq::pipeline_stats::TargetIndexSource::persisted,
-								scanner_pg_ctx,
-								row,
-								per_row_query_mode,
-								broadcast_query_ordinal,
-								/*execution_proof=*/nullptr,
-								/*consumed_shared_cached_query_proof=*/false,
-								cached_query_minimizer_proof_operation_accounted);
+								coord_run.operation_proof,
+								bioseq::gpu::vulkan::
+									PersistedShapeV5CoordinateJobExpectation{
+										.problem_index = problem_index,
+										.query_authority_identity =
+											query_authority_identity,
+										.resident_descriptors = bioseq::gpu::vulkan::
+											runtime_buffer_identity(prepared_gpu_target
+												->resident_view.descriptors),
+										.resident_controls = bioseq::gpu::vulkan::
+											runtime_buffer_identity(prepared_gpu_target
+												->resident_view.controls),
+										.resident_positions = bioseq::gpu::vulkan::
+											runtime_buffer_identity(prepared_gpu_target
+												->resident_view.positions),
+										.query_minimizer_buffer = bioseq::gpu::vulkan::
+											runtime_buffer_identity(
+												query_minimizer_buffer_identity),
+										.device_uuid = prepared_gpu_target
+											->resident_view.device_uuid,
+										.descriptor_bytes = prepared_gpu_target
+											->resident_view.descriptor_bytes,
+										.control_bytes = prepared_gpu_target
+											->resident_view.control_bytes,
+										.position_bytes = prepared_gpu_target
+											->resident_view.position_bytes,
+										.position_count = prepared_gpu_target
+											->resident_view.position_count,
+										.max_occ_cap = prepared_gpu_target
+											->resident_view.max_occ_cap,
+										.partition_count = prepared_gpu_target
+											->resident_view.partition_count,
+										.abi_version = prepared_gpu_target
+											->resident_view.abi_version,
+										.generation_id = prepared_gpu_target
+											->resident_view.generation_id,
+										.source_identity = prepared_gpu_target
+											->resident_view.source_identity,
+										.cold_load_identity = prepared_gpu_target
+											->resident_view.cold_load_identity,
+										.target_len = prepared_gpu_target
+											->target_bp_size,
+										.query_index = direct_jobs[problem_index]
+											.query_index,
+										.logical_target_row = direct_jobs[problem_index]
+											.logical_target_row,
+											.logical_query_ordinal = direct_jobs[problem_index]
+												.logical_query_ordinal,
+											.query_record = query_record,
+											.result = coord,
+											.configuration =
+												coordinate_configuration,
+										});
+						}
+						if (!coord_run.operation_proof.fully_consumed()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 operation proof left unconsumed jobs");
 						}
 						if (record_target_operational_outcomes) {
 							record_target_row(stats);

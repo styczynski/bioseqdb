@@ -157,6 +157,48 @@ private:
     }
 };
 
+template <class Handle>
+[[nodiscard]] inline std::uint64_t vulkan_handle_identity(
+    const Handle handle) noexcept {
+    static_assert(sizeof(Handle) <= sizeof(std::uint64_t));
+    std::uint64_t identity = 0u;
+    std::memcpy(&identity, &handle, sizeof(handle));
+    return identity;
+}
+
+/// Immutable snapshot of one Runtime-owned allocation.  The object address is
+/// insufficient because Buffer is move-assignable; operation proof therefore
+/// binds its owner, Vulkan allocation handles, and physical/logical sizes too.
+struct RuntimeBufferIdentity {
+    const Buffer* object = nullptr;
+    const Runtime* owner = nullptr;
+    std::uint64_t buffer_handle = 0u;
+    std::uint64_t memory_handle = 0u;
+    std::uint64_t bytes = 0u;
+    std::uint64_t allocation_bytes = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return object != nullptr && owner != nullptr
+            && buffer_handle != 0u && memory_handle != 0u
+            && bytes != 0u && allocation_bytes >= bytes;
+    }
+    constexpr bool operator==(const RuntimeBufferIdentity&) const noexcept =
+        default;
+};
+
+[[nodiscard]] inline RuntimeBufferIdentity runtime_buffer_identity(
+    const Buffer* buffer) noexcept {
+    if (buffer == nullptr) return {};
+    return RuntimeBufferIdentity{
+        .object = buffer,
+        .owner = buffer->owner,
+        .buffer_handle = vulkan_handle_identity(buffer->buffer),
+        .memory_handle = vulkan_handle_identity(buffer->memory),
+        .bytes = buffer->bytes,
+        .allocation_bytes = buffer->allocation_bytes,
+    };
+}
+
 /// One independent hard chaining range = one dispatched workgroup.
 struct GpuChainRange {
     std::uint32_t begin = 0;
@@ -314,12 +356,181 @@ private:
 
 static_assert(!RuntimeSketchBatchDispatchProof{}.accepted());
 
+/// Exact per-query partition of one batched query-minimizer image.
+struct PhaseCSeedQueryRecordWire {
+    std::uint32_t minimizer_offset = 0;
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t query_len = 0;
+    std::uint32_t flags = 0;
+};
+static_assert(sizeof(PhaseCSeedQueryRecordWire) == 16);
+static_assert(alignof(PhaseCSeedQueryRecordWire) == alignof(std::uint32_t));
+
+/// Query-to-tile grouping supplied with the exact sketch submission. Runtime
+/// derives and seals the final query records from this layout plus the device
+/// count/scan output; coordinate callers cannot repartition the resident image.
+struct PhaseCSketchQueryLayoutWire {
+    std::uint32_t begin = 0;
+    std::uint32_t count = 0;
+    std::uint32_t query_len = 0;
+};
+
+/// Move-only authority for one device-only query sketch.  Only Runtime can
+/// issue it, after the exact count/scan/emit submissions have completed.  The
+/// authority is consumed by the persisted Shape-V5 coordinate operation; a
+/// copied dispatch counter can therefore never stand in for the resident
+/// query buffer that produced the operation.
+class DeviceQuerySketchAuthority {
+public:
+    DeviceQuerySketchAuthority() = default;
+    DeviceQuerySketchAuthority(const DeviceQuerySketchAuthority&) = delete;
+    DeviceQuerySketchAuthority& operator=(
+        const DeviceQuerySketchAuthority&) = delete;
+    DeviceQuerySketchAuthority(DeviceQuerySketchAuthority&& other) noexcept {
+        move_from(other);
+    }
+    DeviceQuerySketchAuthority& operator=(
+        DeviceQuerySketchAuthority&& other) noexcept {
+        if (this != &other) {
+            clear();
+            move_from(other);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        const bool shape_valid = identity_ != 0u
+            && runtime_ != nullptr
+            && buffer_ != VK_NULL_HANDLE
+            && memory_identity_ != 0u
+            && buffer_bytes_ != 0u
+            && allocation_bytes_ >= buffer_bytes_
+            && materialization_
+                == VulkanSketchHostMaterialization::device_only
+            && dispatch_proof_.accepted()
+            && window_size_ != 0u
+            && kmer_size_ != 0u
+            && minimizer_word_kind_ <= 3u
+            && minimizer_words32_per_record_ != 0u
+            && hash_shift_ < 64u
+            && pos_bits_ < 64u
+            && !query_records_.empty()
+            && query_tile_counts_.size() == query_records_.size();
+        if (!shape_valid) return false;
+        std::uint64_t cursor = 0u;
+        for (const auto& record : query_records_) {
+            if (record.flags != 0u
+                || record.minimizer_offset != cursor
+                || record.minimizer_count
+                    > (std::numeric_limits<std::uint64_t>::max)() - cursor) {
+                return false;
+            }
+            cursor += record.minimizer_count;
+        }
+        return cursor == minimizer_count_;
+    }
+    [[nodiscard]] std::uint64_t identity() const noexcept {
+        return identity_;
+    }
+    [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
+        constexpr std::uint64_t maximum =
+            (std::numeric_limits<std::uint64_t>::max)();
+        if (query_records_.capacity()
+                > maximum / sizeof(PhaseCSeedQueryRecordWire)
+            || query_tile_counts_.capacity()
+                > maximum / sizeof(std::uint32_t)) {
+            return (std::numeric_limits<std::uint64_t>::max)();
+        }
+        const std::uint64_t record_bytes =
+            static_cast<std::uint64_t>(query_records_.capacity())
+            * sizeof(PhaseCSeedQueryRecordWire);
+        const std::uint64_t tile_count_bytes =
+            static_cast<std::uint64_t>(query_tile_counts_.capacity())
+            * sizeof(std::uint32_t);
+        return tile_count_bytes > maximum - record_bytes
+            ? maximum
+            : record_bytes + tile_count_bytes;
+    }
+
+private:
+    friend class Runtime;
+
+    void clear() noexcept {
+        identity_ = 0u;
+        runtime_ = nullptr;
+        buffer_ = VK_NULL_HANDLE;
+        memory_identity_ = 0u;
+        buffer_bytes_ = 0u;
+        allocation_bytes_ = 0u;
+        minimizer_count_ = 0u;
+        window_size_ = 0u;
+        kmer_size_ = 0u;
+        minimizer_word_kind_ = 0u;
+        minimizer_words32_per_record_ = 0u;
+        hash_shift_ = 0u;
+        pos_bits_ = 0u;
+        materialization_ =
+            VulkanSketchHostMaterialization::host_and_device;
+        dispatch_proof_ = RuntimeSketchBatchDispatchProof{};
+        device_uuid_.fill(0u);
+        query_records_.clear();
+        query_tile_counts_.clear();
+    }
+    void move_from(DeviceQuerySketchAuthority& other) noexcept {
+        identity_ = other.identity_;
+        runtime_ = other.runtime_;
+        buffer_ = other.buffer_;
+        memory_identity_ = other.memory_identity_;
+        buffer_bytes_ = other.buffer_bytes_;
+        allocation_bytes_ = other.allocation_bytes_;
+        minimizer_count_ = other.minimizer_count_;
+        window_size_ = other.window_size_;
+        kmer_size_ = other.kmer_size_;
+        minimizer_word_kind_ = other.minimizer_word_kind_;
+        minimizer_words32_per_record_ =
+            other.minimizer_words32_per_record_;
+        hash_shift_ = other.hash_shift_;
+        pos_bits_ = other.pos_bits_;
+        materialization_ = other.materialization_;
+        dispatch_proof_ = other.dispatch_proof_;
+        device_uuid_ = other.device_uuid_;
+        query_records_ = std::move(other.query_records_);
+        query_tile_counts_ = std::move(other.query_tile_counts_);
+        other.clear();
+    }
+
+    std::uint64_t identity_ = 0u;
+    Runtime* runtime_ = nullptr;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    std::uint64_t memory_identity_ = 0u;
+    std::uint64_t buffer_bytes_ = 0u;
+    std::uint64_t allocation_bytes_ = 0u;
+    std::uint64_t minimizer_count_ = 0u;
+    std::uint32_t window_size_ = 0u;
+    std::uint32_t kmer_size_ = 0u;
+    std::uint32_t minimizer_word_kind_ = 0u;
+    std::uint32_t minimizer_words32_per_record_ = 0u;
+    std::uint32_t hash_shift_ = 0u;
+    std::uint32_t pos_bits_ = 0u;
+    VulkanSketchHostMaterialization materialization_ =
+        VulkanSketchHostMaterialization::host_and_device;
+    RuntimeSketchBatchDispatchProof dispatch_proof_{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid_{};
+    std::vector<PhaseCSeedQueryRecordWire> query_records_{};
+    std::vector<std::uint32_t> query_tile_counts_{};
+};
+
+static_assert(!std::is_copy_constructible_v<DeviceQuerySketchAuthority>);
+static_assert(std::is_nothrow_move_constructible_v<
+    DeviceQuerySketchAuthority>);
+
 struct RuntimeSketchBatchResult {
     Buffer minimizer_words;
     std::vector<std::byte> host_minimizer_bytes;
     std::vector<std::uint32_t> tile_counts;
     std::vector<std::uint32_t> tile_offsets;
     RuntimeSketchBatchDispatchProof dispatch_proof{};
+    DeviceQuerySketchAuthority query_authority{};
     std::uint64_t count = 0;
     bool overflow = false;
 };
@@ -969,17 +1180,9 @@ private:
 };
 
 /// Common query-side inputs for a batched resident seed→chain→coordinate run.
-/// The query minimizer words are shared by every job in the batch; each job
-/// supplies its own resident target index.
-struct PhaseCSeedQueryRecordWire {
-    std::uint32_t minimizer_offset = 0;
-    std::uint32_t minimizer_count = 0;
-    std::uint32_t query_len = 0;
-    std::uint32_t flags = 0;
-};
-static_assert(sizeof(PhaseCSeedQueryRecordWire) == 16);
-static_assert(alignof(PhaseCSeedQueryRecordWire) == alignof(std::uint32_t));
-
+/// The query minimizer words are shared by every job in the batch. Legacy jobs
+/// may supply distinct slot-table targets; an authenticated Shape-V5 direct
+/// operation is intentionally restricted to one resident generation/view.
 struct PhaseCSeedQueryInputs {
     std::span<const std::byte> host_minimizer_bytes{};
     const Buffer* device_minimizer_words = nullptr;
@@ -988,6 +1191,7 @@ struct PhaseCSeedQueryInputs {
     std::uint32_t minimizer_words32_per_record = 0;
     std::uint32_t hash_shift = 0;
     std::uint32_t pos_bits = 0;
+    std::uint32_t window_size = 0;
     std::span<const PhaseCSeedQueryRecordWire> host_query_records{};
     const Buffer* device_query_records = nullptr;
 };
@@ -1032,6 +1236,8 @@ struct PhaseCSeedCoordinateJob {
     std::uint32_t bucket_count = 0;
     std::uint64_t target_position_offset = 0;
     std::uint32_t query_index = 0;
+    std::uint64_t logical_target_row = 0;
+    std::uint64_t logical_query_ordinal = 0;
     const PhaseCShapeV5ResidentView* shape_v5 = nullptr;
 };
 
@@ -1065,6 +1271,75 @@ enum class PhaseCSeedCoordinateAlgorithm : std::uint8_t {
     coordinate_vote = 1,
 };
 
+/// Exact algorithm inputs bound into a persisted Shape-V5 coordinate proof.
+/// Floating-point penalties are carried by bit pattern so NaNs, signed zero,
+/// and every other dispatch-affecting value compare without normalization.
+struct PersistedShapeV5CoordinateConfigIdentity {
+    std::uint32_t kmer_size = 0u;
+    std::int32_t max_occ = -1;
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm =
+        PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp;
+    ChainingPipelineKey chain_key{};
+    std::int32_t max_dist_x = 0;
+    std::int32_t max_dist_y = 0;
+    std::int32_t bandwidth = 0;
+    std::int32_t max_iter = 0;
+    std::uint32_t gap_penalty_bits = 0u;
+    std::uint32_t skip_penalty_bits = 0u;
+    std::int32_t max_chain_skip = 0;
+    std::int32_t min_chain_score = 0;
+    std::int32_t min_seed_count = 0;
+    std::uint32_t probe_limit = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return kmer_size != 0u && kmer_size <= 255u
+            && max_occ >= 0
+            && coordinate_algorithm
+                == PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp
+            && chain_key.tile_size != 0u
+            && chain_key.local_size != 0u
+            && probe_limit != 0u;
+    }
+    [[nodiscard]] bool operator==(
+        const PersistedShapeV5CoordinateConfigIdentity&) const = default;
+};
+
+[[nodiscard]] inline PersistedShapeV5CoordinateConfigIdentity
+persisted_shape_v5_coordinate_config_identity(
+    std::uint32_t kmer_size,
+    std::int32_t max_occ,
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
+    const ChainingPipelineKey& chain_key,
+    std::int32_t max_dist_x,
+    std::int32_t max_dist_y,
+    std::int32_t bandwidth,
+    std::int32_t max_iter,
+    float gap_penalty,
+    float skip_penalty,
+    std::int32_t max_chain_skip,
+    std::int32_t min_chain_score,
+    std::int32_t min_seed_count,
+    std::uint32_t probe_limit) noexcept {
+    return PersistedShapeV5CoordinateConfigIdentity{
+        .kmer_size = kmer_size,
+        .max_occ = max_occ,
+        .coordinate_algorithm = coordinate_algorithm,
+        .chain_key = chain_key,
+        .max_dist_x = max_dist_x,
+        .max_dist_y = max_dist_y,
+        .bandwidth = bandwidth,
+        .max_iter = max_iter,
+        .gap_penalty_bits = std::bit_cast<std::uint32_t>(gap_penalty),
+        .skip_penalty_bits = std::bit_cast<std::uint32_t>(skip_penalty),
+        .max_chain_skip = max_chain_skip,
+        .min_chain_score = min_chain_score,
+        .min_seed_count = min_seed_count,
+        .probe_limit = probe_limit,
+    };
+}
+
+static_assert(!PersistedShapeV5CoordinateConfigIdentity{}.accepted());
+
 struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t problem_count = 0;
     std::uint64_t wave_count = 0;
@@ -1077,9 +1352,492 @@ struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t coordinate_vote_dispatches = 0;
 };
 
+[[nodiscard]] inline constexpr bool coordinate_result_wire_equal(
+    const GpuCoordinateOnlyResultWire& lhs,
+    const GpuCoordinateOnlyResultWire& rhs) noexcept {
+    return lhs.query_start == rhs.query_start
+        && lhs.query_end == rhs.query_end
+        && lhs.target_start == rhs.target_start
+        && lhs.target_end == rhs.target_end
+        && lhs.match_length == rhs.match_length
+        && lhs.block_length == rhs.block_length
+        && lhs.chain_score == rhs.chain_score
+        && lhs.seed_count == rhs.seed_count
+        && lhs.is_reverse == rhs.is_reverse
+        && lhs.valid == rhs.valid;
+}
+
+[[nodiscard]] inline constexpr bool coordinate_result_wire_well_formed(
+    const GpuCoordinateOnlyResultWire& result,
+    const std::uint64_t query_len,
+    const std::uint64_t target_len) noexcept {
+    if (result.valid == 0u) {
+        return coordinate_result_wire_equal(
+            result, GpuCoordinateOnlyResultWire{});
+    }
+    if (result.valid != 1u || result.is_reverse > 1u
+        || result.seed_count <= 0
+        || result.query_start >= result.query_end
+        || result.query_end > query_len
+        || result.target_start >= result.target_end
+        || result.target_end > target_len
+        || result.match_length > result.block_length) {
+        return false;
+    }
+    const std::uint64_t query_span = result.query_end - result.query_start;
+    const std::uint64_t target_span = result.target_end - result.target_start;
+    return result.match_length <= query_span
+        && result.match_length <= target_span
+        && result.block_length <= query_span + target_span;
+}
+
+/// Exact caller-side identities checked while consuming one sealed operation
+/// record.  These are expectations, not proof: changing any value makes the
+/// one-shot consume fail.
+struct PersistedShapeV5CoordinateJobExpectation {
+    std::size_t problem_index = 0;
+    std::uint64_t query_authority_identity = 0;
+    RuntimeBufferIdentity resident_descriptors{};
+    RuntimeBufferIdentity resident_controls{};
+    RuntimeBufferIdentity resident_positions{};
+    RuntimeBufferIdentity query_minimizer_buffer{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint64_t descriptor_bytes = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t position_bytes = 0;
+    std::uint64_t position_count = 0;
+    std::uint64_t max_occ_cap = 0;
+    std::uint32_t partition_count = 0;
+    std::uint32_t abi_version = 0;
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t cold_load_identity = 0;
+    std::uint64_t target_len = 0;
+    std::uint32_t query_index = 0;
+    std::uint64_t logical_target_row = 0;
+    std::uint64_t logical_query_ordinal = 0;
+    PhaseCSeedQueryRecordWire query_record{};
+    GpuCoordinateOnlyResultWire result{};
+    PersistedShapeV5CoordinateConfigIdentity configuration{};
+};
+
+/// Operation-local audit payload.  Runtime fills this from successful Vulkan
+/// calls; it is public only so the contract can be golden/tamper tested.  It
+/// cannot be converted into an operation proof by callers.
+struct PersistedShapeV5CoordinateJobAudit {
+    std::uint64_t operation_identity = 0;
+    std::uint64_t query_authority_identity = 0;
+    RuntimeBufferIdentity resident_descriptors{};
+    RuntimeBufferIdentity resident_controls{};
+    RuntimeBufferIdentity resident_positions{};
+    RuntimeBufferIdentity query_minimizer_buffer{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint64_t descriptor_bytes = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t position_bytes = 0;
+    std::uint64_t position_count = 0;
+    std::uint64_t max_occ_cap = 0;
+    std::uint32_t partition_count = 0;
+    std::uint32_t abi_version = 0;
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t cold_load_identity = 0;
+    std::uint64_t target_len = 0;
+    std::size_t problem_index = 0;
+    std::uint32_t query_index = 0;
+    std::uint64_t logical_target_row = 0;
+    std::uint64_t logical_query_ordinal = 0;
+    PhaseCSeedQueryRecordWire query_record{};
+    GpuCoordinateOnlyResultWire result{};
+    PersistedShapeV5CoordinateConfigIdentity configuration{};
+    std::uint32_t query_tile_count = 0u;
+    std::uint64_t query_count_dispatches = 0;
+    std::uint64_t query_scan_dispatches = 0;
+    std::uint64_t query_emit_dispatches = 0;
+    std::uint64_t query_completed_roundtrips = 0;
+    std::uint64_t direct_count_dispatches = 0;
+    std::uint64_t direct_scan_dispatches = 0;
+    std::uint64_t direct_emit_dispatches = 0;
+    std::uint64_t anchor_count = 0;
+    std::uint64_t sort_operations = 0;
+    std::uint64_t range_build_dispatches = 0;
+    std::uint64_t range_count = 0;
+    std::uint64_t chain_dispatches = 0;
+    std::uint64_t chain_backtrack_dispatches = 0;
+    std::uint64_t coordinate_dispatches = 0;
+    std::uint64_t count_submit_wait_identity = 0;
+    std::uint64_t emit_submit_wait_identity = 0;
+    std::uint64_t sort_range_submit_wait_identity = 0;
+    std::uint64_t chain_coordinate_submit_wait_identity = 0;
+    std::uint64_t count_status_checks = 0;
+    std::uint64_t emit_status_checks = 0;
+    std::uint64_t result_readbacks = 0;
+    std::uint32_t status_or = 0;
+    std::uint64_t coordinate_vote_dispatches = 0;
+    std::uint64_t cpu_or_simd_biological_calls = 0;
+    std::uint64_t recompute_calls = 0;
+    std::uint64_t fallback_calls = 0;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool identity_and_query = operation_identity != 0u
+            && query_authority_identity != 0u
+            && resident_descriptors.accepted()
+            && resident_controls.accepted()
+            && resident_positions.accepted()
+            && query_minimizer_buffer.accepted()
+            && resident_descriptors.object != resident_controls.object
+            && resident_descriptors.object != resident_positions.object
+            && resident_controls.object != resident_positions.object
+            && query_minimizer_buffer.object
+                != resident_descriptors.object
+            && query_minimizer_buffer.object != resident_controls.object
+            && query_minimizer_buffer.object != resident_positions.object
+            && resident_descriptors.buffer_handle
+                != resident_controls.buffer_handle
+            && resident_descriptors.buffer_handle
+                != resident_positions.buffer_handle
+            && resident_controls.buffer_handle
+                != resident_positions.buffer_handle
+            && query_minimizer_buffer.buffer_handle
+                != resident_descriptors.buffer_handle
+            && query_minimizer_buffer.buffer_handle
+                != resident_controls.buffer_handle
+            && query_minimizer_buffer.buffer_handle
+                != resident_positions.buffer_handle
+            && resident_descriptors.memory_handle
+                != resident_controls.memory_handle
+            && resident_descriptors.memory_handle
+                != resident_positions.memory_handle
+            && resident_controls.memory_handle
+                != resident_positions.memory_handle
+            && query_minimizer_buffer.memory_handle
+                != resident_descriptors.memory_handle
+            && query_minimizer_buffer.memory_handle
+                != resident_controls.memory_handle
+            && query_minimizer_buffer.memory_handle
+                != resident_positions.memory_handle
+            && device_uuid
+                != std::array<std::uint8_t, VK_UUID_SIZE>{}
+            && descriptor_bytes != 0u
+            && descriptor_bytes <= resident_descriptors.bytes
+            && control_bytes != 0u
+            && control_bytes <= resident_controls.bytes
+            && position_bytes != 0u
+            && position_bytes <= resident_positions.bytes
+            && position_count != 0u
+            && max_occ_cap
+                != (std::numeric_limits<std::uint64_t>::max)()
+            && partition_count != 0u
+            && descriptor_bytes
+                == static_cast<std::uint64_t>(partition_count)
+                    * sizeof(GpuShapeV5ResidentPartitionDescriptor)
+            && abi_version == k_gpu_shape_v5_abi_version
+            && generation_id != 0u
+            && source_identity != 0u
+            && cold_load_identity != 0u
+            && target_len != 0u
+            && query_record.flags == 0u
+            && configuration.accepted()
+            && static_cast<std::uint64_t>(configuration.max_occ)
+                <= max_occ_cap
+            && query_tile_count != 0u
+            && query_count_dispatches == 1u
+            && query_scan_dispatches == 3u
+            && query_emit_dispatches == 1u
+            && query_completed_roundtrips == 2u
+            && status_or == 0u
+            && coordinate_vote_dispatches == 0u
+            && cpu_or_simd_biological_calls == 0u
+            && recompute_calls == 0u
+            && fallback_calls == 0u;
+        if (!identity_and_query) return false;
+        if (query_record.minimizer_count == 0u) {
+            // The canonical persisted-GPU contract requires a genuine
+            // per-job partition-selection/seed-lookup dispatch. A query that
+            // produced no minimizers cannot supply that operation evidence,
+            // so it remains explicitly unsupported rather than being
+            // relabelled from batch-level sketch work.
+            return false;
+        }
+        const bool direct_front_end = direct_count_dispatches == 1u
+            && direct_scan_dispatches == 3u
+            && count_submit_wait_identity != 0u
+            && count_status_checks == 1u;
+        if (!direct_front_end) return false;
+        if (anchor_count == 0u) {
+            return direct_emit_dispatches == 0u
+                && sort_operations == 0u
+                && range_build_dispatches == 0u
+                && range_count == 0u
+                && chain_dispatches == 0u
+                && chain_backtrack_dispatches == 0u
+                && coordinate_dispatches == 0u
+                && emit_submit_wait_identity == 0u
+                && sort_range_submit_wait_identity == 0u
+                && chain_coordinate_submit_wait_identity == 0u
+                && emit_status_checks == 0u
+                && result_readbacks == 0u
+                && coordinate_result_wire_equal(
+                    result, GpuCoordinateOnlyResultWire{});
+        }
+        const bool emitted_and_ranged = direct_emit_dispatches == 1u
+            && sort_operations == 1u
+            && range_build_dispatches == 1u
+            && emit_submit_wait_identity != 0u
+            && sort_range_submit_wait_identity != 0u
+            && count_submit_wait_identity != emit_submit_wait_identity
+            && count_submit_wait_identity
+                != sort_range_submit_wait_identity
+            && emit_submit_wait_identity
+                != sort_range_submit_wait_identity
+            && emit_status_checks == 1u;
+        if (!emitted_and_ranged) return false;
+        if (range_count == 0u) {
+            return chain_dispatches == 0u
+                && chain_backtrack_dispatches == 0u
+                && coordinate_dispatches == 0u
+                && chain_coordinate_submit_wait_identity == 0u
+                && result_readbacks == 0u
+                && coordinate_result_wire_equal(
+                    result, GpuCoordinateOnlyResultWire{});
+        }
+        return chain_dispatches == 1u
+            && chain_backtrack_dispatches == 1u
+            && coordinate_dispatches == 1u
+            && chain_coordinate_submit_wait_identity != 0u
+            && chain_coordinate_submit_wait_identity
+                != sort_range_submit_wait_identity
+            && chain_coordinate_submit_wait_identity
+                != emit_submit_wait_identity
+            && chain_coordinate_submit_wait_identity
+                != count_submit_wait_identity
+            && result_readbacks == 1u
+            && coordinate_result_wire_well_formed(
+                result, query_record.query_len, target_len);
+    }
+};
+
+/// Unforgeable consumed view of one accepted audit record.
+class PersistedShapeV5CoordinateJobEvidence {
+public:
+    PersistedShapeV5CoordinateJobEvidence() = default;
+    PersistedShapeV5CoordinateJobEvidence(
+        const PersistedShapeV5CoordinateJobEvidence&) = delete;
+    PersistedShapeV5CoordinateJobEvidence& operator=(
+        const PersistedShapeV5CoordinateJobEvidence&) = delete;
+    PersistedShapeV5CoordinateJobEvidence(
+        PersistedShapeV5CoordinateJobEvidence&& other) noexcept {
+        move_from(other);
+    }
+    PersistedShapeV5CoordinateJobEvidence& operator=(
+        PersistedShapeV5CoordinateJobEvidence&& other) noexcept {
+        if (this != &other) {
+            audit_ = {};
+            issued_ = false;
+            move_from(other);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return issued_ && audit_.accepted();
+    }
+    [[nodiscard]] const PersistedShapeV5CoordinateJobAudit& audit()
+        const noexcept {
+        return audit_;
+    }
+
+private:
+    friend class PersistedShapeV5CoordinateOperationProof;
+
+    void move_from(PersistedShapeV5CoordinateJobEvidence& other) noexcept {
+        audit_ = other.audit_;
+        issued_ = other.issued_;
+        other.audit_ = {};
+        other.issued_ = false;
+    }
+
+    PersistedShapeV5CoordinateJobAudit audit_{};
+    bool issued_ = false;
+};
+
+/// Runtime-sealed, move-only proof for one Shape-V5 coordinate batch.  Each
+/// logical job can be consumed exactly once and only with matching resident,
+/// query-record and result identities.
+class PersistedShapeV5CoordinateOperationProof {
+public:
+    PersistedShapeV5CoordinateOperationProof() = default;
+    PersistedShapeV5CoordinateOperationProof(
+        const PersistedShapeV5CoordinateOperationProof&) = delete;
+    PersistedShapeV5CoordinateOperationProof& operator=(
+        const PersistedShapeV5CoordinateOperationProof&) = delete;
+    PersistedShapeV5CoordinateOperationProof(
+        PersistedShapeV5CoordinateOperationProof&& other) noexcept {
+        move_from(other);
+    }
+    PersistedShapeV5CoordinateOperationProof& operator=(
+        PersistedShapeV5CoordinateOperationProof&& other) noexcept {
+        if (this != &other) {
+            records_.clear();
+            move_from(other);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool sealed() const noexcept {
+        return sealed_ && operation_identity_ != 0u;
+    }
+    [[nodiscard]] std::size_t job_count() const noexcept {
+        return sealed() ? records_.size() : 0u;
+    }
+    [[nodiscard]] bool fully_consumed() const noexcept {
+        return sealed()
+            && !records_.empty()
+            && std::all_of(
+                records_.begin(),
+                records_.end(),
+                [](const auto& record) { return record.consumed; });
+    }
+
+    /// Contract-only test hook.  It returns no proof or evidence and therefore
+    /// grants no runtime authority; it only lets the portable suite exercise
+    /// private sealing, move invalidation, tamper burning, and one-shot consume.
+    [[nodiscard]] static bool self_test_one_shot_contract(
+        const std::array<PersistedShapeV5CoordinateJobAudit, 2>& audits,
+        const std::array<PersistedShapeV5CoordinateJobExpectation, 2>&
+            expectations) {
+        if (audits[0].operation_identity == 0u
+            || audits[0].operation_identity != audits[1].operation_identity
+            || audits[0].problem_index != 0u
+            || audits[1].problem_index != 1u
+            || !audits[0].accepted()
+            || !audits[1].accepted()) {
+            return false;
+        }
+        PersistedShapeV5CoordinateOperationProof issued{};
+        issued.operation_identity_ = audits[0].operation_identity;
+        issued.records_.push_back(Record{.audit = audits[0]});
+        issued.records_.push_back(Record{.audit = audits[1]});
+        issued.sealed_ = true;
+
+        PersistedShapeV5CoordinateOperationProof proof{std::move(issued)};
+        if (issued.sealed() || issued.job_count() != 0u
+            || !proof.sealed() || proof.job_count() != 2u) {
+            return false;
+        }
+        auto first = proof.consume(expectations[0]);
+        if (!first.has_value() || !first->accepted()) return false;
+        if (proof.fully_consumed()) return false;
+        PersistedShapeV5CoordinateJobEvidence moved_first{
+            std::move(*first)};
+        if (first->accepted() || !moved_first.accepted()) return false;
+        if (proof.consume(expectations[0]).has_value()) return false;
+
+        auto tampered_second = expectations[1];
+        tampered_second.source_identity ^= 1u;
+        if (proof.consume(tampered_second).has_value()) return false;
+        if (proof.consume(expectations[1]).has_value()) return false;
+        if (!proof.fully_consumed()) return false;
+
+        PersistedShapeV5CoordinateOperationProof all_valid{};
+        all_valid.operation_identity_ = audits[0].operation_identity;
+        all_valid.records_.push_back(Record{.audit = audits[0]});
+        all_valid.records_.push_back(Record{.audit = audits[1]});
+        all_valid.sealed_ = true;
+        auto valid_first = all_valid.consume(expectations[0]);
+        auto valid_second = all_valid.consume(expectations[1]);
+        return valid_first.has_value() && valid_first->accepted()
+            && valid_second.has_value() && valid_second->accepted()
+            && !all_valid.consume(expectations[0]).has_value()
+            && !all_valid.consume(expectations[1]).has_value()
+            && all_valid.fully_consumed();
+    }
+
+    [[nodiscard]] std::optional<PersistedShapeV5CoordinateJobEvidence>
+    consume(const PersistedShapeV5CoordinateJobExpectation& expected) noexcept {
+        if (!sealed() || expected.problem_index >= records_.size()) {
+            return std::nullopt;
+        }
+        Record& record = records_[expected.problem_index];
+        if (record.consumed) return std::nullopt;
+        record.consumed = true;
+        const auto& audit = record.audit;
+        const auto& query = expected.query_record;
+        const bool identities_match = audit.problem_index
+                == expected.problem_index
+            && audit.operation_identity == operation_identity_
+            && audit.query_authority_identity
+                == expected.query_authority_identity
+            && audit.resident_descriptors == expected.resident_descriptors
+            && audit.resident_controls == expected.resident_controls
+            && audit.resident_positions == expected.resident_positions
+            && audit.query_minimizer_buffer
+                == expected.query_minimizer_buffer
+            && audit.device_uuid == expected.device_uuid
+            && audit.descriptor_bytes == expected.descriptor_bytes
+            && audit.control_bytes == expected.control_bytes
+            && audit.position_bytes == expected.position_bytes
+            && audit.position_count == expected.position_count
+            && audit.max_occ_cap == expected.max_occ_cap
+            && audit.partition_count == expected.partition_count
+            && audit.abi_version == expected.abi_version
+            && audit.generation_id == expected.generation_id
+            && audit.source_identity == expected.source_identity
+            && audit.cold_load_identity == expected.cold_load_identity
+            && audit.target_len == expected.target_len
+            && audit.query_index == expected.query_index
+            && audit.logical_target_row == expected.logical_target_row
+            && audit.logical_query_ordinal
+                == expected.logical_query_ordinal
+            && audit.query_record.minimizer_offset
+                == query.minimizer_offset
+            && audit.query_record.minimizer_count
+                == query.minimizer_count
+            && audit.query_record.query_len == query.query_len
+            && audit.query_record.flags == query.flags
+            && coordinate_result_wire_equal(audit.result, expected.result)
+            && audit.configuration == expected.configuration;
+        if (!identities_match || !audit.accepted()) {
+            return std::nullopt;
+        }
+        PersistedShapeV5CoordinateJobEvidence evidence{};
+        evidence.audit_ = audit;
+        evidence.issued_ = true;
+        return evidence;
+    }
+
+private:
+    friend class Runtime;
+
+    struct Record {
+        PersistedShapeV5CoordinateJobAudit audit{};
+        bool consumed = false;
+    };
+
+    void move_from(PersistedShapeV5CoordinateOperationProof& other) noexcept {
+        operation_identity_ = other.operation_identity_;
+        records_ = std::move(other.records_);
+        sealed_ = other.sealed_;
+        other.operation_identity_ = 0u;
+        other.records_.clear();
+        other.sealed_ = false;
+    }
+
+    std::uint64_t operation_identity_ = 0u;
+    std::vector<Record> records_{};
+    bool sealed_ = false;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedShapeV5CoordinateOperationProof>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedShapeV5CoordinateOperationProof>);
+static_assert(!PersistedShapeV5CoordinateJobAudit{}.accepted());
+
 struct PhaseCSeedCoordinateBatchRun {
     std::vector<GpuCoordinateOnlyResultWire> results{};
     PhaseCSeedCoordinateBatchStats stats{};
+    PersistedShapeV5CoordinateOperationProof operation_proof{};
     struct ShapeV5DirectRouteEvidence {
         bool selected = false;
         bool direct_count_scan_emit_completed = false;
@@ -1223,6 +1981,7 @@ public:
         const VulkanRankLut& rank_lut,
         const VulkanSketchParams& params,
         std::span<const PhaseCSketchTileWire> tiles,
+        std::span<const PhaseCSketchQueryLayoutWire> query_layouts,
         std::uint64_t max_minimizers,
         VulkanSketchHostMaterialization materialization);
 
@@ -1376,7 +2135,8 @@ public:
         std::int32_t max_chain_skip,
         std::int32_t min_chain_score,
         std::int32_t min_seed_count,
-        std::uint32_t probe_limit);
+        std::uint32_t probe_limit,
+        DeviceQuerySketchAuthority query_authority = {});
 
     std::vector<GpuCoordinateOnlyResultWire> run_phase_c_seed_to_coordinate_batch_roundtrip(
         const PhaseCSeedQueryInputs& query_inputs,
@@ -1492,6 +2252,23 @@ private:
     void upload_locked(Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
                        VkAccessFlags dst_access);
     void download_locked(Buffer& transfer_scratch, const Buffer& src, std::span<std::byte> bytes);
+    [[nodiscard]] std::uint64_t next_operation_proof_identity_locked() {
+        constexpr std::uint64_t exhausted =
+            (std::numeric_limits<std::uint64_t>::max)();
+        std::uint64_t identity =
+            operation_proof_identity_.load(std::memory_order_relaxed);
+        while (identity != exhausted) {
+            if (operation_proof_identity_.compare_exchange_weak(
+                    identity,
+                    identity + 1u,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                return identity;
+            }
+        }
+        throw VulkanRuntimeError(
+            "Vulkan operation proof identity space exhausted");
+    }
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
@@ -1525,6 +2302,7 @@ private:
     std::atomic<std::uint64_t> seq_sort_uploaded_bytes_{0};  // DOC0360 full-payload proof
     std::atomic<std::uint64_t> alignment_extension_dispatch_count_{0};
     std::atomic<std::uint64_t> grouped32_stream_identity_{1};
+    std::atomic<std::uint64_t> operation_proof_identity_{1};
     std::mutex mu_;
 };
 
@@ -5343,6 +6121,7 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     const VulkanRankLut& rank_lut,
     const VulkanSketchParams& params,
     std::span<const PhaseCSketchTileWire> tiles,
+    std::span<const PhaseCSketchQueryLayoutWire> query_layouts,
     std::uint64_t max_minimizers,
     VulkanSketchHostMaterialization materialization)
 {
@@ -5360,7 +6139,8 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     result.dispatch_proof.materialization_ = materialization;
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
-    if (tiles.empty() || w == 0u || k == 0u || max_minimizers == 0u) {
+    if (tiles.empty() || query_layouts.empty()
+        || w == 0u || k == 0u || max_minimizers == 0u) {
         return result;
     }
     if (tiles.size()
@@ -5370,6 +6150,21 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     if (max_minimizers
         > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c sketch tile batch capacity exceeds ABI");
+    }
+    std::uint64_t layout_tile_cursor = 0u;
+    for (const PhaseCSketchQueryLayoutWire& layout : query_layouts) {
+        if (layout.begin != layout_tile_cursor
+            || layout.count
+                > static_cast<std::uint64_t>(tiles.size())
+                    - layout_tile_cursor) {
+            throw VulkanRuntimeError(
+                "phase_c sketch query layout does not densely partition tiles");
+        }
+        layout_tile_cursor += layout.count;
+    }
+    if (layout_tile_cursor != tiles.size()) {
+        throw VulkanRuntimeError(
+            "phase_c sketch query layout does not cover all tiles");
     }
 
     const std::uint32_t tile_count = static_cast<std::uint32_t>(tiles.size());
@@ -5698,6 +6493,69 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
 
         result.count = total;
         result.minimizer_words = std::move(out_words);
+    }
+    if (!result.overflow
+        && materialization == VulkanSketchHostMaterialization::device_only
+        && result.minimizer_words.valid()
+        && dispatch_proof.accepted()) {
+        result.query_authority.identity_ =
+            next_operation_proof_identity_locked();
+        result.query_authority.runtime_ = this;
+        result.query_authority.buffer_ = result.minimizer_words.buffer;
+        result.query_authority.memory_identity_ = vulkan_handle_identity(
+            result.minimizer_words.memory);
+        result.query_authority.buffer_bytes_ = result.minimizer_words.bytes;
+        result.query_authority.allocation_bytes_ =
+            result.minimizer_words.allocation_bytes;
+        result.query_authority.minimizer_count_ = result.count;
+        result.query_authority.window_size_ = params.window_size;
+        result.query_authority.kmer_size_ = params.kmer_size;
+        result.query_authority.minimizer_word_kind_ =
+            params.minimizer_word_kind;
+        result.query_authority.minimizer_words32_per_record_ =
+            params.minimizer_words32;
+        result.query_authority.hash_shift_ = params.hash_shift;
+        result.query_authority.pos_bits_ = params.pos_bits;
+        result.query_authority.materialization_ = materialization;
+        result.query_authority.dispatch_proof_ = dispatch_proof;
+        result.query_authority.device_uuid_ = features_.device_uuid;
+        result.query_authority.query_records_.reserve(query_layouts.size());
+        result.query_authority.query_tile_counts_.reserve(
+            query_layouts.size());
+        std::uint64_t query_minimizer_cursor = 0u;
+        for (const PhaseCSketchQueryLayoutWire& layout : query_layouts) {
+            std::uint64_t query_minimizer_count = 0u;
+            for (std::uint32_t tile = 0u; tile < layout.count; ++tile) {
+                query_minimizer_count +=
+                    result.tile_counts[layout.begin + tile];
+            }
+            const std::uint64_t query_minimizer_offset = layout.count == 0u
+                ? query_minimizer_cursor
+                : result.tile_offsets[layout.begin];
+            if (query_minimizer_offset != query_minimizer_cursor
+                || query_minimizer_count
+                    > (std::numeric_limits<std::uint32_t>::max)()) {
+                throw VulkanRuntimeError(
+                    "phase_c sketch query authority partition is invalid");
+            }
+            result.query_authority.query_records_.push_back(
+                PhaseCSeedQueryRecordWire{
+                    .minimizer_offset = static_cast<std::uint32_t>(
+                        query_minimizer_offset),
+                    .minimizer_count = static_cast<std::uint32_t>(
+                        query_minimizer_count),
+                    .query_len = layout.query_len,
+                    .flags = 0u,
+                });
+            result.query_authority.query_tile_counts_.push_back(
+                layout.count);
+            query_minimizer_cursor += query_minimizer_count;
+        }
+        if (query_minimizer_cursor != result.count
+            || !result.query_authority.accepted()) {
+            throw VulkanRuntimeError(
+                "phase_c sketch query authority does not cover device output");
+        }
     }
     arena.rewind(mark);
     check_vk(
@@ -7519,6 +8377,7 @@ struct PhaseCSeedCoordinateWaveState {
     std::size_t result_index = 0;
     PhaseCSeedCoordinateJob job{};
     PhaseCSeedQueryRecordWire query_record{};
+    PersistedShapeV5CoordinateJobAudit operation_audit{};
     std::uint32_t minimizer_count = 0;
     std::uint32_t num_blocks = 0;
     std::uint32_t seed_groups = 0;
@@ -7609,7 +8468,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     std::int32_t max_chain_skip,
     std::int32_t min_chain_score,
     std::int32_t min_seed_count,
-    std::uint32_t probe_limit)
+    std::uint32_t probe_limit,
+    DeviceQuerySketchAuthority query_authority)
 {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -7644,6 +8504,26 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     if (shape_v5_selected && features_.software_device) {
         throw VulkanRuntimeError(
             "phase_c Shape Format-5 direct route rejects software Vulkan devices");
+    }
+    const auto shape_operation_configuration =
+        persisted_shape_v5_coordinate_config_identity(
+            kmer_size,
+            max_occ,
+            coordinate_algorithm,
+            chain_key,
+            max_dist_x,
+            max_dist_y,
+            bandwidth,
+            max_iter,
+            gap_penalty,
+            skip_penalty,
+            max_chain_skip,
+            min_chain_score,
+            min_seed_count,
+            probe_limit);
+    if (shape_v5_selected && !shape_operation_configuration.accepted()) {
+        throw VulkanRuntimeError(
+            "phase_c Shape Format-5 coordinate configuration identity is invalid");
     }
 
     const PhaseCShapeV5ResidentView* common_shape_view = nullptr;
@@ -7819,7 +8699,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             common_shape_view->cold_load_identity;
     }
     const std::uint32_t total_mc = query_inputs.minimizer_count;
-    if (jobs.empty() || total_mc == 0u || max_occ < 0) {
+    if (jobs.empty() || max_occ < 0
+        || (total_mc == 0u && !shape_v5_selected)) {
         run.shape_v5_direct.direct_count_scan_emit_completed =
             shape_v5_selected;
         return run;
@@ -7828,15 +8709,19 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         throw VulkanRuntimeError("phase_c seed-to-coordinate batch missing query records");
     }
     for (const PhaseCSeedQueryRecordWire& qrec : query_inputs.host_query_records) {
-        if (qrec.query_len > std::numeric_limits<std::uint32_t>::max()) {
-            throw VulkanRuntimeError("phase_c seed-to-coordinate query length exceeds ABI");
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(qrec.minimizer_offset)
+            + qrec.minimizer_count;
+        if (qrec.flags != 0u || qrec.minimizer_offset > total_mc
+            || end > total_mc) {
+            throw VulkanRuntimeError(
+                "phase_c seed-to-coordinate query minimizer slice or flags are invalid");
         }
         if (qrec.minimizer_count == 0u) {
             continue;
         }
         if (shape_v5_selected
-            && (qrec.flags != 0u
-                || qrec.query_len < kmer_size
+            && (qrec.query_len < kmer_size
                 || qrec.minimizer_count
                     == (std::numeric_limits<std::uint32_t>::max)()
                 || (static_cast<std::uint64_t>(qrec.minimizer_count) + 1u)
@@ -7844,11 +8729,6 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     > features_.max_storage_buffer_range)) {
             throw VulkanRuntimeError(
                 "phase_c Shape Format-5 query record violates local count/status ABI");
-        }
-        const std::uint64_t end =
-            static_cast<std::uint64_t>(qrec.minimizer_offset) + qrec.minimizer_count;
-        if (end > total_mc) {
-            throw VulkanRuntimeError("phase_c seed-to-coordinate query minimizer slice exceeds buffer");
         }
     }
 
@@ -7888,6 +8768,64 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             || !query_inputs.host_minimizer_bytes.empty())) {
         throw VulkanRuntimeError(
             "phase_c Shape Format-5 direct route requires an unambiguous GPU-resident query sketch");
+    }
+    if (shape_v5_selected) {
+        bool authority_records_match =
+            query_authority.query_records_.size()
+            == query_inputs.host_query_records.size();
+        for (std::size_t record_index = 0u;
+             authority_records_match
+                 && record_index < query_authority.query_records_.size();
+             ++record_index) {
+            const auto& sealed = query_authority.query_records_[record_index];
+            const auto& supplied =
+                query_inputs.host_query_records[record_index];
+            authority_records_match = sealed.minimizer_offset
+                    == supplied.minimizer_offset
+                && sealed.minimizer_count == supplied.minimizer_count
+                && sealed.query_len == supplied.query_len
+                && sealed.flags == supplied.flags;
+        }
+        if (!query_authority.accepted()
+            || query_authority.runtime_ != this
+            || query_authority.buffer_
+                != query_inputs.device_minimizer_words->buffer
+            || query_authority.memory_identity_
+                != vulkan_handle_identity(
+                    query_inputs.device_minimizer_words->memory)
+            || query_authority.buffer_bytes_
+                != query_inputs.device_minimizer_words->bytes
+            || query_authority.allocation_bytes_
+                != query_inputs.device_minimizer_words->allocation_bytes
+            || query_authority.minimizer_count_ != total_mc
+            || query_authority.kmer_size_ != kmer_size
+            || query_authority.window_size_ != query_inputs.window_size
+            || query_authority.minimizer_word_kind_
+                != query_inputs.minimizer_word_kind
+            || query_authority.minimizer_words32_per_record_
+                != query_inputs.minimizer_words32_per_record
+            || query_authority.hash_shift_ != query_inputs.hash_shift
+            || query_authority.pos_bits_ != query_inputs.pos_bits
+            || !authority_records_match
+            || query_authority.device_uuid_ != features_.device_uuid) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 direct route lacks matching one-shot query authority");
+        }
+        if (query_authority.buffer_
+                == common_shape_view->descriptors->buffer
+            || query_authority.buffer_
+                == common_shape_view->controls->buffer
+            || query_authority.buffer_
+                == common_shape_view->positions->buffer) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 query image aliases resident target storage");
+        }
+        run.operation_proof.operation_identity_ =
+            next_operation_proof_identity_locked();
+        run.operation_proof.records_.resize(jobs.size());
+    } else if (query_authority.accepted()) {
+        throw VulkanRuntimeError(
+            "phase_c query authority cannot be consumed by a legacy index route");
     }
     const std::uint64_t min_words_bytes =
         query_inputs.device_minimizer_words == nullptr
@@ -8023,6 +8961,55 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 state.job = jobs[job_index];
                 state.query_record =
                     query_inputs.host_query_records[state.job.query_index];
+                if (shape_v5_selected) {
+                    auto& audit = state.operation_audit;
+                    audit.operation_identity =
+                        run.operation_proof.operation_identity_;
+                    audit.query_authority_identity =
+                        query_authority.identity_;
+                    audit.resident_descriptors = runtime_buffer_identity(
+                        common_shape_view->descriptors);
+                    audit.resident_controls = runtime_buffer_identity(
+                        common_shape_view->controls);
+                    audit.resident_positions = runtime_buffer_identity(
+                        common_shape_view->positions);
+                    audit.query_minimizer_buffer = runtime_buffer_identity(
+                        query_inputs.device_minimizer_words);
+                    audit.device_uuid = common_shape_view->device_uuid;
+                    audit.descriptor_bytes =
+                        common_shape_view->descriptor_bytes;
+                    audit.control_bytes = common_shape_view->control_bytes;
+                    audit.position_bytes = common_shape_view->position_bytes;
+                    audit.position_count = common_shape_view->position_count;
+                    audit.max_occ_cap = common_shape_view->max_occ_cap;
+                    audit.partition_count =
+                        common_shape_view->partition_count;
+                    audit.abi_version = common_shape_view->abi_version;
+                    audit.generation_id = common_shape_view->generation_id;
+                    audit.source_identity = common_shape_view->source_identity;
+                    audit.cold_load_identity =
+                        common_shape_view->cold_load_identity;
+                    audit.target_len = state.job.target_len;
+                    audit.problem_index = state.result_index;
+                    audit.query_index = state.job.query_index;
+                    audit.logical_target_row =
+                        state.job.logical_target_row;
+                    audit.logical_query_ordinal =
+                        state.job.logical_query_ordinal;
+                    audit.query_record = state.query_record;
+                    audit.configuration = shape_operation_configuration;
+                    audit.query_tile_count =
+                        query_authority.query_tile_counts_[
+                            state.job.query_index];
+                    audit.query_count_dispatches =
+                        query_authority.dispatch_proof_.count_dispatches();
+                    audit.query_scan_dispatches =
+                        query_authority.dispatch_proof_.prefix_scan_dispatches();
+                    audit.query_emit_dispatches =
+                        query_authority.dispatch_proof_.emit_dispatches();
+                    audit.query_completed_roundtrips =
+                        query_authority.dispatch_proof_.completed_roundtrips();
+                }
                 state.minimizer_count = state.query_record.minimizer_count;
                 state.query_len = state.query_record.query_len;
                 state.num_blocks = std::max<std::uint32_t>(
@@ -8036,6 +9023,10 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                               features_.max_workgroup_count_x));
                 state.skip_seed = state.minimizer_count == 0u
                     || (!shape_v5_selected && state.job.position_count == 0u);
+                if (shape_v5_selected && state.minimizer_count == 0u) {
+                    run.operation_proof.records_[state.result_index].audit =
+                        state.operation_audit;
+                }
                 const std::uint64_t count_word_count = shape_v5_selected
                     ? static_cast<std::uint64_t>(state.minimizer_count) + 1u
                     : std::max<std::uint64_t>(state.minimizer_count, 1u);
@@ -8513,6 +9504,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         sizeof(state.shape_v5_seed_push),
                         1u);
                     run.shape_v5_direct.count_dispatches += 1u;
+                    state.operation_audit.direct_count_dispatches += 1u;
                 } else {
                     const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
@@ -8556,6 +9548,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
                     command_buffer_, scanb, scan_infos, &scan, sizeof(scan), state.num_blocks);
+                if (shape_v5_selected) {
+                    state.operation_audit.direct_scan_dispatches += 1u;
+                }
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8571,6 +9566,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
                     command_buffer_, scana, scan_infos, &scan, sizeof(scan), 1u);
+                if (shape_v5_selected) {
+                    state.operation_audit.direct_scan_dispatches += 1u;
+                }
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8587,10 +9585,23 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 record_phase_c_dispatch_locked(
                     command_buffer_, scana, scan_infos, &scan, sizeof(scan),
                     ceil_div_u32(state.minimizer_count, 128u));
+                if (shape_v5_selected) {
+                    state.operation_audit.direct_scan_dispatches += 1u;
+                }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
                 device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch1)");
+            if (shape_v5_selected) {
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (!state.skip_seed) {
+                        state.operation_audit.count_submit_wait_identity =
+                            receipt_identity;
+                    }
+                }
+            }
 
             std::uint32_t anchor_active_count = 0;
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8607,6 +9618,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         sizeof(status));
                     run.shape_v5_direct.count_status_checks += 1u;
                     run.shape_v5_direct.status_or |= status;
+                    state.operation_audit.count_status_checks += 1u;
+                    state.operation_audit.status_or |= status;
                     if (status != 0u) {
                         throw VulkanRuntimeError(fmt::format(
                             "phase_c Shape Format-5 count rejected job {} with status 0x{:08x}",
@@ -8627,7 +9640,15 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         + std::uint64_t{state.minimizer_count - 1u} * 4u,
                     4u);
                 state.total_anchors = static_cast<std::uint64_t>(plast) + clast;
+                if (shape_v5_selected) {
+                    state.operation_audit.anchor_count =
+                        state.total_anchors;
+                }
                 if (state.total_anchors == 0u) {
+                    if (shape_v5_selected) {
+                        run.operation_proof.records_[state.result_index].audit =
+                            state.operation_audit;
+                    }
                     continue;
                 }
                 if (state.total_anchors > std::numeric_limits<std::uint32_t>::max()) {
@@ -8751,6 +9772,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         command_buffer_, emit_pipe, seed_infos,
                         &emit_push, sizeof(emit_push), 1u);
                     run.shape_v5_direct.emit_dispatches += 1u;
+                    state.operation_audit.direct_emit_dispatches += 1u;
                 } else {
                     SeedPushC emit_push = state.seed_push;
                     emit_push.emit_mode = 1u;
@@ -8787,10 +9809,14 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 submit_and_wait(
                     device_, queue_, command_buffer_, fence_,
                     "submit(pc_shape_v5_seed_coord_emit)");
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
                 for (PhaseCSeedCoordinateWaveState& state : states) {
                     if (!state.has_anchors) {
                         continue;
                     }
+                    state.operation_audit.emit_submit_wait_identity =
+                        receipt_identity;
                     std::uint32_t status = 0u;
                     std::memcpy(
                         &status,
@@ -8800,6 +9826,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         sizeof(status));
                     run.shape_v5_direct.emit_status_checks += 1u;
                     run.shape_v5_direct.status_or |= status;
+                    state.operation_audit.emit_status_checks += 1u;
+                    state.operation_audit.status_or |= status;
                     if (status != 0u) {
                         throw VulkanRuntimeError(fmt::format(
                             "phase_c Shape Format-5 emit rejected job {} with status 0x{:08x}",
@@ -8898,6 +9926,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     3u,
                     state.sorted_in_scratch);
                 run.stats.sort_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.sort_operations += 1u;
+                }
                 const GpuArenaSlice sorted_anchors =
                     state.sorted_in_scratch ? anchors_scratch_s : anchors_s;
                 const GpuArenaSlice compacted_anchors_s = state.compacted_anchors_slice();
@@ -8919,10 +9950,23 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     command_buffer_, range_pipe, range_infos,
                     &range_push, sizeof(range_push), 1u);
                 run.stats.range_build_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.range_build_dispatches += 1u;
+                }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
                 device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch2)");
+            if (shape_v5_selected) {
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (state.has_anchors) {
+                        state.operation_audit.sort_range_submit_wait_identity =
+                            receipt_identity;
+                    }
+                }
+            }
 
             std::uint32_t chain_active_count = 0;
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8934,7 +9978,14 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     &state.compacted_anchor_count,
                     static_cast<std::byte*>(state.range_count_buf.mapped) + 4u,
                     4u);
+                if (shape_v5_selected) {
+                    state.operation_audit.range_count = state.range_count;
+                }
                 if (state.range_count == 0u) {
+                    if (shape_v5_selected) {
+                        run.operation_proof.records_[state.result_index].audit =
+                            state.operation_audit;
+                    }
                     continue;
                 }
                 if (state.compacted_anchor_count > state.total_anchors_u32) {
@@ -9059,6 +10110,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     0, sizeof(chain_push), &chain_push);
                 vkCmdDispatch(command_buffer_, chain_groups, 1, 1);
                 run.stats.chain_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.chain_dispatches += 1u;
+                }
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -9095,10 +10149,25 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     command_buffer_, coord_pipe, coord_infos,
                     &coord_push, sizeof(coord_push), 1u);
                 run.stats.chain_backtrack_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.chain_backtrack_dispatches += 1u;
+                    state.operation_audit.coordinate_dispatches += 1u;
+                }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
                 device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch3)");
+            if (shape_v5_selected) {
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (state.chain_active) {
+                        state.operation_audit
+                            .chain_coordinate_submit_wait_identity =
+                            receipt_identity;
+                    }
+                }
+            }
 
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (state.chain_active) {
@@ -9106,6 +10175,13 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         &run.results[state.result_index],
                         state.result_buf.mapped,
                         sizeof(GpuCoordinateOnlyResultWire));
+                    if (shape_v5_selected) {
+                        state.operation_audit.result =
+                            run.results[state.result_index];
+                        state.operation_audit.result_readbacks += 1u;
+                        run.operation_proof.records_[state.result_index].audit =
+                            state.operation_audit;
+                    }
                 }
             }
 
@@ -9125,6 +10201,15 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     }
     if (shape_v5_selected) {
         run.shape_v5_direct.direct_count_scan_emit_completed = true;
+        run.operation_proof.sealed_ =
+            run.operation_proof.records_.size() == jobs.size()
+            && !run.operation_proof.records_.empty()
+            && std::all_of(
+                run.operation_proof.records_.begin(),
+                run.operation_proof.records_.end(),
+                [](const auto& record) {
+                    return !record.consumed && record.audit.accepted();
+                });
     }
     return run;
 }

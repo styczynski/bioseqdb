@@ -1125,6 +1125,7 @@ struct VulkanBatchSketchResult {
     std::vector<PhaseCSeedQueryRecordWire> query_records;
     std::shared_ptr<VulkanDeviceMinimizerStorage<MinimizerT>> device;
     RuntimeSketchBatchDispatchProof dispatch_proof{};
+    DeviceQuerySketchAuthority query_authority{};
     VulkanSketchHostMaterialization materialization =
         VulkanSketchHostMaterialization::host_and_device;
     std::uint64_t device_minimizer_count = 0;
@@ -2131,10 +2132,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         return std::nullopt;
     }
 
-    struct QueryTileRange {
-        std::uint32_t begin = 0;
-        std::uint32_t count = 0;
-    };
+    using QueryTileRange = PhaseCSketchQueryLayoutWire;
 
     // Pass 1 is scalar-only: validate every upload and compute exact vector
     // sizes without constructing any owned vector or Vulkan Buffer.
@@ -2272,7 +2270,8 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
                 saturating_mul(uploads.size(), sizeof(QueryTileRange)),
                 saturating_mul(
                     uploads.size(),
-                    sizeof(PhaseCSeedQueryRecordWire))),
+                    2u * sizeof(PhaseCSeedQueryRecordWire)
+                        + sizeof(std::uint32_t))),
             saturating_mul(
                 total_tile_count,
                 2u * sizeof(std::uint32_t))));
@@ -2370,6 +2369,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             .begin = tile_begin,
             .count = static_cast<std::uint32_t>(
                 tiles.size() - tile_begin),
+            .query_len = static_cast<std::uint32_t>(upload.bp_size),
         };
     }
     if (packed_sequence.size() != packed_sequence_bytes
@@ -2399,6 +2399,11 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     const std::uint64_t anticipated_raw_count_bytes = saturating_mul(
         total_tile_count,
         2u * sizeof(std::uint32_t));
+    const std::uint64_t authority_query_record_headroom = saturating_mul(
+        saturating_mul(
+            uploads.size(),
+            sizeof(PhaseCSeedQueryRecordWire) + sizeof(std::uint32_t)),
+        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
     const std::uint64_t pre_dispatch_peak_bytes = sat_add(
         sat_add(
             pre_dispatch_requirements.arena_allocation_bytes,
@@ -2407,7 +2412,9 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             peak_host_minimizer_bytes,
             sat_add(
                 actual_scaffold_capacity_bytes,
-                anticipated_raw_count_bytes)));
+                sat_add(
+                    anticipated_raw_count_bytes,
+                    authority_query_record_headroom))));
     bioseq::parallelism::MemoryAdmissionFailure growth_failure{};
     if (pre_dispatch_peak_bytes
             == (std::numeric_limits<std::uint64_t>::max)()
@@ -2452,6 +2459,8 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             rank_lut,
             sketch_params,
             std::span<const PhaseCSketchTileWire>{tiles.data(), tiles.size()},
+            std::span<const PhaseCSketchQueryLayoutWire>{
+                tile_ranges.data(), tile_ranges.size()},
             max_minimizers,
             materialization);
     const PhaseCSketchBatchAllocationRequirements post_dispatch_requirements =
@@ -2477,7 +2486,9 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
                     vector_capacity_bytes(raw.host_minimizer_bytes),
                     sat_add(
                         vector_capacity_bytes(raw.tile_counts),
-                        vector_capacity_bytes(raw.tile_offsets))))));
+                        sat_add(
+                            vector_capacity_bytes(raw.tile_offsets),
+                            raw.query_authority.owned_capacity_bytes()))))));
     const std::uint64_t post_dispatch_live_bytes = sat_add(
         raw.minimizer_words.allocation_bytes,
         sat_add(
@@ -2498,6 +2509,12 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         throw VulkanRuntimeError{
             "Vulkan batch sketch returned without matching accepted "
             "count/scan/emit proof"};
+    }
+    if (materialization == VulkanSketchHostMaterialization::device_only
+        && !raw.query_authority.accepted()) {
+        throw VulkanRuntimeError{
+            "device-only Vulkan batch sketch returned without runtime-issued "
+            "query authority"};
     }
 
     if (materialization == VulkanSketchHostMaterialization::host_and_device) {
@@ -2558,7 +2575,9 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         raw.minimizer_words.allocation_bytes,
         sat_add(
             retained_host_capacity_bytes,
-            retained_query_record_capacity_bytes));
+            sat_add(
+                retained_query_record_capacity_bytes,
+                raw.query_authority.owned_capacity_bytes())));
     const std::uint64_t transient_vector_bytes = sat_add(
         sat_add(
             vector_capacity_bytes(raw.host_minimizer_bytes),
@@ -2599,6 +2618,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         : raw.count;
     result.device = std::move(storage);
     result.dispatch_proof = raw.dispatch_proof;
+    result.query_authority = std::move(raw.query_authority);
     result.device_minimizer_count = raw.count;
     return result;
 }

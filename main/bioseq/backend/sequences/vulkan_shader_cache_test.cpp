@@ -1480,6 +1480,146 @@ TEST_CASE("format-5 ABI3 direct seed shaders pin raw SoA and local-position ABI"
     }
 }
 
+[[nodiscard]] gv::PersistedShapeV5CoordinateJobAudit
+make_shape_v5_coordinate_hit_audit(
+    const std::size_t problem_index,
+    const std::uint64_t operation_identity)
+{
+    static gv::Buffer resident_descriptors;
+    static gv::Buffer resident_controls;
+    static gv::Buffer resident_positions;
+    static gv::Buffer query_minimizers;
+    const auto identity = [](const gv::Buffer* object,
+                             const std::uint64_t token,
+                             const std::uint64_t bytes) {
+        return gv::RuntimeBufferIdentity{
+            .object = object,
+            .owner = reinterpret_cast<const gv::Runtime*>(1u),
+            .buffer_handle = token,
+            .memory_handle = token + 100u,
+            .bytes = bytes,
+            .allocation_bytes = bytes,
+        };
+    };
+    gv::PersistedShapeV5CoordinateJobAudit audit{};
+    audit.operation_identity = operation_identity;
+    audit.query_authority_identity = 200u;
+    audit.resident_descriptors = identity(
+        &resident_descriptors, 1u, 104u);
+    audit.resident_controls = identity(&resident_controls, 2u, 64u);
+    audit.resident_positions = identity(&resident_positions, 3u, 64u);
+    audit.query_minimizer_buffer = identity(&query_minimizers, 4u, 64u);
+    audit.device_uuid[0] = 1u;
+    audit.descriptor_bytes = 104u;
+    audit.control_bytes = 64u;
+    audit.position_bytes = 64u;
+    audit.position_count = 8u;
+    audit.max_occ_cap = 500u;
+    audit.partition_count = 1u;
+    audit.abi_version = gv::k_gpu_shape_v5_abi_version;
+    audit.generation_id = 300u;
+    audit.source_identity = 400u;
+    audit.cold_load_identity = 500u;
+    audit.target_len = 10'000u;
+    audit.problem_index = problem_index;
+    audit.query_index = static_cast<std::uint32_t>(problem_index);
+    audit.logical_target_row = 600u + problem_index;
+    audit.logical_query_ordinal = 700u + problem_index;
+    audit.query_record = gv::PhaseCSeedQueryRecordWire{
+        .minimizer_offset = static_cast<std::uint32_t>(problem_index * 4u),
+        .minimizer_count = 4u,
+        .query_len = 120u,
+        .flags = 0u,
+    };
+    audit.result = gv::GpuCoordinateOnlyResultWire{
+        .query_start = 1u,
+        .query_end = 119u,
+        .target_start = 100u + problem_index,
+        .target_end = 218u + problem_index,
+        .match_length = 118u,
+        .block_length = 118u,
+        .chain_score = 42,
+        .seed_count = 7u,
+        .is_reverse = 0u,
+        .valid = 1u,
+    };
+    audit.configuration =
+        gv::persisted_shape_v5_coordinate_config_identity(
+            15u,
+            500,
+            gv::PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp,
+            gv::ChainingPipelineKey{
+                .tile_size = 384u,
+                .local_size = 128u,
+            },
+            5'000,
+            5'000,
+            500,
+            3'000,
+            0.01F,
+            0.005F,
+            25,
+            40,
+            3,
+            16u);
+    audit.query_tile_count = 2u;
+    audit.query_count_dispatches = 1u;
+    audit.query_scan_dispatches = 3u;
+    audit.query_emit_dispatches = 1u;
+    audit.query_completed_roundtrips = 2u;
+    audit.direct_count_dispatches = 1u;
+    audit.direct_scan_dispatches = 3u;
+    audit.direct_emit_dispatches = 1u;
+    audit.anchor_count = 7u;
+    audit.sort_operations = 1u;
+    audit.range_build_dispatches = 1u;
+    audit.range_count = 1u;
+    audit.chain_dispatches = 1u;
+    audit.chain_backtrack_dispatches = 1u;
+    audit.coordinate_dispatches = 1u;
+    const std::uint64_t receipt_base = 1'000u + problem_index * 10u;
+    audit.count_submit_wait_identity = receipt_base + 1u;
+    audit.emit_submit_wait_identity = receipt_base + 2u;
+    audit.sort_range_submit_wait_identity = receipt_base + 3u;
+    audit.chain_coordinate_submit_wait_identity = receipt_base + 4u;
+    audit.count_status_checks = 1u;
+    audit.emit_status_checks = 1u;
+    audit.result_readbacks = 1u;
+    return audit;
+}
+
+[[nodiscard]] gv::PersistedShapeV5CoordinateJobExpectation
+expectation_for_shape_v5_coordinate_audit(
+    const gv::PersistedShapeV5CoordinateJobAudit& audit)
+{
+    return gv::PersistedShapeV5CoordinateJobExpectation{
+        .problem_index = audit.problem_index,
+        .query_authority_identity = audit.query_authority_identity,
+        .resident_descriptors = audit.resident_descriptors,
+        .resident_controls = audit.resident_controls,
+        .resident_positions = audit.resident_positions,
+        .query_minimizer_buffer = audit.query_minimizer_buffer,
+        .device_uuid = audit.device_uuid,
+        .descriptor_bytes = audit.descriptor_bytes,
+        .control_bytes = audit.control_bytes,
+        .position_bytes = audit.position_bytes,
+        .position_count = audit.position_count,
+        .max_occ_cap = audit.max_occ_cap,
+        .partition_count = audit.partition_count,
+        .abi_version = audit.abi_version,
+        .generation_id = audit.generation_id,
+        .source_identity = audit.source_identity,
+        .cold_load_identity = audit.cold_load_identity,
+        .target_len = audit.target_len,
+        .query_index = audit.query_index,
+        .logical_target_row = audit.logical_target_row,
+        .logical_query_ordinal = audit.logical_query_ordinal,
+        .query_record = audit.query_record,
+        .result = audit.result,
+        .configuration = audit.configuration,
+    };
+}
+
 TEST_CASE("format-5 seed jobs require strict XOR resident representation",
           "[vulkan][phase_c][shape_v5][route]") {
     gv::Buffer legacy_slots;
@@ -1524,6 +1664,296 @@ TEST_CASE("format-5 seed jobs require strict XOR resident representation",
     };
     CHECK(gv::phase_c_seed_index_representation(incomplete_legacy)
           == gv::PhaseCSeedIndexRepresentation::invalid);
+}
+
+TEST_CASE("persisted shape-v5 coordinate proof is strict and one-shot",
+          "[vulkan][phase_c][shape_v5][operation-proof]") {
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::DeviceQuerySketchAuthority>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::DeviceQuerySketchAuthority>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::PersistedShapeV5CoordinateOperationProof>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::PersistedShapeV5CoordinateOperationProof>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::PersistedShapeV5CoordinateJobEvidence>);
+
+    auto hit = make_shape_v5_coordinate_hit_audit(0u, 100u);
+    REQUIRE(hit.accepted());
+    const auto as_zero_minimizer_query = [](auto audit) {
+        audit.query_record.minimizer_count = 0u;
+        audit.result = {};
+        audit.direct_count_dispatches = 0u;
+        audit.direct_scan_dispatches = 0u;
+        audit.direct_emit_dispatches = 0u;
+        audit.anchor_count = 0u;
+        audit.sort_operations = 0u;
+        audit.range_build_dispatches = 0u;
+        audit.range_count = 0u;
+        audit.chain_dispatches = 0u;
+        audit.chain_backtrack_dispatches = 0u;
+        audit.coordinate_dispatches = 0u;
+        audit.count_submit_wait_identity = 0u;
+        audit.emit_submit_wait_identity = 0u;
+        audit.sort_range_submit_wait_identity = 0u;
+        audit.chain_coordinate_submit_wait_identity = 0u;
+        audit.count_status_checks = 0u;
+        audit.emit_status_checks = 0u;
+        audit.result_readbacks = 0u;
+        return audit;
+    };
+
+    SECTION("every mandatory dispatch and completion is required") {
+        auto missing = hit;
+        missing.query_count_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.query_scan_dispatches = 2u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.query_emit_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.query_completed_roundtrips = 1u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.direct_count_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.direct_scan_dispatches = 2u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.direct_emit_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.sort_operations = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.range_build_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.chain_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.chain_backtrack_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.coordinate_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.result_readbacks = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.count_status_checks = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.emit_status_checks = 0u;
+        CHECK_FALSE(missing.accepted());
+    }
+
+    SECTION("tamper and forbidden-route counters fail closed") {
+        auto tampered = hit;
+        tampered.status_or = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.coordinate_vote_dispatches = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.cpu_or_simd_biological_calls = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.recompute_calls = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.fallback_calls = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.query_record.flags = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.query_authority_identity = 0u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.resident_controls = {};
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.resident_controls.buffer_handle =
+            hit.resident_descriptors.buffer_handle;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.resident_controls.memory_handle =
+            hit.resident_descriptors.memory_handle;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.descriptor_bytes =
+            hit.resident_descriptors.bytes + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.partition_count += 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.control_bytes = hit.resident_controls.bytes + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.position_bytes = hit.resident_positions.bytes + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.device_uuid = {};
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.configuration.coordinate_algorithm =
+            gv::PhaseCSeedCoordinateAlgorithm::coordinate_vote;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.configuration.probe_limit = 0u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.configuration.max_occ =
+            static_cast<std::int32_t>(hit.max_occ_cap + 1u);
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.chain_coordinate_submit_wait_identity =
+            hit.count_submit_wait_identity;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.valid = 2u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.is_reverse = 9u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.query_end = tampered.query_record.query_len + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.target_start = tampered.result.target_end;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.seed_count = -1;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.match_length = tampered.result.block_length + 1u;
+        CHECK_FALSE(tampered.accepted());
+    }
+
+    SECTION("data-dependent no-hit stages remain ineligible") {
+        const auto zero_query = as_zero_minimizer_query(hit);
+        CHECK_FALSE(zero_query.accepted());
+        auto zero_tile_query = zero_query;
+        zero_tile_query.query_tile_count = 0u;
+        CHECK_FALSE(zero_tile_query.accepted());
+
+        auto no_anchor = hit;
+        no_anchor.result = {};
+        no_anchor.direct_emit_dispatches = 0u;
+        no_anchor.anchor_count = 0u;
+        no_anchor.sort_operations = 0u;
+        no_anchor.range_build_dispatches = 0u;
+        no_anchor.range_count = 0u;
+        no_anchor.chain_dispatches = 0u;
+        no_anchor.chain_backtrack_dispatches = 0u;
+        no_anchor.coordinate_dispatches = 0u;
+        no_anchor.emit_submit_wait_identity = 0u;
+        no_anchor.sort_range_submit_wait_identity = 0u;
+        no_anchor.chain_coordinate_submit_wait_identity = 0u;
+        no_anchor.emit_status_checks = 0u;
+        no_anchor.result_readbacks = 0u;
+        CHECK(no_anchor.accepted());
+
+        auto no_range = hit;
+        no_range.result = {};
+        no_range.range_count = 0u;
+        no_range.chain_dispatches = 0u;
+        no_range.chain_backtrack_dispatches = 0u;
+        no_range.coordinate_dispatches = 0u;
+        no_range.chain_coordinate_submit_wait_identity = 0u;
+        no_range.result_readbacks = 0u;
+        CHECK(no_range.accepted());
+    }
+
+    SECTION("two logical jobs move and consume exactly once") {
+        std::array audits{
+            make_shape_v5_coordinate_hit_audit(0u, 900u),
+            make_shape_v5_coordinate_hit_audit(1u, 900u),
+        };
+        std::array expectations{
+            expectation_for_shape_v5_coordinate_audit(audits[0]),
+            expectation_for_shape_v5_coordinate_audit(audits[1]),
+        };
+        CHECK(gv::PersistedShapeV5CoordinateOperationProof::
+              self_test_one_shot_contract(audits, expectations));
+
+        auto unsupported_zero_audits = audits;
+        unsupported_zero_audits[1] =
+            as_zero_minimizer_query(unsupported_zero_audits[1]);
+        std::array unsupported_zero_expectations{
+            expectation_for_shape_v5_coordinate_audit(
+                unsupported_zero_audits[0]),
+            expectation_for_shape_v5_coordinate_audit(
+                unsupported_zero_audits[1]),
+        };
+        CHECK_FALSE(gv::PersistedShapeV5CoordinateOperationProof::
+                    self_test_one_shot_contract(
+                        unsupported_zero_audits,
+                        unsupported_zero_expectations));
+
+        const auto config_tamper_fails = [&](auto mutate) {
+            auto tampered = expectations;
+            mutate(tampered[0].configuration);
+            return !gv::PersistedShapeV5CoordinateOperationProof::
+                self_test_one_shot_contract(audits, tampered);
+        };
+        CHECK(config_tamper_fails([](auto& config) {
+            config.kmer_size += 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_occ += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.coordinate_algorithm =
+                gv::PhaseCSeedCoordinateAlgorithm::coordinate_vote;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.chain_key.tile_size += 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.chain_key.local_size += 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_dist_x += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_dist_y += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.bandwidth += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_iter += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.gap_penalty_bits ^= 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.skip_penalty_bits ^= 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_chain_skip += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.min_chain_score += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.min_seed_count += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.probe_limit += 1u;
+        }));
+
+        expectations[0].result.target_end += 1u;
+        CHECK_FALSE(gv::PersistedShapeV5CoordinateOperationProof::
+                    self_test_one_shot_contract(audits, expectations));
+    }
 }
 
 TEST_CASE("format-4 bounded stream kernels compile and reflect exact raw ABI",
