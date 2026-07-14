@@ -667,6 +667,13 @@ void fill_column_schema(
         makeInteger(static_cast<std::int32_t>(range_entry->relid)));
     output->provider_private_nodes = static_cast<List*>(
         copyObject(reinterpret_cast<CustomPath*>(provider_path)->custom_private));
+    output->provider_security_digest_format_version =
+        BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1;
+    output->provider_security_flags = 0;
+    std::memset(
+        output->provider_security_digest,
+        0,
+        sizeof(output->provider_security_digest));
     return BIOSEQ_CACHE_STATUS_OK;
 }
 

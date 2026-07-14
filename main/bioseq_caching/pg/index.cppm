@@ -1447,6 +1447,10 @@ struct PlannerDecodedCoverageV1 {
             .required_lineage_attno_count = header.required_lineage_count,
             .dependency_nodes = static_cast<List*>(dependencies),
             .provider_private_nodes = static_cast<List*>(provider_private),
+            .provider_security_digest_format_version =
+                BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1,
+            .provider_security_flags = 0,
+            .provider_security_digest = {},
         };
         decoded->source = BioseqCacheReusableSourceV1{
             .struct_size = sizeof(BioseqCacheReusableSourceV1),
