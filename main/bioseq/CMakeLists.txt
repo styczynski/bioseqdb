@@ -215,15 +215,11 @@ target_sources(bioseq_io_source_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
 
-# DOC0372 §413-424 — memory-admission controller + its sysinfo memory probe as a
-# single-owner leaf, so a metadata/live target can reserve memory without
-# scheduling dna4_w8. sysinfo.cppm imports nothing (POSIX/std only) and
-# memory_admission.cppm now imports only the sysinfo partition (its sibling in
-# this target), so the leaf carries no edge back into bioseq_modules_nopg. Both
-# stay in BIOSEQ_NOPG_MODULES (PG glob still excludes them) but leave
-# BIOSEQ_NOPG_OWNED_MODULES so they compile exactly once, here.
+# DOC0372 §413-424 / DOC0371 §37.2 — the admission controller remains a
+# single-owner leaf, while OS probes and MemoryBudget now have one shared
+# implementation in bioseq_memory_budget. The compatibility sysinfo facade
+# remains in the broad Domain-N module set and only forwards to that library.
 set(BIOSEQ_MEMORY_ADMISSION_CORE_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/sysinfo.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/memory_admission.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
   ${BIOSEQ_MEMORY_ADMISSION_CORE_MODULES})
@@ -234,6 +230,7 @@ set_target_properties(bioseq_memory_admission_core PROPERTIES
   CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 target_compile_definitions(bioseq_memory_admission_core PRIVATE NO_POSTGRES=1)
+target_link_libraries(bioseq_memory_admission_core PUBLIC bioseq_memory_budget)
 target_sources(bioseq_memory_admission_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_MEMORY_ADMISSION_CORE_MODULES})
@@ -366,6 +363,7 @@ elseif(EXISTS "/usr/local/include/MoltenVK/mvk_private_api.h")
 endif()
 
 target_link_libraries(bioseq_modules_nopg PUBLIC
+  bioseq_memory_budget
   bioseq_runtime_core
   bioseq_sink_control_core
   bioseq_checked_arithmetic_core

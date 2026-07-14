@@ -6,8 +6,8 @@
 module;
 // DOC0372 §413-424 — the controller lives in the single-owner
 // bioseq_memory_admission_core leaf and imports only the sysinfo partition it
-// uses (bioseq::memory::default_budget), not the bioseq.instr umbrella, so the
-// leaf carries no edge back into the broad non-PG target. common.h was unused.
+// uses the shared no-PG memory budget directly, not the bioseq.instr umbrella,
+// so the leaf carries no edge back into the broad non-PG target.
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -19,7 +19,7 @@ module;
 #include <vector>
 
 export module bioseq.parallelism.memory_admission;
-import bioseq.instr.detail.sysinfo;
+import bioseq.common.memory_budget;
 
 export namespace bioseq::parallelism {
 
@@ -222,7 +222,7 @@ struct MemoryMaterializationCommit {
 }
 
 [[nodiscard]] inline std::uint64_t live_process_footprint_probe() noexcept {
-    return bioseq::memory::default_budget().footprint_bytes();
+    return bioseq::common::memory::default_budget().footprint_bytes();
 }
 
 struct BudgetedWave {
@@ -288,7 +288,8 @@ public:
     }
 
     [[nodiscard]] std::uint64_t budget_ceiling() const noexcept {
-        std::uint64_t budget = bioseq::memory::default_budget().allocatable_bytes();
+        std::uint64_t budget =
+            bioseq::common::memory::default_budget().allocatable_bytes();
         const std::uint64_t cap = index_memory_cap_bytes();
         if (cap == 0) {
             return budget;
@@ -320,7 +321,7 @@ public:
             return MemoryPermit{this, 0};
         }
 
-        auto& live_budget = bioseq::memory::default_budget();
+        auto& live_budget = bioseq::common::memory::default_budget();
         struct BudgetSnapshot {
             std::uint64_t process_footprint_bytes = 0;
             std::uint64_t system_available_bytes = 0;
