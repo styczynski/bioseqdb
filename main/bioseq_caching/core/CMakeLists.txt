@@ -27,6 +27,7 @@ target_sources(bioseq_cache_core
       "${CMAKE_CURRENT_LIST_DIR}/readiness.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/provider_validation.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/column_format.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/reusable_registry.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/../pg/reusable_planning.cppm")
 
 add_library(bioseq::cache_core ALIAS bioseq_cache_core)
