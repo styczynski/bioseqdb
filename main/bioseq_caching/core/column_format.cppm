@@ -1,0 +1,1581 @@
+/**
+ * @file bioseq_caching/core/column_format.cppm
+ * @brief Policy-hashed little-endian columnar row-group writer and reader.
+ */
+module;
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <concepts>
+#include <cstdint>
+#include <cstring>
+#include <expected>
+#include <limits>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+export module bioseq.cache.core:column_format;
+import :checked_math;
+import :wire;
+
+export namespace bioseq::cache {
+
+enum class ChecksumError : std::uint8_t {
+    Unavailable,
+    Failed,
+};
+
+template <class Policy>
+concept column_checksum_policy = requires(
+    Policy policy,
+    std::span<const std::byte> bytes) {
+    { policy.block_crc32c(bytes) }
+        -> std::same_as<std::expected<std::uint32_t, ChecksumError>>;
+    { policy.sha256(bytes) }
+        -> std::same_as<std::expected<CacheDigest256, ChecksumError>>;
+};
+
+enum class FormatError : std::uint16_t {
+    ArithmeticOverflow,
+    InvalidSchema,
+    TooManyColumns,
+    ColumnCountMismatch,
+    UnsupportedEncoding,
+    InvalidFixedWidth,
+    InvalidBoolean,
+    InvalidAlignment,
+    ChecksumUnavailable,
+    BadMagic,
+    UnsupportedVersion,
+    EndianMismatch,
+    AbiMismatch,
+    IdentityMismatch,
+    SchemaMismatch,
+    Truncated,
+    OffsetOutOfBounds,
+    InvalidRowOrdinal,
+    InvalidNullBitmap,
+    InvalidOffsets,
+    CorruptBlock,
+    CorruptManifest,
+    InvalidBlockReference,
+};
+
+inline constexpr std::uint16_t kColumnFlagNullable = 1u << 0;
+inline constexpr std::size_t kColumnStoreHeaderBytes = 112;
+inline constexpr std::size_t kRowGroupHeaderBytes = 40;
+inline constexpr std::size_t kColumnChunkBytes = 64;
+inline constexpr std::size_t kRowGroupIndexEntryBytes = 24;
+inline constexpr std::size_t kFooterPrefixBytes = 16;
+inline constexpr std::size_t kHeaderCrcOffset = 108;
+inline constexpr std::size_t kGroupCrcOffset = 32;
+
+struct ColumnSchema {
+    std::string name;
+    ColumnDescriptorV1 descriptor{};
+    SemanticId128 semantic_id{};
+
+    [[nodiscard]] bool operator==(const ColumnSchema&) const noexcept = default;
+};
+
+struct EncodedColumnValue {
+    bool is_null = false;
+    std::span<const std::byte> bytes{};
+};
+
+struct ColumnValueView {
+    bool is_null = false;
+    bool is_boolean = false;
+    bool boolean_value = false;
+    std::span<const std::byte> bytes{};
+};
+
+struct ColumnStoreIdentity {
+    std::uint32_t postgres_major = 0;
+    std::uint64_t boot_nonce = 0;
+    std::uint32_t database_oid = 0;
+    std::uint32_t owner_role_oid = 0;
+    std::uint8_t datum_width = sizeof(std::uintptr_t);
+
+    [[nodiscard]] bool operator==(
+        const ColumnStoreIdentity&) const noexcept = default;
+};
+
+struct RowGroupLimits {
+    std::uint32_t rows = kDefaultRowGroupRows;
+    std::uint64_t value_bytes = kDefaultRowGroupValueBytes;
+};
+
+/** Encode validity bits with one for non-NULL and deterministic zero tail bits. */
+[[nodiscard]] inline std::vector<std::byte> encode_validity(
+    std::span<const bool> valid) {
+    std::vector<std::byte> bytes((valid.size() + 7u) / 8u, std::byte{0});
+    for (std::size_t index = 0; index < valid.size(); ++index) {
+        if (valid[index]) {
+            bytes[index / 8u] |= static_cast<std::byte>(1u << (index % 8u));
+        }
+    }
+    return bytes;
+}
+
+/** Decode exactly the requested number of validity bits. */
+[[nodiscard]] inline std::expected<std::vector<bool>, FormatError>
+decode_validity(
+    std::span<const std::byte> bytes,
+    std::size_t row_count) {
+    if (bytes.size() != (row_count + 7u) / 8u) {
+        return std::unexpected(FormatError::InvalidNullBitmap);
+    }
+    std::vector<bool> valid(row_count, false);
+    for (std::size_t index = 0; index < row_count; ++index) {
+        valid[index] =
+            (std::to_integer<unsigned int>(bytes[index / 8u])
+             & (1u << (index % 8u))) != 0;
+    }
+    return valid;
+}
+
+/** Verify that bits beyond the row count cannot destabilize checksums. */
+[[nodiscard]] inline bool unused_tail_bits_are_zero(
+    std::span<const std::byte> bytes,
+    std::size_t row_count) noexcept {
+    if (bytes.size() != (row_count + 7u) / 8u || bytes.empty()) {
+        return bytes.empty() && row_count == 0;
+    }
+    const std::size_t used = row_count % 8u;
+    if (used == 0) {
+        return true;
+    }
+    const unsigned int mask = static_cast<unsigned int>(0xffu << used);
+    return (std::to_integer<unsigned int>(bytes.back()) & mask) == 0;
+}
+
+/** Reject dictionary candidates that do not strictly reduce encoded bytes. */
+[[nodiscard]] constexpr bool dictionary_is_beneficial(
+    std::uint64_t plain_bytes,
+    std::uint64_t dictionary_bytes,
+    std::uint64_t index_bytes) noexcept {
+    const auto encoded = checked_add(dictionary_bytes, index_bytes);
+    return encoded.has_value() && *encoded < plain_bytes;
+}
+
+/** Validate a DSA/file reference before deriving a backing-store pointer. */
+[[nodiscard]] constexpr bool validate_block_reference(
+    const BlockReferenceV1& reference,
+    std::uint64_t backing_size) noexcept {
+    const bool known_tier = reference.tier == BlockBackingTierV1::Dsa
+        || reference.tier == BlockBackingTierV1::File;
+    return known_tier
+        && reference.handle_or_file_id != 0
+        && checked_range(reference.offset, reference.length, backing_size);
+}
+
+namespace detail {
+
+struct OwnedValue {
+    bool is_null = false;
+    std::vector<std::byte> bytes;
+};
+
+using OwnedRow = std::vector<OwnedValue>;
+
+struct PendingGroup {
+    std::uint64_t first_row_ordinal = 0;
+    std::uint64_t value_bytes = 0;
+    std::vector<OwnedRow> rows;
+};
+
+struct ParsedChunk {
+    ColumnChunkV1 wire{};
+};
+
+struct ParsedGroup {
+    std::uint64_t first_row_ordinal = 0;
+    std::uint32_t row_count = 0;
+    std::uint64_t offset = 0;
+    std::uint64_t length = 0;
+    std::vector<ParsedChunk> chunks;
+};
+
+struct GroupIndexEntry {
+    std::uint64_t offset = 0;
+    std::uint64_t length = 0;
+    std::uint32_t crc32c = 0;
+};
+
+/** Overwrite a fixed-width integer already reserved in a byte vector. */
+template <class Integer>
+void write_little_endian_at(
+    std::vector<std::byte>& destination,
+    std::size_t offset,
+    Integer value) {
+    std::vector<std::byte> encoded;
+    encoded.reserve(sizeof(Integer));
+    append_little_endian(encoded, value);
+    std::copy(encoded.begin(), encoded.end(), destination.begin() + offset);
+}
+
+/** Append zero padding to reach a checked power-of-two alignment. */
+[[nodiscard]] inline std::expected<void, FormatError> align_vector(
+    std::vector<std::byte>& bytes,
+    std::uint64_t alignment) {
+    const auto aligned = checked_align_up(bytes.size(), alignment);
+    if (!aligned.has_value()) {
+        return std::unexpected(FormatError::InvalidAlignment);
+    }
+    bytes.resize(static_cast<std::size_t>(*aligned), std::byte{0});
+    return {};
+}
+
+/** Build the exact canonical descriptor block used for the schema digest. */
+[[nodiscard]] inline std::expected<std::vector<std::byte>, FormatError>
+serialize_schema(std::span<const ColumnSchema> schema) {
+    if (schema.size() > kMaxProviderBoundaryColumns
+        || schema.size() > (std::numeric_limits<std::uint16_t>::max)()) {
+        return std::unexpected(FormatError::TooManyColumns);
+    }
+    std::vector<std::byte> bytes;
+    append_little_endian(bytes, static_cast<std::uint32_t>(schema.size()));
+    for (const ColumnSchema& column : schema) {
+        const ColumnDescriptorV1& descriptor = column.descriptor;
+        const bool supported_encoding =
+            descriptor.encoding == ColumnEncoding::BooleanBits
+            || descriptor.encoding == ColumnEncoding::FixedByValue
+            || descriptor.encoding == ColumnEncoding::FixedByReference
+            || descriptor.encoding == ColumnEncoding::FlatVarlena
+            || descriptor.encoding == ColumnEncoding::BinarySend;
+        const bool fixed_encoding =
+            descriptor.encoding == ColumnEncoding::FixedByValue
+            || descriptor.encoding == ColumnEncoding::FixedByReference;
+        if (column.name.size() > kMaxCanonicalKeyBytes
+            || descriptor.type_alignment == 0
+            || (descriptor.type_alignment & (descriptor.type_alignment - 1))
+                != 0
+            || descriptor.by_value > 1
+            || descriptor.reserved != 0
+            || (descriptor.flags & ~kColumnFlagNullable) != 0) {
+            return std::unexpected(FormatError::InvalidSchema);
+        }
+        if (!supported_encoding) {
+            return std::unexpected(
+                descriptor.encoding == ColumnEncoding::Dictionary
+                    || descriptor.encoding == ColumnEncoding::RunLength
+                ? FormatError::UnsupportedEncoding
+                : FormatError::InvalidSchema);
+        }
+        if ((fixed_encoding && descriptor.type_length <= 0)
+            || (descriptor.encoding == ColumnEncoding::BooleanBits
+                && descriptor.type_length != 1)) {
+            return std::unexpected(FormatError::InvalidFixedWidth);
+        }
+        const std::uint64_t name_offset = bytes.size() + 64u;
+        append_little_endian(bytes, descriptor.type_oid);
+        append_little_endian(bytes, descriptor.typmod);
+        append_little_endian(bytes, descriptor.collation_oid);
+        append_little_endian(bytes, descriptor.type_length);
+        append_little_endian(bytes, descriptor.by_value);
+        append_little_endian(bytes, descriptor.type_alignment);
+        append_little_endian(bytes, descriptor.encoding);
+        append_little_endian(bytes, descriptor.flags);
+        append_little_endian(bytes, descriptor.send_function_oid);
+        append_little_endian(bytes, descriptor.receive_function_oid);
+        append_little_endian(bytes, descriptor.receive_type_io_param);
+        append_little_endian(bytes, descriptor.reserved);
+        append_little_endian(bytes, name_offset);
+        append_little_endian(bytes, column.semantic_id.high);
+        append_little_endian(bytes, column.semantic_id.low);
+        append_little_endian(bytes, static_cast<std::uint32_t>(column.name.size()));
+        for (const char character : column.name) {
+            bytes.push_back(static_cast<std::byte>(
+                static_cast<unsigned char>(character)));
+        }
+    }
+    return bytes;
+}
+
+/** Copy selected byte ranges into one canonical chunk-checksum input. */
+[[nodiscard]] inline std::expected<std::vector<std::byte>, FormatError>
+chunk_checksum_bytes(
+    std::span<const std::byte> group,
+    const ColumnChunkV1& chunk) {
+    std::vector<std::byte> bytes;
+    for (const auto [offset, length] : std::array{
+             std::pair{chunk.null_bitmap_offset, chunk.null_bitmap_bytes},
+             std::pair{chunk.offsets_offset, chunk.offsets_bytes},
+             std::pair{chunk.values_offset, chunk.values_bytes}}) {
+        if (length == 0) {
+            continue;
+        }
+        const auto region = checked_subspan(group, offset, length);
+        if (!region.has_value()) {
+            return std::unexpected(FormatError::OffsetOutOfBounds);
+        }
+        bytes.insert(bytes.end(), region->begin(), region->end());
+    }
+    return bytes;
+}
+
+} // namespace detail
+
+/** Return the canonical schema bytes used by writer and validator. */
+[[nodiscard]] inline std::expected<std::vector<std::byte>, FormatError>
+schema_canonical_bytes(std::span<const ColumnSchema> schema) {
+    return detail::serialize_schema(schema);
+}
+
+/** Compute a provider-independent schema digest through the injected policy. */
+template <column_checksum_policy Policy>
+[[nodiscard]] std::expected<CacheDigest256, FormatError> schema_digest(
+    std::span<const ColumnSchema> schema,
+    Policy& policy) {
+    auto bytes = schema_canonical_bytes(schema);
+    if (!bytes.has_value()) {
+        return std::unexpected(bytes.error());
+    }
+    auto digest = policy.sha256(*bytes);
+    if (!digest.has_value()) {
+        return std::unexpected(FormatError::ChecksumUnavailable);
+    }
+    return *digest;
+}
+
+/** Incremental row API; sealed output is one self-validating byte blob. */
+class ColumnStoreBuilder {
+public:
+    ColumnStoreBuilder(
+        ColumnStoreIdentity identity,
+        std::span<const ColumnSchema> schema,
+        RowGroupLimits limits = {})
+        : identity_(identity),
+          schema_(schema.begin(), schema.end()),
+          limits_(limits) {
+        if (limits_.rows == 0) {
+            limits_.rows = kDefaultRowGroupRows;
+        }
+        if (limits_.value_bytes == 0) {
+            limits_.value_bytes = kDefaultRowGroupValueBytes;
+        }
+    }
+
+    /** Copy one raw encoded row; no caller memory survives this call. */
+    [[nodiscard]] std::expected<void, FormatError> append_row(
+        std::span<const EncodedColumnValue> values) {
+        if (values.size() != schema_.size()) {
+            return std::unexpected(FormatError::ColumnCountMismatch);
+        }
+        std::uint64_t row_bytes = 0;
+        detail::OwnedRow row;
+        row.reserve(values.size());
+        for (std::size_t column_index = 0;
+             column_index < values.size();
+             ++column_index) {
+            const ColumnSchema& schema = schema_[column_index];
+            const EncodedColumnValue& value = values[column_index];
+            const ColumnEncoding encoding = schema.descriptor.encoding;
+            if (value.is_null
+                && (schema.descriptor.flags & kColumnFlagNullable) == 0) {
+                return std::unexpected(FormatError::InvalidNullBitmap);
+            }
+            if (encoding == ColumnEncoding::Dictionary
+                || encoding == ColumnEncoding::RunLength) {
+                return std::unexpected(FormatError::UnsupportedEncoding);
+            }
+            if (!value.is_null) {
+                if ((encoding == ColumnEncoding::FixedByValue
+                     || encoding == ColumnEncoding::FixedByReference)
+                    && (schema.descriptor.type_length <= 0
+                        || value.bytes.size()
+                            != static_cast<std::size_t>(
+                                schema.descriptor.type_length))) {
+                    return std::unexpected(FormatError::InvalidFixedWidth);
+                }
+                if (encoding == ColumnEncoding::BooleanBits
+                    && (value.bytes.size() != 1
+                        || (value.bytes[0] != std::byte{0}
+                            && value.bytes[0] != std::byte{1}))) {
+                    return std::unexpected(FormatError::InvalidBoolean);
+                }
+            }
+            const auto next_bytes = checked_add(
+                row_bytes, static_cast<std::uint64_t>(value.bytes.size()));
+            if (!next_bytes.has_value()) {
+                return std::unexpected(FormatError::ArithmeticOverflow);
+            }
+            row_bytes = *next_bytes;
+            row.push_back(detail::OwnedValue{
+                .is_null = value.is_null,
+                .bytes = value.is_null
+                    ? std::vector<std::byte>{}
+                    : std::vector<std::byte>(
+                        value.bytes.begin(), value.bytes.end()),
+            });
+        }
+        if (groups_.empty()
+            || groups_.back().rows.size() >= limits_.rows
+            || (!groups_.back().rows.empty() && [&] {
+                const auto next_group_bytes = checked_add(
+                    groups_.back().value_bytes, row_bytes);
+                return !next_group_bytes.has_value()
+                    || *next_group_bytes > limits_.value_bytes;
+            }())) {
+            groups_.push_back(detail::PendingGroup{
+                .first_row_ordinal = row_count_,
+            });
+        }
+        groups_.back().rows.push_back(std::move(row));
+        const auto next_group_bytes = checked_add(
+            groups_.back().value_bytes, row_bytes);
+        const auto next_row_count = checked_add(row_count_, std::uint64_t{1});
+        if (!next_group_bytes.has_value() || !next_row_count.has_value()) {
+            groups_.back().rows.pop_back();
+            if (groups_.back().rows.empty()) {
+                groups_.pop_back();
+            }
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        groups_.back().value_bytes = *next_group_bytes;
+        row_count_ = *next_row_count;
+        return {};
+    }
+
+    /** Serialize all row groups, checksums, index, and manifest. */
+    template <column_checksum_policy Policy>
+    [[nodiscard]] std::expected<std::vector<std::byte>, FormatError> seal(
+        Policy& policy) const {
+        if (groups_.size()
+            > (std::numeric_limits<std::uint32_t>::max)() - 3u) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        auto descriptors = detail::serialize_schema(schema_);
+        if (!descriptors.has_value()) {
+            return std::unexpected(descriptors.error());
+        }
+        auto schema_hash = policy.sha256(*descriptors);
+        if (!schema_hash.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+
+        std::vector<std::byte> store(kColumnStoreHeaderBytes, std::byte{0});
+        const std::uint64_t descriptor_offset = store.size();
+        store.insert(store.end(), descriptors->begin(), descriptors->end());
+
+        std::vector<detail::GroupIndexEntry> group_index;
+        group_index.reserve(groups_.size());
+        for (const detail::PendingGroup& group : groups_) {
+            auto encoded = serialize_group(group, policy);
+            if (!encoded.has_value()) {
+                return std::unexpected(encoded.error());
+            }
+            auto group_crc = policy.block_crc32c(*encoded);
+            if (!group_crc.has_value()) {
+                return std::unexpected(FormatError::ChecksumUnavailable);
+            }
+            const std::uint64_t offset = store.size();
+            store.insert(store.end(), encoded->begin(), encoded->end());
+            group_index.push_back(detail::GroupIndexEntry{
+                .offset = offset,
+                .length = encoded->size(),
+                .crc32c = *group_crc,
+            });
+        }
+
+        const std::uint64_t index_offset = store.size();
+        std::vector<std::byte> index_bytes;
+        append_little_endian(
+            index_bytes, static_cast<std::uint64_t>(group_index.size()));
+        for (const auto& group : group_index) {
+            append_little_endian(index_bytes, group.offset);
+            append_little_endian(index_bytes, group.length);
+            append_little_endian(index_bytes, group.crc32c);
+            append_little_endian(index_bytes, std::uint32_t{0});
+        }
+        store.insert(store.end(), index_bytes.begin(), index_bytes.end());
+
+        std::vector<std::byte> header;
+        header.reserve(kColumnStoreHeaderBytes);
+        for (const char byte : kColumnMagic) {
+            header.push_back(static_cast<std::byte>(
+                static_cast<unsigned char>(byte)));
+        }
+        append_little_endian(header, kColumnFormatVersion);
+        append_little_endian(header, identity_.postgres_major);
+        append_little_endian(header, kSharedAbiVersion);
+        append_little_endian(header, std::uint32_t{0});
+        append_little_endian(header, identity_.boot_nonce);
+        append_little_endian(header, identity_.database_oid);
+        append_little_endian(header, identity_.owner_role_oid);
+        append_little_endian(header, static_cast<std::uint8_t>(DataEndian::Little));
+        append_little_endian(header, identity_.datum_width);
+        append_little_endian(header, static_cast<std::uint16_t>(schema_.size()));
+        append_little_endian(header, row_count_);
+        append_little_endian(header, static_cast<std::uint64_t>(groups_.size()));
+        append_little_endian(header, descriptor_offset);
+        append_little_endian(header, index_offset);
+        for (const std::uint8_t byte : schema_hash->bytes) {
+            header.push_back(static_cast<std::byte>(byte));
+        }
+        append_little_endian(header, std::uint32_t{0});
+        if (header.size() != kColumnStoreHeaderBytes) {
+            return std::unexpected(FormatError::InvalidSchema);
+        }
+        auto header_crc = policy.block_crc32c(header);
+        if (!header_crc.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        detail::write_little_endian_at(header, kHeaderCrcOffset, *header_crc);
+        std::copy(header.begin(), header.end(), store.begin());
+
+        std::vector<CacheDigest256> block_digests;
+        block_digests.reserve(groups_.size() + 3u);
+        const auto append_digest = [&policy, &block_digests](
+                std::span<const std::byte> block)
+                -> std::expected<void, FormatError> {
+            auto digest = policy.sha256(block);
+            if (!digest.has_value()) {
+                return std::unexpected(FormatError::ChecksumUnavailable);
+            }
+            block_digests.push_back(*digest);
+            return {};
+        };
+        if (!append_digest(std::span<const std::byte>(store).first(
+                kColumnStoreHeaderBytes))) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        const std::uint64_t first_group_offset = group_index.empty()
+            ? index_offset
+            : group_index.front().offset;
+        if (!append_digest(std::span<const std::byte>(store).subspan(
+                static_cast<std::size_t>(descriptor_offset),
+                static_cast<std::size_t>(
+                    first_group_offset - descriptor_offset)))) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        for (const auto& group : group_index) {
+            if (!append_digest(std::span<const std::byte>(store).subspan(
+                    static_cast<std::size_t>(group.offset),
+                    static_cast<std::size_t>(group.length)))) {
+                return std::unexpected(FormatError::ChecksumUnavailable);
+            }
+        }
+        if (!append_digest(std::span<const std::byte>(store).subspan(
+                static_cast<std::size_t>(index_offset)))) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+
+        std::vector<std::byte> digest_bytes;
+        digest_bytes.reserve(block_digests.size() * 32u);
+        for (const CacheDigest256& digest : block_digests) {
+            for (const std::uint8_t byte : digest.bytes) {
+                digest_bytes.push_back(static_cast<std::byte>(byte));
+            }
+        }
+        auto manifest = policy.sha256(digest_bytes);
+        if (!manifest.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        for (const char byte : kColumnFooterMagic) {
+            store.push_back(static_cast<std::byte>(
+                static_cast<unsigned char>(byte)));
+        }
+        append_little_endian(
+            store, static_cast<std::uint32_t>(block_digests.size()));
+        append_little_endian(store, std::uint32_t{0});
+        store.insert(store.end(), digest_bytes.begin(), digest_bytes.end());
+        for (const std::uint8_t byte : manifest->bytes) {
+            store.push_back(static_cast<std::byte>(byte));
+        }
+        return store;
+    }
+
+    [[nodiscard]] std::uint64_t row_count() const noexcept {
+        return row_count_;
+    }
+
+private:
+    /** Serialize one internally columnar row group. */
+    template <column_checksum_policy Policy>
+    [[nodiscard]] std::expected<std::vector<std::byte>, FormatError>
+    serialize_group(
+        const detail::PendingGroup& group,
+        Policy& policy) const {
+        const auto chunk_table_bytes = checked_mul(
+            static_cast<std::uint64_t>(schema_.size()),
+            static_cast<std::uint64_t>(kColumnChunkBytes));
+        if (!chunk_table_bytes.has_value()) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        const auto payload_start = checked_add(
+            static_cast<std::uint64_t>(kRowGroupHeaderBytes),
+            *chunk_table_bytes);
+        if (!payload_start.has_value()
+            || *payload_start > (std::numeric_limits<std::size_t>::max)()) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        std::vector<std::byte> bytes(
+            static_cast<std::size_t>(*payload_start), std::byte{0});
+        std::vector<ColumnChunkV1> chunks(schema_.size());
+        for (std::size_t column_index = 0;
+             column_index < schema_.size();
+             ++column_index) {
+            const ColumnSchema& schema = schema_[column_index];
+            ColumnChunkV1& chunk = chunks[column_index];
+            std::vector<bool> valid(group.rows.size(), true);
+            bool has_null = false;
+            for (std::size_t row = 0; row < group.rows.size(); ++row) {
+                valid[row] = !group.rows[row][column_index].is_null;
+                has_null = has_null || !valid[row];
+            }
+            if (has_null) {
+                chunk.null_bitmap_offset = bytes.size();
+                std::vector<bool> stable_valid = valid;
+                std::vector<std::byte> bitmap(
+                    (stable_valid.size() + 7u) / 8u, std::byte{0});
+                for (std::size_t row = 0; row < stable_valid.size(); ++row) {
+                    if (stable_valid[row]) {
+                        bitmap[row / 8u] |= static_cast<std::byte>(
+                            1u << (row % 8u));
+                    }
+                }
+                chunk.null_bitmap_bytes = bitmap.size();
+                bytes.insert(bytes.end(), bitmap.begin(), bitmap.end());
+            }
+
+            const ColumnEncoding encoding = schema.descriptor.encoding;
+            const bool variable = encoding == ColumnEncoding::FlatVarlena
+                || encoding == ColumnEncoding::BinarySend;
+            if (variable) {
+                chunk.offsets_offset = bytes.size();
+                chunk.offsets_bytes = (group.rows.size() + 1u) * sizeof(std::uint64_t);
+                std::uint64_t payload_offset = 0;
+                append_little_endian(bytes, payload_offset);
+                for (const auto& row : group.rows) {
+                    const auto next = checked_add(
+                        payload_offset,
+                        static_cast<std::uint64_t>(
+                            row[column_index].bytes.size()));
+                    if (!next.has_value()) {
+                        return std::unexpected(FormatError::ArithmeticOverflow);
+                    }
+                    payload_offset = *next;
+                    append_little_endian(bytes, payload_offset);
+                }
+                chunk.values_offset = bytes.size();
+                for (const auto& row : group.rows) {
+                    bytes.insert(
+                        bytes.end(),
+                        row[column_index].bytes.begin(),
+                        row[column_index].bytes.end());
+                }
+                chunk.values_bytes = payload_offset;
+                chunk.logical_values_bytes = payload_offset;
+            } else if (encoding == ColumnEncoding::BooleanBits) {
+                chunk.values_offset = bytes.size();
+                chunk.values_bytes = (group.rows.size() + 7u) / 8u;
+                bytes.resize(
+                    bytes.size() + static_cast<std::size_t>(chunk.values_bytes),
+                    std::byte{0});
+                for (std::size_t row = 0; row < group.rows.size(); ++row) {
+                    if (!group.rows[row][column_index].is_null
+                        && group.rows[row][column_index].bytes[0]
+                            == std::byte{1}) {
+                        bytes[static_cast<std::size_t>(chunk.values_offset)
+                              + row / 8u]
+                            |= static_cast<std::byte>(1u << (row % 8u));
+                    }
+                }
+                chunk.logical_values_bytes = group.rows.size();
+            } else {
+                const auto alignment = detail::align_vector(
+                    bytes, schema.descriptor.type_alignment);
+                if (!alignment.has_value()) {
+                    return std::unexpected(alignment.error());
+                }
+                chunk.values_offset = bytes.size();
+                const std::size_t width = static_cast<std::size_t>(
+                    schema.descriptor.type_length);
+                const auto required_values = checked_mul(
+                    static_cast<std::uint64_t>(width),
+                    static_cast<std::uint64_t>(group.rows.size()));
+                if (!required_values.has_value()
+                    || *required_values
+                        > (std::numeric_limits<std::size_t>::max)()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                for (const auto& row : group.rows) {
+                    if (row[column_index].is_null) {
+                        bytes.resize(bytes.size() + width, std::byte{0});
+                    } else {
+                        bytes.insert(
+                            bytes.end(),
+                            row[column_index].bytes.begin(),
+                            row[column_index].bytes.end());
+                    }
+                }
+                chunk.values_bytes = *required_values;
+                chunk.logical_values_bytes = chunk.values_bytes;
+            }
+            auto checksum_input = detail::chunk_checksum_bytes(bytes, chunk);
+            if (!checksum_input.has_value()) {
+                return std::unexpected(checksum_input.error());
+            }
+            auto checksum = policy.block_crc32c(*checksum_input);
+            if (!checksum.has_value()) {
+                return std::unexpected(FormatError::ChecksumUnavailable);
+            }
+            chunk.crc32c = *checksum;
+        }
+
+        for (std::size_t index = 0; index < chunks.size(); ++index) {
+            const std::size_t offset = kRowGroupHeaderBytes
+                + index * kColumnChunkBytes;
+            const ColumnChunkV1& chunk = chunks[index];
+            std::size_t cursor = offset;
+            for (const std::uint64_t value : {
+                     chunk.null_bitmap_offset,
+                     chunk.null_bitmap_bytes,
+                     chunk.offsets_offset,
+                     chunk.offsets_bytes,
+                     chunk.values_offset,
+                     chunk.values_bytes,
+                     chunk.logical_values_bytes}) {
+                detail::write_little_endian_at(bytes, cursor, value);
+                cursor += sizeof(value);
+            }
+            detail::write_little_endian_at(bytes, cursor, chunk.crc32c);
+            cursor += sizeof(chunk.crc32c);
+            detail::write_little_endian_at(bytes, cursor, chunk.flags);
+        }
+
+        std::vector<std::byte> header;
+        append_little_endian(header, group.first_row_ordinal);
+        append_little_endian(
+            header, static_cast<std::uint32_t>(group.rows.size()));
+        append_little_endian(
+            header, static_cast<std::uint16_t>(schema_.size()));
+        append_little_endian(header, std::uint16_t{0});
+        append_little_endian(
+            header, static_cast<std::uint64_t>(kRowGroupHeaderBytes));
+        append_little_endian(header, static_cast<std::uint64_t>(bytes.size()));
+        append_little_endian(header, std::uint32_t{0});
+        append_little_endian(header, std::uint32_t{0});
+        std::copy(header.begin(), header.end(), bytes.begin());
+        auto group_crc = policy.block_crc32c(bytes);
+        if (!group_crc.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        detail::write_little_endian_at(bytes, kGroupCrcOffset, *group_crc);
+        return bytes;
+    }
+
+    ColumnStoreIdentity identity_{};
+    std::vector<ColumnSchema> schema_;
+    RowGroupLimits limits_{};
+    std::vector<detail::PendingGroup> groups_;
+    std::uint64_t row_count_ = 0;
+};
+
+/** Fully prevalidated, non-owning view over a caller-owned sealed blob. */
+class ColumnStoreView {
+public:
+    ColumnStoreView() = default;
+
+    ColumnStoreView(
+        std::span<const std::byte> bytes,
+        ColumnStoreIdentity identity,
+        std::vector<ColumnSchema> schema,
+        std::vector<detail::ParsedGroup> groups,
+        std::uint64_t row_count) noexcept
+        : bytes_(bytes),
+          identity_(identity),
+          schema_(std::move(schema)),
+          groups_(std::move(groups)),
+          row_count_(row_count) {}
+
+    [[nodiscard]] std::uint64_t row_count() const noexcept {
+        return row_count_;
+    }
+
+    [[nodiscard]] std::size_t column_count() const noexcept {
+        return schema_.size();
+    }
+
+    [[nodiscard]] std::size_t row_group_count() const noexcept {
+        return groups_.size();
+    }
+
+    [[nodiscard]] const std::vector<ColumnSchema>& schema() const noexcept {
+        return schema_;
+    }
+
+    [[nodiscard]] const ColumnStoreIdentity& identity() const noexcept {
+        return identity_;
+    }
+
+    /** Return one encoded cell without invoking PostgreSQL receive functions. */
+    [[nodiscard]] std::expected<ColumnValueView, FormatError> value(
+        std::uint64_t row_ordinal,
+        std::size_t column_index) const noexcept {
+        if (row_ordinal >= row_count_ || column_index >= schema_.size()) {
+            return std::unexpected(FormatError::OffsetOutOfBounds);
+        }
+        const detail::ParsedGroup* selected = nullptr;
+        for (const auto& group : groups_) {
+            const auto group_end = checked_add(
+                group.first_row_ordinal,
+                static_cast<std::uint64_t>(group.row_count));
+            if (row_ordinal >= group.first_row_ordinal
+                && group_end.has_value() && row_ordinal < *group_end) {
+                selected = &group;
+                break;
+            }
+        }
+        if (selected == nullptr) {
+            return std::unexpected(FormatError::InvalidRowOrdinal);
+        }
+        const std::uint64_t local_row = row_ordinal - selected->first_row_ordinal;
+        const ColumnChunkV1& chunk = selected->chunks[column_index].wire;
+        auto group_bytes = checked_subspan(
+            bytes_, selected->offset, selected->length);
+        if (!group_bytes.has_value()) {
+            return std::unexpected(FormatError::OffsetOutOfBounds);
+        }
+        bool valid = true;
+        if (chunk.null_bitmap_bytes != 0) {
+            auto bitmap = checked_subspan(
+                *group_bytes,
+                chunk.null_bitmap_offset,
+                chunk.null_bitmap_bytes);
+            if (!bitmap.has_value()) {
+                return std::unexpected(FormatError::OffsetOutOfBounds);
+            }
+            valid = (std::to_integer<unsigned int>(
+                         (*bitmap)[local_row / 8u])
+                     & (1u << (local_row % 8u))) != 0;
+        }
+        if (!valid) {
+            return ColumnValueView{.is_null = true};
+        }
+        const ColumnEncoding encoding = schema_[column_index].descriptor.encoding;
+        if (encoding == ColumnEncoding::BooleanBits) {
+            auto values = checked_subspan(
+                *group_bytes, chunk.values_offset, chunk.values_bytes);
+            if (!values.has_value()) {
+                return std::unexpected(FormatError::OffsetOutOfBounds);
+            }
+            const bool boolean =
+                (std::to_integer<unsigned int>((*values)[local_row / 8u])
+                 & (1u << (local_row % 8u))) != 0;
+            return ColumnValueView{
+                .is_boolean = true,
+                .boolean_value = boolean,
+            };
+        }
+        std::uint64_t value_offset = 0;
+        std::uint64_t value_length = 0;
+        if (encoding == ColumnEncoding::FlatVarlena
+            || encoding == ColumnEncoding::BinarySend) {
+            auto offsets = checked_subspan(
+                *group_bytes, chunk.offsets_offset, chunk.offsets_bytes);
+            if (!offsets.has_value()) {
+                return std::unexpected(FormatError::OffsetOutOfBounds);
+            }
+            std::size_t first_cursor = local_row * sizeof(std::uint64_t);
+            std::size_t next_cursor = first_cursor + sizeof(std::uint64_t);
+            auto first = read_little_endian<std::uint64_t>(*offsets, first_cursor);
+            auto next = read_little_endian<std::uint64_t>(*offsets, next_cursor);
+            if (!first.has_value() || !next.has_value() || *next < *first) {
+                return std::unexpected(FormatError::InvalidOffsets);
+            }
+            value_offset = *first;
+            value_length = *next - *first;
+        } else {
+            const std::uint64_t width = static_cast<std::uint64_t>(
+                schema_[column_index].descriptor.type_length);
+            const auto offset = checked_mul(local_row, width);
+            if (!offset.has_value()) {
+                return std::unexpected(FormatError::ArithmeticOverflow);
+            }
+            value_offset = *offset;
+            value_length = width;
+        }
+        auto values = checked_subspan(
+            *group_bytes, chunk.values_offset, chunk.values_bytes);
+        if (!values.has_value()) {
+            return std::unexpected(FormatError::OffsetOutOfBounds);
+        }
+        auto selected_value = checked_subspan(
+            *values, value_offset, value_length);
+        if (!selected_value.has_value()) {
+            return std::unexpected(FormatError::InvalidOffsets);
+        }
+        return ColumnValueView{.bytes = *selected_value};
+    }
+
+private:
+    std::span<const std::byte> bytes_{};
+    ColumnStoreIdentity identity_{};
+    std::vector<ColumnSchema> schema_;
+    std::vector<detail::ParsedGroup> groups_;
+    std::uint64_t row_count_ = 0;
+};
+
+/** Validate every protected byte and decoder-independent layout before replay. */
+template <column_checksum_policy Policy>
+[[nodiscard]] std::expected<ColumnStoreView, FormatError>
+validate_column_store(
+    std::span<const std::byte> store,
+    const ColumnStoreIdentity& expected_identity,
+    Policy& policy) {
+    if (store.size() < kColumnStoreHeaderBytes + kFooterPrefixBytes + 32u) {
+        return std::unexpected(FormatError::Truncated);
+    }
+    for (std::size_t index = 0; index < kColumnMagic.size(); ++index) {
+        if (store[index] != static_cast<std::byte>(
+                static_cast<unsigned char>(kColumnMagic[index]))) {
+            return std::unexpected(FormatError::BadMagic);
+        }
+    }
+    std::size_t cursor = kColumnMagic.size();
+    auto format_version = read_little_endian<std::uint32_t>(store, cursor);
+    if (!format_version.has_value() || *format_version != kColumnFormatVersion) {
+        return std::unexpected(FormatError::UnsupportedVersion);
+    }
+    auto postgres_major = read_little_endian<std::uint32_t>(store, cursor);
+    auto shared_abi = read_little_endian<std::uint32_t>(store, cursor);
+    auto flags = read_little_endian<std::uint32_t>(store, cursor);
+    auto boot_nonce = read_little_endian<std::uint64_t>(store, cursor);
+    auto database_oid = read_little_endian<std::uint32_t>(store, cursor);
+    auto owner_role_oid = read_little_endian<std::uint32_t>(store, cursor);
+    auto endian = read_little_endian<std::uint8_t>(store, cursor);
+    auto datum_width = read_little_endian<std::uint8_t>(store, cursor);
+    auto column_count = read_little_endian<std::uint16_t>(store, cursor);
+    auto row_count = read_little_endian<std::uint64_t>(store, cursor);
+    auto group_count = read_little_endian<std::uint64_t>(store, cursor);
+    auto descriptor_offset = read_little_endian<std::uint64_t>(store, cursor);
+    auto index_offset = read_little_endian<std::uint64_t>(store, cursor);
+    if (!postgres_major || !shared_abi || !flags || !boot_nonce
+        || !database_oid || !owner_role_oid || !endian || !datum_width
+        || !column_count || !row_count || !group_count
+        || !descriptor_offset || !index_offset) {
+        return std::unexpected(FormatError::Truncated);
+    }
+    CacheDigest256 stored_schema_digest{};
+    for (std::uint8_t& byte : stored_schema_digest.bytes) {
+        byte = std::to_integer<std::uint8_t>(store[cursor++]);
+    }
+    auto stored_header_crc = read_little_endian<std::uint32_t>(store, cursor);
+    if (!stored_header_crc || cursor != kColumnStoreHeaderBytes) {
+        return std::unexpected(FormatError::Truncated);
+    }
+    if (*shared_abi != kSharedAbiVersion) {
+        return std::unexpected(FormatError::AbiMismatch);
+    }
+    if (*flags != 0) {
+        return std::unexpected(FormatError::UnsupportedVersion);
+    }
+    if (*endian != static_cast<std::uint8_t>(DataEndian::Little)
+        || !host_is_little_endian()) {
+        return std::unexpected(FormatError::EndianMismatch);
+    }
+    const ColumnStoreIdentity identity{
+        .postgres_major = *postgres_major,
+        .boot_nonce = *boot_nonce,
+        .database_oid = *database_oid,
+        .owner_role_oid = *owner_role_oid,
+        .datum_width = *datum_width,
+    };
+    if (identity != expected_identity) {
+        return std::unexpected(FormatError::IdentityMismatch);
+    }
+    std::vector<std::byte> header(
+        store.begin(), store.begin() + kColumnStoreHeaderBytes);
+    detail::write_little_endian_at(
+        header, kHeaderCrcOffset, std::uint32_t{0});
+    auto header_crc = policy.block_crc32c(header);
+    if (!header_crc.has_value()) {
+        return std::unexpected(FormatError::ChecksumUnavailable);
+    }
+    if (*header_crc != *stored_header_crc) {
+        return std::unexpected(FormatError::CorruptBlock);
+    }
+    if (*descriptor_offset != kColumnStoreHeaderBytes
+        || *index_offset < *descriptor_offset
+        || *index_offset >= store.size()) {
+        return std::unexpected(FormatError::OffsetOutOfBounds);
+    }
+
+    std::size_t schema_cursor = static_cast<std::size_t>(*descriptor_offset);
+    auto descriptor_count = read_little_endian<std::uint32_t>(
+        store, schema_cursor);
+    if (!descriptor_count || *descriptor_count != *column_count
+        || *descriptor_count > kMaxProviderBoundaryColumns) {
+        return std::unexpected(FormatError::InvalidSchema);
+    }
+    std::vector<ColumnSchema> schema;
+    schema.reserve(*descriptor_count);
+    for (std::uint32_t index = 0; index < *descriptor_count; ++index) {
+        ColumnSchema column{};
+        auto type_oid = read_little_endian<std::uint32_t>(store, schema_cursor);
+        auto typmod = read_little_endian<std::int32_t>(store, schema_cursor);
+        auto collation = read_little_endian<std::uint32_t>(store, schema_cursor);
+        auto type_length = read_little_endian<std::int16_t>(store, schema_cursor);
+        auto by_value = read_little_endian<std::uint8_t>(store, schema_cursor);
+        auto alignment = read_little_endian<std::uint8_t>(store, schema_cursor);
+        auto encoding = read_little_endian<ColumnEncoding>(store, schema_cursor);
+        auto column_flags = read_little_endian<std::uint16_t>(store, schema_cursor);
+        auto send_oid = read_little_endian<std::uint32_t>(store, schema_cursor);
+        auto receive_oid = read_little_endian<std::uint32_t>(store, schema_cursor);
+        auto io_param = read_little_endian<std::uint32_t>(store, schema_cursor);
+        auto reserved = read_little_endian<std::uint32_t>(store, schema_cursor);
+        auto name_offset = read_little_endian<std::uint64_t>(store, schema_cursor);
+        auto semantic_high = read_little_endian<std::uint64_t>(store, schema_cursor);
+        auto semantic_low = read_little_endian<std::uint64_t>(store, schema_cursor);
+        auto name_length = read_little_endian<std::uint32_t>(store, schema_cursor);
+        if (!type_oid || !typmod || !collation || !type_length || !by_value
+            || !alignment || !encoding || !column_flags || !send_oid
+            || !receive_oid || !io_param || !reserved || !name_offset
+            || !semantic_high || !semantic_low || !name_length
+            || *name_offset != schema_cursor - *descriptor_offset
+            || !checked_range(schema_cursor, *name_length, *index_offset)) {
+            return std::unexpected(FormatError::InvalidSchema);
+        }
+        const bool supported_encoding =
+            *encoding == ColumnEncoding::BooleanBits
+            || *encoding == ColumnEncoding::FixedByValue
+            || *encoding == ColumnEncoding::FixedByReference
+            || *encoding == ColumnEncoding::FlatVarlena
+            || *encoding == ColumnEncoding::BinarySend;
+        const bool fixed_encoding =
+            *encoding == ColumnEncoding::FixedByValue
+            || *encoding == ColumnEncoding::FixedByReference;
+        if (!supported_encoding) {
+            return std::unexpected(
+                *encoding == ColumnEncoding::Dictionary
+                    || *encoding == ColumnEncoding::RunLength
+                ? FormatError::UnsupportedEncoding
+                : FormatError::InvalidSchema);
+        }
+        if (*alignment == 0 || (*alignment & (*alignment - 1)) != 0) {
+            return std::unexpected(FormatError::InvalidAlignment);
+        }
+        if (*by_value > 1 || *reserved != 0
+            || (*column_flags & ~kColumnFlagNullable) != 0
+            || *name_length > kMaxCanonicalKeyBytes) {
+            return std::unexpected(FormatError::InvalidSchema);
+        }
+        if ((fixed_encoding && *type_length <= 0)
+            || (*encoding == ColumnEncoding::BooleanBits
+                && *type_length != 1)) {
+            return std::unexpected(FormatError::InvalidFixedWidth);
+        }
+        column.name.reserve(*name_length);
+        for (std::uint32_t byte = 0; byte < *name_length; ++byte) {
+            column.name.push_back(static_cast<char>(
+                std::to_integer<unsigned char>(store[schema_cursor++])));
+        }
+        column.descriptor = ColumnDescriptorV1{
+            .type_oid = *type_oid,
+            .typmod = *typmod,
+            .collation_oid = *collation,
+            .type_length = *type_length,
+            .by_value = *by_value,
+            .type_alignment = *alignment,
+            .encoding = *encoding,
+            .flags = *column_flags,
+            .send_function_oid = *send_oid,
+            .receive_function_oid = *receive_oid,
+            .receive_type_io_param = *io_param,
+            .reserved = *reserved,
+            .name_offset = *name_offset,
+        };
+        column.semantic_id = SemanticId128{
+            .high = *semantic_high,
+            .low = *semantic_low,
+        };
+        schema.push_back(std::move(column));
+    }
+    const std::uint64_t descriptor_end = schema_cursor;
+
+    std::size_t index_cursor = static_cast<std::size_t>(*index_offset);
+    auto indexed_group_count = read_little_endian<std::uint64_t>(
+        store, index_cursor);
+    if (!indexed_group_count || *indexed_group_count != *group_count
+        || *indexed_group_count
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+        return std::unexpected(FormatError::InvalidOffsets);
+    }
+    std::vector<detail::GroupIndexEntry> group_index;
+    group_index.reserve(static_cast<std::size_t>(*group_count));
+    for (std::uint64_t index = 0; index < *group_count; ++index) {
+        auto offset = read_little_endian<std::uint64_t>(store, index_cursor);
+        auto length = read_little_endian<std::uint64_t>(store, index_cursor);
+        auto crc = read_little_endian<std::uint32_t>(store, index_cursor);
+        auto index_reserved = read_little_endian<std::uint32_t>(store, index_cursor);
+        if (!offset || !length || !crc || !index_reserved || *index_reserved != 0
+            || !checked_range(*offset, *length, *index_offset)) {
+            return std::unexpected(FormatError::InvalidOffsets);
+        }
+        group_index.push_back(detail::GroupIndexEntry{
+            .offset = *offset,
+            .length = *length,
+            .crc32c = *crc,
+        });
+    }
+    const std::uint64_t footer_offset = index_cursor;
+    const std::uint64_t first_group_offset = group_index.empty()
+        ? *index_offset
+        : group_index.front().offset;
+    if (descriptor_end != first_group_offset) {
+        return std::unexpected(FormatError::InvalidOffsets);
+    }
+    std::uint64_t expected_group_offset = first_group_offset;
+    for (const auto& entry : group_index) {
+        if (entry.offset != expected_group_offset) {
+            return std::unexpected(FormatError::InvalidOffsets);
+        }
+        const auto next_group_offset = checked_add(
+            expected_group_offset, entry.length);
+        if (!next_group_offset.has_value()) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        expected_group_offset = *next_group_offset;
+    }
+    if (expected_group_offset != *index_offset) {
+        return std::unexpected(FormatError::InvalidOffsets);
+    }
+
+    auto descriptor_block = checked_subspan(
+        store,
+        *descriptor_offset,
+        first_group_offset - *descriptor_offset);
+    if (!descriptor_block.has_value()) {
+        return std::unexpected(FormatError::OffsetOutOfBounds);
+    }
+    auto computed_schema_digest = policy.sha256(*descriptor_block);
+    if (!computed_schema_digest.has_value()) {
+        return std::unexpected(FormatError::ChecksumUnavailable);
+    }
+    if (*computed_schema_digest != stored_schema_digest) {
+        return std::unexpected(FormatError::SchemaMismatch);
+    }
+
+    if (group_index.size()
+        > (std::numeric_limits<std::uint32_t>::max)() - 3u) {
+        return std::unexpected(FormatError::ArithmeticOverflow);
+    }
+    const std::uint32_t expected_block_count = static_cast<std::uint32_t>(
+        group_index.size() + 3u);
+    const auto footer_bytes = checked_add(
+        static_cast<std::uint64_t>(kFooterPrefixBytes + 32u),
+        static_cast<std::uint64_t>(expected_block_count) * 32u);
+    if (!footer_bytes.has_value()
+        || !checked_range(footer_offset, *footer_bytes, store.size())
+        || footer_offset + *footer_bytes != store.size()) {
+        return std::unexpected(FormatError::Truncated);
+    }
+    for (std::size_t index = 0; index < kColumnFooterMagic.size(); ++index) {
+        if (store[footer_offset + index] != static_cast<std::byte>(
+                static_cast<unsigned char>(kColumnFooterMagic[index]))) {
+            return std::unexpected(FormatError::CorruptManifest);
+        }
+    }
+    std::size_t footer_cursor = static_cast<std::size_t>(footer_offset)
+        + kColumnFooterMagic.size();
+    auto block_count = read_little_endian<std::uint32_t>(store, footer_cursor);
+    auto footer_reserved = read_little_endian<std::uint32_t>(store, footer_cursor);
+    if (!block_count || !footer_reserved
+        || *block_count != expected_block_count
+        || *footer_reserved != 0) {
+        return std::unexpected(FormatError::CorruptManifest);
+    }
+    std::vector<std::byte> stored_digest_bytes(
+        store.begin() + footer_cursor,
+        store.begin() + footer_cursor + expected_block_count * 32u);
+    footer_cursor += expected_block_count * 32u;
+    CacheDigest256 stored_manifest{};
+    for (std::uint8_t& byte : stored_manifest.bytes) {
+        byte = std::to_integer<std::uint8_t>(store[footer_cursor++]);
+    }
+    auto computed_manifest = policy.sha256(stored_digest_bytes);
+    if (!computed_manifest.has_value()) {
+        return std::unexpected(FormatError::ChecksumUnavailable);
+    }
+    if (*computed_manifest != stored_manifest) {
+        return std::unexpected(FormatError::CorruptManifest);
+    }
+
+    std::vector<std::span<const std::byte>> blocks;
+    blocks.reserve(expected_block_count);
+    blocks.push_back(store.first(kColumnStoreHeaderBytes));
+    blocks.push_back(*descriptor_block);
+    for (const auto& entry : group_index) {
+        blocks.push_back(store.subspan(
+            static_cast<std::size_t>(entry.offset),
+            static_cast<std::size_t>(entry.length)));
+    }
+    blocks.push_back(store.subspan(
+        static_cast<std::size_t>(*index_offset),
+        static_cast<std::size_t>(footer_offset - *index_offset)));
+    for (std::size_t index = 0; index < blocks.size(); ++index) {
+        auto digest = policy.sha256(blocks[index]);
+        if (!digest.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        for (std::size_t byte = 0; byte < digest->bytes.size(); ++byte) {
+            if (digest->bytes[byte]
+                != std::to_integer<std::uint8_t>(
+                    stored_digest_bytes[index * 32u + byte])) {
+                return std::unexpected(FormatError::CorruptManifest);
+            }
+        }
+    }
+
+    std::vector<detail::ParsedGroup> parsed_groups;
+    parsed_groups.reserve(group_index.size());
+    std::uint64_t expected_ordinal = 0;
+    for (const auto& entry : group_index) {
+        auto group = checked_subspan(store, entry.offset, entry.length);
+        if (!group.has_value() || group->size() < kRowGroupHeaderBytes) {
+            return std::unexpected(FormatError::Truncated);
+        }
+        std::vector<std::byte> crc_bytes(group->begin(), group->end());
+        auto computed_index_crc = policy.block_crc32c(*group);
+        if (!computed_index_crc.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        if (*computed_index_crc != entry.crc32c) {
+            return std::unexpected(FormatError::CorruptBlock);
+        }
+        std::size_t group_cursor = 0;
+        auto first_ordinal = read_little_endian<std::uint64_t>(*group, group_cursor);
+        auto rows = read_little_endian<std::uint32_t>(*group, group_cursor);
+        auto columns = read_little_endian<std::uint16_t>(*group, group_cursor);
+        auto group_flags = read_little_endian<std::uint16_t>(*group, group_cursor);
+        auto chunk_table = read_little_endian<std::uint64_t>(*group, group_cursor);
+        auto byte_length = read_little_endian<std::uint64_t>(*group, group_cursor);
+        auto stored_group_crc = read_little_endian<std::uint32_t>(*group, group_cursor);
+        auto group_reserved = read_little_endian<std::uint32_t>(*group, group_cursor);
+        if (!first_ordinal || !rows || !columns || !group_flags || !chunk_table
+            || !byte_length || !stored_group_crc || !group_reserved
+            || *first_ordinal != expected_ordinal
+            || *rows == 0
+            || *columns != schema.size()
+            || *group_flags != 0
+            || *chunk_table != kRowGroupHeaderBytes
+            || *byte_length != entry.length
+            || *group_reserved != 0) {
+            return std::unexpected(FormatError::InvalidRowOrdinal);
+        }
+        detail::write_little_endian_at(
+            crc_bytes, kGroupCrcOffset, std::uint32_t{0});
+        auto computed_group_crc = policy.block_crc32c(crc_bytes);
+        if (!computed_group_crc.has_value()) {
+            return std::unexpected(FormatError::ChecksumUnavailable);
+        }
+        if (*computed_group_crc != *stored_group_crc) {
+            return std::unexpected(FormatError::CorruptBlock);
+        }
+        detail::ParsedGroup parsed{
+            .first_row_ordinal = *first_ordinal,
+            .row_count = *rows,
+            .offset = entry.offset,
+            .length = entry.length,
+        };
+        parsed.chunks.reserve(schema.size());
+        std::size_t chunk_cursor = kRowGroupHeaderBytes;
+        const std::uint64_t payload_start = kRowGroupHeaderBytes
+            + schema.size() * kColumnChunkBytes;
+        std::uint64_t expected_payload_offset = payload_start;
+        for (std::size_t column_index = 0;
+             column_index < schema.size();
+             ++column_index) {
+            ColumnChunkV1 chunk{};
+            auto read_u64 = [&]() {
+                return read_little_endian<std::uint64_t>(*group, chunk_cursor);
+            };
+            auto null_offset = read_u64();
+            auto null_bytes = read_u64();
+            auto offsets_offset = read_u64();
+            auto offsets_bytes = read_u64();
+            auto values_offset = read_u64();
+            auto values_bytes = read_u64();
+            auto logical_bytes = read_u64();
+            auto chunk_crc = read_little_endian<std::uint32_t>(*group, chunk_cursor);
+            auto chunk_flags = read_little_endian<std::uint32_t>(*group, chunk_cursor);
+            if (!null_offset || !null_bytes || !offsets_offset || !offsets_bytes
+                || !values_offset || !values_bytes || !logical_bytes
+                || !chunk_crc || !chunk_flags || *chunk_flags != 0) {
+                return std::unexpected(FormatError::Truncated);
+            }
+            chunk = ColumnChunkV1{
+                .null_bitmap_offset = *null_offset,
+                .null_bitmap_bytes = *null_bytes,
+                .offsets_offset = *offsets_offset,
+                .offsets_bytes = *offsets_bytes,
+                .values_offset = *values_offset,
+                .values_bytes = *values_bytes,
+                .logical_values_bytes = *logical_bytes,
+                .crc32c = *chunk_crc,
+                .flags = *chunk_flags,
+            };
+            if ((chunk.null_bitmap_bytes != 0
+                 && (chunk.null_bitmap_offset < payload_start
+                     || !checked_range(
+                         chunk.null_bitmap_offset,
+                         chunk.null_bitmap_bytes,
+                         entry.length)))
+                || (chunk.offsets_bytes != 0
+                    && (chunk.offsets_offset < payload_start
+                        || !checked_range(
+                            chunk.offsets_offset,
+                            chunk.offsets_bytes,
+                            entry.length)))
+                || chunk.values_offset < payload_start
+                || !checked_range(
+                    chunk.values_offset, chunk.values_bytes, entry.length)) {
+                return std::unexpected(FormatError::OffsetOutOfBounds);
+            }
+            if ((chunk.null_bitmap_bytes == 0
+                 && chunk.null_bitmap_offset != 0)
+                || (chunk.null_bitmap_bytes != 0
+                    && chunk.null_bitmap_offset != expected_payload_offset)) {
+                return std::unexpected(FormatError::InvalidNullBitmap);
+            }
+            if (chunk.null_bitmap_bytes != 0) {
+                if (chunk.null_bitmap_bytes != (*rows + 7u) / 8u) {
+                    return std::unexpected(FormatError::InvalidNullBitmap);
+                }
+                auto bitmap = checked_subspan(
+                    *group, chunk.null_bitmap_offset, chunk.null_bitmap_bytes);
+                if (!bitmap.has_value()
+                    || !unused_tail_bits_are_zero(*bitmap, *rows)) {
+                    return std::unexpected(FormatError::InvalidNullBitmap);
+                }
+                bool has_null = false;
+                for (std::uint64_t row = 0; row < *rows; ++row) {
+                    has_null = has_null
+                        || (std::to_integer<unsigned int>(
+                                (*bitmap)[row / 8u])
+                            & (1u << (row % 8u))) == 0;
+                }
+                if (!has_null
+                    || (schema[column_index].descriptor.flags
+                        & kColumnFlagNullable) == 0) {
+                    return std::unexpected(FormatError::InvalidNullBitmap);
+                }
+                const auto next_payload = checked_add(
+                    expected_payload_offset, chunk.null_bitmap_bytes);
+                if (!next_payload.has_value()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                expected_payload_offset = *next_payload;
+            }
+            const ColumnSchema& column = schema[column_index];
+            const bool variable =
+                column.descriptor.encoding == ColumnEncoding::FlatVarlena
+                || column.descriptor.encoding == ColumnEncoding::BinarySend;
+            if (variable) {
+                const std::uint64_t required_offset_bytes =
+                    (static_cast<std::uint64_t>(*rows) + 1u)
+                    * sizeof(std::uint64_t);
+                if (chunk.offsets_bytes != required_offset_bytes
+                    || chunk.logical_values_bytes != chunk.values_bytes
+                    || chunk.offsets_offset != expected_payload_offset) {
+                    return std::unexpected(FormatError::InvalidOffsets);
+                }
+                auto offsets = checked_subspan(
+                    *group, chunk.offsets_offset, chunk.offsets_bytes);
+                if (!offsets.has_value()) {
+                    return std::unexpected(FormatError::InvalidOffsets);
+                }
+                std::uint64_t prior = 0;
+                std::size_t offsets_cursor = 0;
+                std::vector<std::uint64_t> parsed_offsets;
+                parsed_offsets.reserve(static_cast<std::size_t>(*rows) + 1u);
+                for (std::uint64_t row = 0; row <= *rows; ++row) {
+                    auto offset = read_little_endian<std::uint64_t>(
+                        *offsets, offsets_cursor);
+                    if (!offset.has_value() || *offset < prior
+                        || *offset > chunk.values_bytes) {
+                        return std::unexpected(FormatError::InvalidOffsets);
+                    }
+                    prior = *offset;
+                    parsed_offsets.push_back(*offset);
+                }
+                if (prior != chunk.values_bytes) {
+                    return std::unexpected(FormatError::InvalidOffsets);
+                }
+                const auto values_position = checked_add(
+                    expected_payload_offset, chunk.offsets_bytes);
+                if (!values_position.has_value()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                const auto next_payload = checked_add(
+                    *values_position, chunk.values_bytes);
+                if (!next_payload.has_value()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                if (chunk.values_offset != *values_position) {
+                    return std::unexpected(FormatError::InvalidOffsets);
+                }
+                if (chunk.null_bitmap_bytes != 0) {
+                    auto bitmap = checked_subspan(
+                        *group,
+                        chunk.null_bitmap_offset,
+                        chunk.null_bitmap_bytes);
+                    for (std::uint64_t row = 0; row < *rows; ++row) {
+                        const bool valid =
+                            (std::to_integer<unsigned int>(
+                                 (*bitmap)[row / 8u])
+                             & (1u << (row % 8u))) != 0;
+                        if (!valid
+                            && parsed_offsets[row]
+                                != parsed_offsets[row + 1u]) {
+                            return std::unexpected(FormatError::InvalidOffsets);
+                        }
+                    }
+                }
+                expected_payload_offset = *next_payload;
+            } else if (column.descriptor.encoding
+                       == ColumnEncoding::BooleanBits) {
+                if (chunk.offsets_bytes != 0
+                    || chunk.offsets_offset != 0
+                    || chunk.values_offset != expected_payload_offset
+                    || chunk.values_bytes != (*rows + 7u) / 8u
+                    || chunk.logical_values_bytes != *rows) {
+                    return std::unexpected(FormatError::InvalidOffsets);
+                }
+                auto values = checked_subspan(
+                    *group, chunk.values_offset, chunk.values_bytes);
+                if (!values.has_value()
+                    || !unused_tail_bits_are_zero(*values, *rows)) {
+                    return std::unexpected(FormatError::InvalidBoolean);
+                }
+                if (chunk.null_bitmap_bytes != 0) {
+                    auto bitmap = checked_subspan(
+                        *group,
+                        chunk.null_bitmap_offset,
+                        chunk.null_bitmap_bytes);
+                    for (std::uint64_t row = 0; row < *rows; ++row) {
+                        const bool valid =
+                            (std::to_integer<unsigned int>(
+                                 (*bitmap)[row / 8u])
+                             & (1u << (row % 8u))) != 0;
+                        const bool bit =
+                            (std::to_integer<unsigned int>(
+                                 (*values)[row / 8u])
+                             & (1u << (row % 8u))) != 0;
+                        if (!valid && bit) {
+                            return std::unexpected(FormatError::InvalidBoolean);
+                        }
+                    }
+                }
+                const auto next_payload = checked_add(
+                    expected_payload_offset, chunk.values_bytes);
+                if (!next_payload.has_value()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                expected_payload_offset = *next_payload;
+            } else {
+                const auto required_values = checked_mul(
+                    static_cast<std::uint64_t>(*rows),
+                    static_cast<std::uint64_t>(column.descriptor.type_length));
+                if (!required_values.has_value()
+                    || column.descriptor.type_length <= 0
+                    || chunk.offsets_bytes != 0
+                    || chunk.offsets_offset != 0
+                    || chunk.values_bytes != *required_values
+                    || chunk.logical_values_bytes != chunk.values_bytes
+                    || chunk.values_offset
+                        % column.descriptor.type_alignment != 0) {
+                    return std::unexpected(FormatError::InvalidFixedWidth);
+                }
+                const auto aligned = checked_align_up(
+                    expected_payload_offset,
+                    column.descriptor.type_alignment);
+                if (!aligned.has_value()) {
+                    return std::unexpected(FormatError::InvalidAlignment);
+                }
+                const auto next_payload = checked_add(
+                    *aligned, chunk.values_bytes);
+                if (!next_payload.has_value()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                if (chunk.values_offset != *aligned) {
+                    return std::unexpected(FormatError::InvalidFixedWidth);
+                }
+                for (std::uint64_t padding = expected_payload_offset;
+                     padding < *aligned;
+                     ++padding) {
+                    if ((*group)[padding] != std::byte{0}) {
+                        return std::unexpected(FormatError::CorruptBlock);
+                    }
+                }
+                if (chunk.null_bitmap_bytes != 0) {
+                    auto bitmap = checked_subspan(
+                        *group,
+                        chunk.null_bitmap_offset,
+                        chunk.null_bitmap_bytes);
+                    auto values = checked_subspan(
+                        *group, chunk.values_offset, chunk.values_bytes);
+                    const std::uint64_t width = static_cast<std::uint64_t>(
+                        column.descriptor.type_length);
+                    for (std::uint64_t row = 0; row < *rows; ++row) {
+                        const bool valid =
+                            (std::to_integer<unsigned int>(
+                                 (*bitmap)[row / 8u])
+                             & (1u << (row % 8u))) != 0;
+                        if (valid) {
+                            continue;
+                        }
+                        for (std::uint64_t byte = 0; byte < width; ++byte) {
+                            if ((*values)[row * width + byte]
+                                != std::byte{0}) {
+                                return std::unexpected(FormatError::CorruptBlock);
+                            }
+                        }
+                    }
+                }
+                expected_payload_offset = *next_payload;
+            }
+            auto checksum_input = detail::chunk_checksum_bytes(*group, chunk);
+            if (!checksum_input.has_value()) {
+                return std::unexpected(checksum_input.error());
+            }
+            auto computed_chunk_crc = policy.block_crc32c(*checksum_input);
+            if (!computed_chunk_crc.has_value()) {
+                return std::unexpected(FormatError::ChecksumUnavailable);
+            }
+            if (*computed_chunk_crc != chunk.crc32c) {
+                return std::unexpected(FormatError::CorruptBlock);
+            }
+            parsed.chunks.push_back(detail::ParsedChunk{.wire = chunk});
+        }
+        if (expected_payload_offset != entry.length) {
+            return std::unexpected(FormatError::InvalidOffsets);
+        }
+        const auto next_ordinal = checked_add(
+            expected_ordinal, static_cast<std::uint64_t>(*rows));
+        if (!next_ordinal.has_value()) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        expected_ordinal = *next_ordinal;
+        parsed_groups.push_back(std::move(parsed));
+    }
+    if (expected_ordinal != *row_count) {
+        return std::unexpected(FormatError::InvalidRowOrdinal);
+    }
+    return ColumnStoreView{
+        store,
+        identity,
+        std::move(schema),
+        std::move(parsed_groups),
+        *row_count,
+    };
+}
+
+} // namespace bioseq::cache
