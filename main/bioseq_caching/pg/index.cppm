@@ -419,7 +419,6 @@ struct PlannerFrame {
         provider_registry::kMaximumRegisteredProvidersV1> intents{};
     std::size_t provider_intent_count = 0;
     bool eligible = false;
-    bool reusable_coverage_planned = false;
 };
 
 inline PlannerFrame* g_planner_frame = nullptr;
@@ -2780,14 +2779,13 @@ void consider_provider_reusable_paths_impl(
     foreach(cell, original_paths) {
         Path* path = static_cast<Path*>(lfirst(cell));
         if (path != nullptr && list_member_ptr(relation->pathlist, path)) {
-            frame->reusable_coverage_planned = wrap_one_provider_path(
+            static_cast<void>(wrap_one_provider_path(
                 root,
                 relation,
                 path,
                 provider,
                 *intent,
-                planner_context)
-                || frame->reusable_coverage_planned;
+                planner_context));
         }
     }
 }
@@ -7362,6 +7360,140 @@ const CustomPathMethods& coverage_path_methods() {
     return methods;
 }
 
+[[nodiscard]] bool path_contains_reusable_coverage(const Path* path);
+
+/** Inspect only selected child paths; relation pathlists contain alternatives. */
+[[nodiscard]] bool path_list_contains_reusable_coverage(const List* paths) {
+    const ListCell* cell = nullptr;
+    foreach(cell, paths) {
+        if (path_contains_reusable_coverage(
+                static_cast<const Path*>(lfirst(cell)))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Recognize a cache-owned coverage node anywhere in one chosen Path tree. */
+[[nodiscard]] bool path_contains_reusable_coverage(const Path* path) {
+    if (path == nullptr) {
+        return false;
+    }
+    switch (nodeTag(path)) {
+        case T_BitmapHeapPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const BitmapHeapPath*>(path)->bitmapqual);
+        case T_BitmapAndPath:
+            return path_list_contains_reusable_coverage(
+                reinterpret_cast<const BitmapAndPath*>(path)->bitmapquals);
+        case T_BitmapOrPath:
+            return path_list_contains_reusable_coverage(
+                reinterpret_cast<const BitmapOrPath*>(path)->bitmapquals);
+        case T_SubqueryScanPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const SubqueryScanPath*>(path)->subpath);
+        case T_ForeignPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const ForeignPath*>(path)->fdw_outerpath);
+        case T_CustomPath: {
+            const auto* custom = reinterpret_cast<const CustomPath*>(path);
+            return custom->methods == &coverage_path_methods()
+                || path_list_contains_reusable_coverage(
+                    custom->custom_paths);
+        }
+        case T_AppendPath:
+            return path_list_contains_reusable_coverage(
+                reinterpret_cast<const AppendPath*>(path)->subpaths);
+        case T_MergeAppendPath:
+            return path_list_contains_reusable_coverage(
+                reinterpret_cast<const MergeAppendPath*>(path)->subpaths);
+        case T_MaterialPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const MaterialPath*>(path)->subpath);
+        case T_MemoizePath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const MemoizePath*>(path)->subpath);
+        case T_UniquePath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const UniquePath*>(path)->subpath);
+        case T_GatherPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const GatherPath*>(path)->subpath);
+        case T_GatherMergePath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const GatherMergePath*>(path)->subpath);
+        case T_NestPath:
+        case T_MergePath:
+        case T_HashPath: {
+            const auto* join = reinterpret_cast<const JoinPath*>(path);
+            return path_contains_reusable_coverage(join->outerjoinpath)
+                || path_contains_reusable_coverage(join->innerjoinpath);
+        }
+        case T_ProjectionPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const ProjectionPath*>(path)->subpath);
+        case T_ProjectSetPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const ProjectSetPath*>(path)->subpath);
+        case T_SortPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const SortPath*>(path)->subpath);
+        case T_IncrementalSortPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const IncrementalSortPath*>(path)
+                    ->spath.subpath);
+        case T_GroupPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const GroupPath*>(path)->subpath);
+        case T_UpperUniquePath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const UpperUniquePath*>(path)->subpath);
+        case T_AggPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const AggPath*>(path)->subpath);
+        case T_GroupingSetsPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const GroupingSetsPath*>(path)->subpath);
+        case T_MinMaxAggPath: {
+            const auto* aggregate = reinterpret_cast<const MinMaxAggPath*>(
+                path);
+            const ListCell* cell = nullptr;
+            foreach(cell, aggregate->mmaggregates) {
+                const auto* info = static_cast<const MinMaxAggInfo*>(
+                    lfirst(cell));
+                if (info != nullptr
+                    && path_contains_reusable_coverage(info->path)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case T_WindowAggPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const WindowAggPath*>(path)->subpath);
+        case T_SetOpPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const SetOpPath*>(path)->subpath);
+        case T_RecursiveUnionPath: {
+            const auto* recursive =
+                reinterpret_cast<const RecursiveUnionPath*>(path);
+            return path_contains_reusable_coverage(recursive->leftpath)
+                || path_contains_reusable_coverage(recursive->rightpath);
+        }
+        case T_LockRowsPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const LockRowsPath*>(path)->subpath);
+        case T_ModifyTablePath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const ModifyTablePath*>(path)->subpath);
+        case T_LimitPath:
+            return path_contains_reusable_coverage(
+                reinterpret_cast<const LimitPath*>(path)->subpath);
+        default:
+            return false;
+    }
+}
+
 /** Create an exact-result wrapper around one final path. */
 [[nodiscard]] CustomPath* make_exact_cache_path(
         RelOptInfo& output_relation, Path& input_path,
@@ -7414,24 +7546,28 @@ void cache_create_upper_paths(
         || root->parent_root != nullptr
         || root->parse != frame->delegated_query
         || output_relation == nullptr
-        || output_relation->pathlist == NIL
-        || frame->reusable_coverage_planned) {
+        || output_relation->pathlist == NIL) {
         return;
     }
 
     List* original_paths = output_relation->pathlist;
-    List* wrappers = NIL;
+    List* replacements = NIL;
+    bool exact_path_added = false;
     ListCell* path_cell = nullptr;
     foreach(path_cell, original_paths) {
         Path* input_path = static_cast<Path*>(lfirst(path_cell));
-        if (input_path->param_info != nullptr) {
-            continue;
+        if (input_path->param_info != nullptr
+            || path_contains_reusable_coverage(input_path)) {
+            replacements = lappend(replacements, input_path);
+        } else {
+            replacements = lappend(
+                replacements,
+                make_exact_cache_path(
+                    *output_relation, *input_path, *frame));
+            exact_path_added = true;
         }
-        wrappers = lappend(
-            wrappers,
-            make_exact_cache_path(*output_relation, *input_path, *frame));
     }
-    if (wrappers == NIL) {
+    if (!exact_path_added) {
         return;
     }
 
@@ -7440,7 +7576,7 @@ void cache_create_upper_paths(
     output_relation->cheapest_total_path = nullptr;
     output_relation->cheapest_unique_path = nullptr;
     output_relation->cheapest_parameterized_paths = NIL;
-    foreach(path_cell, wrappers) {
+    foreach(path_cell, replacements) {
         add_path(output_relation, static_cast<Path*>(lfirst(path_cell)));
     }
     set_cheapest(output_relation);
