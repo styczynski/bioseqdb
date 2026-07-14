@@ -15,13 +15,19 @@ sub storage_snapshot
 		q{SET bioseq.query_cache_optimisation_mode = 'same';
 		  EXPLAIN (COSTS OFF)
 		  SELECT id FROM entitlement_rows WHERE id <= 100 ORDER BY id;});
-	my ($hot_bytes, $file_bytes, $manifest_count) =
-	  $explain =~
-	  /Cache Storage: [^\n]*hot=(\d+)\/\d+; file=(\d+)\/\d+; manifests=(\d+)/;
-	my ($waiter_count) =
-	  $explain =~ /Cache Storage: [^\n]*\bwaiters=(\d+)/;
+	my ($storage_diagnostic) =
+	  $explain =~ /Cache Storage: ([^\n]+)/;
 	die "Cache Storage diagnostics missing from EXPLAIN:\n$explain\n"
-	  unless defined($manifest_count) && defined($waiter_count);
+	  unless defined($storage_diagnostic);
+	my ($hot_bytes) = $storage_diagnostic =~ /\bhot=(\d+)\/\d+/;
+	my ($file_bytes) = $storage_diagnostic =~ /\bfile=(\d+)\/\d+/;
+	my ($manifest_count) = $storage_diagnostic =~ /\bmanifests=(\d+)/;
+	my ($waiter_count) = $storage_diagnostic =~ /\bwaiters=(\d+)/;
+	die "Cache Storage diagnostics missing from EXPLAIN:\n$explain\n"
+	  unless defined($hot_bytes)
+	  && defined($file_bytes)
+	  && defined($manifest_count)
+	  && defined($waiter_count);
 	return ($hot_bytes, $file_bytes, $manifest_count, $waiter_count);
 }
 
