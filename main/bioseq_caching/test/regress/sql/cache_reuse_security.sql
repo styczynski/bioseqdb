@@ -24,8 +24,13 @@ INSERT INTO cache_security_rows VALUES
 
 CREATE ROLE cache_security_alice;
 CREATE ROLE cache_security_bob;
+CREATE ROLE cache_security_monitor;
 GRANT SELECT ON cache_security_rows
 TO cache_security_alice, cache_security_bob;
+GRANT USAGE ON SCHEMA bioseq_cache
+TO cache_security_alice, cache_security_monitor;
+GRANT EXECUTE ON FUNCTION bioseq_cache.entries()
+TO cache_security_alice, cache_security_monitor;
 
 SELECT bioseq_cache_test.provider_init();
 SELECT bioseq_cache_test.provider_use_relation('cache_security_rows');
@@ -62,12 +67,6 @@ END
 $$;
 
 -- C-side row filtering applies before reusable SQL and Plan text are copied.
-CREATE ROLE cache_security_monitor;
-GRANT USAGE ON SCHEMA bioseq_cache
-TO cache_security_alice, cache_security_monitor;
-GRANT EXECUTE ON FUNCTION bioseq_cache.entries()
-TO cache_security_alice, cache_security_monitor;
-
 SET ROLE cache_security_alice;
 DO $$
 DECLARE
