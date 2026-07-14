@@ -113,6 +113,73 @@ CROSS JOIN LATERAL (
 ) AS provider;
 \o /dev/null
 
+-- A retained coverage alternative must not suppress exact caching when the
+-- final path instead chooses PostgreSQL's ordered index scan.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache_test.request_janitor_sweep();
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
+SET enable_sort = off;
+DO $$
+DECLARE
+    plan_text text;
+    plan jsonb;
+    provider_stats jsonb;
+BEGIN
+    EXECUTE
+        'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
+        'SELECT row_id, base_id, occurrence_no, nullable_value, payload, '
+        'capability_mask FROM cache_provider_rows '
+        'WHERE row_id > 0 ORDER BY row_id'
+        INTO plan_text;
+    plan := plan_text::jsonb;
+    provider_stats := bioseq_cache_test.provider_stats();
+    IF plan->0->'Plan'->>'Cache Entry Kind' <> 'ExactFinalResult'
+       OR COALESCE(
+            (plan->0->'Plan'->>'Cache Force Bypass')::boolean,
+            true)
+       OR position('BioseqReusableCoverageScan' in plan_text) <> 0
+       OR position('Index Scan' in plan_text) = 0
+       OR (provider_stats->>'decorate_path')::bigint = 0 THEN
+        RAISE EXCEPTION
+            'losing coverage alternative suppressed the exact path: %, %',
+            plan, provider_stats;
+    END IF;
+END
+$$;
+
+SELECT row_id, base_id, occurrence_no, nullable_value, payload,
+       capability_mask
+FROM cache_provider_rows
+WHERE row_id > 0
+ORDER BY row_id;
+SELECT row_id, base_id, occurrence_no, nullable_value, payload,
+       capability_mask
+FROM cache_provider_rows
+WHERE row_id > 0
+ORDER BY row_id;
+
+DO $$
+DECLARE
+    cache_stats record;
+    provider_stats jsonb;
+BEGIN
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    provider_stats := bioseq_cache_test.provider_stats();
+    IF cache_stats.produced <> 1
+       OR cache_stats.completed_hits <> 1
+       OR cache_stats.reuse_hits <> 0
+       OR cache_stats.fallbacks <> 0
+       OR (provider_stats->>'executor_rows')::bigint <> 0
+       OR (provider_stats->>'extract_occurrence')::bigint <> 0 THEN
+        RAISE EXCEPTION
+            'chosen exact path did not produce and replay cleanly: %, %',
+            row_to_json(cache_stats), provider_stats;
+    END IF;
+END
+$$;
+RESET enable_sort;
+
 -- Keep the remaining provider-contract cases independent of the hit proof.
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache_test.request_janitor_sweep();
