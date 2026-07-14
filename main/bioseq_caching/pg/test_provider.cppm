@@ -741,6 +741,283 @@ void fill_column_schema(
 
 namespace bioseq::cache::pg::test_provider {
 
+/** Extract one stable provider-opaque binding occurrence from a raw slot. */
+[[nodiscard]] BioseqCacheStatusV1 provider_extract_occurrence(
+    List* plan_domain_nodes,
+    TupleTableSlot* slot,
+    BioseqCacheOccurrenceV1* output) {
+    ++g_counters.extract_occurrence;
+    Oid relation_oid = InvalidOid;
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    if (slot == nullptr || output == nullptr
+        || output->struct_size < sizeof(*output)
+        || !parse_plan_nodes(
+            plan_domain_nodes,
+            &relation_oid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    bool row_is_null = false;
+    bool base_is_null = false;
+    bool occurrence_is_null = false;
+    bool capability_is_null = false;
+    const Datum row_value = slot_getattr(slot, row_attno, &row_is_null);
+    const Datum base_value = slot_getattr(slot, base_attno, &base_is_null);
+    const Datum occurrence_value = slot_getattr(
+        slot, occurrence_attno, &occurrence_is_null);
+    const Datum capability_value = slot_getattr(
+        slot, capability_attno, &capability_is_null);
+    if (row_is_null || base_is_null || occurrence_is_null
+        || capability_is_null) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    output->struct_size = sizeof(*output);
+    output->rte_ordinal = 1;
+    output->logical_relation_oid = relation_oid;
+    output->leaf_relation_oid = relation_oid;
+    output->identity_kind = 3U;
+    output->reserved = 0;
+    output->row_identity = static_cast<std::uint64_t>(
+        DatumGetInt64(row_value));
+    output->occurrence_high = static_cast<std::uint64_t>(
+        DatumGetInt64(base_value));
+    output->occurrence_low = static_cast<std::uint64_t>(
+        DatumGetInt32(occurrence_value));
+    output->capability_mask = static_cast<std::uint64_t>(
+        DatumGetInt64(capability_value));
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+/** Emit one terminal status for every reference on an early batch failure. */
+void emit_batch_failure_statuses(
+    BioseqCacheLateFetchSinkV1* sink,
+    std::size_t occurrence_count,
+    BioseqCacheStatusV1 status) noexcept {
+    if (sink == nullptr || sink->struct_size < sizeof(*sink)
+        || sink->emit_reference_status == nullptr) {
+        return;
+    }
+    for (std::size_t index = 0; index < occurrence_count; ++index) {
+        sink->emit_reference_status(sink->opaque, index, status);
+    }
+}
+
+/**
+ * Fetch every provider-opaque row identity in one table scan under the
+ * consumer snapshot, emitting values first and exactly one terminal status.
+ */
+[[nodiscard]] BioseqCacheStatusV1 provider_late_fetch_batch(
+    List* plan_domain_nodes,
+    EState* estate,
+    const BioseqCacheOccurrenceV1* occurrences,
+    std::size_t occurrence_count,
+    const std::int16_t* attribute_numbers,
+    std::size_t attribute_count,
+    BioseqCacheLateFetchSinkV1* sink) {
+    ++g_counters.late_fetch_batch;
+    g_counters.late_fetch_references += occurrence_count;
+    Oid relation_oid = InvalidOid;
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    if (estate == nullptr || estate->es_snapshot == nullptr
+        || occurrences == nullptr || occurrence_count == 0
+        || occurrence_count > 4096
+        || (attribute_count != 0 && attribute_numbers == nullptr)
+        || sink == nullptr || sink->struct_size < sizeof(*sink)
+        || sink->emit_value == nullptr
+        || sink->emit_reference_status == nullptr
+        || !parse_plan_nodes(
+            plan_domain_nodes,
+            &relation_oid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno)) {
+        emit_batch_failure_statuses(
+            sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    for (std::size_t index = 0; index < occurrence_count; ++index) {
+        if (occurrences[index].struct_size < sizeof(BioseqCacheOccurrenceV1)
+            || occurrences[index].identity_kind != 3U
+            || occurrences[index].logical_relation_oid != relation_oid
+            || occurrences[index].leaf_relation_oid != relation_oid) {
+            emit_batch_failure_statuses(
+                sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
+            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        }
+    }
+
+    Relation relation = table_open(relation_oid, NoLock);
+    TupleDesc descriptor = RelationGetDescr(relation);
+    for (std::size_t index = 0; index < attribute_count; ++index) {
+        const AttrNumber attno = attribute_numbers[index];
+        if (attno <= 0 || attno > descriptor->natts
+            || TupleDescAttr(descriptor, attno - 1)->attisdropped) {
+            table_close(relation, NoLock);
+            emit_batch_failure_statuses(
+                sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
+            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        }
+    }
+
+    auto* found = static_cast<bool*>(
+        palloc0(occurrence_count * sizeof(bool)));
+    auto* terminal = static_cast<BioseqCacheStatusV1*>(palloc(
+        occurrence_count * sizeof(BioseqCacheStatusV1)));
+    for (std::size_t index = 0; index < occurrence_count; ++index) {
+        terminal[index] = BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+
+    TableScanDesc scan = table_beginscan(
+        relation, estate->es_snapshot, 0, nullptr);
+    TupleTableSlot* slot = table_slot_create(relation, nullptr);
+    while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
+        bool row_is_null = false;
+        bool base_is_null = false;
+        bool occurrence_is_null = false;
+        bool capability_is_null = false;
+        const Datum row_value = slot_getattr(slot, row_attno, &row_is_null);
+        const Datum base_value = slot_getattr(slot, base_attno, &base_is_null);
+        const Datum occurrence_value = slot_getattr(
+            slot, occurrence_attno, &occurrence_is_null);
+        const Datum capability_value = slot_getattr(
+            slot, capability_attno, &capability_is_null);
+        if (row_is_null || base_is_null || occurrence_is_null
+            || capability_is_null) {
+            ExecClearTuple(slot);
+            continue;
+        }
+        const auto row_identity = static_cast<std::uint64_t>(
+            DatumGetInt64(row_value));
+        const auto base_identity = static_cast<std::uint64_t>(
+            DatumGetInt64(base_value));
+        const auto occurrence_identity = static_cast<std::uint64_t>(
+            DatumGetInt32(occurrence_value));
+        const auto capability_mask = static_cast<std::uint64_t>(
+            DatumGetInt64(capability_value));
+        for (std::size_t reference = 0;
+             reference < occurrence_count;
+             ++reference) {
+            if (found[reference]
+                || occurrences[reference].row_identity != row_identity) {
+                continue;
+            }
+            found[reference] = true;
+            if (occurrences[reference].occurrence_high != base_identity
+                || occurrences[reference].occurrence_low
+                    != occurrence_identity
+                || occurrences[reference].capability_mask
+                    != capability_mask) {
+                terminal[reference] = BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+                continue;
+            }
+            terminal[reference] = BIOSEQ_CACHE_STATUS_OK;
+            for (std::size_t requested = 0;
+                 requested < attribute_count;
+                 ++requested) {
+                bool is_null = false;
+                const Datum value = slot_getattr(
+                    slot, attribute_numbers[requested], &is_null);
+                const BioseqCacheStatusV1 status = sink->emit_value(
+                    sink->opaque,
+                    reference,
+                    requested,
+                    static_cast<std::uintptr_t>(value),
+                    is_null);
+                if (status != BIOSEQ_CACHE_STATUS_OK) {
+                    terminal[reference] = status;
+                    break;
+                }
+            }
+        }
+        ExecClearTuple(slot);
+    }
+
+    ExecDropSingleTupleTableSlot(slot);
+    table_endscan(scan);
+    table_close(relation, NoLock);
+    bool all_valid = true;
+    for (std::size_t index = 0; index < occurrence_count; ++index) {
+        sink->emit_reference_status(sink->opaque, index, terminal[index]);
+        all_valid = all_valid && terminal[index] == BIOSEQ_CACHE_STATUS_OK;
+    }
+    pfree(terminal);
+    pfree(found);
+    return all_valid
+        ? BIOSEQ_CACHE_STATUS_OK
+        : BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+}
+
+/** Provider-specific EXPLAIN fields contain no raw SQL or sensitive values. */
+void provider_explain_domain(
+    List* plan_domain_nodes,
+    BioseqCacheExplainSinkV1* sink) {
+    if (sink == nullptr || sink->struct_size < sizeof(*sink)) {
+        return;
+    }
+    const bool valid = parse_plan_nodes(
+        plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr);
+    if (sink->property_text != nullptr) {
+        sink->property_text(
+            sink->opaque,
+            "Generic Provider",
+            "nullable occurrence table");
+    }
+    if (sink->property_bool != nullptr) {
+        sink->property_bool(sink->opaque, "Provider Recipe Valid", valid);
+    }
+    if (sink->property_uint64 != nullptr) {
+        sink->property_uint64(
+            sink->opaque,
+            "Provider Mapping Calls",
+            g_counters.map_source);
+        sink->property_uint64(
+            sink->opaque,
+            "Provider Late Fetch References",
+            g_counters.late_fetch_references);
+    }
+}
+
+/** Complete ABI table registered only by an explicit test-only SQL call. */
+[[nodiscard]] const BioseqCacheProviderV1& provider_v1() noexcept {
+    static const BioseqCacheProviderV1 provider{
+        .struct_size = sizeof(BioseqCacheProviderV1),
+        .abi_version = bioseq::cache::kProviderAbiVersion,
+        .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
+        .provider_id = kProviderId,
+        .provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE,
+        .reserved = 0,
+        .provider_name = "generic_nullable_occurrence_test_provider",
+        .provider_scan_methods = &provider_scan_methods(),
+        .analyze_query = provider_analyze_query,
+        .describe_path = provider_describe_path,
+        .append_domain_semantic_digest = provider_append_domain_digest,
+        .append_generation_semantic_digest = provider_append_generation_digest,
+        .append_runtime_generation_semantic_digest =
+            provider_append_runtime_digest,
+        .map_reusable_source = provider_map_reusable_source,
+        .decorate_path = provider_decorate_path,
+        .build_plan_digest_recipe = provider_build_plan_digest_recipe,
+        .extract_occurrence = provider_extract_occurrence,
+        .late_fetch_batch = provider_late_fetch_batch,
+        .explain_domain = provider_explain_domain,
+    };
+    return provider;
+}
+
+} // namespace bioseq::cache::pg::test_provider
+
+namespace bioseq::cache::pg::test_provider {
+
 /** Runtime digest validates only the immutable Node recipe. */
 [[nodiscard]] BioseqCacheStatusV1 provider_append_runtime_digest(
     const List* plan_domain_nodes,
