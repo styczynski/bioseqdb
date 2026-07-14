@@ -34,16 +34,25 @@ session "controller"
 step "current_arm" {
   SELECT bioseq_cache_test.arm_pause('after_building_publish');
 }
+step "current_arm_waiter" {
+  SELECT bioseq_cache_test.arm_pause('after_waiter_registered');
+}
 step "current_producer_paused" {
   SELECT bioseq_cache_test.wait_until_paused('after_building_publish');
+}
+step "current_waiter_paused" {
+  SELECT bioseq_cache_test.wait_until_paused('after_waiter_registered');
 }
 step "current_building" {
   SELECT count(*) AS reusable_building, count(*) = 1 AS exactly_one
   FROM bioseq_cache.entries()
   WHERE kind = 'ReusableCoverage' AND state = 'BUILDING';
 }
-step "current_release" {
+step "current_release_producer" {
   SELECT bioseq_cache_test.release_pause('after_building_publish');
+}
+step "current_release_waiter" {
+  SELECT bioseq_cache_test.release_pause('after_waiter_registered');
 }
 step "current_stats" {
   SELECT produced, reuse_hits, fallbacks,
@@ -87,8 +96,9 @@ step "current_wait" {
   ORDER BY row_id;
 }
 
-permutation "current_arm"
+permutation "current_arm" "current_arm_waiter"
   "current_producer_init" "current_producer_mode" "current_produce"
   "current_producer_paused"
   "current_waiter_init" "current_waiter_mode" "current_wait"
-  "current_building" "current_release" "current_stats"
+  "current_waiter_paused" "current_building"
+  "current_release_producer" "current_release_waiter" "current_stats"
