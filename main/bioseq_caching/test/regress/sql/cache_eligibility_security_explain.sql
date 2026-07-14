@@ -280,7 +280,9 @@ TO qc_cache_producer, qc_cache_monitor;
 SET ROLE qc_cache_monitor;
 DO $$
 BEGIN
-    IF (SELECT count(*) FROM bioseq_cache.entries()) <> 1
+    IF (SELECT count(*)
+        FROM bioseq_cache.entries()
+        WHERE kind = 'ExactFinalResult' AND state = 'COMPLETE') <> 1
        OR EXISTS (
             SELECT 1
             FROM bioseq_cache.entries()
