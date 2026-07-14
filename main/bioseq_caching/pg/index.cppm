@@ -85,13 +85,15 @@ PG_MODULE_MAGIC;
 export module bioseq.cache.pg;
 
 import bioseq.cache.core;
+import bioseq.cache.pg.maintenance;
 import bioseq.cache.pg.provider_registry;
+import bioseq.cache.pg.storage;
 
 namespace bioseq::cache::pg {
 
 inline constexpr std::uint32_t kSharedMagic = 0x42535143U; /* BSQC */
-inline constexpr std::uint32_t kSharedAbiVersion = 1;
-inline constexpr char kSharedName[] = "bioseq_cache shared state v1";
+inline constexpr std::uint32_t kSharedAbiVersion = 2;
+inline constexpr char kSharedName[] = "bioseq_cache shared state v2";
 inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr std::size_t kRegistryCapacity = 64;
 inline constexpr std::size_t kMaximumKeyBytes = 64U * 1024U;
@@ -231,7 +233,9 @@ struct CacheEntry {
     SharedEntryState state;
     std::uint32_t key_size;
     std::uint64_t generation;
+    std::uint64_t claim_sequence;
     std::uint64_t key_hash;
+    CacheDigest256 key_digest;
     std::uint64_t database_epoch;
     Oid database_oid;
     Oid current_role_oid;
@@ -250,7 +254,7 @@ struct CacheEntry {
     std::uint16_t relation_count;
     std::uint16_t reserved;
     Oid relation_oids[kMaximumRelationDependencies];
-    char final_path[MAXPGPATH];
+    storage::ManifestHandle manifest_handle;
     char display_sql[4096];
     ConditionVariable changed;
     unsigned char key[kMaximumKeyBytes];
@@ -275,6 +279,7 @@ struct CacheSharedState {
     pg_atomic_uint64 coarse_dependency_epoch;
     pg_atomic_uint32 last_committed_write_xid;
     pg_atomic_uint32 database_transition_count;
+    pg_atomic_uint64 next_claim_sequence;
     ConditionVariable database_changed;
     CacheSharedStats stats;
 #if defined(BIOSEQ_CACHE_TESTING)
@@ -349,6 +354,7 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
     pg_atomic_init_u32(
         &shared.last_committed_write_xid, InvalidTransactionId);
     pg_atomic_init_u32(&shared.database_transition_count, 0);
+    pg_atomic_init_u64(&shared.next_claim_sequence, 1);
     ConditionVariableInit(&shared.database_changed);
     pg_atomic_init_u64(&shared.stats.produced, 0);
     pg_atomic_init_u64(&shared.stats.completed_hits, 0);
@@ -667,40 +673,7 @@ void cache_shmem_request() {
     }
     RequestAddinShmemSpace(MAXALIGN(sizeof(CacheSharedState)));
     RequestNamedLWLockTranche(kRegistryTrancheName, 1);
-}
-
-/** Build the postmaster-private cache directory path. */
-void cache_store_directory(char* output, std::size_t capacity) noexcept {
-    snprintf(output, capacity, "%s/bioseq_cache", DataDir);
-}
-
-/** A new postmaster never trusts file artifacts from an older boot nonce. */
-void clean_orphaned_cache_files() {
-    char directory[MAXPGPATH]{};
-    cache_store_directory(directory, sizeof(directory));
-    if (MakePGDirectory(directory) != 0 && errno != EEXIST) {
-        ereport(WARNING,
-            (errcode_for_file_access(),
-             errmsg("could not create bioseq_cache directory \"%s\": %m",
-                    directory)));
-        return;
-    }
-    DIR* stream = AllocateDir(directory);
-    if (stream == nullptr) {
-        return;
-    }
-    while (struct dirent* item = ReadDir(stream, directory)) {
-        if (item->d_name[0] == '.') {
-            continue;
-        }
-        char path[MAXPGPATH]{};
-        const int length = snprintf(
-            path, sizeof(path), "%s/%s", directory, item->d_name);
-        if (length >= 0 && static_cast<std::size_t>(length) < sizeof(path)) {
-            static_cast<void>(::unlink(path));
-        }
-    }
-    static_cast<void>(FreeDir(stream));
+    storage::request_storage_resources();
 }
 
 /** Attach or initialize the postmaster-lifetime cache header. */
@@ -713,20 +686,42 @@ void cache_shmem_startup() {
     g_shared = static_cast<CacheSharedState*>(
         ShmemInitStruct(kSharedName, sizeof(CacheSharedState), &found));
     if (!found) {
-        clean_orphaned_cache_files();
         initialize_shared_state(*g_shared);
     }
     g_registry_lock = &GetNamedLWLockTranche(kRegistryTrancheName)[0].lock;
+    const std::uint64_t boot_nonce = pg_atomic_read_u64(&g_shared->boot_nonce);
+    if (!storage::startup_storage(boot_nonce)) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+        return;
+    }
+    if (maintenance::static_janitor_registered()) {
+        storage::publish_worker_lifecycle(
+            storage::WorkerLifecycle::Registered, 0);
+    }
+    if (!storage::publish_correctness_readiness(
+            CacheCorrectnessReadiness::GenericMvccReady)) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+    }
 }
 
 /** True only when preload installed and the shared ABI is usable. */
 [[nodiscard]] bool shared_cache_ready() noexcept {
-    return g_preload_requested
+    const bool header_ready = g_preload_requested
         && g_shared != nullptr
         && g_shared->magic == kSharedMagic
         && g_shared->shared_abi_version == kSharedAbiVersion
         && pg_atomic_read_u32(&g_shared->ready) != 0
         && pg_atomic_read_u32(&g_shared->bootstrap_failure) == 0;
+    if (!header_ready) {
+        return false;
+    }
+    if (!storage::storage_ready() && !storage::attach_storage()) {
+        return false;
+    }
+    return storage::runtime_snapshot().correctness_readiness
+        >= CacheCorrectnessReadiness::GenericMvccReady;
 }
 
 struct VisibilityTicket {
@@ -1091,17 +1086,23 @@ struct BioseqCacheState {
     bool child_initialized;
     bool capture_failed;
     bool producer_completed;
+    bool manifest_pin_owned;
+    bool manifest_waiter_owned;
+    bool registry_reader_owned;
     RuntimeRole runtime_role;
     int registry_index;
-    int output_file;
     std::uint64_t generation;
     std::uint64_t row_count;
     std::uint64_t payload_bytes;
     std::uint64_t logical_bytes;
+    CacheEntryId entry_id;
+    storage::ManifestHandle manifest_handle;
+    storage::ManifestPin manifest_pin;
+    std::array<storage::StoredBlockToken,
+        storage::kBlocksPerManifest> stored_tokens;
+    std::uint32_t stored_token_count;
     ColumnStoreBuilder* column_builder;
     Oid* send_functions;
-    char temporary_path[MAXPGPATH];
-    char final_path[MAXPGPATH];
     Tuplestorestate* replay_store;
     TupleTableSlot* replay_slot;
     MemoryContextCallback cleanup_callback;
@@ -1427,42 +1428,6 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
     return key;
 }
 
-/** EINTR-safe cache-file writes; callers fail open on false. */
-[[nodiscard]] bool write_all(int file, const void* bytes, std::size_t size) {
-    const auto* cursor = static_cast<const unsigned char*>(bytes);
-    while (size != 0) {
-        const ssize_t written = ::write(file, cursor, size);
-        if (written > 0) {
-            cursor += written;
-            size -= static_cast<std::size_t>(written);
-            continue;
-        }
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
-/** EINTR-safe exact cache-file reads. */
-[[nodiscard]] bool read_all(int file, void* bytes, std::size_t size) {
-    auto* cursor = static_cast<unsigned char*>(bytes);
-    while (size != 0) {
-        const ssize_t received = ::read(file, cursor, size);
-        if (received > 0) {
-            cursor += received;
-            size -= static_cast<std::size_t>(received);
-            continue;
-        }
-        if (received < 0 && errno == EINTR) {
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
 #if defined(BIOSEQ_CACHE_TESTING)
 [[nodiscard]] constexpr std::uint32_t pause_bit(
         TestPausePoint point) noexcept {
@@ -1550,8 +1515,29 @@ struct RegistryDecision {
     RuntimeRole role = RuntimeRole::Bypass;
     int index = -1;
     std::uint64_t generation = 0;
-    char final_path[MAXPGPATH]{};
+    CacheEntryId entry_id{};
+    storage::ManifestHandle manifest_handle{};
+    bool waiter_entitled = false;
 };
+
+[[nodiscard]] CacheEntryId cache_entry_id(const CacheEntry& entry) noexcept {
+    return CacheEntryId{
+        .digest = entry.key_digest,
+        .boot_nonce = pg_atomic_read_u64(&g_shared->boot_nonce),
+        .generation = entry.generation,
+        .claim_sequence = entry.claim_sequence,
+    };
+}
+
+[[nodiscard]] std::uint64_t next_claim_sequence() noexcept {
+    std::uint64_t sequence = pg_atomic_fetch_add_u64(
+        &g_shared->next_claim_sequence, 1);
+    if (sequence == 0) {
+        sequence = pg_atomic_fetch_add_u64(
+            &g_shared->next_claim_sequence, 1);
+    }
+    return sequence == 0 ? 1 : sequence;
+}
 
 /** Compare every key byte after the hash bucket shortcut. */
 [[nodiscard]] bool entry_key_matches(
@@ -1567,6 +1553,7 @@ struct RegistryDecision {
         const CacheEntry& entry, std::uint64_t database_epoch,
         TimestampTz now) noexcept {
     return entry.state == SharedEntryState::Complete
+        && static_cast<bool>(entry.manifest_handle)
         && entry.database_epoch == database_epoch
         && entry.expires_at > now;
 }
@@ -1584,6 +1571,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         int index, std::uint64_t generation) {
     RegistryDecision decision{};
     CacheEntry& entry = g_shared->entries[index];
+    storage::ManifestHandle waiter_to_release{};
     ConditionVariablePrepareToSleep(&entry.changed);
     PG_TRY();
     {
@@ -1597,6 +1585,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 || entry.state == SharedEntryState::Empty) {
                 if (entry.generation == generation && entry.waiter_count > 0) {
                     --entry.waiter_count;
+                    waiter_to_release = entry.manifest_handle;
                 }
                 LWLockRelease(g_registry_lock);
                 break;
@@ -1610,9 +1599,9 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 decision.role = RuntimeRole::Consumer;
                 decision.index = index;
                 decision.generation = generation;
-                strlcpy(
-                    decision.final_path, entry.final_path,
-                    sizeof(decision.final_path));
+                decision.entry_id = cache_entry_id(entry);
+                decision.manifest_handle = entry.manifest_handle;
+                decision.waiter_entitled = true;
                 LWLockRelease(g_registry_lock);
                 break;
             }
@@ -1640,11 +1629,20 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
         if (entry.generation == generation && entry.waiter_count > 0) {
             --entry.waiter_count;
+            waiter_to_release = entry.manifest_handle;
         }
         LWLockRelease(g_registry_lock);
+        if (waiter_to_release) {
+            static_cast<void>(
+                storage::unregister_manifest_waiter(waiter_to_release));
+        }
         PG_RE_THROW();
     }
     PG_END_TRY();
+    if (waiter_to_release) {
+        static_cast<void>(
+            storage::unregister_manifest_waiter(waiter_to_release));
+    }
     return decision;
 }
 
@@ -1653,6 +1651,14 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         const StringInfo key, std::uint64_t database_epoch,
         const char* display_sql, List* relation_oids) {
     RegistryDecision decision{};
+    PostgreSqlColumnChecksumPolicy checksum_policy;
+    const auto digest = checksum_policy.sha256(std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(key->data),
+        static_cast<std::size_t>(key->len),
+    });
+    if (!digest.has_value()) {
+        return decision;
+    }
     const std::uint64_t key_hash = hash_any_extended(
         reinterpret_cast<const unsigned char*>(key->data), key->len,
         pg_atomic_read_u64(&g_shared->boot_nonce));
@@ -1661,7 +1667,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
     int lru_index = -1;
     TimestampTz oldest_completion = DT_NOEND;
     TimestampTz oldest_live_completion = DT_NOEND;
-    char retired_path[MAXPGPATH]{};
+    storage::ManifestHandle retired_manifest{};
 
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (std::size_t offset = 0; offset < kRegistryCapacity; ++offset) {
@@ -1673,9 +1679,8 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 decision.role = RuntimeRole::Consumer;
                 decision.index = static_cast<int>(offset);
                 decision.generation = entry.generation;
-                strlcpy(
-                    decision.final_path, entry.final_path,
-                    sizeof(decision.final_path));
+                decision.entry_id = cache_entry_id(entry);
+                decision.manifest_handle = entry.manifest_handle;
                 LWLockRelease(g_registry_lock);
                 return decision;
             }
@@ -1726,14 +1731,14 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
 
     if (reusable_index >= 0) {
         CacheEntry& entry = g_shared->entries[reusable_index];
-        if (entry.final_path[0] != '\0') {
-            strlcpy(retired_path, entry.final_path, sizeof(retired_path));
-        }
+        retired_manifest = entry.manifest_handle;
         const std::uint64_t next_generation = entry.generation + 1;
         entry.state = SharedEntryState::Producing;
         entry.key_size = static_cast<std::uint32_t>(key->len);
         entry.generation = next_generation == 0 ? 1 : next_generation;
+        entry.claim_sequence = next_claim_sequence();
         entry.key_hash = key_hash;
+        entry.key_digest = *digest;
         entry.database_epoch = database_epoch;
         entry.database_oid = MyDatabaseId;
         entry.current_role_oid = GetUserId();
@@ -1760,7 +1765,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
             entry.relation_oids[entry.relation_count++] =
                 lfirst_oid(relation_cell);
         }
-        entry.final_path[0] = '\0';
+        entry.manifest_handle = {};
         strlcpy(
             entry.display_sql,
             display_sql == nullptr ? "<query text unavailable>" : display_sql,
@@ -1769,11 +1774,12 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         decision.role = RuntimeRole::Producer;
         decision.index = reusable_index;
         decision.generation = entry.generation;
+        decision.entry_id = cache_entry_id(entry);
     }
     LWLockRelease(g_registry_lock);
 
-    if (retired_path[0] != '\0') {
-        static_cast<void>(::unlink(retired_path));
+    if (retired_manifest) {
+        static_cast<void>(storage::retire_manifest(retired_manifest));
         if (g_shared != nullptr) {
             pg_atomic_fetch_add_u64(&g_shared->stats.evictions, 1);
         }
@@ -1787,7 +1793,7 @@ void release_registry_reader(
     if (g_shared == nullptr || index < 0) {
         return;
     }
-    char invalid_path[MAXPGPATH]{};
+    storage::ManifestHandle retired_manifest{};
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     CacheEntry& entry = g_shared->entries[index];
     if (entry.generation == generation) {
@@ -1796,20 +1802,22 @@ void release_registry_reader(
         }
         if (entry.reader_count == 0
             && entry.state == SharedEntryState::Retired
-            && entry.final_path[0] != '\0') {
-            strlcpy(invalid_path, entry.final_path, sizeof(invalid_path));
-            entry.final_path[0] = '\0';
+            && entry.manifest_handle) {
+            retired_manifest = entry.manifest_handle;
+            entry.manifest_handle = {};
         }
         if (!successful && entry.state == SharedEntryState::Complete) {
             entry.state = SharedEntryState::Retired;
-            strlcpy(invalid_path, entry.final_path, sizeof(invalid_path));
-            entry.final_path[0] = '\0';
+            if (entry.reader_count == 0 && entry.manifest_handle) {
+                retired_manifest = entry.manifest_handle;
+                entry.manifest_handle = {};
+            }
             ConditionVariableBroadcast(&entry.changed);
         }
     }
     LWLockRelease(g_registry_lock);
-    if (invalid_path[0] != '\0') {
-        static_cast<void>(::unlink(invalid_path));
+    if (retired_manifest) {
+        static_cast<void>(storage::retire_manifest(retired_manifest));
     }
     if (successful) {
         pg_atomic_fetch_add_u64(&g_shared->stats.completed_hits, 1);
@@ -1818,29 +1826,55 @@ void release_registry_reader(
     }
 }
 
+void discard_unpublished_tokens(BioseqCacheState& state) noexcept {
+    for (std::uint32_t index = 0;
+         index < state.stored_token_count; ++index) {
+        if (state.stored_tokens[index]) {
+            static_cast<void>(storage::discard_unpublished_block(
+                state.stored_tokens[index]));
+            state.stored_tokens[index] = {};
+        }
+    }
+    state.stored_token_count = 0;
+}
+
+void release_storage_reader_claims(BioseqCacheState& state) noexcept {
+    if (state.manifest_pin_owned) {
+        static_cast<void>(storage::unpin_manifest(state.manifest_pin));
+        state.manifest_pin = {};
+        state.manifest_pin_owned = false;
+    }
+    if (state.manifest_waiter_owned) {
+        static_cast<void>(storage::unregister_manifest_waiter(
+            state.manifest_handle));
+        state.manifest_waiter_owned = false;
+    }
+}
+
 /** Fail a generation only when this backend still owns the producer token. */
 void fail_registry_producer(BioseqCacheState& state) noexcept {
+    storage::ManifestHandle retired_manifest{};
     if (g_shared != nullptr && state.registry_index >= 0) {
         LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
         CacheEntry& entry = g_shared->entries[state.registry_index];
         if (entry.generation == state.generation
             && entry.state == SharedEntryState::Producing
             && entry.producer_pid == MyProcPid) {
+            retired_manifest = entry.manifest_handle;
+            entry.manifest_handle = {};
             fail_abandoned_producer(entry);
         }
         LWLockRelease(g_registry_lock);
     }
-    if (state.output_file >= 0) {
-        static_cast<void>(CloseTransientFile(state.output_file));
-        state.output_file = -1;
+    if (retired_manifest) {
+        static_cast<void>(storage::retire_manifest(retired_manifest));
     }
-    if (state.temporary_path[0] != '\0') {
-        static_cast<void>(::unlink(state.temporary_path));
-        state.temporary_path[0] = '\0';
+    if (state.manifest_handle && !state.producer_completed) {
+        static_cast<void>(storage::retire_manifest(state.manifest_handle));
+        state.manifest_handle = {};
     }
-    if (state.final_path[0] != '\0' && !state.producer_completed) {
-        static_cast<void>(::unlink(state.final_path));
-    }
+    release_storage_reader_claims(state);
+    discard_unpublished_tokens(state);
     destroy_column_builder(state);
     state.capture_failed = true;
     state.runtime_role = RuntimeRole::Bypass;
@@ -1853,18 +1887,17 @@ void cache_state_cleanup(void* argument) noexcept {
         return;
     }
     state->cleanup_done = true;
+    release_storage_reader_claims(*state);
+    if (state->registry_reader_owned) {
+        release_registry_reader(
+            state->registry_index, state->generation, false);
+        state->registry_reader_owned = false;
+    }
     if (state->runtime_role == RuntimeRole::Producer
         && !state->producer_completed) {
         fail_registry_producer(*state);
     }
-    if (state->output_file >= 0) {
-        static_cast<void>(CloseTransientFile(state->output_file));
-        state->output_file = -1;
-    }
-    if (state->temporary_path[0] != '\0') {
-        static_cast<void>(::unlink(state->temporary_path));
-        state->temporary_path[0] = '\0';
-    }
+    discard_unpublished_tokens(*state);
     if (state->replay_store != nullptr) {
         tuplestore_end(state->replay_store);
         state->replay_store = nullptr;
@@ -1877,29 +1910,8 @@ void cache_state_cleanup(void* argument) noexcept {
 }
 
 /** Prepare one generation-private self-validating column-store capture. */
-[[nodiscard]] bool begin_producer_file(
+[[nodiscard]] bool begin_producer_capture(
         BioseqCacheState& state, TupleDesc descriptor) {
-    char directory[MAXPGPATH]{};
-    cache_store_directory(directory, sizeof(directory));
-    const unsigned long long boot_nonce = static_cast<unsigned long long>(
-        pg_atomic_read_u64(&g_shared->boot_nonce));
-    const unsigned long long generation = static_cast<unsigned long long>(
-        state.generation);
-    const int final_length = snprintf(
-        state.final_path, sizeof(state.final_path),
-        "%s/bioseq_cache_%llx_%u_%d_%llu.result",
-        directory,
-        boot_nonce, MyDatabaseId, state.registry_index, generation);
-    const int temporary_length = snprintf(
-        state.temporary_path, sizeof(state.temporary_path),
-        "%s.tmp.%d", state.final_path, MyProcPid);
-    if (final_length < 0
-        || static_cast<std::size_t>(final_length) >= sizeof(state.final_path)
-        || temporary_length < 0
-        || static_cast<std::size_t>(temporary_length)
-            >= sizeof(state.temporary_path)) {
-        return false;
-    }
     try {
         state.send_functions = static_cast<Oid*>(
             palloc0(sizeof(Oid) * static_cast<std::size_t>(descriptor->natts)));
@@ -1966,7 +1978,7 @@ void cache_state_cleanup(void* argument) noexcept {
     return success;
 }
 
-/** Atomically publish a complete file only if no commit raced its capture. */
+/** Publish immutable storage blocks only if no commit raced their capture. */
 [[nodiscard]] bool complete_registry_producer(
         BioseqCacheState& state, TupleDesc descriptor) {
     static_cast<void>(descriptor);
@@ -1996,37 +2008,31 @@ void cache_state_cleanup(void* argument) noexcept {
     }
 #endif
     state.payload_bytes = sealed.size();
-    state.output_file = OpenTransientFile(
-        state.temporary_path,
-        O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
-    if (state.output_file < 0) {
+    if (sealed.empty()) {
         return false;
     }
-    LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
-    CacheEntry& producing_entry = g_shared->entries[state.registry_index];
-    if (producing_entry.generation == state.generation
-        && producing_entry.state == SharedEntryState::Producing
-        && producing_entry.producer_pid == MyProcPid) {
-        strlcpy(
-            producing_entry.final_path, state.temporary_path,
-            sizeof(producing_entry.final_path));
+    for (std::size_t offset = 0; offset < sealed.size();) {
+        if (state.stored_token_count >= storage::kBlocksPerManifest) {
+            discard_unpublished_tokens(state);
+            return false;
+        }
+        const std::size_t remaining = sealed.size() - offset;
+        const std::size_t block_bytes = remaining
+                < static_cast<std::size_t>(storage::kDefaultMaximumBlockBytes)
+            ? remaining
+            : static_cast<std::size_t>(storage::kDefaultMaximumBlockBytes);
+        auto stored = storage::store_block(std::span<const std::byte>{
+            sealed.data() + offset, block_bytes});
+        if (!stored) {
+            discard_unpublished_tokens(state);
+            return false;
+        }
+        state.stored_tokens[state.stored_token_count++] = stored.token;
+        offset += block_bytes;
     }
-    LWLockRelease(g_registry_lock);
-    if (!write_all(state.output_file, sealed.data(), sealed.size())
-        || pg_fsync(state.output_file) != 0
-        || CloseTransientFile(state.output_file) != 0) {
-        state.output_file = -1;
-        return false;
-    }
-    state.output_file = -1;
-    if (::rename(state.temporary_path, state.final_path) != 0) {
-        return false;
-    }
-    state.temporary_path[0] = '\0';
     destroy_column_builder(state);
     maybe_pause(TestPausePoint::BeforeTerminalPublish);
 
-    bool published = false;
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     CacheEntry& entry = g_shared->entries[state.registry_index];
     const std::uint64_t current_epoch = pg_atomic_read_u64(
@@ -2036,11 +2042,33 @@ void cache_state_cleanup(void* argument) noexcept {
     if (entry.generation == state.generation
         && entry.state == SharedEntryState::Producing
         && entry.producer_pid == MyProcPid
+        && entry.claim_sequence == state.entry_id.claim_sequence
         && entry.database_epoch == current_epoch
         && stable_visibility) {
         const TimestampTz completed_at = GetCurrentTimestamp();
         const std::int64_t ttl_microseconds =
             static_cast<std::int64_t>(g_query_cache_ttl_ms) * 1000;
+        storage::ManifestDescriptor manifest{
+            .id = state.entry_id,
+            .kind = CacheEntryKind::ExactFinalResult,
+            .logical_bytes = state.logical_bytes,
+            .row_count = state.row_count,
+            .created_at_us = entry.created_at,
+            .expires_at_us = completed_at + ttl_microseconds,
+            .initial_waiter_references = entry.waiter_count,
+        };
+        auto publication = storage::publish_manifest(
+            manifest,
+            std::span<const storage::StoredBlockToken>{
+                state.stored_tokens.data(), state.stored_token_count});
+        if (!publication) {
+            fail_abandoned_producer(entry);
+            LWLockRelease(g_registry_lock);
+            discard_unpublished_tokens(state);
+            return false;
+        }
+        state.stored_token_count = 0;
+        state.manifest_handle = publication.handle;
         entry.state = SharedEntryState::Complete;
         entry.producer_pid = 0;
         entry.producer_proc_number = INVALID_PROC_NUMBER;
@@ -2049,54 +2077,65 @@ void cache_state_cleanup(void* argument) noexcept {
         entry.row_count = state.row_count;
         entry.logical_bytes = state.logical_bytes;
         entry.stored_bytes = state.payload_bytes;
-        strlcpy(entry.final_path, state.final_path, sizeof(entry.final_path));
+        entry.manifest_handle = publication.handle;
         pg_atomic_fetch_add_u64(&g_shared->stats.produced, 1);
         pg_atomic_fetch_add_u64(
             &g_shared->stats.logical_bytes, state.logical_bytes);
         pg_atomic_fetch_add_u64(
             &g_shared->stats.stored_bytes, entry.stored_bytes);
-        published = true;
         state.producer_completed = true;
         ConditionVariableBroadcast(&entry.changed);
     } else if (entry.generation == state.generation
             && entry.state == SharedEntryState::Producing) {
         fail_abandoned_producer(entry);
     }
+    const bool published = state.producer_completed;
     LWLockRelease(g_registry_lock);
     if (!published) {
-        static_cast<void>(::unlink(state.final_path));
+        discard_unpublished_tokens(state);
     }
     return published;
 }
 
 /** Materialize and validate an entire shared result before exposing row one. */
 [[nodiscard]] Tuplestorestate* load_complete_result(
-        const char* path, TupleDesc expected_descriptor) {
+        const storage::ManifestPin& pin, TupleDesc expected_descriptor) {
     std::vector<ColumnSchema> expected_schema;
     try {
         expected_schema = build_column_schema(expected_descriptor, nullptr);
     } catch (...) {
         return nullptr;
     }
-    int file = OpenTransientFile(path, O_RDONLY | PG_BINARY);
-    if (file < 0) {
+    if (!pin || pin.kind != CacheEntryKind::ExactFinalResult
+        || pin.block_count > storage::kBlocksPerManifest) {
         return nullptr;
     }
-    struct stat status{};
-    if (::fstat(file, &status) != 0
-        || status.st_size <= 0
-        || static_cast<std::uint64_t>(status.st_size)
-            > kMaximumStoredResultBytes) {
-        static_cast<void>(CloseTransientFile(file));
+    std::uint64_t total_bytes = 0;
+    for (std::uint32_t index = 0; index < pin.block_count; ++index) {
+        const std::uint64_t length = pin.blocks[index].length;
+        if (length == 0 || length > kMaximumStoredResultBytes
+            || total_bytes > kMaximumStoredResultBytes - length) {
+            return nullptr;
+        }
+        total_bytes += length;
+    }
+    if (total_bytes == 0 || total_bytes > kMaximumStoredResultBytes) {
         return nullptr;
     }
-    const std::size_t store_size = static_cast<std::size_t>(status.st_size);
+    const std::size_t store_size = static_cast<std::size_t>(total_bytes);
     auto* store = static_cast<std::byte*>(palloc(store_size));
-    const bool read = read_all(file, store, store_size);
-    static_cast<void>(CloseTransientFile(file));
-    if (!read) {
-        pfree(store);
-        return nullptr;
+    std::size_t offset = 0;
+    for (std::uint32_t index = 0; index < pin.block_count; ++index) {
+        const std::size_t length = static_cast<std::size_t>(
+            pin.blocks[index].length);
+        if (storage::read_pinned_block(
+                pin, index,
+                std::span<std::byte>{store + offset, length})
+                != storage::StorageError::None) {
+            pfree(store);
+            return nullptr;
+        }
+        offset += length;
     }
 
     ColumnStoreView* view = nullptr;
@@ -2238,15 +2277,20 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     auto* scan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
     state->runtime_role = RuntimeRole::Bypass;
     state->registry_index = -1;
-    state->output_file = -1;
     state->replay_store = nullptr;
     state->replay_slot = nullptr;
     state->column_builder = nullptr;
     state->send_functions = nullptr;
     state->capture_failed = false;
     state->producer_completed = false;
-    state->temporary_path[0] = '\0';
-    state->final_path[0] = '\0';
+    state->manifest_pin_owned = false;
+    state->manifest_waiter_owned = false;
+    state->registry_reader_owned = false;
+    state->entry_id = {};
+    state->manifest_handle = {};
+    state->manifest_pin = {};
+    state->stored_tokens = {};
+    state->stored_token_count = 0;
     node->custom_ps = NIL;
     state->cleanup_done = false;
     if (!state->cleanup_registered) {
@@ -2302,9 +2346,11 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             state->runtime_role = decision.role;
             state->registry_index = decision.index;
             state->generation = decision.generation;
-            strlcpy(
-                state->final_path, decision.final_path,
-                sizeof(state->final_path));
+            state->entry_id = decision.entry_id;
+            state->manifest_handle = decision.manifest_handle;
+            state->manifest_waiter_owned = decision.waiter_entitled;
+            state->registry_reader_owned =
+                decision.role == RuntimeRole::Consumer;
         }
         if (key != nullptr) {
             pfree(key->data);
@@ -2315,8 +2361,18 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             MemoryContext load_context = CurrentMemoryContext;
             PG_TRY();
             {
-                state->replay_store = load_complete_result(
-                    state->final_path, node->ss.ps.ps_ResultTupleDesc);
+                storage::PinManifestResult pinned =
+                    state->manifest_waiter_owned
+                    ? storage::convert_waiter_to_pin(state->manifest_handle)
+                    : storage::pin_manifest(state->entry_id);
+                if (pinned) {
+                    state->manifest_waiter_owned = false;
+                    state->manifest_pin = pinned.pin;
+                    state->manifest_pin_owned = true;
+                    state->replay_store = load_complete_result(
+                        state->manifest_pin,
+                        node->ss.ps.ps_ResultTupleDesc);
+                }
                 if (state->replay_store != nullptr) {
                     state->replay_slot = MakeSingleTupleTableSlot(
                         node->ss.ps.ps_ResultTupleDesc,
@@ -2339,8 +2395,10 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             PG_END_TRY();
             const bool loaded = state->replay_store != nullptr
                 && state->replay_slot != nullptr;
+            release_storage_reader_claims(*state);
             release_registry_reader(
                 state->registry_index, state->generation, loaded);
+            state->registry_reader_owned = false;
             if (loaded) {
                 return;
             }
@@ -2350,7 +2408,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         if (state->runtime_role == RuntimeRole::Producer
             ) {
             maybe_pause(TestPausePoint::AfterBuildingPublish);
-            if (!begin_producer_file(
+            if (!begin_producer_capture(
                     *state, node->ss.ps.ps_ResultTupleDesc)) {
                 fail_registry_producer(*state);
             }
@@ -2479,6 +2537,37 @@ void cache_rescan_custom_scan(CustomScanState* node) {
 }
 
 /** Explain provisional and actual pass-through state without side effects. */
+[[nodiscard]] const char* readiness_name(
+        CacheCorrectnessReadiness readiness) noexcept {
+    switch (readiness) {
+        case CacheCorrectnessReadiness::PassthroughOnly:
+            return "passthrough-only";
+        case CacheCorrectnessReadiness::RelationFreeOnly:
+            return "relation-free-only";
+        case CacheCorrectnessReadiness::GenericMvccReady:
+            return "generic-mvcc-ready";
+        case CacheCorrectnessReadiness::ProviderCompleteReady:
+            return "provider-complete-ready";
+        case CacheCorrectnessReadiness::ReusableCoverageReady:
+            return "reusable-coverage-ready";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] const char* worker_lifecycle_name(
+        storage::WorkerLifecycle lifecycle) noexcept {
+    switch (lifecycle) {
+        case storage::WorkerLifecycle::NotRegistered: return "not-registered";
+        case storage::WorkerLifecycle::Registered: return "registered";
+        case storage::WorkerLifecycle::Starting: return "starting";
+        case storage::WorkerLifecycle::Running: return "running";
+        case storage::WorkerLifecycle::Stopping: return "stopping";
+        case storage::WorkerLifecycle::Stopped: return "stopped";
+        case storage::WorkerLifecycle::Failed: return "failed";
+    }
+    return "unknown";
+}
+
 void cache_explain_custom_scan(
         CustomScanState* node, List*, ExplainState* explain_state) {
     const auto* scan = reinterpret_cast<const CustomScan*>(node->ss.ps.plan);
@@ -2499,7 +2588,27 @@ void cache_explain_custom_scan(
     }
     ExplainPropertyText("SQL", private_string(*scan, 1), explain_state);
     ExplainPropertyText("Cache Entry Kind", "ExactFinalResult", explain_state);
-    ExplainPropertyText("Cache Readiness", "passthrough", explain_state);
+    const storage::StorageRuntimeSnapshot storage_snapshot =
+        storage::runtime_snapshot();
+    ExplainPropertyText(
+        "Cache Readiness",
+        readiness_name(storage_snapshot.correctness_readiness),
+        explain_state);
+    char* storage_diagnostic = psprintf(
+        "%s; backend=%s; hot=%llu/%llu; file=%llu/%llu; manifests=%llu",
+        storage_snapshot.bootstrap_ready ? "ready" : "unavailable",
+        storage_snapshot.dsa_attached ? "attached" : "not-attached",
+        static_cast<unsigned long long>(storage_snapshot.reserved_hot_bytes),
+        static_cast<unsigned long long>(storage_snapshot.hot_ceiling_bytes),
+        static_cast<unsigned long long>(storage_snapshot.reserved_file_bytes),
+        static_cast<unsigned long long>(storage_snapshot.file_ceiling_bytes),
+        static_cast<unsigned long long>(storage_snapshot.manifest_count));
+    ExplainPropertyText("Cache Storage", storage_diagnostic, explain_state);
+    pfree(storage_diagnostic);
+    ExplainPropertyText(
+        "Cache Janitor",
+        worker_lifecycle_name(storage_snapshot.worker_lifecycle),
+        explain_state);
 }
 
 const CustomExecMethods& cache_exec_methods() {
@@ -2522,7 +2631,6 @@ Node* cache_create_custom_scan_state(CustomScan*) {
     state->child_initialized = false;
     state->runtime_role = RuntimeRole::Bypass;
     state->registry_index = -1;
-    state->output_file = -1;
     state->column_builder = nullptr;
     state->send_functions = nullptr;
     state->replay_slot = nullptr;
@@ -2859,8 +2967,8 @@ struct EntrySnapshot {
     if (g_shared == nullptr) {
         return 0;
     }
-    char paths[kRegistryCapacity][MAXPGPATH]{};
-    std::size_t path_count = 0;
+    storage::ManifestHandle manifests[kRegistryCapacity]{};
+    std::size_t manifest_count = 0;
     std::uint64_t swept = 0;
     const TimestampTz now = GetCurrentTimestamp();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
@@ -2884,15 +2992,15 @@ struct EntrySnapshot {
             entry.state = SharedEntryState::Retired;
             ConditionVariableBroadcast(&entry.changed);
         }
-        if (entry.reader_count == 0 && entry.final_path[0] != '\0') {
-            strlcpy(paths[path_count++], entry.final_path, MAXPGPATH);
-            entry.final_path[0] = '\0';
+        if (entry.reader_count == 0 && entry.manifest_handle) {
+            manifests[manifest_count++] = entry.manifest_handle;
+            entry.manifest_handle = {};
         }
         ++swept;
     }
     LWLockRelease(g_registry_lock);
-    for (std::size_t index = 0; index < path_count; ++index) {
-        static_cast<void>(::unlink(paths[index]));
+    for (std::size_t index = 0; index < manifest_count; ++index) {
+        static_cast<void>(storage::retire_manifest(manifests[index]));
     }
     return swept;
 }
@@ -2938,8 +3046,8 @@ struct EntrySnapshot {
     if (g_shared == nullptr) {
         return 0;
     }
-    char paths[kRegistryCapacity][MAXPGPATH]{};
-    std::size_t path_count = 0;
+    storage::ManifestHandle manifests[kRegistryCapacity]{};
+    std::size_t manifest_count = 0;
     std::uint64_t invalidated = 0;
     pg_atomic_fetch_add_u64(&g_shared->database_write_epoch, 1);
     pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
@@ -2948,6 +3056,10 @@ struct EntrySnapshot {
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
             ++invalidated;
+            if (entry.reader_count == 0 && entry.manifest_handle) {
+                manifests[manifest_count++] = entry.manifest_handle;
+                entry.manifest_handle = {};
+            }
             continue;
         }
         if (entry.state != SharedEntryState::Complete) {
@@ -2955,15 +3067,15 @@ struct EntrySnapshot {
         }
         entry.state = SharedEntryState::Retired;
         ++invalidated;
-        if (entry.reader_count == 0 && entry.final_path[0] != '\0') {
-            strlcpy(paths[path_count++], entry.final_path, MAXPGPATH);
-            entry.final_path[0] = '\0';
+        if (entry.reader_count == 0 && entry.manifest_handle) {
+            manifests[manifest_count++] = entry.manifest_handle;
+            entry.manifest_handle = {};
         }
         ConditionVariableBroadcast(&entry.changed);
     }
     LWLockRelease(g_registry_lock);
-    for (std::size_t index = 0; index < path_count; ++index) {
-        static_cast<void>(::unlink(paths[index]));
+    for (std::size_t index = 0; index < manifest_count; ++index) {
+        static_cast<void>(storage::retire_manifest(manifests[index]));
     }
     if (invalidated != 0) {
         pg_atomic_fetch_add_u64(
@@ -2992,8 +3104,8 @@ struct EntrySnapshot {
     if (g_shared == nullptr || !OidIsValid(relation_oid)) {
         return 0;
     }
-    char paths[kRegistryCapacity][MAXPGPATH]{};
-    std::size_t path_count = 0;
+    storage::ManifestHandle manifests[kRegistryCapacity]{};
+    std::size_t manifest_count = 0;
     std::uint64_t invalidated = 0;
     pg_atomic_fetch_add_u64(&g_shared->database_write_epoch, 1);
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
@@ -3007,6 +3119,10 @@ struct EntrySnapshot {
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
             ++invalidated;
+            if (entry.reader_count == 0 && entry.manifest_handle) {
+                manifests[manifest_count++] = entry.manifest_handle;
+                entry.manifest_handle = {};
+            }
             continue;
         }
         if (entry.state != SharedEntryState::Complete) {
@@ -3014,15 +3130,15 @@ struct EntrySnapshot {
         }
         entry.state = SharedEntryState::Retired;
         ++invalidated;
-        if (entry.reader_count == 0 && entry.final_path[0] != '\0') {
-            strlcpy(paths[path_count++], entry.final_path, MAXPGPATH);
-            entry.final_path[0] = '\0';
+        if (entry.reader_count == 0 && entry.manifest_handle) {
+            manifests[manifest_count++] = entry.manifest_handle;
+            entry.manifest_handle = {};
         }
         ConditionVariableBroadcast(&entry.changed);
     }
     LWLockRelease(g_registry_lock);
-    for (std::size_t index = 0; index < path_count; ++index) {
-        static_cast<void>(::unlink(paths[index]));
+    for (std::size_t index = 0; index < manifest_count; ++index) {
+        static_cast<void>(storage::retire_manifest(manifests[index]));
     }
     if (invalidated != 0) {
         pg_atomic_fetch_add_u64(
@@ -3625,6 +3741,7 @@ PG_FUNCTION_INFO_V1(bioseq_cache_test_request_janitor_sweep);
 Datum bioseq_cache_test_request_janitor_sweep(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache::pg;
     require_cache_test_superuser();
+    storage::request_janitor_sweep(true);
     static_cast<void>(sweep_registry(true));
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (InjectedCoverage& entry : g_shared->injected_coverage) {
@@ -3722,6 +3839,10 @@ void _PG_init() {
     }
     if (process_shared_preload_libraries_in_progress) {
         g_preload_requested = true;
+        if (!maintenance::register_static_janitor_worker()) {
+            ereport(WARNING,
+                (errmsg("bioseq_cache could not register its janitor worker")));
+        }
         g_previous_shmem_request_hook = shmem_request_hook;
         shmem_request_hook = cache_shmem_request;
         g_previous_shmem_startup_hook = shmem_startup_hook;
