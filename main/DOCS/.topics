@@ -37,6 +37,7 @@ kmers
 kperf-profiler
 ksw2
 landing-page
+locking
 mcp
 memory-allocators
 memory-foonathan
@@ -66,6 +67,7 @@ sidecar
 simd-sort
 simdjson
 sneaky-snake
+sql
 storage
 template-pipeline
 testing
