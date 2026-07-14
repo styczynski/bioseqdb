@@ -285,6 +285,20 @@ def _sample_summary(samples_ns: Sequence[int]) -> dict[str, Any]:
     }
 
 
+def _throughput_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
+    def rate(quantity: int, elapsed_ns: int) -> int:
+        return int(quantity * 1_000_000_000 / max(1, elapsed_ns))
+
+    return {
+        "rows_per_second": _sample_summary(
+            [rate(output.rows, output.elapsed_ns) for output in outputs]
+        ),
+        "output_bytes_per_second": _sample_summary(
+            [rate(output.stdout_bytes, output.elapsed_ns) for output in outputs]
+        ),
+    }
+
+
 def _unavailable_metric(detail: str) -> dict[str, Any]:
     return {"status": "unavailable", "value": None, "detail": detail}
 
@@ -422,6 +436,29 @@ def _measure_explain(cluster: Any, *, mode: str, sql: str) -> dict[str, float]:
     }
 
 
+def _measure_explain_samples(
+    cluster: Any,
+    *,
+    mode: str,
+    sql: str,
+    sample_count: int,
+) -> dict[str, Any]:
+    samples = [
+        _measure_explain(cluster, mode=mode, sql=sql)
+        for _ in range(sample_count)
+    ]
+    planning_ns = [int(sample["planning_ms"] * 1_000_000) for sample in samples]
+    execution_ns = [int(sample["execution_ms"] * 1_000_000) for sample in samples]
+    planning = _sample_summary(planning_ns)
+    execution = _sample_summary(execution_ns)
+    return {
+        "planning": planning,
+        "execution": execution,
+        "planning_ms": planning["p50_ns"] / 1_000_000.0,
+        "execution_ms": execution["p50_ns"] / 1_000_000.0,
+    }
+
+
 def _measure_case(
     cluster: Any,
     case: Mapping[str, Any],
@@ -432,7 +469,12 @@ def _measure_case(
     ordered = bool(case["ordered"])
     _reset_case(cluster)
     reference = _execute_query(cluster, mode="disabled", sql=sql)
-    disabled_explain = _measure_explain(cluster, mode="disabled", sql=sql)
+    disabled_explain = _measure_explain_samples(
+        cluster,
+        mode="disabled",
+        sql=sql,
+        sample_count=sample_count,
+    )
 
     _reset_case(cluster)
     producer = _execute_query(cluster, mode="same", sql=sql)
@@ -440,7 +482,12 @@ def _measure_case(
         _execute_query(cluster, mode="same", sql=sql)
         for _ in range(sample_count)
     ]
-    same_explain = _measure_explain(cluster, mode="same", sql=sql)
+    same_explain = _measure_explain_samples(
+        cluster,
+        mode="same",
+        sql=sql,
+        sample_count=sample_count,
+    )
     case_stats = _stats(cluster)
     runtime = _entry_runtime_snapshot(cluster)
     correctness = _same_result(reference, producer, ordered) and all(
@@ -479,16 +526,19 @@ def _measure_case(
         "disabled": {
             **_sample_summary([reference.elapsed_ns]),
             "time_to_first_row": _first_row_summary([reference]),
+            "throughput": _throughput_summary([reference]),
             **disabled_explain,
         },
         "producer": {
             **_sample_summary([producer.elapsed_ns]),
             "time_to_first_row": _first_row_summary([producer]),
+            "throughput": _throughput_summary([producer]),
             "baseline_delta_percent": producer_delta,
         },
         "completed_hit": {
             **_sample_summary([sample.elapsed_ns for sample in hit_samples]),
             "time_to_first_row": hit_first_row,
+            "throughput": _throughput_summary(hit_samples),
             "speedup_vs_disabled": speedup,
             **same_explain,
         },
@@ -571,8 +621,11 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
         },
         **_sample_summary([output.elapsed_ns for output in outputs]),
         "time_to_first_row": _first_row_summary(outputs),
+        "throughput": _throughput_summary(outputs),
         "producer_time_to_first_row": _first_row_summary([producer_output]),
+        "producer_throughput": _throughput_summary([producer_output]),
         "waiter_time_to_first_row": _first_row_summary(waiter_outputs),
+        "waiter_throughput": _throughput_summary(waiter_outputs),
         "wait_duration": {
             "status": "partially_measured",
             "waiters_observed_to_release_ns": released_at - waiters_observed_at,
