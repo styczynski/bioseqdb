@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +44,30 @@ void count_release(
     ++counter.calls;
     counter.last = entry_id;
     counter.kind = kind;
+}
+
+struct ReactivatingReleaseCounter {
+    PlannerCandidateCleanupRecordV1* record = nullptr;
+    CacheEntryId replacement{};
+    std::array<CandidateReferenceKindV1, 2> kinds{};
+    std::size_t calls = 0;
+    bool reactivation_succeeded = false;
+};
+
+void reactivate_once_release(
+    void* opaque,
+    const CacheEntryId&,
+    CandidateReferenceKindV1 kind) noexcept {
+    auto& counter = *static_cast<ReactivatingReleaseCounter*>(opaque);
+    counter.kinds[counter.calls++] = kind;
+    if (counter.calls == 1) {
+        counter.reactivation_succeeded = activate_candidate_reference(
+            *counter.record,
+            counter.replacement,
+            CandidateReferenceKindV1::InFlightWaiter,
+            &reactivate_once_release,
+            &counter);
+    }
 }
 
 } // namespace
@@ -213,6 +238,60 @@ TEST_CASE("runtime recipe and digest sink reject malformed or oversized data") {
     REQUIRE(buffer.failed);
 }
 
+TEST_CASE("finalized recipe and expected digest are accepted atomically") {
+    CacheDigest256 digest_a{};
+    digest_a.bytes[0] = 0xa1;
+    CacheDigest256 digest_b{};
+    digest_b.bytes[0] = 0xb2;
+
+    BioseqCachePlanDigestRecipeV1 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+        .flags = 0,
+        .digest_format_version = kProviderRecipeFormatVersion,
+        .reserved = 0,
+        .plan_domain_nodes = reinterpret_cast<::List*>(0x1),
+    };
+    std::copy(
+        digest_a.bytes.begin(),
+        digest_a.bytes.end(),
+        recipe.expected_generation_digest);
+
+    const auto finalized_a = finalize_plan_digest_recipe(
+        &recipe, 1, 37, 4, &digest_a);
+    REQUIRE(finalized_a.has_value());
+    REQUIRE(finalized_a->expected_generation_digest == digest_a);
+    REQUIRE(finalized_a->digest_format_version
+            == kProviderRecipeFormatVersion);
+    REQUIRE(finalized_a->recipe_count == 1);
+    REQUIRE(finalized_a->serialized_bytes == 37);
+    REQUIRE(finalized_a->node_count == 4);
+
+    std::copy(
+        digest_b.bytes.begin(),
+        digest_b.bytes.end(),
+        recipe.expected_generation_digest);
+    recipe.plan_domain_nodes = nullptr;
+    const auto partial_output = finalize_plan_digest_recipe(
+        &recipe, 1, 37, 4, &digest_a);
+    REQUIRE_FALSE(partial_output.has_value());
+    REQUIRE(partial_output.error() == ProviderContractErrorV1::RecipeShape);
+    REQUIRE(finalized_a->expected_generation_digest == digest_a);
+
+    recipe.plan_domain_nodes = reinterpret_cast<::List*>(0x1);
+    const auto path_final_mismatch = finalize_plan_digest_recipe(
+        &recipe, 1, 37, 4, &digest_a);
+    REQUIRE_FALSE(path_final_mismatch.has_value());
+    REQUIRE(
+        path_final_mismatch.error()
+        == ProviderContractErrorV1::CoverageDigestMismatch);
+    REQUIRE(finalized_a->expected_generation_digest == digest_a);
+
+    const auto exact_b = finalize_plan_digest_recipe(
+        &recipe, 1, 37, 4);
+    REQUIRE(exact_b.has_value());
+    REQUIRE(exact_b->expected_generation_digest == digest_b);
+}
+
 TEST_CASE("branch ownership is occurrence-disjoint and SQL NULL correct") {
     const std::array<bool, 3> valid{true, false, true};
     const std::array predicates{
@@ -271,37 +350,181 @@ TEST_CASE("late fetch sink enforces one value and one terminal per reference") {
     REQUIRE_FALSE(late_fetch_complete_and_valid(state));
 }
 
-TEST_CASE("candidate cleanup and gate publication remain idempotent") {
+TEST_CASE("candidate cleanup exhausts reference kinds and reentrancy") {
     ReleaseCounter counter{};
     CacheEntryId entry{};
     entry.generation = 9;
-    PlannerCandidateCleanupRecordV1 cleanup{};
-    REQUIRE(activate_candidate_reference(
-        cleanup,
-        entry,
+    entry.claim_sequence = 13;
+    constexpr std::array kinds{
         CandidateReferenceKindV1::ProvisionalPin,
-        &count_release,
-        &counter));
-    REQUIRE_FALSE(activate_candidate_reference(
-        cleanup,
-        entry,
-        CandidateReferenceKindV1::ProvisionalPin,
-        &count_release,
-        &counter));
-    release_candidate_reference_noerror(cleanup);
-    release_candidate_reference_noerror(cleanup);
-    REQUIRE(counter.calls == 1);
+        CandidateReferenceKindV1::InFlightWaiter,
+        CandidateReferenceKindV1::AdmissionReservation,
+    };
+    for (const CandidateReferenceKindV1 kind : kinds) {
+        PlannerCandidateCleanupRecordV1 next{};
+        PlannerCandidateCleanupRecordV1 cleanup{.next = &next};
+        release_candidate_reference_noerror(cleanup);
+        REQUIRE_FALSE(activate_candidate_reference(
+            cleanup,
+            entry,
+            CandidateReferenceKindV1::None,
+            &count_release,
+            &counter));
+        REQUIRE_FALSE(activate_candidate_reference(
+            cleanup, entry, kind, nullptr, &counter));
+        REQUIRE_FALSE(cleanup.active);
+        REQUIRE(cleanup.next == &next);
+        REQUIRE(cleanup.reference_kind == CandidateReferenceKindV1::None);
+        REQUIRE(activate_candidate_reference(
+            cleanup, entry, kind, &count_release, &counter));
+        REQUIRE_FALSE(activate_candidate_reference(
+            cleanup, entry, kind, &count_release, &counter));
+        release_candidate_reference_noerror(cleanup);
+        release_candidate_reference_noerror(cleanup);
+        REQUIRE_FALSE(cleanup.active);
+        REQUIRE(cleanup.reference_kind == CandidateReferenceKindV1::None);
+        REQUIRE(cleanup.release == nullptr);
+        REQUIRE(cleanup.release_opaque == nullptr);
+        REQUIRE(cleanup.next == &next);
+        REQUIRE(counter.kind == kind);
+    }
+    REQUIRE(counter.calls == kinds.size());
     REQUIRE(counter.last.generation == 9);
-    REQUIRE(counter.kind == CandidateReferenceKindV1::ProvisionalPin);
+    REQUIRE(counter.last.claim_sequence == 13);
 
-    ReuseGateFreezeV1 gates{};
-    REQUIRE(begin_gate_preflight(gates, 3));
-    REQUIRE(stage_valid_source(gates, 1));
-    REQUIRE_FALSE(source_gate_is_valid(gates, 1));
-    REQUIRE(freeze_source_decisions(gates));
-    REQUIRE(source_gate_is_valid(gates, 1));
-    REQUIRE_FALSE(source_gate_is_valid(gates, 0));
-    REQUIRE_FALSE(stage_valid_source(gates, 2));
+    PlannerCandidateCleanupRecordV1 reentrant{};
+    ReactivatingReleaseCounter reactivating{
+        .record = &reentrant,
+        .replacement = {
+            .generation = 10,
+            .claim_sequence = 14,
+        },
+    };
+    REQUIRE(activate_candidate_reference(
+        reentrant,
+        entry,
+        CandidateReferenceKindV1::ProvisionalPin,
+        &reactivate_once_release,
+        &reactivating));
+    release_candidate_reference_noerror(reentrant);
+    REQUIRE(reactivating.reactivation_succeeded);
+    REQUIRE(reentrant.active);
+    REQUIRE(
+        reentrant.reference_kind
+        == CandidateReferenceKindV1::InFlightWaiter);
+    release_candidate_reference_noerror(reentrant);
+    REQUIRE_FALSE(reentrant.active);
+    REQUIRE(reactivating.calls == 2);
+    REQUIRE(
+        reactivating.kinds[0]
+        == CandidateReferenceKindV1::ProvisionalPin);
+    REQUIRE(
+        reactivating.kinds[1]
+        == CandidateReferenceKindV1::InFlightWaiter);
+}
+
+TEST_CASE("gate publication is one-way and exhaustive at its bounds") {
+    ReuseGateFreezeV1 empty{};
+    REQUIRE_FALSE(source_gate_is_valid(empty, 0));
+    REQUIRE_FALSE(begin_gate_preflight(empty, 0));
+    REQUIRE_FALSE(begin_gate_preflight(
+        empty, kMaxSourcesPerCoverageNode + 1));
+    REQUIRE(empty.state == ReusePreflightStateV1::Empty);
+
+    ReuseGateFreezeV1 maximum{};
+    REQUIRE(begin_gate_preflight(maximum, kMaxSourcesPerCoverageNode));
+    REQUIRE(stage_valid_source(maximum, 0));
+    REQUIRE(stage_valid_source(
+        maximum, kMaxSourcesPerCoverageNode - 1));
+    REQUIRE_FALSE(stage_valid_source(
+        maximum, kMaxSourcesPerCoverageNode));
+    REQUIRE_FALSE(source_gate_is_valid(maximum, 0));
+    REQUIRE(freeze_source_decisions(maximum));
+    REQUIRE(source_gate_is_valid(maximum, 0));
+    REQUIRE(source_gate_is_valid(
+        maximum, kMaxSourcesPerCoverageNode - 1));
+    REQUIRE_FALSE(source_gate_is_valid(
+        maximum, kMaxSourcesPerCoverageNode));
+    REQUIRE_FALSE(freeze_source_decisions(maximum));
+    REQUIRE_FALSE(stage_valid_source(maximum, 1));
+    REQUIRE_FALSE(begin_gate_preflight(maximum, 1));
+    freeze_all_sources_invalid(maximum);
+    REQUIRE(source_gate_is_valid(maximum, 0));
+
+    ReuseGateFreezeV1 fail_open{};
+    REQUIRE(begin_gate_preflight(fail_open, 3));
+    REQUIRE(stage_valid_source(fail_open, 0));
+    REQUIRE(stage_valid_source(fail_open, 2));
+    freeze_all_sources_invalid(fail_open);
+    REQUIRE(fail_open.state == ReusePreflightStateV1::Frozen);
+    for (std::size_t index = 0; index < 3; ++index) {
+        REQUIRE_FALSE(source_gate_is_valid(fail_open, index));
+    }
+}
+
+TEST_CASE("replacement plans retain independent frozen digests and gates") {
+    CacheDigest256 digest_a{};
+    digest_a.bytes[0] = 0xa1;
+    CacheDigest256 digest_b{};
+    digest_b.bytes[0] = 0xb2;
+    CacheDigest256 live_configuration_digest = digest_a;
+    BioseqCachePlanDigestRecipeV1 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+        .digest_format_version = kProviderRecipeFormatVersion,
+        .plan_domain_nodes = reinterpret_cast<::List*>(0x1),
+    };
+
+    std::copy(
+        live_configuration_digest.bytes.begin(),
+        live_configuration_digest.bytes.end(),
+        recipe.expected_generation_digest);
+    const auto plan_a = finalize_plan_digest_recipe(
+        &recipe, 1, 8, 1, &live_configuration_digest);
+    REQUIRE(plan_a.has_value());
+    const CacheDigest256 paused_a_begin_digest =
+        plan_a->expected_generation_digest;
+
+    ReuseGateFreezeV1 plan_a_gates{};
+    REQUIRE(begin_gate_preflight(plan_a_gates, 2));
+    REQUIRE(stage_valid_source(plan_a_gates, 0));
+    REQUIRE(freeze_source_decisions(plan_a_gates));
+
+    live_configuration_digest = digest_b;
+    std::copy(
+        live_configuration_digest.bytes.begin(),
+        live_configuration_digest.bytes.end(),
+        recipe.expected_generation_digest);
+    const auto plan_b = finalize_plan_digest_recipe(
+        &recipe, 1, 8, 1, &live_configuration_digest);
+    REQUIRE(plan_b.has_value());
+    const CacheDigest256 replacement_b_begin_digest =
+        plan_b->expected_generation_digest;
+    ReuseGateFreezeV1 plan_b_gates{};
+    REQUIRE(begin_gate_preflight(plan_b_gates, 2));
+    REQUIRE(stage_valid_source(plan_b_gates, 1));
+    REQUIRE(freeze_source_decisions(plan_b_gates));
+
+    REQUIRE(runtime_digest_matches(
+        plan_a->expected_generation_digest,
+        paused_a_begin_digest));
+    REQUIRE(runtime_digest_matches(
+        plan_b->expected_generation_digest,
+        replacement_b_begin_digest));
+    REQUIRE_FALSE(runtime_digest_matches(
+        plan_a->expected_generation_digest,
+        live_configuration_digest));
+    REQUIRE(runtime_digest_matches(
+        plan_b->expected_generation_digest,
+        live_configuration_digest));
+    REQUIRE(source_gate_is_valid(plan_a_gates, 0));
+    REQUIRE_FALSE(source_gate_is_valid(plan_a_gates, 1));
+    REQUIRE_FALSE(source_gate_is_valid(plan_b_gates, 0));
+    REQUIRE(source_gate_is_valid(plan_b_gates, 1));
+
+    REQUIRE_FALSE(begin_gate_preflight(plan_a_gates, 2));
+    freeze_all_sources_invalid(plan_a_gates);
+    REQUIRE(source_gate_is_valid(plan_a_gates, 0));
+    REQUIRE_FALSE(source_gate_is_valid(plan_a_gates, 1));
 }
 
 TEST_CASE("reuse waits obey descending owned claim order") {

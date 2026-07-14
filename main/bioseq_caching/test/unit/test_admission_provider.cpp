@@ -522,6 +522,34 @@ TEST_CASE("canonical keys, identities, dependencies, and settings are exact") {
     right.bytes[1] = std::byte{99};
     REQUIRE_FALSE(physical_identity_equal(left, right));
 
+    PhysicalIdentityV1 locator_a{
+        .kind = PhysicalIdentityKind::PgRelFileLocator,
+        .length = 12,
+    };
+    for (std::size_t index = 0; index < locator_a.length; ++index) {
+        locator_a.bytes[index] = static_cast<std::byte>(index + 1);
+    }
+    PhysicalIdentityV1 locator_b = locator_a;
+    locator_b.bytes[locator_b.length - 1] = std::byte{0xff};
+    CacheDigest256 forced_collision_digest{};
+    forced_collision_digest.bytes[0] = 0x5a;
+    const CanonicalCacheKey locator_key_a{
+        .digest = forced_collision_digest,
+        .bytes = std::vector<std::byte>(
+            locator_a.bytes.begin(),
+            locator_a.bytes.begin() + locator_a.length),
+    };
+    const CanonicalCacheKey locator_key_b{
+        .digest = forced_collision_digest,
+        .bytes = std::vector<std::byte>(
+            locator_b.bytes.begin(),
+            locator_b.bytes.begin() + locator_b.length),
+    };
+    REQUIRE(locator_key_a.digest == locator_key_b.digest);
+    REQUIRE_FALSE(physical_identity_equal(locator_a, locator_b));
+    REQUIRE_FALSE(collision_checked_key_equal(
+        locator_key_a, locator_key_b));
+
     BaseRowReferenceV1 occurrence_a{
         .rte_ordinal = 1,
         .logical_rel_oid = 10,

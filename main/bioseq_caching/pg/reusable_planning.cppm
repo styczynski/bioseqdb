@@ -219,6 +219,7 @@ enum class ProviderContractErrorV1 : std::uint16_t {
     DecoratedBoundaryMismatch,
     DecoratedLineageMismatch,
     RecipeShape,
+    CoverageDigestMismatch,
 };
 
 [[nodiscard]] constexpr std::expected<void, ProviderContractErrorV1>
@@ -381,6 +382,59 @@ validate_plan_digest_recipe(
         return std::unexpected(ProviderContractErrorV1::RecipeShape);
     }
     return {};
+}
+
+/**
+ * Pure, all-or-nothing snapshot of one validated finalized-plan recipe.
+ * PostgreSQL-owned recipe Nodes remain outside this provider-neutral value.
+ */
+struct FinalizedPlanRecipeContractV1 {
+    CacheDigest256 expected_generation_digest{};
+    std::uint32_t digest_format_version = 0;
+    std::uint32_t recipe_count = 0;
+    std::uint64_t serialized_bytes = 0;
+    std::uint32_t node_count = 0;
+};
+
+/**
+ * Accept recipe shape and expected output digest as one value.  Coverage may
+ * additionally require the finalized digest to equal its path-time digest.
+ */
+[[nodiscard]] constexpr std::expected<
+    FinalizedPlanRecipeContractV1,
+    ProviderContractErrorV1>
+finalize_plan_digest_recipe(
+    const BioseqCachePlanDigestRecipeV1* recipe,
+    std::uint32_t recipe_count,
+    std::uint64_t serialized_bytes,
+    std::uint32_t node_count,
+    const CacheDigest256* coverage_path_digest = nullptr) noexcept {
+    const auto validation = validate_plan_digest_recipe(
+        recipe, recipe_count, serialized_bytes, node_count);
+    if (!validation.has_value()) {
+        return std::unexpected(validation.error());
+    }
+
+    FinalizedPlanRecipeContractV1 finalized{
+        .digest_format_version = recipe->digest_format_version,
+        .recipe_count = recipe_count,
+        .serialized_bytes = serialized_bytes,
+        .node_count = node_count,
+    };
+    for (std::size_t index = 0;
+         index < finalized.expected_generation_digest.bytes.size();
+         ++index) {
+        finalized.expected_generation_digest.bytes[index] =
+            recipe->expected_generation_digest[index];
+    }
+    if (coverage_path_digest != nullptr
+        && !runtime_digest_matches(
+            *coverage_path_digest,
+            finalized.expected_generation_digest)) {
+        return std::unexpected(
+            ProviderContractErrorV1::CoverageDigestMismatch);
+    }
+    return finalized;
 }
 
 /** Caller-owned fixed buffer used directly as a provider digest sink. */
@@ -673,7 +727,7 @@ struct PlannerCandidateCleanupRecordV1 {
     return true;
 }
 
-/** Idempotent and reentrancy-safe: clear active before calling the registry. */
+/** Idempotent and reentrancy-safe: clear the record before registry release. */
 inline void release_candidate_reference_noerror(
     PlannerCandidateCleanupRecordV1& record) noexcept {
     if (!record.active) {
@@ -681,15 +735,19 @@ inline void release_candidate_reference_noerror(
     }
     record.active = false;
     const CandidateReleaseNoErrorV1 release = record.release;
-    if (release != nullptr) {
-        release(
-            record.release_opaque,
-            record.entry_id,
-            record.reference_kind);
-    }
+    void* const release_opaque = record.release_opaque;
+    const CacheEntryId entry_id = record.entry_id;
+    const CandidateReferenceKindV1 reference_kind =
+        record.reference_kind;
     record.reference_kind = CandidateReferenceKindV1::None;
     record.release = nullptr;
     record.release_opaque = nullptr;
+    if (release != nullptr) {
+        release(
+            release_opaque,
+            entry_id,
+            reference_kind);
+    }
 }
 
 enum class ReusePreflightStateV1 : std::uint8_t {
@@ -709,7 +767,8 @@ struct ReuseGateFreezeV1 {
 [[nodiscard]] inline bool begin_gate_preflight(
     ReuseGateFreezeV1& gates,
     std::size_t source_count) noexcept {
-    if (source_count == 0
+    if (gates.state != ReusePreflightStateV1::Empty
+        || source_count == 0
         || source_count > kMaxSourcesPerCoverageNode) {
         return false;
     }
@@ -743,6 +802,9 @@ struct ReuseGateFreezeV1 {
 
 /** Fail open as one atomic all-false decision. */
 inline void freeze_all_sources_invalid(ReuseGateFreezeV1& gates) noexcept {
+    if (gates.state != ReusePreflightStateV1::Collecting) {
+        return;
+    }
     gates.staged.fill(0);
     gates.published.fill(0);
     gates.state = ReusePreflightStateV1::Frozen;

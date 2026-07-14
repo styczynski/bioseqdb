@@ -4,11 +4,96 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
 import bioseq.cache.core;
 
 using namespace bioseq::cache;
+
+namespace {
+
+inline constexpr std::uint64_t kTestGeneration = 7;
+inline constexpr std::uint64_t kTestClaimSequence = 11;
+
+struct GenerationSnapshot {
+    CacheEntryState state = CacheEntryState::Absent;
+    CacheFailureCode failure = CacheFailureCode::None;
+    std::uint64_t generation = 0;
+    std::uint64_t claim_sequence = 0;
+    std::uint32_t reader_pins = 0;
+    std::uint32_t waiter_references = 0;
+
+    [[nodiscard]] bool operator==(
+        const GenerationSnapshot&) const noexcept = default;
+};
+
+[[nodiscard]] GenerationSnapshot snapshot(
+    const GenerationStateMachine& state) {
+    return GenerationSnapshot{
+        .state = state.value(),
+        .failure = state.failure(),
+        .generation = state.generation(),
+        .claim_sequence = state.claim_sequence(),
+        .reader_pins = state.reader_pins(),
+        .waiter_references = state.waiter_references(),
+    };
+}
+
+[[nodiscard]] GenerationStateMachine machine_in_state(
+    CacheEntryState requested) {
+    GenerationStateMachine state;
+    if (requested == CacheEntryState::Absent) {
+        return state;
+    }
+    (void)state.claim(kTestGeneration, kTestClaimSequence);
+    switch (requested) {
+    case CacheEntryState::Absent:
+    case CacheEntryState::Claimed:
+        break;
+    case CacheEntryState::Building:
+        (void)state.begin_build(kTestGeneration, kTestClaimSequence);
+        break;
+    case CacheEntryState::Complete:
+        (void)state.begin_build(kTestGeneration, kTestClaimSequence);
+        (void)state.publish_complete(
+            kTestGeneration, kTestClaimSequence);
+        break;
+    case CacheEntryState::Failed:
+        (void)state.publish_failed(
+            kTestGeneration,
+            kTestClaimSequence,
+            CacheFailureCode::ProducerError);
+        break;
+    case CacheEntryState::Invalidated:
+        (void)state.begin_build(kTestGeneration, kTestClaimSequence);
+        (void)state.invalidate(kTestGeneration, kTestClaimSequence);
+        break;
+    case CacheEntryState::Evicting:
+        (void)state.publish_failed(
+            kTestGeneration,
+            kTestClaimSequence,
+            CacheFailureCode::ProducerError);
+        (void)state.begin_evict(kTestGeneration, kTestClaimSequence);
+        break;
+    }
+    return state;
+}
+
+struct StateOperationExpectations {
+    CacheEntryState state = CacheEntryState::Absent;
+    bool claim = false;
+    bool begin_build = false;
+    bool publish_complete = false;
+    bool publish_failed = false;
+    bool invalidate = false;
+    bool pin_reader = false;
+    bool register_waiter = false;
+    bool begin_evict = false;
+    bool finish_evict = false;
+};
+
+} // namespace
 
 TEST_CASE("checked cache arithmetic rejects every boundary overflow") {
     constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
@@ -79,6 +164,109 @@ TEST_CASE("the normative cache state graph rejects every omitted edge") {
         CacheEntryState::Invalidated, CacheEntryState::Complete));
 }
 
+TEST_CASE("generation operations exhaust every state and preserve rejections") {
+    constexpr std::array expectations{
+        StateOperationExpectations{
+            .state = CacheEntryState::Absent,
+            .claim = true,
+        },
+        StateOperationExpectations{
+            .state = CacheEntryState::Claimed,
+            .begin_build = true,
+            .publish_failed = true,
+            .register_waiter = true,
+        },
+        StateOperationExpectations{
+            .state = CacheEntryState::Building,
+            .publish_complete = true,
+            .publish_failed = true,
+            .invalidate = true,
+            .register_waiter = true,
+        },
+        StateOperationExpectations{
+            .state = CacheEntryState::Complete,
+            .invalidate = true,
+            .pin_reader = true,
+            .begin_evict = true,
+        },
+        StateOperationExpectations{
+            .state = CacheEntryState::Failed,
+            .begin_evict = true,
+        },
+        StateOperationExpectations{
+            .state = CacheEntryState::Invalidated,
+            .begin_evict = true,
+        },
+        StateOperationExpectations{
+            .state = CacheEntryState::Evicting,
+            .finish_evict = true,
+        },
+    };
+
+    for (const StateOperationExpectations expected : expectations) {
+        const auto check = [expected](
+                               bool allowed,
+                               auto operation) {
+            GenerationStateMachine state = machine_in_state(expected.state);
+            const GenerationSnapshot before = snapshot(state);
+            REQUIRE(operation(state) == allowed);
+            if (!allowed) {
+                REQUIRE(snapshot(state) == before);
+            }
+        };
+
+        check(expected.claim, [](GenerationStateMachine& state) {
+            return state.claim(kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.begin_build, [](GenerationStateMachine& state) {
+            return state.begin_build(kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.publish_complete, [](GenerationStateMachine& state) {
+            return state.publish_complete(
+                kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.publish_failed, [](GenerationStateMachine& state) {
+            return state.publish_failed(
+                kTestGeneration,
+                kTestClaimSequence,
+                CacheFailureCode::ProducerError);
+        });
+        check(false, [](GenerationStateMachine& state) {
+            return state.publish_failed(
+                kTestGeneration,
+                kTestClaimSequence,
+                CacheFailureCode::None);
+        });
+        check(expected.invalidate, [](GenerationStateMachine& state) {
+            return state.invalidate(kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.pin_reader, [](GenerationStateMachine& state) {
+            return state.pin_reader(kTestGeneration, kTestClaimSequence);
+        });
+        check(false, [](GenerationStateMachine& state) {
+            return state.unpin_reader(kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.register_waiter, [](GenerationStateMachine& state) {
+            return state.register_waiter(
+                kTestGeneration, kTestClaimSequence);
+        });
+        check(false, [](GenerationStateMachine& state) {
+            return state.unregister_waiter(
+                kTestGeneration, kTestClaimSequence);
+        });
+        check(false, [](GenerationStateMachine& state) {
+            return state.convert_waiter_to_reader(
+                kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.begin_evict, [](GenerationStateMachine& state) {
+            return state.begin_evict(kTestGeneration, kTestClaimSequence);
+        });
+        check(expected.finish_evict, [](GenerationStateMachine& state) {
+            return state.finish_evict(kTestGeneration, kTestClaimSequence);
+        });
+    }
+}
+
 TEST_CASE("generation identity prevents ABA publication and premature eviction") {
     GenerationStateMachine state;
     REQUIRE_FALSE(state.claim(0, 1));
@@ -124,6 +312,47 @@ TEST_CASE("invalidation preserves old pins but rejects every new reader") {
     REQUIRE(state.begin_evict(3, 4));
 }
 
+TEST_CASE("waiter and reader references drain exactly across terminal states") {
+    GenerationStateMachine complete;
+    REQUIRE(complete.claim(kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.register_waiter(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.register_waiter(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.begin_build(kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.publish_complete(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.convert_waiter_to_reader(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.convert_waiter_to_reader(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE_FALSE(complete.convert_waiter_to_reader(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.pin_reader(kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.reader_pins() == 3);
+    REQUIRE(complete.waiter_references() == 0);
+    REQUIRE(complete.invalidate(kTestGeneration, kTestClaimSequence));
+    REQUIRE_FALSE(complete.pin_reader(
+        kTestGeneration, kTestClaimSequence));
+    for (std::size_t count = 0; count < 3; ++count) {
+        REQUIRE(complete.unpin_reader(
+            kTestGeneration, kTestClaimSequence));
+    }
+    REQUIRE_FALSE(complete.unpin_reader(
+        kTestGeneration, kTestClaimSequence));
+    REQUIRE(complete.begin_evict(kTestGeneration, kTestClaimSequence));
+
+    GenerationStateMachine failed;
+    REQUIRE(failed.claim(8, 12));
+    REQUIRE(failed.register_waiter(8, 12));
+    REQUIRE(failed.publish_failed(
+        8, 12, CacheFailureCode::ProducerExited));
+    REQUIRE_FALSE(failed.begin_evict(8, 12));
+    REQUIRE(failed.unregister_waiter(8, 12));
+    REQUIRE_FALSE(failed.unregister_waiter(8, 12));
+    REQUIRE(failed.begin_evict(8, 12));
+}
+
 TEST_CASE("wait dependencies form a strictly descending claim DAG") {
     const std::array<std::uint64_t, 3> owned{10, 20, 30};
     REQUIRE(claim_sequence_wait_allowed(9, owned));
@@ -152,6 +381,55 @@ TEST_CASE("TTL starts at completion and uses the stricter consumer policy") {
     REQUIRE(ttl_nanoseconds(
         (std::numeric_limits<std::uint64_t>::max)())
         == (std::numeric_limits<std::uint64_t>::max)());
+}
+
+TEST_CASE("monotonic TTL boundaries reject wrap instead of inferring age") {
+    constexpr auto maximum =
+        (std::numeric_limits<std::uint64_t>::max)();
+    constexpr std::uint64_t nanos_per_millisecond = 1'000'000;
+    constexpr std::uint64_t largest_exact_ttl_ms =
+        maximum / nanos_per_millisecond;
+
+    REQUIRE(monotonic_age_ns(0, 0) == 0);
+    REQUIRE(monotonic_age_ns(0, maximum) == maximum);
+    REQUIRE(monotonic_age_ns(maximum, maximum) == 0);
+    REQUIRE_FALSE(monotonic_age_ns(maximum, 0).has_value());
+    REQUIRE_FALSE(monotonic_age_ns(maximum, maximum - 1).has_value());
+
+    REQUIRE(ttl_nanoseconds(0) == 0);
+    REQUIRE(
+        ttl_nanoseconds(largest_exact_ttl_ms)
+        == largest_exact_ttl_ms * nanos_per_millisecond);
+    REQUIRE(ttl_nanoseconds(largest_exact_ttl_ms + 1) == maximum);
+
+    const CacheTimestamps ordinary{
+        .started_ns = 10,
+        .completed_ns = 20,
+    };
+    REQUIRE_FALSE(expired(ordinary, 1, 1, 1'000'019));
+    REQUIRE(expired(ordinary, 1, 1, 1'000'020));
+
+    const CacheTimestamps saturated{
+        .started_ns = 0,
+        .completed_ns = 0,
+    };
+    REQUIRE_FALSE(expired(
+        saturated, maximum, maximum, maximum - 1));
+    REQUIRE(expired(saturated, maximum, maximum, maximum));
+
+    const CacheTimestamps wrapped_sample{
+        .started_ns = maximum - 1,
+        .completed_ns = maximum,
+    };
+    REQUIRE(expired(wrapped_sample, maximum, maximum, 0));
+    REQUIRE_FALSE(completed_ttl_decision(
+        wrapped_sample, 0, 0, 0, true, false).readable);
+
+    const CacheTimestamps incomplete{
+        .started_ns = maximum,
+        .completed_ns = std::nullopt,
+    };
+    REQUIRE_FALSE(expired(incomplete, 0, 0, maximum));
 }
 
 TEST_CASE("zero TTL grants one same-generation waiter read exactly once") {
