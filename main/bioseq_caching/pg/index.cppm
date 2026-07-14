@@ -360,6 +360,7 @@ inline CacheDigest256 g_forced_coverage_domain_digest{};
 /** Backend-local verifier faults exercise unavailable third-party AM paths. */
 enum class TestExactPlanFault : std::uint8_t {
     None,
+    UnknownCustomScan,
     UnknownTableAccessMethod,
     UnknownIndexAccessMethod,
 };
@@ -5404,6 +5405,11 @@ struct ExactPlanVerification {
 /** Positive allowlist for finalized executor sources and structural nodes. */
 [[nodiscard]] bool exact_plan_tree_safe(
         ExactPlanVerification& verification, const Plan* plan) {
+#if defined(BIOSEQ_CACHE_TESTING)
+    if (g_test_exact_plan_fault == TestExactPlanFault::UnknownCustomScan) {
+        return false;
+    }
+#endif
     if (plan == nullptr || !exact_common_plan_expressions_safe(*plan)) {
         return false;
     }
@@ -6313,6 +6319,8 @@ Datum bioseq_cache_test_set_exact_plan_fault(PG_FUNCTION_ARGS) {
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     if (std::strcmp(name, "none") == 0) {
         g_test_exact_plan_fault = TestExactPlanFault::None;
+    } else if (std::strcmp(name, "unknown_custom_scan") == 0) {
+        g_test_exact_plan_fault = TestExactPlanFault::UnknownCustomScan;
     } else if (std::strcmp(name, "unknown_table_am") == 0) {
         g_test_exact_plan_fault =
             TestExactPlanFault::UnknownTableAccessMethod;

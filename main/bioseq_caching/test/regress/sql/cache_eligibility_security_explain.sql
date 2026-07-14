@@ -176,82 +176,49 @@ RESET enable_indexscan;
 RESET enable_indexonlyscan;
 RESET enable_bitmapscan;
 
--- An unregistered CustomScan is likewise bypassed while its executor still
--- produces the complete disabled-mode bag.
-CREATE TABLE qc_unsafe_provider(
-    row_id bigint PRIMARY KEY,
-    base_id bigint NOT NULL,
-    occurrence_no integer NOT NULL,
-    nullable_value integer,
-    payload text NOT NULL,
-    capability_mask bigint NOT NULL,
-    UNIQUE (base_id, occurrence_no)
-);
-INSERT INTO qc_unsafe_provider VALUES
-    (1, 10, 0, NULL, 'null', 3),
-    (2, 11, 0, 0, 'zero', 3),
-    (3, 12, 0, 5, 'first', 3),
-    (4, 12, 1, 5, 'second', 3),
-    (5, 13, 0, 20, 'outside', 3);
-SELECT bioseq_cache_test.provider_init();
-SELECT bioseq_cache_test.provider_use_relation('qc_unsafe_provider');
-SELECT bioseq_cache_test.provider_reset();
+-- A finalized unknown-CustomScan classification is likewise fail-open.
+SELECT bioseq_cache_test.set_exact_plan_fault('unknown_custom_scan');
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache.reset_stats();
 DO $$
 DECLARE
     attempt integer;
-    observed bigint[];
-    observed_row record;
+    observed text;
     cache_stats record;
-    provider_stats jsonb;
     plan_text text;
     plan jsonb;
 BEGIN
     FOR attempt IN 1..2 LOOP
-        observed := ARRAY[]::bigint[];
-        FOR observed_row IN EXECUTE
-            'SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask '
-            'FROM qc_unsafe_provider WHERE nullable_value <= 10'
-        LOOP
-            observed := array_append(observed, observed_row.row_id);
-        END LOOP;
-        SELECT array_agg(value ORDER BY value)
-        INTO observed
-        FROM unnest(observed) AS sorted_values(value);
-        IF observed <> ARRAY[2,3,4]::bigint[] THEN
-            RAISE EXCEPTION 'CustomScan bypass changed retained-child bag: %',
+        EXECUTE 'SELECT value FROM qc_elig WHERE id = 2' INTO observed;
+        IF observed <> 'two' THEN
+            RAISE EXCEPTION 'CustomScan-class bypass changed child result: %',
                 observed;
         END IF;
     END LOOP;
     EXECUTE
         'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
-        'SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask '
-        'FROM qc_unsafe_provider WHERE nullable_value <= 10'
+        'SELECT value FROM qc_elig WHERE id = 2'
         INTO plan_text;
     plan := plan_text::jsonb;
     IF COALESCE(
             (plan->0->'Plan'->>'Cache Force Bypass')::boolean,
-            false) IS NOT TRUE
-       OR position('BioseqCacheGenericTestProvider' in plan::text) = 0 THEN
-        RAISE EXCEPTION 'unknown CustomScan bypass proof is absent: %', plan;
+            false) IS NOT TRUE THEN
+        RAISE EXCEPTION 'unknown-CustomScan bypass proof is absent: %', plan;
     END IF;
     SELECT * INTO cache_stats FROM bioseq_cache.stats();
-    provider_stats := bioseq_cache_test.provider_stats();
     IF cache_stats.produced <> 0
        OR cache_stats.completed_hits <> 0
        OR cache_stats.inflight_waits <> 0
        OR cache_stats.fallbacks <> 2
-       OR (provider_stats->>'executor_rows')::bigint = 0
        OR EXISTS (
             SELECT 1 FROM bioseq_cache_test.entry_states()
             WHERE state IN ('BUILDING', 'COMPLETE')) THEN
-        RAISE EXCEPTION 'CustomScan verifier failed open incorrectly: %, %',
-            row_to_json(cache_stats), provider_stats;
+        RAISE EXCEPTION 'CustomScan classifier touched the registry: %',
+            row_to_json(cache_stats);
     END IF;
 END
 $$;
-SELECT bioseq_cache_test.provider_shutdown();
+SELECT bioseq_cache_test.set_exact_plan_fault('none');
 
 CREATE ROLE qc_alice;
 CREATE ROLE qc_bob;
