@@ -368,6 +368,9 @@ def _run_prove(
     prove: Path,
     tap_dir: Path,
 ) -> None:
+    tap_files = sorted(tap_dir.glob("*.pl"))
+    if not tap_files:
+        raise ClusterCommandError(f"no TAP test files found in {tap_dir}")
     pg_perl = (
         cluster.inputs.bindir.parent
         / "lib"
@@ -385,7 +388,7 @@ def _run_prove(
     command = [str(prove)]
     if pg_perl.is_dir():
         command.extend(["-I", str(pg_perl)])
-    command.extend(["-r", str(tap_dir)])
+    command.extend(str(tap_file) for tap_file in tap_files)
     _run_checked(
         command,
         env=env,
