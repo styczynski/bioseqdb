@@ -82,6 +82,106 @@ SELECT id FROM qc_left
 ORDER BY id
 LIMIT 6 OFFSET 1;
 
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+
+\o
+SELECT k, count(*), min(id), max(id)
+FROM qc_left
+GROUP BY k
+HAVING count(*) >= 1
+ORDER BY k NULLS FIRST;
+SELECT k, count(*), min(id), max(id)
+FROM qc_left
+GROUP BY k
+HAVING count(*) >= 1
+ORDER BY k NULLS FIRST;
+
+SELECT DISTINCT k FROM qc_left ORDER BY k NULLS FIRST;
+SELECT DISTINCT k FROM qc_left ORDER BY k NULLS FIRST;
+
+SELECT id, row_number() OVER (PARTITION BY k ORDER BY id)
+FROM qc_left
+ORDER BY id;
+SELECT id, row_number() OVER (PARTITION BY k ORDER BY id)
+FROM qc_left
+ORDER BY id;
+
+SELECT id FROM qc_left
+UNION ALL
+SELECT id FROM qc_left
+ORDER BY id
+LIMIT 6 OFFSET 1;
+SELECT id FROM qc_left
+UNION ALL
+SELECT id FROM qc_left
+ORDER BY id
+LIMIT 6 OFFSET 1;
+
+SELECT produced, completed_hits, fallbacks
+FROM bioseq_cache.stats();
+\o /dev/null
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM bioseq_cache.stats()
+        WHERE produced = 4
+          AND completed_hits = 4
+          AND fallbacks = 0)
+    THEN
+        RAISE EXCEPTION 'immutable upper operations did not produce and replay';
+    END IF;
+END
+$$;
+
+-- bigint || text selects the polymorphic STABLE anytextcat function.  The
+-- aggregates remain immutable, but DOC0371 deliberately rejects this call.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+\o
+SELECT count(*) || '|' || sum(id) FROM qc_left;
+SELECT count(*) || '|' || sum(id) FROM qc_left;
+SELECT produced, completed_hits, fallbacks
+FROM bioseq_cache.stats();
+\o /dev/null
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM bioseq_cache.stats()
+        WHERE produced <> 0
+           OR completed_hits <> 0
+           OR fallbacks <> 0)
+    THEN
+        RAISE EXCEPTION 'STABLE implicit text conversion entered exact cache';
+    END IF;
+END
+$$;
+
+-- Explicit immutable integer-to-text casts select immutable textcat.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+\o
+SELECT count(*)::text || '|' || sum(id)::text FROM qc_left;
+SELECT count(*)::text || '|' || sum(id)::text FROM qc_left;
+SELECT produced, completed_hits, fallbacks
+FROM bioseq_cache.stats();
+\o /dev/null
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM bioseq_cache.stats()
+        WHERE produced = 1
+          AND completed_hits = 1
+          AND fallbacks = 0)
+    THEN
+        RAISE EXCEPTION 'immutable scalar aggregate did not produce and replay';
+    END IF;
+END
+$$;
+
 CREATE FUNCTION qc_volatile_state(integer, integer)
 RETURNS integer
 LANGUAGE SQL VOLATILE
