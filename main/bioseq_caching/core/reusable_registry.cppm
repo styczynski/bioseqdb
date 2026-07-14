@@ -30,12 +30,13 @@ import :wire;
 export namespace bioseq::cache {
 
 inline constexpr std::uint32_t kReusableRegistryMagicV1 = 0x42524347U;
-inline constexpr std::uint32_t kReusableRegistryAbiVersionV1 = 1;
+inline constexpr std::uint32_t kReusableRegistryAbiVersionV1 = 2;
 inline constexpr std::uint32_t kDefaultReusableRegistryGenerationsV1 = 256;
 inline constexpr std::uint32_t kDefaultReusableRegistryPartitionsV1 = 16;
 inline constexpr std::uint32_t kDefaultReusableRegistryArenaBytesV1 = 16U << 20;
 inline constexpr std::uint32_t kMaximumReusableRegistryGenerationsV1 = 65'536;
 inline constexpr std::uint32_t kMaximumReusableJanitorBatchV1 = 64;
+inline constexpr std::uint32_t kReusableReferenceOwnersPerGenerationV1 = 64;
 inline constexpr std::uint32_t kInvalidReusableRegistrySlotV1 =
     (std::numeric_limits<std::uint32_t>::max)();
 
@@ -63,6 +64,7 @@ enum class ReusableRegistryErrorV1 : std::uint32_t {
   InvalidState,
   CounterOverflow,
   CounterUnderflow,
+  ReferenceSlotsFull,
   ManifestMismatch,
   NoReclaimableGeneration,
 };
@@ -150,7 +152,13 @@ struct ReusableProducerIdentityV1 {
     return proc_number != kInvalidReusableRegistrySlotV1 && pid > 0 &&
            backend_nonce != 0;
   }
+
+  [[nodiscard]] bool
+  operator==(const ReusableProducerIdentityV1 &) const noexcept = default;
 };
+
+/** Generic backend identity used by every waiter/planner/reader reference. */
+using ReusableReferenceOwnerV1 = ReusableProducerIdentityV1;
 
 /** Region-relative immutable bytes. Offset zero is always invalid. */
 struct ReusableSharedByteRangeV1 {
@@ -207,12 +215,24 @@ enum class ReusableReferenceKindV1 : std::uint8_t {
   ReaderPin = 3,
 };
 
+/** One fixed shared owner record; sequence prevents slot reuse ABA. */
+struct ReusableSharedReferenceOwnerV1 {
+  ReusableReferenceOwnerV1 owner{};
+  std::uint64_t owner_sequence = 0;
+  ReusableReferenceKindV1 kind = ReusableReferenceKindV1::None;
+  bool active = false;
+  std::array<std::uint8_t, 6> reserved{};
+};
+
 /** Backend-local ownership token; release clears active before mutation. */
 struct ReusableReferenceTokenV1 {
   ReusableGenerationReferenceV1 reference{};
+  ReusableReferenceOwnerV1 owner{};
+  std::uint64_t owner_sequence = 0;
+  std::uint32_t owner_slot = kInvalidReusableRegistrySlotV1;
   ReusableReferenceKindV1 kind = ReusableReferenceKindV1::None;
-  std::array<std::uint8_t, 7> reserved{};
   bool active = false;
+  std::array<std::uint8_t, 2> reserved{};
 };
 
 enum class ReusableRecordMembershipV1 : std::uint32_t {
@@ -272,6 +292,9 @@ struct ReusableSharedGenerationV1 {
   std::uint32_t planner_pin_count = 0;
   std::uint32_t reader_pin_count = 0;
   std::uint32_t reserved_count = 0;
+  std::array<ReusableSharedReferenceOwnerV1,
+             kReusableReferenceOwnersPerGenerationV1>
+      reference_owners{};
   std::uint64_t started_monotonic_ns = 0;
   std::uint64_t completed_monotonic_ns = 0;
   std::uint64_t last_access_monotonic_ns = 0;
@@ -292,6 +315,7 @@ struct ReusableRegistryHeaderV1 {
   std::uint64_t next_generation = 1;
   std::uint64_t next_claim_sequence = 1;
   std::uint64_t next_slot_sequence = 1;
+  std::uint64_t next_reference_sequence = 1;
   std::uint32_t free_generation_head = kInvalidReusableRegistrySlotV1;
   std::uint32_t retired_generation_head = kInvalidReusableRegistrySlotV1;
   std::uint32_t free_extent_count = 0;
@@ -660,6 +684,7 @@ validate_reusable_registry_attachment(
       shared.layout.total_bytes > attachment.region.size() ||
       shared.boot_nonce == 0 || shared.next_generation == 0 ||
       shared.next_claim_sequence == 0 || shared.next_slot_sequence == 0 ||
+      shared.next_reference_sequence == 0 ||
       shared.free_extent_count > shared.layout.free_extent_capacity ||
       shared.janitor_scan_cursor >= shared.config.max_generations ||
       shared.indexed_generations > shared.config.max_generations ||
@@ -734,6 +759,7 @@ startup_reusable_registry(std::span<std::byte> region, std::uint64_t boot_nonce,
   shared.next_generation = 1;
   shared.next_claim_sequence = 1;
   shared.next_slot_sequence = 1;
+  shared.next_reference_sequence = 1;
   shared.free_generation_head = 0;
   shared.retired_generation_head = kInvalidReusableRegistrySlotV1;
   shared.free_extent_count = 1;
@@ -813,6 +839,7 @@ struct ReusableClaimRequestV1 {
   std::span<const std::byte> coverage_descriptor{};
   ReusableGenerationMetadataV1 metadata{};
   ReusableProducerIdentityV1 producer{};
+  ReusableReferenceOwnerV1 reference_owner{};
   std::uint64_t started_monotonic_ns = 0;
   std::uint64_t consumer_ttl_ms = (std::numeric_limits<std::uint64_t>::max)();
   bool pin_complete = true;
@@ -881,6 +908,7 @@ struct ReusableLookupResultV1 {
 struct ReusableCandidateRequestV1 {
   ReusableCoverageDirectoryKeyV1 coverage_directory_key{};
   std::span<const std::byte> canonical_domain_key{};
+  ReusableReferenceOwnerV1 reference_owner{};
   std::uint32_t provider_id = 0;
   std::uint32_t reserved = 0;
   std::uint64_t compatibility_family_id = 0;
@@ -940,10 +968,13 @@ struct ReusableRegistrySnapshotV1 {
 
 using ReusableProducerAliveV1 =
     bool (*)(void *, const ReusableProducerIdentityV1 &) noexcept;
+using ReusableReferenceOwnerAliveV1 =
+    bool (*)(void *, const ReusableReferenceOwnerV1 &) noexcept;
 
 struct ReusableJanitorCallbacksV1 {
   void *context = nullptr;
   ReusableProducerAliveV1 producer_alive = nullptr;
+  ReusableReferenceOwnerAliveV1 reference_owner_alive = nullptr;
 };
 
 struct ReusableJanitorSweepResultV1 {
@@ -953,6 +984,9 @@ struct ReusableJanitorSweepResultV1 {
   std::uint32_t retired_failed = 0;
   std::uint32_t retired_invalidated = 0;
   std::uint32_t failed_dead_producers = 0;
+  std::uint32_t reaped_waiters = 0;
+  std::uint32_t reaped_planner_pins = 0;
+  std::uint32_t reaped_reader_pins = 0;
   std::array<ReusableManifestHandleV1, kMaximumReusableJanitorBatchV1>
       retired_manifests{};
   std::size_t retired_manifest_count = 0;
@@ -1645,8 +1679,13 @@ find_exact_current(const ReusableRegistryAttachmentV1 &attachment,
 
 [[nodiscard]] inline std::expected<ReusableReferenceTokenV1,
                                    ReusableRegistryErrorV1>
-increment_reference(ReusableSharedGenerationV1 &generation, std::uint32_t slot,
-                    ReusableReferenceKindV1 kind) noexcept {
+increment_reference(ReusableRegistryAttachmentV1 &attachment,
+                    ReusableSharedGenerationV1 &generation,
+                    std::uint32_t slot, ReusableReferenceKindV1 kind,
+                    const ReusableReferenceOwnerV1 &owner) noexcept {
+  if (!owner.valid()) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
   std::uint32_t *counter = nullptr;
   switch (kind) {
   case ReusableReferenceKindV1::Waiter:
@@ -1676,12 +1715,76 @@ increment_reference(ReusableSharedGenerationV1 &generation, std::uint32_t slot,
   if (*counter == (std::numeric_limits<std::uint32_t>::max)()) {
     return std::unexpected(ReusableRegistryErrorV1::CounterOverflow);
   }
-  ++*counter;
-  return ReusableReferenceTokenV1{
-      .reference = make_reference(generation, slot),
+  std::uint32_t owner_slot = kInvalidReusableRegistrySlotV1;
+  for (std::uint32_t index = 0;
+       index < kReusableReferenceOwnersPerGenerationV1; ++index) {
+    if (!generation.reference_owners[index].active) {
+      owner_slot = index;
+      break;
+    }
+  }
+  if (owner_slot == kInvalidReusableRegistrySlotV1) {
+    return std::unexpected(ReusableRegistryErrorV1::ReferenceSlotsFull);
+  }
+  const std::uint64_t owner_sequence =
+      take_sequence(header(attachment).next_reference_sequence);
+  if (owner_sequence == 0) {
+    return std::unexpected(ReusableRegistryErrorV1::CounterOverflow);
+  }
+  generation.reference_owners[owner_slot] = ReusableSharedReferenceOwnerV1{
+      .owner = owner,
+      .owner_sequence = owner_sequence,
       .kind = kind,
       .active = true,
   };
+  ++*counter;
+  return ReusableReferenceTokenV1{
+      .reference = make_reference(generation, slot),
+      .owner = owner,
+      .owner_sequence = owner_sequence,
+      .owner_slot = owner_slot,
+      .kind = kind,
+      .active = true,
+  };
+}
+
+[[nodiscard]] inline std::uint32_t *reference_counter(
+    ReusableSharedGenerationV1 &generation,
+    ReusableReferenceKindV1 kind) noexcept {
+  if (kind == ReusableReferenceKindV1::Waiter) {
+    return &generation.waiter_count;
+  }
+  if (kind == ReusableReferenceKindV1::PlannerPin) {
+    return &generation.planner_pin_count;
+  }
+  if (kind == ReusableReferenceKindV1::ReaderPin) {
+    return &generation.reader_pin_count;
+  }
+  return nullptr;
+}
+
+[[nodiscard]] inline bool reference_owner_matches(
+    const ReusableSharedReferenceOwnerV1 &shared_owner,
+    const ReusableReferenceTokenV1 &token) noexcept {
+  return token.owner_slot < kReusableReferenceOwnersPerGenerationV1 &&
+         shared_owner.active && shared_owner.kind == token.kind &&
+         shared_owner.owner_sequence == token.owner_sequence &&
+         shared_owner.owner == token.owner;
+}
+
+[[nodiscard]] inline ReusableRegistryErrorV1 deactivate_reference_owner(
+    ReusableSharedGenerationV1 &generation,
+    ReusableSharedReferenceOwnerV1 &shared_owner) noexcept {
+  std::uint32_t *counter = reference_counter(generation, shared_owner.kind);
+  if (!shared_owner.active || counter == nullptr) {
+    return ReusableRegistryErrorV1::InvalidState;
+  }
+  if (*counter == 0) {
+    return ReusableRegistryErrorV1::CounterUnderflow;
+  }
+  --*counter;
+  shared_owner = ReusableSharedReferenceOwnerV1{};
+  return ReusableRegistryErrorV1::None;
 }
 
 [[nodiscard]] inline bool
@@ -1704,7 +1807,9 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
              request.metadata.physical_identity.bytes.size() &&
          request.metadata.observability ==
              WriteObservability::ProviderComplete &&
-         request.producer.valid();
+         request.producer.valid() &&
+         ((!request.pin_complete && !request.register_waiter) ||
+          request.reference_owner.valid());
 }
 
 [[nodiscard]] inline bool
@@ -1731,13 +1836,15 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
     std::span<const std::byte> domain_key,
     const CacheDigest256 &generation_digest,
     std::span<const std::byte> generation_key, ReusableLookupModeV1 mode,
+    const ReusableReferenceOwnerV1 &reference_owner,
     const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
   using namespace reusable_registry_detail;
   ReusableLookupResultV1 result{};
   const ReusableRegistryErrorV1 attachment_error =
       validate_reusable_registry_attachment(attachment);
   if (attachment_error != ReusableRegistryErrorV1::None || !callbacks.valid() ||
-      domain_key.empty() || generation_key.empty()) {
+      domain_key.empty() || generation_key.empty() ||
+      (mode != ReusableLookupModeV1::Observe && !reference_owner.valid())) {
     result.error = attachment_error != ReusableRegistryErrorV1::None
                        ? attachment_error
                        : ReusableRegistryErrorV1::InvalidArgument;
@@ -1773,7 +1880,8 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
     kind = ReusableReferenceKindV1::ReaderPin;
   }
   if (kind != ReusableReferenceKindV1::None) {
-    auto token = increment_reference(generation, match.slot, kind);
+    auto token = increment_reference(attachment, generation, match.slot, kind,
+                                     reference_owner);
     if (!token.has_value()) {
       release_exact(callbacks, partition);
       result.error = token.error();
@@ -1831,8 +1939,9 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
         generation.state == CacheEntryState::Building) {
       result.disposition = ReusableClaimDispositionV1::ExistingInFlight;
       if (request.register_waiter) {
-        auto token = increment_reference(generation, existing.slot,
-                                         ReusableReferenceKindV1::Waiter);
+        auto token = increment_reference(
+            attachment, generation, existing.slot,
+            ReusableReferenceKindV1::Waiter, request.reference_owner);
         if (!token.has_value()) {
           release_exact(callbacks, exact_partition);
           result.error = token.error();
@@ -1848,8 +1957,9 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
                                       request.started_monotonic_ns)) {
       result.disposition = ReusableClaimDispositionV1::ExistingComplete;
       if (request.pin_complete) {
-        auto token = increment_reference(generation, existing.slot,
-                                         ReusableReferenceKindV1::ReaderPin);
+        auto token = increment_reference(
+            attachment, generation, existing.slot,
+            ReusableReferenceKindV1::ReaderPin, request.reference_owner);
         if (!token.has_value()) {
           release_exact(callbacks, exact_partition);
           result.error = token.error();
@@ -1980,6 +2090,7 @@ pin_reusable_generation(
     ReusableRegistryAttachmentV1 &attachment,
     const ReusableGenerationReferenceV1 &reference,
     ReusableReferenceKindV1 kind,
+    const ReusableReferenceOwnerV1 &reference_owner,
     const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
   using namespace reusable_registry_detail;
   const ReusableRegistryErrorV1 attachment_error =
@@ -1987,7 +2098,7 @@ pin_reusable_generation(
   if (attachment_error != ReusableRegistryErrorV1::None) {
     return std::unexpected(attachment_error);
   }
-  if (!callbacks.valid() || !reference ||
+  if (!callbacks.valid() || !reference || !reference_owner.valid() ||
       reference.generation_slot >= header(attachment).config.max_generations) {
     return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
   }
@@ -2000,7 +2111,9 @@ pin_reusable_generation(
     release_exact(callbacks, partition);
     return std::unexpected(ReusableRegistryErrorV1::StaleReference);
   }
-  auto token = increment_reference(generation, reference.generation_slot, kind);
+  auto token = increment_reference(attachment, generation,
+                                   reference.generation_slot, kind,
+                                   reference_owner);
   release_exact(callbacks, partition);
   return token;
 }
@@ -2014,14 +2127,16 @@ pin_reusable_generation(
     return ReusableRegistryErrorV1::None;
   }
   const ReusableReferenceTokenV1 owned = token;
-  token.active = false;
-  token.kind = ReusableReferenceKindV1::None;
+  token = ReusableReferenceTokenV1{};
   const ReusableRegistryErrorV1 attachment_error =
       validate_reusable_registry_attachment(attachment);
   if (attachment_error != ReusableRegistryErrorV1::None) {
     return attachment_error;
   }
-  if (!callbacks.valid() || !owned.reference ||
+  if (!callbacks.valid() || !owned.reference || !owned.owner.valid() ||
+      owned.owner_sequence == 0 ||
+      owned.owner_slot >= kReusableReferenceOwnersPerGenerationV1 ||
+      owned.kind == ReusableReferenceKindV1::None ||
       owned.reference.generation_slot >=
           header(attachment).config.max_generations) {
     return ReusableRegistryErrorV1::InvalidArgument;
@@ -2035,24 +2150,16 @@ pin_reusable_generation(
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::StaleReference;
   }
-  std::uint32_t *counter = nullptr;
-  if (owned.kind == ReusableReferenceKindV1::Waiter) {
-    counter = &generation.waiter_count;
-  } else if (owned.kind == ReusableReferenceKindV1::PlannerPin) {
-    counter = &generation.planner_pin_count;
-  } else if (owned.kind == ReusableReferenceKindV1::ReaderPin) {
-    counter = &generation.reader_pin_count;
-  } else {
+  ReusableSharedReferenceOwnerV1 &shared_owner =
+      generation.reference_owners[owned.owner_slot];
+  if (!reference_owner_matches(shared_owner, owned)) {
     release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::InvalidArgument;
+    return ReusableRegistryErrorV1::StaleReference;
   }
-  if (*counter == 0) {
-    release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::CounterUnderflow;
-  }
-  --*counter;
+  const ReusableRegistryErrorV1 release_error =
+      deactivate_reference_owner(generation, shared_owner);
   release_exact(callbacks, partition);
-  return ReusableRegistryErrorV1::None;
+  return release_error;
 }
 
 /** Atomically convert an in-flight waiter entitlement to a complete reader pin.
@@ -2068,6 +2175,8 @@ pin_reusable_generation(
   }
   if (!callbacks.valid() || !token.active ||
       token.kind != ReusableReferenceKindV1::Waiter || !token.reference ||
+      !token.owner.valid() || token.owner_sequence == 0 ||
+      token.owner_slot >= kReusableReferenceOwnersPerGenerationV1 ||
       token.reference.generation_slot >=
           header(attachment).config.max_generations) {
     return ReusableRegistryErrorV1::InvalidArgument;
@@ -2081,15 +2190,28 @@ pin_reusable_generation(
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::StaleReference;
   }
-  if (generation.state != CacheEntryState::Complete ||
-      generation.waiter_count == 0 ||
-      generation.reader_pin_count ==
-          (std::numeric_limits<std::uint32_t>::max)()) {
+  ReusableSharedReferenceOwnerV1 &shared_owner =
+      generation.reference_owners[token.owner_slot];
+  if (!reference_owner_matches(shared_owner, token)) {
+    release_exact(callbacks, partition);
+    return ReusableRegistryErrorV1::StaleReference;
+  }
+  if (generation.state != CacheEntryState::Complete) {
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::InvalidState;
   }
+  if (generation.waiter_count == 0) {
+    release_exact(callbacks, partition);
+    return ReusableRegistryErrorV1::CounterUnderflow;
+  }
+  if (generation.reader_pin_count ==
+      (std::numeric_limits<std::uint32_t>::max)()) {
+    release_exact(callbacks, partition);
+    return ReusableRegistryErrorV1::CounterOverflow;
+  }
   --generation.waiter_count;
   ++generation.reader_pin_count;
+  shared_owner.kind = ReusableReferenceKindV1::ReaderPin;
   token.kind = ReusableReferenceKindV1::ReaderPin;
   release_exact(callbacks, partition);
   return ReusableRegistryErrorV1::None;
@@ -2145,7 +2267,8 @@ snapshot_reusable_candidates(
   if (attachment_error != ReusableRegistryErrorV1::None || !callbacks.valid() ||
       request.canonical_domain_key.empty() ||
       request.canonical_domain_key.size() > kMaxCoverageDomainKeyBytes ||
-      request.provider_id == 0 || request.compatibility_family_id == 0) {
+      !request.reference_owner.valid() || request.provider_id == 0 ||
+      request.compatibility_family_id == 0) {
     return std::unexpected(attachment_error != ReusableRegistryErrorV1::None
                                ? attachment_error
                                : ReusableRegistryErrorV1::InvalidArgument);
@@ -2250,7 +2373,8 @@ snapshot_reusable_candidates(
     ReusableCandidateSnapshotV1 &candidate = result.candidates[index];
     auto planner_pin =
         pin_reusable_generation(attachment, candidate.generation.reference,
-                                ReusableReferenceKindV1::PlannerPin, callbacks);
+                                ReusableReferenceKindV1::PlannerPin,
+                                request.reference_owner, callbacks);
     if (!planner_pin.has_value()) {
       for (std::size_t release_index = 0; release_index < index;
            ++release_index) {

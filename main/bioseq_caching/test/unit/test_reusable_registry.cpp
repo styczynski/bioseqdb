@@ -78,6 +78,11 @@ producer(std::uint32_t ordinal) noexcept {
   };
 }
 
+[[nodiscard]] ReusableReferenceOwnerV1
+reference_owner(std::uint32_t ordinal) noexcept {
+  return producer(1'000 + ordinal);
+}
+
 class RegistryFixture {
 private:
   ReusableRegistryConfigV1 config_{};
@@ -128,6 +133,8 @@ claim(RegistryFixture &fixture, const ReusableCoverageDirectoryKeyV1 &key,
                               .canonical_generation_key = byte_view(generation),
                               .metadata = metadata(producer_ttl_ms),
                               .producer = producer(producer_ordinal),
+                              .reference_owner =
+                                  reference_owner(producer_ordinal),
                               .started_monotonic_ns = started_ns,
                           });
 }
@@ -165,6 +172,8 @@ candidate_request(const ReusableCoverageDirectoryKeyV1 &key,
   return ReusableCandidateRequestV1{
       .coverage_directory_key = key,
       .canonical_domain_key = byte_view(domain),
+      .reference_owner =
+          reference_owner(key.security_namespace.current_role_oid),
       .provider_id = 7,
       .compatibility_family_id = 41,
       .required_capability_mask = 0b0101,
@@ -213,7 +222,8 @@ TEST_CASE("reusable registry sizes exactly and coalesces only full keys") {
   REQUIRE(static_cast<bool>(handle));
   auto lookup = lookup_reusable_current(
       fixture.attachment, key, byte_view("domain-a"), forced_collision,
-      byte_view("generation-a"), ReusableLookupModeV1::PinComplete);
+      byte_view("generation-a"), ReusableLookupModeV1::PinComplete,
+      reference_owner(90));
   REQUIRE(lookup.error == ReusableRegistryErrorV1::None);
   REQUIRE(lookup.snapshot.state == CacheEntryState::Complete);
   REQUIRE(lookup.snapshot.manifest.id == first.reference.id);
@@ -307,7 +317,8 @@ TEST_CASE("two index retirement and reclaim reject stale ABA references") {
   REQUIRE(static_cast<bool>(manifest));
 
   auto planner_pin = pin_reusable_generation(
-      fixture.attachment, old_reference, ReusableReferenceKindV1::PlannerPin);
+      fixture.attachment, old_reference, ReusableReferenceKindV1::PlannerPin,
+      reference_owner(91));
   REQUIRE(planner_pin.has_value());
   auto pinned_retire =
       retire_reusable_generation(fixture.attachment, old_reference);
@@ -324,7 +335,8 @@ TEST_CASE("two index retirement and reclaim reject stale ABA references") {
 
   auto exact = lookup_reusable_current(
       fixture.attachment, key, byte_view("domain"), digest(40),
-      byte_view("generation"), ReusableLookupModeV1::Observe);
+      byte_view("generation"), ReusableLookupModeV1::Observe,
+      reference_owner(92));
   REQUIRE(exact.error == ReusableRegistryErrorV1::NotFound);
   auto coverage = snapshot_reusable_candidates(
       fixture.attachment, candidate_request(key, "domain"));
