@@ -1024,6 +1024,43 @@ struct ReusableRegistrySnapshotV1 {
   std::uint32_t invalidations = 0;
 };
 
+/** Pointer-free, redacted admin row for one currently indexed generation. */
+struct ReusableGenerationDiagnosticsRowV1 {
+  ReusableGenerationReferenceV1 reference{};
+  ReusableManifestHandleV1 manifest{};
+  CacheDigest256 dependency_fingerprint{};
+  CacheEntryKind entry_kind = CacheEntryKind::ReusableCoverage;
+  CacheEntryState state = CacheEntryState::Absent;
+  CacheFailureCode failure = CacheFailureCode::None;
+  WriteObservability observability = WriteObservability::DatabaseWideFallback;
+  std::uint32_t provider_id = 0;
+  std::uint32_t provider_abi_version = 0;
+  std::uint32_t provider_domain_abi_version = 0;
+  std::uint32_t dependency_count = 0;
+  std::int32_t producer_pid = 0;
+  std::uint32_t waiter_count = 0;
+  std::uint32_t planner_pin_count = 0;
+  std::uint32_t reader_pin_count = 0;
+  std::uint64_t compatibility_family_id = 0;
+  std::uint64_t capability_mask = 0;
+  std::uint64_t estimated_covered_rows = 0;
+  std::uint64_t row_count = 0;
+  std::uint64_t logical_bytes = 0;
+  std::uint64_t stored_bytes = 0;
+  std::uint64_t producer_ttl_ms = 0;
+  std::uint64_t started_monotonic_ns = 0;
+  std::uint64_t completed_monotonic_ns = 0;
+  std::uint64_t last_access_monotonic_ns = 0;
+};
+
+/** Counts for one caller-bounded diagnostics copy. */
+struct ReusableGenerationDiagnosticsResultV1 {
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  std::uint32_t indexed_generation_count = 0;
+  std::size_t count = 0;
+  bool truncated = false;
+};
+
 using ReusableProducerAliveV1 =
     bool (*)(void *, const ReusableProducerIdentityV1 &) noexcept;
 using ReusableReferenceOwnerAliveV1 =
@@ -1412,6 +1449,40 @@ make_snapshot(const ReusableSharedGenerationV1 &generation,
       .completed_monotonic_ns = generation.completed_monotonic_ns,
       .last_access_monotonic_ns = generation.last_access_monotonic_ns,
       .row_count = generation.row_count,
+  };
+}
+
+/** Copy only scalar/digest diagnostics, never shared byte ranges or pointers. */
+[[nodiscard]] inline ReusableGenerationDiagnosticsRowV1
+make_diagnostics_row(const ReusableSharedGenerationV1 &generation,
+                     std::uint32_t slot) noexcept {
+  return ReusableGenerationDiagnosticsRowV1{
+      .reference = make_reference(generation, slot),
+      .manifest = generation.manifest,
+      .dependency_fingerprint = generation.metadata.dependency_fingerprint,
+      .entry_kind = generation.entry_kind,
+      .state = generation.state,
+      .failure = generation.failure,
+      .observability = generation.metadata.observability,
+      .provider_id = generation.metadata.provider_id,
+      .provider_abi_version = generation.metadata.provider_abi_version,
+      .provider_domain_abi_version =
+          generation.metadata.provider_domain_abi_version,
+      .dependency_count = generation.metadata.dependency_count,
+      .producer_pid = generation.producer.pid,
+      .waiter_count = generation.waiter_count,
+      .planner_pin_count = generation.planner_pin_count,
+      .reader_pin_count = generation.reader_pin_count,
+      .compatibility_family_id = generation.metadata.compatibility_family_id,
+      .capability_mask = generation.metadata.capability_mask,
+      .estimated_covered_rows = generation.metadata.estimated_covered_rows,
+      .row_count = generation.row_count,
+      .logical_bytes = generation.metadata.logical_bytes,
+      .stored_bytes = generation.metadata.stored_bytes,
+      .producer_ttl_ms = generation.metadata.producer_ttl_ms,
+      .started_monotonic_ns = generation.started_monotonic_ns,
+      .completed_monotonic_ns = generation.completed_monotonic_ns,
+      .last_access_monotonic_ns = generation.last_access_monotonic_ns,
   };
 }
 
@@ -3179,6 +3250,79 @@ reclaim_retired_reusable_generations(
   return result;
 }
 
+/**
+ * Copy a caller-bounded redacted view while membership is held shared.
+ * Optional partition callbacks make each indexed row internally consistent.
+ */
+[[nodiscard]] inline ReusableGenerationDiagnosticsResultV1
+snapshot_reusable_generation_diagnostics(
+    const ReusableRegistryAttachmentV1 &attachment,
+    std::span<ReusableGenerationDiagnosticsRowV1> rows,
+    const ReusableRegistryPartitionCallbacksV1 &partition_callbacks =
+        {}) noexcept {
+  using namespace reusable_registry_detail;
+  ReusableGenerationDiagnosticsResultV1 result{};
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None ||
+      !partition_callbacks.valid()) {
+    result.error = attachment_error != ReusableRegistryErrorV1::None
+                       ? attachment_error
+                       : ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+
+  const ReusableRegistryHeaderV1 &shared = header(attachment);
+  result.indexed_generation_count = shared.indexed_generations;
+  if (rows.empty()) {
+    result.truncated = shared.indexed_generations != 0;
+    return result;
+  }
+
+  const ReusableSharedGenerationV1 *records = generations(attachment);
+  for (std::uint32_t slot = 0; slot < shared.config.max_generations; ++slot) {
+    const ReusableSharedGenerationV1 &generation = records[slot];
+    if (generation.membership != ReusableRecordMembershipV1::Indexed) {
+      continue;
+    }
+    if (result.count >= rows.size()) {
+      result.truncated = true;
+      break;
+    }
+
+    const ReusableGenerationReferenceV1 reference =
+        make_reference(generation, slot);
+    if (!reference) {
+      result.error = ReusableRegistryErrorV1::CorruptGeneration;
+      return result;
+    }
+    const std::uint32_t exact_partition =
+        reusable_exact_partition(attachment, reference.id.digest);
+    acquire_exact(partition_callbacks, exact_partition);
+    const bool known_kind =
+        generation.entry_kind == CacheEntryKind::ExactFinalResult ||
+        generation.entry_kind == CacheEntryKind::ReusableCoverage;
+    const bool known_state =
+        generation.state == CacheEntryState::Claimed ||
+        generation.state == CacheEntryState::Building ||
+        generation.state == CacheEntryState::Complete ||
+        generation.state == CacheEntryState::Failed ||
+        generation.state == CacheEntryState::Invalidated;
+    if (!reference_matches(generation, reference) || !known_kind ||
+        !known_state) {
+      release_exact(partition_callbacks, exact_partition);
+      result.error = ReusableRegistryErrorV1::CorruptGeneration;
+      return result;
+    }
+    rows[result.count++] = make_diagnostics_row(generation, slot);
+    release_exact(partition_callbacks, exact_partition);
+  }
+  if (!result.truncated && result.count != shared.indexed_generations) {
+    result.error = ReusableRegistryErrorV1::CorruptGeneration;
+  }
+  return result;
+}
+
 /** Snapshot bounded diagnostics without exposing query or canonical bytes. */
 [[nodiscard]] inline ReusableRegistrySnapshotV1 reusable_registry_snapshot(
     const ReusableRegistryAttachmentV1 &attachment) noexcept {
@@ -3611,5 +3755,9 @@ static_assert(std::is_trivially_copyable_v<ReusableSharedReferenceOwnerV1>);
 static_assert(std::is_trivially_copyable_v<ReusableReferenceTokenV1>);
 static_assert(std::is_trivially_copyable_v<ReusableInvalidationSelectorV1>);
 static_assert(std::is_trivially_copyable_v<ReusableInvalidationResultV1>);
+static_assert(std::is_standard_layout_v<ReusableGenerationDiagnosticsRowV1>);
+static_assert(std::is_trivially_copyable_v<ReusableGenerationDiagnosticsRowV1>);
+static_assert(
+    std::is_trivially_copyable_v<ReusableGenerationDiagnosticsResultV1>);
 
 } // namespace bioseq::cache

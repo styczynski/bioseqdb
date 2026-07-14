@@ -104,6 +104,54 @@ reference_owner(std::uint32_t ordinal) noexcept {
   return producer(1'000 + ordinal);
 }
 
+template <class Row>
+concept exposes_reusable_shared_byte_ranges = requires(Row row) {
+  row.canonical_generation_key;
+  row.canonical_domain_key;
+  row.coverage_descriptor;
+};
+
+static_assert(!exposes_reusable_shared_byte_ranges<
+              ReusableGenerationDiagnosticsRowV1>);
+
+struct DiagnosticsPartitionTrace {
+  std::uint32_t exact_acquires = 0;
+  std::uint32_t exact_releases = 0;
+  std::uint32_t coverage_acquires = 0;
+  std::uint32_t coverage_releases = 0;
+};
+
+void trace_exact_acquire(void *opaque, std::uint32_t) noexcept {
+  auto &trace = *static_cast<DiagnosticsPartitionTrace *>(opaque);
+  ++trace.exact_acquires;
+}
+
+void trace_exact_release(void *opaque, std::uint32_t) noexcept {
+  auto &trace = *static_cast<DiagnosticsPartitionTrace *>(opaque);
+  ++trace.exact_releases;
+}
+
+void trace_coverage_acquire(void *opaque, std::uint32_t) noexcept {
+  auto &trace = *static_cast<DiagnosticsPartitionTrace *>(opaque);
+  ++trace.coverage_acquires;
+}
+
+void trace_coverage_release(void *opaque, std::uint32_t) noexcept {
+  auto &trace = *static_cast<DiagnosticsPartitionTrace *>(opaque);
+  ++trace.coverage_releases;
+}
+
+[[nodiscard]] const ReusableGenerationDiagnosticsRowV1 *diagnostics_row(
+    std::span<const ReusableGenerationDiagnosticsRowV1> rows,
+    const ReusableGenerationReferenceV1 &reference) noexcept {
+  for (const ReusableGenerationDiagnosticsRowV1 &row : rows) {
+    if (row.reference == reference) {
+      return &row;
+    }
+  }
+  return nullptr;
+}
+
 class RegistryFixture {
 private:
   ReusableRegistryConfigV1 config_{};
@@ -146,13 +194,16 @@ claim_with_metadata(
     const CacheDigest256 &generation_digest, std::string_view domain,
     std::string_view generation, std::uint32_t producer_ordinal,
     const ReusableGenerationMetadataV1 &generation_metadata,
-    std::uint64_t started_ns = 100) noexcept {
+    std::uint64_t started_ns = 100,
+    std::string_view coverage_descriptor = {}) noexcept {
   return claim_reusable_generation(
       fixture.attachment, ReusableClaimRequestV1{
                               .coverage_directory_key = key,
                               .generation_digest = generation_digest,
                               .canonical_domain_key = byte_view(domain),
                               .canonical_generation_key = byte_view(generation),
+                              .coverage_descriptor =
+                                  byte_view(coverage_descriptor),
                               .metadata = generation_metadata,
                               .producer = producer(producer_ordinal),
                               .reference_owner =
@@ -166,10 +217,12 @@ claim(RegistryFixture &fixture, const ReusableCoverageDirectoryKeyV1 &key,
       const CacheDigest256 &generation_digest, std::string_view domain,
       std::string_view generation, std::uint32_t producer_ordinal,
       std::uint64_t started_ns = 100,
-      std::uint64_t producer_ttl_ms = 60'000) noexcept {
+      std::uint64_t producer_ttl_ms = 60'000,
+      std::string_view coverage_descriptor = {}) noexcept {
   return claim_with_metadata(fixture, key, generation_digest, domain,
                              generation, producer_ordinal,
-                             metadata(producer_ttl_ms), started_ns);
+                             metadata(producer_ttl_ms), started_ns,
+                             coverage_descriptor);
 }
 
 [[nodiscard]] ReusableManifestHandleV1
@@ -504,6 +557,138 @@ TEST_CASE("janitor reaps exact dead waiter planner and reader owners") {
       janitor_reusable_registry(fixture.attachment, 1'001);
   REQUIRE(retirement.error == ReusableRegistryErrorV1::None);
   REQUIRE(retirement.retired_invalidated == 1);
+}
+
+TEST_CASE("reusable diagnostics copy bounded redacted generation rows") {
+  RegistryFixture fixture{8, 32U << 10, 1};
+  const auto key = coverage_key(47);
+
+  auto claimed = claim(
+      fixture, key, digest(70), "admin-domain", "claimed", 1,
+      101, 60'001, "provider-private-secret");
+  REQUIRE(claimed);
+  auto waiter = claim(
+      fixture, key, digest(70), "admin-domain", "claimed", 10);
+  REQUIRE(waiter.disposition ==
+          ReusableClaimDispositionV1::ExistingInFlight);
+
+  auto building = claim(
+      fixture, key, digest(71), "admin-domain", "building", 2, 102);
+  REQUIRE(building);
+  REQUIRE(begin_reusable_build(fixture.attachment, building.reference) ==
+          ReusableRegistryErrorV1::None);
+
+  auto complete = claim(
+      fixture, key, digest(72), "admin-domain", "complete", 3, 103);
+  REQUIRE(complete);
+  const ReusableManifestHandleV1 complete_manifest =
+      publish(fixture, complete.reference, 203);
+  REQUIRE(static_cast<bool>(complete_manifest));
+  auto planner_pin = pin_reusable_generation(
+      fixture.attachment, complete.reference,
+      ReusableReferenceKindV1::PlannerPin, reference_owner(700));
+  REQUIRE(planner_pin.has_value());
+  auto reader = lookup_reusable_current(
+      fixture.attachment, key, byte_view("admin-domain"), digest(72),
+      byte_view("complete"), ReusableLookupModeV1::PinComplete,
+      reference_owner(701));
+  REQUIRE(reader.error == ReusableRegistryErrorV1::None);
+
+  auto failed = claim(
+      fixture, key, digest(73), "admin-domain", "failed", 4, 104);
+  REQUIRE(failed);
+  REQUIRE(begin_reusable_build(fixture.attachment, failed.reference) ==
+          ReusableRegistryErrorV1::None);
+  REQUIRE(fail_reusable_generation(
+              fixture.attachment, failed.reference,
+              CacheFailureCode::ProducerError) ==
+          ReusableRegistryErrorV1::None);
+
+  std::array<ReusableGenerationDiagnosticsRowV1, 4> rows{};
+  DiagnosticsPartitionTrace trace{};
+  const auto snapshot = snapshot_reusable_generation_diagnostics(
+      fixture.attachment, rows,
+      ReusableRegistryPartitionCallbacksV1{
+          .context = &trace,
+          .acquire_exact = trace_exact_acquire,
+          .release_exact = trace_exact_release,
+          .acquire_coverage = trace_coverage_acquire,
+          .release_coverage = trace_coverage_release,
+      });
+  REQUIRE(snapshot.error == ReusableRegistryErrorV1::None);
+  REQUIRE(snapshot.indexed_generation_count == rows.size());
+  REQUIRE(snapshot.count == rows.size());
+  REQUIRE_FALSE(snapshot.truncated);
+  REQUIRE(trace.exact_acquires == rows.size());
+  REQUIRE(trace.exact_releases == rows.size());
+  REQUIRE(trace.coverage_acquires == 0);
+  REQUIRE(trace.coverage_releases == 0);
+
+  const auto *claimed_row = diagnostics_row(rows, claimed.reference);
+  REQUIRE(claimed_row != nullptr);
+  REQUIRE(claimed_row->entry_kind == CacheEntryKind::ReusableCoverage);
+  REQUIRE(claimed_row->state == CacheEntryState::Claimed);
+  REQUIRE(claimed_row->failure == CacheFailureCode::None);
+  REQUIRE(claimed_row->producer_pid == producer(1).pid);
+  REQUIRE(claimed_row->waiter_count == 1);
+  REQUIRE(claimed_row->provider_id == 7);
+  REQUIRE(claimed_row->provider_abi_version == 2);
+  REQUIRE(claimed_row->provider_domain_abi_version == 3);
+  REQUIRE(claimed_row->dependency_count == 2);
+  REQUIRE(claimed_row->dependency_fingerprint == digest(104));
+  REQUIRE(claimed_row->compatibility_family_id == 41);
+  REQUIRE(claimed_row->capability_mask == 0b1111);
+  REQUIRE(claimed_row->observability == WriteObservability::ProviderComplete);
+  REQUIRE(claimed_row->estimated_covered_rows == 50);
+  REQUIRE(claimed_row->producer_ttl_ms == 60'001);
+  REQUIRE(claimed_row->started_monotonic_ns == 101);
+
+  const auto *building_row = diagnostics_row(rows, building.reference);
+  REQUIRE(building_row != nullptr);
+  REQUIRE(building_row->state == CacheEntryState::Building);
+  REQUIRE(building_row->failure == CacheFailureCode::None);
+
+  const auto *complete_row = diagnostics_row(rows, complete.reference);
+  REQUIRE(complete_row != nullptr);
+  REQUIRE(complete_row->state == CacheEntryState::Complete);
+  REQUIRE(complete_row->manifest == complete_manifest);
+  REQUIRE(complete_row->row_count == 17);
+  REQUIRE(complete_row->logical_bytes == 700);
+  REQUIRE(complete_row->stored_bytes == 300);
+  REQUIRE(complete_row->planner_pin_count == 1);
+  REQUIRE(complete_row->reader_pin_count == 1);
+  REQUIRE(complete_row->completed_monotonic_ns == 203);
+  REQUIRE(complete_row->last_access_monotonic_ns == 203);
+
+  const auto *failed_row = diagnostics_row(rows, failed.reference);
+  REQUIRE(failed_row != nullptr);
+  REQUIRE(failed_row->state == CacheEntryState::Failed);
+  REQUIRE(failed_row->failure == CacheFailureCode::ProducerError);
+
+  std::array<ReusableGenerationDiagnosticsRowV1, 2> bounded_rows{};
+  const auto bounded = snapshot_reusable_generation_diagnostics(
+      fixture.attachment, bounded_rows);
+  REQUIRE(bounded.error == ReusableRegistryErrorV1::None);
+  REQUIRE(bounded.indexed_generation_count == rows.size());
+  REQUIRE(bounded.count == bounded_rows.size());
+  REQUIRE(bounded.truncated);
+
+  const auto count_only = snapshot_reusable_generation_diagnostics(
+      fixture.attachment,
+      std::span<ReusableGenerationDiagnosticsRowV1>{});
+  REQUIRE(count_only.error == ReusableRegistryErrorV1::None);
+  REQUIRE(count_only.indexed_generation_count == rows.size());
+  REQUIRE(count_only.count == 0);
+  REQUIRE(count_only.truncated);
+
+  REQUIRE(release_reusable_reference(fixture.attachment, waiter.token) ==
+          ReusableRegistryErrorV1::None);
+  REQUIRE(release_reusable_reference(fixture.attachment, *planner_pin) ==
+          ReusableRegistryErrorV1::None);
+  REQUIRE(release_reusable_reference(fixture.attachment, reader.token) ==
+          ReusableRegistryErrorV1::None);
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
 }
 
 TEST_CASE("bounded reusable invalidation is collision and ABA safe") {
