@@ -106,7 +106,7 @@ sleep 0.02;
 is(
 	$node->safe_psql(
 		'postgres',
-		q{SELECT count(*) || '|' || min(state) || '|' || max(reader_count)
+		q{SELECT count(*) || '|' || min(state) || '|' || max(readers)
 		  FROM bioseq_cache.entries()}),
 	'1|COMPLETE|0',
 	'expired entry remains observable before an explicit exact-registry sweep');
