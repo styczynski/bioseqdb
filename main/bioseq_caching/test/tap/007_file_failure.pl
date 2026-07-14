@@ -15,14 +15,14 @@ $node->safe_psql(
 	  INSERT INTO file_rows
 	  SELECT i, repeat(md5(i::text), 1024)
 	  FROM generate_series(1, 128) AS g(i);
-	  SET bioseq.query_cache_optimisation_mode = 'same';
 	  SELECT bioseq_cache.reset_stats();
 	  SELECT bioseq_cache_test.fail_next_write('enospc');});
 
 is(
 	$node->safe_psql(
 		'postgres',
-		q{SELECT count(*) || '|' || sum(id) FROM file_rows}),
+		q{SET bioseq.query_cache_optimisation_mode = 'same';
+		  SELECT count(*) || '|' || sum(id) FROM file_rows}),
 	'128|8256',
 	'producer returns complete source result after ENOSPC');
 is(
