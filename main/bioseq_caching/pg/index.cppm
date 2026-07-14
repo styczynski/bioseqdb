@@ -28,6 +28,7 @@ extern "C" {
 #include "common/cryptohash.h"
 #include "common/hashfn.h"
 #include "commands/explain.h"
+#include "executor/execdesc.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "executor/tuptable.h"
@@ -423,6 +424,7 @@ struct PlannerFrame {
 };
 
 inline PlannerFrame* g_planner_frame = nullptr;
+inline bool g_producer_plan_capture_active = false;
 
 /** Initialize all shared atomics exactly once. */
 void initialize_shared_state(CacheSharedState& shared) noexcept {
@@ -2126,8 +2128,8 @@ void invalidate_dirty_reusable_generations() noexcept {
 }
 
 [[nodiscard]] ReusableRegistryErrorV1 begin_current_reusable_generation(
-        const ReusableGenerationReferenceV1& reference) noexcept {
-    if (!reference || g_reusable_membership_lock == nullptr) {
+        const ReusableDiagnosticTextUpdateV1& diagnostics) noexcept {
+    if (!diagnostics.reference || g_reusable_membership_lock == nullptr) {
         return ReusableRegistryErrorV1::InvalidArgument;
     }
     ReusableRegistryErrorV1 result = ReusableRegistryErrorV1::InvalidState;
@@ -2137,9 +2139,9 @@ void invalidate_dirty_reusable_generations() noexcept {
     {
         LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
         membership_owned = true;
-        result = begin_reusable_build(
+        result = begin_reusable_build_with_diagnostics(
             g_reusable_registry,
-            reference,
+            diagnostics,
             reusable_partition_callbacks());
         LWLockRelease(g_reusable_membership_lock);
         membership_owned = false;
@@ -2160,7 +2162,7 @@ void invalidate_dirty_reusable_generations() noexcept {
     }
     PG_END_TRY();
     if (result == ReusableRegistryErrorV1::None) {
-        broadcast_reusable_generation(reference);
+        broadcast_reusable_generation(diagnostics.reference);
     }
     return result;
 }
@@ -7683,6 +7685,156 @@ capture_cleanup:
     return true;
 }
 
+struct BoundedDiagnosticTextV1 {
+    char* data = nullptr;
+    std::size_t size = 0;
+    bool available = false;
+    bool truncated = false;
+};
+
+/** Copy diagnostics into planner/query memory with an explicit byte bound. */
+[[nodiscard]] bool copy_bounded_diagnostic_text(
+        const char* source,
+        std::size_t capacity,
+        BoundedDiagnosticTextV1* output) {
+    if (source == nullptr || capacity == 0 || output == nullptr) {
+        return false;
+    }
+    const std::size_t observed = strnlen(source, capacity + 1U);
+    const std::size_t copied = std::min(observed, capacity);
+    output->data = pnstrdup(source, copied);
+    output->size = copied;
+    output->available = copied != 0;
+    output->truncated = observed > capacity;
+    return output->available;
+}
+
+/** Canonical child Plan text is diagnostics only and fails open. */
+[[nodiscard]] bool capture_canonical_child_plan_fail_open(
+        const Plan* child,
+        BoundedDiagnosticTextV1* output) {
+    if (child == nullptr || output == nullptr
+        || g_producer_plan_capture_active) {
+        return false;
+    }
+    *output = {};
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool capture_active = false;
+    PG_TRY();
+    {
+        g_producer_plan_capture_active = true;
+        capture_active = true;
+        char* serialized = nodeToString(child);
+        static_cast<void>(copy_bounded_diagnostic_text(
+            serialized,
+            kReusableCanonicalPlanCapacityV1,
+            output));
+        if (serialized != nullptr) {
+            pfree(serialized);
+        }
+        g_producer_plan_capture_active = false;
+        capture_active = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (capture_active) {
+            g_producer_plan_capture_active = false;
+            capture_active = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        *output = {};
+    }
+    PG_END_TRY();
+    return output->available;
+}
+
+/** Render an initialized producer child without mutating the live QueryDesc. */
+[[nodiscard]] bool capture_initialized_child_plan_fail_open(
+        CustomScanState* node,
+        EState* estate,
+        const char* display_sql,
+        BoundedDiagnosticTextV1* output) {
+    PlanState* child_state = node == nullptr
+        ? nullptr
+        : coverage_retained_child(node);
+    auto* scan = node == nullptr
+        ? nullptr
+        : reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+    Plan* child_plan = scan == nullptr || scan->custom_plans == NIL
+        ? nullptr
+        : static_cast<Plan*>(linitial(scan->custom_plans));
+    if (child_state == nullptr || child_plan == nullptr || estate == nullptr
+        || estate->es_plannedstmt == nullptr || output == nullptr
+        || g_producer_plan_capture_active) {
+        return false;
+    }
+    *output = {};
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool capture_active = false;
+    PG_TRY();
+    {
+        g_producer_plan_capture_active = true;
+        capture_active = true;
+        PlannedStmt planned = *estate->es_plannedstmt;
+        planned.planTree = child_plan;
+        QueryDesc view{};
+        view.operation = planned.commandType;
+        view.plannedstmt = &planned;
+        view.sourceText = display_sql;
+        view.snapshot = estate->es_snapshot;
+        view.crosscheck_snapshot = estate->es_crosscheck_snapshot;
+        view.params = estate->es_param_list_info;
+        view.queryEnv = estate->es_queryEnv;
+        view.instrument_options = estate->es_instrument;
+        view.tupDesc = child_state->ps_ResultTupleDesc;
+        view.estate = estate;
+        view.planstate = child_state;
+
+        ExplainState* explain = NewExplainState();
+        explain->format = EXPLAIN_FORMAT_TEXT;
+        explain->verbose = true;
+        explain->costs = true;
+        explain->analyze = false;
+        explain->buffers = false;
+        explain->wal = false;
+        explain->timing = false;
+        explain->summary = false;
+        explain->settings = false;
+        ExplainBeginOutput(explain);
+        ExplainPrintPlan(explain, &view);
+        ExplainEndOutput(explain);
+        if (explain->str != nullptr && explain->str->data != nullptr) {
+            static_cast<void>(copy_bounded_diagnostic_text(
+                explain->str->data,
+                kReusableProducerPlanCapacityV1,
+                output));
+        }
+        g_producer_plan_capture_active = false;
+        capture_active = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (capture_active) {
+            g_producer_plan_capture_active = false;
+            capture_active = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        *output = {};
+    }
+    PG_END_TRY();
+    return output->available;
+}
+
 void initialize_coverage_child(
         ReusableCoverageState& state,
         CustomScanState* node,
@@ -7853,9 +8005,24 @@ void coverage_begin_custom_scan(
                     &recipe,
                     estate,
                     estate->es_query_cxt,
-                    &diagnostic);
+                &diagnostic);
         }
     }
+
+    const bool diagnostic_private_valid = scan->custom_private != NIL
+        && list_length(scan->custom_private) >= 10
+        && IsA(list_nth(scan->custom_private, 7), String)
+        && IsA(list_nth(scan->custom_private, 8), String)
+        && IsA(list_nth(scan->custom_private, 9), Integer);
+    const char* producer_display_sql = diagnostic_private_valid
+        ? strVal(list_nth(scan->custom_private, 7))
+        : "<query text unavailable>";
+    const char* canonical_child_plan = diagnostic_private_valid
+        ? strVal(list_nth(scan->custom_private, 8))
+        : "";
+    const int producer_diagnostic_flags = diagnostic_private_valid
+        ? intVal(list_nth(scan->custom_private, 9))
+        : 0;
 
     const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
     const bool runtime_allowed = !explain_only
@@ -7871,7 +8038,7 @@ void coverage_begin_custom_scan(
         && XactIsoLevel == XACT_READ_COMMITTED
         && shared_cache_ready()
         && scan->custom_private != NIL
-        && list_length(scan->custom_private) >= 7;
+        && diagnostic_private_valid;
     const VisibilityTicket visibility = runtime_allowed
         ? mint_visibility_ticket()
         : VisibilityTicket{};
@@ -7979,14 +8146,6 @@ void coverage_begin_custom_scan(
                             CoverageRuntimeRoleV1::Producer;
                         state->current_producer_owned = true;
                         state->producer_started_at = GetCurrentTimestamp();
-                        if (begin_current_reusable_generation(
-                                state->current_reference)
-                                == ReusableRegistryErrorV1::None) {
-                            maybe_pause(
-                                TestPausePoint::AfterBuildingPublish);
-                        } else {
-                            fail_coverage_producer(*state);
-                        }
                         if (state->current_producer_owned
                             && begin_coverage_capture(*state)) {
                             PG_TRY();
@@ -8010,7 +8169,58 @@ void coverage_begin_custom_scan(
                                 PG_RE_THROW();
                             }
                             PG_END_TRY();
-                            runtime_selected = true;
+                            BoundedDiagnosticTextV1 human_plan{};
+                            static_cast<void>(
+                                capture_initialized_child_plan_fail_open(
+                                    node,
+                                    estate,
+                                    producer_display_sql,
+                                    &human_plan));
+                            constexpr int display_sql_truncated_flag = 1 << 0;
+                            constexpr int canonical_plan_truncated_flag =
+                                1 << 1;
+                            const std::size_t display_sql_bytes = strnlen(
+                                producer_display_sql,
+                                kReusableDisplaySqlCapacityV1);
+                            const std::size_t canonical_plan_bytes = strnlen(
+                                canonical_child_plan,
+                                kReusableCanonicalPlanCapacityV1);
+                            const ReusableDiagnosticTextUpdateV1 diagnostics{
+                                .reference = state->current_reference,
+                                .producer = owner,
+                                .display_sql = std::span<const char>{
+                                    producer_display_sql,
+                                    display_sql_bytes},
+                                .canonical_plan = std::span<const char>{
+                                    canonical_child_plan,
+                                    canonical_plan_bytes},
+                                .producer_plan = human_plan.available
+                                    ? std::span<const char>{
+                                        human_plan.data, human_plan.size}
+                                    : std::span<const char>{},
+                                .canonical_plan_status =
+                                    canonical_plan_bytes == 0
+                                    ? ReusablePlanSnapshotStatusV1::Unavailable
+                                    : ReusablePlanSnapshotStatusV1::Planned,
+                                .plan_status = human_plan.available
+                                    ? ReusablePlanSnapshotStatusV1::Planned
+                                    : ReusablePlanSnapshotStatusV1::Unavailable,
+                                .display_sql_truncated =
+                                    (producer_diagnostic_flags
+                                        & display_sql_truncated_flag) != 0,
+                                .canonical_plan_truncated =
+                                    (producer_diagnostic_flags
+                                        & canonical_plan_truncated_flag) != 0,
+                                .producer_plan_truncated = human_plan.truncated,
+                            };
+                            if (begin_current_reusable_generation(diagnostics)
+                                    == ReusableRegistryErrorV1::None) {
+                                maybe_pause(
+                                    TestPausePoint::AfterBuildingPublish);
+                                runtime_selected = true;
+                            } else {
+                                fail_coverage_producer(*state);
+                            }
                         } else {
                             if (state->current_producer_owned) {
                                 fail_coverage_producer(*state);
@@ -8360,6 +8570,29 @@ Plan* coverage_plan_custom_path(
         makeInteger(recipe_valid
             ? static_cast<int>(recipe.value.digest_format_version)
             : 0));
+    BoundedDiagnosticTextV1 display_sql{};
+    static_cast<void>(copy_bounded_diagnostic_text(
+        g_planner_frame == nullptr ? nullptr : g_planner_frame->display_sql,
+        kReusableDisplaySqlCapacityV1,
+        &display_sql));
+    if (!display_sql.available) {
+        static_cast<void>(copy_bounded_diagnostic_text(
+            "<query text unavailable>",
+            kReusableDisplaySqlCapacityV1,
+            &display_sql));
+    }
+    BoundedDiagnosticTextV1 canonical_plan{};
+    static_cast<void>(capture_canonical_child_plan_fail_open(
+        child, &canonical_plan));
+    constexpr int display_sql_truncated_flag = 1 << 0;
+    constexpr int canonical_plan_truncated_flag = 1 << 1;
+    int diagnostic_flags = 0;
+    if (display_sql.truncated) {
+        diagnostic_flags |= display_sql_truncated_flag;
+    }
+    if (canonical_plan.truncated) {
+        diagnostic_flags |= canonical_plan_truncated_flag;
+    }
 
     auto* scan = makeNode(CustomScan);
     scan->methods = &coverage_scan_methods();
@@ -8371,6 +8604,15 @@ Plan* coverage_plan_custom_path(
     scan->custom_private = static_cast<List*>(
         copyObject(best_path->custom_private));
     scan->custom_private = lappend(scan->custom_private, recipe_private);
+    scan->custom_private = lappend(
+        scan->custom_private, makeString(display_sql.data));
+    scan->custom_private = lappend(
+        scan->custom_private,
+        makeString(canonical_plan.available
+            ? canonical_plan.data
+            : pstrdup("")));
+    scan->custom_private = lappend(
+        scan->custom_private, makeInteger(diagnostic_flags));
     scan->custom_exprs = list_make1(
         copyObject(list_nth(best_path->custom_private, 4)));
     const auto* sources = static_cast<const List*>(
@@ -9302,6 +9544,20 @@ struct EntrySnapshot {
     return "Unknown";
 }
 
+/** Render one bounded producer-plan capture status. */
+[[nodiscard]] const char* reusable_plan_snapshot_status_name(
+        ReusablePlanSnapshotStatusV1 status) noexcept {
+    switch (status) {
+        case ReusablePlanSnapshotStatusV1::Unavailable:
+            return "Unavailable";
+        case ReusablePlanSnapshotStatusV1::Planned:
+            return "Planned";
+        case ReusablePlanSnapshotStatusV1::Analyzed:
+            return "Analyzed";
+    }
+    return "Unknown";
+}
+
 /** Format a collision-index digest without reading canonical identity bytes. */
 [[nodiscard]] std::array<char, 65> reusable_digest_hex(
         const CacheDigest256& digest) noexcept {
@@ -9496,6 +9752,64 @@ snapshot_reusable_entries(
     }
     PG_END_TRY();
     return result;
+}
+
+struct ReusableDiagnosticTextSnapshotV1 {
+    ReusableDiagnosticTextCopyV1 metadata{};
+    std::array<char, kReusableDisplaySqlCapacityV1> display_sql{};
+    std::array<char, kReusableCanonicalPlanCapacityV1> canonical_plan{};
+    std::array<char, kReusableProducerPlanCapacityV1> producer_plan{};
+    bool copied = false;
+};
+
+/** Copy row text only after the SQL caller passed row-level authorization. */
+[[nodiscard]] bool copy_reusable_entry_text(
+        const ReusableGenerationReferenceV1& reference,
+        ReusableDiagnosticTextSnapshotV1* output) noexcept {
+    if (!reference || output == nullptr || !g_reusable_registry
+        || g_reusable_membership_lock == nullptr) {
+        return false;
+    }
+    *output = {};
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    volatile bool accepted = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        const auto copied = copy_reusable_diagnostic_text(
+            g_reusable_registry,
+            reference,
+            output->display_sql,
+            output->canonical_plan,
+            output->producer_plan,
+            reusable_partition_callbacks());
+        if (copied.has_value()) {
+            output->metadata = *copied;
+            output->copied = true;
+            accepted = true;
+        }
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        *output = {};
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        accepted = false;
+    }
+    PG_END_TRY();
+    return accepted;
 }
 
 /** Append one affected reusable identity exactly once to caller-owned storage. */
@@ -10081,8 +10395,26 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
             values[15] = Int32GetDatum(static_cast<int32>(
                 entry.reader_pin_count));
             values[16] = Int64GetDatum(0); /* Per-generation hits are absent. */
-            nulls[17] = true; /* Canonical query and predicate bytes stay redacted. */
-            nulls[18] = true; /* No reusable producer Plan bytes are exposed. */
+            ReusableDiagnosticTextSnapshotV1 diagnostic_text{};
+            const bool diagnostic_text_copied = full_disclosure
+                && copy_reusable_entry_text(
+                    entry.reference, &diagnostic_text);
+            if (diagnostic_text_copied
+                && diagnostic_text.metadata.display_sql_bytes != 0) {
+                values[17] = PointerGetDatum(cstring_to_text_with_len(
+                    diagnostic_text.display_sql.data(),
+                    diagnostic_text.metadata.display_sql_bytes));
+            } else {
+                nulls[17] = true;
+            }
+            if (diagnostic_text_copied
+                && diagnostic_text.metadata.producer_plan_bytes != 0) {
+                values[18] = PointerGetDatum(cstring_to_text_with_len(
+                    diagnostic_text.producer_plan.data(),
+                    diagnostic_text.metadata.producer_plan_bytes));
+            } else {
+                nulls[18] = true;
+            }
             StringInfoData dependencies{};
             initStringInfo(&dependencies);
             appendStringInfo(
@@ -10093,7 +10425,12 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
                 "\"compatibility_family_id\":%llu,"
                 "\"capability_mask\":%llu,\"dependency_count\":%u,"
                 "\"dependency_fingerprint\":\"%s\","
-                "\"observability\":\"%s\",\"planner_pins\":%u",
+                "\"observability\":\"%s\",\"planner_pins\":%u,"
+                "\"canonical_plan_status\":\"%s\","
+                "\"producer_plan_status\":\"%s\","
+                "\"display_sql_truncated\":%s,"
+                "\"canonical_plan_truncated\":%s,"
+                "\"producer_plan_truncated\":%s",
                 reusable_entry_action_name(entry.state),
                 reusable_failure_name(entry.failure),
                 entry.provider_id,
@@ -10105,7 +10442,14 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
                 entry.dependency_count,
                 dependency.data(),
                 reusable_observability_name(entry.observability),
-                entry.planner_pin_count);
+                entry.planner_pin_count,
+                reusable_plan_snapshot_status_name(
+                    entry.canonical_plan_snapshot_status),
+                reusable_plan_snapshot_status_name(
+                    entry.plan_snapshot_status),
+                entry.display_sql_truncated ? "true" : "false",
+                entry.canonical_plan_truncated ? "true" : "false",
+                entry.producer_plan_truncated ? "true" : "false");
             if (entry.manifest) {
                 appendStringInfo(
                     &dependencies,
