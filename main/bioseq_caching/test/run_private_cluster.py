@@ -402,6 +402,22 @@ def _run_prove(
         env["PERL5LIB"] = os.pathsep.join(
             part for part in (str(pg_perl), existing_perl5lib) if part
         )
+    perl = shutil.which("perl", path=env.get("PATH"))
+    if perl is None:
+        raise ClusterCommandError("Perl is required for PostgreSQL TAP tests")
+    module_check = subprocess.run(
+        [perl, "-MIPC::Run", "-MIO::Pty", "-e", "exit 0"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if module_check.returncode != 0:
+        raise ClusterCommandError(
+            "PostgreSQL TAP tests require Perl IPC::Run and IO::Pty "
+            "(Ubuntu: libipc-run-perl and libio-pty-perl): "
+            + module_check.stderr.strip()
+        )
     command = [str(prove)]
     if pg_perl.is_dir():
         command.extend(["-I", str(pg_perl)])

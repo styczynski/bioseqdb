@@ -111,6 +111,7 @@ if(BIOSEQ_CACHE_BUILD_TESTS)
 endif()
 
 if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
+  find_package(Perl REQUIRED)
   find_program(BIOSEQ_CACHE_PG_REGRESS pg_regress REQUIRED
     HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/regress"
           "${PostgreSQL_BIN_DIR}")
@@ -118,6 +119,16 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
     HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/isolation"
           "${PostgreSQL_BIN_DIR}")
   find_program(BIOSEQ_CACHE_PROVE prove REQUIRED)
+  execute_process(
+    COMMAND "${PERL_EXECUTABLE}" -MIPC::Run -MIO::Pty -e "exit 0"
+    RESULT_VARIABLE BIOSEQ_CACHE_PERL_TAP_MODULES_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET)
+  if(NOT BIOSEQ_CACHE_PERL_TAP_MODULES_RESULT EQUAL 0)
+    message(FATAL_ERROR
+      "bioseq_cache TAP tests require Perl IPC::Run and IO::Pty "
+      "(Ubuntu: libipc-run-perl and libio-pty-perl)")
+  endif()
 
   add_custom_target(test_bioseq_cache_regress
     COMMAND "${Python3_EXECUTABLE}"
