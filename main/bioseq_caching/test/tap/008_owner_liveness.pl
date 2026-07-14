@@ -5,6 +5,7 @@ use FindBin;
 use lib $FindBin::RealBin;
 use BioseqCacheTest;
 use Test::More;
+use Time::HiRes qw(sleep time);
 
 my $node = new_cache_node('cache_owner_liveness', preload => 1);
 $node->start;
@@ -61,6 +62,69 @@ is(
 		  SELECT count(*) || '|' || sum(id) FROM owner_rows}),
 	'64|2080',
 	'fresh producer succeeds after owner cleanup');
+
+my $reader_controller = $node->background_psql('postgres');
+$reader_controller->query_until(
+	qr/reader-controller-armed/,
+	q{SELECT bioseq_cache_test.arm_pause('after_reader_pinned');
+	  \echo reader-controller-armed
+});
+
+my $reader = $node->background_psql('postgres');
+$reader->query_until(
+	qr/reader-start/,
+	q{\echo reader-start
+	  SET application_name = 'cache_dead_reader';
+	  SET bioseq.query_cache_optimisation_mode = 'same';
+	  SELECT count(*), sum(id) FROM owner_rows;
+});
+ok(
+	$node->poll_query_until(
+		'postgres',
+		q{SELECT EXISTS (
+		    SELECT 1 FROM bioseq_cache_test.entry_states()
+		    WHERE state = 'COMPLETE' AND reader_count = 1)
+		  AND (SELECT reader_pins = 1
+		       FROM bioseq_cache_test.storage_tier_stats())},
+		't'),
+	'exact and storage reader ownership is visible before backend death');
+
+my $reader_pid = $node->safe_psql(
+	'postgres',
+	q{SELECT pid FROM pg_stat_activity
+	  WHERE application_name = 'cache_dead_reader'});
+is(kill('KILL', int($reader_pid)), 1, 'reader backend is killed without cleanup');
+eval { $reader->quit; };
+eval { $reader_controller->quit; };
+
+ok(
+	$node->poll_query_until('postgres', 'SELECT 1', '1'),
+	'postmaster recovers after the reader backend crash');
+$node->safe_psql(
+	'postgres',
+	q{SELECT bioseq_cache_test.release_pause('after_reader_pinned');
+	  SELECT bioseq_cache.invalidate_all();
+	  SELECT bioseq_cache_test.request_janitor_sweep();});
+
+my $cleanup_deadline = time() + 10;
+my $reader_cleanup = '';
+while (time() < $cleanup_deadline)
+{
+	$reader_cleanup = $node->safe_psql(
+		'postgres',
+		q{SELECT (NOT EXISTS (
+		     SELECT 1 FROM bioseq_cache_test.entry_states()))::integer
+		   || '|' ||
+		   (SELECT (reader_pins = 0)::integer
+		    FROM bioseq_cache_test.storage_tier_stats())});
+	last if $reader_cleanup eq '1|1';
+	$node->safe_psql(
+		'postgres', 'SELECT bioseq_cache_test.request_janitor_sweep()');
+	sleep(0.05);
+}
+ok(
+	$reader_cleanup eq '1|1',
+	'dead exact and storage reader owners are reaped after invalidation');
 
 $node->stop;
 done_testing();

@@ -40,6 +40,22 @@ my ($forced, $dsa_blocks, $file_blocks, $hot_bytes, $file_bytes) =
 is($forced, 't', 'test-only shared override is observable');
 cmp_ok($file_blocks, '>', 0, 'live ledger contains file-backed blocks');
 cmp_ok($file_bytes, '>', 0, 'file-tier admission bytes are reserved');
+my $tier_coherence = $node->safe_psql(
+	'postgres',
+	q{SELECT coherent,
+	         occupied_blocks,
+	         dsa_blocks + file_blocks,
+	         reserved_blocks + stored_blocks + referenced_blocks
+	           + retiring_blocks + release_committed_blocks,
+	         reader_pins
+	  FROM bioseq_cache_test.storage_tier_stats()});
+my ($coherent, $occupied, $tier_occupied, $state_occupied, $reader_pins) =
+	split(/\|/, $tier_coherence);
+is($coherent, 't', 'storage snapshot reports internally coherent state');
+cmp_ok($occupied, '>', 0, 'storage snapshot observes occupied ledger slots');
+is($tier_occupied, $occupied, 'tier counts cover every occupied ledger slot');
+is($state_occupied, $occupied, 'state counts cover every occupied ledger slot');
+is($reader_pins, 0, 'completed replay drains its storage reader pin');
 is(
 	$node->safe_psql(
 		'postgres',
@@ -69,6 +85,14 @@ while (time() < $cleanup_deadline)
 }
 is($remaining_file_blocks, 0, 'janitor unlinks file-backed ledger blocks');
 is($remaining_file_bytes, 0, 'janitor releases file admission bytes');
+is(
+	$node->safe_psql(
+		'postgres',
+		q{SELECT CASE WHEN coherent THEN 't' ELSE 'f' END
+		           || '|' || occupied_blocks
+		  FROM bioseq_cache_test.storage_tier_stats()}),
+	't|0',
+	'empty storage snapshot remains coherent after reclamation');
 
 is(
 	$node->safe_psql(
@@ -79,6 +103,13 @@ is(
 	'1|64',
 	'short-TTL exact producer returns a nonempty result');
 sleep 0.02;
+is(
+	$node->safe_psql(
+		'postgres',
+		q{SELECT count(*) || '|' || min(state) || '|' || max(reader_count)
+		  FROM bioseq_cache.entries()}),
+	'1|COMPLETE|0',
+	'expired entry remains observable before an explicit exact-registry sweep');
 $node->safe_psql(
 	'postgres', 'SELECT bioseq_cache_test.request_janitor_sweep()');
 is(
