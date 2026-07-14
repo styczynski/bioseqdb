@@ -57,7 +57,6 @@ inline constexpr std::uint64_t kDefaultDsaInitialBytes = 256ULL << 10;
 inline constexpr std::uint64_t kDefaultHotCeilingBytes = 256ULL << 20;
 inline constexpr std::uint64_t kDefaultFileCeilingBytes = 128ULL << 30;
 inline constexpr std::uint64_t kDefaultMaximumBlockBytes = 64ULL << 20;
-inline constexpr std::int64_t kDefaultPendingTimeoutUs = 5LL * 60LL * 1000000LL;
 inline constexpr std::uint32_t kDefaultSweepIntervalMs = 1000;
 inline constexpr std::uint32_t kDefaultReclaimBatch = 64;
 
@@ -67,7 +66,6 @@ struct StorageConfig {
     std::uint64_t hot_ceiling_bytes = kDefaultHotCeilingBytes;
     std::uint64_t file_ceiling_bytes = kDefaultFileCeilingBytes;
     std::uint64_t maximum_block_bytes = kDefaultMaximumBlockBytes;
-    std::int64_t pending_timeout_us = kDefaultPendingTimeoutUs;
     std::uint32_t sweep_interval_ms = kDefaultSweepIntervalMs;
     std::uint32_t reclaim_batch = kDefaultReclaimBatch;
     std::uint32_t soft_limit_percent = 80;
@@ -114,6 +112,7 @@ enum class WorkerLifecycle : std::uint32_t {
 
 enum class ManifestState : std::uint32_t {
     Empty = 0,
+    Publishing,
     Complete,
     Retiring,
 };
@@ -330,10 +329,15 @@ enum class BlockLedgerState : std::uint32_t {
     Stored,
     Referenced,
     Retiring,
+    ReleaseCommitted,
 };
 
 struct BlockLedgerEntry {
     BlockLedgerState state;
+    BlockBackingTierV1 reservation_tier;
+    bool reservation_accounted;
+    std::uint8_t reserved8;
+    std::uint16_t reserved16;
     std::uint32_t owner_proc_number;
     int owner_pid;
     std::uint32_t manifest_slot;
@@ -348,6 +352,8 @@ struct SharedManifestEntry {
     CacheEntryKind kind;
     std::uint16_t block_count;
     std::uint32_t flags;
+    bool manifest_counted;
+    std::uint8_t reserved8[7];
     std::uint64_t slot_sequence;
     CacheEntryId id;
     std::uint64_t logical_bytes;
@@ -370,7 +376,6 @@ struct StorageSharedState {
     std::uint64_t hot_ceiling_bytes;
     std::uint64_t file_ceiling_bytes;
     std::uint64_t maximum_block_bytes;
-    std::int64_t pending_timeout_us;
     std::uint32_t sweep_interval_ms;
     std::uint32_t reclaim_batch;
     std::uint32_t soft_limit_percent;
@@ -393,6 +398,8 @@ struct StorageSharedState {
     pg_atomic_uint32 worker_proc_number;
     pg_atomic_uint32 sweep_requested;
     pg_atomic_uint32 reserved_atomic;
+    int sweep_owner_pid;
+    std::uint32_t sweep_owner_proc_number;
     BlockLedgerEntry block_ledger[kBlockLedgerCapacity];
     SharedManifestEntry manifests[kManifestCapacity];
 };
@@ -404,7 +411,6 @@ inline StorageSharedState* g_shared = nullptr;
 inline LWLock* g_storage_lock = nullptr;
 inline dsa_area* g_dsa = nullptr;
 inline StorageConfig g_requested_config{};
-inline bool g_resources_requested = false;
 inline bool g_exit_callback_registered = false;
 
 [[nodiscard]] constexpr std::uint64_t checked_multiply_or_max(
@@ -465,11 +471,12 @@ inline bool g_exit_callback_registered = false;
 
 [[nodiscard]] bool config_valid(const StorageConfig& config) noexcept {
     return config.dsa_initial_bytes >= dsa_minimum_size()
+        && config.dsa_initial_bytes <=
+            (std::numeric_limits<std::size_t>::max)() - MAXIMUM_ALIGNOF
         && config.hot_ceiling_bytes != 0
         && config.file_ceiling_bytes != 0
         && config.maximum_block_bytes != 0
         && config.maximum_block_bytes <= kMaxFileCacheBytes
-        && config.pending_timeout_us > 0
         && config.sweep_interval_ms >= 10
         && config.reclaim_batch != 0
         && config.reclaim_batch <= kManifestCapacity
@@ -739,6 +746,39 @@ void clean_orphaned_store_files() noexcept {
     return process != nullptr && process->pid == pid;
 }
 
+[[nodiscard]] bool acquire_sweep_ownership() noexcept {
+    const std::uint32_t my_proc_number =
+        static_cast<std::uint32_t>(MyProcNumber);
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    const bool unowned = g_shared->sweep_owner_pid <= 0
+        || g_shared->sweep_owner_proc_number
+            == static_cast<std::uint32_t>(INVALID_PROC_NUMBER);
+    const bool abandoned = !unowned
+        && !process_alive(
+            g_shared->sweep_owner_pid,
+            g_shared->sweep_owner_proc_number);
+    if (unowned || abandoned) {
+        g_shared->sweep_owner_pid = MyProcPid;
+        g_shared->sweep_owner_proc_number = my_proc_number;
+        LWLockRelease(g_storage_lock);
+        return true;
+    }
+    LWLockRelease(g_storage_lock);
+    return false;
+}
+
+void release_sweep_ownership() noexcept {
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    if (g_shared->sweep_owner_pid == MyProcPid
+        && g_shared->sweep_owner_proc_number
+            == static_cast<std::uint32_t>(MyProcNumber)) {
+        g_shared->sweep_owner_pid = 0;
+        g_shared->sweep_owner_proc_number =
+            static_cast<std::uint32_t>(INVALID_PROC_NUMBER);
+    }
+    LWLockRelease(g_storage_lock);
+}
+
 void initialize_shared_state(
         StorageSharedState& shared,
         std::size_t total_bytes,
@@ -752,7 +792,6 @@ void initialize_shared_state(
     shared.hot_ceiling_bytes = bounded_hot_ceiling(config);
     shared.file_ceiling_bytes = config.file_ceiling_bytes;
     shared.maximum_block_bytes = config.maximum_block_bytes;
-    shared.pending_timeout_us = config.pending_timeout_us;
     shared.sweep_interval_ms = config.sweep_interval_ms;
     shared.reclaim_batch = config.reclaim_batch;
     shared.soft_limit_percent = config.soft_limit_percent;
@@ -761,7 +800,7 @@ void initialize_shared_state(
         static_cast<std::uint32_t>(BootstrapState::Initializing));
     pg_atomic_init_u32(
         &shared.worker_lifecycle,
-        static_cast<std::uint32_t>(WorkerLifecycle::Registered));
+        static_cast<std::uint32_t>(WorkerLifecycle::NotRegistered));
     pg_atomic_init_u32(
         &shared.correctness_readiness,
         static_cast<std::uint32_t>(CacheCorrectnessReadiness::PassthroughOnly));
@@ -782,6 +821,9 @@ void initialize_shared_state(
     pg_atomic_init_u32(&shared.worker_proc_number, INVALID_PROC_NUMBER);
     pg_atomic_init_u32(&shared.sweep_requested, 0);
     pg_atomic_init_u32(&shared.reserved_atomic, 0);
+    shared.sweep_owner_pid = 0;
+    shared.sweep_owner_proc_number =
+        static_cast<std::uint32_t>(INVALID_PROC_NUMBER);
     for (BlockLedgerEntry& entry : shared.block_ledger) {
         entry.state = BlockLedgerState::Empty;
         entry.manifest_slot = kInvalidSlot;
@@ -811,6 +853,25 @@ void storage_backend_exit(int, Datum) {
         const CacheEntryId& left,
         const CacheEntryId& right) noexcept {
     return left == right;
+}
+
+[[nodiscard]] bool valid_stored_reference(
+        const BlockReferenceV1& reference,
+        std::uint64_t reserved_bytes) noexcept {
+    const bool known_tier = reference.tier == BlockBackingTierV1::Dsa
+        || reference.tier == BlockBackingTierV1::File;
+    const bool valid_handle = reference.tier == BlockBackingTierV1::File
+        ? reference.handle_or_file_id != 0
+        : DsaPointerIsValid(
+            static_cast<dsa_pointer>(reference.handle_or_file_id));
+    return known_tier
+        && valid_handle
+        && reference.flags == 0
+        && reference.reserved == 0
+        && reference.reserved2 == 0
+        && reference.offset == 0
+        && reference.length != 0
+        && reference.length == reserved_bytes;
 }
 
 [[nodiscard]] bool handle_matches(
@@ -860,11 +921,50 @@ void clear_unreserved_ledger_slot(
     BlockLedgerEntry& entry = g_shared->block_ledger[slot];
     if (entry.sequence == sequence
         && entry.state == BlockLedgerState::Reserved
+        && !entry.reservation_accounted
         && entry.reference.length == 0) {
         entry = BlockLedgerEntry{};
         entry.manifest_slot = kInvalidSlot;
     }
     LWLockRelease(g_storage_lock);
+}
+
+[[nodiscard]] StorageError mark_ledger_reservation(
+        std::uint32_t slot,
+        std::uint64_t sequence,
+        BlockBackingTierV1 tier) noexcept {
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    BlockLedgerEntry& entry = g_shared->block_ledger[slot];
+    if (entry.sequence != sequence
+        || entry.state != BlockLedgerState::Reserved
+        || entry.reservation_accounted
+        || entry.reference.length != 0) {
+        LWLockRelease(g_storage_lock);
+        return StorageError::StaleToken;
+    }
+    entry.reservation_tier = tier;
+    entry.reservation_accounted = true;
+    LWLockRelease(g_storage_lock);
+    return StorageError::None;
+}
+
+[[nodiscard]] StorageError cancel_ledger_reservation(
+        std::uint32_t slot,
+        std::uint64_t sequence,
+        BlockBackingTierV1 tier) noexcept {
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    BlockLedgerEntry& entry = g_shared->block_ledger[slot];
+    if (entry.sequence != sequence
+        || entry.state != BlockLedgerState::Reserved
+        || !entry.reservation_accounted
+        || entry.reservation_tier != tier
+        || entry.reference.length != 0) {
+        LWLockRelease(g_storage_lock);
+        return StorageError::StaleToken;
+    }
+    entry.reservation_accounted = false;
+    LWLockRelease(g_storage_lock);
+    return StorageError::None;
 }
 
 [[nodiscard]] StorageError publish_stored_ledger_block(
@@ -878,9 +978,32 @@ void clear_unreserved_ledger_slot(
         LWLockRelease(g_storage_lock);
         return StorageError::StaleToken;
     }
+    if (entry.reference.length != 0
+        && std::memcmp(
+            &entry.reference, &reference, sizeof(reference)) != 0) {
+        LWLockRelease(g_storage_lock);
+        return StorageError::StaleToken;
+    }
     entry.reference = reference;
     pg_write_barrier();
     entry.state = BlockLedgerState::Stored;
+    LWLockRelease(g_storage_lock);
+    return StorageError::None;
+}
+
+[[nodiscard]] StorageError record_reserved_block(
+        std::uint32_t slot,
+        std::uint64_t sequence,
+        const BlockReferenceV1& reference) noexcept {
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    BlockLedgerEntry& entry = g_shared->block_ledger[slot];
+    if (entry.sequence != sequence
+        || entry.state != BlockLedgerState::Reserved
+        || entry.reference.length != 0) {
+        LWLockRelease(g_storage_lock);
+        return StorageError::StaleToken;
+    }
+    entry.reference = reference;
     LWLockRelease(g_storage_lock);
     return StorageError::None;
 }
@@ -1050,7 +1173,7 @@ void clear_unreserved_ledger_slot(
         || status.st_nlink != 1
         || (status.st_mode & (S_IRWXG | S_IRWXO)) != 0
         || status.st_size < 0
-        || static_cast<std::uint64_t>(status.st_size) < end) {
+        || static_cast<std::uint64_t>(status.st_size) != end) {
         error = StorageError::UnsafePath;
     } else {
         error = read_all_at(descriptor, reference.offset, destination);
@@ -1074,41 +1197,87 @@ void clear_unreserved_ledger_slot(
     BlockLedgerEntry& entry = g_shared->block_ledger[slot];
     if (entry.sequence != sequence
         || (entry.state != BlockLedgerState::Stored
-            && entry.state != BlockLedgerState::Retiring)) {
+            && entry.state != BlockLedgerState::Retiring
+            && !(entry.state == BlockLedgerState::Reserved
+                && entry.reference.length != 0))) {
         LWLockRelease(g_storage_lock);
         return StorageError::StaleToken;
     }
-    entry.state = BlockLedgerState::Retiring;
+    if (!entry.reservation_accounted
+        || entry.reservation_tier != entry.reference.tier
+        || !valid_stored_reference(
+            entry.reference, entry.reserved_bytes)) {
+        LWLockRelease(g_storage_lock);
+        return StorageError::InvalidState;
+    }
+    /*
+     * Commit the one-way release before touching the physical tier.  If this
+     * process exits inside dsa_free()/unlink(), a later janitor leaves the
+     * tombstone fail-closed instead of risking a second DSA free.
+     */
+    entry.state = BlockLedgerState::ReleaseCommitted;
     reference = entry.reference;
     reserved_bytes = entry.reserved_bytes;
+    const BlockBackingTierV1 reservation_tier = entry.reservation_tier;
+    const bool reservation_accounted = entry.reservation_accounted;
+    LWLockRelease(g_storage_lock);
 
-    /* Physical release is serialized so no second janitor can double-free. */
+    /* ReleaseCommitted prevents a second janitor while physical I/O runs. */
     if (reference.tier == BlockBackingTierV1::Dsa
         && DsaPointerIsValid(static_cast<dsa_pointer>(reference.handle_or_file_id))) {
         dsa_free(g_dsa, static_cast<dsa_pointer>(reference.handle_or_file_id));
-        static_cast<void>(release_counter(g_shared->reserved_hot_bytes, reserved_bytes));
-        if (result != nullptr) {
+        if (reservation_accounted
+            && reservation_tier == BlockBackingTierV1::Dsa) {
+            static_cast<void>(release_counter(
+                g_shared->reserved_hot_bytes, reserved_bytes));
+        }
+        if (result != nullptr && reservation_accounted
+            && reservation_tier == BlockBackingTierV1::Dsa) {
             result->reclaimed_hot_bytes += reserved_bytes;
         }
     } else if (reference.tier == BlockBackingTierV1::File) {
         char temporary[MAXPGPATH]{};
         char final[MAXPGPATH]{};
-        if (build_file_paths(
+        bool released = build_file_paths(
                 reference.handle_or_file_id,
                 temporary,
                 sizeof(temporary),
                 final,
-                sizeof(final))) {
+                sizeof(final));
+        if (released) {
             static_cast<void>(::unlink(temporary));
-            static_cast<void>(::unlink(final));
+            released = ::unlink(final) == 0 || errno == ENOENT;
         }
-        static_cast<void>(release_counter(g_shared->reserved_file_bytes, reserved_bytes));
-        if (result != nullptr) {
+        if (!released) {
+            LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+            BlockLedgerEntry& failed = g_shared->block_ledger[slot];
+            if (failed.sequence == sequence
+                && failed.state == BlockLedgerState::ReleaseCommitted) {
+                failed.state = BlockLedgerState::Retiring;
+            }
+            LWLockRelease(g_storage_lock);
+            return StorageError::WriteFailed;
+        }
+        if (reservation_accounted
+            && reservation_tier == BlockBackingTierV1::File) {
+            static_cast<void>(release_counter(
+                g_shared->reserved_file_bytes, reserved_bytes));
+        }
+        if (result != nullptr && reservation_accounted
+            && reservation_tier == BlockBackingTierV1::File) {
             result->reclaimed_file_bytes += reserved_bytes;
         }
     }
-    entry = BlockLedgerEntry{};
-    entry.manifest_slot = kInvalidSlot;
+
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
+    BlockLedgerEntry& completed = g_shared->block_ledger[slot];
+    if (completed.sequence != sequence
+        || completed.state != BlockLedgerState::ReleaseCommitted) {
+        LWLockRelease(g_storage_lock);
+        return StorageError::StaleToken;
+    }
+    completed = BlockLedgerEntry{};
+    completed.manifest_slot = kInvalidSlot;
     LWLockRelease(g_storage_lock);
     if (result != nullptr) {
         ++result->reclaimed_blocks;
@@ -1138,6 +1307,7 @@ void clear_unreserved_ledger_slot(
     std::array<std::uint32_t, kBlocksPerManifest> ledger_slots{};
     std::array<std::uint64_t, kBlocksPerManifest> ledger_sequences{};
     std::uint32_t block_count = 0;
+    bool decrement_manifest_count = false;
 
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[slot];
@@ -1146,6 +1316,8 @@ void clear_unreserved_ledger_slot(
         LWLockRelease(g_storage_lock);
         return StorageError::Pinned;
     }
+    decrement_manifest_count = manifest.manifest_counted;
+    manifest.manifest_counted = false;
     manifest.state = ManifestState::Retiring;
     block_count = manifest.block_count;
     for (std::uint32_t index = 0; index < block_count; ++index) {
@@ -1181,7 +1353,10 @@ void clear_unreserved_ledger_slot(
         pg_atomic_init_u64(&current.last_access_at_us, 0);
         pg_atomic_init_u32(&current.reader_pins, 0);
         pg_atomic_init_u32(&current.waiter_references, 0);
-        static_cast<void>(pg_atomic_fetch_sub_u64(&g_shared->manifest_count, 1));
+        if (decrement_manifest_count) {
+            static_cast<void>(pg_atomic_fetch_sub_u64(
+                &g_shared->manifest_count, 1));
+        }
     }
     LWLockRelease(g_storage_lock);
     return StorageError::None;
@@ -1193,8 +1368,12 @@ std::size_t storage_shared_memory_size(const StorageConfig& config) noexcept {
     const std::uint64_t initial = config.dsa_initial_bytes < dsa_minimum_size()
         ? dsa_minimum_size()
         : config.dsa_initial_bytes;
+    if (initial > (std::numeric_limits<std::size_t>::max)()
+            - MAXIMUM_ALIGNOF) {
+        return 0;
+    }
     const std::uint64_t header = MAXALIGN(sizeof(StorageSharedState));
-    const std::uint64_t area = MAXALIGN(initial);
+    const std::uint64_t area = MAXALIGN(static_cast<std::size_t>(initial));
     if (header > (std::numeric_limits<std::size_t>::max)() - area) {
         return 0;
     }
@@ -1203,9 +1382,8 @@ std::size_t storage_shared_memory_size(const StorageConfig& config) noexcept {
 
 void request_storage_resources(const StorageConfig& config) {
     g_requested_config = config;
-    g_resources_requested = config_valid(config);
     const std::size_t bytes = storage_shared_memory_size(config);
-    if (!g_resources_requested || bytes == 0) {
+    if (!config_valid(config) || bytes == 0) {
         return;
     }
     RequestAddinShmemSpace(MAXALIGN(bytes));
@@ -1227,7 +1405,13 @@ bool startup_storage(
         const bool matches = g_shared->magic == kStorageMagic
             && g_shared->abi_version == kStorageAbiVersion
             && g_shared->total_shmem_bytes == bytes
-            && g_shared->dsa_initial_bytes == MAXALIGN(config.dsa_initial_bytes);
+            && g_shared->dsa_initial_bytes == MAXALIGN(config.dsa_initial_bytes)
+            && g_shared->hot_ceiling_bytes == bounded_hot_ceiling(config)
+            && g_shared->file_ceiling_bytes == config.file_ceiling_bytes
+            && g_shared->maximum_block_bytes == config.maximum_block_bytes
+            && g_shared->sweep_interval_ms == config.sweep_interval_ms
+            && g_shared->reclaim_batch == config.reclaim_batch
+            && g_shared->soft_limit_percent == config.soft_limit_percent;
         if (!matches) {
             remember_failure(StorageError::BootstrapFailed);
             return false;
@@ -1299,10 +1483,10 @@ bool attach_storage() {
             != static_cast<std::uint32_t>(BootstrapState::Ready)) {
         return false;
     }
-    LWLockRegisterTranche(
-        static_cast<int>(g_shared->dsa_tranche_id),
-        "bioseq_cache storage dsa");
     if (g_dsa == nullptr) {
+        LWLockRegisterTranche(
+            static_cast<int>(g_shared->dsa_tranche_id),
+            "bioseq_cache storage dsa");
         void* place = reinterpret_cast<char*>(g_shared)
             + MAXALIGN(sizeof(StorageSharedState));
         MemoryContext previous = MemoryContextSwitchTo(TopMemoryContext);
@@ -1365,19 +1549,41 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
             g_shared->hot_ceiling_bytes);
     }
     if (hot_reserved) {
+        result.error = mark_ledger_reservation(
+            ledger_slot, sequence, BlockBackingTierV1::Dsa);
+        if (result.error != StorageError::None) {
+            static_cast<void>(release_counter(
+                g_shared->reserved_hot_bytes, bytes.size()));
+            clear_unreserved_ledger_slot(ledger_slot, sequence);
+            remember_failure(result.error);
+            return result;
+        }
         const dsa_pointer allocation = dsa_allocate_extended(
             g_dsa,
             bytes.size(),
             DSA_ALLOC_NO_OOM);
         if (DsaPointerIsValid(allocation)) {
-            void* address = dsa_get_address(g_dsa, allocation);
-            std::memcpy(address, bytes.data(), bytes.size());
-            pg_write_barrier();
             reference.tier = BlockBackingTierV1::Dsa;
             reference.handle_or_file_id = static_cast<std::uint64_t>(allocation);
             reference.offset = 0;
             reference.length = bytes.size();
             reference.crc32c = crc32c(bytes);
+            result.error = record_reserved_block(
+                ledger_slot, sequence, reference);
+            if (result.error != StorageError::None) {
+                dsa_free(g_dsa, allocation);
+                /* The reference was not installed, so undo the ledger permit. */
+                static_cast<void>(cancel_ledger_reservation(
+                    ledger_slot, sequence, BlockBackingTierV1::Dsa));
+                static_cast<void>(release_counter(
+                    g_shared->reserved_hot_bytes, bytes.size()));
+                clear_unreserved_ledger_slot(ledger_slot, sequence);
+                remember_failure(result.error);
+                return result;
+            }
+            void* address = dsa_get_address(g_dsa, allocation);
+            std::memcpy(address, bytes.data(), bytes.size());
+            pg_write_barrier();
             result.error = publish_stored_ledger_block(
                 ledger_slot, sequence, reference);
             if (result.error == StorageError::None) {
@@ -1388,8 +1594,12 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
                 };
                 return result;
             }
-            dsa_free(g_dsa, allocation);
+            static_cast<void>(release_block_slot(ledger_slot, sequence));
+            remember_failure(result.error);
+            return result;
         }
+        static_cast<void>(cancel_ledger_reservation(
+            ledger_slot, sequence, BlockBackingTierV1::Dsa));
         static_cast<void>(release_counter(
             g_shared->reserved_hot_bytes, bytes.size()));
     }
@@ -1410,17 +1620,38 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
         : policy_ceiling;
     const std::uint64_t observed = pg_atomic_read_u64(
         &g_shared->reserved_file_bytes);
+    const std::uint64_t free_floor = FileAdmissionPolicy::free_floor_bytes(
+        filesystem_bytes);
+    const std::uint64_t free_headroom = filesystem_available > free_floor
+        ? filesystem_available - free_floor
+        : 0;
+    const std::uint64_t concurrency_ceiling = observed <=
+            (std::numeric_limits<std::uint64_t>::max)() - free_headroom
+        ? observed + free_headroom
+        : (std::numeric_limits<std::uint64_t>::max)();
+    const std::uint64_t reservation_ceiling = ceiling < concurrency_ceiling
+        ? ceiling
+        : concurrency_ceiling;
     if (!FileAdmissionPolicy::can_reserve(
             observed,
             bytes.size(),
             filesystem_bytes,
             filesystem_available)
         || !reserve_counter(
-            g_shared->reserved_file_bytes, bytes.size(), ceiling)) {
+            g_shared->reserved_file_bytes, bytes.size(), reservation_ceiling)) {
         clear_unreserved_ledger_slot(ledger_slot, sequence);
         result.error = system_memory_under_pressure()
             ? StorageError::MemoryPressure
             : StorageError::FileTierFull;
+        remember_failure(result.error);
+        return result;
+    }
+    result.error = mark_ledger_reservation(
+        ledger_slot, sequence, BlockBackingTierV1::File);
+    if (result.error != StorageError::None) {
+        static_cast<void>(release_counter(
+            g_shared->reserved_file_bytes, bytes.size()));
+        clear_unreserved_ledger_slot(ledger_slot, sequence);
         remember_failure(result.error);
         return result;
     }
@@ -1429,26 +1660,32 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
     if (file_id == 0) {
         file_id = pg_atomic_fetch_add_u64(&g_shared->next_file_id, 1);
     }
-    result.error = store_file_block(bytes, file_id, reference);
+    reference.tier = BlockBackingTierV1::File;
+    reference.handle_or_file_id = file_id;
+    reference.offset = 0;
+    reference.length = bytes.size();
+    reference.crc32c = crc32c(bytes);
+    result.error = record_reserved_block(
+        ledger_slot, sequence, reference);
     if (result.error != StorageError::None) {
+        static_cast<void>(cancel_ledger_reservation(
+            ledger_slot, sequence, BlockBackingTierV1::File));
         static_cast<void>(release_counter(
             g_shared->reserved_file_bytes, bytes.size()));
         clear_unreserved_ledger_slot(ledger_slot, sequence);
         remember_failure(result.error);
         return result;
     }
+    result.error = store_file_block(bytes, file_id, reference);
+    if (result.error != StorageError::None) {
+        static_cast<void>(release_block_slot(ledger_slot, sequence));
+        remember_failure(result.error);
+        return result;
+    }
     result.error = publish_stored_ledger_block(
         ledger_slot, sequence, reference);
     if (result.error != StorageError::None) {
-        char temporary[MAXPGPATH]{};
-        char final[MAXPGPATH]{};
-        if (build_file_paths(
-                file_id, temporary, sizeof(temporary), final, sizeof(final))) {
-            static_cast<void>(::unlink(final));
-        }
-        static_cast<void>(release_counter(
-            g_shared->reserved_file_bytes, bytes.size()));
-        clear_unreserved_ledger_slot(ledger_slot, sequence);
+        static_cast<void>(release_block_slot(ledger_slot, sequence));
         remember_failure(result.error);
         return result;
     }
@@ -1484,8 +1721,12 @@ PublishManifestResult publish_manifest(
         return result;
     }
     if (descriptor.id.boot_nonce == 0
+        || descriptor.id.boot_nonce
+            != pg_atomic_read_u64(&g_shared->boot_nonce)
         || descriptor.id.generation == 0
         || descriptor.id.claim_sequence == 0
+        || (descriptor.kind != CacheEntryKind::ExactFinalResult
+            && descriptor.kind != CacheEntryKind::ReusableCoverage)
         || descriptor.reserved != 0
         || descriptor.flags != 0
         || blocks.empty()
@@ -1513,7 +1754,10 @@ PublishManifestResult publish_manifest(
         return result;
     }
     std::uint64_t stored_bytes = 0;
-    for (const StoredBlockToken& token : blocks) {
+    for (std::size_t token_index = 0;
+         token_index < blocks.size();
+         ++token_index) {
+        const StoredBlockToken& token = blocks[token_index];
         if (!token || token.ledger_slot >= kBlockLedgerCapacity) {
             LWLockRelease(g_storage_lock);
             result.error = StorageError::InvalidArgument;
@@ -1523,6 +1767,10 @@ PublishManifestResult publish_manifest(
         if (block.sequence != token.sequence
             || block.state != BlockLedgerState::Stored
             || block.manifest_slot != kInvalidSlot
+            || !block.reservation_accounted
+            || block.reservation_tier != block.reference.tier
+            || !valid_stored_reference(
+                block.reference, block.reserved_bytes)
             || std::memcmp(
                 &block.reference,
                 &token.reference,
@@ -1533,12 +1781,21 @@ PublishManifestResult publish_manifest(
             result.error = StorageError::StaleToken;
             return result;
         }
+        for (std::size_t previous = 0;
+             previous < token_index;
+             ++previous) {
+            if (blocks[previous].ledger_slot == token.ledger_slot) {
+                LWLockRelease(g_storage_lock);
+                result.error = StorageError::InvalidArgument;
+                return result;
+            }
+        }
         stored_bytes += block.reference.length;
     }
 
     SharedManifestEntry& manifest = g_shared->manifests[free_slot];
     manifest = SharedManifestEntry{};
-    manifest.state = ManifestState::Complete;
+    manifest.state = ManifestState::Empty;
     manifest.kind = descriptor.kind;
     manifest.block_count = static_cast<std::uint16_t>(blocks.size());
     manifest.flags = descriptor.flags;
@@ -1554,6 +1811,18 @@ PublishManifestResult publish_manifest(
     manifest.row_count = descriptor.row_count;
     manifest.created_at_us = current_time_us(descriptor.created_at_us);
     manifest.expires_at_us = descriptor.expires_at_us;
+    if (manifest.expires_at_us != 0
+        && manifest.expires_at_us < manifest.created_at_us) {
+        manifest = SharedManifestEntry{};
+        manifest.state = ManifestState::Empty;
+        manifest.ledger_slots.fill(kInvalidSlot);
+        pg_atomic_init_u64(&manifest.last_access_at_us, 0);
+        pg_atomic_init_u32(&manifest.reader_pins, 0);
+        pg_atomic_init_u32(&manifest.waiter_references, 0);
+        LWLockRelease(g_storage_lock);
+        result.error = StorageError::InvalidArgument;
+        return result;
+    }
     manifest.ledger_slots.fill(kInvalidSlot);
     pg_atomic_init_u64(&manifest.last_access_at_us, manifest.created_at_us);
     pg_atomic_init_u32(&manifest.reader_pins, 0);
@@ -1564,12 +1833,21 @@ PublishManifestResult publish_manifest(
         const StoredBlockToken& token = blocks[index];
         manifest.ledger_slots[index] = token.ledger_slot;
         manifest.blocks[index] = token.reference;
+    }
+    /* Complete is published last; janitor repairs a crashed Publishing slot. */
+    manifest.state = ManifestState::Publishing;
+    pg_write_barrier();
+    for (std::size_t index = 0; index < blocks.size(); ++index) {
+        const StoredBlockToken& token = blocks[index];
         BlockLedgerEntry& block = g_shared->block_ledger[token.ledger_slot];
         block.state = BlockLedgerState::Referenced;
         block.manifest_slot = free_slot;
     }
     pg_write_barrier();
     static_cast<void>(pg_atomic_fetch_add_u64(&g_shared->manifest_count, 1));
+    manifest.manifest_counted = true;
+    manifest.state = ManifestState::Complete;
+    pg_write_barrier();
     result.handle = ManifestHandle{
         .slot = free_slot,
         .slot_sequence = manifest.slot_sequence,
@@ -1588,7 +1866,7 @@ PinManifestResult pin_manifest(
         return result;
     }
     const std::int64_t now = current_time_us(now_us);
-    LWLockAcquire(g_storage_lock, LW_SHARED);
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     for (std::uint32_t index = 0; index < kManifestCapacity; ++index) {
         SharedManifestEntry& manifest = g_shared->manifests[index];
         if (manifest.state != ManifestState::Complete
@@ -1598,6 +1876,12 @@ PinManifestResult pin_manifest(
         if (manifest.expires_at_us != 0 && now >= manifest.expires_at_us) {
             LWLockRelease(g_storage_lock);
             result.error = StorageError::NotFound;
+            return result;
+        }
+        if (pg_atomic_read_u32(&manifest.reader_pins)
+            == (std::numeric_limits<std::uint32_t>::max)()) {
+            LWLockRelease(g_storage_lock);
+            result.error = StorageError::InvalidState;
             return result;
         }
         static_cast<void>(pg_atomic_fetch_add_u32(&manifest.reader_pins, 1));
@@ -1630,7 +1914,7 @@ StorageError register_manifest_waiter(
         return StorageError::InvalidArgument;
     }
     const std::int64_t now = current_time_us(now_us);
-    LWLockAcquire(g_storage_lock, LW_SHARED);
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[handle.slot];
     if (!handle_matches(manifest, handle)
         || manifest.state != ManifestState::Complete
@@ -1656,11 +1940,13 @@ PinManifestResult convert_waiter_to_pin(const ManifestHandle& handle) {
         result.error = StorageError::InvalidArgument;
         return result;
     }
-    LWLockAcquire(g_storage_lock, LW_SHARED);
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[handle.slot];
     if (!handle_matches(manifest, handle)
         || manifest.state != ManifestState::Complete
-        || pg_atomic_read_u32(&manifest.waiter_references) == 0) {
+        || pg_atomic_read_u32(&manifest.waiter_references) == 0
+        || pg_atomic_read_u32(&manifest.reader_pins)
+            == (std::numeric_limits<std::uint32_t>::max)()) {
         LWLockRelease(g_storage_lock);
         result.error = StorageError::NotFound;
         return result;
@@ -1686,7 +1972,7 @@ StorageError unpin_manifest(const ManifestPin& pin) noexcept {
     if (!storage_ready() || !pin || pin.handle.slot >= kManifestCapacity) {
         return StorageError::InvalidArgument;
     }
-    LWLockAcquire(g_storage_lock, LW_SHARED);
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[pin.handle.slot];
     if (!handle_matches(manifest, pin.handle)
         || pg_atomic_read_u32(&manifest.reader_pins) == 0) {
@@ -1703,7 +1989,7 @@ StorageError unregister_manifest_waiter(
     if (!storage_ready() || !handle) {
         return StorageError::InvalidArgument;
     }
-    LWLockAcquire(g_storage_lock, LW_SHARED);
+    LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[handle.slot];
     if (!handle_matches(manifest, handle)
         || pg_atomic_read_u32(&manifest.waiter_references) == 0) {
@@ -1781,6 +2067,12 @@ JanitorSweepResult janitor_sweep(
     if (!attach_storage()) {
         return result;
     }
+    if (!acquire_sweep_ownership()) {
+        if (aggressive) {
+            request_janitor_sweep(true);
+        }
+        return result;
+    }
     const std::int64_t now = current_time_us(now_us);
     const std::uint32_t requested = pg_atomic_exchange_u32(
         &g_shared->sweep_requested, 0);
@@ -1795,15 +2087,16 @@ JanitorSweepResult janitor_sweep(
         bool reclaim = false;
         LWLockAcquire(g_storage_lock, LW_SHARED);
         const BlockLedgerEntry& block = g_shared->block_ledger[index];
-        if (block.state == BlockLedgerState::Reserved
+        if (block.state == BlockLedgerState::Retiring) {
+            reclaim = true;
+            sequence = block.sequence;
+        } else if (block.state == BlockLedgerState::Reserved
             || (block.state == BlockLedgerState::Stored
                 && block.manifest_slot == kInvalidSlot)) {
             const bool abandoned = !process_alive(
                 block.owner_pid, block.owner_proc_number);
-            const bool timed_out = block.created_at_us > 0
-                && now > block.created_at_us
-                && now - block.created_at_us >= g_shared->pending_timeout_us;
-            reclaim = abandoned || timed_out;
+            /* Never race a slow but live producer solely because it is old. */
+            reclaim = abandoned;
             sequence = block.sequence;
         }
         LWLockRelease(g_storage_lock);
@@ -1815,6 +2108,25 @@ JanitorSweepResult janitor_sweep(
         if (current_block.sequence == sequence
             && current_block.state == BlockLedgerState::Reserved
             && current_block.reference.length == 0) {
+            if (current_block.reservation_accounted
+                && current_block.reservation_tier
+                    == BlockBackingTierV1::Dsa) {
+                /*
+                 * A SIGKILL can land after dsa_allocate() but before its
+                 * pointer reaches this ledger slot.  Keep that reservation
+                 * fail-closed until restart rather than undercounting a
+                 * possibly live allocation that can no longer be addressed.
+                 */
+            } else if (current_block.reservation_accounted
+                && current_block.reservation_tier
+                    == BlockBackingTierV1::File) {
+                if (release_counter(
+                        g_shared->reserved_file_bytes,
+                        current_block.reserved_bytes)) {
+                    result.reclaimed_file_bytes +=
+                        current_block.reserved_bytes;
+                }
+            }
             current_block = BlockLedgerEntry{};
             current_block.manifest_slot = kInvalidSlot;
             ++result.abandoned_blocks;
@@ -1838,7 +2150,8 @@ JanitorSweepResult janitor_sweep(
         LWLockAcquire(g_storage_lock, LW_SHARED);
         const SharedManifestEntry& manifest = g_shared->manifests[index];
         if (manifest_reclaimable(manifest)) {
-            expired = manifest.state == ManifestState::Retiring
+            expired = manifest.state == ManifestState::Publishing
+                || manifest.state == ManifestState::Retiring
                 || (manifest.expires_at_us != 0
                     && now >= manifest.expires_at_us);
             sequence = manifest.slot_sequence;
@@ -1853,11 +2166,26 @@ JanitorSweepResult janitor_sweep(
 
     const std::uint64_t hot_soft = soft_limit(
         g_shared->hot_ceiling_bytes, g_shared->soft_limit_percent);
+    std::uint64_t filesystem_bytes = 0;
+    std::uint64_t filesystem_available = 0;
+    const bool filesystem_known = filesystem_capacity(
+        filesystem_bytes, filesystem_available) == StorageError::None;
+    const std::uint64_t policy_file_ceiling = filesystem_known
+        ? FileAdmissionPolicy::ceiling_bytes(filesystem_bytes)
+        : g_shared->file_ceiling_bytes;
+    const std::uint64_t effective_file_ceiling =
+        g_shared->file_ceiling_bytes < policy_file_ceiling
+            ? g_shared->file_ceiling_bytes
+            : policy_file_ceiling;
     const std::uint64_t file_soft = soft_limit(
-        g_shared->file_ceiling_bytes, g_shared->soft_limit_percent);
+        effective_file_ceiling, g_shared->soft_limit_percent);
+    const bool filesystem_pressure = filesystem_known
+        && filesystem_available
+            < FileAdmissionPolicy::free_floor_bytes(filesystem_bytes);
     auto pressure_remains = [&]() noexcept {
         return aggressive
             || system_memory_under_pressure()
+            || filesystem_pressure
             || pg_atomic_read_u64(&g_shared->reserved_hot_bytes) > hot_soft
             || pg_atomic_read_u64(&g_shared->reserved_file_bytes) > file_soft;
     };
@@ -1898,6 +2226,7 @@ JanitorSweepResult janitor_sweep(
     }
     pg_atomic_write_u64(&g_shared->last_sweep_at_us, now);
     static_cast<void>(pg_atomic_fetch_add_u64(&g_shared->completed_sweeps, 1));
+    release_sweep_ownership();
     return result;
 }
 
