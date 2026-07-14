@@ -71,6 +71,8 @@ SET ROLE cache_security_alice;
 DO $$
 DECLARE
     own_rows integer;
+    scalar_rows integer;
+    foreign_rows integer;
     leaked_rows integer;
 BEGIN
     SELECT count(*) INTO own_rows
@@ -83,6 +85,24 @@ BEGIN
       AND producer_plan IS NOT NULL
       AND dependencies->>'canonical_plan_status' = 'Planned'
       AND dependencies->>'producer_plan_status' = 'Planned';
+    SELECT count(*) INTO scalar_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND entry_key IS NOT NULL
+      AND age IS NOT NULL
+      AND rows IS NOT NULL
+      AND logical_bytes IS NOT NULL
+      AND stored_bytes IS NOT NULL;
+    SELECT count(*) INTO foreign_rows
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ReusableCoverage'
+      AND state = 'COMPLETE'
+      AND owner_role IS NULL
+      AND producer_pid IS NULL
+      AND sql IS NULL
+      AND producer_plan IS NULL
+      AND dependencies IS NULL;
     SELECT count(*) INTO leaked_rows
     FROM bioseq_cache.entries()
     WHERE kind = 'ReusableCoverage'
@@ -90,10 +110,11 @@ BEGIN
       AND owner_role IS NULL
       AND (producer_pid IS NOT NULL OR sql IS NOT NULL
            OR producer_plan IS NOT NULL OR dependencies IS NOT NULL);
-    IF own_rows <> 1 OR leaked_rows <> 0 THEN
+    IF own_rows <> 1 OR scalar_rows <> 2 OR foreign_rows <> 1
+       OR leaked_rows <> 0 THEN
         RAISE EXCEPTION
-            'producer row-level diagnostic filtering failed: %, %',
-            own_rows, leaked_rows;
+            'producer row-level diagnostic filtering failed: %, %, %, %',
+            own_rows, scalar_rows, foreign_rows, leaked_rows;
     END IF;
 END
 $$;
