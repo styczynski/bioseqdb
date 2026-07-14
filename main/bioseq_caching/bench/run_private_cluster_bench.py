@@ -14,12 +14,14 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Mapping, Sequence
 
@@ -272,6 +274,204 @@ class _PauseController:
         if process.returncode not in (0, None) and exc_type is None:
             raise self._error(
                 f"pause controller psql exited {process.returncode}"
+            )
+
+
+class _ProviderSession:
+    """Measure backend-local provider counters beside each query execution."""
+
+    def __init__(self, cluster: Any) -> None:
+        self._cluster = cluster
+        self._process: subprocess.Popen[str] | None = None
+        self._marker_sequence = 0
+        self._stdout_queue: queue.Queue[tuple[str, int] | None] = queue.Queue()
+        self._stdout_thread: threading.Thread | None = None
+
+    def _error(self, message: str) -> BenchmarkError:
+        error = ""
+        if (
+            self._process is not None
+            and self._process.poll() is not None
+            and self._process.stderr is not None
+        ):
+            with contextlib.suppress(Exception):
+                error = self._process.stderr.read()
+        suffix = f": {error}" if error else ""
+        return BenchmarkError(message + suffix)
+
+    def _next_marker(self) -> str:
+        self._marker_sequence += 1
+        return (
+            "BIOSEQ_CACHE_PROVIDER_"
+            f"{os.getpid()}_{self._marker_sequence}"
+        )
+
+    def _send(self, sql: str) -> None:
+        process = self._process
+        if process is None or process.stdin is None:
+            raise self._error("provider benchmark session has no psql stdin")
+        process.stdin.write(sql)
+        if not sql.endswith("\n"):
+            process.stdin.write("\n")
+        process.stdin.flush()
+
+    def _pump_stdout(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            self._stdout_queue.put(None)
+            return
+        try:
+            for line in process.stdout:
+                self._stdout_queue.put((line, time.perf_counter_ns()))
+        finally:
+            self._stdout_queue.put(None)
+
+    def _read_until(
+        self,
+        marker: str,
+        *,
+        timeout_seconds: float = 120.0,
+    ) -> tuple[list[str], int | None]:
+        process = self._process
+        if process is None or process.stdout is None:
+            raise self._error("provider benchmark session has no psql stdout")
+        lines: list[str] = []
+        first_output_at_ns: int | None = None
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                queued = self._stdout_queue.get(
+                    timeout=min(0.1, deadline - time.monotonic())
+                )
+            except queue.Empty:
+                if process.poll() is not None:
+                    raise self._error("provider benchmark psql exited early")
+                continue
+            if queued is None:
+                raise self._error("provider benchmark psql closed stdout")
+            line, arrived_at_ns = queued
+            if line.rstrip("\r\n") == marker:
+                return lines, first_output_at_ns
+            if first_output_at_ns is None:
+                first_output_at_ns = arrived_at_ns
+            lines.append(line)
+        raise self._error(
+            f"provider benchmark timed out waiting for {marker}"
+        )
+
+    def _command(self, sql: str) -> list[str]:
+        marker = self._next_marker()
+        statement = sql.rstrip()
+        if not statement.endswith(";"):
+            statement += ";"
+        self._send(
+            "SET bioseq.query_cache_optimisation_mode = 'disabled';\n"
+            f"{statement}\n\\echo {marker}"
+        )
+        lines, _ = self._read_until(marker)
+        return lines
+
+    def __enter__(self) -> "_ProviderSession":
+        command = _psql_command(self._cluster, "")[:-2]
+        self._process = subprocess.Popen(
+            command,
+            env=self._cluster.environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._stdout_thread = threading.Thread(
+            target=self._pump_stdout,
+            name="bioseq-cache-provider-bench-stdout",
+            daemon=True,
+        )
+        self._stdout_thread.start()
+        self._command(
+            "SELECT bioseq_cache_test.provider_init();\n"
+            "SET bioseq.query_cache_ttl = 3600000"
+        )
+        return self
+
+    def use_relation(self, relation: str) -> None:
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", relation):
+            raise BenchmarkError(
+                f"unsafe provider benchmark relation name: {relation!r}"
+            )
+        self._command(
+            "SELECT bioseq_cache_test.provider_use_relation("
+            f"'{relation}'::regclass)"
+        )
+
+    def reset_provider(self) -> None:
+        self._command("SELECT bioseq_cache_test.provider_reset()")
+
+    def provider_stats(self) -> dict[str, Any]:
+        lines = [
+            line.strip()
+            for line in self._command(
+                "SELECT bioseq_cache_test.provider_stats()::text"
+            )
+            if line.strip()
+        ]
+        if len(lines) != 1:
+            raise BenchmarkError(
+                f"unexpected generic provider stats output: {lines!r}"
+            )
+        document = json.loads(lines[0])
+        if not isinstance(document, dict):
+            raise BenchmarkError(
+                f"generic provider stats are not an object: {document!r}"
+            )
+        return document
+
+    def execute(self, *, mode: str, sql: str) -> QueryOutput:
+        if mode not in {"disabled", "same", "reuse"}:
+            raise BenchmarkError(f"unsupported provider benchmark mode: {mode}")
+        marker = self._next_marker()
+        started = time.perf_counter_ns()
+        self._send(
+            "SET bioseq.query_cache_optimisation_mode = "
+            f"'{mode}';\n{sql.rstrip(';')};\n\\echo {marker}"
+        )
+        lines, first_output_at_ns = self._read_until(marker)
+        completed_at_ns = time.perf_counter_ns()
+        first_row_ns = (
+            first_output_at_ns - started
+            if first_output_at_ns is not None
+            else None
+        )
+        return _digest_output(
+            "".join(lines),
+            completed_at_ns - started,
+            first_row_ns,
+            completed_at_ns,
+        )
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is None:
+            with contextlib.suppress(Exception):
+                self._command(
+                    "SELECT bioseq_cache_test.provider_shutdown()"
+                )
+        if process.stdin is not None and process.poll() is None:
+            with contextlib.suppress(Exception):
+                process.stdin.write("\\q\n")
+                process.stdin.flush()
+        try:
+            process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        if self._stdout_thread is not None:
+            self._stdout_thread.join(timeout=1.0)
+        if process.returncode not in (0, None) and exc_type is None:
+            raise self._error(
+                f"provider benchmark psql exited {process.returncode}"
             )
 
 
@@ -534,6 +734,100 @@ def _stats(cluster: Any) -> dict[str, int]:
     return {name: int(value) for name, value in zip(names, values)}
 
 
+PROVIDER_COUNTER_NAMES = (
+    "analyze_query",
+    "describe_path",
+    "domain_digest",
+    "generation_digest",
+    "runtime_digest",
+    "map_source",
+    "decorate_path",
+    "build_recipe",
+    "extract_occurrence",
+    "late_fetch_batch",
+    "late_fetch_references",
+    "planner_bridge_calls",
+    "executor_rows",
+    "gated_expensive_rows",
+)
+
+
+def _counter_delta(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    names: Sequence[str],
+) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for name in names:
+        before_value = before.get(name)
+        after_value = after.get(name)
+        if not isinstance(before_value, int) or not isinstance(after_value, int):
+            raise BenchmarkError(
+                f"counter {name!r} is absent or non-integral: "
+                f"{before_value!r} -> {after_value!r}"
+            )
+        result[name] = after_value - before_value
+    return result
+
+
+def _storage_snapshot(cluster: Any) -> dict[str, Any]:
+    return {
+        "runtime_admin": _entry_runtime_snapshot(cluster),
+        "test_tier_evidence": _test_storage_tier_snapshot(cluster),
+    }
+
+
+def _provider_phase_report(
+    cluster: Any,
+    *,
+    reference: QueryOutput,
+    outputs: Sequence[QueryOutput],
+    ordered: bool,
+    cache_before: Mapping[str, Any],
+    cache_after: Mapping[str, Any],
+    provider_before: Mapping[str, Any],
+    provider_after: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not outputs:
+        raise BenchmarkError("provider benchmark phase has no output samples")
+    digest_name = "ordered_sha256" if ordered else "multiset_sha256"
+    digest_value = (
+        reference.ordered_sha256 if ordered else reference.multiset_sha256
+    )
+    return {
+        "correctness": {
+            "passed": all(
+                _same_result(reference, output, ordered)
+                for output in outputs
+            ),
+            "row_count": reference.rows,
+            "ordered_sha256": reference.ordered_sha256,
+            "multiset_sha256": reference.multiset_sha256,
+            "comparison_digest": digest_name,
+            "comparison_sha256": digest_value,
+            "stdout_bytes": reference.stdout_bytes,
+        },
+        "wall": _sample_summary([output.elapsed_ns for output in outputs]),
+        "time_to_first_row": _first_row_summary(outputs),
+        "throughput": _throughput_summary(outputs),
+        "cache_stats": {
+            "before": dict(cache_before),
+            "after": dict(cache_after),
+            "delta": _counter_delta(
+                cache_before, cache_after, tuple(cache_before.keys())
+            ),
+        },
+        "provider_stats": {
+            "before": dict(provider_before),
+            "after": dict(provider_after),
+            "delta": _counter_delta(
+                provider_before, provider_after, PROVIDER_COUNTER_NAMES
+            ),
+        },
+        "storage": _storage_snapshot(cluster),
+    }
+
+
 def _reset_case(cluster: Any, *, ttl_ms: int = 3_600_000) -> None:
     _run_sql(
         cluster,
@@ -790,6 +1084,367 @@ def _measure_case(
         },
         "runtime_storage": runtime,
         "stats": case_stats,
+    }
+
+
+def _measure_generic_provider_reuse(
+    cluster: Any,
+    *,
+    fixture_rows: int,
+    sample_count: int,
+) -> dict[str, Any]:
+    if fixture_rows <= 0 or sample_count <= 0:
+        raise BenchmarkError("generic provider benchmark sizes must be positive")
+    projection = (
+        "SELECT row_id, base_id, occurrence_no, nullable_value, "
+        "payload, capability_mask "
+    )
+    current_sql = (
+        projection
+        + "FROM cache_bench_provider_rows "
+        "WHERE nullable_value <= 10 ORDER BY row_id"
+    )
+    overlap_sql = (
+        projection
+        + "FROM cache_bench_provider_rows "
+        "WHERE nullable_value >= 0 ORDER BY row_id"
+    )
+    partition_sql = (
+        projection
+        + "FROM cache_bench_provider_part_a "
+        "WHERE nullable_value <= 10 ORDER BY row_id"
+    )
+
+    with _ProviderSession(cluster) as session:
+        _reset_case(cluster)
+        session.use_relation("cache_bench_provider_rows")
+        session.reset_provider()
+        disabled_provider_before = session.provider_stats()
+        disabled_cache_before = _stats(cluster)
+        disabled_outputs = [
+            session.execute(mode="disabled", sql=current_sql)
+            for _ in range(sample_count)
+        ]
+        disabled_provider_after = session.provider_stats()
+        disabled_cache_after = _stats(cluster)
+        reference = disabled_outputs[0]
+        disabled = _provider_phase_report(
+            cluster,
+            reference=reference,
+            outputs=disabled_outputs,
+            ordered=True,
+            cache_before=disabled_cache_before,
+            cache_after=disabled_cache_after,
+            provider_before=disabled_provider_before,
+            provider_after=disabled_provider_after,
+        )
+
+        session.reset_provider()
+        producer_provider_before = session.provider_stats()
+        producer_cache_before = _stats(cluster)
+        producer_output = session.execute(mode="reuse", sql=current_sql)
+        producer_provider_after = session.provider_stats()
+        producer_cache_after = _stats(cluster)
+        producer = _provider_phase_report(
+            cluster,
+            reference=reference,
+            outputs=[producer_output],
+            ordered=True,
+            cache_before=producer_cache_before,
+            cache_after=producer_cache_after,
+            provider_before=producer_provider_before,
+            provider_after=producer_provider_after,
+        )
+
+        session.reset_provider()
+        hit_provider_before = session.provider_stats()
+        hit_cache_before = _stats(cluster)
+        hit_outputs = [
+            session.execute(mode="reuse", sql=current_sql)
+            for _ in range(sample_count)
+        ]
+        hit_provider_after = session.provider_stats()
+        hit_cache_after = _stats(cluster)
+        identical_hit = _provider_phase_report(
+            cluster,
+            reference=reference,
+            outputs=hit_outputs,
+            ordered=True,
+            cache_before=hit_cache_before,
+            cache_after=hit_cache_after,
+            provider_before=hit_provider_before,
+            provider_after=hit_provider_after,
+        )
+
+        disabled_cache_delta = disabled["cache_stats"]["delta"]
+        producer_cache_delta = producer["cache_stats"]["delta"]
+        producer_provider_delta = producer["provider_stats"]["delta"]
+        hit_cache_delta = identical_hit["cache_stats"]["delta"]
+        hit_provider_delta = identical_hit["provider_stats"]["delta"]
+        current_behavior = {
+            "passed": (
+                disabled["correctness"]["passed"]
+                and producer["correctness"]["passed"]
+                and identical_hit["correctness"]["passed"]
+                and all(value == 0 for value in disabled_cache_delta.values())
+                and producer_cache_delta["produced"] == 1
+                and producer_cache_delta["reuse_hits"] == 0
+                and producer_cache_delta["fallbacks"] == 0
+                and producer_provider_delta["extract_occurrence"] > 0
+                and producer_provider_delta["executor_rows"] > 0
+                and producer_provider_delta["gated_expensive_rows"] > 0
+                and hit_cache_delta["produced"] == 0
+                and hit_cache_delta["reuse_hits"] == sample_count
+                and hit_cache_delta["fallbacks"] == 0
+                and hit_provider_delta["extract_occurrence"] == 0
+                and hit_provider_delta["executor_rows"] == 0
+                and hit_provider_delta["gated_expensive_rows"] == 0
+            ),
+            "expected_identical_hits": sample_count,
+            "producer_cache_delta": producer_cache_delta,
+            "producer_provider_delta": producer_provider_delta,
+            "hit_cache_delta": hit_cache_delta,
+            "hit_provider_delta": hit_provider_delta,
+        }
+
+        _reset_case(cluster)
+        session.use_relation("cache_bench_provider_rows")
+        session.reset_provider()
+        overlap_source_provider_before = session.provider_stats()
+        overlap_source_cache_before = _stats(cluster)
+        overlap_source_output = session.execute(
+            mode="reuse", sql=current_sql
+        )
+        overlap_source_provider_after = session.provider_stats()
+        overlap_source_cache_after = _stats(cluster)
+        overlap_source = _provider_phase_report(
+            cluster,
+            reference=reference,
+            outputs=[overlap_source_output],
+            ordered=True,
+            cache_before=overlap_source_cache_before,
+            cache_after=overlap_source_cache_after,
+            provider_before=overlap_source_provider_before,
+            provider_after=overlap_source_provider_after,
+        )
+
+        session.reset_provider()
+        overlap_disabled_provider_before = session.provider_stats()
+        overlap_disabled_cache_before = _stats(cluster)
+        overlap_reference_output = session.execute(
+            mode="disabled", sql=overlap_sql
+        )
+        overlap_disabled_provider_after = session.provider_stats()
+        overlap_disabled_cache_after = _stats(cluster)
+        overlap_disabled = _provider_phase_report(
+            cluster,
+            reference=overlap_reference_output,
+            outputs=[overlap_reference_output],
+            ordered=True,
+            cache_before=overlap_disabled_cache_before,
+            cache_after=overlap_disabled_cache_after,
+            provider_before=overlap_disabled_provider_before,
+            provider_after=overlap_disabled_provider_after,
+        )
+
+        session.reset_provider()
+        overlap_reuse_provider_before = session.provider_stats()
+        overlap_reuse_cache_before = _stats(cluster)
+        overlap_reuse_output = session.execute(mode="reuse", sql=overlap_sql)
+        overlap_reuse_provider_after = session.provider_stats()
+        overlap_reuse_cache_after = _stats(cluster)
+        overlap_reuse = _provider_phase_report(
+            cluster,
+            reference=overlap_reference_output,
+            outputs=[overlap_reuse_output],
+            ordered=True,
+            cache_before=overlap_reuse_cache_before,
+            cache_after=overlap_reuse_cache_after,
+            provider_before=overlap_reuse_provider_before,
+            provider_after=overlap_reuse_provider_after,
+        )
+        overlap_cache_delta = overlap_reuse["cache_stats"]["delta"]
+        overlap_provider_delta = overlap_reuse["provider_stats"]["delta"]
+        overlap_disabled_provider_delta = overlap_disabled[
+            "provider_stats"
+        ]["delta"]
+        overlap_supported = (
+            overlap_cache_delta["reuse_hits"] > 0
+            and overlap_provider_delta["map_source"] > 0
+        )
+        overlap_work_reduced = (
+            overlap_provider_delta["executor_rows"]
+            < overlap_disabled_provider_delta["executor_rows"]
+            and overlap_provider_delta["gated_expensive_rows"]
+            < overlap_disabled_provider_delta["gated_expensive_rows"]
+        )
+        overlapping = {
+            "status": "measured" if overlap_supported else "not_applicable",
+            "detail": (
+                "An older predicate source was mapped and read while the "
+                "provider executed only the residual."
+                if overlap_supported
+                else "The planner/runtime emitted no mapped older-source hit."
+            ),
+            "source": overlap_source,
+            "disabled_reference": overlap_disabled,
+            "reuse": overlap_reuse,
+            "behavior": {
+                "supported": overlap_supported,
+                "passed": (
+                    overlap_reuse["correctness"]["passed"]
+                    and overlap_work_reduced
+                    and overlap_cache_delta["fallbacks"] == 0
+                )
+                if overlap_supported
+                else None,
+                "provider_work_reduced": overlap_work_reduced,
+                "cache_delta": overlap_cache_delta,
+                "provider_delta": overlap_provider_delta,
+                "disabled_provider_delta": overlap_disabled_provider_delta,
+            },
+        }
+
+        _reset_case(cluster)
+        session.use_relation("cache_bench_provider_part_a")
+        session.reset_provider()
+        partition_disabled_provider_before = session.provider_stats()
+        partition_disabled_cache_before = _stats(cluster)
+        partition_reference_output = session.execute(
+            mode="disabled", sql=partition_sql
+        )
+        partition_disabled_provider_after = session.provider_stats()
+        partition_disabled_cache_after = _stats(cluster)
+        partition_disabled = _provider_phase_report(
+            cluster,
+            reference=partition_reference_output,
+            outputs=[partition_reference_output],
+            ordered=True,
+            cache_before=partition_disabled_cache_before,
+            cache_after=partition_disabled_cache_after,
+            provider_before=partition_disabled_provider_before,
+            provider_after=partition_disabled_provider_after,
+        )
+
+        session.reset_provider()
+        partition_producer_provider_before = session.provider_stats()
+        partition_producer_cache_before = _stats(cluster)
+        partition_producer_output = session.execute(
+            mode="reuse", sql=partition_sql
+        )
+        partition_producer_provider_after = session.provider_stats()
+        partition_producer_cache_after = _stats(cluster)
+        partition_producer = _provider_phase_report(
+            cluster,
+            reference=partition_reference_output,
+            outputs=[partition_producer_output],
+            ordered=True,
+            cache_before=partition_producer_cache_before,
+            cache_after=partition_producer_cache_after,
+            provider_before=partition_producer_provider_before,
+            provider_after=partition_producer_provider_after,
+        )
+
+        cache_before_neighbor_write = _stats(cluster)
+        write_started = time.perf_counter_ns()
+        _run_sql(
+            cluster,
+            "UPDATE cache_bench_provider_part_b "
+            "SET payload = payload || '-updated' WHERE row_id = "
+            "(SELECT min(row_id) FROM cache_bench_provider_part_b)",
+        )
+        neighbor_write_ns = time.perf_counter_ns() - write_started
+        cache_after_neighbor_write = _stats(cluster)
+
+        session.reset_provider()
+        partition_hit_provider_before = session.provider_stats()
+        partition_hit_cache_before = _stats(cluster)
+        partition_hit_outputs = [
+            session.execute(mode="reuse", sql=partition_sql)
+            for _ in range(sample_count)
+        ]
+        partition_hit_provider_after = session.provider_stats()
+        partition_hit_cache_after = _stats(cluster)
+        partition_hit = _provider_phase_report(
+            cluster,
+            reference=partition_reference_output,
+            outputs=partition_hit_outputs,
+            ordered=True,
+            cache_before=partition_hit_cache_before,
+            cache_after=partition_hit_cache_after,
+            provider_before=partition_hit_provider_before,
+            provider_after=partition_hit_provider_after,
+        )
+        partition_cache_delta = partition_hit["cache_stats"]["delta"]
+        partition_provider_delta = partition_hit["provider_stats"]["delta"]
+        partition_behavior = {
+            "passed": (
+                partition_disabled["correctness"]["passed"]
+                and partition_producer["correctness"]["passed"]
+                and partition_hit["correctness"]["passed"]
+                and partition_producer["cache_stats"]["delta"]["produced"]
+                == 1
+                and cache_after_neighbor_write["produced"]
+                == cache_before_neighbor_write["produced"]
+                and partition_cache_delta["produced"] == 0
+                and partition_cache_delta["reuse_hits"] == sample_count
+                and partition_cache_delta["fallbacks"] == 0
+                and partition_provider_delta["extract_occurrence"] == 0
+                and partition_provider_delta["executor_rows"] == 0
+                and partition_provider_delta["gated_expensive_rows"] == 0
+            ),
+            "expected_post_write_hits": sample_count,
+            "neighbor_write_ns": neighbor_write_ns,
+            "cache_before_neighbor_write": cache_before_neighbor_write,
+            "cache_after_neighbor_write": cache_after_neighbor_write,
+            "cache_neighbor_write_delta": _counter_delta(
+                cache_before_neighbor_write,
+                cache_after_neighbor_write,
+                tuple(cache_before_neighbor_write.keys()),
+            ),
+            "post_write_cache_delta": partition_cache_delta,
+            "post_write_provider_delta": partition_provider_delta,
+        }
+        partition = {
+            "disabled_reference": partition_disabled,
+            "producer": partition_producer,
+            "post_neighbor_write_hit": partition_hit,
+            "behavior": partition_behavior,
+        }
+
+    overlap_correct = (
+        overlapping["behavior"]["passed"] is not False
+    )
+    return {
+        "fixture": {
+            "provider_rows": fixture_rows,
+            "partition_rows_per_leaf": max(512, fixture_rows // 4),
+            "measurement_scope": (
+                "One persistent backend keeps provider counters local; wall "
+                "and first-row samples start when each SQL command is sent and "
+                "exclude initial connection startup."
+            ),
+            "null_rule": "row_id % 17 = 0",
+            "current_predicate": "nullable_value <= 10",
+            "overlap_predicate": "nullable_value >= 0",
+            "current_sql": current_sql,
+            "overlap_sql": overlap_sql,
+            "partition_sql": partition_sql,
+        },
+        "disabled_reference": disabled,
+        "reusable_producer": producer,
+        "identical_current_hit": identical_hit,
+        "current_behavior": current_behavior,
+        "overlapping_predicate_reuse": overlapping,
+        "partition_fragment_reuse": partition,
+        "correctness": {
+            "passed": (
+                current_behavior["passed"]
+                and partition_behavior["passed"]
+                and overlap_correct
+            ),
+            "overlap_applicable": overlapping["status"] == "measured",
+        },
     }
 
 
@@ -1086,6 +1741,7 @@ def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
 
 
 def _setup_fixture(cluster: Any, rows: int) -> None:
+    provider_partition_rows = max(512, rows // 4)
     setup_sql = f"""
     CREATE TABLE cache_bench_narrow(
       id bigint PRIMARY KEY, group_id integer NOT NULL, payload bigint NOT NULL);
@@ -1108,9 +1764,62 @@ def _setup_fixture(cluster: Any, rows: int) -> None:
     FROM generate_series(1, 64) AS g(i);
 
     CREATE TABLE cache_bench_unrelated(id bigint PRIMARY KEY);
+
+    CREATE TABLE cache_bench_provider_rows(
+      row_id bigint PRIMARY KEY,
+      base_id bigint NOT NULL,
+      occurrence_no integer NOT NULL,
+      nullable_value integer,
+      payload text NOT NULL,
+      capability_mask bigint NOT NULL,
+      UNIQUE(base_id, occurrence_no));
+    INSERT INTO cache_bench_provider_rows
+    SELECT i,
+           (i + 1) / 2,
+           ((i - 1) % 2)::integer,
+           CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 101) - 50 END,
+           repeat(md5(i::text), 2),
+           3
+    FROM generate_series(1, {rows}) AS g(i);
+
+    CREATE TABLE cache_bench_provider_partitioned(
+      row_id bigint NOT NULL,
+      part integer NOT NULL,
+      base_id bigint NOT NULL,
+      occurrence_no integer NOT NULL,
+      nullable_value integer,
+      payload text NOT NULL,
+      capability_mask bigint NOT NULL
+    ) PARTITION BY LIST(part);
+    CREATE TABLE cache_bench_provider_part_a
+      PARTITION OF cache_bench_provider_partitioned FOR VALUES IN (1);
+    CREATE TABLE cache_bench_provider_part_b
+      PARTITION OF cache_bench_provider_partitioned FOR VALUES IN (2);
+    INSERT INTO cache_bench_provider_partitioned
+    SELECT i,
+           1,
+           i,
+           0,
+           CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 101) - 50 END,
+           repeat(md5('a-' || i::text), 2),
+           3
+    FROM generate_series(1, {provider_partition_rows}) AS g(i);
+    INSERT INTO cache_bench_provider_partitioned
+    SELECT {provider_partition_rows} + i,
+           2,
+           {provider_partition_rows} + i,
+           0,
+           CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 101) - 50 END,
+           repeat(md5('b-' || i::text), 2),
+           3
+    FROM generate_series(1, {provider_partition_rows}) AS g(i);
+
     ANALYZE cache_bench_narrow;
     ANALYZE cache_bench_wide;
     ANALYZE cache_bench_toast;
+    ANALYZE cache_bench_provider_rows;
+    ANALYZE cache_bench_provider_part_a;
+    ANALYZE cache_bench_provider_part_b;
     """
     _run_sql(cluster, setup_sql)
 
@@ -1158,6 +1867,7 @@ def _threshold(
 def _evaluate_thresholds(
     core: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
+    generic_provider: Mapping[str, Any],
     fanout: Sequence[Mapping[str, Any]],
     invalidation: Sequence[Mapping[str, Any]],
     eviction_pressure: Mapping[str, Any],
@@ -1244,6 +1954,9 @@ def _evaluate_thresholds(
     )
     correctness_passed = correctness_passed and bool(
         unrelated_commit["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        generic_provider["correctness"]["passed"]
     )
     thresholds.append(
         _threshold(
@@ -1404,11 +2117,52 @@ def _evaluate_thresholds(
     )
     thresholds.append(
         _threshold(
+            "generic_reusable_current_hit",
+            actual=generic_provider["current_behavior"],
+            limit=(
+                "one reusable publication; identical current requests read it "
+                "without provider executor work"
+            ),
+            passed=bool(generic_provider["current_behavior"]["passed"]),
+            detail=(
+                "Cache and backend-local provider counter deltas are measured "
+                "beside ordered row/checksum validation."
+            ),
+        )
+    )
+    overlap = generic_provider["overlapping_predicate_reuse"]
+    overlap_passed = (
+        overlap["behavior"]["passed"]
+        if overlap["status"] == "measured"
+        else None
+    )
+    thresholds.append(
+        _threshold(
+            "generic_overlapping_predicate_reuse",
+            actual=overlap["behavior"],
+            limit=(
+                "when mapped older-source reuse is supported, preserve the "
+                "ordered bag and reduce provider residual work"
+            ),
+            passed=overlap_passed,
+            detail=overlap["detail"],
+        )
+    )
+    thresholds.append(
+        _threshold(
             "provider_partition_fragment_reuse",
-            actual=None,
+            actual=generic_provider["partition_fragment_reuse"]["behavior"],
             limit="unaffected provider partition remains reusable",
-            passed=None,
-            detail="Provider-only threshold belongs to cache-bioseq-bench.",
+            passed=bool(
+                generic_provider["partition_fragment_reuse"]["behavior"][
+                    "passed"
+                ]
+            ),
+            detail=(
+                "Measured with the deterministic cache-only generic provider: "
+                "a committed write to leaf B must leave leaf A's reusable "
+                "generation readable without provider executor work."
+            ),
         )
     )
     thresholds.append(
@@ -1489,6 +2243,11 @@ def run(argv: Sequence[str]) -> int:
         fixture_rows = int(cases_document.get("fixture_rows", 20_000))
         sample_count = int(cases_document.get("samples_per_case", 7))
         _setup_fixture(cluster, fixture_rows)
+        generic_provider = _measure_generic_provider_reuse(
+            cluster,
+            fixture_rows=fixture_rows,
+            sample_count=sample_count,
+        )
         cases = [
             _measure_case(cluster, case, sample_count=sample_count)
             for case in cases_document["cases"]
@@ -1506,6 +2265,7 @@ def run(argv: Sequence[str]) -> int:
         thresholds = _evaluate_thresholds(
             core,
             cases,
+            generic_provider,
             fanout,
             invalidation,
             eviction_pressure,
@@ -1526,6 +2286,7 @@ def run(argv: Sequence[str]) -> int:
             "private_cluster": True,
             "build_tree_dso": str(cache_dso),
             "core": core,
+            "generic_provider_reuse": generic_provider,
             "cases": cases,
             "fanout": fanout,
             "invalidation": invalidation,
