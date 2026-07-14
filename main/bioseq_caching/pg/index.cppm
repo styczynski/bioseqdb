@@ -19,6 +19,7 @@ extern "C" {
 
 #include "access/xact.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
@@ -96,8 +97,8 @@ import bioseq.cache.pg.storage;
 namespace bioseq::cache::pg {
 
 inline constexpr std::uint32_t kSharedMagic = 0x42535143U; /* BSQC */
-inline constexpr std::uint32_t kSharedAbiVersion = 3;
-inline constexpr char kSharedName[] = "bioseq_cache shared state v3";
+inline constexpr std::uint32_t kSharedAbiVersion = 4;
+inline constexpr char kSharedName[] = "bioseq_cache shared state v4";
 inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr char kReusableSharedName[] =
     "bioseq_cache reusable registry v1";
@@ -202,7 +203,8 @@ enum class TestPausePoint : std::uint32_t {
     AfterBuildingPublish = 0,
     AfterWaiterRegistered = 1,
     BeforeTerminalPublish = 2,
-    Count = 3,
+    AfterReaderPinned = 3,
+    Count = 4,
 };
 
 struct CacheTestControl {
@@ -251,6 +253,15 @@ struct RegistryWaiterOwner {
     storage::ManifestWaiterToken storage_token;
 };
 
+struct RegistryReaderOwner {
+    bool active;
+    std::uint8_t reserved8[3];
+    int owner_pid;
+    std::uint32_t owner_proc_number;
+    std::uint32_t reserved32;
+    std::uint64_t registration_sequence;
+};
+
 /** One bounded registry record. Full key bytes make hash collisions harmless. */
 struct CacheEntry {
     SharedEntryState state;
@@ -267,6 +278,7 @@ struct CacheEntry {
     ProcNumber producer_proc_number;
     std::uint32_t waiter_count;
     std::uint32_t reader_count;
+    RegistryReaderOwner readers[storage::kReaderPinsPerManifest];
     RegistryWaiterOwner waiters[storage::kWaitersPerManifest];
     TimestampTz created_at;
     TimestampTz completed_at;
@@ -305,6 +317,7 @@ struct CacheSharedState {
     pg_atomic_uint32 database_transition_count;
     pg_atomic_uint64 next_claim_sequence;
     pg_atomic_uint64 next_registry_waiter_sequence;
+    pg_atomic_uint64 next_registry_reader_sequence;
     ConditionVariable database_changed;
     CacheSharedStats stats;
 #if defined(BIOSEQ_CACHE_TESTING)
@@ -338,6 +351,17 @@ inline bool g_callbacks_registered = false;
 inline int g_query_cache_mode = static_cast<int>(QueryCacheMode::Disabled);
 inline int g_query_cache_ttl_ms = 60 * 60 * 1000;
 inline bool g_internal_planning = false;
+
+#if defined(BIOSEQ_CACHE_TESTING)
+/** Backend-local verifier faults exercise unavailable third-party AM paths. */
+enum class TestExactPlanFault : std::uint8_t {
+    None,
+    UnknownTableAccessMethod,
+    UnknownIndexAccessMethod,
+};
+
+inline TestExactPlanFault g_test_exact_plan_fault = TestExactPlanFault::None;
+#endif
 
 /** Backend-local dirty state follows savepoint commit and rollback exactly. */
 struct DirtyFrame {
@@ -390,6 +414,7 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
     pg_atomic_init_u32(&shared.database_transition_count, 0);
     pg_atomic_init_u64(&shared.next_claim_sequence, 1);
     pg_atomic_init_u64(&shared.next_registry_waiter_sequence, 1);
+    pg_atomic_init_u64(&shared.next_registry_reader_sequence, 1);
     ConditionVariableInit(&shared.database_changed);
     pg_atomic_init_u64(&shared.stats.produced, 0);
     pg_atomic_init_u64(&shared.stats.completed_hits, 0);
@@ -2200,7 +2225,6 @@ bool collect_relation_oid_walker(Node* node, void* context) {
 /** Conservative v1 exact-cache eligibility before path decoration. */
 [[nodiscard]] bool query_is_exact_cache_eligible(const Query& query) {
     if (query.commandType != CMD_SELECT
-        || query.rtable == NIL
         || query.hasModifyingCTE
         || query.rowMarks != NIL
         || query.hasTargetSRFs
@@ -2256,6 +2280,18 @@ enum class RuntimeRole : std::uint8_t {
     Consumer,
 };
 
+struct RegistryReaderClaim {
+    std::uint32_t slot =
+        (std::numeric_limits<std::uint32_t>::max)();
+    std::uint32_t reserved = 0;
+    std::uint64_t registration_sequence = 0;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return slot < storage::kReaderPinsPerManifest
+            && registration_sequence != 0;
+    }
+};
+
 struct StoredAttribute {
     Oid type_oid;
     std::int32_t type_modifier;
@@ -2279,6 +2315,7 @@ struct BioseqCacheState {
     std::uint64_t row_count;
     std::uint64_t payload_bytes;
     std::uint64_t logical_bytes;
+    RegistryReaderClaim registry_reader_claim;
     CacheEntryId entry_id;
     storage::ManifestHandle manifest_handle;
     storage::ManifestWaiterToken manifest_waiter_token;
@@ -2305,6 +2342,32 @@ static_assert(offsetof(BioseqCacheState, css) == 0);
     }
     Node* node = static_cast<Node*>(list_nth(scan.custom_private, index));
     return IsA(node, String) ? strVal(node) : "<metadata invalid>";
+}
+
+/** Read the post-setrefs fail-open bit; malformed metadata always bypasses. */
+[[nodiscard]] bool private_force_bypass(const CustomScan& scan) noexcept {
+    if (scan.custom_private == NIL
+        || list_length(scan.custom_private) <= 2) {
+        return true;
+    }
+    const Node* marker = static_cast<const Node*>(
+        list_nth(scan.custom_private, 2));
+    return marker == nullptr || !IsA(marker, Integer) || intVal(marker) != 0;
+}
+
+/** Mutate only the preallocated scalar; never reshape a finalized Plan. */
+[[nodiscard]] bool set_private_force_bypass(
+        CustomScan& scan, bool force_bypass) noexcept {
+    if (scan.custom_private == NIL
+        || list_length(scan.custom_private) <= 2) {
+        return false;
+    }
+    Node* marker = static_cast<Node*>(list_nth(scan.custom_private, 2));
+    if (marker == nullptr || !IsA(marker, Integer)) {
+        return false;
+    }
+    reinterpret_cast<Integer*>(marker)->ival = force_bypass ? 1 : 0;
+    return true;
 }
 
 /** Append a length-delimited field to an exact key without ambiguous joins. */
@@ -2636,6 +2699,9 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
     if (std::strcmp(name, "before_terminal_publish") == 0) {
         return TestPausePoint::BeforeTerminalPublish;
     }
+    if (std::strcmp(name, "after_reader_pinned") == 0) {
+        return TestPausePoint::AfterReaderPinned;
+    }
     ereport(ERROR,
         (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
          errmsg("unknown bioseq_cache pause point: %s", name)));
@@ -2692,6 +2758,7 @@ enum class TestPausePoint : std::uint32_t {
     AfterBuildingPublish,
     AfterWaiterRegistered,
     BeforeTerminalPublish,
+    AfterReaderPinned,
 };
 inline void maybe_pause(TestPausePoint) noexcept {}
 #endif
@@ -2700,6 +2767,7 @@ struct RegistryDecision {
     RuntimeRole role = RuntimeRole::Bypass;
     int index = -1;
     std::uint64_t generation = 0;
+    RegistryReaderClaim reader_claim{};
     CacheEntryId entry_id{};
     storage::ManifestHandle manifest_handle{};
     storage::ManifestWaiterToken manifest_waiter_token{};
@@ -2747,6 +2815,60 @@ struct RegistryWaiterClaim {
     PGPROC* owner = ProcNumberGetProc(
         static_cast<ProcNumber>(owner_proc_number));
     return owner != nullptr && owner->pid == owner_pid;
+}
+
+void clear_registry_reader_locked(
+        CacheEntry& entry,
+        RegistryReaderOwner& reader) noexcept {
+    if (!reader.active) {
+        return;
+    }
+    reader = RegistryReaderOwner{};
+    if (entry.reader_count > 0) {
+        --entry.reader_count;
+    }
+}
+
+void reap_dead_registry_readers_locked(CacheEntry& entry) noexcept {
+    for (RegistryReaderOwner& reader : entry.readers) {
+        if (reader.active
+            && !registry_owner_alive(
+                reader.owner_pid, reader.owner_proc_number)) {
+            clear_registry_reader_locked(entry, reader);
+        }
+    }
+}
+
+[[nodiscard]] RegistryReaderClaim claim_registry_reader_locked(
+        CacheEntry& entry) noexcept {
+    for (std::uint32_t index = 0;
+         index < storage::kReaderPinsPerManifest; ++index) {
+        RegistryReaderOwner& reader = entry.readers[index];
+        if (reader.active) {
+            continue;
+        }
+        std::uint64_t sequence = pg_atomic_fetch_add_u64(
+            &g_shared->next_registry_reader_sequence, 1);
+        if (sequence == 0) {
+            sequence = pg_atomic_fetch_add_u64(
+                &g_shared->next_registry_reader_sequence, 1);
+        }
+        if (sequence == 0) {
+            sequence = 1;
+        }
+        reader = RegistryReaderOwner{
+            .active = true,
+            .owner_pid = MyProcPid,
+            .owner_proc_number = static_cast<std::uint32_t>(MyProcNumber),
+            .registration_sequence = sequence,
+        };
+        ++entry.reader_count;
+        return RegistryReaderClaim{
+            .slot = index,
+            .registration_sequence = sequence,
+        };
+    }
+    return {};
 }
 
 void clear_registry_waiter_locked(
@@ -2876,6 +2998,7 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
     entry.producer_proc_number = INVALID_PROC_NUMBER;
     entry.waiter_count = 0;
     entry.reader_count = 0;
+    std::memset(entry.readers, 0, sizeof(entry.readers));
     std::memset(entry.waiters, 0, sizeof(entry.waiters));
     entry.created_at = 0;
     entry.completed_at = 0;
@@ -2926,14 +3049,20 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
                 const bool claimed = take_registry_waiter_locked(
                     entry, waiter_claim, waiter_token);
                 if (claimed && waiter_token) {
-                    ++entry.reader_count;
-                    ++entry.hits;
-                    decision.role = RuntimeRole::Consumer;
-                    decision.index = index;
-                    decision.generation = generation;
-                    decision.entry_id = cache_entry_id(entry);
-                    decision.manifest_handle = entry.manifest_handle;
-                    decision.manifest_waiter_token = waiter_token;
+                    const RegistryReaderClaim reader_claim =
+                        claim_registry_reader_locked(entry);
+                    if (reader_claim) {
+                        ++entry.hits;
+                        decision.role = RuntimeRole::Consumer;
+                        decision.index = index;
+                        decision.generation = generation;
+                        decision.reader_claim = reader_claim;
+                        decision.entry_id = cache_entry_id(entry);
+                        decision.manifest_handle = entry.manifest_handle;
+                        decision.manifest_waiter_token = waiter_token;
+                    } else {
+                        waiter_to_release = waiter_token;
+                    }
                 } else if (waiter_token) {
                     waiter_to_release = waiter_token;
                 }
@@ -3006,14 +3135,21 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (std::size_t offset = 0; offset < kRegistryCapacity; ++offset) {
         CacheEntry& entry = g_shared->entries[offset];
+        reap_dead_registry_readers_locked(entry);
         reap_dead_registry_waiters_locked(entry, true);
         if (entry_key_matches(entry, key_hash, key)) {
             if (entry_is_current(entry, database_epoch, now)) {
-                ++entry.reader_count;
+                const RegistryReaderClaim reader_claim =
+                    claim_registry_reader_locked(entry);
+                if (!reader_claim) {
+                    LWLockRelease(g_registry_lock);
+                    return decision;
+                }
                 ++entry.hits;
                 decision.role = RuntimeRole::Consumer;
                 decision.index = static_cast<int>(offset);
                 decision.generation = entry.generation;
+                decision.reader_claim = reader_claim;
                 decision.entry_id = cache_entry_id(entry);
                 decision.manifest_handle = entry.manifest_handle;
                 LWLockRelease(g_registry_lock);
@@ -3087,6 +3223,7 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
         entry.producer_proc_number = MyProcNumber;
         entry.waiter_count = 0;
         entry.reader_count = 0;
+        std::memset(entry.readers, 0, sizeof(entry.readers));
         std::memset(entry.waiters, 0, sizeof(entry.waiters));
         entry.created_at = now;
         entry.completed_at = 0;
@@ -3130,26 +3267,36 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
 
 /** Release a short reader pin after full preflight/materialization. */
 void release_registry_reader(
-        int index, std::uint64_t generation, bool successful,
+        int index, std::uint64_t generation,
+        const RegistryReaderClaim& reader_claim,
+        bool successful,
         bool invalidate_failure = true,
         bool count_outcome = true) noexcept {
-    if (g_shared == nullptr || index < 0) {
+    if (g_shared == nullptr || index < 0 || !reader_claim) {
         return;
     }
     storage::ManifestHandle retired_manifest{};
+    bool released = false;
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     CacheEntry& entry = g_shared->entries[index];
     if (entry.generation == generation) {
-        if (entry.reader_count > 0) {
-            --entry.reader_count;
+        RegistryReaderOwner& reader = entry.readers[reader_claim.slot];
+        if (reader.active
+            && reader.registration_sequence
+                == reader_claim.registration_sequence
+            && reader.owner_pid == MyProcPid
+            && reader.owner_proc_number
+                == static_cast<std::uint32_t>(MyProcNumber)) {
+            clear_registry_reader_locked(entry, reader);
+            released = true;
         }
-        if (entry.reader_count == 0
+        if (released && entry.reader_count == 0
             && entry.state == SharedEntryState::Retired
             && entry.manifest_handle) {
             retired_manifest = entry.manifest_handle;
             entry.manifest_handle = {};
         }
-        if (!successful && invalidate_failure
+        if (released && !successful && invalidate_failure
             && entry.state == SharedEntryState::Complete) {
             entry.state = SharedEntryState::Retired;
             if (entry.reader_count == 0 && entry.manifest_handle) {
@@ -3163,7 +3310,7 @@ void release_registry_reader(
     if (retired_manifest) {
         static_cast<void>(storage::retire_manifest(retired_manifest));
     }
-    if (!count_outcome) {
+    if (!released || !count_outcome) {
         return;
     }
     if (successful) {
@@ -3238,8 +3385,12 @@ void cache_state_cleanup(void* argument) noexcept {
     release_storage_reader_claims(*state);
     if (state->registry_reader_owned) {
         release_registry_reader(
-            state->registry_index, state->generation, false);
+            state->registry_index,
+            state->generation,
+            state->registry_reader_claim,
+            false);
         state->registry_reader_owned = false;
+        state->registry_reader_claim = {};
     }
     if (state->runtime_role == RuntimeRole::Producer
         && !state->producer_completed) {
@@ -3679,6 +3830,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     state->manifest_pin_owned = false;
     state->manifest_waiter_owned = false;
     state->registry_reader_owned = false;
+    state->registry_reader_claim = {};
     state->entry_id = {};
     state->manifest_handle = {};
     state->manifest_waiter_token = {};
@@ -3744,6 +3896,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             state->runtime_role = decision.role;
             state->registry_index = decision.index;
             state->generation = decision.generation;
+            state->registry_reader_claim = decision.reader_claim;
             state->entry_id = decision.entry_id;
             state->manifest_handle = decision.manifest_handle;
             state->manifest_waiter_token =
@@ -3751,7 +3904,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             state->manifest_waiter_owned =
                 static_cast<bool>(decision.manifest_waiter_token);
             state->registry_reader_owned =
-                decision.role == RuntimeRole::Consumer;
+                static_cast<bool>(decision.reader_claim);
         }
         if (key != nullptr) {
             pfree(key->data);
@@ -3772,6 +3925,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                     state->manifest_waiter_token = {};
                     state->manifest_pin = pinned.pin;
                     state->manifest_pin_owned = true;
+                    maybe_pause(TestPausePoint::AfterReaderPinned);
                     state->replay_store = load_complete_result(
                         state->manifest_pin,
                         node->ss.ps.ps_ResultTupleDesc);
@@ -3800,10 +3954,12 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                         release_registry_reader(
                             state->registry_index,
                             state->generation,
+                            state->registry_reader_claim,
                             false,
                             false,
                             false);
                         state->registry_reader_owned = false;
+                        state->registry_reader_claim = {};
                     }
                     PG_RE_THROW();
                 }
@@ -3814,8 +3970,12 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                 && state->replay_slot != nullptr;
             release_storage_reader_claims(*state);
             release_registry_reader(
-                state->registry_index, state->generation, loaded);
+                state->registry_index,
+                state->generation,
+                state->registry_reader_claim,
+                loaded);
             state->registry_reader_owned = false;
+            state->registry_reader_claim = {};
             if (loaded) {
                 return;
             }
@@ -4507,6 +4667,332 @@ void cache_create_upper_paths(
     }
 }
 
+struct ExactPlanVerification {
+    const PlannedStmt* statement = nullptr;
+    const List* relation_oids = NIL;
+    bool relation_free = false;
+    bool saw_relation_free_source = false;
+};
+
+[[nodiscard]] const RangeTblEntry* exact_plan_range_entry(
+        const ExactPlanVerification& verification,
+        Index range_table_index) noexcept {
+    if (verification.statement == nullptr || range_table_index == 0
+        || range_table_index > static_cast<Index>(
+            list_length(verification.statement->rtable))) {
+        return nullptr;
+    }
+    return static_cast<const RangeTblEntry*>(list_nth(
+        verification.statement->rtable,
+        static_cast<int>(range_table_index - 1)));
+}
+
+/** V1 admits only PostgreSQL's built-in heap table AM. */
+[[nodiscard]] bool exact_table_access_method_safe(Oid relation_oid) {
+#if defined(BIOSEQ_CACHE_TESTING)
+    if (g_test_exact_plan_fault
+        == TestExactPlanFault::UnknownTableAccessMethod) {
+        return false;
+    }
+#endif
+    return OidIsValid(relation_oid)
+        && get_rel_relam(relation_oid) == HEAP_TABLE_AM_OID;
+}
+
+/** V1 admits the built-in index AMs whose executor paths are reviewed. */
+[[nodiscard]] bool exact_index_access_method_safe(Oid index_oid) {
+#if defined(BIOSEQ_CACHE_TESTING)
+    if (g_test_exact_plan_fault
+        == TestExactPlanFault::UnknownIndexAccessMethod) {
+        return false;
+    }
+#endif
+    if (!OidIsValid(index_oid)) {
+        return false;
+    }
+    switch (get_rel_relam(index_oid)) {
+        case BTREE_AM_OID:
+        case HASH_AM_OID:
+        case GIST_AM_OID:
+        case GIN_AM_OID:
+        case SPGIST_AM_OID:
+        case BRIN_AM_OID:
+            return true;
+        default:
+            return false;
+    }
+}
+
+[[nodiscard]] bool exact_relation_scan_safe(
+        ExactPlanVerification& verification, const Scan& scan) {
+    const RangeTblEntry* range = exact_plan_range_entry(
+        verification, scan.scanrelid);
+    if (range == nullptr || range->rtekind != RTE_RELATION
+        || !OidIsValid(range->relid) || verification.relation_free) {
+        return false;
+    }
+    const char relation_kind = get_rel_relkind(range->relid);
+    return (relation_kind == RELKIND_RELATION
+            || relation_kind == RELKIND_MATVIEW)
+        && exact_table_access_method_safe(range->relid);
+}
+
+[[nodiscard]] bool exact_synthetic_scan_safe(
+        const ExactPlanVerification& verification,
+        const Scan& scan, RTEKind expected_kind) noexcept {
+    const RangeTblEntry* range = exact_plan_range_entry(
+        verification, scan.scanrelid);
+    return range != nullptr && range->rtekind == expected_kind;
+}
+
+[[nodiscard]] bool exact_plan_tree_safe(
+    ExactPlanVerification& verification, const Plan* plan);
+
+[[nodiscard]] bool exact_plan_list_safe(
+        ExactPlanVerification& verification, const List* plans) {
+    const ListCell* cell = nullptr;
+    foreach(cell, plans) {
+        if (!exact_plan_tree_safe(
+                verification, static_cast<const Plan*>(lfirst(cell)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool exact_common_plan_expressions_safe(const Plan& plan) {
+    return !contain_mutable_functions(
+            reinterpret_cast<Node*>(plan.targetlist))
+        && !contain_mutable_functions(reinterpret_cast<Node*>(plan.qual))
+        && !contain_mutable_functions(reinterpret_cast<Node*>(plan.initPlan));
+}
+
+/** Positive allowlist for finalized executor sources and structural nodes. */
+[[nodiscard]] bool exact_plan_tree_safe(
+        ExactPlanVerification& verification, const Plan* plan) {
+    if (plan == nullptr || !exact_common_plan_expressions_safe(*plan)) {
+        return false;
+    }
+
+    switch (nodeTag(plan)) {
+        case T_Result: {
+            const auto* result = reinterpret_cast<const Result*>(plan);
+            if (contain_mutable_functions(result->resconstantqual)) {
+                return false;
+            }
+            if (verification.relation_free && outerPlan(plan) == nullptr
+                && innerPlan(plan) == nullptr) {
+                verification.saw_relation_free_source = true;
+            }
+            break;
+        }
+        case T_ValuesScan: {
+            const auto* scan = reinterpret_cast<const ValuesScan*>(plan);
+            if (!exact_synthetic_scan_safe(
+                    verification, scan->scan, RTE_VALUES)
+                || contain_mutable_functions(
+                    reinterpret_cast<Node*>(scan->values_lists))) {
+                return false;
+            }
+            if (verification.relation_free) {
+                verification.saw_relation_free_source = true;
+            }
+            break;
+        }
+        case T_SubqueryScan: {
+            const auto* scan = reinterpret_cast<const SubqueryScan*>(plan);
+            if (!exact_synthetic_scan_safe(
+                    verification, scan->scan, RTE_SUBQUERY)
+                || !exact_plan_tree_safe(verification, scan->subplan)) {
+                return false;
+            }
+            break;
+        }
+        case T_SeqScan:
+        case T_BitmapHeapScan:
+        case T_TidScan:
+        case T_TidRangeScan:
+            if (!exact_relation_scan_safe(
+                    verification,
+                    *reinterpret_cast<const Scan*>(plan))) {
+                return false;
+            }
+            break;
+        case T_IndexScan: {
+            const auto* scan = reinterpret_cast<const IndexScan*>(plan);
+            if (!exact_relation_scan_safe(verification, scan->scan)
+                || !exact_index_access_method_safe(scan->indexid)) {
+                return false;
+            }
+            break;
+        }
+        case T_IndexOnlyScan: {
+            const auto* scan = reinterpret_cast<const IndexOnlyScan*>(plan);
+            if (!exact_relation_scan_safe(verification, scan->scan)
+                || !exact_index_access_method_safe(scan->indexid)) {
+                return false;
+            }
+            break;
+        }
+        case T_BitmapIndexScan: {
+            const auto* scan = reinterpret_cast<const BitmapIndexScan*>(plan);
+            if (!exact_relation_scan_safe(verification, scan->scan)
+                || !exact_index_access_method_safe(scan->indexid)) {
+                return false;
+            }
+            break;
+        }
+        case T_Append:
+            if (!exact_plan_list_safe(
+                    verification,
+                    reinterpret_cast<const Append*>(plan)->appendplans)) {
+                return false;
+            }
+            break;
+        case T_MergeAppend:
+            if (!exact_plan_list_safe(
+                    verification,
+                    reinterpret_cast<const MergeAppend*>(plan)->mergeplans)) {
+                return false;
+            }
+            break;
+        case T_BitmapAnd:
+            if (!exact_plan_list_safe(
+                    verification,
+                    reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans)) {
+                return false;
+            }
+            break;
+        case T_BitmapOr:
+            if (!exact_plan_list_safe(
+                    verification,
+                    reinterpret_cast<const BitmapOr*>(plan)->bitmapplans)) {
+                return false;
+            }
+            break;
+        case T_CustomScan: {
+            const auto* scan = reinterpret_cast<const CustomScan*>(plan);
+            if (scan->methods != &coverage_scan_methods()
+                || list_length(scan->custom_plans) != 1
+                || contain_mutable_functions(
+                    reinterpret_cast<Node*>(scan->custom_exprs))
+                || !exact_plan_list_safe(
+                    verification, scan->custom_plans)) {
+                return false;
+            }
+            break;
+        }
+        case T_NestLoop:
+        case T_MergeJoin:
+        case T_HashJoin:
+        case T_Material:
+        case T_Memoize:
+        case T_Sort:
+        case T_IncrementalSort:
+        case T_Group:
+        case T_Agg:
+        case T_WindowAgg:
+        case T_Unique:
+        case T_Gather:
+        case T_GatherMerge:
+        case T_Hash:
+        case T_SetOp:
+        case T_Limit:
+            break;
+        case T_ProjectSet:
+        case T_ModifyTable:
+        case T_RecursiveUnion:
+        case T_SampleScan:
+        case T_FunctionScan:
+        case T_TableFuncScan:
+        case T_CteScan:
+        case T_NamedTuplestoreScan:
+        case T_WorkTableScan:
+        case T_ForeignScan:
+        case T_LockRows:
+        default:
+            return false;
+    }
+
+    return (outerPlan(plan) == nullptr
+            || exact_plan_tree_safe(verification, outerPlan(plan)))
+        && (innerPlan(plan) == nullptr
+            || exact_plan_tree_safe(verification, innerPlan(plan)));
+}
+
+[[nodiscard]] bool exact_dependency_metadata(
+        const CustomScan& scan, const List** relation_oids) noexcept {
+    if (relation_oids == nullptr || scan.custom_private == NIL
+        || list_length(scan.custom_private) <= 4) {
+        return false;
+    }
+    const auto* dependencies = static_cast<const List*>(
+        list_nth(scan.custom_private, 4));
+    if (dependencies != NIL && nodeTag(dependencies) != T_OidList) {
+        return false;
+    }
+    *relation_oids = dependencies;
+    return true;
+}
+
+/** Verify the exact retained tree after setrefs and flip only its marker. */
+void verify_exact_cache_plan_fail_open(PlannedStmt& statement) {
+    if (statement.planTree == nullptr
+        || !IsA(statement.planTree, CustomScan)) {
+        return;
+    }
+    auto* exact = reinterpret_cast<CustomScan*>(statement.planTree);
+    if (exact->methods != &cache_scan_methods()) {
+        return;
+    }
+    if (!set_private_force_bypass(*exact, true)) {
+        return;
+    }
+
+    bool safe = false;
+    MemoryContext caller_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        const List* relation_oids = NIL;
+        ExactPlanVerification verification{
+            .statement = &statement,
+            .relation_oids = NIL,
+            .relation_free = false,
+            .saw_relation_free_source = false,
+        };
+        if (exact_dependency_metadata(*exact, &relation_oids)
+            && list_length(exact->custom_plans) == 1) {
+            verification.relation_oids = relation_oids;
+            verification.relation_free = relation_oids == NIL;
+            safe = exact_plan_tree_safe(
+                verification,
+                static_cast<const Plan*>(linitial(exact->custom_plans)));
+            ListCell* subplan_cell = nullptr;
+            foreach(subplan_cell, statement.subplans) {
+                safe = safe && exact_plan_tree_safe(
+                    verification,
+                    static_cast<const Plan*>(lfirst(subplan_cell)));
+            }
+            safe = safe && (!verification.relation_free
+                || verification.saw_relation_free_source);
+        }
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        safe = false;
+    }
+    PG_END_TRY();
+    if (safe) {
+        static_cast<void>(set_private_force_bypass(*exact, false));
+    }
+}
+
 /** Reentrant planner wrapper that owns canonical bytes for upper-path hooks. */
 PlannedStmt* cache_planner(
         Query* query, const char* query_string,
@@ -4579,6 +5065,9 @@ PlannedStmt* cache_planner(
                 query, query_string, cursor_options, bound_parameters)
             : standard_planner(
                 query, query_string, cursor_options, bound_parameters);
+        if (result != nullptr) {
+            verify_exact_cache_plan_fail_open(*result);
+        }
         g_planner_frame = frame.previous;
     }
     PG_CATCH();
@@ -4748,6 +5237,7 @@ struct EntrySnapshot {
     const TimestampTz now = GetCurrentTimestamp();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (CacheEntry& entry : g_shared->entries) {
+        reap_dead_registry_readers_locked(entry);
         reap_dead_registry_waiters_locked(entry, storage_attached);
         PGPROC* producer = entry.producer_proc_number == INVALID_PROC_NUMBER
             ? nullptr
@@ -4800,7 +5290,6 @@ struct EntrySnapshot {
     if (g_shared == nullptr) {
         return 0;
     }
-    static_cast<void>(sweep_registry(true));
     int count = 0;
     LWLockAcquire(g_registry_lock, LW_SHARED);
     for (const CacheEntry& entry : g_shared->entries) {
@@ -4845,6 +5334,7 @@ struct EntrySnapshot {
     pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (CacheEntry& entry : g_shared->entries) {
+        reap_dead_registry_readers_locked(entry);
         reap_dead_registry_waiters_locked(entry, storage_attached);
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
@@ -4910,6 +5400,7 @@ struct EntrySnapshot {
         pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
     }
     for (CacheEntry& entry : g_shared->entries) {
+        reap_dead_registry_readers_locked(entry);
         reap_dead_registry_waiters_locked(entry, storage_attached);
         if (!entry_depends_on_relation(entry, relation_oid)) {
             continue;
@@ -5247,7 +5738,7 @@ Datum bioseq_cache_test_storage_tier_stats(PG_FUNCTION_ARGS) {
     TupleDesc descriptor = initialize_srf(fcinfo, &store);
     const storage::StorageTierTestSnapshot snapshot =
         storage::test_storage_tier_snapshot();
-    Datum values[5]{
+    Datum values[13]{
         BoolGetDatum(snapshot.force_file_tier),
         Int64GetDatum(static_cast<std::int64_t>(snapshot.dsa_blocks)),
         Int64GetDatum(static_cast<std::int64_t>(snapshot.file_blocks)),
@@ -5255,8 +5746,17 @@ Datum bioseq_cache_test_storage_tier_stats(PG_FUNCTION_ARGS) {
             static_cast<std::int64_t>(snapshot.reserved_hot_bytes)),
         Int64GetDatum(
             static_cast<std::int64_t>(snapshot.reserved_file_bytes)),
+        BoolGetDatum(snapshot.coherent),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.occupied_blocks)),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.reserved_blocks)),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.stored_blocks)),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.referenced_blocks)),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.retiring_blocks)),
+        Int64GetDatum(
+            static_cast<std::int64_t>(snapshot.release_committed_blocks)),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.reader_pins)),
     };
-    bool nulls[5]{};
+    bool nulls[13]{};
     tuplestore_putvalues(store, descriptor, values, nulls);
     PG_RETURN_NULL();
 }

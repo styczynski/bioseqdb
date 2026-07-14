@@ -32,7 +32,15 @@ RETURNS TABLE (
     dsa_blocks bigint,
     file_blocks bigint,
     reserved_hot_bytes bigint,
-    reserved_file_bytes bigint)
+    reserved_file_bytes bigint,
+    coherent boolean,
+    occupied_blocks bigint,
+    reserved_blocks bigint,
+    stored_blocks bigint,
+    referenced_blocks bigint,
+    retiring_blocks bigint,
+    release_committed_blocks bigint,
+    reader_pins bigint)
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_storage_tier_stats'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 
