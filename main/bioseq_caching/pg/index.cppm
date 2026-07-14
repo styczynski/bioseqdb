@@ -39,6 +39,7 @@ extern "C" {
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
+#include "portability/instr_time.h"
 #include "storage/ipc.h"
 #include "storage/condition_variable.h"
 #include "storage/fd.h"
@@ -87,6 +88,8 @@ export module bioseq.cache.pg;
 import bioseq.cache.core;
 import bioseq.cache.pg.maintenance;
 import bioseq.cache.pg.provider_registry;
+import bioseq.cache.pg.reusable_adapter;
+import bioseq.cache.pg.reusable_planning;
 import bioseq.cache.pg.storage;
 
 namespace bioseq::cache::pg {
@@ -95,6 +98,14 @@ inline constexpr std::uint32_t kSharedMagic = 0x42535143U; /* BSQC */
 inline constexpr std::uint32_t kSharedAbiVersion = 3;
 inline constexpr char kSharedName[] = "bioseq_cache shared state v3";
 inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
+inline constexpr char kReusableSharedName[] =
+    "bioseq_cache reusable registry v1";
+inline constexpr char kReusableMembershipTrancheName[] =
+    "bioseq_cache reusable membership";
+inline constexpr char kReusableExactTrancheName[] =
+    "bioseq_cache reusable exact partitions";
+inline constexpr char kReusableCoverageTrancheName[] =
+    "bioseq_cache reusable coverage partitions";
 inline constexpr std::size_t kRegistryCapacity = 64;
 inline constexpr std::size_t kMaximumKeyBytes = 64U * 1024U;
 inline constexpr std::uint64_t kMaximumStoredResultBytes = 256ULL * 1024ULL * 1024ULL;
@@ -309,6 +320,10 @@ static_assert(alignof(CacheSharedState) <= MAXIMUM_ALIGNOF);
 
 inline CacheSharedState* g_shared = nullptr;
 inline LWLock* g_registry_lock = nullptr;
+inline ReusableRegistryAttachmentV1 g_reusable_registry{};
+inline LWLock* g_reusable_membership_lock = nullptr;
+inline LWLockPadded* g_reusable_exact_locks = nullptr;
+inline LWLockPadded* g_reusable_coverage_locks = nullptr;
 inline shmem_request_hook_type g_previous_shmem_request_hook = nullptr;
 inline shmem_startup_hook_type g_previous_shmem_startup_hook = nullptr;
 inline planner_hook_type g_previous_planner_hook = nullptr;
@@ -446,6 +461,16 @@ void observe_provider_relation_write(
     if (database_oid == static_cast<std::uint32_t>(MyDatabaseId)) {
         mark_current_transaction_relation_dirty(
             static_cast<Oid>(relation_oid));
+    }
+}
+
+/** Provider-owned path hook rendezvous; unsupported reuse remains fail-open. */
+void observe_provider_rel_paths(
+        PlannerInfo*, RelOptInfo*, unsigned int, RangeTblEntry*,
+        const provider_registry::ProviderV1*) noexcept {
+    if (g_query_cache_mode != static_cast<int>(QueryCacheMode::Reuse)
+        || !g_reusable_registry) {
+        return;
     }
 }
 
@@ -680,13 +705,116 @@ void cache_subtransaction_callback(
     }
 }
 
-/** Request bounded shared memory and one named registry lock. */
+[[nodiscard]] constexpr ReusableRegistryConfigV1
+reusable_registry_config() noexcept {
+    return ReusableRegistryConfigV1{};
+}
+
+void acquire_reusable_exact_partition(
+        void*, std::uint32_t partition) noexcept {
+    LWLockAcquire(&g_reusable_exact_locks[partition].lock, LW_EXCLUSIVE);
+}
+
+void release_reusable_exact_partition(
+        void*, std::uint32_t partition) noexcept {
+    LWLockRelease(&g_reusable_exact_locks[partition].lock);
+}
+
+void acquire_reusable_coverage_partition(
+        void*, std::uint32_t partition) noexcept {
+    LWLockAcquire(&g_reusable_coverage_locks[partition].lock, LW_EXCLUSIVE);
+}
+
+void release_reusable_coverage_partition(
+        void*, std::uint32_t partition) noexcept {
+    LWLockRelease(&g_reusable_coverage_locks[partition].lock);
+}
+
+[[nodiscard]] ReusableRegistryPartitionCallbacksV1
+reusable_partition_callbacks() noexcept {
+    return ReusableRegistryPartitionCallbacksV1{
+        .acquire_exact = acquire_reusable_exact_partition,
+        .release_exact = release_reusable_exact_partition,
+        .acquire_coverage = acquire_reusable_coverage_partition,
+        .release_coverage = release_reusable_coverage_partition,
+    };
+}
+
+[[nodiscard]] std::uint64_t reusable_monotonic_now_ns() noexcept {
+    instr_time current{};
+    INSTR_TIME_SET_CURRENT(current);
+    return INSTR_TIME_GET_NANOSEC(current);
+}
+
+[[nodiscard]] ReusableProducerIdentityV1
+current_reusable_producer_identity() noexcept {
+    const std::uint64_t nonce =
+        static_cast<std::uint64_t>(MyStartTimestamp)
+        ^ (static_cast<std::uint64_t>(MyProcPid) << 32U)
+        ^ static_cast<std::uint64_t>(MyProcNumber);
+    return ReusableProducerIdentityV1{
+        .proc_number = static_cast<std::uint32_t>(MyProcNumber),
+        .pid = MyProcPid,
+        .backend_nonce = nonce == 0 ? 1 : nonce,
+        .backend_started_at_us = MyStartTimestamp,
+    };
+}
+
+[[nodiscard]] ReusableManifestHandleV1 reusable_manifest_handle(
+        const storage::ManifestHandle& handle) noexcept {
+    return ReusableManifestHandleV1{
+        .slot = handle.slot,
+        .reserved = handle.reserved,
+        .slot_sequence = handle.slot_sequence,
+        .id = handle.id,
+    };
+}
+
+[[nodiscard]] storage::ManifestHandle storage_manifest_handle(
+        const ReusableManifestHandleV1& handle) noexcept {
+    return storage::ManifestHandle{
+        .slot = handle.slot,
+        .reserved = handle.reserved,
+        .slot_sequence = handle.slot_sequence,
+        .id = handle.id,
+    };
+}
+
+[[nodiscard]] bool reusable_producer_alive(
+        void*, const ReusableProducerIdentityV1& producer) noexcept {
+    if (producer.pid <= 0
+        || producer.proc_number
+            >= static_cast<std::uint32_t>(ProcGlobal->allProcCount)) {
+        return false;
+    }
+    PGPROC* process = ProcNumberGetProc(
+        static_cast<ProcNumber>(producer.proc_number));
+    return process != nullptr && process->pid == producer.pid;
+}
+
+/** Request bounded shared memory and partitioned registry locks. */
 void cache_shmem_request() {
     if (g_previous_shmem_request_hook != nullptr) {
         g_previous_shmem_request_hook();
     }
     RequestAddinShmemSpace(MAXALIGN(sizeof(CacheSharedState)));
     RequestNamedLWLockTranche(kRegistryTrancheName, 1);
+    const auto reusable_request = reusable_registry_preload_request(
+        reusable_registry_config());
+    if (!reusable_request.has_value()) {
+        ereport(ERROR,
+            (errmsg("bioseq_cache reusable registry configuration is invalid")));
+    }
+    RequestAddinShmemSpace(MAXALIGN(reusable_request->layout.total_bytes));
+    RequestNamedLWLockTranche(
+        kReusableMembershipTrancheName,
+        reusable_request->membership_lock_count);
+    RequestNamedLWLockTranche(
+        kReusableExactTrancheName,
+        reusable_request->exact_partition_lock_count);
+    RequestNamedLWLockTranche(
+        kReusableCoverageTrancheName,
+        reusable_request->coverage_partition_lock_count);
     storage::request_storage_resources();
 }
 
@@ -704,6 +832,42 @@ void cache_shmem_startup() {
     }
     g_registry_lock = &GetNamedLWLockTranche(kRegistryTrancheName)[0].lock;
     const std::uint64_t boot_nonce = pg_atomic_read_u64(&g_shared->boot_nonce);
+    const auto reusable_request = reusable_registry_preload_request(
+        reusable_registry_config());
+    if (!reusable_request.has_value()) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+        return;
+    }
+    bool reusable_found = false;
+    void* reusable_region = ShmemInitStruct(
+        kReusableSharedName,
+        reusable_request->layout.total_bytes,
+        &reusable_found);
+    if (reusable_region == nullptr) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+        return;
+    }
+    auto reusable_started = startup_reusable_registry(
+        std::span<std::byte>{
+            static_cast<std::byte*>(reusable_region),
+            reusable_request->layout.total_bytes},
+        boot_nonce,
+        reusable_request->config,
+        reusable_found);
+    if (!reusable_started.has_value()) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+        return;
+    }
+    g_reusable_registry = *reusable_started;
+    g_reusable_membership_lock =
+        &GetNamedLWLockTranche(kReusableMembershipTrancheName)[0].lock;
+    g_reusable_exact_locks =
+        GetNamedLWLockTranche(kReusableExactTrancheName);
+    g_reusable_coverage_locks =
+        GetNamedLWLockTranche(kReusableCoverageTrancheName);
     if (!storage::startup_storage(boot_nonce)) {
         pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
         pg_atomic_write_u32(&g_shared->ready, 0);
@@ -734,8 +898,18 @@ void cache_shmem_startup() {
     if (!storage::storage_ready() && !storage::attach_storage()) {
         return false;
     }
+    const CacheCorrectnessReadiness required_readiness =
+        g_query_cache_mode == static_cast<int>(QueryCacheMode::Reuse)
+        ? CacheCorrectnessReadiness::ReusableCoverageReady
+        : CacheCorrectnessReadiness::GenericMvccReady;
     return storage::runtime_snapshot().correctness_readiness
-        >= CacheCorrectnessReadiness::GenericMvccReady;
+            >= required_readiness
+        && (required_readiness
+                != CacheCorrectnessReadiness::ReusableCoverageReady
+            || (g_reusable_registry
+                && g_reusable_membership_lock != nullptr
+                && g_reusable_exact_locks != nullptr
+                && g_reusable_coverage_locks != nullptr));
 }
 
 [[nodiscard]] bool cache_interrupt_error(int sqlstate) noexcept {
@@ -4083,6 +4257,8 @@ void _PG_init() {
     register_cache_gucs();
     provider_registry::install_relation_write_observer_v1(
         observe_provider_relation_write);
+    provider_registry::install_planner_bridge_observer_v1(
+        observe_provider_rel_paths);
     if (!provider_registry::initialize_provider_registry_v1()) {
         ereport(WARNING,
             (errmsg("bioseq_cache provider rendezvous is owned by another library")));
@@ -4110,6 +4286,7 @@ void _PG_init() {
 void _PG_fini() {
     using namespace bioseq::cache::pg;
     provider_registry::install_relation_write_observer_v1(nullptr);
+    provider_registry::install_planner_bridge_observer_v1(nullptr);
     provider_registry::unpublish_provider_registry_v1();
 }
 
