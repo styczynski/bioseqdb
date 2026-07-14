@@ -1,42 +1,55 @@
 /**
  * @file sorted_pair_runs_pg.cpp
- * @brief PostgreSQL logging implementation for the sorted-run module.
+ * @brief PCM-free PostgreSQL error leaf for the sorted-run module.
  */
-module bioseq.storage.indexing_pg.sorted_runs;
+#include "common.h"
 
-import bioseq.common.mlogging;
+extern "C" {
 
-namespace bioseq::storage::indexing {
-
-void report_sorted_run_error(SortedRunError error) {
-    switch (error) {
-    case SortedRunError::position_spill_create_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: position spill create failed");
-        return;
-    case SortedRunError::position_spill_rewind_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: failed to rewind position spill");
-        return;
-    case SortedRunError::temp_file_create_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: BufFileCreateTemp returned null");
-        return;
-    case SortedRunError::admitted_run_without_permit:
-        bioseq_log<ERR, PG>("bioseq sorted runs: admitted run without permit");
-        return;
-    case SortedRunError::run_rewind_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: failed to rewind BufFile");
-        return;
-    case SortedRunError::merge_reader_admission_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: could not admit one merge reader");
-        return;
-    case SortedRunError::compacted_run_rewind_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: failed to rewind compacted BufFile");
-        return;
-    case SortedRunError::compact_temp_file_create_failed:
-        bioseq_log<ERR, PG>("bioseq sorted runs: compact BufFile create failed");
-        return;
+[[noreturn]] void bioseq_sorted_run_error_pg_leaf(
+        unsigned error_code) {
+    const char* message = "bioseq sorted runs: unknown error";
+    switch (error_code) {
+    case 0u:
+        message = "bioseq sorted runs: position spill create failed";
+        break;
+    case 1u:
+        message = "bioseq sorted runs: failed to rewind position spill";
+        break;
+    case 2u:
+        message = "bioseq sorted runs: could not admit exact position buffers";
+        break;
+    case 3u:
+        message = "bioseq sorted runs: BufFileCreateTemp returned null";
+        break;
+    case 4u:
+        message = "bioseq sorted runs: admitted run without permit";
+        break;
+    case 5u:
+        message = "bioseq sorted runs: failed to rewind BufFile";
+        break;
+    case 6u:
+        message = "bioseq sorted runs: could not admit one merge reader";
+        break;
+    case 7u:
+        message = "bioseq sorted runs: failed to rewind compacted BufFile";
+        break;
+    case 8u:
+        message = "bioseq sorted runs: compact BufFile create failed";
+        break;
+    case 9u:
+        message =
+            "bioseq sorted runs: poisoned run store reused after PostgreSQL error";
+        break;
+    case 10u:
+        message = "bioseq sorted runs: finalized run store cannot be reused";
+        break;
     }
 
-    bioseq_log<ERR, PG>("bioseq sorted runs: unknown error");
+    ereport(ERROR,
+        (errcode(ERRCODE_INTERNAL_ERROR),
+         errmsg_internal("%s", message)));
+    __builtin_unreachable();
 }
 
-} // namespace bioseq::storage::indexing
+} // extern "C"

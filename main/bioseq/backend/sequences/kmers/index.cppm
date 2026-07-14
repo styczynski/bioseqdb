@@ -5,11 +5,16 @@ module;
 
 #include "common.h"
 
+#include <algorithm>
 #include <chrono>
+#include <concepts>
+#include <cstring>
+#include <limits>
 #include <new>
 #include <ranges>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 export module bioseq.sequences.kmers;
 
@@ -404,6 +409,8 @@ struct sketch_collector_t {
 private:
     std::vector<MinimizerT> sketches;
 public:
+    using minimizer_type = MinimizerT;
+
     // Earlier we reserved 10 000 entries up front (~160 KB of system-heap
     // storage per collector). Two collectors are built per pair × 400 pairs
     // = ~128 MB of allocator traffic per bench section, of which only ~5 %
@@ -430,6 +437,36 @@ public:
 
     [[always_inline]] constexpr void collect(const MinimizerT& sketch) {
         sketches.push_back(sketch);
+    }
+
+    /// Append a stable SIMD-compressed batch without a scalar per-record
+    /// construction loop. The chronological minimizer kernel writes the raw
+    /// representation selected by `MinimizerRepr` directly, then commits the
+    /// compacted prefix in one bulk copy. `MinimizerRepr` is deliberately a
+    /// trivially-copyable, storage-sized wire value, so the byte copy starts
+    /// the same object representation that `from_raw_storage` would produce.
+    template<class M = MinimizerT>
+    [[nodiscard, always_inline]] bool append_raw_storage(
+        const typename M::storage_t* raw,
+        std::size_t count)
+        requires (
+            std::same_as<M, MinimizerT>
+            && requires { typename M::storage_t; }
+            && std::is_trivially_copyable_v<M>
+            && sizeof(M) == sizeof(typename M::storage_t))
+    {
+        const std::size_t old_size = sketches.size();
+        if (count > sketches.max_size() - old_size) {
+            return false;
+        }
+        sketches.resize(old_size + count);
+        if (count != 0) {
+            std::memcpy(
+                static_cast<void*>(sketches.data() + old_size),
+                static_cast<const void*>(raw),
+                count * sizeof(typename M::storage_t));
+        }
+        return true;
     }
 
     constexpr std::vector<MinimizerT> extract_sketches() const {
@@ -468,6 +505,175 @@ public:
 // Default alias — matches the postgres on-disk + cached-in-memory
 // MinimapSketchData layout (28-bit pos, 35-bit hash, 1-bit strand).
 using sketch_collector = sketch_collector_t<MinimapSketchData>;
+
+/**
+ * Sketch collector whose vector capacity is owned by a caller-supplied memory
+ * admission permit.  `Permit` is intentionally a template parameter: the core
+ * k-mer module stays independent of the backend memory-admission module while
+ * PostgreSQL and tests can supply `MemoryPermit`.
+ *
+ * The permit is declared before the vector, hence the vector is destroyed
+ * first.  Each growth reserves the old retained capacity plus headroom for the
+ * replacement allocation before calling `std::vector::reserve()`, then
+ * reconciles the permit to the allocator-reported retained capacity.  A denied
+ * growth is sticky and emits no partial record; callers must check `ok()` after
+ * kernels whose scalar `collect()` surface cannot return a status.
+ */
+template<class MinimizerT, class Permit>
+class admitted_sketch_collector_t {
+public:
+    using minimizer_type = MinimizerT;
+    static constexpr std::size_t initial_growth_records = 8u;
+
+    explicit admitted_sketch_collector_t(
+            Permit permit,
+            std::uint64_t allocation_headroom_factor)
+        : permit_(std::move(permit)),
+          allocation_headroom_factor_(allocation_headroom_factor) {
+        if (!permit_ || permit_.bytes() != 0u
+            || allocation_headroom_factor_ == 0u) {
+            failed_ = true;
+        }
+    }
+
+    admitted_sketch_collector_t(const admitted_sketch_collector_t&) = delete;
+    admitted_sketch_collector_t& operator=(
+        const admitted_sketch_collector_t&) = delete;
+    admitted_sketch_collector_t(admitted_sketch_collector_t&&) = delete;
+    admitted_sketch_collector_t& operator=(
+        admitted_sketch_collector_t&&) = delete;
+
+    [[nodiscard]] bool reserve(std::size_t expected_count) {
+        return ensure_capacity(expected_count);
+    }
+
+    [[always_inline]] void collect(MinimizerT&& sketch) {
+        if (sketches_.size() == sketches_.max_size()) {
+            failed_ = true;
+        } else if (ensure_capacity(sketches_.size() + 1u)) {
+            sketches_.push_back(std::move(sketch));
+        }
+    }
+
+    [[always_inline]] void collect(const MinimizerT& sketch) {
+        if (sketches_.size() == sketches_.max_size()) {
+            failed_ = true;
+        } else if (ensure_capacity(sketches_.size() + 1u)) {
+            sketches_.push_back(sketch);
+        }
+    }
+
+    template<class M = MinimizerT>
+    [[nodiscard, always_inline]] bool append_raw_storage(
+        const typename M::storage_t* raw,
+        std::size_t count)
+        requires (
+            std::same_as<M, MinimizerT>
+            && requires { typename M::storage_t; }
+            && std::is_trivially_copyable_v<M>
+            && sizeof(M) == sizeof(typename M::storage_t))
+    {
+        const std::size_t old_size = sketches_.size();
+        if (count > sketches_.max_size() - old_size
+            || !ensure_capacity(old_size + count)) {
+            failed_ = true;
+            return false;
+        }
+        sketches_.resize(old_size + count);
+        if (count != 0u) {
+            std::memcpy(
+                static_cast<void*>(sketches_.data() + old_size),
+                static_cast<const void*>(raw),
+                count * sizeof(typename M::storage_t));
+        }
+        return true;
+    }
+
+    [[nodiscard]] const std::vector<MinimizerT>&
+    extract_sketches_data() const & noexcept {
+        return sketches_;
+    }
+
+    [[nodiscard]] bool ok() const noexcept {
+        return !failed_;
+    }
+
+    [[nodiscard]] std::uint64_t admitted_capacity_bytes() const noexcept {
+        return permit_.bytes();
+    }
+
+private:
+    [[nodiscard]] static bool checked_bytes(
+            std::size_t count,
+            std::uint64_t& result) noexcept {
+        constexpr std::uint64_t maximum =
+            (std::numeric_limits<std::uint64_t>::max)();
+        if (count > maximum / sizeof(MinimizerT)) return false;
+        result = static_cast<std::uint64_t>(count) * sizeof(MinimizerT);
+        return true;
+    }
+
+    [[nodiscard]] bool ensure_capacity(std::size_t required) {
+        if (failed_) return false;
+        if (required <= sketches_.capacity()) return true;
+        if (required > sketches_.max_size()) {
+            failed_ = true;
+            return false;
+        }
+
+        const std::size_t old_capacity = sketches_.capacity();
+        std::size_t requested_capacity = initial_growth_records;
+        if (old_capacity != 0u) {
+            requested_capacity = old_capacity <= sketches_.max_size() / 2u
+                ? old_capacity * 2u
+                : required;
+        }
+        requested_capacity = std::max(requested_capacity, required);
+
+        constexpr std::uint64_t maximum =
+            (std::numeric_limits<std::uint64_t>::max)();
+        std::uint64_t old_bytes = 0u;
+        std::uint64_t requested_bytes = 0u;
+        if (!checked_bytes(old_capacity, old_bytes)
+            || !checked_bytes(requested_capacity, requested_bytes)
+            || requested_bytes > maximum / allocation_headroom_factor_
+            || permit_.bytes() != old_bytes) {
+            failed_ = true;
+            return false;
+        }
+        const std::uint64_t allocation_headroom =
+            requested_bytes * allocation_headroom_factor_;
+        if (allocation_headroom > maximum - old_bytes
+            || !permit_.grow_to(old_bytes + allocation_headroom)) {
+            failed_ = true;
+            return false;
+        }
+
+        try {
+            sketches_.reserve(requested_capacity);
+        } catch (...) {
+            permit_.shrink_to(old_bytes);
+            throw;
+        }
+
+        std::uint64_t retained_bytes = 0u;
+        if (!checked_bytes(sketches_.capacity(), retained_bytes)
+            || retained_bytes > allocation_headroom) {
+            // The allocation already exists.  Retain all reserved headroom
+            // until destruction and fail closed instead of emitting into an
+            // allocation whose exact ownership could not be reconciled.
+            failed_ = true;
+            return false;
+        }
+        permit_.shrink_to(retained_bytes);
+        return true;
+    }
+
+    Permit permit_;
+    std::vector<MinimizerT> sketches_{};
+    std::uint64_t allocation_headroom_factor_ = 0u;
+    bool failed_ = false;
+};
 
 // DOC0263 §8 — `SeqView` (was `supports_compact_sequence_range R`) so this
 // scalar kernel runs over EITHER a compact_sequence_range OR a
@@ -692,6 +898,8 @@ inline void collect_minimizers_view(
 enum class MinimizerSketchBackend : std::uint8_t {
     Scalar = 0,
     VulkanSegment = 1,
+    ExactSimd = 2,
+    PaperNtHashSimd = 3,
 };
 
 [[nodiscard]] inline constexpr const char*
@@ -701,6 +909,10 @@ minimizer_sketch_backend_name(MinimizerSketchBackend backend) noexcept {
         return "scalar";
     case MinimizerSketchBackend::VulkanSegment:
         return "vulkan_segment";
+    case MinimizerSketchBackend::ExactSimd:
+        return "exact_simd";
+    case MinimizerSketchBackend::PaperNtHashSimd:
+        return "paper_nthash_simd";
     }
     return "unknown";
 }

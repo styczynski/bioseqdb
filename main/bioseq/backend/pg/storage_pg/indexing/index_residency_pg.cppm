@@ -29,6 +29,7 @@ import bioseq.storage.size;
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.parallelism.memory_admission;
+import bioseq.pg_utils;
 
 namespace bioseq::storage::indexing::residency_detail {
 
@@ -36,7 +37,10 @@ using bioseq::indexing::index_sub_key_t;
 using bioseq::storage::sequence_size_t;
 
 struct RegisteredCallbacks {
-    bool registered = false;
+    bool xact_registered = false;
+    bool subxact_registered = false;
+    bool relcache_registered = false;
+    bool installed = false;
 };
 
 [[nodiscard]] RegisteredCallbacks& callback_state() {
@@ -78,7 +82,63 @@ template <class Key>
 export namespace bioseq::storage::indexing {
 
 using bioseq::indexing::index_sub_key_t;
+using bioseq::indexing::MinimizerSchemeIdentity;
+using bioseq::indexing::MinimizerSketchBackend;
 using bioseq::storage::sequence_size_t;
+
+#ifdef BIOSEQ_TEST_INDEXES
+enum class IndexResidencyCallbackFailure : std::uint8_t {
+    none = 0,
+    register_xact = 1,
+    register_subxact = 2,
+    register_relcache = 3,
+};
+
+inline thread_local IndexResidencyCallbackFailure
+    g_index_residency_callback_failure =
+        IndexResidencyCallbackFailure::none;
+
+void arm_index_residency_callback_failure(
+        IndexResidencyCallbackFailure point) noexcept {
+    g_index_residency_callback_failure = point;
+}
+
+void disarm_index_residency_callback_failure() noexcept {
+    g_index_residency_callback_failure =
+        IndexResidencyCallbackFailure::none;
+}
+
+void inject_index_residency_callback_failure(
+        IndexResidencyCallbackFailure point) {
+    if (g_index_residency_callback_failure != point) {
+        return;
+    }
+    g_index_residency_callback_failure =
+        IndexResidencyCallbackFailure::none;
+    ereport(ERROR,
+        (errcode(ERRCODE_INTERNAL_ERROR),
+         errmsg("injected index residency callback registration failure"),
+         errdetail("failure_point=%u", static_cast<unsigned>(point))));
+}
+
+struct IndexResidencyCallbackInstallSnapshot {
+    bool xact_registered = false;
+    bool subxact_registered = false;
+    bool relcache_registered = false;
+    bool installed = false;
+};
+
+[[nodiscard]] IndexResidencyCallbackInstallSnapshot
+index_residency_callback_install_snapshot() noexcept {
+    const auto& state = residency_detail::callback_state();
+    return {
+        .xact_registered = state.xact_registered,
+        .subxact_registered = state.subxact_registered,
+        .relcache_registered = state.relcache_registered,
+        .installed = state.installed,
+    };
+}
+#endif
 
 struct IndexChunkKey {
     Oid db_oid = InvalidOid;
@@ -106,6 +166,8 @@ struct AssembledIndexKey {
     Oid main_relfilenode = InvalidOid;
     std::int16_t column_attno = 0;
     std::uint64_t index_name_hash = 0;
+    MinimizerSketchBackend sketch_backend = MinimizerSketchBackend::Scalar;
+    MinimizerSchemeIdentity minimizer_scheme{};
     std::uint64_t query_key = 0;
     std::uint64_t query_signature = 0;
     sequence_size_t clip_lo_bp = 0;
@@ -145,12 +207,14 @@ struct AssembledIndexCacheHit {
 [[nodiscard]] inline bool operator==(const AssembledIndexKey& lhs, const AssembledIndexKey& rhs) noexcept {
     return std::tie(lhs.db_oid, lhs.user_relid, lhs.tablespace_oid,
                     lhs.main_relfilenode, lhs.column_attno, lhs.index_name_hash,
-                    lhs.query_key, lhs.query_signature, lhs.clip_lo_bp,
-                    lhs.clip_hi_bp)
+                    lhs.sketch_backend, lhs.minimizer_scheme.id,
+                    lhs.minimizer_scheme.version, lhs.query_key,
+                    lhs.query_signature, lhs.clip_lo_bp, lhs.clip_hi_bp)
         == std::tie(rhs.db_oid, rhs.user_relid, rhs.tablespace_oid,
                     rhs.main_relfilenode, rhs.column_attno, rhs.index_name_hash,
-                    rhs.query_key, rhs.query_signature, rhs.clip_lo_bp,
-                    rhs.clip_hi_bp);
+                    rhs.sketch_backend, rhs.minimizer_scheme.id,
+                    rhs.minimizer_scheme.version, rhs.query_key,
+                    rhs.query_signature, rhs.clip_lo_bp, rhs.clip_hi_bp);
 }
 
 struct ChunkCacheEntry {
@@ -255,6 +319,50 @@ void evict_relation_residency(Oid relid) noexcept {
     }
 }
 
+/// Evict every backend-local cache entry for one logical sidecar identity.
+///
+/// Relcache callbacks receive the sidecar relation OID, while residency keys
+/// intentionally carry the owning user relation OID.  A destructive sidecar
+/// schema replacement therefore cannot rely on `evict_relation_residency`:
+/// the two OIDs are different.  The generation-storage cutover calls this
+/// identity form before dropping the old sidecar and again after publishing
+/// the fresh physical relation.
+void evict_index_residency(
+        Oid db_oid,
+        Oid user_relid,
+        Oid tablespace_oid,
+        Oid main_relfilenode,
+        std::int16_t column_attno,
+        std::uint64_t requested_index_name_hash) noexcept {
+    ResidencyState& state = residency_state();
+    const auto matches = [db_oid, user_relid, tablespace_oid,
+            main_relfilenode, column_attno,
+            requested_index_name_hash](const auto& key) noexcept {
+        return key.db_oid == db_oid
+            && key.user_relid == user_relid
+            && key.tablespace_oid == tablespace_oid
+            && key.main_relfilenode == main_relfilenode
+            && key.column_attno == column_attno
+            && key.index_name_hash == requested_index_name_hash;
+    };
+    for (std::size_t entry_index = 0;
+         entry_index < state.chunk_entries.size();) {
+        if (matches(state.chunk_entries[entry_index].key)) {
+            evict_chunk_index(entry_index);
+        } else {
+            ++entry_index;
+        }
+    }
+    for (std::size_t entry_index = 0;
+         entry_index < state.assembled_entries.size();) {
+        if (matches(state.assembled_entries[entry_index].key)) {
+            evict_assembled_index(entry_index);
+        } else {
+            ++entry_index;
+        }
+    }
+}
+
 void evict_chunk_subxact(SubTransactionId subxid) noexcept {
     ResidencyState& state = residency_state();
     for (std::size_t entry_index = 0; entry_index < state.chunk_entries.size();) {
@@ -319,15 +427,50 @@ void bioseq_index_residency_relcache_callback(Datum, Oid relid) {
 
 void install_index_residency_callbacks() {
     residency_detail::RegisteredCallbacks& state = residency_detail::callback_state();
-    if (state.registered) {
+    if (state.installed) {
         return;
     }
-    RegisterXactCallback(bioseq_index_residency_xact_callback, nullptr);
-    RegisterSubXactCallback(bioseq_index_residency_subxact_callback, nullptr);
-    CacheRegisterRelcacheCallback(
-        bioseq_index_residency_relcache_callback,
-        PointerGetDatum(nullptr));
-    state.registered = true;
+    if (!state.xact_registered) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+#ifdef BIOSEQ_TEST_INDEXES
+            inject_index_residency_callback_failure(
+                IndexResidencyCallbackFailure::register_xact);
+#endif
+            RegisterXactCallback(
+                bioseq_index_residency_xact_callback, nullptr);
+        });
+        state.xact_registered = true;
+    }
+    if (!state.subxact_registered) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+#ifdef BIOSEQ_TEST_INDEXES
+            inject_index_residency_callback_failure(
+                IndexResidencyCallbackFailure::register_subxact);
+#endif
+            RegisterSubXactCallback(
+                bioseq_index_residency_subxact_callback, nullptr);
+        });
+        state.subxact_registered = true;
+    }
+    if (!state.relcache_registered) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+#ifdef BIOSEQ_TEST_INDEXES
+            inject_index_residency_callback_failure(
+                IndexResidencyCallbackFailure::register_relcache);
+#endif
+            CacheRegisterRelcacheCallback(
+                bioseq_index_residency_relcache_callback,
+                PointerGetDatum(nullptr));
+        });
+        state.relcache_registered = true;
+    }
+    state.installed = state.xact_registered
+        && state.subxact_registered
+        && state.relcache_registered;
+    if (!state.installed) {
+        // Defensive only: every leaf above either completed or threw.
+        return;
+    }
     bioseq_log<DBG>("[bioseq] index residency: transaction and relcache callbacks registered");
 }
 

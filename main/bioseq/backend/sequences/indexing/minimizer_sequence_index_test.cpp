@@ -20,6 +20,7 @@
 #include <iterator>
 #include <map>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,6 +40,9 @@ import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
 import bioseq.gpu.vulkan.runtime;   // DOC0345 §16.3 — hardware Vulkan skip guard
@@ -72,8 +76,9 @@ using range_t  = compact_sequence_range<dna4_u64>;
     return v;
 }
 
+template<class Range>
 [[nodiscard]] std::vector<MinimapSketchData>
-whole_sequence_minimizers(range_t& range, std::size_t w, std::size_t k) {
+whole_sequence_minimizers(Range& range, std::size_t w, std::size_t k) {
     sketch_collector collector;
     collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
         collector, range, range.begin(), range.end(), w, k);
@@ -245,6 +250,135 @@ void require_lookup_maps_cover_scalar_with_tile_extras(
 
 }  // namespace
 
+TEST_CASE("MPS admitted run keeps its permit live through unwind, move and release",
+          "[indexing][minimizer-sequence][memory-admission][lifetime]") {
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& admission;
+        std::uint64_t previous = 0;
+        ~RestoreCap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap, baseline + (std::uint64_t{1} << 20)));
+
+    struct DestructionProbe {
+        bioseq::parallelism::MemoryAdmissionController* admission = nullptr;
+        std::uint64_t expected_reserved = 0;
+        bool* destroyed_with_live_permit = nullptr;
+        bool active = true;
+
+        DestructionProbe(
+                bioseq::parallelism::MemoryAdmissionController* owner,
+                std::uint64_t expected,
+                bool* observed) noexcept
+            : admission(owner),
+              expected_reserved(expected),
+              destroyed_with_live_permit(observed)
+        {}
+        DestructionProbe(DestructionProbe&& other) noexcept
+            : admission(other.admission),
+              expected_reserved(other.expected_reserved),
+              destroyed_with_live_permit(other.destroyed_with_live_permit),
+              active(std::exchange(other.active, false))
+        {}
+        DestructionProbe(const DestructionProbe&) = delete;
+        DestructionProbe& operator=(const DestructionProbe&) = delete;
+        DestructionProbe& operator=(DestructionProbe&&) = delete;
+        ~DestructionProbe() {
+            if (active) {
+                *destroyed_with_live_permit =
+                    admission->reserved_bytes() == expected_reserved;
+            }
+        }
+    };
+
+    using ProbeRun = bioseq::indexing::detail::AdmittedVectorRun<DestructionProbe>;
+    const auto make_run = [&]() {
+        constexpr std::uint64_t elements = 4u;
+        const std::uint64_t headroom =
+            bioseq::indexing::detail::admitted_vector_preallocation_bytes<
+                DestructionProbe>(elements);
+        auto permit = admission.try_reserve(headroom);
+        REQUIRE(permit.has_value());
+        ProbeRun run;
+        run.permit = std::move(*permit);
+        REQUIRE(bioseq::indexing::detail::reserve_admitted_vector_run_capacity(
+            run, elements));
+        return run;
+    };
+
+    bool unwind_observed = false;
+    try {
+        ProbeRun run = make_run();
+        const std::uint64_t expected = baseline + run.permit.bytes();
+        run.pairs.emplace_back(&admission, expected, &unwind_observed);
+        throw std::runtime_error("adversarial unwind");
+    } catch (const std::runtime_error&) {
+    }
+    REQUIRE(unwind_observed);
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    bool move_release_observed = false;
+    {
+        ProbeRun source = make_run();
+        const std::uint64_t expected = baseline + source.permit.bytes();
+        source.pairs.emplace_back(
+            &admission, expected, &move_release_observed);
+        ProbeRun destination{std::move(source)};
+        REQUIRE(source.pairs.capacity() == 0u);
+        REQUIRE_FALSE(static_cast<bool>(source.permit));
+        REQUIRE(destination.permit.bytes() == destination.admitted_bytes);
+        destination.release_capacity_before_permit();
+        REQUIRE(destination.pairs.capacity() == 0u);
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+    REQUIRE(move_release_observed);
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("MPS admitted post-sort compaction preserves pair order and accounting",
+          "[indexing][minimizer-sequence][memory-admission][compaction]") {
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& admission;
+        std::uint64_t previous = 0;
+        ~RestoreCap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap, baseline + (std::uint64_t{1} << 20)));
+
+    using Pair = bioseq::indexing::detail::sorted_pair_t;
+    bioseq::indexing::detail::AdmittedPairRun run;
+    constexpr std::uint64_t reserved_elements = 64u;
+    const std::uint64_t headroom =
+        bioseq::indexing::detail::admitted_vector_preallocation_bytes<Pair>(
+            reserved_elements);
+    auto permit = admission.try_reserve(headroom);
+    REQUIRE(permit.has_value());
+    run.permit = std::move(*permit);
+    REQUIRE(bioseq::indexing::detail::reserve_admitted_vector_run_capacity(
+        run, reserved_elements));
+    const std::size_t old_capacity = run.pairs.capacity();
+    run.pairs = {
+        {1u, 2u}, {1u, 5u}, {3u, 1u}, {8u, 13u},
+        {21u, 34u}, {55u, 89u}, {144u, 233u}, {377u, 610u},
+    };
+    const std::vector<Pair> expected = run.pairs;
+
+    bioseq::indexing::detail::compact_admitted_pair_run_after_sort(run);
+    REQUIRE(run.pairs == expected);
+    REQUIRE(run.pairs.capacity() <= old_capacity);
+    REQUIRE(run.admitted_bytes
+            == run.pairs.capacity() * sizeof(Pair));
+    REQUIRE(run.permit.bytes() == run.admitted_bytes);
+    run.release_capacity_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
 TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restricted to query kmers",
           "[indexing][minimizer-sequence][assemble]") {
     constexpr std::size_t FragUnits = 1024;
@@ -255,18 +389,34 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
     const auto total_bp = range.bp_size();
 
     FakeFragmentStorage<> storage;
+    FakeFragmentStorage<> exact_storage;
     storage.run_buffer_bytes_ = 4096;   // TINY -> forces multiple spilled runs
+    exact_storage.run_buffer_bytes_ = 4096;
     {
         lazy_compact_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
         bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(storage, lazy);
     }
+    {
+        lazy_compact_sequence<dna4_u64, chunked> lazy{
+            chunked::from_range(range)};
+        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(
+            exact_storage, lazy, MinimizerSketchBackend::ExactSimd);
+    }
     REQUIRE(storage.runs_.empty());   // build() calls release_runs() at the end
+    REQUIRE(exact_storage.runs_.empty());
 
     // Query = the whole sequence's own minimizers; max_occ wide-open.
     auto query = whole_sequence_minimizers(range, 10, 15);
     bioseq::indexing::MinimizerAssemblyScratch scratch;
     auto idx = bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::assemble_for_query(
         storage, std::span<const MinimapSketchData>(query), total_bp, /*max_occ*/ INT32_MAX, scratch);
+    bioseq::indexing::MinimizerAssemblyScratch exact_scratch;
+    auto exact_idx = bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::assemble_for_query(
+        exact_storage,
+        std::span<const MinimapSketchData>(query),
+        total_bp,
+        /*max_occ*/ INT32_MAX,
+        exact_scratch);
 
     REQUIRE(idx.target_length() == total_bp);
 
@@ -276,6 +426,152 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
     require_lookup_maps_equal(
         lookup_map(idx, kmers),
         baseline_for_query(query, kmers, (std::size_t)INT32_MAX));
+    require_lookup_maps_equal(
+        lookup_map(exact_idx, kmers),
+        lookup_map(idx, kmers));
+}
+
+TEST_CASE("scalar MPS build proof is operation-originated and fail-closed",
+          "[indexing][minimizer-sequence][scalar-proof]") {
+    using Proof = bioseq::indexing::ScalarMpsBuildExecutionProof;
+
+    const Proof empty{};
+    CHECK_FALSE(empty.accepted());
+
+    Proof first{};
+    first.record_scalar_collection(
+        /*symbols=*/64,
+        /*storage_units=*/2,
+        /*storage_unit_bytes=*/8,
+        /*letters_per_unit=*/32);
+    Proof second{};
+    second.record_scalar_collection(
+        /*symbols=*/32,
+        /*storage_units=*/1,
+        /*storage_unit_bytes=*/8,
+        /*letters_per_unit=*/32);
+
+    Proof aggregate{};
+    aggregate.bind_backend(
+        MinimizerSketchBackend::Scalar,
+        /*storage_unit_bytes=*/8,
+        /*letters_per_unit=*/32);
+    aggregate.combine(first);
+    aggregate.combine(second);
+    aggregate.record_completed_build();
+    REQUIRE(aggregate.accepted());
+    CHECK(aggregate.scalar_collection_calls == 2);
+    CHECK(aggregate.input_symbols == 96);
+    CHECK(aggregate.input_storage_units == 3);
+    CHECK(aggregate.input_bytes == 24);
+
+    auto wrong_backend = aggregate;
+    wrong_backend.selected_backend = MinimizerSketchBackend::ExactSimd;
+    CHECK_FALSE(wrong_backend.accepted());
+    auto saturated = aggregate;
+    saturated.saturated = true;
+    CHECK_FALSE(saturated.accepted());
+    auto no_calls = aggregate;
+    no_calls.scalar_collection_calls = 0;
+    CHECK_FALSE(no_calls.accepted());
+    auto no_symbols = aggregate;
+    no_symbols.input_symbols = 0;
+    CHECK_FALSE(no_symbols.accepted());
+    auto forged_bytes = aggregate;
+    ++forged_bytes.input_bytes;
+    CHECK_FALSE(forged_bytes.accepted());
+    auto duplicate_completion = aggregate;
+    duplicate_completion.record_completed_build();
+    CHECK_FALSE(duplicate_completion.accepted());
+
+    Proof mismatched_worker{};
+    mismatched_worker.bind_backend(
+        MinimizerSketchBackend::ExactSimd,
+        /*storage_unit_bytes=*/8,
+        /*letters_per_unit=*/32);
+    auto mismatch = aggregate;
+    mismatch.combine(mismatched_worker);
+    CHECK_FALSE(mismatch.accepted());
+    CHECK(mismatch.aggregation_mismatch);
+}
+
+TEST_CASE("scalar MPS build proof aggregates deterministically across workers",
+          "[indexing][minimizer-sequence][scalar-proof][parallel]") {
+    constexpr std::size_t fragment_units =
+        bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
+    constexpr std::size_t fragment_bp =
+        fragment_units * range_t::traits::letters_per_unit;
+    auto data = make_dna4(5u * fragment_bp, 0x51A1A5u);
+    range_t range(data);
+
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    struct ShutdownPool {
+        bioseq::parallelism::GlobalPool& pool;
+        ~ShutdownPool() { pool.shutdown(); }
+    } shutdown{pool};
+
+    const auto run = [range_pointer = &range, pool_pointer = &pool](
+            bioseq::parallelism::PipelineConcurrencyMode mode) {
+        auto& pool = *pool_pointer;
+        pool.restart(bioseq::parallelism::PoolConfig{
+            .max_concurrency = mode
+                    == bioseq::parallelism::PipelineConcurrencyMode::SINGLE
+                ? 1u : 2u,
+            .mode = mode,
+        });
+        FakeFragmentStorage<> storage;
+        storage.run_buffer_bytes_ = 4096;
+        auto lazy = bioseq::storage::make_lazy_in_memory(*range_pointer);
+        bioseq::indexing::ScalarMpsBuildExecutionProof proof{};
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            FakeFragmentStorage<>>::build(
+                storage,
+                lazy,
+                MinimizerSketchBackend::Scalar,
+                &proof);
+        return proof;
+    };
+
+    const auto serial = run(
+        bioseq::parallelism::PipelineConcurrencyMode::SINGLE);
+    const auto parallel = run(
+        bioseq::parallelism::PipelineConcurrencyMode::TASK_PARALLEL);
+
+    REQUIRE(serial.accepted());
+    REQUIRE(parallel.accepted());
+    CHECK(serial == parallel);
+    CHECK(serial.scalar_collection_calls > 1);
+    CHECK(serial.input_symbols >= range.bp_size());
+    CHECK(serial.input_bytes
+        == serial.input_storage_units * sizeof(std::uint64_t));
+    CHECK(serial.input_symbols
+        <= serial.input_storage_units * range_t::traits::letters_per_unit);
+}
+
+TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
+          "[indexing][minimizer-sequence][exact-simd][dna5]") {
+    using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    using dna5_range = compact_sequence_range<dna5_u64>;
+    using chunked = sequence_scanner_test_chunked<std::uint64_t, 2>;
+    using MpsIndex =
+        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>;
+
+    std::vector<seq::dna5> data(257);
+    constexpr std::array<std::uint8_t, 4> acgt_ranks{0, 1, 2, 4};
+    for (std::size_t index = 0; index < data.size(); ++index) {
+        data[index].assign_rank(acgt_ranks[(index * 3u + index / 7u) % 4u]);
+    }
+    for (const std::size_t position : {41u, 42u, 43u, 127u, 211u}) {
+        data[position].assign_rank(3); // SeqAn dna5 N rank
+    }
+    dna5_range range(data);
+    lazy_compact_sequence<dna5_u64, chunked> lazy{
+        chunked::from_range(range)};
+    FakeFragmentStorage<> storage;
+
+    REQUIRE_NOTHROW(MpsIndex::build(
+        storage, lazy, MinimizerSketchBackend::ExactSimd));
+    REQUIRE(storage.runs_.empty());
 }
 
 TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer under a tiny max_occ",
