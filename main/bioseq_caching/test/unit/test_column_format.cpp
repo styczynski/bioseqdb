@@ -271,6 +271,37 @@ TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
     REQUIRE_FALSE(view->value(0, 3).has_value());
 }
 
+TEST_CASE("binary-send encoding accepts PostgreSQL pass-by-value types") {
+    const std::array<ColumnSchema, 1> schema{{
+        {
+            .name = "binary_int4",
+            .descriptor = {
+                .type_oid = 23,
+                .typmod = -1,
+                .type_length = 4,
+                .by_value = 1,
+                .type_alignment = 4,
+                .encoding = ColumnEncoding::BinarySend,
+                .send_function_oid = 1,
+                .receive_function_oid = 2,
+            },
+            .semantic_id = {.low = 4},
+        },
+    }};
+    const std::array<std::byte, 4> encoded{
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{42}};
+    const std::array<EncodedColumnValue, 1> row{{{.bytes = encoded}}};
+    ColumnStoreBuilder builder(kIdentity, schema);
+    REQUIRE(builder.append_row(row).has_value());
+    TestChecksums checksums;
+    const auto blob = builder.seal(checksums);
+    REQUIRE(blob.has_value());
+    const auto view = validate_column_store(*blob, kIdentity, schema, checksums);
+    REQUIRE(view.has_value());
+    REQUIRE(view->value(0, 0)->bytes.size() == encoded.size());
+    REQUIRE(view->value(0, 0)->bytes[3] == std::byte{42});
+}
+
 TEST_CASE("schema digest commits names and complete SQL type metadata") {
     TestChecksums checksums;
     auto base = mixed_schema();

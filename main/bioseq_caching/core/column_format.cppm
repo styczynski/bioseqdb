@@ -339,8 +339,7 @@ serialize_schema(std::span<const ColumnSchema> schema) {
                 && (descriptor.by_value != 0
                     || descriptor.type_length != -1))
             || (descriptor.encoding == ColumnEncoding::BinarySend
-                && (descriptor.by_value != 0
-                    || descriptor.send_function_oid == 0
+                && (descriptor.send_function_oid == 0
                     || descriptor.receive_function_oid == 0))) {
             return std::unexpected(FormatError::InvalidFixedWidth);
         }
@@ -1203,7 +1202,7 @@ validate_column_store(
             || (*encoding == ColumnEncoding::FlatVarlena
                 && (*by_value != 0 || *type_length != -1))
             || (*encoding == ColumnEncoding::BinarySend
-                && (*by_value != 0 || *send_oid == 0 || *receive_oid == 0))) {
+                && (*send_oid == 0 || *receive_oid == 0))) {
             return std::unexpected(FormatError::InvalidFixedWidth);
         }
         column.name.reserve(*name_length);
