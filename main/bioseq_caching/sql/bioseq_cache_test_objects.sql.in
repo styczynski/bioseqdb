@@ -205,6 +205,16 @@ RETURNS void
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_digest_fault'
 LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
 
+CREATE FUNCTION bioseq_cache_test.provider_set_security_digest(bytea)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_security_digest'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_clear_security_digest()
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_clear_security_digest'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
 CREATE FUNCTION bioseq_cache_test.provider_set_projection_order(text)
 RETURNS void
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_projection_order'

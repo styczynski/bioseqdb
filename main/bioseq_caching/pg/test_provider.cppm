@@ -41,6 +41,7 @@ extern "C" {
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/plancache.h"
 #include "utils/rel.h"
 }
 
@@ -131,6 +132,7 @@ inline bool g_hook_installed = false;
 inline bool g_scan_methods_registered = false;
 inline set_rel_pathlist_hook_type g_previous_set_rel_pathlist_hook = nullptr;
 inline CallbackCounters g_counters{};
+inline std::array<std::uint8_t, kDigestBytes> g_provider_security_digest{};
 
 /** Require superuser for every mutation of the deterministic test provider. */
 void require_test_superuser() {
@@ -670,9 +672,9 @@ void fill_column_schema(
     output->provider_security_digest_format_version =
         BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1;
     output->provider_security_flags = 0;
-    std::memset(
+    std::memcpy(
         output->provider_security_digest,
-        0,
+        g_provider_security_digest.data(),
         sizeof(output->provider_security_digest));
     return BIOSEQ_CACHE_STATUS_OK;
 }
@@ -1142,6 +1144,38 @@ Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
 }
 
+PGDLLEXPORT Datum bioseq_cache_test_provider_set_security_digest(
+    PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_security_digest);
+Datum bioseq_cache_test_provider_set_security_digest(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    bytea* digest = PG_GETARG_BYTEA_PP(0);
+    const std::size_t size = VARSIZE_ANY_EXHDR(digest);
+    if (size != g_provider_security_digest.size()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("generic test-provider security digest must be 32 bytes")));
+    }
+    std::memcpy(
+        g_provider_security_digest.data(),
+        VARDATA_ANY(digest),
+        g_provider_security_digest.size());
+    ResetPlanCache();
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_clear_security_digest(
+    PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_clear_security_digest);
+Datum bioseq_cache_test_provider_clear_security_digest(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    g_provider_security_digest.fill(0);
+    ResetPlanCache();
+    PG_RETURN_VOID();
+}
+
 PGDLLEXPORT Datum bioseq_cache_test_provider_set_projection_order(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_projection_order);
 Datum bioseq_cache_test_provider_set_projection_order(PG_FUNCTION_ARGS) {
@@ -1195,7 +1229,9 @@ Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS) {
     g_digest_fault = DigestFault::None;
     g_projection_order = ProjectionOrder::Natural;
     g_force_domain_digest_collision = false;
+    g_provider_security_digest.fill(0);
     g_counters = {};
+    ResetPlanCache();
     PG_RETURN_VOID();
 }
 
