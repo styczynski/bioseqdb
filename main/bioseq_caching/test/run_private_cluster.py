@@ -379,7 +379,24 @@ def _run_prove(
         / "test"
         / "perl"
     )
+    pg_regress = (
+        cluster.inputs.bindir.parent
+        / "lib"
+        / "pgxs"
+        / "src"
+        / "test"
+        / "regress"
+        / "pg_regress"
+    )
+    if not pg_regress.is_file():
+        raise ClusterCommandError(f"pg_regress is not a file: {pg_regress}")
     env = cluster.environment()
+    env["PG_REGRESS"] = str(pg_regress)
+    env["PATH"] = os.pathsep.join(
+        part
+        for part in (str(cluster.inputs.bindir), env.get("PATH", ""))
+        if part
+    )
     existing_perl5lib = env.get("PERL5LIB", "")
     if pg_perl.is_dir():
         env["PERL5LIB"] = os.pathsep.join(
