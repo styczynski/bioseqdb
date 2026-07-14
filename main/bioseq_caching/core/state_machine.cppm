@@ -105,8 +105,7 @@ public:
     /** Register one reader pin unless eviction/absence has begun. */
     [[nodiscard]] bool pin_reader(std::uint64_t generation) noexcept {
         if (generation_ != generation
-            || (state_ != CacheEntryState::Complete
-                && state_ != CacheEntryState::Invalidated)
+            || state_ != CacheEntryState::Complete
             || reader_pins_ == (std::numeric_limits<std::uint32_t>::max)()) {
             return false;
         }

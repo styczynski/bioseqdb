@@ -107,6 +107,19 @@ TEST_CASE("generation identity prevents ABA publication and premature eviction")
     REQUIRE(state.failure() == CacheFailureCode::ProducerExited);
 }
 
+TEST_CASE("invalidation preserves old pins but rejects every new reader") {
+    GenerationStateMachine state;
+    REQUIRE(state.claim(3, 4));
+    REQUIRE(state.begin_build(3, 4));
+    REQUIRE(state.publish_complete(3, 4));
+    REQUIRE(state.pin_reader(3));
+    REQUIRE(state.invalidate(3));
+    REQUIRE_FALSE(state.pin_reader(3));
+    REQUIRE_FALSE(state.begin_evict(3));
+    REQUIRE(state.unpin_reader(3));
+    REQUIRE(state.begin_evict(3));
+}
+
 TEST_CASE("wait dependencies form a strictly descending claim DAG") {
     const std::array<std::uint64_t, 3> owned{10, 20, 30};
     REQUIRE(claim_sequence_wait_allowed(9, owned));
@@ -149,8 +162,10 @@ TEST_CASE("zero TTL grants one same-generation waiter read exactly once") {
 
     REQUIRE_FALSE(completed_ttl_decision(
         timestamps, 0, 0, 500, true, true).readable);
-    REQUIRE_FALSE(completed_ttl_decision(
+    REQUIRE(completed_ttl_decision(
         timestamps, 0, 0, 501, true, false).readable);
+    REQUIRE_FALSE(completed_ttl_decision(
+        timestamps, 0, 0, 499, true, false).readable);
     REQUIRE_FALSE(completed_ttl_decision(
         timestamps, 0, 0, 500, false, false).readable);
 }

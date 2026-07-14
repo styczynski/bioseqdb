@@ -98,7 +98,7 @@ struct TtlDecision {
     const bool one_time_entitlement = registered_inflight_waiter
         && !entitlement_already_consumed
         && effective_ttl_ms(producer_ttl_ms, consumer_ttl_ms) == 0
-        && now_ns == *timestamps.completed_ns;
+        && now_ns >= *timestamps.completed_ns;
     return TtlDecision{
         .readable = one_time_entitlement,
         .consume_just_completed_entitlement = one_time_entitlement,
