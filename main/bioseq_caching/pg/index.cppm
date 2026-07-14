@@ -72,6 +72,7 @@ PG_MODULE_MAGIC;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <expected>
@@ -4972,6 +4973,33 @@ enum class CoverageRuntimeRoleV1 : std::uint8_t {
     CurrentConsumer = 2,
 };
 
+enum class CoverageStoredColumnKindV1 : std::uint8_t {
+    ResultOrdinal = 0,
+    RteOrdinal = 1,
+    LogicalRelationOid = 2,
+    LeafRelationOid = 3,
+    IdentityKind = 4,
+    RowIdentity = 5,
+    OccurrenceHigh = 6,
+    OccurrenceLow = 7,
+    CapabilityMask = 8,
+    ProviderAttribute = 9,
+};
+
+inline constexpr std::size_t kCoverageOccurrenceColumnCountV1 = 9;
+
+struct CoverageStoredColumnV1 {
+    CoverageStoredColumnKindV1 kind;
+    std::array<std::uint8_t, 3> reserved{};
+    std::uint32_t provider_attno;
+};
+
+struct CoverageStoredRecipeV1 {
+    TupleDesc descriptor = nullptr;
+    CoverageStoredColumnV1* columns = nullptr;
+    std::uint32_t column_count = 0;
+};
+
 struct CoverageRuntimeSourceV1 {
     bool valid;
     bool registry_reference_owned;
@@ -5017,6 +5045,11 @@ struct ReusableCoverageState {
     std::uint64_t payload_bytes;
     ColumnStoreBuilder* column_builder;
     Oid* send_functions;
+    TupleDesc stored_descriptor;
+    CoverageStoredColumnV1* stored_columns;
+    std::uint32_t stored_column_count;
+    std::uint32_t reserved_stored;
+    List* plan_domain_nodes;
     Tuplestorestate* current_replay_store;
     TupleTableSlot* current_replay_slot;
     ExprState* requested_predicate_state;
@@ -5048,6 +5081,267 @@ static_assert(offsetof(ReusableCoverageState, css) == 0);
         : static_cast<PlanState*>(linitial(node->custom_ps));
 }
 
+[[nodiscard]] const BioseqCacheColumnSchemaV1* coverage_contract_column(
+        const BioseqCachePathDomainV1& contract,
+        std::uint32_t attno) noexcept {
+    for (std::size_t index = 0;
+         index < contract.boundary_column_count; ++index) {
+        if (contract.boundary_columns[index].attno == attno) {
+            return &contract.boundary_columns[index];
+        }
+    }
+    for (std::size_t index = 0;
+         index < contract.lineage_column_count; ++index) {
+        if (contract.lineage_columns[index].attno == attno) {
+            return &contract.lineage_columns[index];
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] bool append_unique_coverage_attno(
+        std::vector<std::uint32_t>& attnos,
+        const BioseqCachePathDomainV1& contract,
+        std::uint32_t attno) {
+    if (attno == 0 || coverage_contract_column(contract, attno) == nullptr) {
+        return false;
+    }
+    if (std::find(attnos.begin(), attnos.end(), attno) == attnos.end()) {
+        attnos.push_back(attno);
+    }
+    return true;
+}
+
+[[nodiscard]] bool coverage_column_semantic_digest(
+        const BioseqCachePathDomainV1& contract,
+        std::uint32_t attno,
+        CacheDigest256* output) noexcept {
+    if (output == nullptr) {
+        return false;
+    }
+    constexpr std::size_t schema_scalar_bytes =
+        6U * sizeof(std::uint32_t) + 2U * sizeof(std::uint64_t);
+    std::array<std::byte,
+        sizeof(std::uint32_t)
+            + 2U * (sizeof(std::uint32_t) + schema_scalar_bytes)> bytes{};
+    std::size_t offset = 0;
+    const auto append = [&](const void* source, std::size_t size) {
+        std::memcpy(bytes.data() + offset, source, size);
+        offset += size;
+    };
+    append(&attno, sizeof(attno));
+    const auto append_matching = [&](std::uint32_t role,
+            const BioseqCacheColumnSchemaV1* columns,
+            std::size_t count) {
+        for (std::size_t index = 0; index < count; ++index) {
+            if (columns[index].attno == attno) {
+                const std::uint32_t normalized_struct_size =
+                    sizeof(BioseqCacheColumnSchemaV1);
+                append(&role, sizeof(role));
+                append(
+                    &normalized_struct_size,
+                    sizeof(normalized_struct_size));
+                append(&columns[index].attno, sizeof(columns[index].attno));
+                append(
+                    &columns[index].semantic_id_high,
+                    sizeof(columns[index].semantic_id_high));
+                append(
+                    &columns[index].semantic_id_low,
+                    sizeof(columns[index].semantic_id_low));
+                append(
+                    &columns[index].type_oid,
+                    sizeof(columns[index].type_oid));
+                append(&columns[index].typmod, sizeof(columns[index].typmod));
+                append(
+                    &columns[index].collation_oid,
+                    sizeof(columns[index].collation_oid));
+                append(&columns[index].flags, sizeof(columns[index].flags));
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool boundary = append_matching(
+        1U, contract.boundary_columns, contract.boundary_column_count);
+    const bool lineage = append_matching(
+        2U, contract.lineage_columns, contract.lineage_column_count);
+    if (!boundary && !lineage) {
+        return false;
+    }
+    PostgreSqlColumnChecksumPolicy policy;
+    const auto digest = policy.sha256(std::span<const std::byte>{
+        bytes.data(), offset});
+    if (!digest.has_value()) {
+        return false;
+    }
+    *output = *digest;
+    return true;
+}
+
+/** Build the deterministic provider boundary/lineage + occurrence schema. */
+[[nodiscard]] bool build_coverage_stored_recipe(
+        const BioseqCachePathDomainV1& contract,
+        CoverageStoredRecipeV1* output) {
+    if (output == nullptr
+        || !reuse::validate_path_domain(
+            contract.provider_id, &contract).has_value()) {
+        return false;
+    }
+    std::vector<std::uint32_t> attnos;
+    attnos.reserve(
+        contract.boundary_column_count + contract.lineage_column_count);
+    const auto append_list = [&](const std::uint32_t* values,
+            std::size_t count) {
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!append_unique_coverage_attno(
+                    attnos, contract, values[index])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!append_list(
+            contract.required_lineage_attnos,
+            contract.required_lineage_attno_count)
+        || !append_list(
+            contract.required_boundary_attnos,
+            contract.required_boundary_attno_count)) {
+        return false;
+    }
+    for (std::size_t index = 0;
+         index < contract.lineage_column_count; ++index) {
+        if (!append_unique_coverage_attno(
+                attnos, contract, contract.lineage_columns[index].attno)) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0;
+         index < contract.boundary_column_count; ++index) {
+        if (!append_unique_coverage_attno(
+                attnos, contract, contract.boundary_columns[index].attno)) {
+            return false;
+        }
+    }
+    const std::size_t column_count =
+        kCoverageOccurrenceColumnCountV1 + attnos.size();
+    if (column_count == kCoverageOccurrenceColumnCountV1
+        || column_count > static_cast<std::size_t>(MaxTupleAttributeNumber)) {
+        return false;
+    }
+
+    TupleDesc descriptor = CreateTemplateTupleDesc(
+        static_cast<int>(column_count));
+    auto* columns = static_cast<CoverageStoredColumnV1*>(palloc0(
+        sizeof(CoverageStoredColumnV1) * column_count));
+    struct OccurrenceColumnSpecV1 {
+        CoverageStoredColumnKindV1 kind;
+        const char* name;
+        Oid type_oid;
+    };
+    static constexpr std::array<OccurrenceColumnSpecV1,
+        kCoverageOccurrenceColumnCountV1> occurrence_columns{{
+        {CoverageStoredColumnKindV1::ResultOrdinal,
+            "cache_result_ordinal", INT8OID},
+        {CoverageStoredColumnKindV1::RteOrdinal,
+            "cache_rte_ordinal", INT4OID},
+        {CoverageStoredColumnKindV1::LogicalRelationOid,
+            "cache_logical_relation_oid", OIDOID},
+        {CoverageStoredColumnKindV1::LeafRelationOid,
+            "cache_leaf_relation_oid", OIDOID},
+        {CoverageStoredColumnKindV1::IdentityKind,
+            "cache_identity_kind", INT4OID},
+        {CoverageStoredColumnKindV1::RowIdentity,
+            "cache_row_identity", INT8OID},
+        {CoverageStoredColumnKindV1::OccurrenceHigh,
+            "cache_occurrence_high", INT8OID},
+        {CoverageStoredColumnKindV1::OccurrenceLow,
+            "cache_occurrence_low", INT8OID},
+        {CoverageStoredColumnKindV1::CapabilityMask,
+            "cache_capability_mask", INT8OID},
+    }};
+    for (std::size_t index = 0;
+         index < occurrence_columns.size(); ++index) {
+        const auto& spec = occurrence_columns[index];
+        TupleDescInitEntry(
+            descriptor,
+            static_cast<AttrNumber>(index + 1U),
+            spec.name,
+            spec.type_oid,
+            -1,
+            0);
+        columns[index] = CoverageStoredColumnV1{
+            .kind = spec.kind,
+            .provider_attno = 0,
+        };
+    }
+    static constexpr char hex[] = "0123456789abcdef";
+    for (std::size_t index = 0; index < attnos.size(); ++index) {
+        const std::uint32_t attno = attnos[index];
+        const BioseqCacheColumnSchemaV1* schema =
+            coverage_contract_column(contract, attno);
+        CacheDigest256 semantic_digest{};
+        if (schema == nullptr
+            || !coverage_column_semantic_digest(
+                contract, attno, &semantic_digest)) {
+            FreeTupleDesc(descriptor);
+            pfree(columns);
+            return false;
+        }
+        char name[NAMEDATALEN]{};
+        const int prefix = snprintf(
+            name, sizeof(name), "provider_%u_", attno);
+        if (prefix <= 0 || prefix >= static_cast<int>(sizeof(name))) {
+            FreeTupleDesc(descriptor);
+            pfree(columns);
+            return false;
+        }
+        std::size_t name_offset = static_cast<std::size_t>(prefix);
+        for (std::size_t byte_index = 0;
+             byte_index < 24U
+                && name_offset + 2U < sizeof(name);
+             ++byte_index) {
+            const std::uint8_t value = semantic_digest.bytes[byte_index];
+            name[name_offset++] = hex[value >> 4U];
+            name[name_offset++] = hex[value & 0x0fU];
+        }
+        name[name_offset] = '\0';
+        const std::size_t physical_index =
+            kCoverageOccurrenceColumnCountV1 + index;
+        TupleDescInitEntry(
+            descriptor,
+            static_cast<AttrNumber>(physical_index + 1U),
+            name,
+            schema->type_oid,
+            schema->typmod,
+            0);
+        TupleDescInitEntryCollation(
+            descriptor,
+            static_cast<AttrNumber>(physical_index + 1U),
+            schema->collation_oid);
+        columns[physical_index] = CoverageStoredColumnV1{
+            .kind = CoverageStoredColumnKindV1::ProviderAttribute,
+            .provider_attno = attno,
+        };
+    }
+    output->descriptor = descriptor;
+    output->columns = columns;
+    output->column_count = static_cast<std::uint32_t>(column_count);
+    return true;
+}
+
+void destroy_coverage_stored_recipe(
+        CoverageStoredRecipeV1& recipe) noexcept {
+    if (recipe.descriptor != nullptr) {
+        FreeTupleDesc(recipe.descriptor);
+        recipe.descriptor = nullptr;
+    }
+    if (recipe.columns != nullptr) {
+        pfree(recipe.columns);
+        recipe.columns = nullptr;
+    }
+    recipe.column_count = 0;
+}
+
 void destroy_coverage_builder(ReusableCoverageState& state) noexcept {
     delete state.column_builder;
     state.column_builder = nullptr;
@@ -5055,6 +5349,15 @@ void destroy_coverage_builder(ReusableCoverageState& state) noexcept {
         pfree(state.send_functions);
         state.send_functions = nullptr;
     }
+    if (state.stored_descriptor != nullptr) {
+        FreeTupleDesc(state.stored_descriptor);
+        state.stored_descriptor = nullptr;
+    }
+    if (state.stored_columns != nullptr) {
+        pfree(state.stored_columns);
+        state.stored_columns = nullptr;
+    }
+    state.stored_column_count = 0;
 }
 
 void discard_coverage_blocks(ReusableCoverageState& state) noexcept {
@@ -5146,12 +5449,20 @@ void coverage_state_cleanup(void* opaque) noexcept {
 }
 
 [[nodiscard]] bool begin_coverage_capture(
-        ReusableCoverageState& state, TupleDesc descriptor) {
+        ReusableCoverageState& state) {
     try {
+        CoverageStoredRecipeV1 recipe{};
+        if (!build_coverage_stored_recipe(
+                state.current_contract.domain, &recipe)) {
+            return false;
+        }
+        state.stored_descriptor = recipe.descriptor;
+        state.stored_columns = recipe.columns;
+        state.stored_column_count = recipe.column_count;
         state.send_functions = static_cast<Oid*>(palloc0(
-            sizeof(Oid) * static_cast<std::size_t>(descriptor->natts)));
+            sizeof(Oid) * state.stored_column_count));
         std::vector<ColumnSchema> schema = build_column_schema(
-            descriptor, state.send_functions);
+            state.stored_descriptor, state.send_functions);
         state.column_builder = new ColumnStoreBuilder(
             current_column_store_identity(), schema);
         return true;
@@ -5164,50 +5475,127 @@ void coverage_state_cleanup(void* opaque) noexcept {
 [[nodiscard]] bool capture_coverage_row(
         ReusableCoverageState& state, TupleTableSlot* slot) {
     if (state.column_builder == nullptr || state.send_functions == nullptr
-        || slot == nullptr) {
+        || state.stored_columns == nullptr
+        || state.stored_descriptor == nullptr
+        || state.stored_column_count == 0 || state.provider == nullptr
+        || state.plan_domain_nodes == NIL || slot == nullptr
+        || slot->tts_tupleDescriptor == nullptr) {
         return false;
     }
-    slot_getallattrs(slot);
-    TupleDesc descriptor = slot->tts_tupleDescriptor;
+    BioseqCacheOccurrenceV1 occurrence{
+        .struct_size = sizeof(BioseqCacheOccurrenceV1),
+    };
+    if (state.provider->extract_occurrence(
+            state.plan_domain_nodes, slot, &occurrence)
+            != BIOSEQ_CACHE_STATUS_OK
+        || occurrence.struct_size < sizeof(BioseqCacheOccurrenceV1)
+        || occurrence.rte_ordinal == 0 || occurrence.logical_relation_oid == 0
+        || occurrence.leaf_relation_oid == 0 || occurrence.identity_kind == 0
+        || occurrence.reserved != 0
+        || (occurrence.capability_mask & state.current_header.capability_mask)
+            != state.current_header.capability_mask) {
+        return false;
+    }
+    const std::size_t column_count = state.stored_column_count;
     auto* values = static_cast<EncodedColumnValue*>(palloc0(
-        sizeof(EncodedColumnValue)
-        * static_cast<std::size_t>(descriptor->natts)));
+        sizeof(EncodedColumnValue) * column_count));
     auto** encoded = static_cast<bytea**>(palloc0(
-        sizeof(bytea*) * static_cast<std::size_t>(descriptor->natts)));
+        sizeof(bytea*) * column_count));
     bool success = false;
-    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
-        if (slot->tts_isnull[attribute]) {
-            values[attribute].is_null = true;
+    std::uint64_t row_logical_bytes = 0;
+    for (std::size_t index = 0; index < column_count; ++index) {
+        Datum datum = static_cast<Datum>(0);
+        bool is_null = false;
+        const CoverageStoredColumnV1& column = state.stored_columns[index];
+        switch (column.kind) {
+            case CoverageStoredColumnKindV1::ResultOrdinal:
+                datum = Int64GetDatum(
+                    static_cast<std::int64_t>(state.row_count));
+                break;
+            case CoverageStoredColumnKindV1::RteOrdinal:
+                datum = Int32GetDatum(
+                    static_cast<std::int32_t>(occurrence.rte_ordinal));
+                break;
+            case CoverageStoredColumnKindV1::LogicalRelationOid:
+                datum = ObjectIdGetDatum(
+                    static_cast<Oid>(occurrence.logical_relation_oid));
+                break;
+            case CoverageStoredColumnKindV1::LeafRelationOid:
+                datum = ObjectIdGetDatum(
+                    static_cast<Oid>(occurrence.leaf_relation_oid));
+                break;
+            case CoverageStoredColumnKindV1::IdentityKind:
+                datum = Int32GetDatum(
+                    static_cast<std::int32_t>(occurrence.identity_kind));
+                break;
+            case CoverageStoredColumnKindV1::RowIdentity:
+                datum = Int64GetDatum(
+                    static_cast<std::int64_t>(occurrence.row_identity));
+                break;
+            case CoverageStoredColumnKindV1::OccurrenceHigh:
+                datum = Int64GetDatum(
+                    static_cast<std::int64_t>(occurrence.occurrence_high));
+                break;
+            case CoverageStoredColumnKindV1::OccurrenceLow:
+                datum = Int64GetDatum(
+                    static_cast<std::int64_t>(occurrence.occurrence_low));
+                break;
+            case CoverageStoredColumnKindV1::CapabilityMask:
+                datum = Int64GetDatum(
+                    static_cast<std::int64_t>(occurrence.capability_mask));
+                break;
+            case CoverageStoredColumnKindV1::ProviderAttribute:
+                if (column.provider_attno == 0
+                    || column.provider_attno
+                        > static_cast<std::uint32_t>(
+                            slot->tts_tupleDescriptor->natts)) {
+                    is_null = true;
+                    success = false;
+                    goto capture_cleanup;
+                }
+                datum = slot_getattr(
+                    slot,
+                    static_cast<int>(column.provider_attno),
+                    &is_null);
+                break;
+        }
+        if (is_null) {
+            values[index].is_null = true;
             continue;
         }
-        encoded[attribute] = OidSendFunctionCall(
-            state.send_functions[attribute], slot->tts_values[attribute]);
-        const std::size_t byte_count = VARSIZE_ANY_EXHDR(encoded[attribute]);
-        values[attribute].bytes = std::span<const std::byte>{
+        encoded[index] = OidSendFunctionCall(
+            state.send_functions[index], datum);
+        const std::size_t byte_count = VARSIZE_ANY_EXHDR(encoded[index]);
+        values[index].bytes = std::span<const std::byte>{
             reinterpret_cast<const std::byte*>(
-                VARDATA_ANY(encoded[attribute])),
+                VARDATA_ANY(encoded[index])),
             byte_count};
-        state.logical_bytes += byte_count;
+        if (row_logical_bytes > kMaximumStoredResultBytes - byte_count) {
+            goto capture_cleanup;
+        }
+        row_logical_bytes += byte_count;
     }
-    if (state.logical_bytes <= kMaximumStoredResultBytes) {
+    if (state.logical_bytes
+            <= kMaximumStoredResultBytes - row_logical_bytes) {
         try {
             success = state.column_builder->append_row(
                 std::span<const EncodedColumnValue>{
-                    values,
-                    static_cast<std::size_t>(descriptor->natts)})
+                    values, column_count})
                 .has_value();
         } catch (...) {
             success = false;
         }
     }
-    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
-        if (encoded[attribute] != nullptr) {
-            pfree(encoded[attribute]);
+capture_cleanup:
+    for (std::size_t index = 0; index < column_count; ++index) {
+        if (encoded[index] != nullptr) {
+            pfree(encoded[index]);
         }
     }
     pfree(encoded);
     pfree(values);
     if (success) {
+        state.logical_bytes += row_logical_bytes;
         ++state.row_count;
     }
     return success;
