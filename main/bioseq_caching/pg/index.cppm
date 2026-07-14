@@ -1156,6 +1156,10 @@ struct CoverageDescriptorHeaderV1 {
     std::uint32_t flags = 0;
     std::uint64_t compatibility_family_id = 0;
     std::uint64_t capability_mask = 0;
+    std::uint32_t provider_security_digest_format_version = 0;
+    std::uint32_t provider_security_flags = 0;
+    std::array<std::uint8_t, kProviderDigestBytes>
+        provider_security_digest{};
     std::uint32_t boundary_count = 0;
     std::uint32_t lineage_count = 0;
     std::uint32_t required_boundary_count = 0;
@@ -1199,6 +1203,9 @@ struct PlannerDecodedCoverageV1 {
         || header.format_version != kCoverageDescriptorFormatV1
         || header.provider_id == 0 || header.flags != 0
         || header.compatibility_family_id == 0 || header.reserved != 0
+        || header.provider_security_digest_format_version
+            != BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1
+        || header.provider_security_flags != 0
         || header.boundary_count > kMaxProviderBoundaryColumns
         || header.lineage_count > kMaxProviderBoundaryColumns
         || header.required_boundary_count > kMaxProviderBoundaryColumns
@@ -1271,6 +1278,17 @@ struct PlannerDecodedCoverageV1 {
             .provider_id = domain.provider_id,
             .compatibility_family_id = domain.compatibility_family_id,
             .capability_mask = domain.capability_mask,
+            .provider_security_digest_format_version =
+                domain.provider_security_digest_format_version,
+            .provider_security_flags = domain.provider_security_flags,
+            .provider_security_digest = [&domain] {
+                std::array<std::uint8_t, kProviderDigestBytes> digest{};
+                std::copy_n(
+                    domain.provider_security_digest,
+                    digest.size(),
+                    digest.begin());
+                return digest;
+            }(),
             .boundary_count = static_cast<std::uint32_t>(
                 domain.boundary_column_count),
             .lineage_count = static_cast<std::uint32_t>(
@@ -1448,10 +1466,14 @@ struct PlannerDecodedCoverageV1 {
             .dependency_nodes = static_cast<List*>(dependencies),
             .provider_private_nodes = static_cast<List*>(provider_private),
             .provider_security_digest_format_version =
-                BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1,
-            .provider_security_flags = 0,
+                header.provider_security_digest_format_version,
+            .provider_security_flags = header.provider_security_flags,
             .provider_security_digest = {},
         };
+        std::copy_n(
+            header.provider_security_digest.begin(),
+            header.provider_security_digest.size(),
+            decoded->domain.provider_security_digest);
         decoded->source = BioseqCacheReusableSourceV1{
             .struct_size = sizeof(BioseqCacheReusableSourceV1),
             .provider_id = header.provider_id,
@@ -1502,7 +1524,24 @@ struct PlannerSemanticKeysV1 {
     bytea* canonical_generation_key = nullptr;
     CacheDigest256 domain_digest{};
     CacheDigest256 generation_digest{};
+    ReusableSecurityNamespaceV1 security_namespace{};
 };
+
+[[nodiscard]] ReusableSecurityNamespaceV1
+current_reusable_security_namespace(
+        const CacheDigest256& provider_security_digest) noexcept {
+    Oid current_role = InvalidOid;
+    int security_context = 0;
+    GetUserIdAndSecContext(&current_role, &security_context);
+    return ReusableSecurityNamespaceV1{
+        .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
+        .current_role_oid = static_cast<std::uint32_t>(current_role),
+        .session_user_oid = static_cast<std::uint32_t>(GetSessionUserId()),
+        .security_context_flags = static_cast<std::uint32_t>(security_context),
+        .row_security_mode = row_security ? 1 : 0,
+        .provider_security_digest = provider_security_digest,
+    };
+}
 
 /** Capture both provider-defined canonical keys and their SHA-256 directories. */
 [[nodiscard]] bool capture_planner_semantic_keys_fail_open(
@@ -1510,7 +1549,15 @@ struct PlannerSemanticKeysV1 {
         const BioseqCachePathDomainV1& domain,
         MemoryContext planner_context,
         PlannerSemanticKeysV1* output) noexcept {
-    if (provider == nullptr || planner_context == nullptr || output == nullptr) {
+    if (provider == nullptr || planner_context == nullptr || output == nullptr
+        || !reuse::validate_path_domain(
+            domain.provider_id, &domain).has_value()) {
+        return false;
+    }
+    const ReusableSecurityNamespaceV1 security_namespace =
+        current_reusable_security_namespace(
+            reuse::provider_security_digest(domain));
+    if (!valid_reusable_security_namespace(security_namespace)) {
         return false;
     }
     MemoryContext old_context = CurrentMemoryContext;
@@ -1524,17 +1571,26 @@ struct PlannerSemanticKeysV1 {
             VARHDRSZ + static_cast<std::size_t>(kMaxCoverageDomainKeyBytes)));
         auto* generation_key = static_cast<bytea*>(palloc(
             VARHDRSZ + static_cast<std::size_t>(kMaxCanonicalKeyBytes)));
-        std::size_t domain_size = 0;
-        std::size_t generation_size = 0;
+        constexpr std::size_t domain_payload_capacity =
+            static_cast<std::size_t>(kMaxCoverageDomainKeyBytes)
+            - reuse::kCoverageCanonicalKeyFixedBytesV1;
+        constexpr std::size_t generation_payload_capacity =
+            static_cast<std::size_t>(kMaxCanonicalKeyBytes)
+            - reuse::kCoverageCanonicalKeyFixedBytesV1;
+        auto* domain_payload = static_cast<std::byte*>(
+            palloc(domain_payload_capacity));
+        auto* generation_payload = static_cast<std::byte*>(
+            palloc(generation_payload_capacity));
+        std::size_t domain_payload_size = 0;
+        std::size_t generation_payload_size = 0;
         reuse::ProviderCallDiagnosticV1 diagnostic{};
         if (!reuse::invoke_semantic_digest_fail_open(
                 provider,
                 &domain,
                 reuse::SemanticDigestKindV1::Domain,
                 std::span<std::byte>{
-                    reinterpret_cast<std::byte*>(VARDATA(domain_key)),
-                    static_cast<std::size_t>(kMaxCoverageDomainKeyBytes)},
-                &domain_size,
+                    domain_payload, domain_payload_capacity},
+                &domain_payload_size,
                 planner_context,
                 &diagnostic)
             || !reuse::invoke_semantic_digest_fail_open(
@@ -1542,26 +1598,48 @@ struct PlannerSemanticKeysV1 {
                 &domain,
                 reuse::SemanticDigestKindV1::Generation,
                 std::span<std::byte>{
-                    reinterpret_cast<std::byte*>(VARDATA(generation_key)),
-                    static_cast<std::size_t>(kMaxCanonicalKeyBytes)},
-                &generation_size,
+                    generation_payload, generation_payload_capacity},
+                &generation_payload_size,
                 planner_context,
                 &diagnostic)) {
             ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("bioseq cache provider semantic key is unavailable")));
         }
-        SET_VARSIZE(domain_key, VARHDRSZ + domain_size);
-        SET_VARSIZE(generation_key, VARHDRSZ + generation_size);
+        const auto domain_size = reuse::write_coverage_canonical_key(
+            reuse::CoverageCanonicalKeyKindV1::Domain,
+            security_namespace,
+            std::span<const std::byte>{
+                domain_payload, domain_payload_size},
+            std::span<std::byte>{
+                reinterpret_cast<std::byte*>(VARDATA(domain_key)),
+                static_cast<std::size_t>(kMaxCoverageDomainKeyBytes)});
+        const auto generation_size = reuse::write_coverage_canonical_key(
+            reuse::CoverageCanonicalKeyKindV1::Generation,
+            security_namespace,
+            std::span<const std::byte>{
+                generation_payload, generation_payload_size},
+            std::span<std::byte>{
+                reinterpret_cast<std::byte*>(VARDATA(generation_key)),
+                static_cast<std::size_t>(kMaxCanonicalKeyBytes)});
+        if (!domain_size.has_value() || !generation_size.has_value()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("bioseq cache canonical security key is unavailable")));
+        }
+        pfree(generation_payload);
+        pfree(domain_payload);
+        SET_VARSIZE(domain_key, VARHDRSZ + *domain_size);
+        SET_VARSIZE(generation_key, VARHDRSZ + *generation_size);
         PostgreSqlColumnChecksumPolicy checksum_policy;
         const auto domain_digest = checksum_policy.sha256(
             std::span<const std::byte>{
                 reinterpret_cast<const std::byte*>(VARDATA(domain_key)),
-                domain_size});
+                *domain_size});
         const auto generation_digest = checksum_policy.sha256(
             std::span<const std::byte>{
                 reinterpret_cast<const std::byte*>(VARDATA(generation_key)),
-                generation_size});
+                *generation_size});
         if (!domain_digest.has_value() || !generation_digest.has_value()) {
             ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
@@ -1571,6 +1649,7 @@ struct PlannerSemanticKeysV1 {
         keys->canonical_generation_key = generation_key;
         keys->domain_digest = *domain_digest;
         keys->generation_digest = *generation_digest;
+        keys->security_namespace = security_namespace;
 #if defined(BIOSEQ_CACHE_TESTING)
         if (g_forced_coverage_domain_digest_active) {
             keys->domain_digest = g_forced_coverage_domain_digest;
@@ -1597,33 +1676,10 @@ struct PlannerSemanticKeysV1 {
     return true;
 }
 
-[[nodiscard]] ReusableSecurityNamespaceV1
-current_reusable_security_namespace() noexcept {
-    Oid current_role = InvalidOid;
-    int security_context = 0;
-    GetUserIdAndSecContext(&current_role, &security_context);
-    return ReusableSecurityNamespaceV1{
-        .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
-        .current_role_oid = static_cast<std::uint32_t>(current_role),
-        .session_user_oid = static_cast<std::uint32_t>(GetSessionUserId()),
-        .security_context_flags = static_cast<std::uint32_t>(security_context),
-        .row_security_mode = row_security ? 1 : 0,
-        .provider_security_digest = {},
-    };
-}
-
 [[nodiscard]] reuse::CoverageSecurityNamespaceV1
 planner_security_namespace(
         const ReusableSecurityNamespaceV1& source) noexcept {
-    return reuse::CoverageSecurityNamespaceV1{
-        .database_oid = source.database_oid,
-        .current_role_oid = source.current_role_oid,
-        .session_user_oid = source.session_user_oid,
-        .security_context_flags = source.security_context_flags,
-        .row_security_mode = static_cast<std::uint8_t>(
-            source.row_security_mode != 0),
-        .provider_security_digest = source.provider_security_digest,
-    };
+    return source;
 }
 
 inline constexpr std::uint32_t kCoverageCurrentPlanMagicV1 = 0x42435031U;
@@ -1694,7 +1750,9 @@ struct CoverageCurrentPlanViewV1 {
     output->coverage_descriptor = take(header.coverage_descriptor_bytes);
     return offset == bytes.size()
         && output->header.coverage_directory_key.security_namespace
-            == current_reusable_security_namespace();
+            == current_reusable_security_namespace(
+                output->header.coverage_directory_key.security_namespace
+                    .provider_security_digest);
 }
 
 struct CoverageDependencyTicketV1 {
@@ -2214,7 +2272,7 @@ void fail_current_reusable_generation(
         .compatibility_family_id = domain.compatibility_family_id,
         .capability_mask = domain.capability_mask,
         .coverage_directory_key = {
-            .security_namespace = current_reusable_security_namespace(),
+            .security_namespace = keys.security_namespace,
             .coverage_domain_digest = keys.domain_digest,
         },
         .generation_digest = keys.generation_digest,
@@ -2392,7 +2450,7 @@ void release_planner_pin_noerror(
 
     const ReusableCandidateRequestV1 request{
         .coverage_directory_key = {
-            .security_namespace = current_reusable_security_namespace(),
+            .security_namespace = keys.security_namespace,
             .coverage_domain_digest = keys.domain_digest,
         },
         .canonical_domain_key = bytea_payload(keys.canonical_domain_key),
@@ -2588,7 +2646,10 @@ void release_planner_pin_noerror(
             candidate_bytes[index].coverage_descriptor);
         PlannerDecodedCoverageV1 decoded{};
         if (!decode_coverage_descriptor_fail_open(
-                descriptor_bytes, planner_context, &decoded)) {
+                descriptor_bytes, planner_context, &decoded)
+            || reuse::provider_security_digest(decoded.domain)
+                != candidate.generation.coverage_directory_key
+                    .security_namespace.provider_security_digest) {
             reuse::release_candidate_reference_noerror(
                 release_records[index]);
             continue;
@@ -6803,6 +6864,10 @@ void coverage_begin_custom_scan(
                 current_plan.coverage_descriptor,
                 estate->es_query_cxt,
                 &state->current_contract)
+            && reuse::provider_security_digest(
+                state->current_contract.domain)
+                == current_plan.header.coverage_directory_key
+                    .security_namespace.provider_security_digest
             && state->current_contract.domain.provider_id
                 == current_plan.header.provider_id
             && state->current_contract.domain.compatibility_family_id
