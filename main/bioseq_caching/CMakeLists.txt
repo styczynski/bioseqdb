@@ -35,6 +35,11 @@ target_link_libraries(postgresql_bioseq_cache PRIVATE
   bioseq_pg_support
   bioseq_memory_budget)
 if(BIOSEQ_CACHE_TESTING)
+  target_sources(postgresql_bioseq_cache
+    PRIVATE FILE_SET CXX_MODULES
+      BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+      FILES
+        "${CMAKE_CURRENT_LIST_DIR}/pg/test_provider.cppm")
   target_compile_definitions(postgresql_bioseq_cache PRIVATE
     BIOSEQ_CACHE_TESTING=1)
 endif()
