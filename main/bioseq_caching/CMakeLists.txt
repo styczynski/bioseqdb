@@ -22,6 +22,8 @@ target_sources(postgresql_bioseq_cache
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/pg/provider_registry.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm")
 target_include_directories(postgresql_bioseq_cache PRIVATE
   ${PostgreSQL_INCLUDE_DIRS})
