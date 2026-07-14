@@ -814,32 +814,14 @@ namespace bioseq::cache::pg::test_provider {
     return true;
 }
 
-/** Choose a deterministic unparameterized ordinary child path. */
-[[nodiscard]] Path* choose_provider_child(RelOptInfo* relation) noexcept {
-    Path* best_seqscan = nullptr;
-    Path* best_other = nullptr;
-    ListCell* cell = nullptr;
-    foreach(cell, relation->pathlist) {
-        auto* candidate = static_cast<Path*>(lfirst(cell));
-        if (candidate == nullptr || candidate->param_info != nullptr) {
-            continue;
-        }
-        if (candidate->pathtype == T_CustomScan
-            && reinterpret_cast<CustomPath*>(candidate)->methods
-                == &provider_path_methods()) {
-            continue;
-        }
-        if (best_other == nullptr
-            || candidate->total_cost < best_other->total_cost) {
-            best_other = candidate;
-        }
-        if (candidate->pathtype == T_SeqScan
-            && (best_seqscan == nullptr
-                || candidate->total_cost < best_seqscan->total_cost)) {
-            best_seqscan = candidate;
-        }
+/** Build an unregistered child that add_path cannot evict from under us. */
+[[nodiscard]] Path* make_provider_child(
+        PlannerInfo* root, RelOptInfo* relation) noexcept {
+    if (root == nullptr || relation == nullptr
+        || !bms_is_empty(relation->lateral_relids)) {
+        return nullptr;
     }
-    return best_seqscan != nullptr ? best_seqscan : best_other;
+    return create_seqscan_path(root, relation, nullptr, 0);
 }
 
 /** Add every physical user attribute to the provider's raw PathTarget. */
@@ -927,7 +909,7 @@ void provider_set_rel_pathlist_hook(
             &capability_attno)) {
         return;
     }
-    Path* child = choose_provider_child(relation);
+    Path* child = make_provider_child(root, relation);
     if (child == nullptr || child->pathtarget == nullptr) {
         return;
     }

@@ -1141,8 +1141,9 @@ bool replace_provider_path(
     rel->pathlist = list_delete_ptr(
         rel->pathlist, original_provider_path);
     add_path(rel, &wrapper->path);
+    const bool retained = list_member_ptr(rel->pathlist, &wrapper->path);
     set_cheapest(rel);
-    return true;
+    return retained;
 }
 
 CandidateContextCleanupV1* register_candidate_context_cleanup(
