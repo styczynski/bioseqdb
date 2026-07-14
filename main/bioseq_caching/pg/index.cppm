@@ -102,6 +102,8 @@ inline constexpr char kSharedName[] = "bioseq_cache shared state v4";
 inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr char kReusableSharedName[] =
     "bioseq_cache reusable registry v1";
+inline constexpr char kReusableWaitSlotsName[] =
+    "bioseq_cache reusable wait slots v1";
 inline constexpr char kReusableMembershipTrancheName[] =
     "bioseq_cache reusable membership";
 inline constexpr char kReusableExactTrancheName[] =
@@ -329,6 +331,11 @@ struct CacheSharedState {
     CacheEntry entries[kRegistryCapacity];
 };
 
+/** PostgreSQL wake objects are a fixed sidecar keyed by ABA-safe slot index. */
+struct ReusableWaitSlotV1 {
+    ConditionVariable state_changed;
+};
+
 static_assert(std::is_standard_layout_v<CacheSharedState>);
 static_assert(alignof(CacheSharedState) <= MAXIMUM_ALIGNOF);
 
@@ -338,6 +345,8 @@ inline ReusableRegistryAttachmentV1 g_reusable_registry{};
 inline LWLock* g_reusable_membership_lock = nullptr;
 inline LWLockPadded* g_reusable_exact_locks = nullptr;
 inline LWLockPadded* g_reusable_coverage_locks = nullptr;
+inline ReusableWaitSlotV1* g_reusable_wait_slots = nullptr;
+inline std::uint32_t g_reusable_wait_slot_count = 0;
 inline shmem_request_hook_type g_previous_shmem_request_hook = nullptr;
 inline shmem_startup_hook_type g_previous_shmem_startup_hook = nullptr;
 inline planner_hook_type g_previous_planner_hook = nullptr;
@@ -875,6 +884,9 @@ void cache_shmem_request() {
     RequestNamedLWLockTranche(
         kReusableCoverageTrancheName,
         reusable_request->coverage_partition_lock_count);
+    RequestAddinShmemSpace(MAXALIGN(
+        sizeof(ReusableWaitSlotV1)
+            * reusable_request->config.max_generations));
     storage::request_storage_resources();
 }
 
@@ -928,6 +940,28 @@ void cache_shmem_startup() {
         GetNamedLWLockTranche(kReusableExactTrancheName);
     g_reusable_coverage_locks =
         GetNamedLWLockTranche(kReusableCoverageTrancheName);
+    bool wait_slots_found = false;
+    const std::size_t wait_slots_bytes = sizeof(ReusableWaitSlotV1)
+        * reusable_request->config.max_generations;
+    g_reusable_wait_slots = static_cast<ReusableWaitSlotV1*>(
+        ShmemInitStruct(
+            kReusableWaitSlotsName,
+            wait_slots_bytes,
+            &wait_slots_found));
+    if (g_reusable_wait_slots == nullptr) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+        return;
+    }
+    g_reusable_wait_slot_count = reusable_request->config.max_generations;
+    if (!wait_slots_found) {
+        for (std::uint32_t index = 0;
+             index < g_reusable_wait_slot_count;
+             ++index) {
+            ConditionVariableInit(
+                &g_reusable_wait_slots[index].state_changed);
+        }
+    }
     if (!storage::startup_storage(boot_nonce)) {
         pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
         pg_atomic_write_u32(&g_shared->ready, 0);
@@ -969,7 +1003,9 @@ void cache_shmem_startup() {
             || (g_reusable_registry
                 && g_reusable_membership_lock != nullptr
                 && g_reusable_exact_locks != nullptr
-                && g_reusable_coverage_locks != nullptr));
+                && g_reusable_coverage_locks != nullptr
+                && g_reusable_wait_slots != nullptr
+                && g_reusable_wait_slot_count != 0));
 }
 
 [[nodiscard]] bool cache_interrupt_error(int sqlstate) noexcept {
@@ -1544,6 +1580,23 @@ struct CoverageCurrentPlanViewV1 {
     return digest.has_value() ? *digest : CacheDigest256{};
 }
 
+[[nodiscard]] ConditionVariable* reusable_generation_changed(
+        const ReusableGenerationReferenceV1& reference) noexcept {
+    return reference
+            && g_reusable_wait_slots != nullptr
+            && reference.generation_slot < g_reusable_wait_slot_count
+        ? &g_reusable_wait_slots[reference.generation_slot].state_changed
+        : nullptr;
+}
+
+void broadcast_reusable_generation(
+        const ReusableGenerationReferenceV1& reference) noexcept {
+    if (ConditionVariable* changed = reusable_generation_changed(reference);
+        changed != nullptr) {
+        ConditionVariableBroadcast(changed);
+    }
+}
+
 /** Membership mutations are centralized for lock-order and future owner tokens. */
 [[nodiscard]] ReusableClaimResultV1 claim_current_reusable_generation(
         const ReusableClaimRequestV1& request) noexcept {
@@ -1611,6 +1664,49 @@ struct CoverageCurrentPlanViewV1 {
         result = ReusableRegistryErrorV1::InvalidState;
     }
     PG_END_TRY();
+    if (result == ReusableRegistryErrorV1::None) {
+        broadcast_reusable_generation(request.reference);
+    }
+    return result;
+}
+
+[[nodiscard]] ReusableRegistryErrorV1 begin_current_reusable_generation(
+        const ReusableGenerationReferenceV1& reference) noexcept {
+    if (!reference || g_reusable_membership_lock == nullptr) {
+        return ReusableRegistryErrorV1::InvalidArgument;
+    }
+    ReusableRegistryErrorV1 result = ReusableRegistryErrorV1::InvalidState;
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        result = begin_reusable_build(
+            g_reusable_registry,
+            reference,
+            reusable_partition_callbacks());
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        result = ReusableRegistryErrorV1::InvalidState;
+    }
+    PG_END_TRY();
+    if (result == ReusableRegistryErrorV1::None) {
+        broadcast_reusable_generation(reference);
+    }
     return result;
 }
 
@@ -1622,15 +1718,17 @@ void fail_current_reusable_generation(
     }
     MemoryContext caller_context = CurrentMemoryContext;
     volatile bool membership_owned = false;
+    volatile bool failed = false;
     PG_TRY();
     {
         LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
         membership_owned = true;
-        static_cast<void>(fail_reusable_generation(
+        failed = fail_reusable_generation(
             g_reusable_registry,
             reference,
             failure,
-            reusable_partition_callbacks()));
+            reusable_partition_callbacks())
+            == ReusableRegistryErrorV1::None;
         LWLockRelease(g_reusable_membership_lock);
         membership_owned = false;
     }
@@ -1648,6 +1746,9 @@ void fail_current_reusable_generation(
         FlushErrorState();
     }
     PG_END_TRY();
+    if (failed) {
+        broadcast_reusable_generation(reference);
+    }
 }
 
 [[nodiscard]] Const* make_binary_node(
