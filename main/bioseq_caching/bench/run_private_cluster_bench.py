@@ -431,7 +431,7 @@ def _reset_case(cluster: Any, *, ttl_ms: int = 3_600_000) -> None:
     )
 
 
-def _measure_explain(cluster: Any, *, mode: str, sql: str) -> dict[str, float]:
+def _measure_explain(cluster: Any, *, mode: str, sql: str) -> dict[str, Any]:
     stdout, _ = _run_sql(
         cluster,
         f"SET bioseq.query_cache_optimisation_mode = '{mode}'; "
@@ -439,9 +439,54 @@ def _measure_explain(cluster: Any, *, mode: str, sql: str) -> dict[str, float]:
     )
     document = json.loads(stdout)
     root = document[0]
+
+    def cache_properties(plan: Mapping[str, Any]) -> dict[str, Any] | None:
+        if "Cache Storage" in plan:
+            return {
+                "storage": plan.get("Cache Storage"),
+                "action": plan.get("Actual Cache Action"),
+                "readiness": plan.get("Cache Readiness"),
+                "janitor": plan.get("Cache Janitor"),
+            }
+        for child in plan.get("Plans", []):
+            if isinstance(child, dict):
+                found = cache_properties(child)
+                if found is not None:
+                    return found
+        return None
+
+    properties = cache_properties(root.get("Plan", {}))
     return {
         "planning_ms": float(root.get("Planning Time", 0.0)),
         "execution_ms": float(root.get("Execution Time", 0.0)),
+        "cache_properties": properties,
+    }
+
+
+def _parse_cache_storage(value: Any) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return _unavailable_metric(
+            "Structured EXPLAIN exposed no Cache Storage property."
+        )
+    match = re.fullmatch(
+        r"(ready|unavailable); backend=([^;]+); hot=(\d+)/(\d+); "
+        r"file=(\d+)/(\d+); manifests=(\d+); waiters=(\d+)",
+        value,
+    )
+    if match is None:
+        return _unavailable_metric(
+            f"Unrecognized Cache Storage EXPLAIN value: {value!r}"
+        )
+    return {
+        "status": "measured",
+        "bootstrap": match.group(1),
+        "backend": match.group(2),
+        "reserved_hot_bytes": int(match.group(3)),
+        "hot_ceiling_bytes": int(match.group(4)),
+        "reserved_file_bytes": int(match.group(5)),
+        "file_ceiling_bytes": int(match.group(6)),
+        "manifest_count": int(match.group(7)),
+        "waiter_references": int(match.group(8)),
     }
 
 
@@ -460,11 +505,50 @@ def _measure_explain_samples(
     execution_ns = [int(sample["execution_ms"] * 1_000_000) for sample in samples]
     planning = _sample_summary(planning_ns)
     execution = _sample_summary(execution_ns)
+    properties = [
+        sample["cache_properties"]
+        for sample in samples
+        if sample["cache_properties"] is not None
+    ]
+    parsed_storage = [
+        _parse_cache_storage(property["storage"])
+        for property in properties
+    ]
+    measured_storage = [
+        storage
+        for storage in parsed_storage
+        if storage["status"] == "measured"
+    ]
+    storage: dict[str, Any]
+    if measured_storage:
+        storage = {
+            **measured_storage[-1],
+            "peak_reserved_hot_bytes": max(
+                item["reserved_hot_bytes"] for item in measured_storage
+            ),
+            "peak_reserved_file_bytes": max(
+                item["reserved_file_bytes"] for item in measured_storage
+            ),
+        }
+    elif parsed_storage:
+        storage = parsed_storage[-1]
+    else:
+        storage = _unavailable_metric(
+            "No cache CustomScan was present in structured EXPLAIN."
+        )
     return {
         "planning": planning,
         "execution": execution,
         "planning_ms": planning["p50_ns"] / 1_000_000.0,
         "execution_ms": execution["p50_ns"] / 1_000_000.0,
+        "actual_cache_actions": [
+            property["action"] for property in properties
+        ],
+        "cache_readiness": [
+            property["readiness"] for property in properties
+        ],
+        "cache_janitor": [property["janitor"] for property in properties],
+        "cache_storage": storage,
     }
 
 
@@ -499,9 +583,26 @@ def _measure_case(
     )
     case_stats = _stats(cluster)
     runtime = _entry_runtime_snapshot(cluster)
+    runtime["storage_explain"] = same_explain["cache_storage"]
     correctness = _same_result(reference, producer, ordered) and all(
         _same_result(reference, sample, ordered) for sample in hit_samples
     )
+    hit_action = "[Hit] exact final result"
+    cache_behavior = {
+        "passed": (
+            case_stats["produced"] == 1
+            and case_stats["completed_hits"] >= sample_count * 2
+            and len(same_explain["actual_cache_actions"]) == sample_count
+            and all(
+                action == hit_action
+                for action in same_explain["actual_cache_actions"]
+            )
+        ),
+        "publications": case_stats["produced"],
+        "completed_hits": case_stats["completed_hits"],
+        "minimum_expected_completed_hits": sample_count * 2,
+        "explain_actions": same_explain["actual_cache_actions"],
+    }
     reference_ns = reference.elapsed_ns
     producer_delta = (
         ((producer.elapsed_ns - reference_ns) / reference_ns) * 100.0
@@ -532,6 +633,7 @@ def _measure_case(
             digest_name: digest_value,
             "stdout_bytes": reference.stdout_bytes,
         },
+        "cache_behavior": cache_behavior,
         "disabled": {
             **_sample_summary([reference.elapsed_ns]),
             "time_to_first_row": _first_row_summary([reference]),
@@ -1022,6 +1124,23 @@ def _evaluate_thresholds(
             detail="Ordered or multiset SHA-256 and row count versus disabled execution.",
         )
     )
+    exact_behavior = {
+        case["key"]: case["cache_behavior"] for case in cases
+    }
+    thresholds.append(
+        _threshold(
+            "manifest_exact_hit_behavior",
+            actual=exact_behavior,
+            limit="one publication and completed manifest hits for every SQL case",
+            passed=all(
+                bool(case["cache_behavior"]["passed"]) for case in cases
+            ),
+            detail=(
+                "Direct executions and structured EXPLAIN must both observe "
+                "completed exact hits rather than silent child passthrough."
+            ),
+        )
+    )
     thresholds.append(
         _threshold(
             "insert_update_delete_invalidation",
@@ -1093,19 +1212,40 @@ def _evaluate_thresholds(
             detail="Free space at report creation; cache internal policy remains authoritative.",
         )
     )
-    compact_runtime = compact["runtime_storage"]
+    compact_storage = compact["completed_hit"]["cache_storage"]
+    toast = next(case for case in cases if case["key"] == "large_toasted_values")
+    toast_storage = toast["completed_hit"]["cache_storage"]
+    tier_samples = [
+        case["completed_hit"]["cache_storage"] for case in cases
+    ]
+    tiers_measured = all(
+        sample["status"] == "measured" for sample in tier_samples
+    )
+    tiers_bounded = tiers_measured and all(
+        sample["reserved_hot_bytes"] <= sample["hot_ceiling_bytes"]
+        and sample["reserved_file_bytes"] <= sample["file_ceiling_bytes"]
+        for sample in tier_samples
+    )
+    tier_cases_observed = (
+        tiers_measured
+        and compact_storage["peak_reserved_hot_bytes"] > 0
+        and toast_storage["peak_reserved_file_bytes"] > 0
+    )
     thresholds.append(
         _threshold(
             "internal_storage_tier_metrics",
             actual={
-                "dsa_hot_bytes": compact_runtime["dsa_hot_bytes"],
-                "file_bytes": compact_runtime["file_bytes"],
+                "compact": compact_storage,
+                "large_toasted": toast_storage,
             },
-            limit="runtime exposes bounded DSA and file byte counters",
-            passed=None,
+            limit=(
+                "all reservations within ceilings; compact observes DSA and "
+                "large TOAST observes file tier"
+            ),
+            passed=tiers_bounded and tier_cases_observed,
             detail=(
-                "No pass/fail threshold is claimed until the runtime exposes both "
-                "tier counters and its configured internal ceilings."
+                "Values come from structured EXPLAIN's production storage "
+                "runtime snapshot after mandatory hit prevalidation."
             ),
         )
     )
