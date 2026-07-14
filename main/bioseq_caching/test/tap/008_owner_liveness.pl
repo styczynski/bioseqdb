@@ -7,7 +7,10 @@ use BioseqCacheTest;
 use Test::More;
 use Time::HiRes qw(sleep time);
 
-my $node = new_cache_node('cache_owner_liveness', preload => 1);
+my $node = new_cache_node(
+	'cache_owner_liveness',
+	preload => 1,
+	extra_conf => "restart_after_crash = on\n");
 $node->start;
 bootstrap_cache($node);
 $node->safe_psql(
