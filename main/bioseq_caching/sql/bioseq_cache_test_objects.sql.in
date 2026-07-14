@@ -21,6 +21,21 @@ RETURNS void
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_fail_next_write'
 LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
 
+CREATE FUNCTION bioseq_cache_test.set_force_file_tier(boolean)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_set_force_file_tier'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.storage_tier_stats()
+RETURNS TABLE (
+    force_file_tier boolean,
+    dsa_blocks bigint,
+    file_blocks bigint,
+    reserved_hot_bytes bigint,
+    reserved_file_bytes bigint)
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_storage_tier_stats'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
 CREATE FUNCTION bioseq_cache_test.entry_states()
 RETURNS TABLE (
     entry_key text,
@@ -149,6 +164,58 @@ CREATE FUNCTION bioseq_cache_test.direct_heap_insert(
 RETURNS void
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_direct_heap_insert'
 LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+-- Generic provider controls.  The provider is compiled only into testing
+-- builds and is registered separately in each backend that plans a fixture.
+CREATE FUNCTION bioseq_cache_test.provider_init()
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_init'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_shutdown()
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_shutdown'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_use_relation(regclass)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_use_relation'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_set_mapping_fault(text)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_mapping_fault'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_set_digest_fault(text)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_digest_fault'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_set_projection_order(text)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_projection_order'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_set_capabilities(bigint)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_set_capabilities'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_force_domain_collision(boolean)
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_force_domain_collision'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_reset()
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_reset'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache_test.provider_stats()
+RETURNS jsonb
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_provider_stats'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 
 REVOKE ALL ON SCHEMA bioseq_cache_test FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bioseq_cache_test FROM PUBLIC;
