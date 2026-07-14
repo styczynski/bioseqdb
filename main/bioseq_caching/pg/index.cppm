@@ -984,6 +984,7 @@ bool collect_relation_oid_walker(Node* node, void* context) {
 /** Conservative v1 exact-cache eligibility before path decoration. */
 [[nodiscard]] bool query_is_exact_cache_eligible(const Query& query) {
     if (query.commandType != CMD_SELECT
+        || query.rtable == NIL
         || query.hasModifyingCTE
         || query.rowMarks != NIL
         || query.hasTargetSRFs
