@@ -10,3 +10,4 @@ test: cache_ten_waiters
 test: cache_producer_cancel
 test: cache_sql_error
 test: cache_wait_timeout
+test: cache_unrelated_completion
