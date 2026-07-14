@@ -38,6 +38,7 @@ extern "C" {
 #include "storage/condition_variable.h"
 #include "storage/fd.h"
 #include "storage/lwlock.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/shmem.h"
 #include "tcop/utility.h"
@@ -48,6 +49,7 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/plancache.h"
+#include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
@@ -161,6 +163,7 @@ struct CacheEntry {
     Oid current_role_oid;
     Oid session_user_oid;
     int producer_pid;
+    ProcNumber producer_proc_number;
     std::uint32_t waiter_count;
     std::uint32_t reader_count;
     TimestampTz created_at;
@@ -184,6 +187,7 @@ struct CacheSharedState {
     pg_atomic_uint32 bootstrap_failure;
     pg_atomic_uint64 boot_nonce;
     pg_atomic_uint64 database_write_epoch;
+    pg_atomic_uint32 last_committed_write_xid;
     pg_atomic_uint32 database_transition_count;
     ConditionVariable database_changed;
     CacheSharedStats stats;
@@ -223,6 +227,7 @@ struct DirtyFrame {
 
 inline DirtyFrame* g_dirty_frames = nullptr;
 inline bool g_database_transition_published = false;
+inline TransactionId g_database_transition_xid = InvalidTransactionId;
 
 /** Per-planner invocation frame; PostgreSQL backends are single-threaded. */
 struct PlannerFrame {
@@ -230,6 +235,7 @@ struct PlannerFrame {
     Query* delegated_query = nullptr;
     char* canonical_query = nullptr;
     char* display_sql = nullptr;
+    List* referenced_parameter_ids = NIL;
     bool eligible = false;
 };
 
@@ -247,6 +253,8 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
         ^ (static_cast<std::uint64_t>(MyProcPid) << 32U);
     pg_atomic_init_u64(&shared.boot_nonce, nonce == 0 ? 1 : nonce);
     pg_atomic_init_u64(&shared.database_write_epoch, 1);
+    pg_atomic_init_u32(
+        &shared.last_committed_write_xid, InvalidTransactionId);
     pg_atomic_init_u32(&shared.database_transition_count, 0);
     ConditionVariableInit(&shared.database_changed);
     pg_atomic_init_u64(&shared.stats.produced, 0);
@@ -351,6 +359,7 @@ void begin_database_transition() noexcept {
         return;
     }
     pg_atomic_fetch_add_u32(&g_shared->database_transition_count, 1);
+    g_database_transition_xid = GetTopTransactionIdIfAny();
     g_database_transition_published = true;
     ConditionVariableBroadcast(&g_shared->database_changed);
 }
@@ -359,14 +368,21 @@ void begin_database_transition() noexcept {
 void finish_database_transition(bool committed) noexcept {
     if (!g_database_transition_published || g_shared == nullptr) {
         g_database_transition_published = false;
+        g_database_transition_xid = InvalidTransactionId;
         return;
     }
     if (committed) {
+        if (TransactionIdIsValid(g_database_transition_xid)) {
+            pg_atomic_write_u32(
+                &g_shared->last_committed_write_xid,
+                g_database_transition_xid);
+        }
         pg_atomic_fetch_add_u64(&g_shared->database_write_epoch, 1);
         pg_atomic_fetch_add_u64(&g_shared->stats.invalidations, 1);
     }
     pg_atomic_fetch_sub_u32(&g_shared->database_transition_count, 1);
     g_database_transition_published = false;
+    g_database_transition_xid = InvalidTransactionId;
     ConditionVariableBroadcast(&g_shared->database_changed);
 }
 
@@ -484,6 +500,50 @@ void cache_shmem_startup() {
         && pg_atomic_read_u32(&g_shared->bootstrap_failure) == 0;
 }
 
+struct VisibilityTicket {
+    std::uint64_t database_epoch = 0;
+    TransactionId last_committed_write_xid = InvalidTransactionId;
+    bool valid = false;
+};
+
+/** Bind the committed-write epoch to the statement's already-active snapshot. */
+[[nodiscard]] VisibilityTicket mint_visibility_ticket() noexcept {
+    VisibilityTicket ticket{};
+    if (!shared_cache_ready()) {
+        return ticket;
+    }
+    Snapshot snapshot = GetActiveSnapshot();
+    if (snapshot == nullptr || !IsMVCCSnapshot(snapshot)) {
+        return ticket;
+    }
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (pg_atomic_read_u32(&g_shared->database_transition_count) != 0) {
+            return ticket;
+        }
+        const std::uint64_t before = pg_atomic_read_u64(
+            &g_shared->database_write_epoch);
+        pg_read_barrier();
+        const TransactionId last_write = static_cast<TransactionId>(
+            pg_atomic_read_u32(&g_shared->last_committed_write_xid));
+        pg_read_barrier();
+        const std::uint64_t after = pg_atomic_read_u64(
+            &g_shared->database_write_epoch);
+        if (before != after
+            || pg_atomic_read_u32(&g_shared->database_transition_count) != 0) {
+            continue;
+        }
+        if (TransactionIdIsValid(last_write)
+            && XidInMVCCSnapshot(last_write, snapshot)) {
+            return ticket;
+        }
+        ticket.database_epoch = after;
+        ticket.last_committed_write_xid = last_write;
+        ticket.valid = true;
+        return ticket;
+    }
+    return ticket;
+}
+
 /** Reject non-disabled use when the library was not preloaded. */
 bool check_query_cache_mode(int* new_value, void**, GucSource) {
     if (*new_value == static_cast<int>(QueryCacheMode::Disabled)) {
@@ -548,8 +608,8 @@ void register_cache_gucs() {
     g_gucs_registered = true;
 }
 
-/** Reject system-column Vars and collect no mutable expression state. */
-bool query_contains_system_var_walker(Node* node, void*) {
+/** Reject execution state that cannot be represented by the exact key/epoch. */
+bool query_contains_unsafe_state_walker(Node* node, void*) {
     if (node == nullptr) {
         return false;
     }
@@ -557,8 +617,79 @@ bool query_contains_system_var_walker(Node* node, void*) {
         const Var* variable = reinterpret_cast<const Var*>(node);
         return variable->varattno < 0;
     }
+    if (IsA(node, SQLValueFunction)
+        || IsA(node, NextValueExpr)
+        || IsA(node, CurrentOfExpr)) {
+        return true;
+    }
+    if (IsA(node, RangeTblEntry)) {
+        const auto* range = reinterpret_cast<const RangeTblEntry*>(node);
+        if (range->tablesample != nullptr || range->securityQuals != NIL) {
+            return true;
+        }
+        if (range->rtekind == RTE_NAMEDTUPLESTORE
+            || range->rtekind == RTE_TABLEFUNC) {
+            return true;
+        }
+        if (range->rtekind == RTE_RELATION) {
+            const char relation_kind = get_rel_relkind(range->relid);
+            if (get_rel_persistence(range->relid) == RELPERSISTENCE_TEMP
+                || (relation_kind != RELKIND_RELATION
+                    && relation_kind != RELKIND_PARTITIONED_TABLE
+                    && relation_kind != RELKIND_MATVIEW)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (IsA(node, Query)) {
+        return query_tree_walker(
+            reinterpret_cast<Query*>(node),
+            query_contains_unsafe_state_walker,
+            nullptr,
+            QTW_EXAMINE_RTES_BEFORE);
+    }
     return expression_tree_walker(
-        node, query_contains_system_var_walker, nullptr);
+        node, query_contains_unsafe_state_walker, nullptr);
+}
+
+/** Collect only PARAM_EXTERN ids the analyzed query can actually evaluate. */
+bool collect_external_parameter_walker(Node* node, void* context) {
+    if (node == nullptr) {
+        return false;
+    }
+    if (IsA(node, Param)) {
+        const auto* parameter = reinterpret_cast<const Param*>(node);
+        if (parameter->paramkind == PARAM_EXTERN && parameter->paramid > 0) {
+            auto** parameters = static_cast<Bitmapset**>(context);
+            *parameters = bms_add_member(
+                *parameters, static_cast<int>(parameter->paramid));
+        }
+        return false;
+    }
+    if (IsA(node, Query)) {
+        return query_tree_walker(
+            reinterpret_cast<Query*>(node),
+            collect_external_parameter_walker,
+            context,
+            QTW_EXAMINE_RTES_BEFORE);
+    }
+    return expression_tree_walker(
+        node, collect_external_parameter_walker, context);
+}
+
+[[nodiscard]] List* collect_external_parameter_ids(Query& query) {
+    Bitmapset* parameters = nullptr;
+    static_cast<void>(query_tree_walker(
+        &query, collect_external_parameter_walker, &parameters,
+        QTW_EXAMINE_RTES_BEFORE));
+    List* result = NIL;
+    int parameter_id = -1;
+    while ((parameter_id = bms_next_member(parameters, parameter_id)) >= 0) {
+        result = lappend(result, makeInteger(parameter_id));
+    }
+    bms_free(parameters);
+    return result;
 }
 
 /** Conservative v1 exact-cache eligibility before path decoration. */
@@ -566,22 +697,10 @@ bool query_contains_system_var_walker(Node* node, void*) {
     if (query.commandType != CMD_SELECT
         || query.hasModifyingCTE
         || query.rowMarks != NIL
-        || query.intoClause != nullptr
         || query.hasTargetSRFs
         || query.hasRowSecurity
         || query.hasForUpdate) {
         return false;
-    }
-    ListCell* range_cell = nullptr;
-    foreach(range_cell, query.rtable) {
-        const auto* range = static_cast<const RangeTblEntry*>(lfirst(range_cell));
-        if (range->tablesample != nullptr || range->securityQuals != NIL) {
-            return false;
-        }
-        if (range->rtekind == RTE_RELATION
-            && get_rel_persistence(range->relid) == RELPERSISTENCE_TEMP) {
-            return false;
-        }
     }
     if (contain_mutable_functions(reinterpret_cast<Node*>(
             const_cast<Query*>(&query)))) {
@@ -589,7 +708,7 @@ bool query_contains_system_var_walker(Node* node, void*) {
     }
     if (query_tree_walker(
             const_cast<Query*>(&query),
-            query_contains_system_var_walker,
+            query_contains_unsafe_state_walker,
             nullptr,
             QTW_EXAMINE_RTES_BEFORE)) {
         return false;
@@ -599,7 +718,8 @@ bool query_contains_system_var_walker(Node* node, void*) {
 
 /** Canonical analyzed-tree bytes; source locations are omitted by nodeToString. */
 [[nodiscard]] char* canonicalize_query(const Query& query) {
-    Query* copy = static_cast<Query*>(copyObject(&query));
+    Query* copy = static_cast<Query*>(
+        copyObject(const_cast<Query*>(&query)));
     copy->queryId = 0;
     copy->stmt_location = -1;
     copy->stmt_len = 0;
@@ -815,15 +935,27 @@ void validate_binary_schema(const TupleDesc descriptor) {
     ParamListInfo parameters = estate == nullptr
         ? nullptr
         : estate->es_param_list_info;
-    const int parameter_count = parameters == nullptr
-        ? 0
-        : parameters->numParams;
+    List* referenced_parameters = scan.custom_private != NIL
+            && list_length(scan.custom_private) > 3
+        ? static_cast<List*>(list_nth(scan.custom_private, 3))
+        : NIL;
+    const int parameter_count = list_length(referenced_parameters);
     if (!append_key_scalar(key, parameter_count)) {
         pfree(key->data);
         pfree(key);
         return nullptr;
     }
-    for (int parameter_id = 1; parameter_id <= parameter_count; ++parameter_id) {
+    ListCell* parameter_cell = nullptr;
+    foreach(parameter_cell, referenced_parameters) {
+        const int parameter_id = intVal(lfirst(parameter_cell));
+        if (parameters == nullptr
+            || parameter_id <= 0
+            || parameter_id > parameters->numParams
+            || !append_key_scalar(key, parameter_id)) {
+            pfree(key->data);
+            pfree(key);
+            return nullptr;
+        }
         ParamExternData workspace{};
         ParamExternData* parameter = parameters->paramFetch != nullptr
             ? parameters->paramFetch(
@@ -993,6 +1125,7 @@ struct RegistryDecision {
 void fail_abandoned_producer(CacheEntry& entry) noexcept {
     entry.state = SharedEntryState::Failed;
     entry.producer_pid = 0;
+    entry.producer_proc_number = INVALID_PROC_NUMBER;
     ConditionVariableBroadcast(&entry.changed);
 }
 
@@ -1036,9 +1169,11 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 LWLockRelease(g_registry_lock);
                 break;
             }
+            PGPROC* producer = entry.producer_proc_number == INVALID_PROC_NUMBER
+                ? nullptr
+                : ProcNumberGetProc(entry.producer_proc_number);
             if (entry.state == SharedEntryState::Producing
-                && entry.producer_pid > 0
-                && BackendPidGetProc(entry.producer_pid) == nullptr) {
+                && (producer == nullptr || producer->pid != entry.producer_pid)) {
                 if (entry.waiter_count > 0) {
                     --entry.waiter_count;
                 }
@@ -1076,7 +1211,9 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         pg_atomic_read_u64(&g_shared->boot_nonce));
     const TimestampTz now = GetCurrentTimestamp();
     int reusable_index = -1;
+    int lru_index = -1;
     TimestampTz oldest_completion = DT_NOEND;
+    TimestampTz oldest_live_completion = DT_NOEND;
     char retired_path[MAXPGPATH]{};
 
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
@@ -1127,7 +1264,17 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 || entry.completed_at < oldest_completion)) {
             reusable_index = static_cast<int>(offset);
             oldest_completion = entry.completed_at;
+            continue;
         }
+        if (entry.state == SharedEntryState::Complete
+            && entry.completed_at < oldest_live_completion) {
+            lru_index = static_cast<int>(offset);
+            oldest_live_completion = entry.completed_at;
+        }
+    }
+
+    if (reusable_index < 0) {
+        reusable_index = lru_index;
     }
 
     if (reusable_index >= 0) {
@@ -1145,6 +1292,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         entry.current_role_oid = GetUserId();
         entry.session_user_oid = GetSessionUserId();
         entry.producer_pid = MyProcPid;
+        entry.producer_proc_number = MyProcNumber;
         entry.waiter_count = 0;
         entry.reader_count = 0;
         entry.created_at = now;
@@ -1449,6 +1597,7 @@ void cache_state_cleanup(void* argument) noexcept {
             static_cast<std::int64_t>(g_query_cache_ttl_ms) * 1000;
         entry.state = SharedEntryState::Complete;
         entry.producer_pid = 0;
+        entry.producer_proc_number = INVALID_PROC_NUMBER;
         entry.completed_at = completed_at;
         entry.expires_at = completed_at + ttl_microseconds;
         entry.row_count = state.row_count;
@@ -1647,7 +1796,11 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         state->cleanup_registered = true;
     }
 
-    const bool cache_allowed = shared_cache_ready()
+    const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
+    const VisibilityTicket visibility = explain_only
+        ? VisibilityTicket{}
+        : mint_visibility_ticket();
+    const bool cache_allowed = visibility.valid
         && g_query_cache_mode != static_cast<int>(QueryCacheMode::Disabled)
         && XactIsoLevel == XACT_READ_COMMITTED
         && !transaction_is_dirty()
@@ -1669,12 +1822,9 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         }
         PG_END_TRY();
 
-        if (key != nullptr
-            && pg_atomic_read_u32(&g_shared->database_transition_count) == 0) {
-            const std::uint64_t epoch = pg_atomic_read_u64(
-                &g_shared->database_write_epoch);
+        if (key != nullptr) {
             RegistryDecision decision = acquire_registry_entry(
-                key, epoch, private_string(*scan, 1));
+                key, visibility.database_epoch, private_string(*scan, 1));
             state->runtime_role = decision.role;
             state->registry_index = decision.index;
             state->generation = decision.generation;
@@ -1732,7 +1882,9 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         PG_RE_THROW();
     }
     PG_END_TRY();
-    if (state->runtime_role == RuntimeRole::Bypass && g_shared != nullptr) {
+    if (!explain_only
+        && state->runtime_role == RuntimeRole::Bypass
+        && g_shared != nullptr) {
         pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
     }
 }
@@ -1831,6 +1983,12 @@ void cache_rescan_custom_scan(CustomScanState* node) {
         && state->replay_store != nullptr) {
         tuplestore_rescan(state->replay_store);
         return;
+    }
+    if (state->runtime_role == RuntimeRole::Producer) {
+        fail_registry_producer(*state);
+        if (g_shared != nullptr) {
+            pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
+        }
     }
     if (retained_child(node) != nullptr) {
         ExecReScan(retained_child(node));
@@ -1932,7 +2090,9 @@ const CustomPathMethods& cache_path_methods() {
     path->path.parent = &output_relation;
     path->path.pathtarget = input_path.pathtarget;
     path->path.param_info = nullptr;
+#if PG_VERSION_NUM >= 180000
     path->path.disabled_nodes = input_path.disabled_nodes;
+#endif
     path->path.parallel_aware = false;
     path->path.parallel_safe = false;
     path->path.parallel_workers = 0;
@@ -1947,6 +2107,9 @@ const CustomPathMethods& cache_path_methods() {
         makeString(pstrdup(frame.canonical_query)),
         makeString(pstrdup(frame.display_sql)),
         makeInteger(0)); /* force_bypass is preallocated for later verification */
+    path->custom_private = lappend(
+        path->custom_private,
+        copyObject(frame.referenced_parameter_ids));
     path->custom_restrictinfo = NIL;
     path->methods = &cache_path_methods();
     return path;
@@ -2022,6 +2185,7 @@ PlannedStmt* cache_planner(
         .delegated_query = query,
         .canonical_query = nullptr,
         .display_sql = nullptr,
+        .referenced_parameter_ids = NIL,
         .eligible = false,
     };
     g_planner_frame = &frame;
@@ -2033,6 +2197,7 @@ PlannedStmt* cache_planner(
         if (frame.eligible) {
             frame.canonical_query = canonicalize_query(*query);
             frame.display_sql = copy_display_sql(query_string);
+            frame.referenced_parameter_ids = collect_external_parameter_ids(*query);
         }
         result = g_previous_planner_hook != nullptr
             ? g_previous_planner_hook(
@@ -2181,9 +2346,11 @@ struct EntrySnapshot {
     const TimestampTz now = GetCurrentTimestamp();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (CacheEntry& entry : g_shared->entries) {
+        PGPROC* producer = entry.producer_proc_number == INVALID_PROC_NUMBER
+            ? nullptr
+            : ProcNumberGetProc(entry.producer_proc_number);
         const bool dead_producer = entry.state == SharedEntryState::Producing
-            && entry.producer_pid > 0
-            && BackendPidGetProc(entry.producer_pid) == nullptr;
+            && (producer == nullptr || producer->pid != entry.producer_pid);
         const bool expired = expire_completed
             && entry.state == SharedEntryState::Complete
             && entry.expires_at <= now

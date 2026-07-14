@@ -104,8 +104,8 @@ set_target_properties(postgresql_bioseq_cache PROPERTIES
 
 if(BIOSEQ_CACHE_BUILD_TESTS)
   add_subdirectory(test/unit)
+  add_subdirectory(bench)
 endif()
-add_subdirectory(bench)
 
 if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
   find_program(BIOSEQ_CACHE_PG_REGRESS pg_regress REQUIRED
