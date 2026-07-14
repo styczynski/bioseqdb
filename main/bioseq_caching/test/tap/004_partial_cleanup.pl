@@ -7,6 +7,7 @@ use FindBin;
 use lib $FindBin::RealBin;
 use BioseqCacheTest;
 use Test::More;
+use Time::HiRes qw(sleep time);
 
 my $node = new_cache_node('cache_partial_cleanup', preload => 1);
 $node->start;
@@ -22,6 +23,11 @@ ok(-f $partial_path, 'synthetic partial file exists before restart');
 
 $node->restart;
 
+my $deadline = time() + 10;
+while (-e $partial_path && time() < $deadline)
+{
+	sleep(0.05);
+}
 ok(!-e $partial_path, 'startup orphan cleanup removes partial file');
 is(
 	$node->safe_psql('postgres', 'SELECT count(*) FROM bioseq_cache.entries()'),
