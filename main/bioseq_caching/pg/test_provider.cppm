@@ -1748,7 +1748,7 @@ void apply_mapping_fault(
         }
         auto* restriction = make_restrictinfo(
             root,
-            static_cast<Expr*>(copyObject(expression)),
+            static_cast<Expr*>(copyObject(const_cast<Expr*>(expression))),
             true,
             false,
             false,
