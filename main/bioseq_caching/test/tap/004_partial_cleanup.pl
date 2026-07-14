@@ -13,9 +13,11 @@ my $node = new_cache_node('cache_partial_cleanup', preload => 1);
 $node->start;
 bootstrap_cache($node);
 
-my $store_dir = File::Spec->catdir($node->data_dir, 'bioseq_cache');
-make_path($store_dir);
-my $partial_path = File::Spec->catfile($store_dir, 'orphan-test.partial');
+my $store_dir = File::Spec->catdir(
+	$node->data_dir, 'bioseq_cache', 'storage-v1');
+make_path($store_dir, { mode => 0700 });
+my $partial_path = File::Spec->catfile(
+	$store_dir, '.block-0000000000000000-0000000000000000-0.tmp');
 open(my $partial, '>', $partial_path) or die "open $partial_path: $!";
 print {$partial} "not a complete cache manifest\n";
 close($partial) or die "close $partial_path: $!";
