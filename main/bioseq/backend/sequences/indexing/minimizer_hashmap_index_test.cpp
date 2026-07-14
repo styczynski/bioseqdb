@@ -8661,13 +8661,19 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     // performed two complete ownership walks and fresh OS memory probes for
     // each first append, making this shape quadratic in query-union size.
     constexpr std::uint64_t query_count = 2048u;
+    constexpr std::uint64_t segment_span = 8u * 1024u * 1024u;
+    constexpr std::uint64_t segment_count = 3u;
+    constexpr auto retained_bp = [](std::uint64_t index) {
+        return (index % segment_count) * segment_span
+            + index / segment_count;
+    };
     std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
     std::vector<std::uint64_t> queries;
     minimizers.reserve(query_count);
     queries.reserve(query_count);
     for (std::uint64_t index = 0; index < query_count; ++index) {
         const std::uint64_t hash = index + 1u;
-        minimizers.emplace_back(hash, index << 1u);
+        minimizers.emplace_back(hash, retained_bp(index) << 1u);
         queries.push_back(hash);
     }
 
@@ -8675,9 +8681,10 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     CollectingMinimizerRowSink sink;
     const auto generation = encode_minimizer_generation(
         producer, sink,
-        test_shape_v5_generation_options(query_count + 1u, 10u));
+        test_shape_v5_generation_options(
+            segment_count * segment_span, 10u));
     REQUIRE(generation.has_value());
-    REQUIRE(generation->directory.entries().size() == 1u);
+    REQUIRE(generation->directory.entries().size() == segment_count);
 
     bioseq::parallelism::MemoryAdmissionController admission;
     auto reader = PreparedShapeV5QueryReader::begin(
@@ -8702,11 +8709,65 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.position_append_growth_reservations == 0u);
     REQUIRE(evidence.retained_position_count == query_count);
     REQUIRE(evidence.retained_position_capacity >= query_count);
-    REQUIRE(evidence.capacity_accounting_passes <= 16u);
+    const std::uint64_t extent_count =
+        generation->directory.entries().size() * 2u;
+    const std::uint64_t fixed_passes = 7u + extent_count;
+    REQUIRE(evidence.capacity_accounting_passes >= fixed_passes);
+    REQUIRE(evidence.capacity_accounting_passes <= 7u + 3u * extent_count);
+    REQUIRE((evidence.capacity_accounting_passes - fixed_passes) % 4u == 0u);
+    REQUIRE((evidence.capacity_accounting_passes - fixed_passes) / 4u
+        <= extent_count / 2u);
+    REQUIRE(evidence.capacity_accounting_passes == 7u + 3u * extent_count);
     REQUIRE_FALSE(evidence.saturated);
-    REQUIRE(reader->lookup(1u).positions.front() == 0u);
+    REQUIRE(reader->lookup(1u).positions.front() == retained_bp(0u) << 1u);
     REQUIRE(reader->lookup(query_count).positions.front()
-        == (query_count - 1u) << 1u);
+        == retained_bp(query_count - 1u) << 1u);
+
+    // Exercise the statement-level aggregate equation with a second reader
+    // that selects only the first of the three control extents. Production
+    // merges these per-reader counters, so the aggregate must retain the same
+    // 7R + E + 4S shape even when readers select different extent counts.
+    const std::array<std::uint64_t, 1> sparse_queries{1u};
+    auto sparse_reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        sparse_queries,
+        10u);
+    REQUIRE(sparse_reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(sparse_reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(sparse_reader->finish().has_value());
+    const auto sparse_evidence = sparse_reader->memory_evidence();
+    REQUIRE(sparse_evidence.global_position_storage_preparations == 1u);
+    REQUIRE(sparse_evidence.global_position_storage_allocations == 1u);
+    REQUIRE(sparse_evidence.position_append_growth_reservations == 0u);
+    REQUIRE(sparse_evidence.retained_position_count == 1u);
+    REQUIRE(sparse_evidence.retained_position_capacity >= 1u);
+    REQUIRE(sparse_evidence.capacity_accounting_passes
+        == 7u + extent_count + 4u);
+    REQUIRE_FALSE(sparse_evidence.saturated);
+
+    constexpr std::uint64_t aggregate_sessions = 2u;
+    const std::uint64_t aggregate_extents = aggregate_sessions * extent_count;
+    const std::uint64_t aggregate_passes =
+        evidence.capacity_accounting_passes
+        + sparse_evidence.capacity_accounting_passes;
+    const std::uint64_t aggregate_fixed_passes =
+        7u * aggregate_sessions + aggregate_extents;
+    REQUIRE(aggregate_extents >= 2u * aggregate_sessions);
+    REQUIRE(aggregate_extents % 2u == 0u);
+    REQUIRE(aggregate_passes >= aggregate_fixed_passes);
+    REQUIRE((aggregate_passes - aggregate_fixed_passes) % 4u == 0u);
+    REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
+        == segment_count + 1u);
+    REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
+        <= aggregate_extents / 2u);
 }
 
 TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",

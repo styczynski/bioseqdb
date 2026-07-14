@@ -2625,6 +2625,35 @@ inline void require_pipeline_execution_proof(
         && out.format5_reader_retained_position_count == 0
         && out.format5_reader_retained_position_capacity == 0
         && out.format5_reader_memory_evidence_saturated == 0;
+    const __int128 format5_reader_sessions =
+        static_cast<__int128>(out.persisted_generation_read_sessions);
+    const __int128 format5_reader_extents =
+        static_cast<__int128>(counter(74));
+    const __int128 format5_reader_passes = static_cast<__int128>(
+        out.format5_reader_capacity_accounting_passes);
+    const __int128 format5_reader_fixed_passes =
+        7 * format5_reader_sessions + format5_reader_extents;
+    const __int128 format5_reader_selection_passes =
+        format5_reader_passes - format5_reader_fixed_passes;
+    /* Format 5 performs seven fixed ownership calculations per reader, one
+     * after every completed control/position extent, and four for each
+     * selected control extent. Every directory entry contributes one control
+     * and one position extent, so the aggregate extent count is even and has
+     * at least one pair per nonempty reader. There are at most half as many
+     * selected controls as total extents. These scale-aware bounds and the
+     * four-pass congruence reject accounting growth inconsistent with that
+     * structure without imposing the one-entry unit fixture's accidental
+     * constant bound on real genomes. */
+    const bool format5_reader_accounting_shape =
+        format5_reader_sessions > 0
+        && format5_reader_extents >= 2 * format5_reader_sessions
+        && format5_reader_extents % 2 == 0
+        && format5_reader_passes >= format5_reader_fixed_passes
+        && format5_reader_passes
+            <= 7 * format5_reader_sessions + 3 * format5_reader_extents
+        && format5_reader_selection_passes % 4 == 0
+        && format5_reader_selection_passes / 4
+            <= format5_reader_extents / 2;
     const bool format5_reader_memory_gate = expect_persisted && !expect_gpu
         ? out.format5_reader_global_position_storage_preparations
                 == out.persisted_generation_read_sessions
@@ -2634,13 +2663,7 @@ inline void require_pipeline_execution_proof(
             && out.format5_reader_retained_position_count > 0
             && out.format5_reader_retained_position_capacity
                 >= out.format5_reader_retained_position_count
-            && out.format5_reader_capacity_accounting_passes
-                >= out.persisted_generation_read_sessions
-            && static_cast<__int128>(
-                    out.format5_reader_capacity_accounting_passes)
-                <= static_cast<__int128>(16)
-                    * static_cast<__int128>(
-                        out.persisted_generation_read_sessions)
+            && format5_reader_accounting_shape
             && out.format5_reader_memory_evidence_saturated == 0
         : no_format5_reader_memory_evidence;
     // Format 5 is consumed directly from the authenticated persisted reader.
