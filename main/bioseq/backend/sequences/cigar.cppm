@@ -179,7 +179,14 @@ public:
                 case BlockCigarOp::D:  opcode = CIGAR_DEL; break;
                 default: continue;
             }
-            result.push_back((static_cast<uint32_t>(entry.len) << 4) | opcode);
+            // Traceback keeps Eq/X distinct so callers can inspect exact
+            // edit semantics, while the pipeline ABI deliberately projects
+            // both to minimap/KSW's generic M opcode.  Coalesce after that
+            // projection: otherwise an Eq/X boundary becomes adjacent M
+            // records (for example 32M1M), unlike the upstream `cigar()`
+            // result and unlike canonical packed CIGAR.
+            push_packed_cigar(
+                result, opcode, static_cast<uint32_t>(entry.len));
         }
         return result;
     }

@@ -1,0 +1,10 @@
+{"event":"BENCHMARK_STARTED","timestamp":1783996148676,"benchmark_name":"bench_aligners_xxl_hifi_paired"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_block_simd_dp_two_stack_nthash"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_block_vulkan_dp_vulkan_minimap_int"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_block_vulkan_phase_c_frontend"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_ksw2_batched_simd_dp_two_stack_nthash"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_ksw2_scalar_dp_scalar_mm"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_ksw2_simd_dp_scalar_mm"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_ksw2_simd_dp_two_stack_nthash"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash"}
+{"event":"CASE_STARTED","timestamp":1783996152686,"benchmark_name":"bench_aligners_xxl_hifi_paired","case_name":"minimap2_dp"}

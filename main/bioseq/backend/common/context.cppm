@@ -49,6 +49,8 @@ module;
 #include <span>
 #include <type_traits>
 #include <functional>
+#include <limits>
+#include <new>
 #include <vector>
 
 export module bioseq.common.context;
@@ -239,7 +241,9 @@ public:
     class scope {
     public:
         explicit scope(context& ctx) noexcept
-            : ctx_(&ctx), marker_(select_arena(ctx).top())
+            : ctx_(&ctx)
+            , marker_(select_arena(ctx).top())
+            , heap_marker_(select_heap_blocks(ctx).size())
         {}
 
         scope(const scope&)            = delete;
@@ -249,6 +253,15 @@ public:
 
         ~scope() noexcept {
             select_arena(*ctx_).unwind(marker_);
+            // Oversize allocations bypass memory_stack and therefore are not
+            // covered by unwind(marker_).  Give them exactly the same lifetime
+            // as ordinary arena allocations: free only the tail allocated
+            // after this scope's marker, preserving outer-scope blocks.
+            auto& blocks = select_heap_blocks(*ctx_);
+            while (blocks.size() > heap_marker_) {
+                std::free(blocks.back().ptr);
+                blocks.pop_back();
+            }
         }
 
     private:
@@ -257,20 +270,30 @@ public:
             else if constexpr (A == Arena::Chain) return ctx.chain_arena_;
             else                                 return ctx.align_arena_;
         }
+        static auto& select_heap_blocks(context& ctx) noexcept {
+            if constexpr (A == Arena::Scratch) return ctx.large_scratch_blocks_;
+            else if constexpr (A == Arena::Chain) return ctx.large_chain_blocks_;
+            else                                 return ctx.large_align_blocks_;
+        }
         using marker_t = decltype(select_arena(std::declval<context&>()).top());
         context* ctx_;
         marker_t marker_;
+        std::size_t heap_marker_;
     };
 
     template<Arena A>
     [[nodiscard]] scope<A> push() noexcept { return scope<A>(*this); }
 
-    /// Reset per-pipeline arenas. Keeps backing blocks in the cache for
-    /// the next query but marks everything free.
+    /// Reset per-pipeline arenas. Keeps memory_stack backing blocks available
+    /// for reuse, but releases oversize heap fallbacks because those blocks are
+    /// not part of memory_stack and otherwise inflate the next query's RSS.
     void reset_pipeline() noexcept {
         scratch_arena_.shrink_to_fit();
         chain_arena_.shrink_to_fit();
         align_arena_.shrink_to_fit();
+        free_heap_blocks(large_scratch_blocks_);
+        free_heap_blocks(large_chain_blocks_);
+        free_heap_blocks(large_align_blocks_);
     }
 
     // -----------------------------------------------------------------
@@ -284,6 +307,16 @@ public:
     }
     [[nodiscard]] std::size_t align_capacity() const noexcept {
         return align_arena_.capacity_left();
+    }
+
+    [[nodiscard]] std::size_t scratch_heap_fallback_bytes() const noexcept {
+        return heap_fallback_bytes(large_scratch_blocks_);
+    }
+    [[nodiscard]] std::size_t chain_heap_fallback_bytes() const noexcept {
+        return heap_fallback_bytes(large_chain_blocks_);
+    }
+    [[nodiscard]] std::size_t align_heap_fallback_bytes() const noexcept {
+        return heap_fallback_bytes(large_align_blocks_);
     }
 
     /// Destructor frees the heap-fallback blocks tracked by the
@@ -324,6 +357,9 @@ private:
         static constexpr std::size_t requested_align =
             Alignment < alignof(T) ? alignof(T) : Alignment;
         if (count == 0) return {};
+        if (count > (std::numeric_limits<std::size_t>::max)() / sizeof(T)) {
+            throw std::bad_array_new_length{};
+        }
         const std::size_t bytes = count * sizeof(T);
         if (bytes <= kHeapFallbackThreshold) {
             // Arena fast-path. Bypass allocator_traits to skip the
@@ -344,13 +380,31 @@ private:
                     bytes, effective_align, rc);
             std::abort();
         }
-        heap_tracker.push_back({raw, bytes});
+        try {
+            heap_tracker.push_back({raw, bytes});
+        } catch (...) {
+            std::free(raw);
+            throw;
+        }
         return std::span<T>(static_cast<T*>(raw), count);
     }
 
     static void free_heap_blocks(std::vector<heap_block>& blocks) noexcept {
         for (auto& block : blocks) std::free(block.ptr);
         blocks.clear();
+    }
+
+    [[nodiscard]] static std::size_t heap_fallback_bytes(
+        const std::vector<heap_block>& blocks) noexcept
+    {
+        std::size_t total = 0;
+        for (const auto& block : blocks) {
+            if (block.bytes > (std::numeric_limits<std::size_t>::max)() - total) {
+                return (std::numeric_limits<std::size_t>::max)();
+            }
+            total += block.bytes;
+        }
+        return total;
     }
 
     detail::scratch_arena_t scratch_arena_;

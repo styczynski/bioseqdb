@@ -1,0 +1,2 @@
+{"kind":"header","run_id":"93:2026-07-11T10:53:19Z:80655","schema":1}
+{"kind":"footer","manifest":{"append_order_checksum":"cbf29ce484222325","cells":[],"complete":true,"index_and_map_ns":{"count":0,"mean":null,"min":null,"p50":null,"p95":null},"outer_e2e_ns":{"count":0,"mean":null,"min":null,"p50":null,"p95":null},"path":"report_93.raw.jsonl","prefix_bytes":70,"record_count":0,"run_id":"93:2026-07-11T10:53:19Z:80655","schedule_sorted_checksum":"cbf29ce484222325","schema":1},"schema":1}
