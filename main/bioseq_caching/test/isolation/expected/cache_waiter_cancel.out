@@ -1,0 +1,86 @@
+Parsed test spec with 3 sessions
+
+starting permutation: cancel_arm_producer cancel_arm_waiter cancel_producer_mode cancel_produce cancel_producer_paused cancel_waiter_mode cancel_wait cancel_waiter_paused cancel_waiter_backend cancel_release_waiter cancel_release_producer cancel_state
+reset_stats
+-----------
+           
+(1 row)
+
+step cancel_arm_producer: SELECT bioseq_cache_test.arm_pause('after_building_publish');
+arm_pause
+---------
+         
+(1 row)
+
+step cancel_arm_waiter: SELECT bioseq_cache_test.arm_pause('after_waiter_registered');
+arm_pause
+---------
+         
+(1 row)
+
+step cancel_producer_mode: SET bioseq.query_cache_optimisation_mode = 'same';
+step cancel_produce: 
+  SELECT count(*) AS rows, sum(id) AS id_sum
+  FROM qc_cancel WHERE id <= 10;
+ <waiting ...>
+step cancel_producer_paused: SELECT bioseq_cache_test.wait_until_paused('after_building_publish');
+wait_until_paused
+-----------------
+                 
+(1 row)
+
+step cancel_waiter_mode: 
+  SET application_name = 'bioseq_cache_cancel_waiter';
+  SET bioseq.query_cache_optimisation_mode = 'same';
+
+step cancel_wait: 
+  SELECT count(*) AS rows, sum(id) AS id_sum
+  FROM qc_cancel WHERE id <= 10;
+ <waiting ...>
+step cancel_waiter_paused: SELECT bioseq_cache_test.wait_until_paused('after_waiter_registered');
+wait_until_paused
+-----------------
+                 
+(1 row)
+
+step cancel_waiter_backend: 
+  SELECT pg_cancel_backend(pid)
+  FROM pg_stat_activity
+  WHERE application_name = 'bioseq_cache_cancel_waiter';
+
+pg_cancel_backend
+-----------------
+t                
+(1 row)
+
+step cancel_wait: <... completed>
+ERROR:  canceling statement due to user request
+step cancel_release_waiter: SELECT bioseq_cache_test.release_pause('after_waiter_registered');
+release_pause
+-------------
+             
+(1 row)
+
+step cancel_release_producer: SELECT bioseq_cache_test.release_pause('after_building_publish');
+release_pause
+-------------
+             
+(1 row)
+
+step cancel_produce: <... completed>
+rows|id_sum
+----+------
+  10|    55
+(1 row)
+
+step cancel_state: 
+  SELECT state, waiter_count, reader_count
+  FROM bioseq_cache_test.entry_states()
+  ORDER BY generation;
+
+state   |waiter_count|reader_count
+--------+------------+------------
+COMPLETE|           0|           0
+COMPLETE|           0|           0
+(2 rows)
+
