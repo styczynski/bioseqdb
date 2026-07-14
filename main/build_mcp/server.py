@@ -12,8 +12,9 @@ For modes list see MODES dict.
 Concurrency rules:
     - At most one run per "lock group" at a time.
     - "tests"  group covers unit+integration and external-api.
-    - "bench"  group covers bench and bench-fast (they share the binary and
-      the reporting/ output directory, so concurrent runs would race).
+    - "cache-tests" covers cache unit and private-cluster integration modes.
+    - "bench" covers the core and cache benchmark modes; concurrent reports
+      and shared build trees would race.
     - Different lock groups can run in parallel unless both runs install/restart
       the shared PostgreSQL extension (unit+integration conflicts with bench-e2e).
 
@@ -72,7 +73,7 @@ import bootstrap  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 
-# DOC0270 plus test-hook isolation — parallel production/test build families:
+# DOC0270/DOC0371 — isolated production, test, and cache build families:
 #
 #   "bench-opt"        — default production/benchmark fast tree. -O3 + NDEBUG,
 #                        no -g, no -save-temps. Lives under build/bench-opt/.
@@ -87,6 +88,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 #                        Lives under build/bench-opt-debug/ so it does not
 #                        invalidate the default tree's ninja graph.
 #   "test-opt-debug"   — matching isolated test debug/inspect tree.
+#   "cache-opt[-debug]" — independent cache-only trees with deterministic
+#                         hooks and the cache-local vcpkg manifest.
+#   "cache-bioseq-opt[-debug]" — combined provider integration trees that
+#                                retain the Bioseq manifest/toolchain.
 #
 # The preset families share the rest of the toolchain (vcpkg, arm64-osx target).
 # The build dir is selected per-call from mode + `debug`; state records which
@@ -517,10 +522,10 @@ class ModeDefinition:
     targets: List[str]
     """
     Commands we want to run. First element of each command is the binary
-    basename — resolved against the active build tree's `bioseq/` directory
+    basename — resolved against the active mode's `binary_subdir` directory
     at run time (see `bin_dir_for(mode, debug)`). This lets the same MODE
-    definition drive isolated production and test preset families, including
-    their debug/inspect variants.
+    definition drive isolated production, test, cache-only, and combined
+    preset families, including their debug/inspect variants.
     """
     commands: List[List[str]]
     """Extra documentation"""
@@ -749,6 +754,10 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
+BENCH_CLI_MODES: tuple[str, ...] = tuple(sorted(
+    mode for mode, details in MODES.items()
+    if details.is_bench_mode and details.commands
+))
 
 
 @dataclass(frozen=True)
@@ -792,7 +801,7 @@ def get_modes_short_documentation() -> str:
         f"~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)"
         for mode in sorted(VALID_MODES)
     )
-    return f"Modes: {modes_list_str}";
+    return f"Modes: {modes_list_str}"
 
 
 def post_build_targets_for(mode: str, build_only: bool) -> tuple[str, ...]:
@@ -800,6 +809,12 @@ def post_build_targets_for(mode: str, build_only: bool) -> tuple[str, ...]:
     if build_only:
         return ()
     return MODES[mode].post_build_targets
+
+
+def supports_bench_cli_options(mode: str) -> bool:
+    """Whether filter/debug_report can be forwarded to a mode's CLI."""
+    return mode in BENCH_CLI_MODES
+
 
 def _log(msg: str) -> None:
     """Server-side log line. Always stderr — stdout is JSON-RPC only."""
@@ -1829,9 +1844,10 @@ def tool_start_build(mode: str, build_only: bool = False,
     # Bench-only knobs: reject on non-bench modes, validate + translate the
     # filter, and enforce debug-requires-filter — all BEFORE spawning the
     # long-running detached worker (fast feedback).
-    if (bench_filter or debug_report) and not mode_details.is_bench_mode:
-        return (f"`filter`/`debug_report` are only valid for bench modes "
-                f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
+    if (bench_filter or debug_report) and not supports_bench_cli_options(mode):
+        return ("`filter`/`debug_report` require a benchmark CLI that accepts "
+                "those options; valid modes are "
+                f"{', '.join(BENCH_CLI_MODES)}; got '{mode}'.")
     filter_args, ferr = _filter_to_cli_args(bench_filter)
     if ferr is not None:
         return f"Invalid filter: {ferr}"
@@ -3583,9 +3599,10 @@ def tool_remote_run(arguments: dict) -> str:
         debug_report = parse_bool("debug_report",
                                   arguments.get("debug_report", False))
         mode_details = MODES[mode]
-        if (bench_filter or debug_report) and not mode_details.is_bench_mode:
-            return (f"`filter`/`debug_report` are only valid for bench modes "
-                    f"(bench, bench-fast, bench-io, bench-e2e); got '{mode}'.")
+        if (bench_filter or debug_report) and not supports_bench_cli_options(mode):
+            return ("`filter`/`debug_report` require a benchmark CLI that "
+                    "accepts those options; valid modes are "
+                    f"{', '.join(BENCH_CLI_MODES)}; got '{mode}'.")
         filter_args, ferr = _filter_to_cli_args(bench_filter)
         if ferr is not None:
             return f"Invalid filter: {ferr}"
@@ -3642,14 +3659,14 @@ TOOL_DEFINITIONS = [
             "returns the current status instead of starting a duplicate. "
             f"{get_modes_short_documentation()} "
             f"\nNote: If you want to iterate quickly then use build_only parameter."
-            f"\n\nBuild tree selection (`debug` parameter, DOC0270):"
-            f"\n  - debug=false (DEFAULT): uses the mode's fast preset "
-            f"(`test-opt` for unit+integration, `bench-opt` for benchmarks). "
+            f"\n\nBuild tree selection (`debug` parameter, DOC0270/DOC0371):"
+            f"\n  - debug=false (DEFAULT): uses the mode family's fast preset "
+            f"(core, isolated tests, cache-only, or combined provider). "
             f"-O3 + NDEBUG only, no debug info, no "
             f"per-TU temps. This is the fast everyday build — preferred for "
             f"every normal iteration, including running tests and benches."
-            f"\n  - debug=true: uses the corresponding isolated debug preset "
-            f"(`test-opt-debug` or `bench-opt-debug`). Same -O3 + NDEBUG, "
+            f"\n  - debug=true: uses that family's corresponding isolated "
+            f"debug preset. Same -O3 + NDEBUG, "
             f"plus -g (DWARF "
             f"symbols) and -save-temps=obj (writes per-TU .s/.ii/.bc beside "
             f"each .o). REQUIRED by the `inspect` tool: it pulls disassembly "
@@ -3667,7 +3684,7 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": list(VALID_MODES),
+                    "enum": sorted(VALID_MODES),
                     "description": "Which run to start.",
                 },
                 "build_only": {
@@ -3678,9 +3695,8 @@ TOOL_DEFINITIONS = [
                 "debug": {
                    "type": "boolean",
                    "description": (
-                       "Select the mode's isolated debug build tree "
-                       "(test-opt-debug for unit+integration, "
-                       "bench-opt-debug for benchmarks). Adds -g + "
+                       "Select the mode family's isolated debug build tree "
+                       "(core, test, cache-only, or combined). Adds -g + "
                        "-save-temps=obj "
                        "so the `inspect` tool can extract per-function "
                        "disassembly and pre-LTO assembly listings. ~2x slower "
@@ -3695,7 +3711,7 @@ TOOL_DEFINITIONS = [
                     "type": "object",
                     "additionalProperties": False,
                     "description": (
-                        "Bench-only. Subset selection for bench/bench-fast/bench-io/bench-e2e, "
+                        f"CLI-benchmark-only. Subset selection for {', '.join(BENCH_CLI_MODES)}, "
                         "translated to the bench binary's repeatable --filter flag. Each present "
                         "array is an OR-set; the three arrays AND together. Omit an array to leave "
                         "that axis unconstrained. Values may not contain ',' or '='."
@@ -3737,7 +3753,7 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": list(VALID_MODES),
+                    "enum": sorted(VALID_MODES),
                     "description": "Which run to query.",
                 },
             },
@@ -3760,7 +3776,7 @@ TOOL_DEFINITIONS = [
             "no standalone symbol). All large outputs are written to "
             "/tmp/bioseq_inspect/ and pointed at via paths so the AI can "
             "Read them on demand.\n\n"
-            "DOC0270 — build-tree selection: fast production/test trees do "
+            "DOC0270/DOC0371 — fast core/test/cache trees do "
             "NOT carry per-TU .s/.bc files or DWARF. Call `start_build` for "
             "the requested target's mode with debug=true first to produce "
             "the matching isolated debug tree. If you pass "
@@ -3820,14 +3836,12 @@ TOOL_DEFINITIONS = [
                 },
                 "target": {
                     "type": "string",
-                    "enum": ["bioseq_bench", "bioseq_io_bench",
-                             "bioseq_aligner_tests_exec",
-                             "bioseq_aligner_int_tests_exec"],
+                    "enum": sorted(INSPECT_TARGETS),
                     "default": "bioseq_bench",
                     "description":
-                        "Which target binary to inspect. Test executables "
-                        "resolve under test-opt[-debug]; benchmark executables "
-                        "resolve under bench-opt[-debug].",
+                        "Which target binary or extension DSO to inspect. The "
+                        "target map resolves its core, test, cache-only, or "
+                        "combined preset family and binary subdirectory.",
                 },
                 "max_matches": {
                     "type": "integer",
@@ -3879,9 +3893,9 @@ TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description":
                         "Force the inspect tool to read from the requested "
-                        "target's matching tree (DOC0270). Test executables "
-                        "use test-opt[-debug]; benchmark executables use "
-                        "bench-opt[-debug]. true selects the debug tree, "
+                        "target's matching family (DOC0270/DOC0371). Core, "
+                        "test, cache-only, and combined targets each retain "
+                        "their own fast/debug trees. true selects debug, "
                         "false the fast tree. Omit to auto-detect: "
                         "prefer the debug tree when available, fall back "
                         "to fast. Set this explicitly only when you need "
@@ -4270,8 +4284,8 @@ TOOL_DEFINITIONS += [
             "commit (unless sync=false), then runs the operation on the box using "
             "the box-side server.py with the aws-x64-linux preset. " + _FROM_SCRATCH_WARNING + "\n\n"
             "Two operation shapes (oneOf):\n"
-            "  operation='build' — runs one start_build mode (external-api, "
-            "unit+integration, bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
+            "  operation='build' — runs any local start_build mode "
+            f"({', '.join(sorted(VALID_MODES))}) with the same build_only/debug/"
             "filter/debug_report semantics as the local start_build tool.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
             "same parameters as the local inspect tool.\n\n"
@@ -4316,8 +4330,8 @@ TOOL_DEFINITIONS += [
                             "type": "object",
                             "additionalProperties": False,
                             "description": (
-                                "Bench-only. Subset selection for bench/bench-fast/"
-                                "bench-io/bench-e2e, translated to the bench binary's "
+                                f"CLI-benchmark-only. Subset selection for "
+                                f"{', '.join(BENCH_CLI_MODES)}, translated to the bench binary's "
                                 "repeatable --filter flag. Each present array is an "
                                 "OR-set; the three arrays AND together. Omit an array "
                                 "to leave that axis unconstrained. Values may not "
@@ -4371,9 +4385,7 @@ TOOL_DEFINITIONS += [
                         },
                         "target": {
                             "type": "string",
-                            "enum": ["bioseq_bench", "bioseq_io_bench",
-                                     "bioseq_aligner_tests_exec",
-                                     "bioseq_aligner_int_tests_exec"],
+                            "enum": sorted(INSPECT_TARGETS),
                             "default": "bioseq_bench",
                             "description": "Which target binary to inspect on the box.",
                         },
@@ -4739,7 +4751,7 @@ def main() -> int:
             "(synchronous, not detached) for the given mode. Used by the "
             "remote-run tool over SSH so the build verdict is the SSH exit "
             "status and output streams back live. Honours --build-only/--debug "
-            "and the production/test BIOSEQ_*_BUILD_PRESET variables."
+            "and the core/test/cache BIOSEQ_*_BUILD_PRESET variables."
         ),
     )
     parser.add_argument(
@@ -4749,7 +4761,7 @@ def main() -> int:
         help=(
             "(internal) run the inspect tool with the given JSON argument object "
             "and print the JSON result to stdout. Used by remote-run over SSH to "
-            "inspect a binary on the box. Honours the production/test "
+            "inspect a binary on the box. Honours the core/test/cache "
             "BIOSEQ_*_BUILD_PRESET variables."
         ),
     )
