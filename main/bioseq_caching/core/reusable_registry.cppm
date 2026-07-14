@@ -130,6 +130,9 @@ struct ReusableManifestHandleV1 {
   std::uint64_t slot_sequence = 0;
   CacheEntryId id{};
 
+  [[nodiscard]] bool
+  operator==(const ReusableManifestHandleV1 &) const noexcept = default;
+
   [[nodiscard]] explicit operator bool() const noexcept {
     return slot != kInvalidReusableRegistrySlotV1 && slot_sequence != 0 &&
            id.boot_nonce != 0 && id.generation != 0 && id.claim_sequence != 0;
@@ -186,6 +189,9 @@ struct ReusableGenerationReferenceV1 {
   std::uint32_t generation_slot = kInvalidReusableRegistrySlotV1;
   std::uint32_t reserved = 0;
   std::uint64_t slot_sequence = 0;
+
+  [[nodiscard]] bool
+  operator==(const ReusableGenerationReferenceV1 &) const noexcept = default;
 
   [[nodiscard]] explicit operator bool() const noexcept {
     return generation_slot != kInvalidReusableRegistrySlotV1 &&
@@ -289,6 +295,7 @@ struct ReusableRegistryHeaderV1 {
   std::uint32_t free_generation_head = kInvalidReusableRegistrySlotV1;
   std::uint32_t retired_generation_head = kInvalidReusableRegistrySlotV1;
   std::uint32_t free_extent_count = 0;
+  std::uint32_t janitor_scan_cursor = 0;
   std::uint32_t indexed_generations = 0;
   std::uint32_t retired_generations = 0;
   std::uint32_t exact_occupied_buckets = 0;
@@ -654,6 +661,7 @@ validate_reusable_registry_attachment(
       shared.boot_nonce == 0 || shared.next_generation == 0 ||
       shared.next_claim_sequence == 0 || shared.next_slot_sequence == 0 ||
       shared.free_extent_count > shared.layout.free_extent_capacity ||
+      shared.janitor_scan_cursor >= shared.config.max_generations ||
       shared.indexed_generations > shared.config.max_generations ||
       shared.retired_generations > shared.config.max_generations ||
       shared.indexed_generations + shared.retired_generations >
@@ -1678,17 +1686,22 @@ increment_reference(ReusableSharedGenerationV1 &generation, std::uint32_t slot,
 
 [[nodiscard]] inline bool
 claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
-  return request.coverage_directory_key.security_namespace.database_oid != 0 &&
-         request.coverage_directory_key.security_namespace.current_role_oid !=
-             0 &&
-         request.coverage_directory_key.security_namespace.session_user_oid !=
-             0 &&
-         request.coverage_directory_key.security_namespace.reserved == 0 &&
+  const ReusableSecurityNamespaceV1 &security_namespace =
+      request.coverage_directory_key.security_namespace;
+  return security_namespace.database_oid != 0 &&
+         security_namespace.current_role_oid != 0 &&
+         security_namespace.session_user_oid != 0 &&
+         security_namespace.reserved == 0 &&
          !request.canonical_domain_key.empty() &&
          !request.canonical_generation_key.empty() &&
          request.metadata.provider_id != 0 &&
+         request.metadata.provider_abi_version != 0 &&
+         request.metadata.provider_domain_abi_version != 0 &&
          request.metadata.compatibility_family_id != 0 &&
          request.metadata.dependency_count <= kMaxDependenciesPerGeneration &&
+         request.metadata.reserved == 0 &&
+         request.metadata.physical_identity.length <=
+             request.metadata.physical_identity.bytes.size() &&
          request.metadata.observability ==
              WriteObservability::ProviderComplete &&
          request.producer.valid();
@@ -1728,6 +1741,17 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
     result.error = attachment_error != ReusableRegistryErrorV1::None
                        ? attachment_error
                        : ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+  const ReusableSecurityNamespaceV1 &security_namespace =
+      coverage_key.security_namespace;
+  if (security_namespace.database_oid == 0 ||
+      security_namespace.current_role_oid == 0 ||
+      security_namespace.session_user_oid == 0 ||
+      security_namespace.reserved != 0 ||
+      domain_key.size() > kMaxCoverageDomainKeyBytes ||
+      generation_key.size() > kMaxCanonicalKeyBytes) {
+    result.error = ReusableRegistryErrorV1::InvalidArgument;
     return result;
   }
   const std::uint32_t partition =
@@ -2126,6 +2150,14 @@ snapshot_reusable_candidates(
                                ? attachment_error
                                : ReusableRegistryErrorV1::InvalidArgument);
   }
+  const ReusableSecurityNamespaceV1 &security_namespace =
+      request.coverage_directory_key.security_namespace;
+  if (security_namespace.database_oid == 0 ||
+      security_namespace.current_role_oid == 0 ||
+      security_namespace.session_user_oid == 0 ||
+      security_namespace.reserved != 0) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
 
   const ReusableRegistryHeaderV1 &shared = header(attachment);
   const std::uint32_t partition =
@@ -2243,6 +2275,22 @@ snapshot_reusable_candidates(
       return std::unexpected(pinned_snapshot.error());
     }
     candidate.generation = *pinned_snapshot;
+    candidate.complete =
+        candidate.generation.state == CacheEntryState::Complete;
+    candidate.in_flight =
+        candidate.generation.state == CacheEntryState::Claimed ||
+        candidate.generation.state == CacheEntryState::Building;
+    if (!candidate.complete && !candidate.in_flight) {
+      static_cast<void>(release_reusable_reference(
+          attachment, candidate.planner_pin, callbacks));
+      for (std::size_t release_index = 0; release_index < index;
+           ++release_index) {
+        static_cast<void>(release_reusable_reference(
+            attachment, result.candidates[release_index].planner_pin,
+            callbacks));
+      }
+      return std::unexpected(ReusableRegistryErrorV1::InvalidState);
+    }
   }
   return result;
 }
@@ -2251,6 +2299,9 @@ snapshot_reusable_candidates(
 [[nodiscard]] inline ReusableRegistryErrorV1 release_reusable_candidate_batch(
     ReusableRegistryAttachmentV1 &attachment, ReusableCandidateBatchV1 &batch,
     const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+  if (batch.candidate_count > batch.candidates.size()) {
+    return ReusableRegistryErrorV1::InvalidArgument;
+  }
   ReusableRegistryErrorV1 first_error = ReusableRegistryErrorV1::None;
   for (std::size_t index = 0; index < batch.candidate_count; ++index) {
     const ReusableRegistryErrorV1 error = release_reusable_reference(
@@ -2313,6 +2364,7 @@ snapshot_reusable_candidates(
   if (!callbacks.valid() || !request.reference || !request.manifest ||
       request.reference.generation_slot >=
           header(attachment).config.max_generations ||
+      request.manifest.reserved != 0 ||
       request.manifest.id != request.reference.id ||
       request.completed_monotonic_ns <
           generations(attachment)[request.reference.generation_slot]
@@ -2584,16 +2636,21 @@ reclaim_retired_reusable_generations(
     return result;
   }
   result.reclaimed_retired = reclaimed.reclaimed;
-  if (maximum == 0) {
+  if (maximum == 0 || reclaimed.reclaimed >= maximum) {
     return result;
   }
 
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
+  const std::uint32_t remaining = maximum - reclaimed.reclaimed;
+  const std::uint32_t scan_limit =
+      std::min(remaining, shared.config.max_generations);
+  const std::uint32_t scan_start = shared.janitor_scan_cursor;
+  std::uint32_t scanned = 0;
   std::uint32_t retired_this_pass = 0;
-  for (std::uint32_t slot = 0;
-       slot < shared.config.max_generations && retired_this_pass < maximum;
-       ++slot) {
+  for (; scanned < scan_limit && retired_this_pass < remaining; ++scanned) {
+    const std::uint32_t slot =
+        (scan_start + scanned) % shared.config.max_generations;
     ReusableSharedGenerationV1 &generation = records[slot];
     if (generation.membership != ReusableRecordMembershipV1::Indexed) {
       continue;
@@ -2657,6 +2714,8 @@ reclaim_retired_reusable_generations(
     }
     ++retired_this_pass;
   }
+  shared.janitor_scan_cursor =
+      (scan_start + scanned) % shared.config.max_generations;
   return result;
 }
 
@@ -2765,8 +2824,12 @@ reclaim_retired_reusable_generations(
             0 ||
         generation.coverage_directory_key.security_namespace.reserved != 0 ||
         generation.metadata.provider_id == 0 ||
+        generation.metadata.provider_abi_version == 0 ||
+        generation.metadata.provider_domain_abi_version == 0 ||
         generation.metadata.compatibility_family_id == 0 ||
         generation.metadata.dependency_count > kMaxDependenciesPerGeneration ||
+        generation.metadata.reserved != 0 ||
+        generation.manifest.reserved != 0 ||
         generation.metadata.observability !=
             WriteObservability::ProviderComplete ||
         generation.metadata.physical_identity.length >
