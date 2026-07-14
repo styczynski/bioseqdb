@@ -123,6 +123,8 @@ $$;
 
 SELECT bioseq_cache_test.provider_clear_security_digest();
 SELECT bioseq_cache_test.provider_shutdown();
+REVOKE SELECT ON cache_security_rows
+FROM cache_security_alice, cache_security_bob;
 DROP ROLE cache_security_alice;
 DROP ROLE cache_security_bob;
 
