@@ -48,10 +48,11 @@ import bioseq.cache.core;
 
 export namespace bioseq::cache::pg::storage {
 
-inline constexpr std::uint32_t kStorageAbiVersion = 2;
+inline constexpr std::uint32_t kStorageAbiVersion = 3;
 inline constexpr std::size_t kManifestCapacity = 256;
 inline constexpr std::size_t kBlocksPerManifest = 32;
 inline constexpr std::size_t kWaitersPerManifest = 64;
+inline constexpr std::size_t kReaderPinsPerManifest = 64;
 inline constexpr std::size_t kBlockLedgerCapacity =
     kManifestCapacity * kBlocksPerManifest + 256;
 inline constexpr std::uint64_t kDefaultDsaInitialBytes = 256ULL << 10;
@@ -81,6 +82,7 @@ enum class StorageError : std::uint32_t {
     LedgerFull,
     ManifestFull,
     WaiterFull,
+    ReaderFull,
     DuplicateGeneration,
     MemoryPressure,
     HotTierFull,
@@ -213,11 +215,22 @@ struct ManifestPin {
     std::uint64_t logical_bytes = 0;
     std::uint64_t row_count = 0;
     std::uint32_t block_count = 0;
-    std::uint32_t reserved = 0;
+    std::uint32_t reader_slot =
+        (std::numeric_limits<std::uint32_t>::max)();
+    std::uint32_t owner_proc_number =
+        (std::numeric_limits<std::uint32_t>::max)();
+    int owner_pid = 0;
+    std::uint64_t owner_sequence = 0;
     std::array<BlockReferenceV1, kBlocksPerManifest> blocks{};
 
     [[nodiscard]] explicit operator bool() const noexcept {
-        return static_cast<bool>(handle) && block_count != 0;
+        return static_cast<bool>(handle)
+            && block_count != 0
+            && reader_slot < kReaderPinsPerManifest
+            && owner_proc_number
+                != (std::numeric_limits<std::uint32_t>::max)()
+            && owner_pid > 0
+            && owner_sequence != 0;
     }
 };
 
@@ -235,6 +248,7 @@ struct JanitorSweepResult {
     std::uint32_t lru_manifests = 0;
     std::uint32_t abandoned_blocks = 0;
     std::uint32_t reaped_waiters = 0;
+    std::uint32_t reaped_readers = 0;
     std::uint32_t reclaimed_blocks = 0;
     std::uint64_t reclaimed_hot_bytes = 0;
     std::uint64_t reclaimed_file_bytes = 0;
@@ -255,6 +269,7 @@ struct StorageRuntimeSnapshot {
     std::uint64_t file_ceiling_bytes = 0;
     std::uint64_t manifest_count = 0;
     std::uint64_t waiter_reference_count = 0;
+    std::uint64_t reader_reference_count = 0;
     std::uint64_t completed_sweeps = 0;
     std::int64_t last_sweep_at_us = 0;
     std::int64_t worker_heartbeat_at_us = 0;
@@ -265,8 +280,16 @@ struct StorageRuntimeSnapshot {
 /** Test-only shared override and live ledger evidence for tier assertions. */
 struct StorageTierTestSnapshot {
     bool force_file_tier = false;
+    bool coherent = false;
     std::uint64_t dsa_blocks = 0;
     std::uint64_t file_blocks = 0;
+    std::uint64_t occupied_blocks = 0;
+    std::uint64_t reserved_blocks = 0;
+    std::uint64_t stored_blocks = 0;
+    std::uint64_t referenced_blocks = 0;
+    std::uint64_t retiring_blocks = 0;
+    std::uint64_t release_committed_blocks = 0;
+    std::uint64_t reader_pins = 0;
     std::uint64_t reserved_hot_bytes = 0;
     std::uint64_t reserved_file_bytes = 0;
 };
@@ -370,7 +393,7 @@ namespace bioseq::cache::pg::storage {
 namespace {
 
 inline constexpr std::uint32_t kStorageMagic = 0x42535452U; /* BSTR */
-inline constexpr char kStorageSharedName[] = "bioseq_cache storage v2";
+inline constexpr char kStorageSharedName[] = "bioseq_cache storage v3";
 inline constexpr char kStorageLockTranche[] = "bioseq_cache storage";
 inline constexpr char kStoreSubdirectory[] = "storage-v1";
 inline constexpr std::uint32_t kInvalidSlot =
@@ -409,6 +432,15 @@ struct SharedManifestWaiter {
     std::uint64_t owner_sequence;
 };
 
+struct SharedManifestReader {
+    bool active;
+    std::uint8_t reserved8[3];
+    int owner_pid;
+    std::uint32_t owner_proc_number;
+    std::uint32_t reserved32;
+    std::uint64_t owner_sequence;
+};
+
 struct SharedManifestEntry {
     ManifestState state;
     CacheEntryKind kind;
@@ -426,6 +458,7 @@ struct SharedManifestEntry {
     pg_atomic_uint64 last_access_at_us;
     pg_atomic_uint32 reader_pins;
     pg_atomic_uint32 waiter_references;
+    std::array<SharedManifestReader, kReaderPinsPerManifest> readers;
     std::array<SharedManifestWaiter, kWaitersPerManifest> waiters;
     std::array<std::uint32_t, kBlocksPerManifest> ledger_slots;
     std::array<BlockReferenceV1, kBlocksPerManifest> blocks;
@@ -451,11 +484,13 @@ struct StorageSharedState {
     pg_atomic_uint64 next_block_sequence;
     pg_atomic_uint64 next_manifest_sequence;
     pg_atomic_uint64 next_waiter_sequence;
+    pg_atomic_uint64 next_reader_sequence;
     pg_atomic_uint64 next_file_id;
     pg_atomic_uint64 reserved_hot_bytes;
     pg_atomic_uint64 reserved_file_bytes;
     pg_atomic_uint64 manifest_count;
     pg_atomic_uint64 waiter_reference_count;
+    pg_atomic_uint64 reader_reference_count;
     pg_atomic_uint64 completed_sweeps;
     pg_atomic_uint64 last_sweep_at_us;
     pg_atomic_uint64 worker_heartbeat_at_us;
@@ -832,27 +867,57 @@ void clean_orphaned_store_files() noexcept {
     return true;
 }
 
-[[nodiscard]] std::uint32_t reap_backend_waiters(
+[[nodiscard]] bool deactivate_reader_locked(
+        SharedManifestEntry& manifest,
+        SharedManifestReader& reader) noexcept {
+    if (!reader.active) {
+        return false;
+    }
+    reader = SharedManifestReader{};
+    const std::uint32_t pins = pg_atomic_read_u32(&manifest.reader_pins);
+    if (pins != 0) {
+        static_cast<void>(pg_atomic_fetch_sub_u32(
+            &manifest.reader_pins, 1));
+        static_cast<void>(pg_atomic_fetch_sub_u64(
+            &g_shared->reader_reference_count, 1));
+    }
+    return true;
+}
+
+struct ReapedBackendReferences {
+    std::uint32_t readers = 0;
+    std::uint32_t waiters = 0;
+};
+
+[[nodiscard]] ReapedBackendReferences reap_backend_references(
         int owner_pid,
         std::uint32_t owner_proc_number) noexcept {
+    ReapedBackendReferences reaped{};
     if (g_shared == nullptr || g_storage_lock == nullptr
         || owner_pid <= 0
         || owner_proc_number
             == static_cast<std::uint32_t>(INVALID_PROC_NUMBER)) {
-        return 0;
+        return reaped;
     }
-    std::uint32_t reaped = 0;
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     for (SharedManifestEntry& manifest : g_shared->manifests) {
         if (manifest.state == ManifestState::Empty) {
             continue;
+        }
+        for (SharedManifestReader& reader : manifest.readers) {
+            if (reader.active
+                && reader.owner_pid == owner_pid
+                && reader.owner_proc_number == owner_proc_number
+                && deactivate_reader_locked(manifest, reader)) {
+                ++reaped.readers;
+            }
         }
         for (SharedManifestWaiter& waiter : manifest.waiters) {
             if (waiter.active
                 && waiter.owner_pid == owner_pid
                 && waiter.owner_proc_number == owner_proc_number
                 && deactivate_waiter_locked(manifest, waiter)) {
-                ++reaped;
+                ++reaped.waiters;
             }
         }
     }
@@ -925,11 +990,13 @@ void initialize_shared_state(
     pg_atomic_init_u64(&shared.next_block_sequence, 1);
     pg_atomic_init_u64(&shared.next_manifest_sequence, 1);
     pg_atomic_init_u64(&shared.next_waiter_sequence, 1);
+    pg_atomic_init_u64(&shared.next_reader_sequence, 1);
     pg_atomic_init_u64(&shared.next_file_id, 1);
     pg_atomic_init_u64(&shared.reserved_hot_bytes, 0);
     pg_atomic_init_u64(&shared.reserved_file_bytes, 0);
     pg_atomic_init_u64(&shared.manifest_count, 0);
     pg_atomic_init_u64(&shared.waiter_reference_count, 0);
+    pg_atomic_init_u64(&shared.reader_reference_count, 0);
     pg_atomic_init_u64(&shared.completed_sweeps, 0);
     pg_atomic_init_u64(&shared.last_sweep_at_us, 0);
     pg_atomic_init_u64(&shared.worker_heartbeat_at_us, 0);
@@ -957,7 +1024,7 @@ void initialize_shared_state(
 }
 
 void storage_backend_exit(int, Datum) {
-    static_cast<void>(reap_backend_waiters(
+    static_cast<void>(reap_backend_references(
         MyProcPid, static_cast<std::uint32_t>(MyProcNumber)));
     if (g_dsa != nullptr) {
         dsa_detach(g_dsa);
@@ -1011,6 +1078,16 @@ void storage_backend_exit(int, Datum) {
         && waiter.owner_pid == token.owner_pid
         && waiter.owner_proc_number == token.owner_proc_number
         && waiter.owner_sequence == token.owner_sequence;
+}
+
+[[nodiscard]] bool reader_pin_matches(
+        const SharedManifestReader& reader,
+        const ManifestPin& pin) noexcept {
+    return pin.reader_slot < kReaderPinsPerManifest
+        && reader.active
+        && reader.owner_pid == pin.owner_pid
+        && reader.owner_proc_number == pin.owner_proc_number
+        && reader.owner_sequence == pin.owner_sequence;
 }
 
 [[nodiscard]] StorageError allocate_ledger_slot(
@@ -1489,6 +1566,59 @@ void clear_unreserved_ledger_slot(
         }
     }
     LWLockRelease(g_storage_lock);
+    return StorageError::None;
+}
+
+[[nodiscard]] StorageError claim_manifest_reader_locked(
+        SharedManifestEntry& manifest,
+        const ManifestHandle& handle,
+        ManifestPin& pin,
+        std::int64_t accessed_at_us) noexcept {
+    std::uint32_t reader_slot = kInvalidSlot;
+    for (std::uint32_t index = 0; index < kReaderPinsPerManifest; ++index) {
+        if (!manifest.readers[index].active) {
+            reader_slot = index;
+            break;
+        }
+    }
+    if (reader_slot == kInvalidSlot
+        || pg_atomic_read_u32(&manifest.reader_pins)
+            == (std::numeric_limits<std::uint32_t>::max)()) {
+        return StorageError::ReaderFull;
+    }
+    std::uint64_t owner_sequence = pg_atomic_fetch_add_u64(
+        &g_shared->next_reader_sequence, 1);
+    if (owner_sequence == 0) {
+        owner_sequence = pg_atomic_fetch_add_u64(
+            &g_shared->next_reader_sequence, 1);
+    }
+    if (owner_sequence == 0) {
+        owner_sequence = 1;
+    }
+    SharedManifestReader& reader = manifest.readers[reader_slot];
+    reader = SharedManifestReader{
+        .active = true,
+        .owner_pid = MyProcPid,
+        .owner_proc_number = static_cast<std::uint32_t>(MyProcNumber),
+        .owner_sequence = owner_sequence,
+    };
+    static_cast<void>(pg_atomic_fetch_add_u32(&manifest.reader_pins, 1));
+    static_cast<void>(pg_atomic_fetch_add_u64(
+        &g_shared->reader_reference_count, 1));
+    pg_atomic_write_u64(&manifest.last_access_at_us, accessed_at_us);
+    pin.handle = handle;
+    pin.kind = manifest.kind;
+    pin.flags = manifest.flags;
+    pin.logical_bytes = manifest.logical_bytes;
+    pin.row_count = manifest.row_count;
+    pin.block_count = manifest.block_count;
+    pin.reader_slot = reader_slot;
+    pin.owner_proc_number = reader.owner_proc_number;
+    pin.owner_pid = reader.owner_pid;
+    pin.owner_sequence = reader.owner_sequence;
+    for (std::uint32_t index = 0; index < manifest.block_count; ++index) {
+        pin.blocks[index] = manifest.blocks[index];
+    }
     return StorageError::None;
 }
 
@@ -2013,27 +2143,13 @@ PinManifestResult pin_manifest(
             result.error = StorageError::NotFound;
             return result;
         }
-        if (pg_atomic_read_u32(&manifest.reader_pins)
-            == (std::numeric_limits<std::uint32_t>::max)()) {
-            LWLockRelease(g_storage_lock);
-            result.error = StorageError::InvalidState;
-            return result;
-        }
-        static_cast<void>(pg_atomic_fetch_add_u32(&manifest.reader_pins, 1));
-        pg_atomic_write_u64(&manifest.last_access_at_us, now);
-        result.pin.handle = ManifestHandle{
+        const ManifestHandle handle{
             .slot = index,
             .slot_sequence = manifest.slot_sequence,
             .id = manifest.id,
         };
-        result.pin.kind = manifest.kind;
-        result.pin.flags = manifest.flags;
-        result.pin.logical_bytes = manifest.logical_bytes;
-        result.pin.row_count = manifest.row_count;
-        result.pin.block_count = manifest.block_count;
-        for (std::uint32_t block = 0; block < manifest.block_count; ++block) {
-            result.pin.blocks[block] = manifest.blocks[block];
-        }
+        result.error = claim_manifest_reader_locked(
+            manifest, handle, result.pin, now);
         LWLockRelease(g_storage_lock);
         return result;
     }
@@ -2135,41 +2251,39 @@ PinManifestResult convert_waiter_to_pin(
     if (!handle_matches(manifest, token.handle)
         || manifest.state != ManifestState::Complete
         || !waiter_token_matches(waiter, token)
-        || !waiter.active
-        || pg_atomic_read_u32(&manifest.reader_pins)
-            == (std::numeric_limits<std::uint32_t>::max)()) {
+        || !waiter.active) {
         LWLockRelease(g_storage_lock);
         result.error = StorageError::NotFound;
         return result;
     }
-    static_cast<void>(deactivate_waiter_locked(manifest, waiter));
-    static_cast<void>(pg_atomic_fetch_add_u32(&manifest.reader_pins, 1));
-    pg_atomic_write_u64(&manifest.last_access_at_us, current_time_us());
-    result.pin.handle = token.handle;
-    result.pin.kind = manifest.kind;
-    result.pin.flags = manifest.flags;
-    result.pin.logical_bytes = manifest.logical_bytes;
-    result.pin.row_count = manifest.row_count;
-    result.pin.block_count = manifest.block_count;
-    for (std::uint32_t index = 0; index < manifest.block_count; ++index) {
-        result.pin.blocks[index] = manifest.blocks[index];
+    const std::int64_t accessed_at = current_time_us();
+    result.error = claim_manifest_reader_locked(
+        manifest, token.handle, result.pin, accessed_at);
+    if (result.error != StorageError::None) {
+        LWLockRelease(g_storage_lock);
+        return result;
     }
+    static_cast<void>(deactivate_waiter_locked(manifest, waiter));
     LWLockRelease(g_storage_lock);
     return result;
 }
 
 StorageError unpin_manifest(const ManifestPin& pin) noexcept {
-    if (!storage_ready() || !pin || pin.handle.slot >= kManifestCapacity) {
+    if (!storage_ready() || !pin || pin.handle.slot >= kManifestCapacity
+        || pin.owner_pid != MyProcPid
+        || pin.owner_proc_number
+            != static_cast<std::uint32_t>(MyProcNumber)) {
         return StorageError::InvalidArgument;
     }
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     SharedManifestEntry& manifest = g_shared->manifests[pin.handle.slot];
+    SharedManifestReader& reader = manifest.readers[pin.reader_slot];
     if (!handle_matches(manifest, pin.handle)
-        || pg_atomic_read_u32(&manifest.reader_pins) == 0) {
+        || !reader_pin_matches(reader, pin)) {
         LWLockRelease(g_storage_lock);
         return StorageError::StaleToken;
     }
-    static_cast<void>(pg_atomic_fetch_sub_u32(&manifest.reader_pins, 1));
+    static_cast<void>(deactivate_reader_locked(manifest, reader));
     LWLockRelease(g_storage_lock);
     return StorageError::None;
 }
@@ -2271,16 +2385,30 @@ JanitorSweepResult janitor_sweep(
         &g_shared->sweep_requested, 0);
     aggressive = aggressive || requested > 1;
 
-    /* Owner tokens make waiter recovery exact: only a dead PID+ProcNumber
-     * pair can release an entitlement that its backend did not consume. */
+    /* Owner tokens make reference recovery exact: only a dead PID+ProcNumber
+     * pair can release a pin or entitlement its backend did not consume. */
     LWLockAcquire(g_storage_lock, LW_EXCLUSIVE);
     for (SharedManifestEntry& manifest : g_shared->manifests) {
         if (manifest.state == ManifestState::Empty
-            || result.reaped_waiters >= g_shared->reclaim_batch) {
+            || result.reaped_readers + result.reaped_waiters
+                >= g_shared->reclaim_batch) {
             continue;
         }
+        for (SharedManifestReader& reader : manifest.readers) {
+            if (result.reaped_readers + result.reaped_waiters
+                >= g_shared->reclaim_batch) {
+                break;
+            }
+            if (reader.active
+                && !process_alive(
+                    reader.owner_pid, reader.owner_proc_number)
+                && deactivate_reader_locked(manifest, reader)) {
+                ++result.reaped_readers;
+            }
+        }
         for (SharedManifestWaiter& waiter : manifest.waiters) {
-            if (result.reaped_waiters >= g_shared->reclaim_batch) {
+            if (result.reaped_readers + result.reaped_waiters
+                >= g_shared->reclaim_batch) {
                 break;
             }
             if (waiter.active
@@ -2531,6 +2659,8 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
     snapshot.manifest_count = pg_atomic_read_u64(&g_shared->manifest_count);
     snapshot.waiter_reference_count = pg_atomic_read_u64(
         &g_shared->waiter_reference_count);
+    snapshot.reader_reference_count = pg_atomic_read_u64(
+        &g_shared->reader_reference_count);
     snapshot.completed_sweeps = pg_atomic_read_u64(
         &g_shared->completed_sweeps);
     snapshot.last_sweep_at_us = static_cast<std::int64_t>(
@@ -2566,26 +2696,77 @@ StorageTierTestSnapshot test_storage_tier_snapshot() noexcept {
     if (!attach_storage()) {
         return snapshot;
     }
+    bool known_states = true;
+    std::uint64_t accounted_blocks = 0;
+    const auto add_reserved_bytes = [&](std::uint64_t& total,
+                                        std::uint64_t bytes) noexcept {
+        if (total > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+            known_states = false;
+            return;
+        }
+        total += bytes;
+    };
+    LWLockAcquire(g_storage_lock, LW_SHARED);
     snapshot.force_file_tier =
         pg_atomic_read_u32(&g_shared->force_file_tier) != 0;
-    snapshot.reserved_hot_bytes =
-        pg_atomic_read_u64(&g_shared->reserved_hot_bytes);
-    snapshot.reserved_file_bytes =
-        pg_atomic_read_u64(&g_shared->reserved_file_bytes);
-    LWLockAcquire(g_storage_lock, LW_SHARED);
     for (const BlockLedgerEntry& entry : g_shared->block_ledger) {
-        if ((entry.state != BlockLedgerState::Stored
-             && entry.state != BlockLedgerState::Referenced
-             && entry.state != BlockLedgerState::Retiring)
-            || entry.reference.length == 0) {
+        if (entry.state == BlockLedgerState::Empty) {
             continue;
         }
-        if (entry.reference.tier == BlockBackingTierV1::Dsa) {
+        ++snapshot.occupied_blocks;
+        switch (entry.state) {
+            case BlockLedgerState::Reserved:
+                ++snapshot.reserved_blocks;
+                break;
+            case BlockLedgerState::Stored:
+                ++snapshot.stored_blocks;
+                break;
+            case BlockLedgerState::Referenced:
+                ++snapshot.referenced_blocks;
+                break;
+            case BlockLedgerState::Retiring:
+                ++snapshot.retiring_blocks;
+                break;
+            case BlockLedgerState::ReleaseCommitted:
+                ++snapshot.release_committed_blocks;
+                break;
+            case BlockLedgerState::Empty:
+                break;
+            default:
+                known_states = false;
+                break;
+        }
+        if (!entry.reservation_accounted) {
+            continue;
+        }
+        ++accounted_blocks;
+        if (entry.reservation_tier == BlockBackingTierV1::Dsa) {
             ++snapshot.dsa_blocks;
-        } else if (entry.reference.tier == BlockBackingTierV1::File) {
+            add_reserved_bytes(
+                snapshot.reserved_hot_bytes, entry.reserved_bytes);
+        } else if (entry.reservation_tier == BlockBackingTierV1::File) {
             ++snapshot.file_blocks;
+            add_reserved_bytes(
+                snapshot.reserved_file_bytes, entry.reserved_bytes);
+        } else {
+            known_states = false;
         }
     }
+    for (const SharedManifestEntry& manifest : g_shared->manifests) {
+        if (manifest.state != ManifestState::Empty) {
+            snapshot.reader_pins += atomic_read(manifest.reader_pins);
+        }
+    }
+    const std::uint64_t state_total = snapshot.reserved_blocks
+        + snapshot.stored_blocks
+        + snapshot.referenced_blocks
+        + snapshot.retiring_blocks
+        + snapshot.release_committed_blocks;
+    snapshot.coherent = known_states
+        && state_total == snapshot.occupied_blocks
+        && snapshot.dsa_blocks + snapshot.file_blocks == accounted_blocks
+        && snapshot.reader_pins
+            == pg_atomic_read_u64(&g_shared->reader_reference_count);
     LWLockRelease(g_storage_lock);
     return snapshot;
 }
