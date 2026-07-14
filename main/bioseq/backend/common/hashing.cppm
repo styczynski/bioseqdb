@@ -3,7 +3,6 @@
  * @brief Small exported 64-bit hashing helpers shared by logging and caches.
  */
 module;
-#include "common.h"
 
 #include <cstdint>
 #include <string_view>

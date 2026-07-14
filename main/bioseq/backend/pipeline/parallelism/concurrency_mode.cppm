@@ -3,7 +3,6 @@
  * @brief Runtime pipeline concurrency mode helpers.
  */
 module;
-#include "common.h"
 
 #include <cstdint>
 #include <string_view>

@@ -3,7 +3,6 @@
  * @brief Small no-Postgres callable and stats types used by the global pool.
  */
 module;
-#include "common.h"
 
 #include <atomic>
 #include <concepts>

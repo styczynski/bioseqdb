@@ -11,7 +11,7 @@ For modes list see MODES dict.
 
 Concurrency rules:
     - At most one run per "lock group" at a time.
-    - "tests"  group covers unit+integration.
+    - "tests"  group covers unit+integration and external-api.
     - "bench"  group covers bench and bench-fast (they share the binary and
       the reporting/ output directory, so concurrent runs would race).
     - Different lock groups can run in parallel unless both runs install/restart
@@ -151,6 +151,8 @@ TEST_DEBUG_BUILD_PRESET = os.environ.get(
     "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
     _default_test_preset(DEBUG_BUILD_PRESET),
 )
+EXTERNAL_API_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
@@ -169,6 +171,14 @@ def bin_dir_for(debug: bool) -> Path:
 
 
 def preset_for_mode(mode: str, debug: bool) -> str:
+    # A mode may pin an explicit preset (e.g. external-api → GCC16 toolchain);
+    # an override wins outright and is not split into debug/production families.
+    mode_details = MODES.get(mode)
+    if mode_details is not None and mode_details.preset_override:
+        return mode_details.preset_override
+    # unit+integration builds against the isolated test preset family so the
+    # guarded failure hooks / test-only indexes never leak into a production
+    # (benchmark) tree.
     if mode == "unit+integration":
         selected = TEST_DEBUG_BUILD_PRESET if debug else TEST_BUILD_PRESET
         production = preset_for(debug)
@@ -449,9 +459,9 @@ class ModeDefinition:
     """
     Two runs with the same lock group cannot run in parallel. bench and
     bench-fast share the same binary + reporting/ directory, so they're
-    grouped together; unit+integration is its own group. Runtime modes that
-    install/restart the shared PostgreSQL instance also conflict across lock
-    groups, while build-only runs remain independent.
+    grouped together; unit+integration and external-api share the "tests"
+    group. Runtime modes that install/restart the shared PostgreSQL instance
+    also conflict across lock groups, while build-only runs remain independent.
     """
     lock_group: str
     """
@@ -489,6 +499,10 @@ class ModeDefinition:
     stale, previously-installed extension. Requires 'postgresql_bioseq' to be in
     `targets` so the dylib exists at install time."""
     install_extension: bool = False
+    """Optional dedicated CMake preset instead of the server-wide preset."""
+    preset_override: Optional[str] = None
+    """Cache entries that must be set before this mode's targets exist."""
+    required_cache_variables: Optional[Dict[str, str]] = None
 
     @property
     def verb_is(self) -> str:
@@ -505,6 +519,21 @@ class ModeDefinition:
         return REPORTING_DIR / self.reporting_subdir_name
 
 MODES: Dict[str, ModeDefinition] = {
+    "external-api": ModeDefinition(
+        lock_group="tests",
+        expected_duration_min=8.0,
+        build_only_expected_duration_min=5.0,
+        label="External API integration tests",
+        docs="Build and run generated external API clients without sequence or PostgreSQL targets",
+        is_verb_plular=True,
+        targets=["bioseq_external_integration_tests_exec"],
+        commands=[
+            ["bioseq_external_integration_tests_exec",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+        ],
+        preset_override=EXTERNAL_API_BUILD_PRESET,
+        required_cache_variables={"BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON"},
+    ),
     "unit+integration": ModeDefinition(
         lock_group="tests",
         expected_duration_min=120.0,
@@ -585,6 +614,7 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
+
 
 def get_modes_short_documentation() -> str:
     modes_list_str = ", ".join([f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min and ~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)" for mode in VALID_MODES])
@@ -1077,9 +1107,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     by `_stream_subprocess` against `started_at + HARD_TIMEOUT_SEC`.
 
     Unit/integration mode resolves to the isolated test preset family; benchmark
-    modes resolve to the production preset family. `debug=True` selects that
-    family's debug/inspect tree with per-TU `.s`/`.bc` and DWARF artefacts;
-    `debug=False` selects its lean everyday tree.
+    modes resolve to the production preset family; a mode with `preset_override`
+    (e.g. external-api → GCC 16) pins its own preset outright. `debug=True`
+    selects that family's debug/inspect tree with per-TU `.s`/`.bc` and DWARF
+    artefacts; `debug=False` selects its lean everyday tree.
 
     `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
     '--debug']) appended only to bench-mode commands (§5.4).
@@ -1145,6 +1176,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
         # when CMakeLists / cache / vcpkg manifest actually change, so a later
         # `cmake --build` still picks up genuine configuration changes.
+        required_cache = mode_details.required_cache_variables or {}
+        required_cache_args = [
+            f"-D{name}={value}" for name, value in required_cache.items()
+        ]
         build_ninja = active_build_dir / "build.ninja"
         expected_test_indexes = mode == "unit+integration"
         if not build_ninja.exists():
@@ -1155,7 +1190,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "previous configure did not produce build.ninja",
                 )
             rc = _stream_subprocess(
-                ["cmake", "--preset", active_preset],
+                ["cmake", "--preset", active_preset, *required_cache_args],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
             )
             if rc != 0:
@@ -1190,6 +1225,26 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "redundant `cmake --preset` to avoid a full C++-module "
                     "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
                 log_handle.flush()
+
+        cache_repairs = {
+            name: value
+            for name, value in required_cache.items()
+            if _cmake_cache_value(active_build_dir, name) != value
+        }
+        if cache_repairs:
+            repair_description = ", ".join(
+                f"{name}={value}" for name, value in cache_repairs.items())
+            log_handle.write(
+                f"# mode cache enable: setting {repair_description}.\n")
+            log_handle.flush()
+            rc = _stream_subprocess(
+                ["cmake", "--preset", active_preset,
+                 *(f"-D{name}={value}" for name, value in cache_repairs.items())],
+                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    f"mode cache enable exited with code {rc}")
 
         if _is_aws_preset(active_preset):
             if (
@@ -3982,8 +4037,8 @@ TOOL_DEFINITIONS += [
             "commit (unless sync=false), then runs the operation on the box using "
             "the box-side server.py with the aws-x64-linux preset. " + _FROM_SCRATCH_WARNING + "\n\n"
             "Two operation shapes (oneOf):\n"
-            "  operation='build' — runs one start_build mode (unit+integration, "
-            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
+            "  operation='build' — runs one start_build mode (external-api, "
+            "unit+integration, bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug/"
             "filter/debug_report semantics as the local start_build tool.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
             "same parameters as the local inspect tool.\n\n"

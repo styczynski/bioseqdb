@@ -3,9 +3,21 @@
 # target.
 
 include(FetchContent)
+set(_bioseq_io_build_testing_was_defined FALSE)
+if(DEFINED BUILD_TESTING)
+  set(_bioseq_io_build_testing_was_defined TRUE)
+  set(_bioseq_io_saved_build_testing "${BUILD_TESTING}")
+endif()
 set(BUILD_TESTING OFF)
 FetchContent_Declare(kseq++ GIT_REPOSITORY https://github.com/cartoonist/kseqpp.git GIT_TAG v1.1.2)
 FetchContent_MakeAvailable(kseq++)
+if(_bioseq_io_build_testing_was_defined)
+  set(BUILD_TESTING "${_bioseq_io_saved_build_testing}")
+else()
+  unset(BUILD_TESTING)
+endif()
+unset(_bioseq_io_saved_build_testing)
+unset(_bioseq_io_build_testing_was_defined)
 
 # kseq++'s upstream CMakeLists hard-requires BZip2 and chains its
 # INTERFACE_INCLUDE_DIRECTORIES through the kseq++ target, even though
