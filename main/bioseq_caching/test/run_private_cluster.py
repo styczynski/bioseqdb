@@ -104,7 +104,11 @@ class UniquePrivateCluster:
         suffix = uuid.uuid4().hex[:10]
         self.run_dir = inputs.output_root / f"{inputs.kind}_{stamp}_{os.getpid()}_{suffix}"
         self.data_dir = self.run_dir / "data"
-        self.socket_dir = self.run_dir / "socket"
+        # AF_UNIX socket paths are capped at 107 bytes on Linux. Keep the socket
+        # directory short even when the retained build-tree log path is deep.
+        self.socket_dir = Path(
+            tempfile.mkdtemp(prefix=f"bqc_{os.getpid()}_", dir=tempfile.gettempdir())
+        )
         self.runner_output_dir = self.run_dir / "runner"
         self.server_log = self.run_dir / "server_startup.log"
         self.lifecycle_log = self.run_dir / "lifecycle.log"
@@ -149,7 +153,6 @@ class UniquePrivateCluster:
 
     def start(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=False)
-        self.socket_dir.mkdir(mode=0o700)
         self.runner_output_dir.mkdir()
         self._append_lifecycle(f"initializing data directory {self.data_dir}")
         _run_checked(
