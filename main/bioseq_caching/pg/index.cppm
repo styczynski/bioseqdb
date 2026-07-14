@@ -1496,6 +1496,18 @@ static_assert(std::is_trivially_copyable_v<CoverageCurrentPlanHeaderV1>);
     };
 }
 
+[[nodiscard]] bytea* copy_bytea_payload(
+        std::span<const std::byte> bytes) {
+    if (bytes.empty()
+        || bytes.size() > static_cast<std::size_t>(MaxAllocSize - VARHDRSZ)) {
+        return nullptr;
+    }
+    auto* result = static_cast<bytea*>(palloc(VARHDRSZ + bytes.size()));
+    SET_VARSIZE(result, VARHDRSZ + bytes.size());
+    std::memcpy(VARDATA(result), bytes.data(), bytes.size());
+    return result;
+}
+
 /** Persist current exact-generation identity for executor-time claiming. */
 [[nodiscard]] Const* make_current_coverage_plan_node(
         const provider_registry::ProviderV1& provider,
@@ -1612,6 +1624,12 @@ struct PlannerPinReleaseV1 {
     ReusableReferenceTokenV1 token{};
 };
 
+struct PlannerCandidateBytesV1 {
+    bytea* canonical_domain_key = nullptr;
+    bytea* canonical_generation_key = nullptr;
+    bytea* coverage_descriptor = nullptr;
+};
+
 /** Planner-context callback target; idempotent token clearing prevents leaks. */
 void release_planner_pin_noerror(
         void* opaque, const CacheEntryId&,
@@ -1702,9 +1720,16 @@ void release_planner_pin_noerror(
         .compatibility_family_id = described.value.compatibility_family_id,
         .required_capability_mask = described.value.capability_mask,
     };
+    auto* candidate_bytes = static_cast<PlannerCandidateBytesV1*>(
+        MemoryContextAllocZero(
+            planner_context,
+            sizeof(PlannerCandidateBytesV1)
+                * kMaxCoverageGenerationsPerDomain));
+    LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
     auto candidate_result = snapshot_reusable_candidates(
         g_reusable_registry, request, reusable_partition_callbacks());
     if (!candidate_result.has_value()) {
+        LWLockRelease(g_reusable_membership_lock);
         return false;
     }
     ReusableCandidateBatchV1 candidates = *candidate_result;
@@ -1727,21 +1752,58 @@ void release_planner_pin_noerror(
                 reuse::release_candidate_reference_noerror(
                     release_records[release_index]);
             }
+            LWLockRelease(g_reusable_membership_lock);
             return false;
         }
     }
+
+    PG_TRY();
+    {
+        MemoryContext old_context = MemoryContextSwitchTo(planner_context);
+        for (std::size_t index = 0;
+             index < candidates.candidate_count;
+             ++index) {
+            const ReusableGenerationSnapshotV1& generation =
+                candidates.candidates[index].generation;
+            candidate_bytes[index].canonical_domain_key = copy_bytea_payload(
+                reusable_shared_bytes(
+                    g_reusable_registry,
+                    generation.canonical_domain_key));
+            candidate_bytes[index].canonical_generation_key =
+                copy_bytea_payload(reusable_shared_bytes(
+                    g_reusable_registry,
+                    generation.canonical_generation_key));
+            candidate_bytes[index].coverage_descriptor = copy_bytea_payload(
+                reusable_shared_bytes(
+                    g_reusable_registry,
+                    generation.coverage_descriptor));
+            if (candidate_bytes[index].canonical_domain_key == nullptr
+                || candidate_bytes[index].canonical_generation_key == nullptr
+                || candidate_bytes[index].coverage_descriptor == nullptr) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq cache candidate bytes are unavailable")));
+            }
+        }
+        MemoryContextSwitchTo(old_context);
+        LWLockRelease(g_reusable_membership_lock);
+    }
+    PG_CATCH();
+    {
+        LWLockRelease(g_reusable_membership_lock);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     std::array<reuse::CoverageCandidateViewV1,
         kMaxCoverageGenerationsPerDomain> candidate_views{};
     for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
         const ReusableCandidateSnapshotV1& candidate =
             candidates.candidates[index];
-        const auto domain_bytes = reusable_shared_bytes(
-            g_reusable_registry,
-            candidate.generation.canonical_domain_key);
-        const auto generation_bytes = reusable_shared_bytes(
-            g_reusable_registry,
-            candidate.generation.canonical_generation_key);
+        const auto domain_bytes = bytea_payload(
+            candidate_bytes[index].canonical_domain_key);
+        const auto generation_bytes = bytea_payload(
+            candidate_bytes[index].canonical_generation_key);
         const bool is_current_exact = reuse::exact_current_key_equal(
             keys.generation_digest,
             bytea_payload(keys.canonical_generation_key),
@@ -1795,9 +1857,8 @@ void release_planner_pin_noerror(
         }
         const ReusableCandidateSnapshotV1& candidate =
             candidates.candidates[index];
-        const auto descriptor_bytes = reusable_shared_bytes(
-            g_reusable_registry,
-            candidate.generation.coverage_descriptor);
+        const auto descriptor_bytes = bytea_payload(
+            candidate_bytes[index].coverage_descriptor);
         PlannerDecodedCoverageV1 decoded{};
         if (!decode_coverage_descriptor_fail_open(
                 descriptor_bytes, planner_context, &decoded)) {
@@ -1809,9 +1870,12 @@ void release_planner_pin_noerror(
             std::as_bytes(std::span{
                 &candidate.generation.reference,
                 std::size_t{1}}));
+        Const* generation_key_node = make_binary_node(
+            bytea_payload(candidate_bytes[index].canonical_generation_key));
         Const* descriptor_node = make_binary_node(descriptor_bytes);
         reuse::PlannerGateNodesV1 gate{};
-        if (reference_node == nullptr || descriptor_node == nullptr
+        if (reference_node == nullptr || generation_key_node == nullptr
+            || descriptor_node == nullptr
             || !reuse::build_planner_gate_nodes(
                 root, decoded.domain.coverage_predicate, &gate)) {
             reuse::release_candidate_reference_noerror(
@@ -1836,9 +1900,12 @@ void release_planner_pin_noerror(
         }
         List* source_private = list_make5(
             reference_node,
+            generation_key_node,
             descriptor_node,
             mapping_node,
-            copyObject(mapping.value.provider_private_nodes),
+            copyObject(mapping.value.provider_private_nodes));
+        source_private = lappend(
+            source_private,
             makeInteger(gate.param_id));
         source_private = lappend(
             source_private,
@@ -4346,13 +4413,13 @@ void coverage_begin_custom_scan(
     ListCell* cell = nullptr;
     foreach(cell, candidates) {
         const auto* source = static_cast<const List*>(lfirst(cell));
-        if (source == nullptr || list_length(source) != 6
-            || !IsA(list_nth(source, 4), Integer)) {
+        if (source == nullptr || list_length(source) != 7
+            || !IsA(list_nth(source, 5), Integer)) {
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("BioseqReusableCoverageScan source metadata is invalid")));
         }
-        gate_ids[gate_index++] = intVal(list_nth(source, 4));
+        gate_ids[gate_index++] = intVal(list_nth(source, 5));
     }
 
     const int provider_id = scan->custom_private != NIL
@@ -4559,12 +4626,12 @@ Plan* coverage_plan_custom_path(
     ListCell* cell = nullptr;
     foreach(cell, sources) {
         const auto* source = static_cast<const List*>(lfirst(cell));
-        if (source == nullptr || list_length(source) != 6) {
+        if (source == nullptr || list_length(source) != 7) {
             return nullptr;
         }
         scan->custom_exprs = lappend(
             scan->custom_exprs,
-            copyObject(list_nth(source, 5)));
+            copyObject(list_nth(source, 6)));
     }
     scan->custom_scan_tlist = static_cast<List*>(
         copyObject(child->targetlist));
