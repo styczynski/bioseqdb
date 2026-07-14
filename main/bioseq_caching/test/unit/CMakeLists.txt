@@ -11,6 +11,7 @@ set_target_properties(bioseq_cache_unit_tests PROPERTIES
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS ON
   CXX_MODULE_STD ON
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching"
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(bioseq_cache_unit_tests

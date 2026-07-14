@@ -117,6 +117,9 @@
         "description": "Cache-only C++26 module tree with deterministic test hooks; skips Bioseq sequence, GPU, paper and benchmark dependencies.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
+          "VCPKG_TARGET_TRIPLET": null,
+          "CMAKE_OSX_ARCHITECTURES": null,
+          "VCPKG_TARGET_ARCHITECTURE": null,
           "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
           "BIOSEQ_BUILD_CORE": "OFF",
           "BIOSEQ_BUILD_CACHE": "ON",
@@ -132,6 +135,9 @@
         "description": "Debug-artifact analogue of cache-opt with DWARF and per-module compiler outputs for MCP inspect.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
+          "VCPKG_TARGET_TRIPLET": null,
+          "CMAKE_OSX_ARCHITECTURES": null,
+          "VCPKG_TARGET_ARCHITECTURE": null,
           "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
           "BIOSEQ_BUILD_CORE": "OFF",
           "BIOSEQ_BUILD_CACHE": "ON",
