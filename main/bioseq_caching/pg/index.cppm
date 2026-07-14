@@ -92,8 +92,8 @@ import bioseq.cache.pg.storage;
 namespace bioseq::cache::pg {
 
 inline constexpr std::uint32_t kSharedMagic = 0x42535143U; /* BSQC */
-inline constexpr std::uint32_t kSharedAbiVersion = 2;
-inline constexpr char kSharedName[] = "bioseq_cache shared state v2";
+inline constexpr std::uint32_t kSharedAbiVersion = 3;
+inline constexpr char kSharedName[] = "bioseq_cache shared state v3";
 inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr std::size_t kRegistryCapacity = 64;
 inline constexpr std::size_t kMaximumKeyBytes = 64U * 1024U;
@@ -228,6 +228,17 @@ enum class SharedEntryState : std::uint32_t {
     Retired = 4,
 };
 
+struct RegistryWaiterOwner {
+    bool active;
+    std::uint8_t reserved8[3];
+    int owner_pid;
+    std::uint32_t owner_proc_number;
+    std::uint32_t reserved32;
+    std::uint64_t registration_sequence;
+    TimestampTz registered_at;
+    storage::ManifestWaiterToken storage_token;
+};
+
 /** One bounded registry record. Full key bytes make hash collisions harmless. */
 struct CacheEntry {
     SharedEntryState state;
@@ -244,6 +255,7 @@ struct CacheEntry {
     ProcNumber producer_proc_number;
     std::uint32_t waiter_count;
     std::uint32_t reader_count;
+    RegistryWaiterOwner waiters[storage::kWaitersPerManifest];
     TimestampTz created_at;
     TimestampTz completed_at;
     TimestampTz expires_at;
@@ -280,6 +292,7 @@ struct CacheSharedState {
     pg_atomic_uint32 last_committed_write_xid;
     pg_atomic_uint32 database_transition_count;
     pg_atomic_uint64 next_claim_sequence;
+    pg_atomic_uint64 next_registry_waiter_sequence;
     ConditionVariable database_changed;
     CacheSharedStats stats;
 #if defined(BIOSEQ_CACHE_TESTING)
@@ -355,6 +368,7 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
         &shared.last_committed_write_xid, InvalidTransactionId);
     pg_atomic_init_u32(&shared.database_transition_count, 0);
     pg_atomic_init_u64(&shared.next_claim_sequence, 1);
+    pg_atomic_init_u64(&shared.next_registry_waiter_sequence, 1);
     ConditionVariableInit(&shared.database_changed);
     pg_atomic_init_u64(&shared.stats.produced, 0);
     pg_atomic_init_u64(&shared.stats.completed_hits, 0);
@@ -1104,6 +1118,7 @@ struct BioseqCacheState {
     std::uint64_t logical_bytes;
     CacheEntryId entry_id;
     storage::ManifestHandle manifest_handle;
+    storage::ManifestWaiterToken manifest_waiter_token;
     storage::ManifestPin manifest_pin;
     std::array<storage::StoredBlockToken,
         storage::kBlocksPerManifest> stored_tokens;
@@ -1524,7 +1539,19 @@ struct RegistryDecision {
     std::uint64_t generation = 0;
     CacheEntryId entry_id{};
     storage::ManifestHandle manifest_handle{};
-    bool waiter_entitled = false;
+    storage::ManifestWaiterToken manifest_waiter_token{};
+};
+
+struct RegistryWaiterClaim {
+    std::uint32_t slot =
+        (std::numeric_limits<std::uint32_t>::max)();
+    std::uint32_t reserved = 0;
+    std::uint64_t registration_sequence = 0;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return slot < storage::kWaitersPerManifest
+            && registration_sequence != 0;
+    }
 };
 
 [[nodiscard]] CacheEntryId cache_entry_id(const CacheEntry& entry) noexcept {
@@ -1544,6 +1571,104 @@ struct RegistryDecision {
             &g_shared->next_claim_sequence, 1);
     }
     return sequence == 0 ? 1 : sequence;
+}
+
+[[nodiscard]] bool registry_owner_alive(
+        int owner_pid,
+        std::uint32_t owner_proc_number) noexcept {
+    if (owner_pid <= 0
+        || owner_proc_number
+            >= static_cast<std::uint32_t>(ProcGlobal->allProcCount)) {
+        return false;
+    }
+    PGPROC* owner = ProcNumberGetProc(
+        static_cast<ProcNumber>(owner_proc_number));
+    return owner != nullptr && owner->pid == owner_pid;
+}
+
+void clear_registry_waiter_locked(
+        CacheEntry& entry,
+        RegistryWaiterOwner& waiter) noexcept {
+    if (!waiter.active) {
+        return;
+    }
+    waiter = RegistryWaiterOwner{};
+    if (entry.waiter_count > 0) {
+        --entry.waiter_count;
+    }
+}
+
+void reap_dead_registry_waiters_locked(
+        CacheEntry& entry,
+        bool storage_attached) noexcept {
+    for (RegistryWaiterOwner& waiter : entry.waiters) {
+        if (!waiter.active
+            || registry_owner_alive(
+                waiter.owner_pid, waiter.owner_proc_number)) {
+            continue;
+        }
+        if (waiter.storage_token) {
+            if (!storage_attached) {
+                continue;
+            }
+            static_cast<void>(storage::unregister_manifest_waiter(
+                waiter.storage_token));
+        }
+        clear_registry_waiter_locked(entry, waiter);
+    }
+}
+
+[[nodiscard]] RegistryWaiterClaim claim_registry_waiter_locked(
+        CacheEntry& entry) noexcept {
+    for (std::uint32_t index = 0;
+         index < storage::kWaitersPerManifest; ++index) {
+        RegistryWaiterOwner& waiter = entry.waiters[index];
+        if (waiter.active) {
+            continue;
+        }
+        std::uint64_t sequence = pg_atomic_fetch_add_u64(
+            &g_shared->next_registry_waiter_sequence, 1);
+        if (sequence == 0) {
+            sequence = pg_atomic_fetch_add_u64(
+                &g_shared->next_registry_waiter_sequence, 1);
+        }
+        if (sequence == 0) {
+            sequence = 1;
+        }
+        waiter = RegistryWaiterOwner{
+            .active = true,
+            .owner_pid = MyProcPid,
+            .owner_proc_number = static_cast<std::uint32_t>(MyProcNumber),
+            .registration_sequence = sequence,
+            .registered_at = GetCurrentTimestamp(),
+        };
+        ++entry.waiter_count;
+        return RegistryWaiterClaim{
+            .slot = index,
+            .registration_sequence = sequence,
+        };
+    }
+    return {};
+}
+
+[[nodiscard]] bool take_registry_waiter_locked(
+        CacheEntry& entry,
+        const RegistryWaiterClaim& claim,
+        storage::ManifestWaiterToken& token) noexcept {
+    if (!claim) {
+        return false;
+    }
+    RegistryWaiterOwner& waiter = entry.waiters[claim.slot];
+    if (!waiter.active
+        || waiter.registration_sequence != claim.registration_sequence
+        || waiter.owner_pid != MyProcPid
+        || waiter.owner_proc_number
+            != static_cast<std::uint32_t>(MyProcNumber)) {
+        return false;
+    }
+    token = waiter.storage_token;
+    clear_registry_waiter_locked(entry, waiter);
+    return true;
 }
 
 /** Compare every key byte after the hash bucket shortcut. */
@@ -1575,10 +1700,11 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
 
 /** Wait for a matching producer; pre-existing waiters may consume TTL-zero. */
 [[nodiscard]] RegistryDecision wait_for_producer(
-        int index, std::uint64_t generation) {
+        int index, std::uint64_t generation,
+        const RegistryWaiterClaim& waiter_claim) {
     RegistryDecision decision{};
     CacheEntry& entry = g_shared->entries[index];
-    storage::ManifestHandle waiter_to_release{};
+    storage::ManifestWaiterToken waiter_to_release{};
     ConditionVariablePrepareToSleep(&entry.changed);
     PG_TRY();
     {
@@ -1590,25 +1716,29 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 || entry.state == SharedEntryState::Failed
                 || entry.state == SharedEntryState::Retired
                 || entry.state == SharedEntryState::Empty) {
-                if (entry.generation == generation && entry.waiter_count > 0) {
-                    --entry.waiter_count;
-                    waiter_to_release = entry.manifest_handle;
+                if (entry.generation == generation) {
+                    static_cast<void>(take_registry_waiter_locked(
+                        entry, waiter_claim, waiter_to_release));
                 }
                 LWLockRelease(g_registry_lock);
                 break;
             }
             if (entry.state == SharedEntryState::Complete) {
-                if (entry.waiter_count > 0) {
-                    --entry.waiter_count;
+                storage::ManifestWaiterToken waiter_token{};
+                const bool claimed = take_registry_waiter_locked(
+                    entry, waiter_claim, waiter_token);
+                if (claimed && waiter_token) {
+                    ++entry.reader_count;
+                    ++entry.hits;
+                    decision.role = RuntimeRole::Consumer;
+                    decision.index = index;
+                    decision.generation = generation;
+                    decision.entry_id = cache_entry_id(entry);
+                    decision.manifest_handle = entry.manifest_handle;
+                    decision.manifest_waiter_token = waiter_token;
+                } else if (waiter_token) {
+                    waiter_to_release = waiter_token;
                 }
-                ++entry.reader_count;
-                ++entry.hits;
-                decision.role = RuntimeRole::Consumer;
-                decision.index = index;
-                decision.generation = generation;
-                decision.entry_id = cache_entry_id(entry);
-                decision.manifest_handle = entry.manifest_handle;
-                decision.waiter_entitled = true;
                 LWLockRelease(g_registry_lock);
                 break;
             }
@@ -1617,9 +1747,8 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                 : ProcNumberGetProc(entry.producer_proc_number);
             if (entry.state == SharedEntryState::Producing
                 && (producer == nullptr || producer->pid != entry.producer_pid)) {
-                if (entry.waiter_count > 0) {
-                    --entry.waiter_count;
-                }
+                static_cast<void>(take_registry_waiter_locked(
+                    entry, waiter_claim, waiter_to_release));
                 fail_abandoned_producer(entry);
                 LWLockRelease(g_registry_lock);
                 break;
@@ -1634,9 +1763,9 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
     {
         ConditionVariableCancelSleep();
         LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
-        if (entry.generation == generation && entry.waiter_count > 0) {
-            --entry.waiter_count;
-            waiter_to_release = entry.manifest_handle;
+        if (entry.generation == generation) {
+            static_cast<void>(take_registry_waiter_locked(
+                entry, waiter_claim, waiter_to_release));
         }
         LWLockRelease(g_registry_lock);
         if (waiter_to_release) {
@@ -1679,6 +1808,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (std::size_t offset = 0; offset < kRegistryCapacity; ++offset) {
         CacheEntry& entry = g_shared->entries[offset];
+        reap_dead_registry_waiters_locked(entry, true);
         if (entry_key_matches(entry, key_hash, key)) {
             if (entry_is_current(entry, database_epoch, now)) {
                 ++entry.reader_count;
@@ -1693,7 +1823,12 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
             }
             if (entry.state == SharedEntryState::Producing
                 && entry.database_epoch == database_epoch) {
-                ++entry.waiter_count;
+                const RegistryWaiterClaim waiter_claim =
+                    claim_registry_waiter_locked(entry);
+                if (!waiter_claim) {
+                    LWLockRelease(g_registry_lock);
+                    return decision;
+                }
                 const std::uint64_t generation = entry.generation;
                 LWLockRelease(g_registry_lock);
                 if (g_shared != nullptr) {
@@ -1701,7 +1836,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
                         &g_shared->stats.inflight_waits, 1);
                 }
                 return wait_for_producer(
-                    static_cast<int>(offset), generation);
+                    static_cast<int>(offset), generation, waiter_claim);
             }
         }
 
@@ -1754,6 +1889,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
         entry.producer_proc_number = MyProcNumber;
         entry.waiter_count = 0;
         entry.reader_count = 0;
+        std::memset(entry.waiters, 0, sizeof(entry.waiters));
         entry.created_at = now;
         entry.completed_at = 0;
         entry.expires_at = 0;
@@ -1859,7 +1995,8 @@ void release_storage_reader_claims(BioseqCacheState& state) noexcept {
     }
     if (state.manifest_waiter_owned) {
         static_cast<void>(storage::unregister_manifest_waiter(
-            state.manifest_handle));
+            state.manifest_waiter_token));
+        state.manifest_waiter_token = {};
         state.manifest_waiter_owned = false;
     }
 }
@@ -2052,6 +2189,7 @@ void cache_state_cleanup(void* argument) noexcept {
         &g_shared->database_write_epoch);
     const bool stable_visibility = pg_atomic_read_u32(
         &g_shared->database_transition_count) == 0;
+    reap_dead_registry_waiters_locked(entry, true);
     if (entry.generation == state.generation
         && entry.state == SharedEntryState::Producing
         && entry.producer_pid == MyProcPid
@@ -2068,7 +2206,6 @@ void cache_state_cleanup(void* argument) noexcept {
             .row_count = state.row_count,
             .created_at_us = entry.created_at,
             .expires_at_us = completed_at + ttl_microseconds,
-            .initial_waiter_references = entry.waiter_count,
         };
         auto publication = storage::publish_manifest(
             manifest,
@@ -2081,6 +2218,41 @@ void cache_state_cleanup(void* argument) noexcept {
             return false;
         }
         state.stored_token_count = 0;
+        bool waiters_registered = true;
+        for (RegistryWaiterOwner& waiter : entry.waiters) {
+            if (!waiter.active) {
+                continue;
+            }
+            auto registered = storage::register_manifest_waiter(
+                publication.handle,
+                waiter.owner_pid,
+                waiter.owner_proc_number,
+                waiter.registered_at);
+            if (registered) {
+                waiter.storage_token = registered.token;
+                continue;
+            }
+            if (!registry_owner_alive(
+                    waiter.owner_pid, waiter.owner_proc_number)) {
+                clear_registry_waiter_locked(entry, waiter);
+                continue;
+            }
+            waiters_registered = false;
+            break;
+        }
+        if (!waiters_registered) {
+            for (RegistryWaiterOwner& waiter : entry.waiters) {
+                if (waiter.storage_token) {
+                    static_cast<void>(storage::unregister_manifest_waiter(
+                        waiter.storage_token));
+                    waiter.storage_token = {};
+                }
+            }
+            static_cast<void>(storage::retire_manifest(publication.handle));
+            fail_abandoned_producer(entry);
+            LWLockRelease(g_registry_lock);
+            return false;
+        }
         state.manifest_handle = publication.handle;
         entry.state = SharedEntryState::Complete;
         entry.producer_pid = 0;
@@ -2311,6 +2483,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     state->registry_reader_owned = false;
     state->entry_id = {};
     state->manifest_handle = {};
+    state->manifest_waiter_token = {};
     state->manifest_pin = {};
     state->stored_tokens = {};
     state->stored_token_count = 0;
@@ -2375,7 +2548,10 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             state->generation = decision.generation;
             state->entry_id = decision.entry_id;
             state->manifest_handle = decision.manifest_handle;
-            state->manifest_waiter_owned = decision.waiter_entitled;
+            state->manifest_waiter_token =
+                decision.manifest_waiter_token;
+            state->manifest_waiter_owned =
+                static_cast<bool>(decision.manifest_waiter_token);
             state->registry_reader_owned =
                 decision.role == RuntimeRole::Consumer;
         }
@@ -2390,10 +2566,12 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             {
                 storage::PinManifestResult pinned =
                     state->manifest_waiter_owned
-                    ? storage::convert_waiter_to_pin(state->manifest_handle)
+                    ? storage::convert_waiter_to_pin(
+                        state->manifest_waiter_token)
                     : storage::pin_manifest(state->entry_id);
                 if (pinned) {
                     state->manifest_waiter_owned = false;
+                    state->manifest_waiter_token = {};
                     state->manifest_pin = pinned.pin;
                     state->manifest_pin_owned = true;
                     state->replay_store = load_complete_result(
@@ -2650,14 +2828,17 @@ void cache_explain_custom_scan(
         readiness_name(storage_snapshot.correctness_readiness),
         explain_state);
     char* storage_diagnostic = psprintf(
-        "%s; backend=%s; hot=%llu/%llu; file=%llu/%llu; manifests=%llu",
+        "%s; backend=%s; hot=%llu/%llu; file=%llu/%llu; "
+        "manifests=%llu; waiters=%llu",
         storage_snapshot.bootstrap_ready ? "ready" : "unavailable",
         storage_snapshot.dsa_attached ? "attached" : "not-attached",
         static_cast<unsigned long long>(storage_snapshot.reserved_hot_bytes),
         static_cast<unsigned long long>(storage_snapshot.hot_ceiling_bytes),
         static_cast<unsigned long long>(storage_snapshot.reserved_file_bytes),
         static_cast<unsigned long long>(storage_snapshot.file_ceiling_bytes),
-        static_cast<unsigned long long>(storage_snapshot.manifest_count));
+        static_cast<unsigned long long>(storage_snapshot.manifest_count),
+        static_cast<unsigned long long>(
+            storage_snapshot.waiter_reference_count));
     ExplainPropertyText("Cache Storage", storage_diagnostic, explain_state);
     pfree(storage_diagnostic);
     ExplainPropertyText(
@@ -3030,6 +3211,7 @@ struct EntrySnapshot {
     const TimestampTz now = GetCurrentTimestamp();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (CacheEntry& entry : g_shared->entries) {
+        reap_dead_registry_waiters_locked(entry, storage_attached);
         PGPROC* producer = entry.producer_proc_number == INVALID_PROC_NUMBER
             ? nullptr
             : ProcNumberGetProc(entry.producer_proc_number);
@@ -3113,6 +3295,7 @@ struct EntrySnapshot {
     pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (CacheEntry& entry : g_shared->entries) {
+        reap_dead_registry_waiters_locked(entry, storage_attached);
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
             ++invalidated;
@@ -3177,6 +3360,7 @@ struct EntrySnapshot {
         pg_atomic_fetch_add_u64(&g_shared->coarse_dependency_epoch, 1);
     }
     for (CacheEntry& entry : g_shared->entries) {
+        reap_dead_registry_waiters_locked(entry, storage_attached);
         if (!entry_depends_on_relation(entry, relation_oid)) {
             continue;
         }
