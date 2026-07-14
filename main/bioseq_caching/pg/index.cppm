@@ -79,6 +79,7 @@ PG_MODULE_MAGIC;
 #include <fcntl.h>
 #include <limits>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <sys/stat.h>
@@ -5204,6 +5205,7 @@ struct ReusableCoverageState {
     bool capture_failed;
     bool cleanup_registered;
     bool cleanup_done;
+    bool current_manifest_pin_owned;
     std::uint16_t source_count;
     std::uint16_t active_source_count;
     std::uint16_t replay_source_index;
@@ -5214,10 +5216,14 @@ struct ReusableCoverageState {
     CoverageCurrentPlanHeaderV1 current_header;
     CacheDigest256 dependency_fingerprint;
     PhysicalIdentityV1 dependency_physical_identity;
+    CacheDigest256 schema_fingerprint;
+    CacheDigest256 mapping_fingerprint;
+    CacheDigest256 lineage_fingerprint;
     PlannerDecodedCoverageV1 current_contract;
     ReusableGenerationReferenceV1 current_reference;
     ReusableReferenceTokenV1 current_reference_token;
     storage::ManifestHandle manifest_handle;
+    storage::ManifestPin current_manifest_pin;
     std::array<storage::StoredBlockToken, storage::kBlocksPerManifest>
         stored_tokens;
     std::uint32_t stored_token_count;
@@ -5225,6 +5231,7 @@ struct ReusableCoverageState {
     std::uint64_t row_count;
     std::uint64_t logical_bytes;
     std::uint64_t payload_bytes;
+    TimestampTz producer_started_at;
     ColumnStoreBuilder* column_builder;
     Oid* send_functions;
     TupleDesc stored_descriptor;
@@ -5241,6 +5248,37 @@ struct ReusableCoverageState {
 
 static_assert(std::is_standard_layout_v<ReusableCoverageState>);
 static_assert(offsetof(ReusableCoverageState, css) == 0);
+
+struct CoverageSemanticFingerprintsV1 {
+    CacheDigest256 schema{};
+    CacheDigest256 mapping{};
+    CacheDigest256 lineage{};
+    bool valid = false;
+};
+
+[[nodiscard]] std::optional<CacheDigest256> tagged_coverage_digest(
+        std::uint32_t tag,
+        std::span<const std::byte> bytes) noexcept {
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+    try {
+        std::vector<std::byte> tagged(sizeof(tag) + bytes.size());
+        std::memcpy(tagged.data(), &tag, sizeof(tag));
+        std::memcpy(tagged.data() + sizeof(tag), bytes.data(), bytes.size());
+        PostgreSqlColumnChecksumPolicy policy;
+        const auto digest = policy.sha256(tagged);
+        return digest.has_value()
+            ? std::optional<CacheDigest256>{*digest}
+            : std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] CoverageSemanticFingerprintsV1
+coverage_semantic_fingerprints(
+        const BioseqCachePathDomainV1& contract) noexcept;
 
 [[nodiscard]] std::span<const std::byte> binary_node_payload(
         const void* node) noexcept {
@@ -5358,6 +5396,180 @@ static_assert(offsetof(ReusableCoverageState, css) == 0);
     }
     *output = *digest;
     return true;
+}
+
+/** Hash explicit ABI scalars only; provider struct padding is never semantic. */
+[[nodiscard]] CoverageSemanticFingerprintsV1
+coverage_semantic_fingerprints(
+        const BioseqCachePathDomainV1& contract) noexcept {
+    CoverageSemanticFingerprintsV1 result{};
+    try {
+        std::vector<std::byte> schema_bytes;
+        std::vector<std::byte> lineage_bytes;
+        std::vector<std::byte> mapping_bytes;
+        schema_bytes.reserve(8192);
+        lineage_bytes.reserve(8192);
+        mapping_bytes.reserve(4096);
+        const auto append = [](std::vector<std::byte>& output,
+                const void* source, std::size_t size) {
+            if (source == nullptr && size != 0) {
+                return false;
+            }
+            const std::size_t offset = output.size();
+            output.resize(offset + size);
+            if (size != 0) {
+                std::memcpy(output.data() + offset, source, size);
+            }
+            return true;
+        };
+        const auto append_column = [&](std::vector<std::byte>& output,
+                std::uint32_t role, std::uint32_t ordinal,
+                const BioseqCacheColumnSchemaV1& column) {
+            const std::uint32_t normalized_struct_size =
+                sizeof(BioseqCacheColumnSchemaV1);
+            return append(output, &role, sizeof(role))
+                && append(output, &ordinal, sizeof(ordinal))
+                && append(output, &normalized_struct_size,
+                    sizeof(normalized_struct_size))
+                && append(output, &column.attno, sizeof(column.attno))
+                && append(output, &column.semantic_id_high,
+                    sizeof(column.semantic_id_high))
+                && append(output, &column.semantic_id_low,
+                    sizeof(column.semantic_id_low))
+                && append(output, &column.type_oid, sizeof(column.type_oid))
+                && append(output, &column.typmod, sizeof(column.typmod))
+                && append(output, &column.collation_oid,
+                    sizeof(column.collation_oid))
+                && append(output, &column.flags, sizeof(column.flags));
+        };
+        const std::uint32_t format = 1;
+        const std::uint32_t boundary_count =
+            contract.boundary_column_count;
+        const std::uint32_t lineage_count =
+            contract.lineage_column_count;
+        if (!append(schema_bytes, &format, sizeof(format))
+            || !append(schema_bytes, &contract.compatibility_family_id,
+                sizeof(contract.compatibility_family_id))
+            || !append(schema_bytes, &contract.capability_mask,
+                sizeof(contract.capability_mask))
+            || !append(schema_bytes, &boundary_count,
+                sizeof(boundary_count))) {
+            return result;
+        }
+        for (std::uint32_t index = 0; index < boundary_count; ++index) {
+            if (!append_column(
+                    schema_bytes, 1U, index,
+                    contract.boundary_columns[index])) {
+                return result;
+            }
+        }
+        if (!append(schema_bytes, &lineage_count, sizeof(lineage_count))) {
+            return result;
+        }
+        for (std::uint32_t index = 0; index < lineage_count; ++index) {
+            if (!append_column(
+                    schema_bytes, 2U, index,
+                    contract.lineage_columns[index])) {
+                return result;
+            }
+        }
+
+        const std::uint32_t required_boundary_count =
+            contract.required_boundary_attno_count;
+        const std::uint32_t required_lineage_count =
+            contract.required_lineage_attno_count;
+        if (!append(lineage_bytes, &format, sizeof(format))
+            || !append(lineage_bytes, &contract.compatibility_family_id,
+                sizeof(contract.compatibility_family_id))
+            || !append(lineage_bytes, &contract.capability_mask,
+                sizeof(contract.capability_mask))
+            || !append(lineage_bytes, &required_boundary_count,
+                sizeof(required_boundary_count))
+            || !append(lineage_bytes, contract.required_boundary_attnos,
+                sizeof(std::uint32_t) * required_boundary_count)
+            || !append(lineage_bytes, &required_lineage_count,
+                sizeof(required_lineage_count))
+            || !append(lineage_bytes, contract.required_lineage_attnos,
+                sizeof(std::uint32_t) * required_lineage_count)) {
+            return result;
+        }
+        for (std::uint32_t index = 0; index < lineage_count; ++index) {
+            if (!append_column(
+                    lineage_bytes, 2U, index,
+                    contract.lineage_columns[index])) {
+                return result;
+            }
+        }
+
+        std::vector<std::uint32_t> stored_attnos;
+        stored_attnos.reserve(boundary_count + lineage_count);
+        const auto append_attnos = [&](const std::uint32_t* values,
+                std::uint32_t count) {
+            for (std::uint32_t index = 0; index < count; ++index) {
+                if (!append_unique_coverage_attno(
+                        stored_attnos, contract, values[index])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!append_attnos(
+                contract.required_lineage_attnos, required_lineage_count)
+            || !append_attnos(
+                contract.required_boundary_attnos, required_boundary_count)) {
+            return result;
+        }
+        for (std::uint32_t index = 0; index < lineage_count; ++index) {
+            if (!append_unique_coverage_attno(
+                    stored_attnos, contract,
+                    contract.lineage_columns[index].attno)) {
+                return result;
+            }
+        }
+        for (std::uint32_t index = 0; index < boundary_count; ++index) {
+            if (!append_unique_coverage_attno(
+                    stored_attnos, contract,
+                    contract.boundary_columns[index].attno)) {
+                return result;
+            }
+        }
+        const std::uint32_t occurrence_columns =
+            kCoverageOccurrenceColumnCountV1;
+        const std::uint32_t stored_count = stored_attnos.size();
+        if (!append(mapping_bytes, &format, sizeof(format))
+            || !append(mapping_bytes, &occurrence_columns,
+                sizeof(occurrence_columns))
+            || !append(mapping_bytes, &stored_count, sizeof(stored_count))) {
+            return result;
+        }
+        for (const std::uint32_t attno : stored_attnos) {
+            CacheDigest256 semantic{};
+            if (!coverage_column_semantic_digest(
+                    contract, attno, &semantic)
+                || !append(mapping_bytes, &attno, sizeof(attno))
+                || !append(mapping_bytes, semantic.bytes.data(),
+                    semantic.bytes.size())) {
+                return result;
+            }
+        }
+        const auto schema = tagged_coverage_digest(
+            0x53434831U, schema_bytes);
+        const auto mapping = tagged_coverage_digest(
+            0x4d415031U, mapping_bytes);
+        const auto lineage = tagged_coverage_digest(
+            0x4c494e31U, lineage_bytes);
+        if (!schema.has_value() || !mapping.has_value()
+            || !lineage.has_value()) {
+            return result;
+        }
+        result.schema = *schema;
+        result.mapping = *mapping;
+        result.lineage = *lineage;
+        result.valid = true;
+    } catch (...) {
+        result = CoverageSemanticFingerprintsV1{};
+    }
+    return result;
 }
 
 /** Build the deterministic provider boundary/lineage + occurrence schema. */
@@ -5608,6 +5820,12 @@ void coverage_state_cleanup(void* opaque) noexcept {
         return;
     }
     state->cleanup_done = true;
+    if (state->current_manifest_pin_owned) {
+        static_cast<void>(storage::unpin_manifest(
+            state->current_manifest_pin));
+        state->current_manifest_pin = {};
+        state->current_manifest_pin_owned = false;
+    }
     if (state->current_reference_owned) {
         release_runtime_reusable_reference(state->current_reference_token);
         state->current_reference_owned = false;
@@ -5628,6 +5846,166 @@ void coverage_state_cleanup(void* opaque) noexcept {
     }
     discard_coverage_blocks(*state);
     destroy_coverage_builder(*state);
+}
+
+[[nodiscard]] bool snapshot_current_reusable_generation(
+        const ReusableGenerationReferenceV1& reference,
+        ReusableGenerationSnapshotV1* output) noexcept {
+    if (!reference || output == nullptr || !g_reusable_registry
+        || g_reusable_membership_lock == nullptr) {
+        return false;
+    }
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    volatile bool accepted = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        const auto snapshot = wait_reusable_generation(
+            g_reusable_registry,
+            reference,
+            reusable_partition_callbacks());
+        if (snapshot.has_value()) {
+            *output = *snapshot;
+            accepted = true;
+        }
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        accepted = false;
+    }
+    PG_END_TRY();
+    return accepted;
+}
+
+[[nodiscard]] bool reusable_bytes_equal(
+        ReusableSharedByteRangeV1 shared_range,
+        std::span<const std::byte> expected) noexcept {
+    const std::span<const std::byte> shared = reusable_shared_bytes(
+        g_reusable_registry, shared_range);
+    return !expected.empty() && shared.size() == expected.size()
+        && std::memcmp(shared.data(), expected.data(), expected.size()) == 0;
+}
+
+[[nodiscard]] bool current_reusable_snapshot_matches(
+        const ReusableGenerationSnapshotV1& snapshot,
+        const CoverageCurrentPlanViewV1& plan,
+        const ReusableGenerationMetadataV1& expected_metadata) noexcept {
+    const ReusableGenerationMetadataV1& actual = snapshot.metadata;
+    return snapshot.reference
+        && snapshot.reference.id.digest == plan.header.generation_digest
+        && snapshot.coverage_directory_key
+            == plan.header.coverage_directory_key
+        && actual.provider_id == expected_metadata.provider_id
+        && actual.provider_abi_version
+            == expected_metadata.provider_abi_version
+        && actual.provider_domain_abi_version
+            == expected_metadata.provider_domain_abi_version
+        && actual.dependency_count == expected_metadata.dependency_count
+        && actual.compatibility_family_id
+            == expected_metadata.compatibility_family_id
+        && actual.capability_mask == expected_metadata.capability_mask
+        && actual.schema_fingerprint == expected_metadata.schema_fingerprint
+        && actual.mapping_fingerprint == expected_metadata.mapping_fingerprint
+        && actual.lineage_fingerprint == expected_metadata.lineage_fingerprint
+        && actual.dependency_fingerprint
+            == expected_metadata.dependency_fingerprint
+        && actual.physical_identity == expected_metadata.physical_identity
+        && actual.observability == WriteObservability::ProviderComplete
+        && reusable_bytes_equal(
+            snapshot.canonical_domain_key, plan.canonical_domain_key)
+        && reusable_bytes_equal(
+            snapshot.canonical_generation_key,
+            plan.canonical_generation_key)
+        && reusable_bytes_equal(
+            snapshot.coverage_descriptor, plan.coverage_descriptor);
+}
+
+[[nodiscard]] bool current_dependency_ticket_matches(
+        const ReusableCoverageState& state) noexcept {
+    const CoverageDependencyTicketV1 ticket = coverage_dependency_ticket(
+        state.current_contract.domain, state.provider);
+    return ticket.valid
+        && ticket.dependency_count != 0
+        && ticket.observability == WriteObservability::ProviderComplete
+        && ticket.fingerprint == state.dependency_fingerprint
+        && ticket.physical_identity == state.dependency_physical_identity
+        && pg_atomic_read_u32(&g_shared->database_transition_count) == 0;
+}
+
+/** Wake-driven, ABA-keyed wait; cancellation releases through query cleanup. */
+[[nodiscard]] bool wait_for_current_reusable_generation(
+        ReusableCoverageState& state,
+        const CoverageCurrentPlanViewV1& plan,
+        const ReusableGenerationMetadataV1& expected_metadata,
+        ReusableGenerationSnapshotV1* completed) {
+    ConditionVariable* changed = reusable_generation_changed(
+        state.current_reference);
+    if (changed == nullptr || completed == nullptr
+        || !state.current_reference_owned
+        || state.current_reference_token.kind
+            != ReusableReferenceKindV1::Waiter) {
+        return false;
+    }
+    volatile bool accepted = false;
+    ConditionVariablePrepareToSleep(changed);
+    PG_TRY();
+    {
+        for (;;) {
+            CHECK_FOR_INTERRUPTS();
+            ReusableGenerationSnapshotV1 snapshot{};
+            if (!snapshot_current_reusable_generation(
+                    state.current_reference, &snapshot)
+                || snapshot.reference != state.current_reference) {
+                break;
+            }
+            if (snapshot.state == CacheEntryState::Complete) {
+                if (snapshot.manifest
+                    && current_reusable_snapshot_matches(
+                        snapshot, plan, expected_metadata)
+                    && current_dependency_ticket_matches(state)) {
+                    *completed = snapshot;
+                    accepted = true;
+                }
+                break;
+            }
+            if (snapshot.state == CacheEntryState::Failed
+                || snapshot.state == CacheEntryState::Invalidated
+                || snapshot.state == CacheEntryState::Evicting
+                || (snapshot.state != CacheEntryState::Claimed
+                    && snapshot.state != CacheEntryState::Building)) {
+                break;
+            }
+            if (!reusable_producer_alive(nullptr, snapshot.producer)) {
+                fail_current_reusable_generation(
+                    state.current_reference,
+                    CacheFailureCode::ProducerExited);
+                continue;
+            }
+            ConditionVariableSleep(changed, PG_WAIT_EXTENSION);
+        }
+        ConditionVariableCancelSleep();
+    }
+    PG_CATCH();
+    {
+        ConditionVariableCancelSleep();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    return accepted;
 }
 
 [[nodiscard]] bool begin_coverage_capture(
