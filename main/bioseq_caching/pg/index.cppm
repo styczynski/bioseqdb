@@ -1066,6 +1066,7 @@ struct BioseqCacheState {
     char temporary_path[MAXPGPATH];
     char final_path[MAXPGPATH];
     Tuplestorestate* replay_store;
+    TupleTableSlot* replay_slot;
     MemoryContextCallback cleanup_callback;
     bool cleanup_registered;
     bool cleanup_done;
@@ -1810,6 +1811,14 @@ void cache_state_cleanup(void* argument) noexcept {
         static_cast<void>(::unlink(state->temporary_path));
         state->temporary_path[0] = '\0';
     }
+    if (state->replay_store != nullptr) {
+        tuplestore_end(state->replay_store);
+        state->replay_store = nullptr;
+    }
+    if (state->replay_slot != nullptr) {
+        ExecDropSingleTupleTableSlot(state->replay_slot);
+        state->replay_slot = nullptr;
+    }
     destroy_column_builder(*state);
 }
 
@@ -2177,6 +2186,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     state->registry_index = -1;
     state->output_file = -1;
     state->replay_store = nullptr;
+    state->replay_slot = nullptr;
     state->column_builder = nullptr;
     state->send_functions = nullptr;
     state->capture_failed = false;
@@ -2253,15 +2263,28 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             {
                 state->replay_store = load_complete_result(
                     state->final_path, node->ss.ps.ps_ResultTupleDesc);
+                if (state->replay_store != nullptr) {
+                    state->replay_slot = MakeSingleTupleTableSlot(
+                        node->ss.ps.ps_ResultTupleDesc,
+                        &TTSOpsMinimalTuple);
+                }
             }
             PG_CATCH();
             {
                 MemoryContextSwitchTo(load_context);
                 FlushErrorState();
+                if (state->replay_store != nullptr) {
+                    tuplestore_end(state->replay_store);
+                }
+                if (state->replay_slot != nullptr) {
+                    ExecDropSingleTupleTableSlot(state->replay_slot);
+                }
                 state->replay_store = nullptr;
+                state->replay_slot = nullptr;
             }
             PG_END_TRY();
-            const bool loaded = state->replay_store != nullptr;
+            const bool loaded = state->replay_store != nullptr
+                && state->replay_slot != nullptr;
             release_registry_reader(
                 state->registry_index, state->generation, loaded);
             if (loaded) {
@@ -2303,7 +2326,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
 TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<BioseqCacheState*>(node);
     if (state->runtime_role == RuntimeRole::Consumer) {
-        TupleTableSlot* slot = node->ss.ps.ps_ResultTupleSlot;
+        TupleTableSlot* slot = state->replay_slot;
         ExecClearTuple(slot);
         static_cast<void>(tuplestore_gettupleslot(
             state->replay_store, true, false, slot));
@@ -2373,10 +2396,6 @@ void cache_end_custom_scan(CustomScanState* node) {
     if (state->runtime_role == RuntimeRole::Producer
         && !state->producer_completed) {
         fail_registry_producer(*state);
-    }
-    if (state->replay_store != nullptr) {
-        tuplestore_end(state->replay_store);
-        state->replay_store = nullptr;
     }
     cache_state_cleanup(state);
     if (state->child_initialized && retained_child(node) != nullptr) {
@@ -2452,6 +2471,7 @@ Node* cache_create_custom_scan_state(CustomScan*) {
     state->output_file = -1;
     state->column_builder = nullptr;
     state->send_functions = nullptr;
+    state->replay_slot = nullptr;
     return reinterpret_cast<Node*>(&state->css);
 }
 
