@@ -5823,6 +5823,29 @@ template <is_constexpr_aligner_params Cep,
         && (!params.do_cigar || params.vulkan_extend_enabled);
 }
 
+/// Validate the target-format and algorithm tuple admitted by the dedicated
+/// persisted Shape-V5 GPU preparation route. The caller supplies the live
+/// supported-alphabet pack size so a legitimate zero-based alphabet code is
+/// distinguished from an out-of-range code.
+[[nodiscard]] inline bool persisted_shape_v5_gpu_preparation_tuple_valid(
+    const std::uint8_t alphabet_code,
+    const std::size_t supported_alphabet_count,
+    const std::uint8_t storage_unit_byte_width,
+    const ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+{
+    return static_cast<std::size_t>(alphabet_code) < supported_alphabet_count
+        && (storage_unit_byte_width == 1u
+            || storage_unit_byte_width == 2u
+            || storage_unit_byte_width == 4u
+            || storage_unit_byte_width == 8u)
+        && params.kmer_size == 15
+        && params.window_size == 10
+        && backend == ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+               VulkanSegment
+        && complete_all_gpu_tuple_selected(params);
+}
+
 // DOC0310 §16 — the Phase C frontend's GPU target-index build replaces the CPU
 // `MinimizerHashmapFragmentIndex` build for this exact (minimizer, chaining)
 // leaf. Runtime-gated; both flags plus the matching algorithm selectors must be

@@ -4007,6 +4007,8 @@ TEST_CASE("canonical Vulkan selection separates capability from a complete all-G
     params.compute_divergence = false;
     params.compute_mapq = false;
     params.max_occ = 500;
+    params.kmer_size = 15;
+    params.window_size = 10;
     REQUIRE(complete_all_gpu_tuple_selected(params));
 
     params.vulkan_enabled = false;
@@ -4026,6 +4028,69 @@ TEST_CASE("canonical Vulkan selection separates capability from a complete all-G
     params.base_alignment_algorithm =
         ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
     REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+}
+
+TEST_CASE("persisted Shape-V5 GPU preparation admits zero-based supported alphabets",
+          "[vulkan][pipe][routing][shape-v5][admission][fail-closed]") {
+    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        persisted_shape_v5_gpu_preparation_tuple_valid;
+
+    constexpr std::size_t supported_alphabet_count = 2u;
+    constexpr std::uint8_t dna4_code = 0u;
+    constexpr std::uint8_t dna5_code = 1u;
+
+    Minimap2Params params{};
+    params.vulkan_enabled = true;
+    params.vulkan_seed_hits_enabled = true;
+    params.vulkan_fused_frontend_enabled = true;
+    params.vulkan_gpu_index_build_enabled = true;
+    params.vulkan_extend_enabled = true;
+    params.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    params.compute_divergence = false;
+    params.compute_mapq = false;
+    params.max_occ = 500;
+
+    const auto admitted = [&](const std::uint8_t alphabet_code,
+                              const std::uint8_t byte_width,
+                              const MinimizerSketchBackend backend =
+                                  MinimizerSketchBackend::VulkanSegment) {
+        return persisted_shape_v5_gpu_preparation_tuple_valid(
+            alphabet_code, supported_alphabet_count, byte_width,
+            backend, params);
+    };
+
+    REQUIRE(admitted(dna4_code, 1u));
+    REQUIRE(admitted(dna4_code, 2u));
+    REQUIRE(admitted(dna5_code, 4u));
+    REQUIRE(admitted(dna5_code, 8u));
+    REQUIRE_FALSE(persisted_shape_v5_gpu_preparation_tuple_valid(
+        dna4_code, 0u, 1u, MinimizerSketchBackend::VulkanSegment,
+        params));
+    REQUIRE_FALSE(admitted(
+        static_cast<std::uint8_t>(supported_alphabet_count), 1u));
+    REQUIRE_FALSE(admitted((std::numeric_limits<std::uint8_t>::max)(), 1u));
+    REQUIRE_FALSE(admitted(dna4_code, 0u));
+    REQUIRE_FALSE(admitted(dna4_code, 3u));
+    REQUIRE_FALSE(admitted(dna4_code, 16u));
+    REQUIRE_FALSE(admitted(
+        dna4_code, 1u, MinimizerSketchBackend::Scalar));
+
+    params.vulkan_enabled = false;
+    REQUIRE_FALSE(admitted(dna4_code, 1u));
+    params.vulkan_enabled = true;
+
+    params.kmer_size = 14;
+    REQUIRE_FALSE(admitted(dna4_code, 1u));
+    params.kmer_size = 15;
+    params.window_size = 9;
+    REQUIRE_FALSE(admitted(dna4_code, 1u));
 }
 
 TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",

@@ -1711,12 +1711,12 @@ void BatchProcessor::prepare_gpu_persisted_shape_v5_target(
 				(std::numeric_limits<std::int64_t>::max)())
 		|| target_bp_size == 0
 		|| query_count == 0
-		|| alphabet_code == 0
-		|| storage_unit_byte_width == 0
-		|| params.kmer_size != 15
-		|| params.window_size != 10
-		|| backend != MinimizerSketchBackend::VulkanSegment
-		|| !pipe::complete_all_gpu_tuple_selected(params)
+		|| !pipe::persisted_shape_v5_gpu_preparation_tuple_valid(
+			alphabet_code,
+			pgseq_supported_alphabets::alphabet_count,
+			storage_unit_byte_width,
+			backend,
+			params)
 		|| !executor_read.matches(
 			database_oid, tablespace_oid, main_relfilenode, user_relid)) {
 		fail(ERRCODE_INVALID_PARAMETER_VALUE,
