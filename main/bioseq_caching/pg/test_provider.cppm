@@ -738,3 +738,368 @@ void fill_column_schema(
 }
 
 } // namespace bioseq::cache::pg::test_provider
+
+namespace bioseq::cache::pg::test_provider {
+
+/** Runtime digest validates only the immutable Node recipe. */
+[[nodiscard]] BioseqCacheStatusV1 provider_append_runtime_digest(
+    const List* plan_domain_nodes,
+    EState*,
+    BioseqCacheDigestSinkV1* sink) {
+    ++g_counters.runtime_digest;
+    if (!parse_plan_nodes(
+            plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    auto digest = digest_plan_nodes(plan_domain_nodes);
+    if (g_digest_fault == DigestFault::RuntimeMismatch) {
+        digest[0] ^= 0x5aU;
+    }
+    return append_digest_bytes(sink, digest.data(), digest.size())
+        ? BIOSEQ_CACHE_STATUS_OK
+        : BIOSEQ_CACHE_STATUS_ERROR;
+}
+
+/** Find a source column having exactly the same semantic contract. */
+[[nodiscard]] const BioseqCacheColumnSchemaV1* find_compatible_source_column(
+    const BioseqCacheColumnSchemaV1& consumer,
+    const BioseqCacheColumnSchemaV1* source_columns,
+    std::size_t source_count) noexcept {
+    for (std::size_t index = 0; index < source_count; ++index) {
+        const auto& source = source_columns[index];
+        if (source.semantic_id_high == consumer.semantic_id_high
+            && source.semantic_id_low == consumer.semantic_id_low
+            && source.type_oid == consumer.type_oid
+            && source.typmod == consumer.typmod
+            && source.collation_oid == consumer.collation_oid) {
+            return &source;
+        }
+    }
+    return nullptr;
+}
+
+/** Construct one complete source-to-consumer map in requested consumer order. */
+[[nodiscard]] bool fill_source_map(
+    const BioseqCacheColumnSchemaV1* consumer_columns,
+    std::size_t consumer_count,
+    const std::uint32_t* required_attnos,
+    std::size_t required_count,
+    const BioseqCacheColumnSchemaV1* source_columns,
+    std::size_t source_count,
+    BioseqCacheColumnMapEntryV1* output) noexcept {
+    if (required_count != 0
+        && (required_attnos == nullptr || output == nullptr)) {
+        return false;
+    }
+    for (std::size_t index = 0; index < required_count; ++index) {
+        const auto* consumer = find_schema_column(
+            consumer_columns, consumer_count, required_attnos[index]);
+        if (consumer == nullptr) {
+            return false;
+        }
+        const auto* source = find_compatible_source_column(
+            *consumer, source_columns, source_count);
+        if (source == nullptr) {
+            return false;
+        }
+        output[index] = {
+            .struct_size = sizeof(BioseqCacheColumnMapEntryV1),
+            .consumer_attno = consumer->attno,
+            .source_attno = source->attno,
+            .flags = 0,
+            .semantic_id_high = consumer->semantic_id_high,
+            .semantic_id_low = consumer->semantic_id_low,
+            .type_oid = consumer->type_oid,
+            .typmod = consumer->typmod,
+            .collation_oid = consumer->collation_oid,
+            .reserved = 0,
+        };
+    }
+    return true;
+}
+
+/** Apply one malformed-output mode after constructing a correct map. */
+void apply_mapping_fault(
+    BioseqCacheSourceMappingV1& mapping,
+    std::size_t boundary_capacity,
+    std::size_t lineage_capacity) {
+    auto* boundary = const_cast<BioseqCacheColumnMapEntryV1*>(
+        mapping.boundary_map);
+    auto* lineage = const_cast<BioseqCacheColumnMapEntryV1*>(
+        mapping.lineage_map);
+    switch (g_mapping_fault) {
+        case MappingFault::None:
+        case MappingFault::DecoratedBoundarySchemaMismatch:
+        case MappingFault::DecoratedLineageSchemaMismatch:
+            break;
+        case MappingFault::NullPointerNonzeroCount:
+            mapping.boundary_map = nullptr;
+            break;
+        case MappingFault::ShortBoundaryMap:
+        case MappingFault::MissingRequiredAttno:
+            if (mapping.boundary_map_count != 0) {
+                --mapping.boundary_map_count;
+            }
+            break;
+        case MappingFault::LongBoundaryMap:
+            if (boundary != nullptr && boundary_capacity > mapping.boundary_map_count
+                && mapping.boundary_map_count != 0) {
+                boundary[mapping.boundary_map_count] = boundary[0];
+                ++mapping.boundary_map_count;
+            }
+            break;
+        case MappingFault::ShortLineageMap:
+            if (mapping.lineage_map_count != 0) {
+                --mapping.lineage_map_count;
+            }
+            break;
+        case MappingFault::LongLineageMap:
+            if (lineage != nullptr && lineage_capacity > mapping.lineage_map_count
+                && mapping.lineage_map_count != 0) {
+                lineage[mapping.lineage_map_count] = lineage[0];
+                ++mapping.lineage_map_count;
+            }
+            break;
+        case MappingFault::ZeroConsumerAttno:
+            if (mapping.boundary_map_count != 0) {
+                boundary[0].consumer_attno = 0;
+            }
+            break;
+        case MappingFault::ZeroSourceAttno:
+            if (mapping.boundary_map_count != 0) {
+                boundary[0].source_attno = 0;
+            }
+            break;
+        case MappingFault::SourceAttnoOutOfRange:
+            if (mapping.boundary_map_count != 0) {
+                boundary[0].source_attno = 0xffffffffU;
+            }
+            break;
+        case MappingFault::DuplicateConsumerAttno:
+            if (mapping.boundary_map_count > 1) {
+                boundary[1].consumer_attno = boundary[0].consumer_attno;
+            }
+            break;
+        case MappingFault::WrongType:
+            if (mapping.boundary_map_count != 0) {
+                boundary[0].type_oid = BOOLOID;
+            }
+            break;
+        case MappingFault::WrongTypmod:
+            if (mapping.boundary_map_count != 0) {
+                ++boundary[0].typmod;
+            }
+            break;
+        case MappingFault::WrongCollation:
+            if (mapping.boundary_map_count != 0) {
+                boundary[0].collation_oid = static_cast<Oid>(9999);
+            }
+            break;
+        case MappingFault::WrongSemanticId:
+            if (mapping.boundary_map_count != 0) {
+                boundary[0].semantic_id_low ^= 1U;
+            }
+            break;
+        case MappingFault::SameTypedColumnPermutation:
+            if (mapping.boundary_map_count > 1) {
+                boundary[0].source_attno = boundary[1].source_attno;
+            }
+            break;
+        case MappingFault::IllegalRepeatedSourceAttno:
+            if (mapping.boundary_map_count > 1) {
+                boundary[1].source_attno = boundary[0].source_attno;
+            }
+            break;
+        case MappingFault::BadProviderPrivateVersion:
+            mapping.provider_private_nodes = list_make1(makeInteger(-1));
+            break;
+        case MappingFault::NonIntegerPersistedMapNode:
+            mapping.provider_private_nodes = list_make1(makeString("bad"));
+            break;
+        case MappingFault::UnknownPersistedMapVersion:
+            mapping.provider_private_nodes = list_make1(makeInteger(999));
+            break;
+        case MappingFault::ProviderError:
+            break;
+    }
+}
+
+/** Explicitly affirm every older source, including apparent identity maps. */
+[[nodiscard]] BioseqCacheStatusV1 provider_map_reusable_source(
+    PlannerInfo*,
+    const BioseqCachePathDomainV1* consumer,
+    const BioseqCacheReusableSourceV1* source,
+    BioseqCacheSourceMappingV1* output) {
+    ++g_counters.map_source;
+    if (g_mapping_fault == MappingFault::ProviderError) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("injected generic cache-provider mapping error")));
+    }
+    if (consumer == nullptr || source == nullptr || output == nullptr
+        || output->struct_size < sizeof(*output)
+        || consumer->provider_id != kProviderId
+        || source->provider_id != kProviderId
+        || source->compatibility_family_id != kCompatibilityFamily
+        || (source->capability_mask & consumer->capability_mask)
+            != consumer->capability_mask) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+
+    const std::size_t boundary_capacity =
+        consumer->required_boundary_attno_count + 1U;
+    const std::size_t lineage_capacity =
+        consumer->required_lineage_attno_count + 1U;
+    auto* boundary = static_cast<BioseqCacheColumnMapEntryV1*>(palloc0(
+        boundary_capacity * sizeof(BioseqCacheColumnMapEntryV1)));
+    auto* lineage = static_cast<BioseqCacheColumnMapEntryV1*>(palloc0(
+        lineage_capacity * sizeof(BioseqCacheColumnMapEntryV1)));
+    if (!fill_source_map(
+            consumer->boundary_columns,
+            consumer->boundary_column_count,
+            consumer->required_boundary_attnos,
+            consumer->required_boundary_attno_count,
+            source->boundary_columns,
+            source->boundary_column_count,
+            boundary)
+        || !fill_source_map(
+            consumer->lineage_columns,
+            consumer->lineage_column_count,
+            consumer->required_lineage_attnos,
+            consumer->required_lineage_attno_count,
+            source->lineage_columns,
+            source->lineage_column_count,
+            lineage)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+
+    output->struct_size = sizeof(*output);
+    output->flags = 0;
+    output->boundary_map = boundary;
+    output->boundary_map_count = consumer->required_boundary_attno_count;
+    output->lineage_map = lineage;
+    output->lineage_map_count = consumer->required_lineage_attno_count;
+    output->provider_private_nodes = list_make1(makeInteger(kPlanVersion));
+    apply_mapping_fault(*output, boundary_capacity, lineage_capacity);
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+/** Add cache-owned gate expressions to a cloned provider path only. */
+[[nodiscard]] BioseqCacheStatusV1 provider_decorate_path(
+    PlannerInfo* root,
+    RelOptInfo* relation,
+    Path* provider_path,
+    const BioseqCachePathDomainV1* domain,
+    List* gated_qual_exprs,
+    BioseqCacheDecoratedPathV1* output) {
+    ++g_counters.decorate_path;
+    if (root == nullptr || relation == nullptr || provider_path == nullptr
+        || domain == nullptr || output == nullptr
+        || output->struct_size < sizeof(*output)
+        || provider_path->parent != relation
+        || provider_path->pathtype != T_CustomScan
+        || reinterpret_cast<CustomPath*>(provider_path)->methods
+            != &provider_path_methods()) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    auto* original = reinterpret_cast<CustomPath*>(provider_path);
+    auto* decorated = makeNode(CustomPath);
+    *decorated = *original;
+    decorated->custom_paths = list_copy(original->custom_paths);
+    decorated->custom_private = static_cast<List*>(
+        copyObject(original->custom_private));
+    decorated->custom_restrictinfo = list_copy(
+        original->custom_restrictinfo);
+    ListCell* cell = nullptr;
+    foreach(cell, gated_qual_exprs) {
+        const auto* expression = static_cast<const Expr*>(lfirst(cell));
+        if (expression == nullptr) {
+            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        }
+        auto* restriction = make_restrictinfo(
+            root,
+            static_cast<Expr*>(copyObject(expression)),
+            true,
+            false,
+            false,
+            false,
+            0,
+            nullptr,
+            nullptr,
+            nullptr);
+        decorated->custom_restrictinfo = lappend(
+            decorated->custom_restrictinfo, restriction);
+    }
+
+    output->struct_size = sizeof(*output);
+    output->flags = 0;
+    output->path = &decorated->path;
+    output->actual_boundary_columns = domain->boundary_columns;
+    output->actual_boundary_column_count = domain->boundary_column_count;
+    output->actual_lineage_columns = domain->lineage_columns;
+    output->actual_lineage_column_count = domain->lineage_column_count;
+    output->provider_private_nodes = static_cast<List*>(
+        copyObject(domain->provider_private_nodes));
+
+    if (g_mapping_fault == MappingFault::DecoratedBoundarySchemaMismatch
+        && domain->boundary_column_count != 0) {
+        auto* columns = static_cast<BioseqCacheColumnSchemaV1*>(palloc(
+            domain->boundary_column_count
+            * sizeof(BioseqCacheColumnSchemaV1)));
+        std::memcpy(
+            columns,
+            domain->boundary_columns,
+            domain->boundary_column_count
+                * sizeof(BioseqCacheColumnSchemaV1));
+        columns[0].semantic_id_low ^= 1U;
+        output->actual_boundary_columns = columns;
+    }
+    if (g_mapping_fault == MappingFault::DecoratedLineageSchemaMismatch
+        && domain->lineage_column_count != 0) {
+        auto* columns = static_cast<BioseqCacheColumnSchemaV1*>(palloc(
+            domain->lineage_column_count
+            * sizeof(BioseqCacheColumnSchemaV1)));
+        std::memcpy(
+            columns,
+            domain->lineage_columns,
+            domain->lineage_column_count
+                * sizeof(BioseqCacheColumnSchemaV1));
+        columns[0].semantic_id_low ^= 1U;
+        output->actual_lineage_columns = columns;
+    }
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+/** Freeze plan semantics and expected runtime digest atomically. */
+[[nodiscard]] BioseqCacheStatusV1 provider_build_plan_digest_recipe(
+    PlannerInfo*,
+    const Plan* provider_plan,
+    BioseqCachePlanDigestRecipeV1* output) {
+    ++g_counters.build_recipe;
+    if (provider_plan == nullptr || output == nullptr
+        || output->struct_size < sizeof(*output)
+        || !IsA(provider_plan, CustomScan)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    const auto* scan = reinterpret_cast<const CustomScan*>(provider_plan);
+    if (scan->methods != &provider_scan_methods()
+        || !parse_plan_nodes(
+            scan->custom_private, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    const auto digest = digest_plan_nodes(scan->custom_private);
+    output->struct_size = sizeof(*output);
+    output->flags = 0;
+    output->digest_format_version = 1;
+    output->reserved = 0;
+    output->plan_domain_nodes = static_cast<List*>(
+        copyObject(scan->custom_private));
+    std::memcpy(
+        output->expected_generation_digest, digest.data(), digest.size());
+    if (g_digest_fault == DigestFault::RecipeMismatch) {
+        output->expected_generation_digest[0] ^= 0xa5U;
+    }
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+} // namespace bioseq::cache::pg::test_provider
