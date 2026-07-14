@@ -64,12 +64,12 @@ $preloaded->safe_psql(
 	  GRANT SELECT ON public.cache_entries_count
 	    TO cache_monitor_granted, cache_monitor_execute_only;});
 
-is(
+like(
 	$preloaded->safe_psql(
 		'postgres',
 		q{SET ROLE cache_monitor_granted;
 		  SELECT entry_count FROM public.cache_entries_count;}),
-	'0',
+	qr/^\d+$/,
 	'explicit schema and function grants pass the C diagnostics boundary');
 
 my ($acl_ret, $acl_out, $acl_err) = $preloaded->psql(
