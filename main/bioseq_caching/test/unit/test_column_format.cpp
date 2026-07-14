@@ -52,6 +52,19 @@ struct TestChecksums {
         }
         return digest;
     }
+
+    [[nodiscard]] std::expected<CacheDigest256, ChecksumError>
+    manifest_sha256(
+        std::span<const CacheDigest256> block_digests) const noexcept {
+        std::vector<std::byte> bytes;
+        bytes.reserve(block_digests.size() * 32u);
+        for (const CacheDigest256& digest : block_digests) {
+            for (const std::uint8_t byte : digest.bytes) {
+                bytes.push_back(static_cast<std::byte>(byte));
+            }
+        }
+        return sha256(bytes);
+    }
 };
 
 struct UnavailableChecksums {
@@ -62,6 +75,12 @@ struct UnavailableChecksums {
 
     [[nodiscard]] std::expected<CacheDigest256, ChecksumError> sha256(
         std::span<const std::byte>) const noexcept {
+        return std::unexpected(ChecksumError::Unavailable);
+    }
+
+    [[nodiscard]] std::expected<CacheDigest256, ChecksumError>
+    manifest_sha256(
+        std::span<const CacheDigest256>) const noexcept {
         return std::unexpected(ChecksumError::Unavailable);
     }
 };
@@ -186,6 +205,31 @@ TEST_CASE("validity bitmaps are canonical at byte boundaries") {
     REQUIRE_FALSE(decode_validity(encoded, 17).has_value());
 }
 
+TEST_CASE("validity bitmap boundary sweep round trips packed booleans") {
+    for (const std::size_t size : {
+             std::size_t{0},
+             std::size_t{1},
+             std::size_t{7},
+             std::size_t{8},
+             std::size_t{9},
+             std::size_t{63},
+             std::size_t{64},
+             std::size_t{65},
+             std::size_t{4'096},
+         }) {
+        std::vector<bool> validity(size);
+        for (std::size_t index = 0; index < size; ++index) {
+            validity[index] = index % 3u != 1u;
+        }
+        const auto encoded = encode_validity(validity);
+        const auto decoded = decode_validity(encoded, size);
+        INFO("bitmap size " << size);
+        REQUIRE(decoded.has_value());
+        REQUIRE(*decoded == validity);
+        REQUIRE(unused_tail_bits_are_zero(encoded, size));
+    }
+}
+
 TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(kIdentity, schema, {.rows = 2, .value_bytes = 1'024});
@@ -195,7 +239,8 @@ TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
     TestChecksums checksums;
     const auto sealed = builder.seal(checksums);
     REQUIRE(sealed.has_value());
-    const auto view = validate_column_store(*sealed, kIdentity, checksums);
+    const auto view = validate_column_store(
+        *sealed, kIdentity, schema, checksums);
     REQUIRE(view.has_value());
     REQUIRE(view->row_count() == 4);
     REQUIRE(view->column_count() == 3);
@@ -226,6 +271,117 @@ TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
     REQUIRE_FALSE(view->value(0, 3).has_value());
 }
 
+TEST_CASE("schema digest commits names and complete SQL type metadata") {
+    TestChecksums checksums;
+    auto base = mixed_schema();
+    const auto original = schema_digest(base, checksums);
+    REQUIRE(original.has_value());
+
+    auto changed = base;
+    changed[0].name = "renamed";
+    REQUIRE(schema_digest(changed, checksums).value() != *original);
+    changed = base;
+    ++changed[0].descriptor.type_oid;
+    REQUIRE(schema_digest(changed, checksums).value() != *original);
+    changed = base;
+    ++changed[0].descriptor.typmod;
+    REQUIRE(schema_digest(changed, checksums).value() != *original);
+    changed = base;
+    ++changed[0].descriptor.collation_oid;
+    REQUIRE(schema_digest(changed, checksums).value() != *original);
+    changed = base;
+    ++changed[0].semantic_id.low;
+    REQUIRE(schema_digest(changed, checksums).value() != *original);
+}
+
+TEST_CASE("row-group row target splits at minus, at, and plus one") {
+    TestChecksums checksums;
+    const std::array<ColumnSchema, 0> schema{};
+    const std::array<EncodedColumnValue, 0> values{};
+    const auto group_count_for = [&](std::uint32_t rows) {
+        ColumnStoreBuilder builder(
+            kIdentity, schema, {.rows = 4, .value_bytes = 1'024});
+        for (std::uint32_t row = 0; row < rows; ++row) {
+            REQUIRE(builder.append_row(values).has_value());
+        }
+        auto blob = builder.seal(checksums);
+        REQUIRE(blob.has_value());
+        auto view = validate_column_store(
+            *blob, kIdentity, schema, checksums);
+        REQUIRE(view.has_value());
+        return view->row_group_count();
+    };
+
+    REQUIRE(group_count_for(3) == 1);
+    REQUIRE(group_count_for(4) == 1);
+    REQUIRE(group_count_for(5) == 2);
+}
+
+TEST_CASE("fixed by-reference storage honors its declared alignment") {
+    const std::array<ColumnSchema, 1> schema{{
+        {
+            .name = "fixed_ref",
+            .descriptor = {
+                .type_oid = 1'000,
+                .typmod = -1,
+                .type_length = 3,
+                .by_value = 0,
+                .type_alignment = 8,
+                .encoding = ColumnEncoding::FixedByReference,
+            },
+            .semantic_id = {.low = 9},
+        },
+    }};
+    const std::array<std::byte, 3> payload{
+        std::byte{1}, std::byte{2}, std::byte{3}};
+    const std::array<std::byte, 3> second_payload{
+        std::byte{4}, std::byte{5}, std::byte{6}};
+    const std::array<EncodedColumnValue, 1> row{{{.bytes = payload}}};
+    const std::array<EncodedColumnValue, 1> second_row{{
+        {.bytes = second_payload},
+    }};
+    ColumnStoreBuilder builder(kIdentity, schema);
+    REQUIRE(builder.append_row(row).has_value());
+    REQUIRE(builder.append_row(second_row).has_value());
+    TestChecksums checksums;
+    const auto blob = builder.seal(checksums);
+    REQUIRE(blob.has_value());
+
+    std::size_t cursor = 68;
+    const auto index_offset = read_little_endian<std::uint64_t>(*blob, cursor);
+    REQUIRE(index_offset.has_value());
+    cursor = static_cast<std::size_t>(*index_offset);
+    REQUIRE(read_little_endian<std::uint64_t>(*blob, cursor).value() == 1);
+    const auto group_offset = read_little_endian<std::uint64_t>(*blob, cursor);
+    REQUIRE(group_offset.has_value());
+    cursor = static_cast<std::size_t>(*group_offset)
+        + kRowGroupHeaderBytes + 4u * sizeof(std::uint64_t);
+    const auto values_offset = read_little_endian<std::uint64_t>(*blob, cursor);
+    REQUIRE(values_offset.has_value());
+    REQUIRE((*group_offset + *values_offset) % 8u == 0);
+
+    const auto view = validate_column_store(
+        *blob, kIdentity, schema, checksums);
+    REQUIRE(view.has_value());
+    REQUIRE(view->value(0, 0)->bytes.size() == payload.size());
+    REQUIRE(view->value(0, 0)->bytes[0] == std::byte{1});
+    REQUIRE(view->value(1, 0)->bytes[0] == std::byte{4});
+}
+
+TEST_CASE("opposite-endian metadata is rejected before allocation") {
+    auto schema = mixed_schema();
+    ColumnStoreBuilder builder(kIdentity, schema);
+    append_mixed_rows(builder);
+    TestChecksums checksums;
+    auto blob = builder.seal(checksums);
+    REQUIRE(blob.has_value());
+    (*blob)[40] = static_cast<std::byte>(
+        static_cast<std::uint8_t>(DataEndian::Big));
+    REQUIRE(
+        validate_column_store(*blob, kIdentity, schema, checksums).error()
+        == FormatError::EndianMismatch);
+}
+
 TEST_CASE("empty and zero-column result shapes remain first-class") {
     TestChecksums checksums;
     auto schema = mixed_schema();
@@ -233,7 +389,7 @@ TEST_CASE("empty and zero-column result shapes remain first-class") {
     const auto empty_blob = empty.seal(checksums);
     REQUIRE(empty_blob.has_value());
     const auto empty_view = validate_column_store(
-        *empty_blob, kIdentity, checksums);
+        *empty_blob, kIdentity, schema, checksums);
     REQUIRE(empty_view.has_value());
     REQUIRE(empty_view->row_count() == 0);
     REQUIRE(empty_view->row_group_count() == 0);
@@ -248,7 +404,7 @@ TEST_CASE("empty and zero-column result shapes remain first-class") {
     const auto zero_blob = zero_columns.seal(checksums);
     REQUIRE(zero_blob.has_value());
     const auto zero_view = validate_column_store(
-        *zero_blob, kIdentity, checksums);
+        *zero_blob, kIdentity, no_schema, checksums);
     REQUIRE(zero_view.has_value());
     REQUIRE(zero_view->row_count() == 3);
     REQUIRE(zero_view->column_count() == 0);
@@ -329,7 +485,7 @@ TEST_CASE("every stored byte is covered by validation or a checksum") {
         corrupt[index] ^= std::byte{0x01};
         INFO("corrupt byte offset " << index);
         REQUIRE_FALSE(validate_column_store(
-            corrupt, kIdentity, checksums).has_value());
+            corrupt, kIdentity, schema, checksums).has_value());
     }
 }
 
@@ -346,21 +502,31 @@ TEST_CASE("all truncation points, identities, and unavailable checksums fail clo
         REQUIRE_FALSE(validate_column_store(
             std::span<const std::byte>(*sealed).first(length),
             kIdentity,
+            schema,
             checksums).has_value());
     }
 
     auto wrong_identity = kIdentity;
     ++wrong_identity.boot_nonce;
     REQUIRE(
-        validate_column_store(*sealed, wrong_identity, checksums).error()
+        validate_column_store(
+            *sealed, wrong_identity, schema, checksums).error()
         == FormatError::IdentityMismatch);
+
+    auto wrong_schema = schema;
+    wrong_schema[0].name = "wrong_name";
+    REQUIRE(
+        validate_column_store(
+            *sealed, kIdentity, wrong_schema, checksums).error()
+        == FormatError::SchemaMismatch);
 
     UnavailableChecksums unavailable;
     REQUIRE(
         builder.seal(unavailable).error()
         == FormatError::ChecksumUnavailable);
     REQUIRE(
-        validate_column_store(*sealed, kIdentity, unavailable).error()
+        validate_column_store(
+            *sealed, kIdentity, schema, unavailable).error()
         == FormatError::ChecksumUnavailable);
 }
 
@@ -384,5 +550,13 @@ TEST_CASE("dictionary and block-reference policies fail safely") {
     REQUIRE_FALSE(validate_block_reference(invalid, 150));
     invalid = valid;
     invalid.handle_or_file_id = 0;
+    REQUIRE_FALSE(validate_block_reference(invalid, 150));
+    invalid = valid;
+    invalid.tier = BlockBackingTierV1::Dsa;
+    REQUIRE(validate_block_reference(invalid, 150));
+    invalid.flags = 1;
+    REQUIRE_FALSE(validate_block_reference(invalid, 150));
+    invalid = valid;
+    invalid.length = 0;
     REQUIRE_FALSE(validate_block_reference(invalid, 150));
 }

@@ -90,6 +90,12 @@ TEST_CASE("source density ordering is exact at uint64 boundaries") {
     incomplete.complete = false;
     REQUIRE(coverage_source_precedes(complete, incomplete));
 
+    CoverageSourceOrderKey higher_benefit = incomplete;
+    higher_benefit.estimated_covered_rows = maximum;
+    CoverageSourceOrderKey lower_benefit = complete;
+    lower_benefit.estimated_covered_rows = maximum - 1;
+    REQUIRE(coverage_source_precedes(higher_benefit, lower_benefit));
+
     CoverageSourceOrderKey denser = complete;
     denser.stored_bytes = maximum;
     REQUIRE(coverage_source_precedes(complete, denser));
@@ -148,4 +154,90 @@ TEST_CASE("readiness gates exact and reusable entries independently") {
         WriteObservability::None,
         true,
         false));
+}
+
+TEST_CASE("every readiness, kind, observability, and class flag is crossed") {
+    const std::array readiness_values{
+        CacheCorrectnessReadiness::PassthroughOnly,
+        CacheCorrectnessReadiness::RelationFreeOnly,
+        CacheCorrectnessReadiness::GenericMvccReady,
+        CacheCorrectnessReadiness::ProviderCompleteReady,
+        CacheCorrectnessReadiness::ReusableCoverageReady,
+        static_cast<CacheCorrectnessReadiness>(99),
+    };
+    const std::array kinds{
+        CacheEntryKind::ExactFinalResult,
+        CacheEntryKind::ReusableCoverage,
+        static_cast<CacheEntryKind>(99),
+    };
+    const std::array observability_values{
+        WriteObservability::None,
+        WriteObservability::ProviderComplete,
+        WriteObservability::ExecutorUtilityOnly,
+        WriteObservability::DatabaseWideFallback,
+        static_cast<WriteObservability>(99),
+    };
+
+    const auto expected = [](
+                              CacheCorrectnessReadiness readiness,
+                              CacheEntryKind kind,
+                              WriteObservability observability,
+                              bool relation_free,
+                              bool provider_backed) {
+        if (!known_readiness(readiness) || !known_observability(observability)) {
+            return false;
+        }
+        if (kind == CacheEntryKind::ReusableCoverage) {
+            return !relation_free && provider_backed
+                && readiness
+                    >= CacheCorrectnessReadiness::ReusableCoverageReady
+                && observability == WriteObservability::ProviderComplete;
+        }
+        if (kind != CacheEntryKind::ExactFinalResult) {
+            return false;
+        }
+        if (provider_backed) {
+            return !relation_free
+                && readiness
+                    >= CacheCorrectnessReadiness::ProviderCompleteReady
+                && observability == WriteObservability::ProviderComplete;
+        }
+        if (relation_free) {
+            return readiness
+                    >= CacheCorrectnessReadiness::RelationFreeOnly
+                && observability == WriteObservability::None;
+        }
+        return readiness >= CacheCorrectnessReadiness::GenericMvccReady
+            && (observability == WriteObservability::ExecutorUtilityOnly
+                || observability
+                    == WriteObservability::DatabaseWideFallback);
+    };
+
+    for (const auto readiness : readiness_values) {
+        for (const auto kind : kinds) {
+            for (const auto observability : observability_values) {
+                for (const bool relation_free : {false, true}) {
+                    for (const bool provider_backed : {false, true}) {
+                        INFO("readiness=" << static_cast<unsigned>(readiness)
+                             << " kind=" << static_cast<unsigned>(kind)
+                             << " observability="
+                             << static_cast<unsigned>(observability)
+                             << " relation_free=" << relation_free
+                             << " provider_backed=" << provider_backed);
+                        REQUIRE(readiness_allows(
+                            readiness,
+                            kind,
+                            observability,
+                            relation_free,
+                            provider_backed) == expected(
+                            readiness,
+                            kind,
+                            observability,
+                            relation_free,
+                            provider_backed));
+                    }
+                }
+            }
+        }
+    }
 }

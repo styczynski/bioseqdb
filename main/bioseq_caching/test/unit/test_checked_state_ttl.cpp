@@ -92,11 +92,14 @@ TEST_CASE("generation identity prevents ABA publication and premature eviction")
     REQUIRE(state.convert_waiter_to_reader(7, 11));
     REQUIRE(state.reader_pins() == 1);
     REQUIRE(state.waiter_references() == 0);
-    REQUIRE_FALSE(state.begin_evict(7));
-    REQUIRE(state.unpin_reader(7));
-    REQUIRE(state.begin_evict(7));
-    REQUIRE_FALSE(state.finish_evict(8));
-    REQUIRE(state.finish_evict(7));
+    REQUIRE_FALSE(state.begin_evict(7, 11));
+    REQUIRE_FALSE(state.unpin_reader(7, 10));
+    REQUIRE(state.unpin_reader(7, 11));
+    REQUIRE_FALSE(state.begin_evict(7, 10));
+    REQUIRE(state.begin_evict(7, 11));
+    REQUIRE_FALSE(state.finish_evict(8, 11));
+    REQUIRE_FALSE(state.finish_evict(7, 10));
+    REQUIRE(state.finish_evict(7, 11));
     REQUIRE(state.value() == CacheEntryState::Absent);
 
     REQUIRE(state.claim(8, 12));
@@ -112,12 +115,13 @@ TEST_CASE("invalidation preserves old pins but rejects every new reader") {
     REQUIRE(state.claim(3, 4));
     REQUIRE(state.begin_build(3, 4));
     REQUIRE(state.publish_complete(3, 4));
-    REQUIRE(state.pin_reader(3));
-    REQUIRE(state.invalidate(3));
-    REQUIRE_FALSE(state.pin_reader(3));
-    REQUIRE_FALSE(state.begin_evict(3));
-    REQUIRE(state.unpin_reader(3));
-    REQUIRE(state.begin_evict(3));
+    REQUIRE(state.pin_reader(3, 4));
+    REQUIRE_FALSE(state.invalidate(3, 5));
+    REQUIRE(state.invalidate(3, 4));
+    REQUIRE_FALSE(state.pin_reader(3, 4));
+    REQUIRE_FALSE(state.begin_evict(3, 4));
+    REQUIRE(state.unpin_reader(3, 4));
+    REQUIRE(state.begin_evict(3, 4));
 }
 
 TEST_CASE("wait dependencies form a strictly descending claim DAG") {
@@ -130,7 +134,9 @@ TEST_CASE("wait dependencies form a strictly descending claim DAG") {
     const std::array<std::uint64_t, 1> invalid_owned{0};
     REQUIRE_FALSE(claim_sequence_wait_allowed(1, invalid_owned));
     REQUIRE(failure_allows_takeover(CacheFailureCode::ProducerCancelled));
-    REQUIRE(failure_allows_takeover(CacheFailureCode::StorageFailure));
+    REQUIRE(failure_allows_takeover(CacheFailureCode::ProducerExited));
+    REQUIRE_FALSE(failure_allows_takeover(CacheFailureCode::StorageFailure));
+    REQUIRE_FALSE(failure_allows_takeover(CacheFailureCode::AdmissionDenied));
     REQUIRE_FALSE(failure_allows_takeover(CacheFailureCode::CorruptResult));
 }
 

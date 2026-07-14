@@ -211,9 +211,9 @@ TEST_CASE("admission reports pressure, overflow, and file floors") {
 
 TEST_CASE("provider schema maps require exact SQL and semantic meaning") {
     const std::array consumer_columns{column(1)};
-    const std::array source_columns{column(9)};
+    const std::array source_columns{column(1)};
     const std::array<std::uint32_t, 1> consumer_required{1};
-    const std::array mappings{map_entry(1, 9)};
+    const std::array mappings{map_entry(1, 1)};
 
     const ProviderContractView consumer{
         .boundary = {
@@ -261,11 +261,61 @@ TEST_CASE("provider schema maps require exact SQL and semantic meaning") {
         == SourceMapError::CapabilityMissing);
 }
 
+TEST_CASE("provider schemas reject zero, duplicate, and out-of-range attnos") {
+    auto valid = column(1);
+    ProviderSchemaView schema{.columns = &valid, .column_count = 1};
+    REQUIRE(validate_provider_schema(schema).has_value());
+
+    auto invalid = valid;
+    invalid.attno = 0;
+    schema.columns = &invalid;
+    REQUIRE(
+        validate_provider_schema(schema).error()
+        == SourceMapError::InvalidAttno);
+    invalid.attno = 2;
+    REQUIRE(
+        validate_provider_schema(schema).error()
+        == SourceMapError::InvalidAttno);
+
+    const std::array duplicate{column(1), column(1)};
+    schema = ProviderSchemaView{
+        .columns = duplicate.data(),
+        .column_count = duplicate.size(),
+    };
+    REQUIRE(
+        validate_provider_schema(schema).error()
+        == SourceMapError::DuplicateAttno);
+
+    const std::array dense{column(1), column(2)};
+    auto incompatible_semantics = dense;
+    incompatible_semantics[1].semantic_id_low =
+        incompatible_semantics[0].semantic_id_low;
+    incompatible_semantics[1].type_oid = 25;
+    schema = ProviderSchemaView{
+        .columns = incompatible_semantics.data(),
+        .column_count = incompatible_semantics.size(),
+    };
+    REQUIRE(
+        validate_provider_schema(schema).error()
+        == SourceMapError::SemanticIdMismatch);
+
+    const std::array<std::uint32_t, 1> out_of_range{3};
+    schema = ProviderSchemaView{
+        .columns = dense.data(),
+        .column_count = dense.size(),
+        .required_attnos = out_of_range.data(),
+        .required_attno_count = out_of_range.size(),
+    };
+    REQUIRE(
+        validate_provider_schema(schema).error()
+        == SourceMapError::InvalidAttno);
+}
+
 TEST_CASE("repeated source attributes are legal only for identical meaning") {
     const std::array consumer_columns{column(1), column(2)};
-    const std::array source_columns{column(9)};
+    const std::array source_columns{column(1)};
     const std::array<std::uint32_t, 2> required{1, 2};
-    const std::array mappings{map_entry(1, 9), map_entry(2, 9)};
+    const std::array mappings{map_entry(1, 1), map_entry(2, 1)};
     const ProviderSchemaView consumer{
         .columns = consumer_columns.data(),
         .column_count = consumer_columns.size(),
@@ -293,6 +343,114 @@ TEST_CASE("repeated source attributes are legal only for identical meaning") {
         == SourceMapError::SemanticIdMismatch);
 }
 
+TEST_CASE("source-map shape and meaning failures are exhaustive") {
+    const std::array consumer_columns{column(1, 7), column(2, 8)};
+    const std::array source_columns{column(1, 7), column(2, 8)};
+    const std::array<std::uint32_t, 2> required{1, 2};
+    const ProviderContractView consumer{
+        .boundary = {
+            .columns = consumer_columns.data(),
+            .column_count = consumer_columns.size(),
+            .required_attnos = required.data(),
+            .required_attno_count = required.size(),
+        },
+        .capability_mask = BIOSEQ_CAP_SCORE,
+    };
+    const ProviderContractView source{
+        .boundary = {
+            .columns = source_columns.data(),
+            .column_count = source_columns.size(),
+        },
+        .capability_mask = BIOSEQ_CAP_SCORE,
+    };
+    const std::array valid_maps{map_entry(1, 1, 7), map_entry(2, 2, 8)};
+    BioseqCacheSourceMappingV1 mapping{
+        .struct_size = sizeof(BioseqCacheSourceMappingV1),
+        .boundary_map = valid_maps.data(),
+        .boundary_map_count = valid_maps.size(),
+    };
+    REQUIRE(validate_source_map(consumer, source, mapping).has_value());
+
+    SECTION("null pointer and short or long count") {
+        mapping.boundary_map = nullptr;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::NullPointer);
+        mapping.boundary_map = valid_maps.data();
+        mapping.boundary_map_count = 1;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::MapCountMismatch);
+        mapping.boundary_map_count = 3;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::MapCountMismatch);
+    }
+
+    SECTION("zero and out-of-range mapping attnos") {
+        auto maps = valid_maps;
+        maps[0].consumer_attno = 0;
+        mapping.boundary_map = maps.data();
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::InvalidAttno);
+        maps = valid_maps;
+        maps[0].source_attno = 3;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::InvalidAttno);
+    }
+
+    SECTION("missing and duplicate consumer attnos") {
+        auto maps = valid_maps;
+        maps[1].consumer_attno = 1;
+        maps[1].semantic_id_low = 7;
+        mapping.boundary_map = maps.data();
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::DuplicateAttno);
+        maps = valid_maps;
+        maps[1].consumer_attno = 3;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::RequiredAttnoMissing);
+    }
+
+    SECTION("type typmod collation and semantic metadata") {
+        auto maps = valid_maps;
+        ++maps[0].type_oid;
+        mapping.boundary_map = maps.data();
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::TypeMismatch);
+        maps = valid_maps;
+        ++maps[0].typmod;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::TypmodMismatch);
+        maps = valid_maps;
+        ++maps[0].collation_oid;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::CollationMismatch);
+        maps = valid_maps;
+        ++maps[0].semantic_id_low;
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::SemanticIdMismatch);
+    }
+
+    SECTION("same-typed semantic permutation") {
+        auto maps = valid_maps;
+        maps[0].source_attno = 2;
+        maps[1].source_attno = 1;
+        mapping.boundary_map = maps.data();
+        REQUIRE(
+            validate_source_map(consumer, source, mapping).error()
+            == SourceMapError::SemanticIdMismatch);
+    }
+}
+
 TEST_CASE("provider registration enforces callbacks implied by flags") {
     BioseqCacheProviderV1 provider{
         .struct_size = sizeof(BioseqCacheProviderV1),
@@ -302,7 +460,8 @@ TEST_CASE("provider registration enforces callbacks implied by flags") {
         .provider_flags = 0,
         .reserved = 0,
         .provider_name = "unit-provider",
-        .provider_scan_methods = nullptr,
+        .provider_scan_methods =
+            reinterpret_cast<const ::CustomScanMethods*>(std::uintptr_t{1}),
         .analyze_query = analyze_query,
         .describe_path = describe_path,
         .append_domain_semantic_digest = append_domain,
@@ -325,12 +484,20 @@ TEST_CASE("provider registration enforces callbacks implied by flags") {
     REQUIRE(provider_registration_valid(&provider, 18));
 
     provider.provider_flags = BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE;
-    REQUIRE_FALSE(provider_registration_valid(&provider, 18));
-    provider.provider_scan_methods =
-        reinterpret_cast<const ::CustomScanMethods*>(std::uintptr_t{1});
     REQUIRE(provider_registration_valid(&provider, 18));
 
     provider.provider_flags = 1U << 31;
+    REQUIRE_FALSE(provider_registration_valid(&provider, 18));
+
+    provider.provider_flags = 0;
+    provider.provider_scan_methods = nullptr;
+    REQUIRE_FALSE(provider_registration_valid(&provider, 18));
+    provider.provider_scan_methods =
+        reinterpret_cast<const ::CustomScanMethods*>(std::uintptr_t{1});
+    provider.struct_size = sizeof(BioseqCacheProviderV1) - 1;
+    REQUIRE_FALSE(provider_registration_valid(&provider, 18));
+    provider.struct_size = sizeof(BioseqCacheProviderV1);
+    provider.abi_version = kProviderAbiVersion + 1;
     REQUIRE_FALSE(provider_registration_valid(&provider, 18));
 }
 
@@ -351,6 +518,9 @@ TEST_CASE("canonical keys, identities, dependencies, and settings are exact") {
     PhysicalIdentityV1 right = left;
     right.bytes[2] = std::byte{99};
     REQUIRE(physical_identity_equal(left, right));
+    right = left;
+    right.bytes[1] = std::byte{99};
+    REQUIRE_FALSE(physical_identity_equal(left, right));
 
     BaseRowReferenceV1 occurrence_a{
         .rte_ordinal = 1,
@@ -397,4 +567,52 @@ TEST_CASE("canonical keys, identities, dependencies, and settings are exact") {
     const std::array<std::uint32_t, 2> duplicate_required{1, 1};
     REQUIRE_FALSE(semantic_setting_inventory_complete(
         duplicate_required, settings));
+
+    auto unknown_class = settings;
+    unknown_class[0].class_mask = 0x10;
+    REQUIRE_FALSE(semantic_setting_inventory_complete(
+        required_settings, unknown_class));
+    const std::array invalid_duplicate{
+        settings[0],
+        SemanticSettingRecord{.setting_id = 1, .class_mask = 0x10},
+        settings[1],
+    };
+    REQUIRE_FALSE(semantic_setting_inventory_complete(
+        required_settings, invalid_duplicate));
+}
+
+TEST_CASE("provider digest framing and runtime recipe checks are unambiguous") {
+    const std::array payload_a{std::byte{2}, std::byte{3}};
+    const std::array payload_b{std::byte{3}};
+    std::vector<std::byte> framed_a;
+    std::vector<std::byte> framed_b;
+    append_provider_digest_frame(framed_a, 1, payload_a);
+    append_provider_digest_frame(framed_b, 12, payload_b);
+    REQUIRE(framed_a != framed_b);
+
+    std::vector<std::byte> preorder_a;
+    append_provider_digest_frame(preorder_a, 1, payload_a);
+    append_provider_digest_frame(preorder_a, 2, payload_b);
+    std::vector<std::byte> preorder_b;
+    append_provider_digest_frame(preorder_b, 2, payload_b);
+    append_provider_digest_frame(preorder_b, 1, payload_a);
+    REQUIRE(preorder_a != preorder_b);
+
+    REQUIRE(provider_recipe_shape_valid(
+        kMaxProviderRecipesPerExactPlan,
+        kMaxProviderRecipeBytes,
+        kMaxProviderBoundaryColumns));
+    REQUIRE_FALSE(provider_recipe_shape_valid(
+        kMaxProviderRecipesPerExactPlan + 1u, 0, 0));
+    REQUIRE_FALSE(provider_recipe_shape_valid(
+        0, kMaxProviderRecipeBytes + 1u, 0));
+    REQUIRE_FALSE(provider_recipe_shape_valid(
+        0, 0, kMaxProviderBoundaryColumns + 1u));
+
+    CacheDigest256 plan_a{};
+    CacheDigest256 plan_b{};
+    plan_b.bytes[0] = 1;
+    REQUIRE(runtime_digest_matches(plan_a, plan_a));
+    REQUIRE(runtime_digest_matches(plan_b, plan_b));
+    REQUIRE_FALSE(runtime_digest_matches(plan_a, plan_b));
 }
