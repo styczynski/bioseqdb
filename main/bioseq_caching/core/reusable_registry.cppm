@@ -2084,6 +2084,26 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
   return true;
 }
 
+/** Copy a previously validated diagnostic update while the exact lock is held. */
+inline void assign_diagnostic_text_unchecked(
+    ReusableSharedGenerationV1 &generation,
+    const ReusableDiagnosticTextUpdateV1 &update) noexcept {
+  std::fill(generation.display_sql.begin(), generation.display_sql.end(), 0);
+  std::fill(generation.producer_plan.begin(), generation.producer_plan.end(),
+            0);
+  std::copy(update.display_sql.begin(), update.display_sql.end(),
+            generation.display_sql.begin());
+  std::copy(update.producer_plan.begin(), update.producer_plan.end(),
+            generation.producer_plan.begin());
+  generation.display_sql_bytes =
+      static_cast<std::uint32_t>(update.display_sql.size());
+  generation.producer_plan_bytes =
+      static_cast<std::uint32_t>(update.producer_plan.size());
+  generation.display_sql_truncated = update.display_sql_truncated;
+  generation.producer_plan_truncated = update.producer_plan_truncated;
+  generation.plan_snapshot_status = update.plan_status;
+}
+
 [[nodiscard]] inline bool
 write_observability_valid(WriteObservability observability) noexcept {
   return observability == WriteObservability::None ||
@@ -2787,7 +2807,11 @@ snapshot_reusable_candidates(
   return first_error;
 }
 
-/** Transition the matching producer from CLAIMED to BUILDING. */
+/**
+ * Transition CLAIMED to BUILDING with an explicit bounded unavailable marker.
+ * New producer paths should use the diagnostic overload below so BUILDING is
+ * first published with the initialized child's planned snapshot.
+ */
 [[nodiscard]] inline ReusableRegistryErrorV1 begin_reusable_build(
     ReusableRegistryAttachmentV1 &attachment,
     const ReusableGenerationReferenceV1 &reference,
@@ -2815,6 +2839,59 @@ snapshot_reusable_candidates(
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::InvalidState;
   }
+  constexpr char unavailable_sql[] = "SQL capture unavailable";
+  constexpr char unavailable_plan[] = "plan capture unavailable";
+  const ReusableDiagnosticTextUpdateV1 unavailable{
+      .reference = reference,
+      .producer = generation.producer,
+      .display_sql = std::span<const char>{
+          unavailable_sql, sizeof(unavailable_sql) - 1},
+      .producer_plan = std::span<const char>{
+          unavailable_plan, sizeof(unavailable_plan) - 1},
+  };
+  assign_diagnostic_text_unchecked(generation, unavailable);
+  generation.state = CacheEntryState::Building;
+  release_exact(callbacks, partition);
+  return ReusableRegistryErrorV1::None;
+}
+
+/**
+ * Publish initialized-child diagnostics and BUILDING atomically. The caller
+ * holds shared membership; the state becomes observable only after text and
+ * status are complete under the exact partition lock.
+ */
+[[nodiscard]] inline ReusableRegistryErrorV1
+begin_reusable_build_with_diagnostics(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableDiagnosticTextUpdateV1 &update,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+  using namespace reusable_registry_detail;
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None) {
+    return attachment_error;
+  }
+  if (!callbacks.valid() || !diagnostic_update_valid(update) ||
+      update.plan_status == ReusablePlanSnapshotStatusV1::Analyzed ||
+      update.reference.generation_slot >=
+          header(attachment).config.max_generations) {
+    return ReusableRegistryErrorV1::InvalidArgument;
+  }
+  const std::uint32_t partition = reusable_exact_partition(
+      attachment, update.reference.id.digest);
+  acquire_exact(callbacks, partition);
+  ReusableSharedGenerationV1 &generation =
+      generations(attachment)[update.reference.generation_slot];
+  if (!reference_matches(generation, update.reference)) {
+    release_exact(callbacks, partition);
+    return ReusableRegistryErrorV1::StaleReference;
+  }
+  if (!legal_state_transition(generation.state, CacheEntryState::Building) ||
+      generation.producer != update.producer) {
+    release_exact(callbacks, partition);
+    return ReusableRegistryErrorV1::InvalidState;
+  }
+  assign_diagnostic_text_unchecked(generation, update);
   generation.state = CacheEntryState::Building;
   release_exact(callbacks, partition);
   return ReusableRegistryErrorV1::None;
@@ -2864,22 +2941,7 @@ store_reusable_diagnostic_text(
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::InvalidState;
   }
-  std::fill(generation.display_sql.begin(), generation.display_sql.end(), 0);
-  std::fill(
-      generation.producer_plan.begin(), generation.producer_plan.end(), 0);
-  std::copy(
-      update.display_sql.begin(), update.display_sql.end(),
-      generation.display_sql.begin());
-  std::copy(
-      update.producer_plan.begin(), update.producer_plan.end(),
-      generation.producer_plan.begin());
-  generation.display_sql_bytes = static_cast<std::uint32_t>(
-      update.display_sql.size());
-  generation.producer_plan_bytes = static_cast<std::uint32_t>(
-      update.producer_plan.size());
-  generation.display_sql_truncated = update.display_sql_truncated;
-  generation.producer_plan_truncated = update.producer_plan_truncated;
-  generation.plan_snapshot_status = update.plan_status;
+  assign_diagnostic_text_unchecked(generation, update);
   release_exact(callbacks, partition);
   return ReusableRegistryErrorV1::None;
 }

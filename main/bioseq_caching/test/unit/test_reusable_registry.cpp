@@ -675,18 +675,44 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
   REQUIRE(
       store_reusable_diagnostic_text(fixture.attachment, update)
       == ReusableRegistryErrorV1::InvalidState);
-  REQUIRE(
-      begin_reusable_build(fixture.attachment, claimed.reference)
-      == ReusableRegistryErrorV1::None);
 
   auto wrong_owner = update;
   wrong_owner.producer = producer(9);
   REQUIRE(
-      store_reusable_diagnostic_text(fixture.attachment, wrong_owner)
+      begin_reusable_build_with_diagnostics(
+          fixture.attachment, wrong_owner)
       == ReusableRegistryErrorV1::InvalidState);
+  const auto still_claimed = snapshot_reusable_generation(
+      fixture.attachment, claimed.reference);
+  REQUIRE(still_claimed.has_value());
+  REQUIRE(still_claimed->state == CacheEntryState::Claimed);
+
+  auto premature_analyzed = update;
+  premature_analyzed.plan_status =
+      ReusablePlanSnapshotStatusV1::Analyzed;
   REQUIRE(
-      store_reusable_diagnostic_text(fixture.attachment, update)
+      begin_reusable_build_with_diagnostics(
+          fixture.attachment, premature_analyzed)
+      == ReusableRegistryErrorV1::InvalidArgument);
+  DiagnosticsPartitionTrace begin_trace{};
+  REQUIRE(
+      begin_reusable_build_with_diagnostics(
+          fixture.attachment, update,
+          ReusableRegistryPartitionCallbacksV1{
+              .context = &begin_trace,
+              .acquire_exact = trace_exact_acquire,
+              .release_exact = trace_exact_release,
+              .acquire_coverage = trace_coverage_acquire,
+              .release_coverage = trace_coverage_release,
+          })
       == ReusableRegistryErrorV1::None);
+  REQUIRE(begin_trace.exact_acquires == 1);
+  REQUIRE(begin_trace.exact_releases == 1);
+  REQUIRE(begin_trace.coverage_acquires == 0);
+  REQUIRE(begin_trace.coverage_releases == 0);
+  REQUIRE(
+      begin_reusable_build_with_diagnostics(fixture.attachment, update)
+      == ReusableRegistryErrorV1::InvalidState);
 
   std::array<ReusableGenerationDiagnosticsRowV1, 1> redacted_rows{};
   const auto redacted = snapshot_reusable_generation_diagnostics(
@@ -764,6 +790,34 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
           fixture.attachment, stale_reference, sql_copy, plan_copy)
           .error()
       == ReusableRegistryErrorV1::StaleReference);
+}
+
+TEST_CASE("reusable legacy begin publishes a bounded unavailable marker") {
+  RegistryFixture fixture{2};
+  auto claimed = claim(
+      fixture, coverage_key(48), digest(71), "legacy-domain",
+      "legacy-generation", 7);
+  REQUIRE(claimed);
+  REQUIRE(
+      begin_reusable_build(fixture.attachment, claimed.reference)
+      == ReusableRegistryErrorV1::None);
+
+  std::array<char, kReusableDisplaySqlCapacityV1> sql_copy{};
+  std::array<char, kReusableProducerPlanCapacityV1> plan_copy{};
+  const auto copied = copy_reusable_diagnostic_text(
+      fixture.attachment, claimed.reference, sql_copy, plan_copy);
+  REQUIRE(copied.has_value());
+  REQUIRE(
+      copied->plan_status == ReusablePlanSnapshotStatusV1::Unavailable);
+  REQUIRE(
+      std::string_view(sql_copy.data(), copied->display_sql_bytes)
+      == "SQL capture unavailable");
+  REQUIRE(
+      std::string_view(plan_copy.data(), copied->producer_plan_bytes)
+      == "plan capture unavailable");
+  REQUIRE(
+      validate_reusable_registry(fixture.attachment)
+      == ReusableRegistryErrorV1::None);
 }
 
 TEST_CASE("reusable diagnostics copy bounded redacted generation rows") {
