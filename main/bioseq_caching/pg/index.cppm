@@ -1690,21 +1690,152 @@ struct CoverageCurrentPlanViewV1 {
             == current_reusable_security_namespace();
 }
 
-[[nodiscard]] CacheDigest256 current_reusable_dependency_fingerprint() noexcept {
-    struct DependencyEpochV1 {
-        std::uint64_t database_epoch;
-        std::uint64_t coarse_epoch;
-    } epochs{
-        .database_epoch = g_shared == nullptr
-            ? 0
-            : pg_atomic_read_u64(&g_shared->database_write_epoch),
-        .coarse_epoch = g_shared == nullptr
-            ? 0
-            : pg_atomic_read_u64(&g_shared->coarse_dependency_epoch),
+struct CoverageDependencyTicketV1 {
+    CacheDigest256 fingerprint{};
+    PhysicalIdentityV1 physical_identity{};
+    std::uint32_t dependency_count = 0;
+    WriteObservability observability = WriteObservability::None;
+    bool valid = false;
+};
+
+/** Refuse a reusable snapshot that can observe this backend's own writes. */
+[[nodiscard]] bool current_transaction_touches_dependency(
+        Oid relation_oid,
+        const PhysicalIdentityV1& physical_identity) noexcept {
+    if (g_force_coarse_transition) {
+        return true;
+    }
+    for (const DirtyFrame* frame = g_dirty_frames;
+         frame != nullptr; frame = frame->next) {
+        if (!frame->dirty) {
+            continue;
+        }
+        if (frame->coarse) {
+            return true;
+        }
+        for (std::uint16_t index = 0;
+             index < frame->relation_count; ++index) {
+            const DirtyRelationObservationV1& observation =
+                frame->relations[index];
+            if (!observation.physical_identity_valid
+                && !observation.storage_parent) {
+                return true;
+            }
+            if (observation.relation_oid == relation_oid
+                || (observation.physical_identity_valid
+                    && observation.physical_identity == physical_identity)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/** Version one admits one precise provider leaf plus the coarse overflow epoch. */
+[[nodiscard]] CoverageDependencyTicketV1 coverage_dependency_ticket(
+        const BioseqCachePathDomainV1& contract,
+        const provider_registry::ProviderV1* provider) noexcept {
+    CoverageDependencyTicketV1 ticket{};
+    if (g_shared == nullptr || provider == nullptr
+        || (provider->provider_flags
+                & BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION) == 0
+        || contract.dependency_nodes == NIL
+        || list_length(contract.dependency_nodes) <= 0
+        || list_length(contract.dependency_nodes)
+            > static_cast<int>(kMaximumRelationDependencies)
+        || pg_atomic_read_u32(&g_shared->database_transition_count) != 0) {
+        return ticket;
+    }
+    std::array<Oid, kMaximumRelationDependencies> relation_oids{};
+    std::size_t relation_count = 0;
+    ListCell* cell = nullptr;
+    foreach(cell, contract.dependency_nodes) {
+        const auto* node = static_cast<const Node*>(lfirst(cell));
+        if (node == nullptr || !IsA(node, Integer)) {
+            return ticket;
+        }
+        const Oid relation_oid = static_cast<Oid>(
+            static_cast<std::uint32_t>(intVal(node)));
+        if (!OidIsValid(relation_oid)) {
+            return ticket;
+        }
+        bool duplicate = false;
+        for (std::size_t index = 0; index < relation_count; ++index) {
+            duplicate = duplicate || relation_oids[index] == relation_oid;
+        }
+        if (!duplicate) {
+            relation_oids[relation_count++] = relation_oid;
+        }
+    }
+    if (relation_count != 1) {
+        return ticket;
+    }
+    std::sort(relation_oids.begin(), relation_oids.begin() + relation_count);
+    if (relation_physical_identity(
+            relation_oids[0], &ticket.physical_identity)
+            != RelationPhysicalIdentityStatusV1::Precise) {
+        return ticket;
+    }
+    if (current_transaction_touches_dependency(
+            relation_oids[0], ticket.physical_identity)) {
+        return ticket;
+    }
+
+    std::array<std::byte,
+        128U + kMaximumRelationDependencies
+            * (sizeof(Oid) + sizeof(std::uint64_t))> bytes{};
+    std::size_t offset = 0;
+    const auto append = [&](const void* source, std::size_t size) {
+        if (source == nullptr || offset > bytes.size()
+            || size > bytes.size() - offset) {
+            return false;
+        }
+        std::memcpy(bytes.data() + offset, source, size);
+        offset += size;
+        return true;
     };
+    const std::uint32_t version = 1;
+    const std::uint32_t database_oid = MyDatabaseId;
+    const std::uint32_t dependency_count = relation_count;
+    const std::uint64_t coarse_epoch = pg_atomic_read_u64(
+        &g_shared->coarse_dependency_epoch);
+    if (!append(&version, sizeof(version))
+        || !append(&database_oid, sizeof(database_oid))
+        || !append(&coarse_epoch, sizeof(coarse_epoch))
+        || !append(&dependency_count, sizeof(dependency_count))) {
+        return ticket;
+    }
+    for (std::size_t index = 0; index < relation_count; ++index) {
+        const std::uint64_t epoch = relation_dependency_epoch(
+            relation_oids[index]);
+        if (epoch == 0
+            || !append(&relation_oids[index], sizeof(relation_oids[index]))
+            || !append(&epoch, sizeof(epoch))) {
+            return ticket;
+        }
+    }
+    const std::uint32_t identity_kind = static_cast<std::uint32_t>(
+        ticket.physical_identity.kind);
+    if (!append(&identity_kind, sizeof(identity_kind))
+        || !append(
+            &ticket.physical_identity.length,
+            sizeof(ticket.physical_identity.length))
+        || !append(
+            ticket.physical_identity.bytes.data(),
+            ticket.physical_identity.length)) {
+        return ticket;
+    }
     PostgreSqlColumnChecksumPolicy checksum;
-    const auto digest = checksum.sha256(std::as_bytes(std::span{&epochs, 1U}));
-    return digest.has_value() ? *digest : CacheDigest256{};
+    const auto digest = checksum.sha256(std::span<const std::byte>{
+        bytes.data(), offset});
+    if (!digest.has_value()) {
+        return ticket;
+    }
+    ticket.fingerprint = *digest;
+    ticket.dependency_count = dependency_count;
+    ticket.observability = WriteObservability::ProviderComplete;
+    ticket.valid = true;
+    return ticket;
 }
 
 [[nodiscard]] ConditionVariable* reusable_generation_changed(
@@ -5032,6 +5163,7 @@ struct ReusableCoverageState {
     const provider_registry::ProviderV1* provider;
     CoverageCurrentPlanHeaderV1 current_header;
     CacheDigest256 dependency_fingerprint;
+    PhysicalIdentityV1 dependency_physical_identity;
     PlannerDecodedCoverageV1 current_contract;
     ReusableGenerationReferenceV1 current_reference;
     ReusableReferenceTokenV1 current_reference_token;
@@ -5604,10 +5736,15 @@ capture_cleanup:
 /** Seal full merged output, publish storage, then make registry COMPLETE last. */
 [[nodiscard]] bool complete_coverage_producer(
         ReusableCoverageState& state) {
+    const CoverageDependencyTicketV1 dependency_ticket =
+        coverage_dependency_ticket(
+            state.current_contract.domain, state.provider);
     if (!state.current_producer_owned || state.column_builder == nullptr
         || state.column_builder->row_count() != state.row_count
-        || state.dependency_fingerprint
-            != current_reusable_dependency_fingerprint()
+        || !dependency_ticket.valid
+        || state.dependency_fingerprint != dependency_ticket.fingerprint
+        || state.dependency_physical_identity
+            != dependency_ticket.physical_identity
         || pg_atomic_read_u32(&g_shared->database_transition_count) != 0) {
         return false;
     }
