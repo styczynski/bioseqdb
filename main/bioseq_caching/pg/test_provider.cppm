@@ -14,6 +14,7 @@ extern "C" {
 
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace_d.h"
 #include "commands/explain.h"
 #include "executor/executor.h"
@@ -909,6 +910,7 @@ void provider_set_rel_pathlist_hook(
     }
     if (root == nullptr || relation == nullptr || range_entry == nullptr
         || range_entry->rtekind != RTE_RELATION
+        || (range_entry->inh && has_subclass(range_entry->relid))
         || range_entry->relid != g_target_relation_oid
         || !g_provider_registered) {
         return;
