@@ -1469,6 +1469,13 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
     return 1U << static_cast<std::uint32_t>(point);
 }
 
+[[nodiscard]] std::int64_t pause_lock_key(TestPausePoint point) noexcept {
+    const std::uint64_t database = static_cast<std::uint64_t>(MyDatabaseId);
+    const std::uint64_t ordinal = static_cast<std::uint32_t>(point) + 1U;
+    return static_cast<std::int64_t>(
+        0x4253514300000000ULL ^ (database << 8U) ^ ordinal);
+}
+
 [[nodiscard]] TestPausePoint parse_pause_point(const char* name) {
     if (std::strcmp(name, "after_building_publish") == 0) {
         return TestPausePoint::AfterBuildingPublish;
@@ -1497,19 +1504,27 @@ void maybe_pause(TestPausePoint point) {
     }
     pg_atomic_fetch_or_u32(&control.paused_mask, bit);
     ConditionVariableBroadcast(&control.changed);
-    ConditionVariablePrepareToSleep(&control.changed);
+    volatile bool lock_acquired = false;
     PG_TRY();
     {
-        while ((pg_atomic_read_u32(&control.released_mask) & bit) == 0) {
-            CHECK_FOR_INTERRUPTS();
-            static_cast<void>(ConditionVariableTimedSleep(
-                &control.changed, 1000L, PG_WAIT_EXTENSION));
-        }
-        ConditionVariableCancelSleep();
+        /* A heavyweight advisory lock makes the pause visible to
+         * pg_isolation_regress's blocked-session detector. */
+        static_cast<void>(DirectFunctionCall1(
+            pg_advisory_lock_int8,
+            Int64GetDatum(pause_lock_key(point))));
+        lock_acquired = true;
+        static_cast<void>(DirectFunctionCall1(
+            pg_advisory_unlock_int8,
+            Int64GetDatum(pause_lock_key(point))));
+        lock_acquired = false;
     }
     PG_CATCH();
     {
-        ConditionVariableCancelSleep();
+        if (lock_acquired) {
+            static_cast<void>(DirectFunctionCall1(
+                pg_advisory_unlock_int8,
+                Int64GetDatum(pause_lock_key(point))));
+        }
         pg_atomic_fetch_and_u32(&control.armed_mask, ~bit);
         pg_atomic_fetch_and_u32(&control.paused_mask, ~bit);
         pg_atomic_fetch_and_u32(&control.released_mask, ~bit);
@@ -1549,8 +1564,10 @@ struct RegistryDecision {
 
 /** Complete entries are usable only in their captured database epoch. */
 [[nodiscard]] bool entry_is_current(
-        const CacheEntry& entry, TimestampTz now) noexcept {
+        const CacheEntry& entry, std::uint64_t database_epoch,
+        TimestampTz now) noexcept {
     return entry.state == SharedEntryState::Complete
+        && entry.database_epoch == database_epoch
         && entry.expires_at > now;
 }
 
@@ -1650,7 +1667,7 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
     for (std::size_t offset = 0; offset < kRegistryCapacity; ++offset) {
         CacheEntry& entry = g_shared->entries[offset];
         if (entry_key_matches(entry, key_hash, key)) {
-            if (entry_is_current(entry, now)) {
+            if (entry_is_current(entry, database_epoch, now)) {
                 ++entry.reader_count;
                 ++entry.hits;
                 decision.role = RuntimeRole::Consumer;
@@ -3214,8 +3231,12 @@ Datum bioseq_cache_test_arm_pause(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache::pg;
     require_cache_test_superuser();
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const std::uint32_t bit = pause_bit(parse_pause_point(name));
+    const TestPausePoint point = parse_pause_point(name);
+    const std::uint32_t bit = pause_bit(point);
     CacheTestControl& control = g_shared->test_control;
+    static_cast<void>(DirectFunctionCall1(
+        pg_advisory_lock_int8,
+        Int64GetDatum(pause_lock_key(point))));
     pg_atomic_fetch_and_u32(&control.paused_mask, ~bit);
     pg_atomic_fetch_and_u32(&control.released_mask, ~bit);
     pg_atomic_fetch_or_u32(&control.armed_mask, bit);
@@ -3263,9 +3284,13 @@ Datum bioseq_cache_test_release_pause(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache::pg;
     require_cache_test_superuser();
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const std::uint32_t bit = pause_bit(parse_pause_point(name));
+    const TestPausePoint point = parse_pause_point(name);
+    const std::uint32_t bit = pause_bit(point);
     pfree(name);
     pg_atomic_fetch_or_u32(&g_shared->test_control.released_mask, bit);
+    static_cast<void>(DirectFunctionCall1(
+        pg_advisory_unlock_int8,
+        Int64GetDatum(pause_lock_key(point))));
     ConditionVariableBroadcast(&g_shared->test_control.changed);
     PG_RETURN_VOID();
 }

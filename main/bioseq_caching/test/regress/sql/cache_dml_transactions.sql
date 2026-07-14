@@ -130,6 +130,47 @@ BEGIN
 END
 $$;
 
+CREATE TABLE qc_partitioned(
+    id integer NOT NULL,
+    payload text NOT NULL
+) PARTITION BY RANGE (id);
+CREATE TABLE qc_partitioned_lo PARTITION OF qc_partitioned
+    FOR VALUES FROM (0) TO (100);
+INSERT INTO qc_partitioned VALUES (1, 'parent scan');
+
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT id, payload FROM qc_partitioned ORDER BY id;
+SELECT id, payload FROM qc_partitioned ORDER BY id;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM bioseq_cache.stats()
+        WHERE produced = 1 AND completed_hits = 1)
+    THEN
+        RAISE EXCEPTION 'partition-parent scan did not reuse its result';
+    END IF;
+END
+$$;
+
+INSERT INTO qc_partitioned_lo VALUES (2, 'direct child write');
+SELECT id, payload FROM qc_partitioned ORDER BY id;
+
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM qc_partitioned) <> 2 THEN
+        RAISE EXCEPTION 'partition-parent scan missed direct child write';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM bioseq_cache.stats()
+        WHERE produced = 2 AND completed_hits = 1)
+    THEN
+        RAISE EXCEPTION 'direct child write did not invalidate parent result';
+    END IF;
+END
+$$;
+
 TRUNCATE qc_dml;
 SELECT count(*) FROM qc_dml;
 
