@@ -59,7 +59,7 @@ is(
 	$node->safe_psql(
 		'postgres',
 		q{SET bioseq.query_cache_optimisation_mode = 'same';
-		  SELECT count(*) || '|' || sum(id) FROM owner_rows}),
+		  SELECT count(*), sum(id) FROM owner_rows}),
 	'64|2080',
 	'fresh producer succeeds after owner cleanup');
 

@@ -144,11 +144,13 @@ is(
 ok(
 	$node->poll_query_until(
 		'postgres',
-		"SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity "
+		"WITH sweep AS MATERIALIZED ("
+		  . "SELECT bioseq_cache_test.request_janitor_sweep()) "
+		  . "SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity "
 		  . "WHERE pid = $waiter_pid) "
 		  . "AND NOT EXISTS (SELECT 1 "
 		  . "FROM bioseq_cache_test.entry_states() "
-		  . "WHERE waiter_count <> 0)",
+		  . "WHERE waiter_count <> 0) FROM sweep",
 		't'),
 	'terminated waiter drains its registry reference');
 eval { $waiter->quit; };
