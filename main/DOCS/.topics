@@ -29,6 +29,7 @@ engineering-overview
 gpu
 gzip-io
 highway-simd
+http-client
 implementation
 io-reader
 json-schema
@@ -36,6 +37,7 @@ kmers
 kperf-profiler
 ksw2
 landing-page
+locking
 mcp
 memory-allocators
 memory-foonathan
@@ -59,11 +61,13 @@ postgres-ux
 profiling
 refactor
 seal
+sequence-database
 setup
 sidecar
 simd-sort
 simdjson
 sneaky-snake
+sql
 storage
 template-pipeline
 testing

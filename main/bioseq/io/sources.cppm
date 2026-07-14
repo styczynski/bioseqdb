@@ -24,23 +24,12 @@ export module bioseq.io.sources;
 import bioseq.common.mlogging;
 import bioseq.io.options;
 
+// read_result + the io_source concept now live in the lightweight
+// bioseq.io.source_core module (DOC0372 §369-374); re-export them so every
+// existing importer of bioseq.io.sources sees them unchanged.
+export import bioseq.io.source_core;
+
 export namespace bioseq::io {
-
-/// Result of one `read_into` call on a source.
-struct read_result {
-    std::size_t bytes_read = 0;
-    bool        is_eof = false;
-    bool        has_error = false;
-};
-
-/// Concept: an I/O source supplies bytes via `read_into(dst, cap)` and
-/// surfaces errors via `last_error_message()`. Sources are monomorphic
-/// per template instantiation; no virtuals.
-template <typename source_t>
-concept io_source = requires(source_t& source, std::uint8_t* dst, std::size_t cap) {
-    { source.read_into(dst, cap) } -> std::same_as<read_result>;
-    { source.last_error_message() } -> std::convertible_to<std::string>;
-};
 
 /// Strip the UTF-8 BOM `0xEF 0xBB 0xBF` if it appears at the start of
 /// `dst`. Returns the number of bytes the cursor should advance past

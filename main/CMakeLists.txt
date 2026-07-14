@@ -21,18 +21,32 @@
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
 
+option(BIOSEQ_BUILD_CORE
+  "Build sequence types, table AM, aligner, CLI and core benchmarks" ON)
+option(BIOSEQ_BUILD_CACHE
+  "Build the independent PostgreSQL query cache extension" ON)
+option(BIOSEQ_BUILD_PAPERS
+  "Build paper and chart targets" ON)
+
 # Change this (or override it without editing this file):
 # CMAKE_NAMED_ENV_TYPE selects the per-machine toolchain block below. Resolution
 # order: an environment variable (set e.g. by a CMake preset's `environment`
 # field or `export CMAKE_NAMED_ENV_TYPE=...`) wins; then any pre-set cache/normal
-# value; otherwise it defaults to "H" (the arm64 macOS "home" box). This keeps a
-# single checked-in default while letting the AWS x86_64 reference box select its
-# own toolchain via the `aws-x64-linux` preset. Supported: "W", "H",
+# value; otherwise it selects the installed Linux toolchain on Linux and "H"
+# (the arm64 macOS "home" box) elsewhere. Presets can still select their own
+# toolchain explicitly. Supported: "W", "H",
 # "AWS_MACHINE_X64", "AWS_MACHINE_X64_GCC16".
 if(DEFINED ENV{CMAKE_NAMED_ENV_TYPE})
   set(CMAKE_NAMED_ENV_TYPE "$ENV{CMAKE_NAMED_ENV_TYPE}")
 elseif(NOT DEFINED CMAKE_NAMED_ENV_TYPE)
-  set(CMAKE_NAMED_ENV_TYPE "H")
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"
+      AND EXISTS "/opt/gcc-16.1.0/bin/g++-16")
+    set(CMAKE_NAMED_ENV_TYPE "AWS_MACHINE_X64_GCC16")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    set(CMAKE_NAMED_ENV_TYPE "AWS_MACHINE_X64")
+  else()
+    set(CMAKE_NAMED_ENV_TYPE "H")
+  endif()
 endif()
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
@@ -133,11 +147,15 @@ if(NOT DEFINED CACHE{CMAKE_CXX_FLAGS_RELEASE})
 endif()
 
 message("CMAKE is ${CMAKE_VERSION}")
-set(CMAKE_CXX_MODULE_STD ON)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS ON)
-set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
+  # Both production trees use C++26 module interface units. Cache-only builds
+  # still need dependency scanning even though they skip the large Bioseq graph.
+  set(CMAKE_CXX_MODULE_STD ON)
+  set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
 # Support CXX modules on MacOS correctly
@@ -193,11 +211,13 @@ endif()
 # per-module-compile flag so it applies only to our module-interface units and
 # leaves -O3 codegen untouched. Probe-guarded so a toolchain lacking the flag
 # still configures cleanly.
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-fmodules-reduced-bmi" BIOSEQ_HAS_REDUCED_BMI)
-if(BIOSEQ_HAS_REDUCED_BMI)
-  string(APPEND CMAKE_CXX_MODULE_MAP_FLAG " -fmodules-reduced-bmi")
-  message(STATUS "bioseq: -fmodules-reduced-bmi enabled; CMAKE_CXX_MODULE_MAP_FLAG='${CMAKE_CXX_MODULE_MAP_FLAG}'")
+if(BIOSEQ_BUILD_CORE)
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-fmodules-reduced-bmi" BIOSEQ_HAS_REDUCED_BMI)
+  if(BIOSEQ_HAS_REDUCED_BMI)
+    string(APPEND CMAKE_CXX_MODULE_MAP_FLAG " -fmodules-reduced-bmi")
+    message(STATUS "bioseq: -fmodules-reduced-bmi enabled; CMAKE_CXX_MODULE_MAP_FLAG='${CMAKE_CXX_MODULE_MAP_FLAG}'")
+  endif()
 endif()
 
 # --- Build-speed: optional throttle for memory-hungry module compiles -------
@@ -216,12 +236,14 @@ endif()
 # pool is attached to the module-heavy targets in bioseq/CMakeLists.txt.
 # Recommended heuristic: 1 heavy compile per ~6 GB of host RAM (so 2 on a
 # 16 GB box, 4 on a 32 GB box, leave empty/unset on >=64 GB).
-set(BIOSEQ_HEAVY_JOBS "" CACHE STRING
-  "Cap on concurrent C++ module compiles for the module-heavy targets. \
+if(BIOSEQ_BUILD_CORE)
+  set(BIOSEQ_HEAVY_JOBS "" CACHE STRING
+    "Cap on concurrent C++ module compiles for the module-heavy targets. \
 Empty/0 = unlimited; set to e.g. 2 on a 16 GB host.")
-if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
-  set_property(GLOBAL APPEND PROPERTY JOB_POOLS heavy_compile=${BIOSEQ_HEAVY_JOBS})
-  message(STATUS "bioseq: throttling heavy module compiles to ${BIOSEQ_HEAVY_JOBS} concurrent (Ninja JOB_POOL=heavy_compile)")
+  if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS heavy_compile=${BIOSEQ_HEAVY_JOBS})
+    message(STATUS "bioseq: throttling heavy module compiles to ${BIOSEQ_HEAVY_JOBS} concurrent (Ninja JOB_POOL=heavy_compile)")
+  endif()
 endif()
 
 # --- Build-speed: optional -ftime-trace for profiling slow compiles ---------
@@ -268,10 +290,81 @@ endif()
 
 # Include extensions and their shared code
 #add_subdirectory(include)
-add_subdirectory(bioseq)
-add_subdirectory(vendor)
-add_subdirectory(papers)
+if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
+  add_subdirectory(common/cache_provider_api)
+  add_subdirectory(common/memory_budget)
+  add_subdirectory(common/pg_support)
+endif()
+
+if(BIOSEQ_BUILD_CACHE)
+  add_subdirectory(bioseq_caching)
+endif()
+
+if(BIOSEQ_BUILD_CORE)
+  add_subdirectory(bioseq)
+  add_subdirectory(vendor)
+endif()
+
+if(BIOSEQ_BUILD_PAPERS)
+  add_subdirectory(papers)
+endif()
 #add_subdirectory(h3_postgis)
+
+# The provider matrix belongs to the combined build tree. Both runners own a
+# private PostgreSQL cluster and consume build-tree DSOs directly; neither
+# target installs into or restarts the shared development server.
+if(BIOSEQ_BUILD_CORE AND BIOSEQ_BUILD_CACHE
+   AND BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_program(BIOSEQ_PROVIDER_PG_REGRESS pg_regress REQUIRED
+    HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/regress"
+          "${PostgreSQL_BIN_DIR}")
+  find_program(BIOSEQ_PROVIDER_PG_ISOLATION_REGRESS
+    pg_isolation_regress REQUIRED
+    HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/isolation"
+          "${PostgreSQL_BIN_DIR}")
+  find_program(BIOSEQ_PROVIDER_PROVE prove REQUIRED)
+  get_target_property(BIOSEQ_TEST_BOOTSTRAP_SQL
+    postgresql_bioseq BIOSEQ_TEST_BOOTSTRAP_SQL)
+  if(NOT BIOSEQ_TEST_BOOTSTRAP_SQL
+     OR BIOSEQ_TEST_BOOTSTRAP_SQL MATCHES "-NOTFOUND$")
+    message(FATAL_ERROR
+      "Combined cache/Bioseq tests require postgresql_bioseq's "
+      "BIOSEQ_TEST_BOOTSTRAP_SQL target property")
+  endif()
+
+  add_custom_target(test_bioseq_cache_bioseq_private
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/run_private_cluster.py"
+      --kind bioseq-provider
+      --bindir "${PostgreSQL_BIN_DIR}"
+      --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
+      --bioseq-dso "$<TARGET_FILE:postgresql_bioseq>"
+      --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/bioseq_cache_test_bootstrap.sql"
+      --bioseq-bootstrap "${BIOSEQ_TEST_BOOTSTRAP_SQL}"
+      --pg-regress "${BIOSEQ_PROVIDER_PG_REGRESS}"
+      --pg-isolation-regress "${BIOSEQ_PROVIDER_PG_ISOLATION_REGRESS}"
+      --prove "${BIOSEQ_PROVIDER_PROVE}"
+      --inputdir "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/bioseq"
+      --output-root "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_bioseq"
+    DEPENDS postgresql_bioseq_cache postgresql_bioseq
+    USES_TERMINAL)
+
+  add_custom_target(run_bioseq_cache_bioseq_bench
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "BIOSEQ_CACHE_DSO=$<TARGET_FILE:postgresql_bioseq_cache>"
+      "BIOSEQ_CACHE_LIBDIR=$<TARGET_FILE_DIR:postgresql_bioseq_cache>"
+      "BIOSEQ_DSO=$<TARGET_FILE:postgresql_bioseq>"
+      "BIOSEQ_LIBDIR=$<TARGET_FILE_DIR:postgresql_bioseq>"
+      "BIOSEQ_CACHE_BOOTSTRAP_SQL=${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/bioseq_cache_test_bootstrap.sql"
+      "BIOSEQ_BOOTSTRAP_SQL=${BIOSEQ_TEST_BOOTSTRAP_SQL}"
+      "BIOSEQ_CACHE_REPORT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/reporting/bioseq_cache_bioseq_bench"
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/bench/run_private_cluster_bench.py"
+      --provider
+    DEPENDS postgresql_bioseq_cache postgresql_bioseq
+    USES_TERMINAL)
+endif()
 
 # Add target that bundles for pgxn
 #configure_file(META.json.in META.json)

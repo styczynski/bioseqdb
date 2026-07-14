@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "rows": 4096,
+  "samples": 7,
+  "correctness": {
+    "passed": true,
+    "row_count": 4096,
+    "expected_ordered_checksum": "8e70868ae6cff525",
+    "actual_ordered_checksum": "8e70868ae6cff525",
+    "column_blob_digest": "522da75391b438aaf1812bd370d23a696ee6d3e9a0aa76ec90207c853d2696e9",
+    "memory_copy_guard": 118,
+    "admission_final_reserved_bytes": 0
+  },
+  "metrics": {
+    "encoded_logical_bytes": 86016,
+    "encoded_stored_bytes": 115976,
+    "row_group_count": 1,
+    "full_block_prevalidation_bytes": 115976,
+    "full_block_prevalidation_p50_ns": 812667,
+    "full_block_prevalidation_p95_ns": 1579902,
+    "full_block_prevalidation_p99_ns": 1579902,
+    "fixed_decode_bytes_per_second": 12087034,
+    "memory_copy_bytes_per_second": 19348328958
+  },
+  "benchmarks": [
+    {"name": "column_encode", "raw_samples_ns": [4228636,4247761,3015584,3730937,3683929,2500968,2590898], "p50_ns": 3683929, "p95_ns": 4247761, "p99_ns": 4247761, "operations": 4096},
+    {"name": "column_full_prevalidation", "raw_samples_ns": [812667,787366,779982,797355,1579902,976178,943590], "p50_ns": 812667, "p95_ns": 1579902, "p99_ns": 1579902, "operations": 115976},
+    {"name": "column_validate_decode", "raw_samples_ns": [1362524,1209004,1777439,1321768,1254466,1355502,1895742], "p50_ns": 1355502, "p95_ns": 1895742, "p99_ns": 1895742, "operations": 4096},
+    {"name": "admission_reserve_release", "raw_samples_ns": [452467,473701,452304,478652,459731,713189,452410], "p50_ns": 459731, "p95_ns": 713189, "p99_ns": 713189, "operations": 100000},
+    {"name": "memory_copy_reference", "raw_samples_ns": [383623,390244,440243,341830,372506,335792,604739], "p50_ns": 383623, "p95_ns": 604739, "p99_ns": 604739, "operations": 64}
+  ]
+}

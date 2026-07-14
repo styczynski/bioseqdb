@@ -1,0 +1,76 @@
+-- Common object body for both CREATE EXTENSION and build-tree test bootstrap.
+-- The caller creates/selects the fixed schema and substitutes either
+-- MODULE_PATHNAME or the quoted absolute build-tree DSO path.
+
+REVOKE CREATE ON SCHEMA bioseq_cache FROM PUBLIC;
+REVOKE ALL ON SCHEMA bioseq_cache FROM PUBLIC;
+GRANT USAGE ON SCHEMA bioseq_cache TO pg_read_all_stats;
+
+CREATE FUNCTION bioseq_cache.version()
+RETURNS text
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_version'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq_cache.stats()
+RETURNS TABLE (
+    produced bigint,
+    completed_hits bigint,
+    inflight_waits bigint,
+    reuse_hits bigint,
+    fallbacks bigint,
+    invalidations bigint,
+    evictions bigint,
+    logical_bytes bigint,
+    stored_bytes bigint)
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_stats'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION bioseq_cache.entries()
+RETURNS TABLE (
+    entry_key text,
+    generation bigint,
+    kind text,
+    state text,
+    database_oid oid,
+    owner_role oid,
+    producer_pid integer,
+    created_at timestamptz,
+    completed_at timestamptz,
+    age interval,
+    ttl interval,
+    rows bigint,
+    logical_bytes bigint,
+    stored_bytes bigint,
+    waiters integer,
+    readers integer,
+    hits bigint,
+    sql text,
+    producer_plan text,
+    dependencies jsonb)
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_entries'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION bioseq_cache.invalidate_all()
+RETURNS bigint
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_invalidate_all'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache.invalidate_relation(regclass)
+RETURNS bigint
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_invalidate_relation'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+CREATE FUNCTION bioseq_cache.reset_stats()
+RETURNS void
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_reset_stats'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE;
+
+REVOKE ALL ON FUNCTION bioseq_cache.invalidate_all() FROM PUBLIC;
+REVOKE ALL ON FUNCTION bioseq_cache.invalidate_relation(regclass) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bioseq_cache.reset_stats() FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION bioseq_cache.entries() FROM PUBLIC;
+REVOKE ALL ON FUNCTION bioseq_cache.stats() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION bioseq_cache.entries() TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION bioseq_cache.stats() TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION bioseq_cache.version() TO pg_read_all_stats;

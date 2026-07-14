@@ -170,8 +170,6 @@ module;
 #define FMTLOG_QUEUE_SIZE (1 << 20)
 #endif
 
-#include "common.h"
-
 export module bioseq.common.mlogging;
 
 import bioseq.common.hashing;

@@ -51,6 +51,7 @@ import bioseq.config;                     // DOC0322 §9.3 — bioseq_aligner_*,
 import bioseq.vector.types;        // VectorColumn, VectorTupleTableSlot, CreateVectorTupleTableSlot, ...
 import bioseq.vector.execution;    // CreateVectorizedExprList, ConstructVectorizedQualList, ExecuteVectorizedQual
 import bioseq.common.mlogging;
+import bioseq.pg.external.path_builder_slot;  // DOC0372 — TryAddBioseqExternalScanPaths (always-owned slot)
 import bioseq.storage.metadata;
 import bioseq.table.types;
 import bioseq.table.scan_state;
@@ -1716,6 +1717,15 @@ BioseqColumnSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			RemovePathsByPredicate(rel, IsNotIndexPath);
 			AddBioseqColumnScanPaths(root, rel, rte);
 		}
+	}
+	else
+	{
+		/* DOC0372 — external logical relations use a distinct table AM. The
+		 * always-owned slot returns false (this columnar hook simply falls
+		 * through) unless the external provider stack is compiled in and has
+		 * registered a path builder, in which case the builder replaces the
+		 * physical scan with the external CustomScan. */
+		(void) TryAddBioseqExternalScanPaths(root, rel, rte, relation);
 	}
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnSetRelPathlistHook() relation_close");
 	RelationClose(relation);
