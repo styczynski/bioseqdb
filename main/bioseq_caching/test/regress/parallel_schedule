@@ -1,0 +1,4 @@
+# Generic cache-only regression suite. Provider/Bioseq schedules are separate.
+test: cache_disabled cache_same_params
+test: cache_types cache_dml_transactions
+test: cache_joins_upper cache_eligibility_security_explain
