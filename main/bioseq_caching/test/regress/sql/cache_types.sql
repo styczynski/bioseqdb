@@ -59,7 +59,7 @@ INSERT INTO qc_types VALUES
 
 CREATE TEMP TABLE qc_types_reference AS TABLE qc_types;
 CREATE TEMP TABLE qc_types_digest AS
-SELECT md5(string_agg(encode(pg_catalog.record_send(t), 'hex'), '' ORDER BY id))
+SELECT md5(string_agg(encode(pg_catalog.record_send(ROW(t.*)), 'hex'), '' ORDER BY id))
        AS digest
 FROM qc_types AS t;
 
@@ -76,7 +76,7 @@ DO $$
 DECLARE
     current_digest text;
 BEGIN
-    SELECT md5(string_agg(encode(pg_catalog.record_send(t), 'hex'), '' ORDER BY id))
+    SELECT md5(string_agg(encode(pg_catalog.record_send(ROW(t.*)), 'hex'), '' ORDER BY id))
     INTO current_digest
     FROM qc_types AS t;
     IF current_digest IS DISTINCT FROM (SELECT digest FROM qc_types_digest) THEN

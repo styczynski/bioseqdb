@@ -905,6 +905,11 @@ bool collect_external_parameter_walker(Node* node, void* context) {
         }
         return false;
     }
+    if (IsA(node, RangeTblEntry)) {
+        // query_tree_walker supplies RTEs to the callback when
+        // QTW_EXAMINE_RTES_BEFORE is set; it owns walking their expressions.
+        return false;
+    }
     if (IsA(node, Query)) {
         return query_tree_walker(
             reinterpret_cast<Query*>(node),
