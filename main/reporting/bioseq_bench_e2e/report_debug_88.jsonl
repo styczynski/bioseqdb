@@ -1,0 +1,2 @@
+{"event":"BENCHMARK_STARTED","timestamp":1784061502834,"benchmark_name":"bench_e2e"}
+{"event":"CASE_STARTED","timestamp":1784061503284,"benchmark_name":"bench_e2e","case_name":"bioseq_block_gpu_dp_gpu_seed_just_index"}
