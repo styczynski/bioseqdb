@@ -59,6 +59,7 @@ DECLARE
     plan_line text;
     plan_text text := '';
     plan jsonb;
+    cache_node jsonb;
 BEGIN
     FOR plan_line IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF) '
@@ -77,16 +78,29 @@ BEGIN
         'FROM cache_provider_rows WHERE nullable_value <= 10 ORDER BY row_id'
         INTO plan_text;
     plan := plan_text::jsonb;
-    IF plan->0->'Plan'->>'Cache Mode' <> 'reuse'
-       OR plan->0->'Plan'->>'Planned Cache Action' IS NULL
-       OR plan->0->'Plan' ? 'Actual Cache Action'
-       OR length(plan->0->'Plan'->>'Cache Entry') <> 16
-       OR plan->0->'Plan'->>'SQL' IS NULL
-       OR plan->0->'Plan'->>'State' <> 'planned/provisional'
+    WITH RECURSIVE plan_nodes(node) AS (
+        SELECT plan->0->'Plan'
+        UNION ALL
+        SELECT child.value
+        FROM plan_nodes
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT node INTO cache_node
+    FROM plan_nodes
+    WHERE node->>'Cache Mode' = 'reuse'
+      AND node->>'Cache Entry Kind' = 'ReusableCoverage'
+    LIMIT 1;
+    IF cache_node IS NULL
+       OR cache_node->>'Planned Cache Action' IS NULL
+       OR cache_node ? 'Actual Cache Action'
+       OR length(cache_node->>'Cache Entry') <> 16
+       OR cache_node->>'SQL' IS NULL
+       OR cache_node->>'State' <> 'planned/provisional'
        OR jsonb_typeof(
-            plan->0->'Plan'->'Selected Cache Branches') <> 'number'
-       OR jsonb_typeof(plan->0->'Plan'->'Residual Child') <> 'object'
-       OR plan->0->'Plan'->'Provider'->>'Generic Provider' IS NULL THEN
+            cache_node->'Selected Cache Branches') <> 'number'
+       OR jsonb_typeof(cache_node->'Residual Child') <> 'object'
+       OR cache_node->'Provider'->>'Generic Provider' IS NULL THEN
         RAISE EXCEPTION
             'structured reusable EXPLAIN contract is incomplete: %', plan;
     END IF;
