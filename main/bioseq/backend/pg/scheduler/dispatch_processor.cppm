@@ -126,6 +126,7 @@ module;
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -147,6 +148,7 @@ import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
 import bioseq.indexing.type;
 import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.minimizer_vulkan;
@@ -194,107 +196,206 @@ export constexpr size_t kDispatchBatchCapacity = 8192;
  * No std::variant, no runtime type erasure on the hot path.
  */
 /*
- * Execution counters captured while BatchProcessor walks a batch. Used by
- * EXPLAIN to print an accurate "Recomputed minimizers: X%" estimate.
- * The struct lives next to the BatchProcessor instance inside the
- * TupleDispatchBuffer so EXPLAIN can read it after run_batch_and_build_cursors
- * without doing a second walk.
+ * Execution proof is owned by the target-independent canonical value in
+ * bioseq::pipeline_stats. Do not reintroduce a Highway-local stats owner.
  */
-export struct GpuBatchExecutionStats {
-    bool gpu_batched_branch_taken = false;
-    std::uint64_t gpu_problem_count = 0;
-    std::uint64_t gpu_wave_count = 0;
-    std::uint64_t gpu_segment_indexes_built = 0;
-    std::uint64_t gpu_segment_indexes_reused = 0;
-    std::uint64_t gpu_seed_dispatches = 0;
-    std::uint64_t gpu_chain_dispatches = 0;
-    std::uint64_t gpu_extend_dispatches = 0;
-    std::uint64_t cpu_fallback_rows = 0;
-    std::uint64_t simd_fallback_rows = 0;
-    std::uint64_t vulkan_declines = 0;
-    std::uint64_t gpu_batch_pipeline_ns = 0;
-    std::uint64_t gpu_query_sketch_ns = 0;
-    std::uint64_t gpu_target_dedup_ns = 0;
-    std::uint64_t gpu_target_plan_ns = 0;
-    std::uint64_t gpu_index_build_ns = 0;
-    std::uint64_t gpu_problem_build_ns = 0;
-    std::uint64_t gpu_seed_chain_runtime_ns = 0;
-    std::uint64_t gpu_cigar_jobs = 0;
-    std::uint64_t gpu_cigar_bounded_jobs = 0;
-    std::uint64_t gpu_cigar_exact_jobs = 0;
-    std::uint64_t gpu_cigar_unit_gap_jobs = 0;
-    std::uint64_t gpu_cigar_gridded_jobs = 0;
-    std::uint64_t gpu_cigar_query_symbols = 0;
-    std::uint64_t gpu_cigar_target_symbols = 0;
-    std::uint64_t gpu_cigar_packed_words = 0;
-    std::uint64_t gpu_cigar_traceback_words = 0;
-    std::uint64_t gpu_cigar_prepare_ns = 0;
-    std::uint64_t gpu_cigar_symbol_pack_ns = 0;
-    std::uint64_t gpu_cigar_classify_ns = 0;
-    std::uint64_t gpu_cigar_runtime_ns = 0;
-    std::uint64_t gpu_cigar_decode_ns = 0;
-
-    void merge(const GpuBatchExecutionStats& rhs) noexcept {
-        gpu_batched_branch_taken =
-            gpu_batched_branch_taken || rhs.gpu_batched_branch_taken;
-        gpu_problem_count += rhs.gpu_problem_count;
-        gpu_wave_count += rhs.gpu_wave_count;
-        gpu_segment_indexes_built += rhs.gpu_segment_indexes_built;
-        gpu_segment_indexes_reused += rhs.gpu_segment_indexes_reused;
-        gpu_seed_dispatches += rhs.gpu_seed_dispatches;
-        gpu_chain_dispatches += rhs.gpu_chain_dispatches;
-        gpu_extend_dispatches += rhs.gpu_extend_dispatches;
-        cpu_fallback_rows += rhs.cpu_fallback_rows;
-        simd_fallback_rows += rhs.simd_fallback_rows;
-        vulkan_declines += rhs.vulkan_declines;
-        gpu_batch_pipeline_ns += rhs.gpu_batch_pipeline_ns;
-        gpu_query_sketch_ns += rhs.gpu_query_sketch_ns;
-        gpu_target_dedup_ns += rhs.gpu_target_dedup_ns;
-        gpu_target_plan_ns += rhs.gpu_target_plan_ns;
-        gpu_index_build_ns += rhs.gpu_index_build_ns;
-        gpu_problem_build_ns += rhs.gpu_problem_build_ns;
-        gpu_seed_chain_runtime_ns += rhs.gpu_seed_chain_runtime_ns;
-        gpu_cigar_jobs += rhs.gpu_cigar_jobs;
-        gpu_cigar_bounded_jobs += rhs.gpu_cigar_bounded_jobs;
-        gpu_cigar_exact_jobs += rhs.gpu_cigar_exact_jobs;
-        gpu_cigar_unit_gap_jobs += rhs.gpu_cigar_unit_gap_jobs;
-        gpu_cigar_gridded_jobs += rhs.gpu_cigar_gridded_jobs;
-        gpu_cigar_query_symbols += rhs.gpu_cigar_query_symbols;
-        gpu_cigar_target_symbols += rhs.gpu_cigar_target_symbols;
-        gpu_cigar_packed_words += rhs.gpu_cigar_packed_words;
-        gpu_cigar_traceback_words += rhs.gpu_cigar_traceback_words;
-        gpu_cigar_prepare_ns += rhs.gpu_cigar_prepare_ns;
-        gpu_cigar_symbol_pack_ns += rhs.gpu_cigar_symbol_pack_ns;
-        gpu_cigar_classify_ns += rhs.gpu_cigar_classify_ns;
-        gpu_cigar_runtime_ns += rhs.gpu_cigar_runtime_ns;
-        gpu_cigar_decode_ns += rhs.gpu_cigar_decode_ns;
-    }
-};
-
-export struct BatchExecutionStats {
-    /// Total rows submitted to process_sequences().
-    size_t targets_considered = 0;
-    /// Rows that arrived with a prebuilt index pointer and reused it.
-    size_t targets_with_prebuilt_index = 0;
-    /// Rows whose minimizers had to be recomputed from the compact_sequence_range.
-    size_t targets_recomputed_minimizers = 0;
-    /// Effective parameters used for the last batch. Captured for EXPLAIN so
-    /// the user sees the actually-applied values after overrides + size-heuristic
-    /// adjustments.
-    Minimap2Params last_effective_params{};
-    /// Selected-Vulkan proof counters surfaced through EXPLAIN/bench reports.
-    GpuBatchExecutionStats gpu{};
-
-    [[nodiscard]] float recomputed_fraction() const {
-        return targets_considered == 0
-            ? 0.0f
-            : static_cast<float>(targets_recomputed_minimizers)
-              / static_cast<float>(targets_considered);
-    }
+export enum class BatchInvocationRole : std::uint8_t {
+    primary,
+    extra_query,
 };
 
 export class BatchProcessor {
 public:
+	struct CpuPreparedIndexGroup {
+		std::int32_t kmer_size = 0;
+		std::int32_t window_size = 0;
+		std::int32_t max_occ = 0;
+		MinimizerSketchBackend sketch_backend =
+			MinimizerSketchBackend::Scalar;
+		std::vector<MinimapSketchData> query_hash_union{};
+		/* Declared before target_index so destruction releases the owned
+		 * index storage before returning its admission reservation. */
+		std::optional<bioseq::parallelism::MemoryPermit> target_index_permit{};
+		std::shared_ptr<bioseq::indexing::MinimizerHashmapFragmentIndex>
+			target_index{};
+		/* Revision-3 grouped32 is already a native MinimizerLookupIndex.  Keep
+		 * the authenticated reader itself; ordinal 2 must never transcode its
+		 * positions through the legacy pair/hashmap assembly path. */
+		std::optional<bioseq::indexing::PreparedGrouped32QueryReader>
+			persisted_grouped32_reader{};
+		::bioseq::pipeline_stats::TargetIndexSource target_index_source =
+			::bioseq::pipeline_stats::TargetIndexSource::none;
+		std::uint64_t key_set_checksum = 0;
+		std::uint64_t target_index_builds = 0;
+		std::uint64_t target_index_reuses = 0;
+		std::uint64_t duplicate_build_attempts = 0;
+		std::uint64_t persisted_reader_loads = 0;
+		std::uint64_t persisted_reader_queries = 0;
+		std::uint64_t persisted_generation_id = 0;
+		std::uint64_t persisted_source_identity = 0;
+		bioseq::storage::indexing::MinimizerGenerationReadStats
+			persisted_read_stats{};
+		bool build_set_checksum_present = false;
+		std::uint64_t build_set_checksum = 0;
+	};
+
+	/* One object per physical target row.  It survives every 8192-query wave
+	 * in TupleDispatchBuffer and may contain one parameter group per effective
+	 * (k,w,max_occ) shape.  GPU locator execution never consumes this object. */
+	struct CpuPreparedTarget {
+		std::int64_t target_rowno = -1;
+		std::uint64_t target_bp_size = 0;
+		std::uint64_t query_count = 0;
+		std::vector<CpuPreparedIndexGroup> groups{};
+		std::uint64_t physical_target_index_reads = 0;
+		std::uint64_t total_unique_keys = 0;
+		std::uint64_t key_set_checksum = 0;
+		bool unions_ready = false;
+		bool persisted_read_stats_published = false;
+		/* The aggregate permit belongs to the target-wide object, not to an
+		 * individual parameter group.  It is deliberately declared after
+		 * groups: default move-assignment replaces old union storage
+		 * before releasing the old permit.  The explicit destructor enforces
+		 * the corresponding deallocate-before-release order at destruction. */
+		std::uint64_t query_union_admission_bytes = 0;
+		std::optional<bioseq::parallelism::MemoryPermit> query_union_permit{};
+
+		CpuPreparedTarget() = default;
+		CpuPreparedTarget(const CpuPreparedTarget&) = delete;
+		CpuPreparedTarget& operator=(const CpuPreparedTarget&) = delete;
+		CpuPreparedTarget(CpuPreparedTarget&&) noexcept = default;
+		CpuPreparedTarget& operator=(CpuPreparedTarget&&) noexcept = default;
+		void release_query_union_state_noexcept() noexcept {
+			std::vector<CpuPreparedIndexGroup>{}.swap(groups);
+			query_union_admission_bytes = 0;
+			query_union_permit.reset();
+		}
+		~CpuPreparedTarget() noexcept {
+			release_query_union_state_noexcept();
+		}
+
+		[[nodiscard]] CpuPreparedIndexGroup* find_group(
+				std::int32_t kmer_size,
+				std::int32_t window_size,
+				std::int32_t max_occ,
+				MinimizerSketchBackend sketch_backend) noexcept;
+	};
+
+	/**
+	 * Narrow SQL-test seam for the deallocate-before-permit reprepare contract.
+	 * It deliberately populates one CpuPreparedTarget object twice instead of
+	 * constructing a later scan object, so stale outer or nested capacity is
+	 * observable.  No PostgreSQL state is touched.
+	 */
+	[[nodiscard]] static bool
+	cpu_prepared_target_same_object_reprepare_probe() {
+		bioseq::parallelism::MemoryAdmissionController admission;
+		CpuPreparedTarget target;
+		auto populate = [&](const std::size_t sketch_capacity) -> bool {
+			target.release_query_union_state_noexcept();
+			auto permit = admission.try_reserve(0u);
+			if (!permit) return false;
+			target.query_union_permit.emplace(std::move(*permit));
+
+			const std::uint64_t outer_headroom =
+				bioseq::parallelism::saturating_mul(
+					sizeof(CpuPreparedIndexGroup),
+					bioseq::parallelism::
+						kVectorPreallocationHeadroomFactor);
+			if (outer_headroom
+					== (std::numeric_limits<std::uint64_t>::max)()
+				|| !target.query_union_permit->grow_to(outer_headroom)) {
+				return false;
+			}
+			target.groups.reserve(1u);
+			const std::uint64_t outer_bytes =
+				bioseq::parallelism::saturating_mul(
+					target.groups.capacity(),
+					sizeof(CpuPreparedIndexGroup));
+			if (outer_bytes > outer_headroom) return false;
+			target.query_union_admission_bytes = outer_bytes;
+			target.query_union_permit->shrink_to(outer_bytes);
+			target.groups.emplace_back();
+
+			const std::uint64_t inner_headroom =
+				bioseq::parallelism::saturating_mul(
+					bioseq::parallelism::saturating_mul(
+						sketch_capacity, sizeof(MinimapSketchData)),
+					bioseq::parallelism::
+						kVectorPreallocationHeadroomFactor);
+			const std::uint64_t peak =
+				bioseq::parallelism::saturating_add(
+					outer_bytes, inner_headroom);
+			if (inner_headroom
+					== (std::numeric_limits<std::uint64_t>::max)()
+				|| peak == (std::numeric_limits<std::uint64_t>::max)()
+				|| !target.query_union_permit->grow_to(peak)) {
+				return false;
+			}
+			target.groups.front().query_hash_union.reserve(sketch_capacity);
+			const std::uint64_t inner_bytes =
+				bioseq::parallelism::saturating_mul(
+					target.groups.front().query_hash_union.capacity(),
+					sizeof(MinimapSketchData));
+			const std::uint64_t retained =
+				bioseq::parallelism::saturating_add(
+					outer_bytes, inner_bytes);
+			if (inner_bytes > inner_headroom
+				|| retained == (std::numeric_limits<std::uint64_t>::max)()) {
+				return false;
+			}
+			target.query_union_admission_bytes = retained;
+			target.query_union_permit->shrink_to(retained);
+			return admission.reserved_bytes() == retained;
+		};
+
+		if (!populate(8193u)) return false;
+		const std::size_t oversized_capacity =
+			target.groups.front().query_hash_union.capacity();
+		target.release_query_union_state_noexcept();
+		if (!target.groups.empty() || target.groups.capacity() != 0u
+			|| target.query_union_permit.has_value()
+			|| target.query_union_admission_bytes != 0u
+			|| admission.reserved_bytes() != 0u) {
+			return false;
+		}
+		if (!populate(1u)) return false;
+		const bool smaller_reprepare =
+			target.groups.size() == 1u
+			&& target.groups.front().query_hash_union.capacity()
+				< oversized_capacity;
+		target.release_query_union_state_noexcept();
+		return smaller_reprepare
+			&& target.groups.capacity() == 0u
+			&& !target.query_union_permit.has_value()
+			&& admission.reserved_bytes() == 0u;
+	}
+
+	[[nodiscard]] static Minimap2Params effective_params_for_pair(
+		const Minimap2Params& base,
+		std::size_t min_bp) noexcept;
+
+	void prepare_cpu_shared_query_unions(
+		std::uint8_t alphabet_code,
+		std::uint8_t storage_unit_byte_width,
+		std::uint64_t target_bp_size,
+		std::span<const pgseq_t* const> query_headers,
+		const Minimap2Params& base_params,
+		bool include_persisted_parameter_group,
+		CpuPreparedTarget& prepared_target);
+
+	void prepare_cpu_persisted_grouped32_target(
+		Oid database_oid,
+		Oid tablespace_oid,
+		Oid main_relfilenode,
+		Oid user_relid,
+			std::int16_t column_attno,
+			std::string_view index_name,
+			std::uint64_t sequence_rowno,
+			const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
+				executor_read,
+			CpuPreparedTarget& prepared_target);
+
     /*
      * DOC0264 / DOC0274 — context required to wire scanner_pg into the
      * per-row pipeline dispatch. When non-null, the dispatch loop uses
@@ -309,6 +410,10 @@ public:
         std::int16_t                                     mmsearch_seq_attno   = 0;
         bioseq::storage::seq_caches*                     caches               = nullptr;
         MemoryContext                                    parent_mctx          = nullptr;
+        // Borrowed statement snapshot owned by the executor/admin caller.
+        // scanner_pg validates that it is registered MVCC state and never
+        // changes its registration count.
+        Snapshot                                         snapshot             = nullptr;
         // Per-row optional locator. nullopt means "use the inline pgseq_t at
         // target_hdrs[i]" — scanner_pg is then constructed in in-memory mode.
         std::array<std::optional<bioseq::storage::seq_locator>,
@@ -316,13 +421,32 @@ public:
         // DOC0279 §11.3c — per-row columnar rowno (== index query_key) and the
         // user relation oid, so the stored per-fragment index can be assembled.
         std::array<std::int64_t, kDispatchBatchCapacity>  target_rownos{};
+        std::array<std::uint64_t, kDispatchBatchCapacity> query_ordinals{};
+        bool                                              explicit_query_ordinals = false;
+        bool                                              shared_target_batch = false;
+        bool                                              record_target_operational_outcomes = true;
+		CpuPreparedTarget*                                cpu_prepared_target = nullptr;
+        // Explicit per-row outcome written by the scanner helper. Match
+        // production and index-source accounting must never infer one another.
+		std::array<::bioseq::pipeline_stats::TargetIndexSource,
+			kDispatchBatchCapacity>                       target_index_sources{};
+		std::array<std::uint64_t, kDispatchBatchCapacity>
+			persisted_generation_ids{};
+		std::array<std::uint64_t, kDispatchBatchCapacity>
+			persisted_source_identities{};
         Oid                                               user_relid           = InvalidOid;
+        bioseq::indexing::IndexReadRequirement            index_read_requirement =
+            bioseq::indexing::IndexReadRequirement::allow;
         bool                                              read_index_active    = false;
         bool                                              index_async_persist_active = false;
         bool                                              recompute_async_persist_active = false;
         // DOC0279 §11.3/§12.3 — the table's ACTIVE read index for the target
-        // column (resolve_active_read_index), default minimizers_per_fragment.
+		// column. The source is retained separately so a configured catalog row
+		// can never be laundered into an indistinguishable no-row default.
         std::string                                       active_index;
+		bioseq::storage::indexing::ActiveReadPolicyResolutionSource
+			active_index_policy_source = bioseq::storage::indexing::
+				ActiveReadPolicyResolutionSource::unresolved;
     };
 
     /*
@@ -367,7 +491,9 @@ public:
         const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
         const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
         const Minimap2Params& base_params,
-        BatchExecutionStats& stats,
+        BatchInvocationRole invocation_role,
+        std::uint64_t broadcast_query_ordinal,
+        ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         ScannerPgContext* scanner_pg_ctx = nullptr);
 
 };

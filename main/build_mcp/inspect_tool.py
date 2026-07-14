@@ -6,7 +6,8 @@ Filename note: the plan (IMPROVE_BUILD_MCP_IMPL_PLAN_1.md §6) calls this
 stdlib `inspect` when `server.py` is run directly (the script's
 directory becomes sys.path[0], ahead of stdlib).
 
-Inspects a function in the latest bench-opt build by combining:
+Inspects a function in the selected production or isolated test build by
+combining:
 
   * post-LTO disassembly from `objdump --disassemble-symbols=<mangled>` —
     the binary ground-truth view of what actually runs;
@@ -864,8 +865,8 @@ def run_inspect(
         if llc_on_bc and tools["llc"]:
             warnings.append(
                 "no per-TU `.s` files available — pre-LTO view is empty. "
-                "Build with -save-temps=obj (already in bench-opt preset) "
-                "or rebuild if .bc files are stale.")
+                "Build the target's matching debug preset with "
+                "-save-temps=obj, or rebuild if .bc files are stale.")
         else:
             warnings.append(
                 "no per-TU `.s` files available and llc-fallback disabled "

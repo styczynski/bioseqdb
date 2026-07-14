@@ -1,6 +1,7 @@
 module;
 #include "common.h"
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <libpq-fe.h>
@@ -144,16 +145,47 @@ inline void parametrise_scanner_combinations(TestBody&& body) {
 export class connection_test_context {
 private:
     PGconn* _raw_conn = nullptr;
+    std::vector<std::string> _notices;
+
+    static void capture_notice(void* arg, const char* message) noexcept {
+        auto* self = static_cast<connection_test_context*>(arg);
+        if (self != nullptr) {
+            try {
+                self->_notices.emplace_back(message == nullptr ? "" : message);
+            } catch (...) {
+                // A libpq notice callback must never unwind through C. Tests
+                // still retain the server-side copy in the PostgreSQL log if
+                // this diagnostic-only allocation is exhausted.
+            }
+        }
+        // Preserve libpq's previous test-runner behaviour: notices remain
+        // visible in the builder log while also becoming assertable.
+        if (message != nullptr) {
+            std::fputs(message, stderr);
+        }
+    }
+
+    void install_notice_capture() noexcept {
+        if (_raw_conn != nullptr) {
+            (void)PQsetNoticeProcessor(
+                _raw_conn, &connection_test_context::capture_notice, this);
+        }
+    }
 
 public:
     connection_test_context()
-        : _raw_conn(detail::connect_raw(detail::make_default_credentials())) {}
+        : _raw_conn(detail::connect_raw(detail::make_default_credentials())) {
+        install_notice_capture();
+    }
 
     connection_test_context(const connection_test_context&) = delete;
     connection_test_context& operator=(const connection_test_context&) = delete;
 
     connection_test_context(connection_test_context&& other) noexcept
-        : _raw_conn(std::exchange(other._raw_conn, nullptr)) {}
+        : _raw_conn(std::exchange(other._raw_conn, nullptr)),
+          _notices(std::move(other._notices)) {
+        install_notice_capture();
+    }
 
     connection_test_context& operator=(connection_test_context&& other) noexcept {
         if (this != &other) {
@@ -161,6 +193,8 @@ public:
                 PQfinish(_raw_conn);
             }
             _raw_conn = std::exchange(other._raw_conn, nullptr);
+            _notices = std::move(other._notices);
+            install_notice_capture();
         }
         return *this;
     }
@@ -173,6 +207,18 @@ public:
 
     [[nodiscard, always_inline]] PGconn* raw() const noexcept {
         return _raw_conn;
+    }
+
+    void clear_notices() noexcept {
+        _notices.clear();
+    }
+
+    [[nodiscard]] bool notice_contains(std::string_view needle) const noexcept {
+        return std::any_of(
+            _notices.begin(), _notices.end(),
+            [needle](const std::string& notice) {
+                return notice.find(needle) != std::string::npos;
+            });
     }
 };
 
