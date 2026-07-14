@@ -608,12 +608,12 @@ inline bool g_exit_callback_registered = false;
         pg_atomic_uint64& counter,
         std::uint64_t bytes,
         std::uint64_t ceiling) noexcept {
-    std::uint64_t observed = pg_atomic_read_u64(&counter);
+    uint64 observed = pg_atomic_read_u64(&counter);
     for (;;) {
         if (bytes > ceiling || observed > ceiling - bytes) {
             return false;
         }
-        const std::uint64_t desired = observed + bytes;
+        const uint64 desired = observed + bytes;
         if (pg_atomic_compare_exchange_u64(&counter, &observed, desired)) {
             return true;
         }
@@ -635,7 +635,7 @@ inline bool g_exit_callback_registered = false;
 [[nodiscard]] bool release_counter(
         pg_atomic_uint64& counter,
         std::uint64_t bytes) noexcept {
-    std::uint64_t observed = pg_atomic_read_u64(&counter);
+    uint64 observed = pg_atomic_read_u64(&counter);
     for (;;) {
         if (bytes > observed) {
             return false;
