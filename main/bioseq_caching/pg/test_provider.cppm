@@ -955,7 +955,7 @@ void provider_set_rel_pathlist_hook(
     const Cost run_cost = projection->path.total_cost
         - projection->path.startup_cost;
     provider_path->path.total_cost = projection->path.startup_cost
-        + run_cost * 0.999;
+        + run_cost * 0.98;
     provider_path->path.pathkeys = projection->path.pathkeys;
     provider_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     provider_path->custom_paths = list_make1(&projection->path);
