@@ -1725,46 +1725,48 @@ void release_planner_pin_noerror(
             planner_context,
             sizeof(PlannerCandidateBytesV1)
                 * kMaxCoverageGenerationsPerDomain));
-    LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
-    auto candidate_result = snapshot_reusable_candidates(
-        g_reusable_registry, request, reusable_partition_callbacks());
-    if (!candidate_result.has_value()) {
-        LWLockRelease(g_reusable_membership_lock);
-        return false;
-    }
-    ReusableCandidateBatchV1 candidates = *candidate_result;
-    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
-        release_owners[index].token = candidates.candidates[index].planner_pin;
-        candidates.candidates[index].planner_pin.active = false;
-        if (!reuse::activate_candidate_reference(
-                release_records[index],
-                candidates.candidates[index].generation.reference.id,
-                reuse::CandidateReferenceKindV1::ProvisionalPin,
-                &release_planner_pin_noerror,
-                &release_owners[index])) {
-            static_cast<void>(release_reusable_reference(
-                g_reusable_registry,
-                release_owners[index].token,
-                reusable_partition_callbacks()));
-            for (std::size_t release_index = 0;
-                 release_index < index;
-                 ++release_index) {
-                reuse::release_candidate_reference_noerror(
-                    release_records[release_index]);
-            }
-            LWLockRelease(g_reusable_membership_lock);
-            return false;
-        }
-    }
-
+    auto* candidates = static_cast<ReusableCandidateBatchV1*>(
+        MemoryContextAllocZero(
+            planner_context, sizeof(ReusableCandidateBatchV1)));
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    volatile bool snapshot_valid = false;
     PG_TRY();
     {
-        MemoryContext old_context = MemoryContextSwitchTo(planner_context);
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        auto candidate_result = snapshot_reusable_candidates(
+            g_reusable_registry, request, reusable_partition_callbacks());
+        if (candidate_result.has_value()) {
+            *candidates = *candidate_result;
+            snapshot_valid = true;
+        }
         for (std::size_t index = 0;
-             index < candidates.candidate_count;
+             snapshot_valid && index < candidates->candidate_count;
+             ++index) {
+            release_owners[index].token =
+                candidates->candidates[index].planner_pin;
+            candidates->candidates[index].planner_pin.active = false;
+            if (!reuse::activate_candidate_reference(
+                    release_records[index],
+                    candidates->candidates[index].generation.reference.id,
+                    reuse::CandidateReferenceKindV1::ProvisionalPin,
+                    &release_planner_pin_noerror,
+                    &release_owners[index])) {
+                static_cast<void>(release_reusable_reference(
+                    g_reusable_registry,
+                    release_owners[index].token,
+                    reusable_partition_callbacks()));
+                snapshot_valid = false;
+                break;
+            }
+        }
+        MemoryContextSwitchTo(planner_context);
+        for (std::size_t index = 0;
+             snapshot_valid && index < candidates->candidate_count;
              ++index) {
             const ReusableGenerationSnapshotV1& generation =
-                candidates.candidates[index].generation;
+                candidates->candidates[index].generation;
             candidate_bytes[index].canonical_domain_key = copy_bytea_payload(
                 reusable_shared_bytes(
                     g_reusable_registry,
@@ -1777,29 +1779,59 @@ void release_planner_pin_noerror(
                 reusable_shared_bytes(
                     g_reusable_registry,
                     generation.coverage_descriptor));
-            if (candidate_bytes[index].canonical_domain_key == nullptr
-                || candidate_bytes[index].canonical_generation_key == nullptr
-                || candidate_bytes[index].coverage_descriptor == nullptr) {
-                ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("bioseq cache candidate bytes are unavailable")));
-            }
+            snapshot_valid =
+                candidate_bytes[index].canonical_domain_key != nullptr
+                && candidate_bytes[index].canonical_generation_key != nullptr
+                && candidate_bytes[index].coverage_descriptor != nullptr;
         }
-        MemoryContextSwitchTo(old_context);
+        MemoryContextSwitchTo(caller_context);
         LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
     }
     PG_CATCH();
     {
-        LWLockRelease(g_reusable_membership_lock);
-        PG_RE_THROW();
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        for (std::size_t index = 0;
+             index < candidates->candidate_count;
+             ++index) {
+            reuse::release_candidate_reference_noerror(
+                release_records[index]);
+        }
+        static_cast<void>(release_reusable_candidate_batch(
+            g_reusable_registry,
+            *candidates,
+            reusable_partition_callbacks()));
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        snapshot_valid = false;
     }
     PG_END_TRY();
+    if (!snapshot_valid) {
+        for (std::size_t index = 0;
+             index < candidates->candidate_count;
+             ++index) {
+            reuse::release_candidate_reference_noerror(
+                release_records[index]);
+        }
+        static_cast<void>(release_reusable_candidate_batch(
+            g_reusable_registry,
+            *candidates,
+            reusable_partition_callbacks()));
+        return false;
+    }
 
     std::array<reuse::CoverageCandidateViewV1,
         kMaxCoverageGenerationsPerDomain> candidate_views{};
-    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+    for (std::size_t index = 0; index < candidates->candidate_count; ++index) {
         const ReusableCandidateSnapshotV1& candidate =
-            candidates.candidates[index];
+            candidates->candidates[index];
         const auto domain_bytes = bytea_payload(
             candidate_bytes[index].canonical_domain_key);
         const auto generation_bytes = bytea_payload(
@@ -1841,7 +1873,7 @@ void release_planner_pin_noerror(
     const auto selected = reuse::select_candidates(
         probe,
         std::span<const reuse::CoverageCandidateViewV1>{
-            candidate_views.data(), candidates.candidate_count});
+            candidate_views.data(), candidates->candidate_count});
     std::array<bool, kMaxCoverageGenerationsPerDomain> selected_mask{};
     for (std::size_t index = 0; index < selected.selected_count; ++index) {
         selected_mask[selected.indices[index]] = true;
@@ -1849,14 +1881,14 @@ void release_planner_pin_noerror(
 
     List* gate_expressions = NIL;
     List* candidate_private = NIL;
-    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+    for (std::size_t index = 0; index < candidates->candidate_count; ++index) {
         if (!selected_mask[index]) {
             reuse::release_candidate_reference_noerror(
                 release_records[index]);
             continue;
         }
         const ReusableCandidateSnapshotV1& candidate =
-            candidates.candidates[index];
+            candidates->candidates[index];
         const auto descriptor_bytes = bytea_payload(
             candidate_bytes[index].coverage_descriptor);
         PlannerDecodedCoverageV1 decoded{};
@@ -1914,7 +1946,7 @@ void release_planner_pin_noerror(
         gate_expressions = lappend(
             gate_expressions, copyObject(gate.residual_gate));
     }
-    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+    for (std::size_t index = 0; index < candidates->candidate_count; ++index) {
         reuse::release_candidate_reference_noerror(release_records[index]);
     }
 
@@ -2435,6 +2467,21 @@ static_assert(offsetof(BioseqCacheState, css) == 0);
     }
     reinterpret_cast<Integer*>(marker)->ival = force_bypass ? 1 : 0;
     return true;
+}
+
+/** Count one typed private list; -1 identifies malformed finalized metadata. */
+[[nodiscard]] int private_list_length(
+        const CustomScan& scan, int index, NodeTag expected_tag) noexcept {
+    if (scan.custom_private == NIL
+        || list_length(scan.custom_private) <= index) {
+        return -1;
+    }
+    const auto* values = static_cast<const List*>(
+        list_nth(scan.custom_private, index));
+    if (values == NIL) {
+        return 0;
+    }
+    return nodeTag(values) == expected_tag ? list_length(values) : -1;
 }
 
 /** Append a length-delimited field to an exact key without ambiguous joins. */
@@ -3916,10 +3963,11 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     }
 
     const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
-    const VisibilityTicket visibility = explain_only
+    const bool force_bypass = private_force_bypass(*scan);
+    const VisibilityTicket visibility = explain_only || force_bypass
         ? VisibilityTicket{}
         : mint_visibility_ticket();
-    const bool cache_allowed = visibility.valid
+    const bool cache_allowed = !force_bypass && visibility.valid
         && g_query_cache_mode != static_cast<int>(QueryCacheMode::Disabled)
         && XactIsoLevel == XACT_READ_COMMITTED
         && !transaction_is_dirty()
@@ -4233,8 +4281,36 @@ void cache_explain_custom_scan(
     const char* mode_name = mode == QueryCacheMode::Reuse
         ? "reuse"
         : mode == QueryCacheMode::Same ? "same" : "disabled";
+    const bool force_bypass = private_force_bypass(*scan);
+    const int parameter_count = private_list_length(*scan, 3, T_List);
+    const int dependency_count = private_list_length(*scan, 4, T_OidList);
     ExplainPropertyText("Cache Mode", mode_name, explain_state);
-    ExplainPropertyText("Planned Cache Action", "provisional", explain_state);
+    ExplainPropertyText(
+        "Planned Cache Action",
+        force_bypass
+            ? "[Bypass] unsafe finalized source path"
+            : "provisional exact result",
+        explain_state);
+    ExplainPropertyBool("Cache Force Bypass", force_bypass, explain_state);
+    if (force_bypass) {
+        ExplainPropertyText(
+            "Cache Bypass Reason",
+            "unsafe finalized source path",
+            explain_state);
+    }
+    ExplainPropertyInteger(
+        "Cache Parameter Count", nullptr, parameter_count, explain_state);
+    ExplainPropertyInteger(
+        "Cache Dependency Count", nullptr, dependency_count, explain_state);
+    char* dependency_diagnostic = dependency_count < 0
+        ? pstrdup("metadata invalid")
+        : dependency_count == 0
+            ? pstrdup("none (relation-free exact)")
+            : psprintf("%d relation%s", dependency_count,
+                dependency_count == 1 ? "" : "s");
+    ExplainPropertyText(
+        "Cache Dependencies", dependency_diagnostic, explain_state);
+    pfree(dependency_diagnostic);
     if (explain_state->analyze) {
         const auto* state = reinterpret_cast<const BioseqCacheState*>(node);
         const char* action = state->replay_store != nullptr
@@ -5265,6 +5341,7 @@ struct EntrySnapshot {
     SharedEntryState state;
     std::uint64_t key_hash;
     std::uint64_t generation;
+    std::uint64_t database_epoch;
     Oid database_oid;
     Oid current_role_oid;
     int producer_pid;
@@ -5277,6 +5354,8 @@ struct EntrySnapshot {
     std::uint64_t logical_bytes;
     std::uint64_t stored_bytes;
     std::uint64_t hits;
+    std::uint16_t relation_count;
+    Oid relation_oids[kMaximumRelationDependencies];
     char display_sql[4096];
 };
 
@@ -5367,6 +5446,7 @@ struct EntrySnapshot {
         snapshot.state = entry.state;
         snapshot.key_hash = entry.key_hash;
         snapshot.generation = entry.generation;
+        snapshot.database_epoch = entry.database_epoch;
         snapshot.database_oid = entry.database_oid;
         snapshot.current_role_oid = entry.current_role_oid;
         snapshot.producer_pid = entry.producer_pid;
@@ -5379,6 +5459,14 @@ struct EntrySnapshot {
         snapshot.logical_bytes = entry.logical_bytes;
         snapshot.stored_bytes = entry.stored_bytes;
         snapshot.hits = entry.hits;
+        snapshot.relation_count = entry.relation_count
+                <= kMaximumRelationDependencies
+            ? entry.relation_count
+            : static_cast<std::uint16_t>(kMaximumRelationDependencies);
+        std::memcpy(
+            snapshot.relation_oids,
+            entry.relation_oids,
+            static_cast<std::size_t>(snapshot.relation_count) * sizeof(Oid));
         strlcpy(
             snapshot.display_sql, entry.display_sql,
             sizeof(snapshot.display_sql));
@@ -5623,13 +5711,31 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
         values[15] = Int32GetDatum(static_cast<int32>(entry.reader_count));
         values[16] = Int64GetDatum(static_cast<int64>(entry.hits));
         values[17] = CStringGetTextDatum(entry.display_sql);
-        values[18] = CStringGetTextDatum("retained child");
+        nulls[18] = true; /* V1 does not persist a producer Plan snapshot. */
+        StringInfoData dependencies{};
+        initStringInfo(&dependencies);
+        appendStringInfo(
+            &dependencies,
+            "{\"database_epoch\":%llu,\"relation_oids\":[",
+            static_cast<unsigned long long>(entry.database_epoch));
+        for (std::uint16_t relation_index = 0;
+             relation_index < entry.relation_count;
+             ++relation_index) {
+            appendStringInfo(
+                &dependencies,
+                "%s%u",
+                relation_index == 0 ? "" : ",",
+                entry.relation_oids[relation_index]);
+        }
+        appendStringInfoChar(&dependencies, ']');
+        appendStringInfoChar(&dependencies, '}');
         values[19] = DirectFunctionCall1(
-            jsonb_in, CStringGetDatum("[]"));
+            jsonb_in, CStringGetDatum(dependencies.data));
         tuplestore_putvalues(tuple_store, tuple_descriptor, values, nulls);
         pfree(key);
         pfree(age);
         pfree(ttl);
+        pfree(dependencies.data);
     }
     pfree(snapshots);
     PG_RETURN_NULL();
@@ -5698,6 +5804,28 @@ static void require_cache_test_superuser() {
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
              errmsg("bioseq_cache test shared memory is unavailable")));
     }
+}
+
+PG_FUNCTION_INFO_V1(bioseq_cache_test_set_exact_plan_fault);
+Datum bioseq_cache_test_set_exact_plan_fault(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg;
+    require_cache_test_superuser();
+    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    if (std::strcmp(name, "none") == 0) {
+        g_test_exact_plan_fault = TestExactPlanFault::None;
+    } else if (std::strcmp(name, "unknown_table_am") == 0) {
+        g_test_exact_plan_fault =
+            TestExactPlanFault::UnknownTableAccessMethod;
+    } else if (std::strcmp(name, "unknown_index_am") == 0) {
+        g_test_exact_plan_fault =
+            TestExactPlanFault::UnknownIndexAccessMethod;
+    } else {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unknown exact-plan verifier fault: %s", name)));
+    }
+    pfree(name);
+    PG_RETURN_VOID();
 }
 
 PG_FUNCTION_INFO_V1(bioseq_cache_test_arm_pause);
