@@ -148,6 +148,42 @@ struct CoverageSourceOrderKey {
     CacheDigest256 digest{};
 };
 
+/** Compare nonnegative fractions exactly without cross-product overflow. */
+[[nodiscard]] constexpr bool fraction_less_exact(
+    std::uint64_t left_numerator,
+    std::uint64_t left_denominator,
+    std::uint64_t right_numerator,
+    std::uint64_t right_denominator) noexcept {
+    if (left_denominator == 0 || right_denominator == 0) {
+        return left_denominator != 0 && right_denominator == 0;
+    }
+    bool reversed = false;
+    for (;;) {
+        const std::uint64_t left_quotient =
+            left_numerator / left_denominator;
+        const std::uint64_t right_quotient =
+            right_numerator / right_denominator;
+        if (left_quotient != right_quotient) {
+            return reversed
+                ? left_quotient > right_quotient
+                : left_quotient < right_quotient;
+        }
+        left_numerator %= left_denominator;
+        right_numerator %= right_denominator;
+        if (left_numerator == 0 || right_numerator == 0) {
+            if (left_numerator == 0 && right_numerator == 0) {
+                return false;
+            }
+            return reversed
+                ? right_numerator == 0
+                : left_numerator == 0;
+        }
+        std::swap(left_numerator, left_denominator);
+        std::swap(right_numerator, right_denominator);
+        reversed = !reversed;
+    }
+}
+
 /** Compare sources using completion, benefit, density, sequence, then digest. */
 [[nodiscard]] inline bool coverage_source_precedes(
     const CoverageSourceOrderKey& left,
@@ -166,13 +202,11 @@ struct CoverageSourceOrderKey {
         if (second.estimated_covered_rows == 0) {
             return true;
         }
-        const long double first_density =
-            static_cast<long double>(first.stored_bytes)
-            / static_cast<long double>(first.estimated_covered_rows);
-        const long double second_density =
-            static_cast<long double>(second.stored_bytes)
-            / static_cast<long double>(second.estimated_covered_rows);
-        return first_density < second_density;
+        return fraction_less_exact(
+            first.stored_bytes,
+            first.estimated_covered_rows,
+            second.stored_bytes,
+            second.estimated_covered_rows);
     };
     if (density_less(left, right)) {
         return true;

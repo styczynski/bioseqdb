@@ -33,6 +33,7 @@ enum class SourceMapError : std::uint16_t {
     SemanticIdMismatch,
     IllegalRepeatedSource,
     CapabilityMissing,
+    InvalidFlags,
 };
 
 /** One copied consumer/source schema plus its ordered required attributes. */
@@ -152,6 +153,9 @@ validate_column_meaning(
         if (mapping.struct_size < sizeof(BioseqCacheColumnMapEntryV1)) {
             return std::unexpected(SourceMapError::StructSize);
         }
+        if (mapping.flags != 0 || mapping.reserved != 0) {
+            return std::unexpected(SourceMapError::InvalidFlags);
+        }
         if (mapping.consumer_attno == 0 || mapping.source_attno == 0) {
             return std::unexpected(SourceMapError::InvalidAttno);
         }
@@ -210,6 +214,12 @@ validate_column_meaning(
     const ProviderContractView& consumer,
     const ProviderContractView& source,
     const BioseqCacheSourceMappingV1& mapping) noexcept {
+    if (mapping.struct_size < sizeof(BioseqCacheSourceMappingV1)) {
+        return std::unexpected(SourceMapError::StructSize);
+    }
+    if (mapping.flags != 0) {
+        return std::unexpected(SourceMapError::InvalidFlags);
+    }
     const auto consumer_boundary = validate_provider_schema(consumer.boundary);
     const auto consumer_lineage = validate_provider_schema(consumer.lineage);
     const auto source_boundary = validate_provider_schema(source.boundary);
@@ -319,12 +329,20 @@ inline void append_provider_digest_frame(
         || provider->abi_version != kProviderAbiVersion
         || provider->postgres_major != postgres_major
         || provider->provider_id == 0
+        || provider->reserved != 0
         || provider->provider_name == nullptr
         || provider->analyze_query == nullptr
         || provider->describe_path == nullptr
         || provider->append_generation_semantic_digest == nullptr
         || provider->build_plan_digest_recipe == nullptr
         || provider->append_runtime_generation_semantic_digest == nullptr) {
+        return false;
+    }
+    constexpr std::uint32_t known_flags =
+        BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE
+        | BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE
+        | BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION;
+    if ((provider->provider_flags & ~known_flags) != 0) {
         return false;
     }
     const bool reusable =
@@ -356,7 +374,8 @@ inline void append_provider_digest_frame(
         && left.identity_kind == right.identity_kind
         && left.block_number == right.block_number
         && left.offset_number == right.offset_number
-        && left.row_number_or_opaque == right.row_number_or_opaque;
+        && left.row_number_or_opaque == right.row_number_or_opaque
+        && left.xmin_identity == right.xmin_identity;
 }
 
 /** Sort and deduplicate dependency lock partitions, never raw keys alone. */
@@ -396,7 +415,15 @@ struct SemanticSettingRecord {
 [[nodiscard]] inline bool semantic_setting_inventory_complete(
     std::span<const std::uint32_t> required_setting_ids,
     std::span<const SemanticSettingRecord> records) noexcept {
-    for (const std::uint32_t required : required_setting_ids) {
+    for (std::size_t required_index = 0;
+         required_index < required_setting_ids.size();
+         ++required_index) {
+        const std::uint32_t required = required_setting_ids[required_index];
+        for (std::size_t prior = 0; prior < required_index; ++prior) {
+            if (required_setting_ids[prior] == required) {
+                return false;
+            }
+        }
         std::size_t matches = 0;
         for (const SemanticSettingRecord& record : records) {
             if (record.setting_id == required

@@ -130,6 +130,14 @@ decode_validity(
     if (bytes.size() != (row_count + 7u) / 8u) {
         return std::unexpected(FormatError::InvalidNullBitmap);
     }
+    const std::size_t used_tail_bits = row_count % 8u;
+    if (used_tail_bits != 0 && !bytes.empty()) {
+        const unsigned int unused_mask =
+            static_cast<unsigned int>(0xffu << used_tail_bits);
+        if ((std::to_integer<unsigned int>(bytes.back()) & unused_mask) != 0) {
+            return std::unexpected(FormatError::InvalidNullBitmap);
+        }
+    }
     std::vector<bool> valid(row_count, false);
     for (std::size_t index = 0; index < row_count; ++index) {
         valid[index] =
