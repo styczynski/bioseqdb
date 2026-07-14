@@ -244,10 +244,19 @@ def _digest_output(
     )
 
 
-def _execute_query(cluster: Any, *, mode: str, sql: str) -> QueryOutput:
+def _execute_query(
+    cluster: Any,
+    *,
+    mode: str,
+    sql: str,
+    ttl_ms: int | None = None,
+) -> QueryOutput:
+    settings = f"SET bioseq.query_cache_optimisation_mode = '{mode}';\n"
+    if ttl_ms is not None:
+        settings += f"SET bioseq.query_cache_ttl = {ttl_ms};\n"
     stdout, elapsed, first_row_ns, completed_at_ns = _run_query_streaming(
         cluster,
-        f"SET bioseq.query_cache_optimisation_mode = '{mode}';\n{sql}",
+        settings + sql,
     )
     return _digest_output(stdout, elapsed, first_row_ns, completed_at_ns)
 
@@ -759,7 +768,7 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
 
 def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
     _reset_case(cluster, ttl_ms=1)
-    _execute_query(cluster, mode="same", sql=sql)
+    _execute_query(cluster, mode="same", sql=sql, ttl_ms=1)
     time.sleep(0.01)
     before = _stats(cluster)
     started = time.perf_counter_ns()
