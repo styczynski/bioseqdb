@@ -127,6 +127,7 @@ inline ProjectionOrder g_projection_order = ProjectionOrder::Natural;
 inline bool g_force_domain_digest_collision = false;
 inline bool g_provider_registered = false;
 inline bool g_hook_installed = false;
+inline bool g_scan_methods_registered = false;
 inline set_rel_pathlist_hook_type g_previous_set_rel_pathlist_hook = nullptr;
 inline CallbackCounters g_counters{};
 
@@ -741,6 +742,485 @@ void fill_column_schema(
 
 namespace bioseq::cache::pg::test_provider {
 
+/*
+ * Genuine ordering cycle: the relation hook calls the provider table, while
+ * the table must be defined after every callback it stores.
+ */
+[[nodiscard]] const BioseqCacheProviderV1& provider_v1() noexcept;
+
+/** Resolve the four required occurrence columns on the configured table. */
+[[nodiscard]] bool relation_contract_attnos(
+    Oid relation_oid,
+    AttrNumber* row_identity_attno,
+    AttrNumber* base_identity_attno,
+    AttrNumber* occurrence_attno,
+    AttrNumber* capability_attno) noexcept {
+    if (!OidIsValid(relation_oid)) {
+        return false;
+    }
+    const AttrNumber row = get_attnum(relation_oid, "row_id");
+    const AttrNumber base = get_attnum(relation_oid, "base_id");
+    const AttrNumber occurrence = get_attnum(relation_oid, "occurrence_no");
+    const AttrNumber capability = get_attnum(relation_oid, "capability_mask");
+    if (row <= 0 || base <= 0 || occurrence <= 0 || capability <= 0
+        || get_atttype(relation_oid, row) != INT8OID
+        || get_atttype(relation_oid, base) != INT8OID
+        || get_atttype(relation_oid, occurrence) != INT4OID
+        || get_atttype(relation_oid, capability) != INT8OID) {
+        return false;
+    }
+    if (row_identity_attno != nullptr) {
+        *row_identity_attno = row;
+    }
+    if (base_identity_attno != nullptr) {
+        *base_identity_attno = base;
+    }
+    if (occurrence_attno != nullptr) {
+        *occurrence_attno = occurrence;
+    }
+    if (capability_attno != nullptr) {
+        *capability_attno = capability;
+    }
+    return true;
+}
+
+/** Choose a deterministic unparameterized ordinary child path. */
+[[nodiscard]] Path* choose_provider_child(RelOptInfo* relation) noexcept {
+    Path* best_seqscan = nullptr;
+    Path* best_other = nullptr;
+    ListCell* cell = nullptr;
+    foreach(cell, relation->pathlist) {
+        auto* candidate = static_cast<Path*>(lfirst(cell));
+        if (candidate == nullptr || candidate->param_info != nullptr) {
+            continue;
+        }
+        if (candidate->pathtype == T_CustomScan
+            && reinterpret_cast<CustomPath*>(candidate)->methods
+                == &provider_path_methods()) {
+            continue;
+        }
+        if (best_other == nullptr
+            || candidate->total_cost < best_other->total_cost) {
+            best_other = candidate;
+        }
+        if (candidate->pathtype == T_SeqScan
+            && (best_seqscan == nullptr
+                || candidate->total_cost < best_seqscan->total_cost)) {
+            best_seqscan = candidate;
+        }
+    }
+    return best_seqscan != nullptr ? best_seqscan : best_other;
+}
+
+/** Add every physical user attribute to the provider's raw PathTarget. */
+[[nodiscard]] PathTarget* make_provider_raw_target(
+    PlannerInfo* root,
+    RelOptInfo* relation,
+    Index range_table_index,
+    Oid relation_oid,
+    PathTarget* original_target) {
+    Relation opened = table_open(relation_oid, NoLock);
+    TupleDesc descriptor = RelationGetDescr(opened);
+    PathTarget* target = copy_pathtarget(original_target);
+    for (int index = 0; index < descriptor->natts; ++index) {
+        Form_pg_attribute attribute = TupleDescAttr(descriptor, index);
+        if (attribute->attisdropped) {
+            continue;
+        }
+        auto* variable = makeVar(
+            range_table_index,
+            static_cast<AttrNumber>(index + 1),
+            attribute->atttypid,
+            attribute->atttypmod,
+            attribute->attcollation,
+            0);
+        add_new_column_to_pathtarget(target, reinterpret_cast<Expr*>(variable));
+    }
+    table_close(opened, NoLock);
+    set_pathtarget_cost_width(root, target);
+    return target;
+}
+
+/** Resolve and call the published planner bridge for every provider path set. */
+void call_planner_bridge(
+    PlannerInfo* root,
+    RelOptInfo* relation,
+    Index range_table_index,
+    RangeTblEntry* range_entry) noexcept {
+    void** slot = find_rendezvous_variable(kBridgeRendezvousName);
+    if (slot == nullptr || *slot == nullptr) {
+        return;
+    }
+    const auto* bridge = static_cast<const BioseqCachePlannerBridgeV1*>(*slot);
+    if (bridge->struct_size < sizeof(*bridge)
+        || bridge->abi_version != bioseq::cache::kProviderAbiVersion
+        || bridge->postgres_major
+            != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
+        || bridge->after_provider_rel_paths == nullptr) {
+        return;
+    }
+    ++g_counters.planner_bridge_calls;
+    bridge->after_provider_rel_paths(
+        root,
+        relation,
+        range_table_index,
+        range_entry,
+        &provider_v1());
+}
+
+/** Chained relation hook: add the provider path, then invoke the bridge. */
+void provider_set_rel_pathlist_hook(
+    PlannerInfo* root,
+    RelOptInfo* relation,
+    Index range_table_index,
+    RangeTblEntry* range_entry) {
+    if (g_previous_set_rel_pathlist_hook != nullptr) {
+        g_previous_set_rel_pathlist_hook(
+            root, relation, range_table_index, range_entry);
+    }
+    if (root == nullptr || relation == nullptr || range_entry == nullptr
+        || range_entry->rtekind != RTE_RELATION || range_entry->inh
+        || range_entry->relid != g_target_relation_oid
+        || !g_provider_registered) {
+        return;
+    }
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    if (!relation_contract_attnos(
+            range_entry->relid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno)) {
+        return;
+    }
+    Path* child = choose_provider_child(relation);
+    if (child == nullptr || child->pathtarget == nullptr) {
+        return;
+    }
+    PathTarget* raw_target = make_provider_raw_target(
+        root,
+        relation,
+        range_table_index,
+        range_entry->relid,
+        child->pathtarget);
+    auto* projection = create_projection_path(
+        root, relation, child, raw_target);
+    if (projection == nullptr) {
+        return;
+    }
+    auto* provider_path = makeNode(CustomPath);
+    provider_path->path.pathtype = T_CustomScan;
+    provider_path->path.parent = relation;
+    provider_path->path.pathtarget = raw_target;
+    provider_path->path.param_info = nullptr;
+    provider_path->path.parallel_aware = false;
+    provider_path->path.parallel_safe = false;
+    provider_path->path.parallel_workers = 0;
+    provider_path->path.rows = child->rows;
+    provider_path->path.startup_cost = projection->path.startup_cost;
+    const Cost run_cost = projection->path.total_cost
+        - projection->path.startup_cost;
+    provider_path->path.total_cost = projection->path.startup_cost
+        + run_cost * 0.999;
+    provider_path->path.pathkeys = projection->path.pathkeys;
+    provider_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    provider_path->custom_paths = list_make1(&projection->path);
+    provider_path->custom_restrictinfo = NIL;
+    provider_path->custom_private = make_plan_nodes(
+        range_entry->relid,
+        row_attno,
+        base_attno,
+        occurrence_attno,
+        capability_attno);
+    provider_path->methods = &provider_path_methods();
+    add_path(relation, &provider_path->path);
+    set_cheapest(relation);
+    if (list_member_ptr(relation->pathlist, provider_path)) {
+        call_planner_bridge(
+            root, relation, range_table_index, range_entry);
+    }
+}
+
+/** Register the provider and its backend-local relation hook idempotently. */
+[[nodiscard]] bool initialize_provider() {
+    if (!g_scan_methods_registered) {
+        RegisterCustomScanMethods(&provider_scan_methods());
+        g_scan_methods_registered = true;
+    }
+    if (!g_provider_registered) {
+        void** slot = find_rendezvous_variable(kApiRendezvousName);
+        if (slot == nullptr || *slot == nullptr) {
+            return false;
+        }
+        auto* api = static_cast<BioseqCacheApiV1*>(*slot);
+        if (api->struct_size < sizeof(*api)
+            || api->abi_version != bioseq::cache::kProviderAbiVersion
+            || api->postgres_major
+                != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
+            || api->register_provider == nullptr
+            || !api->register_provider(&provider_v1())) {
+            return false;
+        }
+        g_provider_registered = true;
+    }
+    if (!g_hook_installed) {
+        g_previous_set_rel_pathlist_hook = set_rel_pathlist_hook;
+        set_rel_pathlist_hook = provider_set_rel_pathlist_hook;
+        g_hook_installed = true;
+    }
+    return true;
+}
+
+/** Restore only the hook slot and provider registration owned by this module. */
+void shutdown_provider() noexcept {
+    if (g_hook_installed && set_rel_pathlist_hook
+        == provider_set_rel_pathlist_hook) {
+        set_rel_pathlist_hook = g_previous_set_rel_pathlist_hook;
+    }
+    g_hook_installed = false;
+    g_previous_set_rel_pathlist_hook = nullptr;
+    if (g_provider_registered) {
+        void** slot = find_rendezvous_variable(kApiRendezvousName);
+        if (slot != nullptr && *slot != nullptr) {
+            auto* api = static_cast<BioseqCacheApiV1*>(*slot);
+            if (api->struct_size >= sizeof(*api)
+                && api->unregister_provider != nullptr) {
+                api->unregister_provider(kProviderId);
+            }
+        }
+    }
+    g_provider_registered = false;
+}
+
+/** Parse the normative mapping-fault control vocabulary. */
+[[nodiscard]] MappingFault parse_mapping_fault(const char* name) {
+    struct NamedFault {
+        const char* name;
+        MappingFault value;
+    };
+    static constexpr std::array<NamedFault, 23> faults{{
+        {"none", MappingFault::None},
+        {"null_pointer_nonzero_count", MappingFault::NullPointerNonzeroCount},
+        {"short_boundary_map", MappingFault::ShortBoundaryMap},
+        {"long_boundary_map", MappingFault::LongBoundaryMap},
+        {"short_lineage_map", MappingFault::ShortLineageMap},
+        {"long_lineage_map", MappingFault::LongLineageMap},
+        {"zero_consumer_attno", MappingFault::ZeroConsumerAttno},
+        {"zero_source_attno", MappingFault::ZeroSourceAttno},
+        {"source_attno_out_of_range", MappingFault::SourceAttnoOutOfRange},
+        {"duplicate_consumer_attno", MappingFault::DuplicateConsumerAttno},
+        {"missing_required_attno", MappingFault::MissingRequiredAttno},
+        {"wrong_type", MappingFault::WrongType},
+        {"wrong_typmod", MappingFault::WrongTypmod},
+        {"wrong_collation", MappingFault::WrongCollation},
+        {"wrong_semantic_id", MappingFault::WrongSemanticId},
+        {"same_typed_column_permutation", MappingFault::SameTypedColumnPermutation},
+        {"illegal_repeated_source_attno", MappingFault::IllegalRepeatedSourceAttno},
+        {"bad_provider_private_version", MappingFault::BadProviderPrivateVersion},
+        {"non_integer_persisted_map_node", MappingFault::NonIntegerPersistedMapNode},
+        {"unknown_persisted_map_version", MappingFault::UnknownPersistedMapVersion},
+        {"decorated_boundary_schema_mismatch", MappingFault::DecoratedBoundarySchemaMismatch},
+        {"decorated_lineage_schema_mismatch", MappingFault::DecoratedLineageSchemaMismatch},
+        {"provider_error", MappingFault::ProviderError},
+    }};
+    for (const auto& fault : faults) {
+        if (std::strcmp(name, fault.name) == 0) {
+            return fault.value;
+        }
+    }
+    ereport(ERROR,
+        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+         errmsg("unknown generic test-provider mapping fault: %s", name)));
+    pg_unreachable();
+}
+
+} // namespace bioseq::cache::pg::test_provider
+
+extern "C" {
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_init(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_init);
+Datum bioseq_cache_test_provider_init(PG_FUNCTION_ARGS) {
+    bioseq::cache::pg::test_provider::require_test_superuser();
+    if (!bioseq::cache::pg::test_provider::initialize_provider()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq_cache test provider could not register")));
+    }
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_shutdown(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_shutdown);
+Datum bioseq_cache_test_provider_shutdown(PG_FUNCTION_ARGS) {
+    bioseq::cache::pg::test_provider::require_test_superuser();
+    bioseq::cache::pg::test_provider::shutdown_provider();
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_use_relation);
+Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    const Oid relation_oid = PG_GETARG_OID(0);
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    Relation relation = table_open(relation_oid, AccessShareLock);
+    const bool compatible = relation->rd_rel->relkind == RELKIND_RELATION
+        && relation_contract_attnos(
+            relation_oid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno);
+    table_close(relation, AccessShareLock);
+    if (!compatible) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("generic test-provider relation has the wrong contract"),
+             errdetail("Required columns: row_id bigint, base_id bigint, occurrence_no integer, capability_mask bigint.")));
+    }
+    g_target_relation_oid = relation_oid;
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_set_mapping_fault(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_mapping_fault);
+Datum bioseq_cache_test_provider_set_mapping_fault(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    g_mapping_fault = parse_mapping_fault(name);
+    pfree(name);
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_digest_fault);
+Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    if (std::strcmp(name, "none") == 0) {
+        g_digest_fault = DigestFault::None;
+    } else if (std::strcmp(name, "recipe_mismatch") == 0) {
+        g_digest_fault = DigestFault::RecipeMismatch;
+    } else if (std::strcmp(name, "runtime_mismatch") == 0) {
+        g_digest_fault = DigestFault::RuntimeMismatch;
+    } else {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unknown generic test-provider digest fault: %s", name)));
+    }
+    pfree(name);
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_set_projection_order(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_projection_order);
+Datum bioseq_cache_test_provider_set_projection_order(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    if (std::strcmp(name, "natural") == 0) {
+        g_projection_order = ProjectionOrder::Natural;
+    } else if (std::strcmp(name, "reverse") == 0) {
+        g_projection_order = ProjectionOrder::Reverse;
+    } else {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unknown generic test-provider projection order: %s", name)));
+    }
+    pfree(name);
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_set_capabilities(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_capabilities);
+Datum bioseq_cache_test_provider_set_capabilities(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    const std::int64_t capabilities = PG_GETARG_INT64(0);
+    if (capabilities <= 0) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("generic test-provider capabilities must be positive")));
+    }
+    g_requested_capabilities = static_cast<std::uint64_t>(capabilities);
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_force_domain_collision(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_force_domain_collision);
+Datum bioseq_cache_test_provider_force_domain_collision(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    g_force_domain_digest_collision = PG_GETARG_BOOL(0);
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_reset);
+Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    g_requested_capabilities = 1;
+    g_mapping_fault = MappingFault::None;
+    g_digest_fault = DigestFault::None;
+    g_projection_order = ProjectionOrder::Natural;
+    g_force_domain_digest_collision = false;
+    g_counters = {};
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_stats);
+Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    StringInfoData json{};
+    initStringInfo(&json);
+    appendStringInfo(
+        &json,
+        "{\"registered\":%s,\"target_relation\":%u,"
+        "\"analyze_query\":%llu,\"describe_path\":%llu,"
+        "\"domain_digest\":%llu,\"generation_digest\":%llu,"
+        "\"runtime_digest\":%llu,\"map_source\":%llu,"
+        "\"decorate_path\":%llu,\"build_recipe\":%llu,"
+        "\"extract_occurrence\":%llu,\"late_fetch_batch\":%llu,"
+        "\"late_fetch_references\":%llu,\"planner_bridge_calls\":%llu,"
+        "\"executor_rows\":%llu,\"gated_expensive_rows\":%llu}",
+        g_provider_registered ? "true" : "false",
+        g_target_relation_oid,
+        static_cast<unsigned long long>(g_counters.analyze_query),
+        static_cast<unsigned long long>(g_counters.describe_path),
+        static_cast<unsigned long long>(g_counters.domain_digest),
+        static_cast<unsigned long long>(g_counters.generation_digest),
+        static_cast<unsigned long long>(g_counters.runtime_digest),
+        static_cast<unsigned long long>(g_counters.map_source),
+        static_cast<unsigned long long>(g_counters.decorate_path),
+        static_cast<unsigned long long>(g_counters.build_recipe),
+        static_cast<unsigned long long>(g_counters.extract_occurrence),
+        static_cast<unsigned long long>(g_counters.late_fetch_batch),
+        static_cast<unsigned long long>(g_counters.late_fetch_references),
+        static_cast<unsigned long long>(g_counters.planner_bridge_calls),
+        static_cast<unsigned long long>(g_counters.executor_rows),
+        static_cast<unsigned long long>(g_counters.gated_expensive_rows));
+    Datum result = DirectFunctionCall1(
+        jsonb_in, CStringGetDatum(json.data));
+    pfree(json.data);
+    PG_RETURN_DATUM(result);
+}
+
+} // extern "C"
+
+namespace bioseq::cache::pg::test_provider {
+
 /** Extract one stable provider-opaque binding occurrence from a raw slot. */
 [[nodiscard]] BioseqCacheStatusV1 provider_extract_occurrence(
     List* plan_domain_nodes,
@@ -985,33 +1465,6 @@ void provider_explain_domain(
             "Provider Late Fetch References",
             g_counters.late_fetch_references);
     }
-}
-
-/** Complete ABI table registered only by an explicit test-only SQL call. */
-[[nodiscard]] const BioseqCacheProviderV1& provider_v1() noexcept {
-    static const BioseqCacheProviderV1 provider{
-        .struct_size = sizeof(BioseqCacheProviderV1),
-        .abi_version = bioseq::cache::kProviderAbiVersion,
-        .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
-        .provider_id = kProviderId,
-        .provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE,
-        .reserved = 0,
-        .provider_name = "generic_nullable_occurrence_test_provider",
-        .provider_scan_methods = &provider_scan_methods(),
-        .analyze_query = provider_analyze_query,
-        .describe_path = provider_describe_path,
-        .append_domain_semantic_digest = provider_append_domain_digest,
-        .append_generation_semantic_digest = provider_append_generation_digest,
-        .append_runtime_generation_semantic_digest =
-            provider_append_runtime_digest,
-        .map_reusable_source = provider_map_reusable_source,
-        .decorate_path = provider_decorate_path,
-        .build_plan_digest_recipe = provider_build_plan_digest_recipe,
-        .extract_occurrence = provider_extract_occurrence,
-        .late_fetch_batch = provider_late_fetch_batch,
-        .explain_domain = provider_explain_domain,
-    };
-    return provider;
 }
 
 } // namespace bioseq::cache::pg::test_provider
@@ -1377,6 +1830,37 @@ void apply_mapping_fault(
         output->expected_generation_digest[0] ^= 0xa5U;
     }
     return BIOSEQ_CACHE_STATUS_OK;
+}
+
+} // namespace bioseq::cache::pg::test_provider
+
+namespace bioseq::cache::pg::test_provider {
+
+/** Complete ABI table registered only by an explicit test-only SQL call. */
+[[nodiscard]] const BioseqCacheProviderV1& provider_v1() noexcept {
+    static const BioseqCacheProviderV1 provider{
+        .struct_size = sizeof(BioseqCacheProviderV1),
+        .abi_version = bioseq::cache::kProviderAbiVersion,
+        .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
+        .provider_id = kProviderId,
+        .provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE,
+        .reserved = 0,
+        .provider_name = "generic_nullable_occurrence_test_provider",
+        .provider_scan_methods = &provider_scan_methods(),
+        .analyze_query = provider_analyze_query,
+        .describe_path = provider_describe_path,
+        .append_domain_semantic_digest = provider_append_domain_digest,
+        .append_generation_semantic_digest = provider_append_generation_digest,
+        .append_runtime_generation_semantic_digest =
+            provider_append_runtime_digest,
+        .map_reusable_source = provider_map_reusable_source,
+        .decorate_path = provider_decorate_path,
+        .build_plan_digest_recipe = provider_build_plan_digest_recipe,
+        .extract_occurrence = provider_extract_occurrence,
+        .late_fetch_batch = provider_late_fetch_batch,
+        .explain_domain = provider_explain_domain,
+    };
+    return provider;
 }
 
 } // namespace bioseq::cache::pg::test_provider
