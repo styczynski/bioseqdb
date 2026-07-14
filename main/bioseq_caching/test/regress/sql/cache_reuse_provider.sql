@@ -119,6 +119,7 @@ SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache_test.request_janitor_sweep();
 SELECT bioseq_cache_test.provider_reset();
 SELECT bioseq_cache.reset_stats();
+SET random_page_cost = 100;
 SET enable_sort = off;
 DO $$
 DECLARE
@@ -179,6 +180,7 @@ BEGIN
 END
 $$;
 RESET enable_sort;
+RESET random_page_cost;
 
 -- Keep the remaining provider-contract cases independent of the hit proof.
 SELECT bioseq_cache.invalidate_all();
