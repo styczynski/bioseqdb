@@ -679,7 +679,12 @@ void fill_column_schema(
         && sink->append(sink->opaque, data, size);
 }
 
-/** Domain digest excludes output-only capabilities by construction. */
+/**
+ * Domain bytes identify the stable provider relation contract.  Predicates
+ * deliberately do not participate: different predicates over one relation
+ * must meet in the same coverage directory before the generation key and
+ * coverage algebra distinguish them.
+ */
 [[nodiscard]] BioseqCacheStatusV1 provider_append_domain_digest(
     const BioseqCachePathDomainV1* domain,
     BioseqCacheDigestSinkV1* sink) {
@@ -688,33 +693,57 @@ void fill_column_schema(
         || domain->coverage_predicate == nullptr) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
+    Oid relation_oid = InvalidOid;
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    if (!parse_plan_nodes(
+            domain->provider_private_nodes,
+            &relation_oid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
     const std::uint64_t header = g_force_domain_digest_collision
         ? 0x434f4c4c4953494fULL
         : kCompatibilityFamily;
-    if (!append_digest_bytes(sink, &header, sizeof(header))) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
-    }
-    if (g_force_domain_digest_collision) {
-        return BIOSEQ_CACHE_STATUS_OK;
-    }
-    char* serialized = nodeToString(domain->coverage_predicate);
-    if (serialized == nullptr) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
-    }
-    const std::size_t length = std::strlen(serialized);
-    const bool appended = append_digest_bytes(sink, &length, sizeof(length))
-        && append_digest_bytes(sink, serialized, length);
-    pfree(serialized);
-    return appended ? BIOSEQ_CACHE_STATUS_OK : BIOSEQ_CACHE_STATUS_ERROR;
+    const std::array<std::uint32_t, 5> identity{
+        static_cast<std::uint32_t>(relation_oid),
+        static_cast<std::uint32_t>(row_attno),
+        static_cast<std::uint32_t>(base_attno),
+        static_cast<std::uint32_t>(occurrence_attno),
+        static_cast<std::uint32_t>(capability_attno),
+    };
+    return append_digest_bytes(sink, &header, sizeof(header))
+            && append_digest_bytes(
+                sink, identity.data(), identity.size() * sizeof(identity[0]))
+        ? BIOSEQ_CACHE_STATUS_OK
+        : BIOSEQ_CACHE_STATUS_ERROR;
 }
 
-/** Generation digest includes exact capability and ordered raw schemas. */
+/** Generation bytes add the exact predicate, capability, and ordered schemas. */
 [[nodiscard]] BioseqCacheStatusV1 provider_append_generation_digest(
     const BioseqCachePathDomainV1* domain,
     BioseqCacheDigestSinkV1* sink) {
     ++g_counters.generation_digest;
     if (provider_append_domain_digest(domain, sink)
         != BIOSEQ_CACHE_STATUS_OK) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    char* serialized = nodeToString(domain->coverage_predicate);
+    if (serialized == nullptr) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    const std::size_t predicate_size = std::strlen(serialized);
+    const std::uint64_t stable_predicate_size = predicate_size;
+    const bool predicate_appended = append_digest_bytes(
+            sink, &stable_predicate_size, sizeof(stable_predicate_size))
+        && append_digest_bytes(sink, serialized, predicate_size);
+    pfree(serialized);
+    if (!predicate_appended) {
         return BIOSEQ_CACHE_STATUS_ERROR;
     }
     if (!append_digest_bytes(
