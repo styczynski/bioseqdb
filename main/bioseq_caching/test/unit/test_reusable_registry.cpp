@@ -878,9 +878,13 @@ TEST_CASE("reusable analyzed diagnostics may refresh a live producer") {
   REQUIRE(
       store_reusable_diagnostic_text(fixture.attachment, analyzed_update)
       == ReusableRegistryErrorV1::None);
-  const auto building = snapshot_reusable_generation(
-      fixture.attachment, claimed.reference);
-  REQUIRE(building.has_value());
+  std::array<ReusableGenerationDiagnosticsRowV1, 1> rows{};
+  const auto snapshot = snapshot_reusable_generation_diagnostics(
+      fixture.attachment, rows);
+  REQUIRE(snapshot.error == ReusableRegistryErrorV1::None);
+  REQUIRE(snapshot.count == 1);
+  const auto* building = diagnostics_row(rows, claimed.reference);
+  REQUIRE(building != nullptr);
   REQUIRE(building->state == CacheEntryState::Building);
   REQUIRE(
       building->plan_snapshot_status
@@ -896,7 +900,7 @@ TEST_CASE("reusable analyzed diagnostics may refresh a live producer") {
       fail_reusable_generation(
           fixture.attachment,
           claimed.reference,
-          CacheFailureCode::CaptureFailure)
+          CacheFailureCode::ProducerError)
       == ReusableRegistryErrorV1::None);
   REQUIRE(
       validate_reusable_registry(fixture.attachment)
