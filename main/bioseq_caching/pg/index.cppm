@@ -419,6 +419,7 @@ struct PlannerFrame {
         provider_registry::kMaximumRegisteredProvidersV1> intents{};
     std::size_t provider_intent_count = 0;
     bool eligible = false;
+    bool reusable_coverage_planned = false;
 };
 
 inline PlannerFrame* g_planner_frame = nullptr;
@@ -2779,13 +2780,14 @@ void consider_provider_reusable_paths_impl(
     foreach(cell, original_paths) {
         Path* path = static_cast<Path*>(lfirst(cell));
         if (path != nullptr && list_member_ptr(relation->pathlist, path)) {
-            static_cast<void>(wrap_one_provider_path(
+            frame->reusable_coverage_planned = wrap_one_provider_path(
                 root,
                 relation,
                 path,
                 provider,
                 *intent,
-                planner_context));
+                planner_context)
+                || frame->reusable_coverage_planned;
         }
     }
 }
@@ -7412,7 +7414,8 @@ void cache_create_upper_paths(
         || root->parent_root != nullptr
         || root->parse != frame->delegated_query
         || output_relation == nullptr
-        || output_relation->pathlist == NIL) {
+        || output_relation->pathlist == NIL
+        || frame->reusable_coverage_planned) {
         return;
     }
 
