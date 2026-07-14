@@ -607,7 +607,7 @@ MODES: Dict[str, ModeDefinition] = {
         # so the extension dylib + SQL must be (re)built and installed before the
         # int-test client runs. Without this the int tests exercise whatever
         # stale extension happens to be installed in the server.
-        targets=["postgresql_bioseq",
+        targets=["postgresql_bioseq_cache", "postgresql_bioseq",
                  "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"],
         install_extension=True,
         commands=[
@@ -668,7 +668,8 @@ MODES: Dict[str, ModeDefinition] = {
         is_verb_plular=False,
         # postgresql_bioseq MUST be built + installed first: the bench connects to
         # the running PostgreSQL and CREATE EXTENSIONs from the *installed* files.
-        targets=["postgresql_bioseq", "bioseq_bench_e2e"],
+        targets=["postgresql_bioseq_cache", "postgresql_bioseq",
+                 "bioseq_bench_e2e"],
         install_extension=True,
         commands=[["bioseq_bench_e2e"]],
         reporting_subdir_name="bioseq_bench_e2e",
