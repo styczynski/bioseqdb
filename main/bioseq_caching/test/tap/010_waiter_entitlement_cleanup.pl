@@ -59,7 +59,7 @@ $producer->query_until(
 	  SET application_name = 'cache_entitlement_producer';
 	  SET bioseq.query_cache_optimisation_mode = 'same';
 	  SET bioseq.query_cache_ttl = 0;
-	  SELECT count(*) || '|' || sum(id) FROM entitlement_rows;
+	  SELECT id FROM entitlement_rows WHERE id <= 100 ORDER BY id;
 });
 $node->safe_psql(
 	'postgres',
@@ -74,7 +74,7 @@ $waiter->query_until(
 	  SET application_name = 'cache_entitlement_waiter';
 	  SET bioseq.query_cache_optimisation_mode = 'same';
 	  SET bioseq.query_cache_ttl = 0;
-	  SELECT count(*) || '|' || sum(id) FROM entitlement_rows;
+	  SELECT id FROM entitlement_rows WHERE id <= 100 ORDER BY id;
 });
 $node->safe_psql(
 	'postgres',
@@ -85,7 +85,9 @@ pass('waiter registered before publication');
 $controller->query(
 	q{SELECT bioseq_cache_test.release_pause('before_terminal_publish');});
 my $producer_output = $producer->query('');
-like($producer_output, qr/100\|5050/, 'producer published the complete result');
+my @producer_rows = grep { /^\d+$/ } split(/\r?\n/, $producer_output);
+is_deeply(\@producer_rows, [ 1 .. 100 ],
+	'producer published the complete ordered result');
 $producer->quit;
 
 ok(
@@ -158,7 +160,7 @@ $controller->quit;
 my $deadline = time() + 10;
 my ($reclaimed_hot, $reclaimed_file, $reclaimed_manifests,
 	$reclaimed_waiters);
-do
+while (time() < $deadline)
 {
 	$node->safe_psql(
 		'postgres', 'SELECT bioseq_cache_test.request_janitor_sweep()');
@@ -171,7 +173,7 @@ do
 	  && $reclaimed_manifests == $baseline_manifests
 	  && $reclaimed_waiters == $baseline_waiters;
 	sleep(0.05);
-} while (time() < $deadline);
+}
 
 is(
 	$reclaimed_manifests,
