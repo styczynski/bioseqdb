@@ -2313,6 +2313,52 @@ struct CoverageMappingHeaderV1 {
     std::uint32_t lineage_count = 0;
 };
 
+struct CoverageMappingViewV1 {
+    CoverageMappingHeaderV1 header{};
+    std::span<const std::byte> boundary{};
+    std::span<const std::byte> lineage{};
+};
+
+/** Decode the unaligned bytea payload without aliasing provider ABI structs. */
+[[nodiscard]] bool decode_source_mapping(
+        std::span<const std::byte> bytes,
+        CoverageMappingViewV1* output) noexcept {
+    if (output == nullptr || bytes.size() < sizeof(CoverageMappingHeaderV1)) {
+        return false;
+    }
+    CoverageMappingHeaderV1 header{};
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    if (header.magic != kCoverageMappingMagicV1
+        || header.format_version != reuse::kReusablePlanFormatVersionV1
+        || header.boundary_count > kMaxProviderBoundaryColumns
+        || header.lineage_count > kMaxProviderBoundaryColumns) {
+        return false;
+    }
+    std::uint64_t expected = sizeof(header);
+    if (!add_coverage_descriptor_size(
+            expected,
+            header.boundary_count,
+            sizeof(BioseqCacheColumnMapEntryV1))
+        || !add_coverage_descriptor_size(
+            expected,
+            header.lineage_count,
+            sizeof(BioseqCacheColumnMapEntryV1))
+        || expected != bytes.size()) {
+        return false;
+    }
+    const std::size_t boundary_bytes =
+        static_cast<std::size_t>(header.boundary_count)
+        * sizeof(BioseqCacheColumnMapEntryV1);
+    const std::size_t lineage_bytes =
+        static_cast<std::size_t>(header.lineage_count)
+        * sizeof(BioseqCacheColumnMapEntryV1);
+    output->header = header;
+    output->boundary = bytes.subspan(sizeof(header), boundary_bytes);
+    output->lineage = bytes.subspan(
+        sizeof(header) + boundary_bytes, lineage_bytes);
+    return true;
+}
+
 /** Persist validated source-column maps as POD; private Nodes stay separate. */
 [[nodiscard]] Const* make_source_mapping_node(
         const BioseqCacheSourceMappingV1& mapping) {
@@ -5255,13 +5301,29 @@ struct CoverageRuntimeSourceV1 {
     bool valid;
     bool registry_reference_owned;
     bool manifest_pin_owned;
-    std::uint8_t reserved;
+    bool waited;
+    bool ttl_entitlement_consumed;
+    std::array<std::uint8_t, 3> reserved_flags{};
     ReusableGenerationReferenceV1 reference;
     ReusableReferenceTokenV1 registry_reference;
+    ReusableGenerationSnapshotV1 completed_snapshot;
     storage::ManifestPin manifest_pin;
     Tuplestorestate* replay_store;
     TupleTableSlot* replay_slot;
     ExprState* predicate_state;
+    PlannerDecodedCoverageV1 contract;
+    TupleDesc stored_descriptor;
+    CoverageStoredColumnV1* stored_columns;
+    std::uint32_t stored_column_count;
+    std::uint32_t boundary_map_count;
+    std::uint32_t lineage_map_count;
+    std::uint32_t reserved_count;
+    BioseqCacheColumnMapEntryV1* boundary_map;
+    BioseqCacheColumnMapEntryV1* lineage_map;
+    List* provider_private_nodes;
+    const void* generation_key_node;
+    const void* descriptor_node;
+    std::uint64_t row_count;
 };
 
 struct ReusableCoverageState {
@@ -5275,6 +5337,8 @@ struct ReusableCoverageState {
     bool cleanup_registered;
     bool cleanup_done;
     bool current_manifest_pin_owned;
+    bool older_preflight_ready;
+    std::array<std::uint8_t, 1> reserved_flags;
     std::uint16_t source_count;
     std::uint16_t active_source_count;
     std::uint16_t replay_source_index;
@@ -5865,6 +5929,32 @@ void release_coverage_source(CoverageRuntimeSourceV1& source) noexcept {
         ExecDropSingleTupleTableSlot(source.replay_slot);
         source.replay_slot = nullptr;
     }
+    if (source.stored_descriptor != nullptr) {
+        FreeTupleDesc(source.stored_descriptor);
+        source.stored_descriptor = nullptr;
+    }
+    if (source.stored_columns != nullptr) {
+        pfree(source.stored_columns);
+        source.stored_columns = nullptr;
+    }
+    if (source.boundary_map != nullptr) {
+        pfree(source.boundary_map);
+        source.boundary_map = nullptr;
+    }
+    if (source.lineage_map != nullptr) {
+        pfree(source.lineage_map);
+        source.lineage_map = nullptr;
+    }
+    source.stored_column_count = 0;
+    source.boundary_map_count = 0;
+    source.lineage_map_count = 0;
+    source.provider_private_nodes = NIL;
+    source.generation_key_node = nullptr;
+    source.descriptor_node = nullptr;
+    source.completed_snapshot = {};
+    source.row_count = 0;
+    source.waited = false;
+    source.ttl_entitlement_consumed = false;
     source.valid = false;
 }
 
@@ -5961,6 +6051,289 @@ void coverage_state_cleanup(void* opaque) noexcept {
     return accepted;
 }
 
+/** Snapshot every in-flight generation produced by this backend. */
+[[nodiscard]] std::size_t collect_local_reusable_claim_sequences(
+        std::span<std::uint64_t> output) noexcept {
+    if (output.empty() || !g_reusable_registry
+        || g_reusable_membership_lock == nullptr) {
+        return 0;
+    }
+    auto* rows = static_cast<ReusableGenerationDiagnosticsRowV1*>(palloc0(
+        sizeof(ReusableGenerationDiagnosticsRowV1)
+        * output.size()));
+    std::size_t output_count = 0;
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        const auto diagnostics = snapshot_reusable_generation_diagnostics(
+            g_reusable_registry,
+            std::span<ReusableGenerationDiagnosticsRowV1>{
+                rows, output.size()},
+            reusable_partition_callbacks());
+        if (diagnostics.error == ReusableRegistryErrorV1::None
+            && !diagnostics.truncated) {
+            const ReusableProducerIdentityV1 local =
+                current_reusable_producer_identity();
+            for (std::size_t index = 0;
+                 index < diagnostics.count && output_count < output.size();
+                 ++index) {
+                if ((rows[index].state != CacheEntryState::Claimed
+                        && rows[index].state != CacheEntryState::Building)
+                    || rows[index].producer_pid != local.pid) {
+                    continue;
+                }
+                const auto snapshot = wait_reusable_generation(
+                    g_reusable_registry,
+                    rows[index].reference,
+                    reusable_partition_callbacks());
+                if (!snapshot.has_value()
+                    || snapshot->reference != rows[index].reference
+                    || (snapshot->state != CacheEntryState::Claimed
+                        && snapshot->state != CacheEntryState::Building)
+                    || snapshot->producer != local
+                    || snapshot->reference.id.claim_sequence == 0) {
+                    continue;
+                }
+                output[output_count++] =
+                    snapshot->reference.id.claim_sequence;
+            }
+        }
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            pfree(rows);
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        output_count = 0;
+    }
+    PG_END_TRY();
+    pfree(rows);
+    std::sort(output.begin(), output.begin() + output_count);
+    const auto unique_end = std::unique(
+        output.begin(), output.begin() + output_count);
+    return static_cast<std::size_t>(unique_end - output.begin());
+}
+
+[[nodiscard]] TtlDecision older_reusable_ttl_decision(
+        const ReusableGenerationSnapshotV1& snapshot,
+        std::uint64_t consumer_ttl_ms,
+        bool registered_inflight_waiter,
+        bool entitlement_already_consumed) noexcept {
+    if (snapshot.state != CacheEntryState::Complete
+        || snapshot.completed_monotonic_ns == 0) {
+        return {};
+    }
+    return completed_ttl_decision(
+        CacheTimestamps{
+            .started_ns = snapshot.started_monotonic_ns,
+            .completed_ns = snapshot.completed_monotonic_ns,
+        },
+        snapshot.metadata.producer_ttl_ms,
+        consumer_ttl_ms,
+        reusable_monotonic_now_ns(),
+        registered_inflight_waiter,
+        entitlement_already_consumed);
+}
+
+/** Acquire one ABA-bound reader or waiter while membership cannot change. */
+[[nodiscard]] bool acquire_older_reusable_reference(
+        CoverageRuntimeSourceV1& source,
+        std::span<const std::uint64_t> locally_owned_claim_sequences,
+        const VisibilityTicket& visibility,
+        std::uint64_t consumer_ttl_ms) noexcept {
+    if (!source.reference || !g_reusable_registry
+        || g_reusable_membership_lock == nullptr
+        || !visibility_ticket_still_bound(visibility)) {
+        return false;
+    }
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    volatile bool accepted = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        const auto observed = wait_reusable_generation(
+            g_reusable_registry,
+            source.reference,
+            reusable_partition_callbacks());
+        if (observed.has_value()
+            && observed->reference == source.reference) {
+            ReusableReferenceKindV1 kind =
+                ReusableReferenceKindV1::None;
+            if (observed->state == CacheEntryState::Complete
+                && observed->manifest
+                && older_reusable_ttl_decision(
+                    *observed, consumer_ttl_ms, false, false).readable) {
+                kind = ReusableReferenceKindV1::ReaderPin;
+            } else if ((observed->state == CacheEntryState::Claimed
+                        || observed->state == CacheEntryState::Building)
+                       && observed->producer
+                            != current_reusable_producer_identity()) {
+                if (reuse::claim_order_allows_wait(
+                        source.reference.id.claim_sequence,
+                        locally_owned_claim_sequences)) {
+                    kind = ReusableReferenceKindV1::Waiter;
+                }
+            }
+            if (kind != ReusableReferenceKindV1::None) {
+                auto pinned = pin_reusable_generation(
+                    g_reusable_registry,
+                    source.reference,
+                    kind,
+                    current_reusable_producer_identity(),
+                    reusable_partition_callbacks());
+                if (pinned.has_value()) {
+                    const auto rebound = wait_reusable_generation(
+                        g_reusable_registry,
+                        source.reference,
+                        reusable_partition_callbacks());
+                    const bool state_matches = rebound.has_value()
+                        && rebound->reference == source.reference
+                        && ((kind == ReusableReferenceKindV1::ReaderPin
+                                && rebound->state
+                                    == CacheEntryState::Complete
+                                && rebound->manifest
+                                && older_reusable_ttl_decision(
+                                    *rebound,
+                                    consumer_ttl_ms,
+                                    false,
+                                    false).readable)
+                            || (kind == ReusableReferenceKindV1::Waiter
+                                && (rebound->state
+                                        == CacheEntryState::Claimed
+                                    || rebound->state
+                                        == CacheEntryState::Building)
+                                && rebound->producer
+                                    != current_reusable_producer_identity()));
+                    if (state_matches
+                        && visibility_ticket_still_bound(visibility)) {
+                        source.registry_reference = *pinned;
+                        source.registry_reference_owned = true;
+                        source.completed_snapshot = *rebound;
+                        source.waited =
+                            kind == ReusableReferenceKindV1::Waiter;
+                        accepted = true;
+                    } else {
+                        ReusableReferenceTokenV1 rejected = *pinned;
+                        static_cast<void>(release_reusable_reference(
+                            g_reusable_registry,
+                            rejected,
+                            reusable_partition_callbacks()));
+                    }
+                }
+            }
+        }
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        accepted = false;
+    }
+    PG_END_TRY();
+    return accepted;
+}
+
+/** Wait only after the ordered acquisition pass has pinned every source. */
+[[nodiscard]] bool wait_for_older_reusable_generation(
+        CoverageRuntimeSourceV1& source,
+        std::span<const std::uint64_t> locally_owned_claim_sequences,
+        const VisibilityTicket& visibility,
+        std::uint64_t consumer_ttl_ms) {
+    if (!source.registry_reference_owned
+        || source.registry_reference.kind != ReusableReferenceKindV1::Waiter
+        || source.reference.id.claim_sequence == 0
+        || !visibility_ticket_still_bound(visibility)) {
+        return false;
+    }
+    ConditionVariable* changed = reusable_generation_changed(source.reference);
+    if (changed == nullptr) {
+        return false;
+    }
+    if (!reuse::claim_order_allows_wait(
+            source.reference.id.claim_sequence,
+            locally_owned_claim_sequences)) {
+        return false;
+    }
+    volatile bool accepted = false;
+    ConditionVariablePrepareToSleep(changed);
+    PG_TRY();
+    {
+        for (;;) {
+            CHECK_FOR_INTERRUPTS();
+            if (!visibility_ticket_still_bound(visibility)) {
+                break;
+            }
+            ReusableGenerationSnapshotV1 snapshot{};
+            if (!snapshot_current_reusable_generation(
+                    source.reference, &snapshot)
+                || snapshot.reference != source.reference) {
+                break;
+            }
+            if (snapshot.state == CacheEntryState::Complete) {
+                if (snapshot.manifest
+                    && older_reusable_ttl_decision(
+                        snapshot,
+                        consumer_ttl_ms,
+                        true,
+                        false).readable
+                    && visibility_ticket_still_bound(visibility)) {
+                    source.completed_snapshot = snapshot;
+                    accepted = true;
+                }
+                break;
+            }
+            if (snapshot.state == CacheEntryState::Failed
+                || snapshot.state == CacheEntryState::Invalidated
+                || snapshot.state == CacheEntryState::Evicting
+                || (snapshot.state != CacheEntryState::Claimed
+                    && snapshot.state != CacheEntryState::Building)
+                || snapshot.producer
+                    == current_reusable_producer_identity()) {
+                break;
+            }
+            if (!reusable_producer_alive(nullptr, snapshot.producer)) {
+                fail_current_reusable_generation(
+                    source.reference, CacheFailureCode::ProducerExited);
+                continue;
+            }
+            ConditionVariableSleep(changed, PG_WAIT_EXTENSION);
+        }
+        ConditionVariableCancelSleep();
+    }
+    PG_CATCH();
+    {
+        ConditionVariableCancelSleep();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    return accepted;
+}
+
 [[nodiscard]] bool reusable_bytes_equal(
         ReusableSharedByteRangeV1 shared_range,
         std::span<const std::byte> expected) noexcept {
@@ -5968,6 +6341,206 @@ void coverage_state_cleanup(void* opaque) noexcept {
         g_reusable_registry, shared_range);
     return !expected.empty() && shared.size() == expected.size()
         && std::memcmp(shared.data(), expected.data(), expected.size()) == 0;
+}
+
+[[nodiscard]] bool decode_reusable_reference_node(
+        const void* node,
+        ReusableGenerationReferenceV1* output) noexcept {
+    const std::span<const std::byte> bytes = binary_node_payload(node);
+    if (output == nullptr
+        || bytes.size() != sizeof(ReusableGenerationReferenceV1)) {
+        return false;
+    }
+    ReusableGenerationReferenceV1 reference{};
+    std::memcpy(&reference, bytes.data(), sizeof(reference));
+    if (!reference || reference.reserved != 0) {
+        return false;
+    }
+    *output = reference;
+    return true;
+}
+
+/** Recheck the opaque provider payload under the same bounded node budget. */
+[[nodiscard]] bool validate_provider_private_nodes_fail_open(
+        const void* nodes) {
+    MemoryContext caller_context = CurrentMemoryContext;
+    MemoryContext disposable = AllocSetContextCreate(
+        caller_context,
+        "bioseq cache source private validation",
+        ALLOCSET_SMALL_SIZES);
+    volatile bool accepted = false;
+    PG_TRY();
+    {
+        MemoryContextSwitchTo(disposable);
+        if (nodes == nullptr) {
+            accepted = true;
+        } else if (IsA(nodes, List)
+            && list_length(static_cast<const List*>(nodes)) >= 0
+            && static_cast<std::uint32_t>(
+                list_length(static_cast<const List*>(nodes)))
+                <= kMaxProviderBoundaryColumns) {
+            char* serialized = nodeToString(nodes);
+            if (serialized != nullptr) {
+                accepted = strnlen(
+                    serialized,
+                    static_cast<std::size_t>(kMaxProviderRecipeBytes) + 1U)
+                    <= kMaxProviderRecipeBytes;
+                pfree(serialized);
+            }
+        }
+        MemoryContextSwitchTo(caller_context);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (cache_interrupt_error(sqlstate)) {
+            MemoryContextDelete(disposable);
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        accepted = false;
+    }
+    PG_END_TRY();
+    MemoryContextDelete(disposable);
+    return accepted;
+}
+
+[[nodiscard]] ProviderContractView coverage_provider_contract(
+        const BioseqCachePathDomainV1& domain) noexcept {
+    return ProviderContractView{
+        .boundary = {
+            .columns = domain.boundary_columns,
+            .column_count = domain.boundary_column_count,
+            .required_attnos = domain.required_boundary_attnos,
+            .required_attno_count = domain.required_boundary_attno_count,
+        },
+        .lineage = {
+            .columns = domain.lineage_columns,
+            .column_count = domain.lineage_column_count,
+            .required_attnos = domain.required_lineage_attnos,
+            .required_attno_count = domain.required_lineage_attno_count,
+        },
+        .capability_mask = domain.capability_mask,
+    };
+}
+
+[[nodiscard]] ProviderContractView coverage_provider_contract(
+        const BioseqCacheReusableSourceV1& source) noexcept {
+    return ProviderContractView{
+        .boundary = {
+            .columns = source.boundary_columns,
+            .column_count = source.boundary_column_count,
+        },
+        .lineage = {
+            .columns = source.lineage_columns,
+            .column_count = source.lineage_column_count,
+        },
+        .capability_mask = source.capability_mask,
+    };
+}
+
+/** Copy unaligned persisted entries, then rerun the generic map validator. */
+[[nodiscard]] bool decode_and_validate_runtime_source_mapping(
+        CoverageRuntimeSourceV1& source,
+        const BioseqCachePathDomainV1& consumer,
+        const void* mapping_node,
+        const void* provider_private_nodes) {
+    CoverageMappingViewV1 view{};
+    if (!decode_source_mapping(binary_node_payload(mapping_node), &view)
+        || !validate_provider_private_nodes_fail_open(
+            provider_private_nodes)) {
+        return false;
+    }
+    if (view.header.boundary_count != 0) {
+        source.boundary_map = static_cast<BioseqCacheColumnMapEntryV1*>(
+            palloc(sizeof(BioseqCacheColumnMapEntryV1)
+                * view.header.boundary_count));
+        std::memcpy(
+            source.boundary_map,
+            view.boundary.data(),
+            view.boundary.size());
+    }
+    if (view.header.lineage_count != 0) {
+        source.lineage_map = static_cast<BioseqCacheColumnMapEntryV1*>(
+            palloc(sizeof(BioseqCacheColumnMapEntryV1)
+                * view.header.lineage_count));
+        std::memcpy(
+            source.lineage_map,
+            view.lineage.data(),
+            view.lineage.size());
+    }
+    source.boundary_map_count = view.header.boundary_count;
+    source.lineage_map_count = view.header.lineage_count;
+    source.provider_private_nodes = const_cast<List*>(
+        static_cast<const List*>(provider_private_nodes));
+    const BioseqCacheSourceMappingV1 mapping{
+        .struct_size = sizeof(BioseqCacheSourceMappingV1),
+        .flags = 0,
+        .boundary_map = source.boundary_map,
+        .boundary_map_count = source.boundary_map_count,
+        .lineage_map = source.lineage_map,
+        .lineage_map_count = source.lineage_map_count,
+        .provider_private_nodes = source.provider_private_nodes,
+    };
+    return validate_source_map(
+        coverage_provider_contract(consumer),
+        coverage_provider_contract(source.contract.source),
+        mapping).has_value();
+}
+
+/** Reprove all shared metadata and collision bytes after executor reacquire. */
+[[nodiscard]] bool older_reusable_snapshot_matches(
+        const ReusableCoverageState& state,
+        const CoverageRuntimeSourceV1& source,
+        const CoverageCurrentPlanViewV1& current_plan,
+        const ReusableGenerationSnapshotV1& snapshot) noexcept {
+    if (!source.reference || snapshot.reference != source.reference
+        || snapshot.state != CacheEntryState::Complete
+        || !snapshot.manifest || state.provider == nullptr
+        || source.contract.domain.provider_id != state.provider->provider_id
+        || source.contract.domain.compatibility_family_id
+            != state.current_header.compatibility_family_id
+        || (source.contract.domain.capability_mask
+                & state.current_header.capability_mask)
+            != state.current_header.capability_mask
+        || reuse::provider_security_digest(source.contract.domain)
+            != state.current_header.coverage_directory_key
+                .security_namespace.provider_security_digest
+        || snapshot.coverage_directory_key
+            != state.current_header.coverage_directory_key) {
+        return false;
+    }
+    const CoverageSemanticFingerprintsV1 fingerprints =
+        coverage_semantic_fingerprints(source.contract.domain);
+    const CoverageDependencyTicketV1 dependency = coverage_dependency_ticket(
+        source.contract.domain, state.provider);
+    const ReusableGenerationMetadataV1& metadata = snapshot.metadata;
+    return fingerprints.valid && dependency.valid
+        && metadata.provider_id == state.provider->provider_id
+        && metadata.provider_abi_version == state.provider->abi_version
+        && metadata.provider_domain_abi_version
+            == kCoverageDescriptorFormatV1
+        && metadata.dependency_count == dependency.dependency_count
+        && metadata.compatibility_family_id
+            == source.contract.domain.compatibility_family_id
+        && metadata.capability_mask
+            == source.contract.domain.capability_mask
+        && metadata.schema_fingerprint == fingerprints.schema
+        && metadata.mapping_fingerprint == fingerprints.mapping
+        && metadata.lineage_fingerprint == fingerprints.lineage
+        && metadata.dependency_fingerprint == dependency.fingerprint
+        && metadata.physical_identity == dependency.physical_identity
+        && metadata.observability == WriteObservability::ProviderComplete
+        && reusable_bytes_equal(
+            snapshot.canonical_domain_key,
+            current_plan.canonical_domain_key)
+        && reusable_bytes_equal(
+            snapshot.canonical_generation_key,
+            binary_node_payload(source.generation_key_node))
+        && reusable_bytes_equal(
+            snapshot.coverage_descriptor,
+            binary_node_payload(source.descriptor_node));
 }
 
 [[nodiscard]] bool current_reusable_snapshot_matches(
@@ -6107,11 +6680,10 @@ void coverage_state_cleanup(void* opaque) noexcept {
     }
 }
 
-[[nodiscard]] bool convert_current_waiter_to_reader(
-        ReusableCoverageState& state) noexcept {
-    if (!state.current_reference_owned
-        || state.current_reference_token.kind
-            != ReusableReferenceKindV1::Waiter
+[[nodiscard]] bool convert_runtime_waiter_to_reader(
+        ReusableReferenceTokenV1& token) noexcept {
+    if (!token.active
+        || token.kind != ReusableReferenceKindV1::Waiter
         || g_reusable_membership_lock == nullptr) {
         return false;
     }
@@ -6125,7 +6697,7 @@ void coverage_state_cleanup(void* opaque) noexcept {
         membership_owned = true;
         result = convert_reusable_waiter_to_reader(
             g_reusable_registry,
-            state.current_reference_token,
+            token,
             reusable_partition_callbacks());
         LWLockRelease(g_reusable_membership_lock);
         membership_owned = false;
@@ -6146,6 +6718,12 @@ void coverage_state_cleanup(void* opaque) noexcept {
     }
     PG_END_TRY();
     return result == ReusableRegistryErrorV1::None;
+}
+
+[[nodiscard]] bool convert_current_waiter_to_reader(
+        ReusableCoverageState& state) noexcept {
+    return state.current_reference_owned
+        && convert_runtime_waiter_to_reader(state.current_reference_token);
 }
 
 void release_current_coverage_consumer(
@@ -6173,11 +6751,14 @@ void release_current_coverage_consumer(
 }
 
 [[nodiscard]] bool coverage_stored_row_valid(
-        ReusableCoverageState& state,
+        const CoverageStoredColumnV1* columns,
+        std::uint32_t column_count,
+        std::uint64_t required_capability_mask,
         TupleTableSlot* stored,
-        std::uint64_t expected_ordinal) {
-    if (stored == nullptr || state.stored_column_count
-            < kCoverageOccurrenceColumnCountV1) {
+        std::uint64_t expected_ordinal,
+        BioseqCacheOccurrenceV1* occurrence = nullptr) {
+    if (columns == nullptr || stored == nullptr
+        || column_count < kCoverageOccurrenceColumnCountV1) {
         return false;
     }
     slot_getallattrs(stored);
@@ -6195,7 +6776,7 @@ void release_current_coverage_consumer(
     Datum occurrence_high = 0;
     Datum occurrence_low = 0;
     Datum capability_mask = 0;
-    return scalar(1, &result_ordinal)
+    const bool valid = scalar(1, &result_ordinal)
         && scalar(2, &rte_ordinal)
         && scalar(3, &logical_relation)
         && scalar(4, &leaf_relation)
@@ -6211,8 +6792,43 @@ void release_current_coverage_consumer(
         && OidIsValid(DatumGetObjectId(leaf_relation))
         && DatumGetInt32(identity_kind) > 0
         && (static_cast<std::uint64_t>(DatumGetInt64(capability_mask))
-                & state.current_header.capability_mask)
-            == state.current_header.capability_mask;
+                & required_capability_mask)
+            == required_capability_mask;
+    if (valid && occurrence != nullptr) {
+        *occurrence = BioseqCacheOccurrenceV1{
+            .struct_size = sizeof(BioseqCacheOccurrenceV1),
+            .rte_ordinal = static_cast<std::uint32_t>(
+                DatumGetInt32(rte_ordinal)),
+            .logical_relation_oid = static_cast<std::uint32_t>(
+                DatumGetObjectId(logical_relation)),
+            .leaf_relation_oid = static_cast<std::uint32_t>(
+                DatumGetObjectId(leaf_relation)),
+            .identity_kind = static_cast<std::uint32_t>(
+                DatumGetInt32(identity_kind)),
+            .reserved = 0,
+            .row_identity = static_cast<std::uint64_t>(
+                DatumGetInt64(row_identity)),
+            .occurrence_high = static_cast<std::uint64_t>(
+                DatumGetInt64(occurrence_high)),
+            .occurrence_low = static_cast<std::uint64_t>(
+                DatumGetInt64(occurrence_low)),
+            .capability_mask = static_cast<std::uint64_t>(
+                DatumGetInt64(capability_mask)),
+        };
+    }
+    return valid;
+}
+
+[[nodiscard]] bool coverage_stored_row_valid(
+        ReusableCoverageState& state,
+        TupleTableSlot* stored,
+        std::uint64_t expected_ordinal) {
+    return coverage_stored_row_valid(
+        state.stored_columns,
+        state.stored_column_count,
+        state.current_header.capability_mask,
+        stored,
+        expected_ordinal);
 }
 
 /** Prove every stored row and semantic attno mapping before gate publication. */
@@ -6289,6 +6905,415 @@ void release_current_coverage_consumer(
     tuplestore_rescan(state.current_replay_store);
     ExecClearTuple(state.current_replay_slot);
     return row_count == expected_rows;
+}
+
+[[nodiscard]] bool source_mapping_matches_raw_descriptor(
+        const CoverageRuntimeSourceV1& source,
+        TupleDesc raw_descriptor) noexcept {
+    if (raw_descriptor == nullptr || source.stored_columns == nullptr
+        || source.stored_column_count < kCoverageOccurrenceColumnCountV1) {
+        return false;
+    }
+    const auto validate_half = [&](
+            const BioseqCacheColumnMapEntryV1* mappings,
+            std::uint32_t count) {
+        for (std::uint32_t index = 0; index < count; ++index) {
+            const BioseqCacheColumnMapEntryV1& mapping = mappings[index];
+            if (mapping.consumer_attno == 0
+                || mapping.consumer_attno
+                    > static_cast<std::uint32_t>(raw_descriptor->natts)) {
+                return false;
+            }
+            const Form_pg_attribute raw = TupleDescAttr(
+                raw_descriptor,
+                static_cast<int>(mapping.consumer_attno - 1U));
+            if (raw->attisdropped || raw->atttypid != mapping.type_oid
+                || raw->atttypmod != mapping.typmod
+                || raw->attcollation != mapping.collation_oid) {
+                return false;
+            }
+            std::uint32_t stored_matches = 0;
+            for (std::uint32_t stored_index = 0;
+                 stored_index < source.stored_column_count;
+                 ++stored_index) {
+                const CoverageStoredColumnV1& stored =
+                    source.stored_columns[stored_index];
+                if (stored.kind
+                        == CoverageStoredColumnKindV1::ProviderAttribute
+                    && stored.provider_attno == mapping.source_attno) {
+                    ++stored_matches;
+                }
+            }
+            if (stored_matches != 1) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return validate_half(source.boundary_map, source.boundary_map_count)
+        && validate_half(source.lineage_map, source.lineage_map_count);
+}
+
+[[nodiscard]] bool preflight_older_coverage_store(
+        CoverageRuntimeSourceV1& source,
+        std::uint64_t required_capability_mask,
+        std::uint64_t expected_rows) {
+    if (source.replay_store == nullptr || source.replay_slot == nullptr
+        || source.stored_descriptor == nullptr
+        || source.stored_descriptor->natts
+            != static_cast<int>(source.stored_column_count)) {
+        return false;
+    }
+    tuplestore_rescan(source.replay_store);
+    std::uint64_t row_count = 0;
+    while (tuplestore_gettupleslot(
+            source.replay_store, true, false, source.replay_slot)) {
+        if (!coverage_stored_row_valid(
+                source.stored_columns,
+                source.stored_column_count,
+                required_capability_mask,
+                source.replay_slot,
+                row_count)) {
+            tuplestore_rescan(source.replay_store);
+            ExecClearTuple(source.replay_slot);
+            return false;
+        }
+        ++row_count;
+    }
+    tuplestore_rescan(source.replay_store);
+    ExecClearTuple(source.replay_slot);
+    source.row_count = row_count;
+    return row_count == expected_rows;
+}
+
+/** Pin, load, checksum, map, and revalidate one completed older generation. */
+[[nodiscard]] bool materialize_older_coverage_source(
+        ReusableCoverageState& state,
+        CoverageRuntimeSourceV1& source,
+        const CoverageCurrentPlanViewV1& current_plan,
+        TupleDesc raw_descriptor,
+        const VisibilityTicket& visibility) {
+    const ReusableGenerationSnapshotV1 completed =
+        source.completed_snapshot;
+    if (!visibility_ticket_still_bound(visibility)
+        || !older_reusable_ttl_decision(
+            completed,
+            state.producer_ttl_ms,
+            source.waited,
+            source.ttl_entitlement_consumed).readable
+        || !older_reusable_snapshot_matches(
+            state, source, current_plan, completed)) {
+        return false;
+    }
+    CoverageStoredRecipeV1 recipe{};
+    if (!build_coverage_stored_recipe(source.contract.domain, &recipe)) {
+        return false;
+    }
+    source.stored_descriptor = recipe.descriptor;
+    source.stored_columns = recipe.columns;
+    source.stored_column_count = recipe.column_count;
+    if (!source_mapping_matches_raw_descriptor(source, raw_descriptor)) {
+        return false;
+    }
+    const storage::ManifestHandle expected_handle =
+        storage_manifest_handle(completed.manifest);
+    storage::PinManifestResult pinned = storage::pin_manifest(
+        completed.reference.id);
+    const bool handle_matches = pinned
+        && pinned.pin.handle.slot == expected_handle.slot
+        && pinned.pin.handle.slot_sequence == expected_handle.slot_sequence
+        && pinned.pin.handle.id == expected_handle.id;
+    if (!handle_matches
+        || pinned.pin.kind != CacheEntryKind::ReusableCoverage
+        || pinned.pin.row_count != completed.row_count) {
+        if (pinned) {
+            static_cast<void>(storage::unpin_manifest(pinned.pin));
+        }
+        return false;
+    }
+    source.manifest_pin = pinned.pin;
+    source.manifest_pin_owned = true;
+    source.replay_store = load_complete_result(
+        source.manifest_pin,
+        source.stored_descriptor,
+        CacheEntryKind::ReusableCoverage);
+    if (source.replay_store != nullptr) {
+        source.replay_slot = MakeSingleTupleTableSlot(
+            source.stored_descriptor, &TTSOpsMinimalTuple);
+    }
+    ReusableGenerationSnapshotV1 final_snapshot{};
+    const bool materialized = source.replay_store != nullptr
+        && source.replay_slot != nullptr
+        && preflight_older_coverage_store(
+            source,
+            state.current_header.capability_mask,
+            completed.row_count)
+        && snapshot_current_reusable_generation(
+            source.reference, &final_snapshot)
+        && final_snapshot.reference == completed.reference
+        && final_snapshot.manifest == completed.manifest
+        && older_reusable_snapshot_matches(
+            state, source, current_plan, final_snapshot)
+        && older_reusable_ttl_decision(
+            final_snapshot,
+            state.producer_ttl_ms,
+            source.waited,
+            source.ttl_entitlement_consumed).readable
+        && visibility_ticket_still_bound(visibility);
+    if (!materialized) {
+        return false;
+    }
+    if (source.registry_reference.kind == ReusableReferenceKindV1::Waiter
+        && !convert_runtime_waiter_to_reader(source.registry_reference)) {
+        return false;
+    }
+    if (source.registry_reference.kind
+            != ReusableReferenceKindV1::ReaderPin) {
+        return false;
+    }
+    source.completed_snapshot = final_snapshot;
+    source.valid = true;
+    return true;
+}
+
+void release_all_older_coverage_sources(
+        ReusableCoverageState& state) noexcept {
+    for (CoverageRuntimeSourceV1& source : state.sources) {
+        release_coverage_source(source);
+    }
+    state.active_source_count = 0;
+    state.older_preflight_ready = false;
+}
+
+[[nodiscard]] bool reusable_reference_precedes(
+        const ReusableGenerationReferenceV1& left,
+        const ReusableGenerationReferenceV1& right) noexcept {
+    if (left.id.claim_sequence != right.id.claim_sequence) {
+        return left.id.claim_sequence < right.id.claim_sequence;
+    }
+    if (left.id.generation != right.id.generation) {
+        return left.id.generation < right.id.generation;
+    }
+    if (left.id.boot_nonce != right.id.boot_nonce) {
+        return left.id.boot_nonce < right.id.boot_nonce;
+    }
+    if (left.id.digest.bytes != right.id.digest.bytes) {
+        return std::lexicographical_compare(
+            left.id.digest.bytes.begin(), left.id.digest.bytes.end(),
+            right.id.digest.bytes.begin(), right.id.digest.bytes.end());
+    }
+    if (left.generation_slot != right.generation_slot) {
+        return left.generation_slot < right.generation_slot;
+    }
+    return left.slot_sequence < right.slot_sequence;
+}
+
+/** Decide every planned older source before any later gate publication. */
+[[nodiscard]] bool prepare_older_coverage_sources(
+        ReusableCoverageState& state,
+        const CustomScan& scan,
+        const CoverageCurrentPlanViewV1& current_plan,
+        TupleDesc raw_descriptor,
+        const VisibilityTicket& visibility) {
+    const auto* candidates = scan.custom_private != NIL
+            && list_length(scan.custom_private) >= 4
+        ? static_cast<const List*>(list_nth(scan.custom_private, 3))
+        : NIL;
+    const std::size_t candidate_count = static_cast<std::size_t>(
+        list_length(candidates));
+    if (candidate_count == 0
+        || candidate_count > state.sources.size()
+        || !state.current_reference
+        || state.current_reference.id.claim_sequence == 0
+        || raw_descriptor == nullptr
+        || !visibility_ticket_still_bound(visibility)) {
+        return false;
+    }
+
+    std::array<std::size_t, kMaxSourcesPerCoverageNode> acquisition_order{};
+    std::size_t acquisition_count = 0;
+    std::size_t planner_index = 0;
+    ListCell* cell = nullptr;
+    foreach(cell, candidates) {
+        CoverageRuntimeSourceV1& runtime = state.sources[planner_index];
+        const auto* candidate = static_cast<const List*>(lfirst(cell));
+        bool decoded = candidate != nullptr
+            && IsA(candidate, List)
+            && list_length(candidate) == 7
+            && decode_reusable_reference_node(
+                list_nth(candidate, 0), &runtime.reference);
+        const std::span<const std::byte> generation_key = decoded
+            ? binary_node_payload(list_nth(candidate, 1))
+            : std::span<const std::byte>{};
+        const std::span<const std::byte> descriptor = decoded
+            ? binary_node_payload(list_nth(candidate, 2))
+            : std::span<const std::byte>{};
+        if (decoded) {
+            runtime.generation_key_node = list_nth(candidate, 1);
+            runtime.descriptor_node = list_nth(candidate, 2);
+            decoded = !generation_key.empty() && !descriptor.empty()
+                && runtime.reference != state.current_reference
+                && runtime.reference.id.claim_sequence
+                    < state.current_reference.id.claim_sequence
+                && decode_coverage_descriptor_fail_open(
+                    descriptor,
+                    CurrentMemoryContext,
+                    &runtime.contract)
+                && runtime.contract.domain.provider_id
+                    == state.current_header.provider_id
+                && runtime.contract.source.provider_id
+                    == state.current_header.provider_id
+                && runtime.contract.domain.compatibility_family_id
+                    == state.current_header.compatibility_family_id
+                && runtime.contract.source.compatibility_family_id
+                    == state.current_header.compatibility_family_id
+                && (runtime.contract.domain.capability_mask
+                        & state.current_header.capability_mask)
+                    == state.current_header.capability_mask
+                && (runtime.contract.source.capability_mask
+                        & state.current_header.capability_mask)
+                    == state.current_header.capability_mask
+                && decode_and_validate_runtime_source_mapping(
+                    runtime,
+                    state.current_contract.domain,
+                    list_nth(candidate, 3),
+                    list_nth(candidate, 4));
+        }
+        if (decoded
+            && runtime.reference.id.digest
+                == state.current_header.generation_digest
+            && generation_key.size()
+                == current_plan.canonical_generation_key.size()
+            && std::memcmp(
+                generation_key.data(),
+                current_plan.canonical_generation_key.data(),
+                generation_key.size()) == 0) {
+            decoded = false;
+        }
+        for (std::size_t prior = 0; decoded && prior < planner_index; ++prior) {
+            decoded = state.sources[prior].reference != runtime.reference;
+        }
+        if (decoded) {
+            acquisition_order[acquisition_count++] = planner_index;
+        } else {
+            release_coverage_source(runtime);
+        }
+        ++planner_index;
+    }
+    if (acquisition_count == 0) {
+        return false;
+    }
+    std::sort(
+        acquisition_order.begin(),
+        acquisition_order.begin() + acquisition_count,
+        [&](std::size_t left, std::size_t right) {
+            return reusable_reference_precedes(
+                state.sources[left].reference,
+                state.sources[right].reference);
+        });
+
+    if (g_reusable_wait_slot_count == 0
+        || g_reusable_wait_slot_count
+            > static_cast<std::size_t>(MaxAllocSize)
+                / sizeof(std::uint64_t)) {
+        release_all_older_coverage_sources(state);
+        return false;
+    }
+    auto* locally_owned = static_cast<std::uint64_t*>(palloc0(
+        sizeof(std::uint64_t) * g_reusable_wait_slot_count));
+    const std::size_t locally_owned_count =
+        collect_local_reusable_claim_sequences(
+            std::span<std::uint64_t>{
+                locally_owned, g_reusable_wait_slot_count});
+    const auto* owned_begin = locally_owned;
+    const auto* owned_end = locally_owned + locally_owned_count;
+    if (locally_owned_count == 0
+        || std::find(
+            owned_begin,
+            owned_end,
+            state.current_reference.id.claim_sequence) == owned_end) {
+        pfree(locally_owned);
+        release_all_older_coverage_sources(state);
+        return false;
+    }
+    const std::span<const std::uint64_t> owned_claims{
+        locally_owned, locally_owned_count};
+    for (std::size_t order = 0; order < acquisition_count; ++order) {
+        CoverageRuntimeSourceV1& source =
+            state.sources[acquisition_order[order]];
+        if (!acquire_older_reusable_reference(
+                source,
+                owned_claims,
+                visibility,
+                state.producer_ttl_ms)) {
+            release_coverage_source(source);
+        }
+    }
+    for (std::size_t order = 0; order < acquisition_count; ++order) {
+        CoverageRuntimeSourceV1& source =
+            state.sources[acquisition_order[order]];
+        if (source.registry_reference_owned
+            && source.registry_reference.kind
+                == ReusableReferenceKindV1::Waiter
+            && !wait_for_older_reusable_generation(
+                source,
+                owned_claims,
+                visibility,
+                state.producer_ttl_ms)) {
+            release_coverage_source(source);
+        }
+    }
+    pfree(locally_owned);
+    std::uint16_t active = 0;
+    for (std::size_t index = 0; index < candidate_count; ++index) {
+        CoverageRuntimeSourceV1& source = state.sources[index];
+        if (source.registry_reference_owned
+            && materialize_older_coverage_source(
+                state,
+                source,
+                current_plan,
+                raw_descriptor,
+                visibility)) {
+            ++active;
+        } else {
+            release_coverage_source(source);
+        }
+    }
+    state.active_source_count = active;
+    state.older_preflight_ready = active != 0
+        && visibility_ticket_still_bound(visibility);
+    if (!state.older_preflight_ready) {
+        release_all_older_coverage_sources(state);
+    }
+    return state.older_preflight_ready;
+}
+
+[[nodiscard]] bool prepare_older_coverage_sources_fail_open(
+        ReusableCoverageState& state,
+        const CustomScan& scan,
+        const CoverageCurrentPlanViewV1& current_plan,
+        TupleDesc raw_descriptor,
+        const VisibilityTicket& visibility) {
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool prepared = false;
+    PG_TRY();
+    {
+        prepared = prepare_older_coverage_sources(
+            state, scan, current_plan, raw_descriptor, visibility);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        release_all_older_coverage_sources(state);
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        prepared = false;
+    }
+    PG_END_TRY();
+    return prepared;
 }
 
 /** Validate and materialize all stored bytes before publishing one valid gate. */
@@ -6688,6 +7713,7 @@ void coverage_begin_custom_scan(
     state->capture_failed = false;
     state->cleanup_done = false;
     state->current_manifest_pin_owned = false;
+    state->older_preflight_ready = false;
     state->source_count = 0;
     state->active_source_count = 0;
     state->replay_source_index = 0;
@@ -6965,6 +7991,16 @@ void coverage_begin_custom_scan(
                             && begin_coverage_capture(*state)) {
                             PG_TRY();
                             {
+                                static_cast<void>(
+                                    prepare_older_coverage_sources_fail_open(
+                                        *state,
+                                        *scan,
+                                        current_plan,
+                                        node->ss.ss_ScanTupleSlot == nullptr
+                                            ? nullptr
+                                            : node->ss.ss_ScanTupleSlot
+                                                ->tts_tupleDescriptor,
+                                        visibility));
                                 initialize_coverage_child(
                                     *state, node, estate, eflags);
                             }
