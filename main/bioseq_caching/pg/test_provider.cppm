@@ -590,7 +590,7 @@ void fill_column_schema(
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
 
-    Relation relation = relation_open(range_entry->relid, NoLock);
+    Relation relation = table_open(range_entry->relid, NoLock);
     TupleDesc descriptor = RelationGetDescr(relation);
     std::size_t boundary_count = 0;
     for (int index = 0; index < descriptor->natts; ++index) {
@@ -599,7 +599,7 @@ void fill_column_schema(
         }
     }
     if (boundary_count == 0 || boundary_count > 1024) {
-        relation_close(relation, NoLock);
+        table_close(relation, NoLock);
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
 
@@ -636,7 +636,7 @@ void fill_column_schema(
         const AttrNumber attno = get_attnum(
             range_entry->relid, lineage_names[index]);
         if (attno <= 0 || attno > descriptor->natts) {
-            relation_close(relation, NoLock);
+            table_close(relation, NoLock);
             return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
         }
         fill_column_schema(
@@ -646,7 +646,7 @@ void fill_column_schema(
             true);
         required_lineage[index] = static_cast<std::uint32_t>(attno);
     }
-    relation_close(relation, NoLock);
+    table_close(relation, NoLock);
 
     output->struct_size = sizeof(*output);
     output->provider_id = kProviderId;
