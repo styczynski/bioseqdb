@@ -25,6 +25,11 @@ byte_view(std::string_view value) noexcept {
   };
 }
 
+[[nodiscard]] std::span<const char>
+char_view(std::string_view value) noexcept {
+  return {value.data(), value.size()};
+}
+
 [[nodiscard]] CacheDigest256 digest(std::uint8_t seed) noexcept {
   CacheDigest256 result{};
   for (std::size_t index = 0; index < result.bytes.size(); ++index) {
@@ -112,6 +117,15 @@ concept exposes_reusable_shared_byte_ranges = requires(Row row) {
 };
 
 static_assert(!exposes_reusable_shared_byte_ranges<
+              ReusableGenerationDiagnosticsRowV1>);
+
+template <class Row>
+concept exposes_reusable_diagnostic_text = requires(Row row) {
+  row.display_sql;
+  row.producer_plan;
+};
+
+static_assert(!exposes_reusable_diagnostic_text<
               ReusableGenerationDiagnosticsRowV1>);
 
 struct DiagnosticsPartitionTrace {
@@ -636,6 +650,120 @@ TEST_CASE("janitor reaps exact dead waiter planner and reader owners") {
       janitor_reusable_registry(fixture.attachment, 1'001);
   REQUIRE(retirement.error == ReusableRegistryErrorV1::None);
   REQUIRE(retirement.retired_invalidated == 1);
+}
+
+TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
+  RegistryFixture fixture{4};
+  const auto key = coverage_key(46);
+  auto claimed = claim(
+      fixture, key, digest(68), "diagnostic-domain",
+      "diagnostic-generation", 8, 101);
+  REQUIRE(claimed);
+
+  const std::string_view sql =
+      "SELECT payload FROM provider_rows WHERE private_value = 17";
+  const std::string_view planned =
+      "Custom Scan (GenericProvider)\n  Provider Workers: 4";
+  ReusableDiagnosticTextUpdateV1 update{
+      .reference = claimed.reference,
+      .producer = producer(8),
+      .display_sql = char_view(sql),
+      .producer_plan = char_view(planned),
+      .plan_status = ReusablePlanSnapshotStatusV1::Planned,
+      .producer_plan_truncated = true,
+  };
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, update)
+      == ReusableRegistryErrorV1::InvalidState);
+  REQUIRE(
+      begin_reusable_build(fixture.attachment, claimed.reference)
+      == ReusableRegistryErrorV1::None);
+
+  auto wrong_owner = update;
+  wrong_owner.producer = producer(9);
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, wrong_owner)
+      == ReusableRegistryErrorV1::InvalidState);
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, update)
+      == ReusableRegistryErrorV1::None);
+
+  std::array<ReusableGenerationDiagnosticsRowV1, 1> redacted_rows{};
+  const auto redacted = snapshot_reusable_generation_diagnostics(
+      fixture.attachment, redacted_rows);
+  REQUIRE(redacted.error == ReusableRegistryErrorV1::None);
+  REQUIRE(redacted.count == 1);
+  REQUIRE(
+      redacted_rows[0].plan_snapshot_status
+      == ReusablePlanSnapshotStatusV1::Planned);
+  REQUIRE_FALSE(redacted_rows[0].display_sql_truncated);
+  REQUIRE(redacted_rows[0].producer_plan_truncated);
+
+  std::array<char, kReusableDisplaySqlCapacityV1> sql_copy{};
+  std::array<char, kReusableProducerPlanCapacityV1> plan_copy{};
+  const auto copied = copy_reusable_diagnostic_text(
+      fixture.attachment, claimed.reference, sql_copy, plan_copy);
+  REQUIRE(copied.has_value());
+  REQUIRE(copied->display_sql_bytes == sql.size());
+  REQUIRE(copied->producer_plan_bytes == planned.size());
+  REQUIRE(copied->plan_status == ReusablePlanSnapshotStatusV1::Planned);
+  REQUIRE(copied->producer_plan_truncated);
+  REQUIRE(
+      std::string_view(sql_copy.data(), copied->display_sql_bytes) == sql);
+  REQUIRE(
+      std::string_view(plan_copy.data(), copied->producer_plan_bytes)
+      == planned);
+
+  std::array<char, 1> undersized{};
+  REQUIRE(
+      copy_reusable_diagnostic_text(
+          fixture.attachment, claimed.reference, undersized, plan_copy)
+          .error()
+      == ReusableRegistryErrorV1::InvalidArgument);
+  std::string oversized(kReusableProducerPlanCapacityV1 + 1U, 'x');
+  auto oversized_update = update;
+  oversized_update.producer_plan = char_view(oversized);
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, oversized_update)
+      == ReusableRegistryErrorV1::InvalidArgument);
+
+  const ReusableManifestHandleV1 manifest{
+      .slot = claimed.reference.generation_slot,
+      .slot_sequence = claimed.reference.slot_sequence + 100,
+      .id = claimed.reference.id,
+  };
+  REQUIRE(
+      publish_reusable_generation(
+          fixture.attachment,
+          ReusablePublishRequestV1{
+              .reference = claimed.reference,
+              .manifest = manifest,
+              .completed_monotonic_ns = 202,
+              .row_count = 4,
+              .logical_bytes = 700,
+              .stored_bytes = 300,
+          })
+      == ReusableRegistryErrorV1::None);
+  const std::string_view analyzed =
+      "Custom Scan (GenericProvider) (actual rows=4)";
+  auto analyzed_update = update;
+  analyzed_update.producer_plan = char_view(analyzed);
+  analyzed_update.plan_status = ReusablePlanSnapshotStatusV1::Analyzed;
+  analyzed_update.producer_plan_truncated = false;
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, analyzed_update)
+      == ReusableRegistryErrorV1::None);
+  REQUIRE(
+      store_reusable_diagnostic_text(fixture.attachment, update)
+      == ReusableRegistryErrorV1::InvalidState);
+
+  auto stale_reference = claimed.reference;
+  ++stale_reference.slot_sequence;
+  REQUIRE(
+      copy_reusable_diagnostic_text(
+          fixture.attachment, stale_reference, sql_copy, plan_copy)
+          .error()
+      == ReusableRegistryErrorV1::StaleReference);
 }
 
 TEST_CASE("reusable diagnostics copy bounded redacted generation rows") {
