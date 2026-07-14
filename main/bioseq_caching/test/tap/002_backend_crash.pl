@@ -14,8 +14,14 @@ $node->safe_psql(
 	q{CREATE TABLE crash_rows(id integer PRIMARY KEY, value text);
 	  INSERT INTO crash_rows
 	  SELECT i, md5(i::text) FROM generate_series(1, 100) AS g(i);
-	  SELECT bioseq_cache.reset_stats();
-	  SELECT bioseq_cache_test.arm_pause('after_building_publish');});
+	  SELECT bioseq_cache.reset_stats();});
+
+my $controller = $node->background_psql('postgres');
+$controller->query_until(
+	qr/cache-controller-armed/,
+	q{SELECT bioseq_cache_test.arm_pause('after_building_publish');
+	  \echo cache-controller-armed
+});
 
 my $producer = $node->background_psql('postgres');
 $producer->query_until(
@@ -63,6 +69,10 @@ is(
 	$node->safe_psql('postgres', "SELECT pg_terminate_backend($producer_pid)"),
 	't',
 	'producer backend terminated cleanly');
+
+$controller->query(
+	q{SELECT bioseq_cache_test.release_pause('after_building_publish');});
+$controller->quit;
 
 my $waiter_output = $waiter->query('');
 like($waiter_output, qr/10\|55/, 'waiter safely retries and returns correct rows');

@@ -13,8 +13,14 @@ $node->safe_psql(
 	'postgres',
 	q{CREATE TABLE owner_rows(id integer PRIMARY KEY, value text);
 	  INSERT INTO owner_rows
-	  SELECT i, md5(i::text) FROM generate_series(1, 64) AS g(i);
-	  SELECT bioseq_cache_test.arm_pause('after_building_publish');});
+	  SELECT i, md5(i::text) FROM generate_series(1, 64) AS g(i);});
+
+my $controller = $node->background_psql('postgres');
+$controller->query_until(
+	qr/owner-controller-armed/,
+	q{SELECT bioseq_cache_test.arm_pause('after_building_publish');
+	  \echo owner-controller-armed
+});
 
 my $owner = $node->background_psql('postgres');
 $owner->query_until(
@@ -37,6 +43,9 @@ my $owner_pid = $node->safe_psql(
 	  WHERE state = 'BUILDING' ORDER BY generation LIMIT 1});
 $node->safe_psql('postgres', "SELECT pg_terminate_backend($owner_pid)");
 eval { $owner->quit; };
+$controller->query(
+	q{SELECT bioseq_cache_test.release_pause('after_building_publish');});
+$controller->quit;
 
 ok(
 	$node->poll_query_until(
