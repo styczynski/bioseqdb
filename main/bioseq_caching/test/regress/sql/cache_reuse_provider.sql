@@ -34,7 +34,6 @@ DO $$
 DECLARE
     plan_line text;
     plan_text text := '';
-    plan jsonb;
 BEGIN
     FOR plan_line IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF) '
@@ -59,6 +58,7 @@ DO $$
 DECLARE
     plan_line text;
     plan_text text := '';
+    plan jsonb;
 BEGIN
     FOR plan_line IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF) '
