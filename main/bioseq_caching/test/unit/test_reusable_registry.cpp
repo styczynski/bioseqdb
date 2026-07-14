@@ -185,6 +185,16 @@ producer_is_dead(void *, const ReusableProducerIdentityV1 &) noexcept {
   return false;
 }
 
+[[nodiscard]] bool
+producer_is_alive(void *, const ReusableProducerIdentityV1 &) noexcept {
+  return true;
+}
+
+[[nodiscard]] bool
+reference_owner_is_dead(void *, const ReusableReferenceOwnerV1 &) noexcept {
+  return false;
+}
+
 } // namespace
 
 TEST_CASE("reusable registry sizes exactly and coalesces only full keys") {
@@ -355,6 +365,112 @@ TEST_CASE("two index retirement and reclaim reject stale ABA references") {
   REQUIRE(stale.error() == ReusableRegistryErrorV1::StaleReference);
   REQUIRE(validate_reusable_registry(fixture.attachment) ==
           ReusableRegistryErrorV1::None);
+}
+
+TEST_CASE("reusable reference owners are ABA safe and bounded") {
+  RegistryFixture fixture{2, 16U << 10, 1};
+  const auto key = coverage_key(45);
+  auto claimed = claim(fixture, key, digest(45), "domain", "generation", 1);
+  REQUIRE(claimed);
+
+  std::vector<ReusableReferenceTokenV1> pins;
+  pins.reserve(kReusableReferenceOwnersPerGenerationV1);
+  for (std::uint32_t index = 0;
+       index < kReusableReferenceOwnersPerGenerationV1; ++index) {
+    auto pin = pin_reusable_generation(
+        fixture.attachment, claimed.reference,
+        ReusableReferenceKindV1::PlannerPin, reference_owner(200 + index));
+    REQUIRE(pin.has_value());
+    pins.push_back(*pin);
+  }
+  auto overflow = pin_reusable_generation(
+      fixture.attachment, claimed.reference,
+      ReusableReferenceKindV1::PlannerPin, reference_owner(300));
+  REQUIRE_FALSE(overflow.has_value());
+  REQUIRE(overflow.error() == ReusableRegistryErrorV1::ReferenceSlotsFull);
+
+  for (ReusableReferenceTokenV1 &pin : pins) {
+    REQUIRE(release_reusable_reference(fixture.attachment, pin) ==
+            ReusableRegistryErrorV1::None);
+  }
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
+}
+
+TEST_CASE("janitor reaps exact dead waiter planner and reader owners") {
+  RegistryFixture fixture{4, 16U << 10, 1};
+  const auto key = coverage_key(46);
+  auto claimed = claim(fixture, key, digest(46), "domain", "generation", 1);
+  REQUIRE(claimed);
+  auto converting =
+      claim(fixture, key, digest(46), "domain", "generation", 2);
+  auto dead_waiter =
+      claim(fixture, key, digest(46), "domain", "generation", 3);
+  REQUIRE(converting.token.kind == ReusableReferenceKindV1::Waiter);
+  REQUIRE(dead_waiter.token.kind == ReusableReferenceKindV1::Waiter);
+
+  auto dead_planner = pin_reusable_generation(
+      fixture.attachment, claimed.reference,
+      ReusableReferenceKindV1::PlannerPin, reference_owner(400));
+  REQUIRE(dead_planner.has_value());
+  REQUIRE(static_cast<bool>(publish(fixture, claimed.reference)));
+
+  const std::uint32_t converting_slot = converting.token.owner_slot;
+  const std::uint64_t converting_sequence = converting.token.owner_sequence;
+  REQUIRE(convert_reusable_waiter_to_reader(fixture.attachment,
+                                            converting.token) ==
+          ReusableRegistryErrorV1::None);
+  REQUIRE(converting.token.kind == ReusableReferenceKindV1::ReaderPin);
+  REQUIRE(converting.token.owner_slot == converting_slot);
+  REQUIRE(converting.token.owner_sequence == converting_sequence);
+  REQUIRE(release_reusable_reference(fixture.attachment, converting.token) ==
+          ReusableRegistryErrorV1::None);
+
+  auto dead_reader = lookup_reusable_current(
+      fixture.attachment, key, byte_view("domain"), digest(46),
+      byte_view("generation"), ReusableLookupModeV1::PinComplete,
+      reference_owner(401));
+  REQUIRE(dead_reader.error == ReusableRegistryErrorV1::None);
+  auto before = snapshot_reusable_generation(fixture.attachment,
+                                             claimed.reference);
+  REQUIRE(before.has_value());
+  REQUIRE(before->waiter_count == 1);
+  REQUIRE(before->planner_pin_count == 1);
+  REQUIRE(before->reader_pin_count == 1);
+
+  const auto sweep = janitor_reusable_registry(
+      fixture.attachment, 1'000, kMaximumReusableJanitorBatchV1,
+      ReusableJanitorCallbacksV1{
+          .producer_alive = producer_is_alive,
+          .reference_owner_alive = reference_owner_is_dead,
+      });
+  REQUIRE(sweep.error == ReusableRegistryErrorV1::None);
+  REQUIRE(sweep.reaped_waiters == 1);
+  REQUIRE(sweep.reaped_planner_pins == 1);
+  REQUIRE(sweep.reaped_reader_pins == 1);
+  auto after = snapshot_reusable_generation(fixture.attachment,
+                                            claimed.reference);
+  REQUIRE(after.has_value());
+  REQUIRE(after->waiter_count == 0);
+  REQUIRE(after->planner_pin_count == 0);
+  REQUIRE(after->reader_pin_count == 0);
+
+  REQUIRE(release_reusable_reference(fixture.attachment, dead_waiter.token) ==
+          ReusableRegistryErrorV1::StaleReference);
+  REQUIRE(release_reusable_reference(fixture.attachment, *dead_planner) ==
+          ReusableRegistryErrorV1::StaleReference);
+  REQUIRE(release_reusable_reference(fixture.attachment, dead_reader.token) ==
+          ReusableRegistryErrorV1::StaleReference);
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
+
+  REQUIRE(invalidate_reusable_generation(fixture.attachment,
+                                         claimed.reference) ==
+          ReusableRegistryErrorV1::None);
+  const auto retirement =
+      janitor_reusable_registry(fixture.attachment, 1'001);
+  REQUIRE(retirement.error == ReusableRegistryErrorV1::None);
+  REQUIRE(retirement.retired_invalidated == 1);
 }
 
 TEST_CASE("janitor fails dead owners and retires expired manifests") {

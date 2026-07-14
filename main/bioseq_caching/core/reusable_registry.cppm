@@ -2772,20 +2772,67 @@ reclaim_retired_reusable_generations(
   const std::uint32_t scan_start = shared.janitor_scan_cursor;
   std::uint32_t scanned = 0;
   std::uint32_t retired_this_pass = 0;
-  for (; scanned < scan_limit && retired_this_pass < remaining; ++scanned) {
+  std::uint32_t reaped_this_pass = 0;
+  for (; scanned < scan_limit &&
+         retired_this_pass + reaped_this_pass < remaining;
+       ++scanned) {
     const std::uint32_t slot =
         (scan_start + scanned) % shared.config.max_generations;
     ReusableSharedGenerationV1 &generation = records[slot];
     if (generation.membership != ReusableRecordMembershipV1::Indexed) {
       continue;
     }
-    if ((generation.state == CacheEntryState::Claimed ||
+    const ReusableGenerationReferenceV1 reference =
+        make_reference(generation, slot);
+    const std::uint32_t exact_partition =
+        reusable_exact_partition(attachment, reference.id.digest);
+    acquire_exact(partition_callbacks, exact_partition);
+    if (!reference_matches(generation, reference)) {
+      release_exact(partition_callbacks, exact_partition);
+      continue;
+    }
+    if (janitor_callbacks.reference_owner_alive != nullptr) {
+      for (ReusableSharedReferenceOwnerV1 &shared_owner :
+           generation.reference_owners) {
+        if (retired_this_pass + reaped_this_pass >= remaining) {
+          break;
+        }
+        if (!shared_owner.active ||
+            janitor_callbacks.reference_owner_alive(
+                janitor_callbacks.context, shared_owner.owner)) {
+          continue;
+        }
+        const ReusableReferenceKindV1 reaped_kind = shared_owner.kind;
+        const ReusableRegistryErrorV1 reap_error =
+            deactivate_reference_owner(generation, shared_owner);
+        if (reap_error != ReusableRegistryErrorV1::None) {
+          release_exact(partition_callbacks, exact_partition);
+          result.error = reap_error;
+          return result;
+        }
+        if (reaped_kind == ReusableReferenceKindV1::Waiter) {
+          ++result.reaped_waiters;
+        } else if (reaped_kind == ReusableReferenceKindV1::PlannerPin) {
+          ++result.reaped_planner_pins;
+        } else if (reaped_kind == ReusableReferenceKindV1::ReaderPin) {
+          ++result.reaped_reader_pins;
+        } else {
+          release_exact(partition_callbacks, exact_partition);
+          result.error = ReusableRegistryErrorV1::CorruptGeneration;
+          return result;
+        }
+        ++reaped_this_pass;
+      }
+    }
+    const bool producer_dead =
+        (generation.state == CacheEntryState::Claimed ||
          generation.state == CacheEntryState::Building) &&
         janitor_callbacks.producer_alive != nullptr &&
         !janitor_callbacks.producer_alive(janitor_callbacks.context,
-                                          generation.producer)) {
-      const ReusableGenerationReferenceV1 reference =
-          make_reference(generation, slot);
+                                          generation.producer);
+    release_exact(partition_callbacks, exact_partition);
+
+    if (producer_dead) {
       const ReusableRegistryErrorV1 failure_error = fail_reusable_generation(
           attachment, reference, CacheFailureCode::ProducerExited,
           partition_callbacks);
@@ -2803,6 +2850,11 @@ reclaim_retired_reusable_generations(
       Invalidated,
     };
     RetireReason reason = RetireReason::None;
+    acquire_exact(partition_callbacks, exact_partition);
+    if (!reference_matches(generation, reference)) {
+      release_exact(partition_callbacks, exact_partition);
+      continue;
+    }
     if (generation.state == CacheEntryState::Complete &&
         completed_generation_expired(generation,
                                      generation.metadata.producer_ttl_ms,
@@ -2813,15 +2865,21 @@ reclaim_retired_reusable_generations(
     } else if (generation.state == CacheEntryState::Invalidated) {
       reason = RetireReason::Invalidated;
     }
-    if (reason == RetireReason::None || generation.waiter_count != 0 ||
-        generation.planner_pin_count != 0 || generation.reader_pin_count != 0) {
+    const bool referenced = generation.waiter_count != 0 ||
+                            generation.planner_pin_count != 0 ||
+                            generation.reader_pin_count != 0;
+    release_exact(partition_callbacks, exact_partition);
+    if (reason == RetireReason::None || referenced ||
+        retired_this_pass + reaped_this_pass >= remaining) {
       continue;
     }
-    const ReusableGenerationReferenceV1 reference =
-        make_reference(generation, slot);
     auto manifest =
         retire_reusable_generation(attachment, reference, partition_callbacks);
     if (!manifest.has_value()) {
+      if (manifest.error() == ReusableRegistryErrorV1::InvalidState ||
+          manifest.error() == ReusableRegistryErrorV1::StaleReference) {
+        continue;
+      }
       result.error = manifest.error();
       return result;
     }
@@ -2913,6 +2971,42 @@ reclaim_retired_reusable_generations(
   std::uint64_t allocated_bytes = 0;
   for (std::uint32_t slot = 0; slot < shared.config.max_generations; ++slot) {
     const ReusableSharedGenerationV1 &generation = records[slot];
+    std::uint32_t waiter_owners = 0;
+    std::uint32_t planner_owners = 0;
+    std::uint32_t reader_owners = 0;
+    for (const ReusableSharedReferenceOwnerV1 &shared_owner :
+         generation.reference_owners) {
+      const bool reserved_clear = std::all_of(
+          shared_owner.reserved.begin(), shared_owner.reserved.end(),
+          [](std::uint8_t value) noexcept { return value == 0; });
+      if (!shared_owner.active) {
+        if (shared_owner.kind != ReusableReferenceKindV1::None ||
+            shared_owner.owner_sequence != 0 ||
+            shared_owner.owner != ReusableReferenceOwnerV1{} ||
+            !reserved_clear) {
+          return ReusableRegistryErrorV1::CorruptGeneration;
+        }
+        continue;
+      }
+      if (!shared_owner.owner.valid() || shared_owner.owner_sequence == 0 ||
+          !reserved_clear) {
+        return ReusableRegistryErrorV1::CorruptGeneration;
+      }
+      if (shared_owner.kind == ReusableReferenceKindV1::Waiter) {
+        ++waiter_owners;
+      } else if (shared_owner.kind == ReusableReferenceKindV1::PlannerPin) {
+        ++planner_owners;
+      } else if (shared_owner.kind == ReusableReferenceKindV1::ReaderPin) {
+        ++reader_owners;
+      } else {
+        return ReusableRegistryErrorV1::CorruptGeneration;
+      }
+    }
+    if (waiter_owners != generation.waiter_count ||
+        planner_owners != generation.planner_pin_count ||
+        reader_owners != generation.reader_pin_count) {
+      return ReusableRegistryErrorV1::CorruptGeneration;
+    }
     if (generation.membership == ReusableRecordMembershipV1::Free) {
       ++free_records;
       if (generation.state != CacheEntryState::Absent ||
@@ -3235,5 +3329,7 @@ static_assert(std::is_standard_layout_v<ReusableSharedGenerationV1>);
 static_assert(std::is_trivially_copyable_v<ReusableSharedGenerationV1>);
 static_assert(std::is_trivially_copyable_v<ReusableManifestHandleV1>);
 static_assert(std::is_trivially_copyable_v<ReusableGenerationReferenceV1>);
+static_assert(std::is_trivially_copyable_v<ReusableSharedReferenceOwnerV1>);
+static_assert(std::is_trivially_copyable_v<ReusableReferenceTokenV1>);
 
 } // namespace bioseq::cache
