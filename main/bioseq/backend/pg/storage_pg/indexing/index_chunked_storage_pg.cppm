@@ -119,20 +119,6 @@ using bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
 using bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
 using bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME;
 
-/// PostgreSQL has already authenticated every field and the address-bound row
-/// CRC in load_rev3_pg_row_or_error().  This friend factory transfers that
-/// callback-scoped authority to the Format-5 reader without hashing the same
-/// 8,064-byte payload a second time.
-struct Rev3ValidatedMinimizerRowReceiptFactory {
-    [[nodiscard]] static ValidatedMinimizerGenerationRowReceipt make(
-            const IndexChunkAddress& address,
-            std::span<const std::byte> bytes,
-            std::uint64_t row_checksum) noexcept {
-        return ValidatedMinimizerGenerationRowReceipt{
-            address, bytes, row_checksum};
-    }
-};
-
 // pg-side mirror checks (§5): the macros ARE in scope here.
 static_assert(bioseq::indexing::kVarlenaHeaderBytes == VARHDRSZ, "VARHDRSZ mirror drift");
 static_assert(bioseq::indexing::kPgMaxAllocSize == MaxAllocSize, "MaxAllocSize mirror drift");
@@ -618,14 +604,22 @@ inline constexpr AttrNumber kRev3AttChunkBytes     = 6;
 inline constexpr AttrNumber kRev3AttChecksum       = 7;
 inline constexpr AttrNumber kRev3AttBlob           = 8;
 
-// Ordered-scan keys address PRIMARY INDEX ordinals, not heap attributes.
-// Keep these namespaces visibly separate: the S1 key deliberately reorders
-// the unchanged eight-column heap tuple.
-inline constexpr AttrNumber kRev3IdxGenerationId    = 1;
-inline constexpr AttrNumber kRev3IdxQueryKey         = 2;
-inline constexpr AttrNumber kRev3IdxSubKey           = 3;
-inline constexpr AttrNumber kRev3IdxPositionSegment  = 4;
-inline constexpr AttrNumber kRev3IdxChunkNo          = 5;
+// systable_beginscan_ordered() accepts HEAP attribute numbers, then remaps
+// each key through pg_index.indkey before handing the scan to the index AM.
+// Keep the call sites in primary-key order while retaining the unchanged
+// eight-column heap tuple's physical attribute numbers. Passing index
+// ordinals here happens to look ordered to C++, but PostgreSQL remaps them a
+// second time and gives btree an out-of-order key sequence.
+inline constexpr AttrNumber kRev3IdxGenerationId =
+    kRev3AttGenerationId;
+inline constexpr AttrNumber kRev3IdxQueryKey =
+    kRev3AttQueryKey;
+inline constexpr AttrNumber kRev3IdxSubKey =
+    kRev3AttSubKey;
+inline constexpr AttrNumber kRev3IdxPositionSegment =
+    kRev3AttPositionSegment;
+inline constexpr AttrNumber kRev3IdxChunkNo =
+    kRev3AttChunkNo;
 
 struct Rev3IndexAttributeDescriptor {
     AttrNumber attno = InvalidAttrNumber;
@@ -656,6 +650,12 @@ inline constexpr std::array<AttrNumber, 5> kRev3IndexPrimaryKeyAttributes{
 static_assert(kRev3IndexAttributeDescriptors.front().attno == 1);
 static_assert(kRev3IndexAttributeDescriptors.back().attno == 8);
 static_assert(kRev3IndexPrimaryKeyAttributes.size() == 5);
+static_assert(kRev3IdxGenerationId == kRev3IndexPrimaryKeyAttributes[0]);
+static_assert(kRev3IdxQueryKey == kRev3IndexPrimaryKeyAttributes[1]);
+static_assert(kRev3IdxSubKey == kRev3IndexPrimaryKeyAttributes[2]);
+static_assert(kRev3IdxPositionSegment ==
+    kRev3IndexPrimaryKeyAttributes[3]);
+static_assert(kRev3IdxChunkNo == kRev3IndexPrimaryKeyAttributes[4]);
 
 /// Preserve all CRC-64 bits in PostgreSQL's signed BIGINT container.
 [[nodiscard]] constexpr std::int64_t checksum_to_pg_bigint(
@@ -769,7 +769,8 @@ struct Rev3IndexSchemaExpectation {
 [[nodiscard]] inline Rev3IndexSchemaInspection inspect_rev3_index_schema(
         Relation relation,
         ColdIndexPreparationStatsPg* cold_stats = nullptr,
-        Rev3IndexSchemaExpectation expected = {}) {
+        Rev3IndexSchemaExpectation expected = {},
+        Oid permitted_auxiliary_index_oid = InvalidOid) {
     if (relation == nullptr || relation->rd_rel->relam != HEAP_TABLE_AM_OID
         || relation->rd_rel->relkind != RELKIND_RELATION) {
         return {.error = Rev3IndexSchemaError::not_heap};
@@ -841,8 +842,13 @@ struct Rev3IndexSchemaExpectation {
     List* index_list = RelationGetIndexList(relation);
     ListCell* cell = nullptr;
     foreach (cell, index_list) {
-        ++index_count;
         const Oid index_oid = lfirst_oid(cell);
+        // Production callers leave this invalid and retain the exact-one-index
+        // contract.  The revision-3 catalog-corruption fixture alone names its
+        // real donor index, which must coexist long enough for its parsed
+        // predicate/expression tree to be copied onto the primary index.
+        if (index_oid == permitted_auxiliary_index_oid) continue;
+        ++index_count;
         Relation index_relation = index_open(index_oid, AccessShareLock);
         if (cold_stats != nullptr) {
             cold_stats->add(cold_stats->sidecar_index_opens, 1);
@@ -1365,7 +1371,8 @@ inline void rev3_test_copy_primary_index_shape_pg(
     if (target == nullptr) {
         rev3_storage_error("rev3 index-shape target relation is missing");
     }
-    const Rev3IndexSchemaInspection schema = inspect_rev3_index_schema(target);
+    const Rev3IndexSchemaInspection schema = inspect_rev3_index_schema(
+        target, nullptr, {}, donor_index_oid);
     relation_close(target, AccessShareLock);
     if (!schema) {
         rev3_storage_error("rev3 index-shape target schema is not initially valid");
@@ -3079,8 +3086,13 @@ struct Rev3LoadedPgRow {
     std::uint64_t checksum = 0;
     bioseq::pg_utils::pg_detoasted_ptr<bytea> blob{};
     std::span<const std::byte> bytes;
+    std::optional<ValidatedMinimizerGenerationRowReceipt>
+        validated_receipt;
 
     void release() {
+        // The receipt seals a callback-scoped span into blob storage. Destroy
+        // that authority before the backing varlena can be released.
+        validated_receipt.reset();
         bioseq::pg_utils::invoke_pg_as_cpp(
             [this] { blob.free_if_copy(); });
         bytes = {};
@@ -3169,13 +3181,14 @@ struct Rev3LoadedPgRow {
         reinterpret_cast<const std::byte*>(VARDATA_ANY(detoasted.ptr)),
         payload_bytes};
     const std::uint64_t checksum = checksum_from_pg_bigint(signed_checksum);
-    if (checksum != bioseq::indexing::crc64_index_chunk_row(
-            address.generation_id,
-            address.position_segment,
-            address.sub_key,
-            address.chunk_no,
-            static_cast<std::uint32_t>(payload_bytes),
-            bytes)) {
+    auto validated_receipt =
+        bioseq::indexing::validate_minimizer_generation_row_receipt(
+            MinimizerGenerationRowView{
+                .address = address,
+                .bytes = bytes,
+                .row_checksum = checksum,
+            });
+    if (!validated_receipt) {
         release_detoasted();
         fail("row checksum disagrees");
     }
@@ -3186,6 +3199,7 @@ struct Rev3LoadedPgRow {
         .checksum = checksum,
         .blob = std::move(detoasted),
         .bytes = bytes,
+        .validated_receipt = std::move(*validated_receipt),
     };
 }
 
@@ -5096,10 +5110,28 @@ public:
                 .version = expected_.minimizer_scheme_version,
             };
             const auto expected_profile =
-                bioseq::indexing::minimizer_generation_payload_profile(
-                    expected_.wire_format,
-                    expected_scheme,
-                    expected_.kmer_size);
+                expected_.wire_format
+                        == bioseq::indexing::MinimizerGenerationWireFormat::
+                            grouped_shape_soa_segment_local
+                    ? expected_.max_occ_cap
+                        ? bioseq::indexing::
+                            minimizer_generation_payload_profile(
+                                expected_.wire_format,
+                                expected_scheme,
+                                expected_.alphabet_code,
+                                expected_.kmer_size,
+                                /*position_segment_span_bp=*/1u,
+                                *expected_.max_occ_cap)
+                        : std::expected<MinimizerGenerationPayloadProfile,
+                            MinimizerGenerationWireError>{
+                                std::unexpected(
+                                    MinimizerGenerationWireError::
+                                        compatibility_mismatch)}
+                    : bioseq::indexing::
+                        minimizer_generation_payload_profile(
+                            expected_.wire_format,
+                            expected_scheme,
+                            expected_.kmer_size);
             const bool supported_storage_width =
                 expected_.storage_unit_byte_width == 1u
                 || expected_.storage_unit_byte_width == 2u
@@ -5396,6 +5428,56 @@ public:
         return read_active_head_impl_(/*bind_expected_wire_format=*/true);
     }
 
+    /// Production cold readers accept the current Format-5 contract while
+    /// retaining explicit read compatibility for already-published Format 4.
+    /// Both compatibility objects are independently derived from the selected
+    /// backend/GUCs before this call; the authenticated head may select one of
+    /// them, but cannot supply or alter any biological compatibility field.
+    /// The relation and primary index remain open exactly once.
+    [[nodiscard]] MinimizerGenerationHead
+    read_active_head_allowing_format4_compatibility_once(
+            const ExpectedMinimizerCompatibility& format4_expected) {
+        const MinimizerGenerationHead result = read_active_head_impl_(
+            /*bind_expected_wire_format=*/false);
+        if (result.wire_format == expected_.wire_format) return result;
+        const bioseq::indexing::MinimizerSchemeIdentity scheme{
+            .id = format4_expected.minimizer_scheme_id,
+            .version = format4_expected.minimizer_scheme_version,
+        };
+        const auto profile =
+            bioseq::indexing::minimizer_generation_payload_profile(
+                format4_expected.wire_format, scheme,
+                format4_expected.kmer_size);
+        const bool same_common_contract =
+            format4_expected.wire_format
+                == bioseq::indexing::MinimizerGenerationWireFormat::
+                    grouped_hash32_segment_local32
+            && !format4_expected.max_occ_cap
+            && format4_expected.alphabet_code == expected_.alphabet_code
+            && format4_expected.storage_unit_byte_width
+                == expected_.storage_unit_byte_width
+            && format4_expected.kmer_size == expected_.kmer_size
+            && format4_expected.window_size == expected_.window_size
+            && format4_expected.minimizer_scheme_id
+                == expected_.minimizer_scheme_id
+            && format4_expected.minimizer_scheme_version
+                == expected_.minimizer_scheme_version
+            && format4_expected.producer_backend_id
+                == expected_.producer_backend_id
+            && format4_expected.producer_backend_identity_version
+                == expected_.producer_backend_identity_version;
+        if (result.wire_format != format4_expected.wire_format
+            || !same_common_contract || !profile
+            || profile->gpu_abi_version
+                != format4_expected.gpu_abi_version) {
+            fail_(
+                "active generation head wire format disagrees with every permitted reader contract");
+        }
+        expected_ = format4_expected;
+        expected_profile_ = *profile;
+        return result;
+    }
+
     /// Administrative wire-format discovery. This authenticates the head,
     /// defers only its expected-format comparison, and closes the head-only
     /// session before returning. The caller must reopen a normally bound
@@ -5484,6 +5566,14 @@ public:
                 *manifest, expected_)) {
             fail_("READY generation minimizer compatibility disagrees");
         }
+        const auto manifest_profile =
+            bioseq::indexing::minimizer_generation_payload_profile(
+                *manifest);
+        if (!manifest_profile
+            || manifest_profile->wire_format != expected_.wire_format) {
+            fail_("READY generation manifest payload profile is invalid");
+        }
+        expected_profile_ = *manifest_profile;
         const std::uint32_t extent_payload_bytes =
             bioseq::indexing::minimizer_extent_payload_bytes(
                 manifest->wire_format);
@@ -6625,8 +6715,31 @@ public:
                     fail_("full-generation payload rows are missing, extra, duplicate, or reordered");
                 }
 
+                std::uint64_t validated_row_checksum = 0u;
+                bool receipt_matches_row = false;
+                const bool receipt_visited = row.validated_receipt.has_value()
+                    && bioseq::indexing::
+                        visit_validated_minimizer_generation_row(
+                            *row.validated_receipt,
+                            [&](const IndexChunkAddress& receipt_address,
+                                std::span<const std::byte> receipt_bytes,
+                                std::uint64_t receipt_checksum) noexcept {
+                                receipt_matches_row =
+                                    receipt_address == row.address
+                                    && receipt_bytes.data()
+                                        == row.bytes.data()
+                                    && receipt_bytes.size()
+                                        == row.bytes.size();
+                                validated_row_checksum = receipt_checksum;
+                            });
+                if (!receipt_visited || !receipt_matches_row) {
+                    row.release();
+                    fail_("full-generation row receipt lost validated authority");
+                }
+
                 extent_checksum.update(row.bytes);
-                extent_row_checksum.update_little_endian(row.checksum);
+                extent_row_checksum.update_little_endian(
+                    validated_row_checksum);
                 if (position_extent) {
                     if (!format5 && extent_chunk == 0) {
                         const std::uint64_t control_checksum_bytes =
@@ -6639,13 +6752,12 @@ public:
                                 control_extent_row_checksums[entry_index],
                                 control_checksum_bytes);
                     }
-                    payload_row_checksum.update_little_endian(row.checksum);
+                    payload_row_checksum.update_little_endian(
+                        validated_row_checksum);
                     if constexpr (std::invocable<PositionSink&,
                             const ValidatedMinimizerGenerationRowReceipt&>) {
-                        const auto receipt =
-                            Rev3ValidatedMinimizerRowReceiptFactory::make(
-                                row.address, row.bytes, row.checksum);
-                        std::invoke(position_sink, receipt);
+                        std::invoke(
+                            position_sink, *row.validated_receipt);
                     } else {
                         std::invoke(position_sink, row.address,
                             reinterpret_cast<const char*>(row.bytes.data()),
@@ -6659,14 +6771,12 @@ public:
                 } else {
                     if (format5) {
                         payload_row_checksum.update_little_endian(
-                            row.checksum);
+                            validated_row_checksum);
                     }
                     if constexpr (std::invocable<ControlSink&,
                             const ValidatedMinimizerGenerationRowReceipt&>) {
-                        const auto receipt =
-                            Rev3ValidatedMinimizerRowReceiptFactory::make(
-                                row.address, row.bytes, row.checksum);
-                        std::invoke(control_sink, receipt);
+                        std::invoke(
+                            control_sink, *row.validated_receipt);
                     } else {
                         std::invoke(control_sink, row.address,
                             reinterpret_cast<const char*>(row.bytes.data()),

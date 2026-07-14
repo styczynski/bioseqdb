@@ -1139,6 +1139,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	if (group.kmer_size != 15 || group.window_size != 10
 		|| group.max_occ < 0
 		|| group.persisted_grouped32_reader
+		|| group.persisted_shape_v5_reader
 		|| group.target_index) {
 		fail("CPU grouped32 parameter group is not the pinned cold-read shape");
 		return;
@@ -1163,15 +1164,31 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		column_attno, source.locator.bucket_idx, source.locator.shard_idx);
 	const auto expected =
 		bioseq::indexing::expected_minimizer_compatibility_for_backend(
+			MinimizerGenerationWireFormat::
+				grouped_shape_soa_segment_local,
+			group.sketch_backend,
+			source.alphabet_code,
+			source.storage_unit_byte_width,
+			static_cast<std::uint16_t>(group.kmer_size),
+			static_cast<std::uint16_t>(group.window_size),
+			bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap);
+	if (!expected) {
+		fail(fmt::format("grouped32 compatibility rejected wire_error={}",
+			static_cast<unsigned>(expected.error())));
+		return;
+	}
+	const auto format4_expected =
+		bioseq::indexing::expected_minimizer_compatibility_for_backend(
 			MinimizerGenerationWireFormat::grouped_hash32_segment_local32,
 			group.sketch_backend,
 			source.alphabet_code,
 			source.storage_unit_byte_width,
 			static_cast<std::uint16_t>(group.kmer_size),
 			static_cast<std::uint16_t>(group.window_size));
-	if (!expected) {
-		fail(fmt::format("grouped32 compatibility rejected wire_error={}",
-			static_cast<unsigned>(expected.error())));
+	if (!format4_expected) {
+		fail(fmt::format(
+			"Format-4 compatibility rejected wire_error={}",
+			static_cast<unsigned>(format4_expected.error())));
 		return;
 	}
 	auto opened = open_exact_minimizer_generation_read_session_pg(
@@ -1204,9 +1221,15 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		}
 	}
 	IndexStorageFragmentGenerationReadSessionPg& session = *opened.session;
-	const auto head = session.read_active_head_once();
+	const auto head =
+		session.read_active_head_allowing_format4_compatibility_once(
+			*format4_expected);
 	const auto& metadata = session.read_manifest_directory_once(head);
 	const auto manifest = metadata.manifest;
+	const auto& selected_expected = manifest.wire_format
+			== MinimizerGenerationWireFormat::
+				grouped_shape_soa_segment_local
+		? *expected : *format4_expected;
 	session.validate_source_attestation(std::move(source_proof));
 	const std::uint64_t query_hash_bytes =
 		bioseq::parallelism::saturating_mul(
@@ -1246,6 +1269,121 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	for (const MinimapSketchData& minimizer : group.query_hash_union) {
 		query_hashes.push_back(minimizer.kmer());
 	}
+
+	// Format 5 is stored in the S1 primary-key order: every control extent,
+	// then every position extent.  The trait-driven reader retains only hashes
+	// requested by this target-wide query union, while the PostgreSQL session
+	// authenticates the complete immutable generation in one ordered scan.
+	// No raw sequence fragment is read and no legacy hashmap is assembled.
+	if (manifest.wire_format
+			== MinimizerGenerationWireFormat::
+				grouped_shape_soa_segment_local) {
+		using ShapeReader = bioseq::indexing::PreparedShapeV5QueryReader;
+		auto made = ShapeReader::begin(
+			bioseq::parallelism::MemoryAdmissionController::instance(),
+			head, manifest, selected_expected,
+			metadata.directory.encoded_bytes(), query_hashes,
+			static_cast<std::uint64_t>(group.max_occ));
+		if (!made) {
+			fail(fmt::format(
+				"Format-5 reader begin rejected wire_error={}",
+				static_cast<unsigned>(made.error())));
+			return;
+		}
+		std::optional<ShapeReader> shape_reader{
+			std::in_place, std::move(*made)};
+		std::optional<MinimizerGenerationWireError> callback_error;
+		std::exception_ptr callback_exception;
+		const auto accept = [&](const bioseq::indexing::
+				ValidatedMinimizerGenerationRowReceipt& receipt) noexcept {
+			if (callback_error || callback_exception) return;
+			try {
+				auto accepted = shape_reader->accept(receipt);
+				if (!accepted) callback_error = accepted.error();
+			} catch (...) {
+				callback_exception = std::current_exception();
+			}
+		};
+		(void)session.read_full_generation_payload_once(accept, accept);
+		if (callback_exception) {
+			std::rethrow_exception(callback_exception);
+		}
+		if (callback_error) {
+			fail(fmt::format(
+				"Format-5 payload ingest rejected wire_error={}",
+				static_cast<unsigned>(*callback_error)));
+			return;
+		}
+		if (auto finished = shape_reader->finish(); !finished) {
+			fail(fmt::format(
+				"Format-5 reader final validation rejected wire_error={}",
+				static_cast<unsigned>(finished.error())));
+			return;
+		}
+
+		const MinimizerGenerationReadStats read_stats = session.finish();
+		const auto scheme =
+			bioseq::indexing::minimizer_scheme_identity_for_backend(
+				group.sketch_backend);
+		const auto producer_backend =
+			bioseq::indexing::minimizer_producer_backend_identity_for_backend(
+				group.sketch_backend);
+		const bool read_proof_matches =
+			shape_reader->ready()
+			&& shape_reader->target_length()
+				== prepared_target.target_bp_size
+			&& manifest.kmer_size == group.kmer_size
+			&& manifest.window_size == group.window_size
+			&& manifest.minimizer_scheme_id == scheme.id
+			&& manifest.minimizer_scheme_version == scheme.version
+			&& manifest.producer_backend_id == producer_backend.id
+			&& manifest.producer_backend_identity_version
+				== producer_backend.version
+			&& manifest.shape_v5
+			&& manifest.shape_v5->max_occ_cap
+				== bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap
+			&& head.generation_id != 0
+			&& head.source_identity != 0
+			&& read_stats.relation_opens == 1
+			&& read_stats.head_scans == 1
+			&& read_stats.manifest_directory_scans == 1
+			&& read_stats.metadata_repeated_reads == 0
+			&& read_stats.full_generation.scan_calls == 1
+			&& read_stats.bulk_read_calls == 1
+			&& read_stats.range_scan_calls == 1
+			&& read_stats.index_scans == 3
+			&& read_stats.payload.delivered_chunks
+				== read_stats.payload.heap_rows_read
+			&& read_stats.payload.delivered_bytes
+				== manifest.payload_bytes
+			&& read_stats.cold.route_empty == 0
+			&& read_stats.cold.route_selective == 0
+			&& read_stats.cold.route_full == 1
+			&& read_stats.source_parent_rows_read == 1
+			&& read_stats.source_catalog_rows_read == 1
+			&& read_stats.source_catalog_index_scans == 1
+			&& read_stats.source_fragment_rows_read == 0
+			&& read_stats.source_decoded_bp == 0
+			&& source_counters.timed_equation_holds();
+		if (!read_proof_matches) {
+			fail("Format-5 READY identity/backend/scheme/read-work proof disagrees");
+			return;
+		}
+
+		group.persisted_shape_v5_reader.emplace(
+			std::move(*shape_reader));
+		group.target_index_source =
+			::bioseq::pipeline_stats::TargetIndexSource::persisted;
+		group.persisted_generation_id = head.generation_id;
+		group.persisted_source_identity = head.source_identity;
+		group.persisted_read_stats = read_stats;
+		group.persisted_reader_loads = 1;
+		group.build_set_checksum_present = true;
+		group.build_set_checksum = group.key_set_checksum;
+		++prepared_target.physical_target_index_reads;
+		return;
+	}
+
 	auto planned = bioseq::indexing::plan_minimizer_grouped32_cold_route(
 		head, manifest, metadata.directory, query_hashes);
 	if (!planned) {
@@ -1291,7 +1429,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 			== bioseq::indexing::MinimizerGrouped32ColdLoadRoute::full) {
 		auto made = Grouped32Reader::begin_full_generation_stream(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
-			head, manifest, *expected, group.sketch_backend,
+			head, manifest, selected_expected, group.sketch_backend,
 			metadata.directory.encoded_bytes(), query_hashes,
 			static_cast<std::uint64_t>(group.max_occ));
 		if (!made) {
@@ -1332,7 +1470,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	} else {
 		auto made = Grouped32Reader::begin(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
-			head, manifest, *expected, group.sketch_backend,
+			head, manifest, selected_expected, group.sketch_backend,
 			metadata.directory.encoded_bytes(), query_hashes,
 			static_cast<std::uint64_t>(group.max_occ));
 		if (!made) {

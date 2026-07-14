@@ -71,6 +71,7 @@ import bootstrap  # noqa: E402
 # --------------------------- configuration ---------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
+WORKSPACE_ROOT = PROJECT_ROOT.parent
 
 # DOC0270 plus test-hook isolation — parallel production/test build families:
 #
@@ -1098,7 +1099,7 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
 
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
-                      test_flags=None) -> int:
+                      test_flags=None, bench_e2e_config=None) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
@@ -1114,6 +1115,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
     '--debug']) appended only to bench-mode commands (§5.4). `test_flags` is a
     validated Catch2 argument list appended identically to both unit and
     integration test executables for a focused test run.
+
+    `bench_e2e_config` is an absolute, server-validated path inside this
+    workspace. It is exposed only to the bench-e2e executable's environment;
+    configure, compilation, installation and every other mode remain immune to
+    a caller's configuration override.
     """
     bench_flags = bench_flags or []
     test_flags = test_flags or []
@@ -1142,6 +1148,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# debug={debug}\n"
         f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
         f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
+        f"# bench_e2e_config={bench_e2e_config or ''}\n"
         f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
     )
     log_handle.flush()
@@ -1153,6 +1160,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
         pre_reports = _report_paths(mode_details.reporting_dir)
 
     env = os.environ.copy()
+    # Never let ambient MCP-server state select an E2E configuration. The
+    # explicit start_build argument below is the sole supported override.
+    env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
     if not _is_aws_preset(active_preset):
         _ensure_local_toolchain_environment(env, active_build_dir)
@@ -1434,6 +1444,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "# BIOSEQ_E2E_PG_RESTART_CMD="
                     f"{env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
                 log_handle.flush()
+            run_env = env
+            if mode == "bench-e2e" and bench_e2e_config is not None:
+                run_env = env.copy()
+                run_env["BIOSEQ_E2E_CONFIG_OVERRIDE"] = bench_e2e_config
+                log_handle.write(
+                    "# BIOSEQ_E2E_CONFIG_OVERRIDE="
+                    f"{bench_e2e_config}\n")
+                log_handle.flush()
             for cmd in mode_details.commands:
                 # MODES.commands store binary BASENAMES; resolve against the
                 # active build's bin dir (DOC0270). Args after the first slot
@@ -1447,7 +1465,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     full_cmd += test_flags
                 rc = _stream_subprocess(
                     full_cmd, log_handle, deadline,
-                    cwd=active_build_dir, env=env,
+                    cwd=active_build_dir, env=run_env,
                 )
                 if rc != 0:
                     # Bench exits non-zero when regression rules are violated
@@ -1671,15 +1689,58 @@ def _unit_test_filter_to_cli_args(test_filter):
     return ["--allow-running-no-tests", combined], None
 
 
+def _validate_bench_e2e_config_override(mode: str, requested_path):
+    """Resolve one explicit local bench-e2e config without path escape.
+
+    The public surface accepts either an absolute path or a workspace-root
+    relative path. ``resolve(strict=True)`` follows symlinks before the
+    containment check, so a workspace symlink cannot smuggle an outside file
+    into the worker. Returning the canonical absolute path also avoids making
+    interpretation depend on the detached worker's current directory.
+    """
+    if requested_path is None:
+        return None, None
+    if mode != "bench-e2e":
+        return None, "bench_e2e_config is accepted only for mode='bench-e2e'"
+    if not isinstance(requested_path, str) or not requested_path.strip():
+        return None, "bench_e2e_config must be a non-empty path string"
+    if requested_path != requested_path.strip():
+        return None, "bench_e2e_config may not have surrounding whitespace"
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in requested_path):
+        return None, "bench_e2e_config may not contain control characters"
+
+    candidate = Path(requested_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = WORKSPACE_ROOT / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(WORKSPACE_ROOT.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, (
+            "bench_e2e_config must resolve to an existing file inside the "
+            f"workspace {WORKSPACE_ROOT}: {exc}"
+        )
+    if not resolved.is_file():
+        return None, f"bench_e2e_config is not a regular file: {resolved}"
+    if resolved.suffix.lower() != ".json":
+        return None, f"bench_e2e_config must name a .json file: {resolved}"
+    return str(resolved), None
+
+
 def tool_start_build(mode: str, build_only: bool = False,
                      debug: bool = False, bench_filter=None,
                      debug_report: bool = False,
-                     debug_report_supplied: bool = False) -> str:
+                     debug_report_supplied: bool = False,
+                     bench_e2e_config=None) -> str:
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
     mode_details = MODES[mode]
+    resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
+        mode, bench_e2e_config)
+    if config_error is not None:
+        return f"Invalid bench_e2e_config: {config_error}"
     try:
         selected_preset = preset_for_mode(mode, debug)
     except RuntimeError as exc:
@@ -1740,7 +1801,8 @@ def tool_start_build(mode: str, build_only: bool = False,
              "--build-only", ("true" if build_only else "false"),
              "--debug", ("true" if debug else "false"),
              "--bench-flags", json.dumps(bench_flags),
-             "--test-flags", json.dumps(test_flags)],
+             "--test-flags", json.dumps(test_flags),
+             "--bench-e2e-config", resolved_e2e_config or ""],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1765,11 +1827,13 @@ def tool_start_build(mode: str, build_only: bool = False,
             "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
+            "bench_e2e_config": resolved_e2e_config,
             "effective_run_args": test_flags if mode == "unit+integration" else bench_flags,
         }
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
              f"bench_flags={bench_flags} focused_test_args={test_flags} "
+             f"bench_e2e_config={resolved_e2e_config} "
              f"log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
@@ -1777,6 +1841,8 @@ def tool_start_build(mode: str, build_only: bool = False,
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
             + (f" with focused Catch2 args {shlex.join(test_flags)}"
                if test_flags else "")
+            + (f" with E2E config {resolved_e2e_config}"
+               if resolved_e2e_config else "")
             + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
@@ -3589,6 +3655,17 @@ TOOL_DEFINITIONS = [
                                        "description": "Run only these benchmark keys. (Maps to the bench CLI's singular `benchmark=`.)"}
                     }
                 },
+                "bench_e2e_config": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Local bench-e2e only. Workspace-root-relative or "
+                        "absolute path to an existing workspace-contained .json "
+                        "configuration. The canonical path is passed only as "
+                        "BIOSEQ_E2E_CONFIG_OVERRIDE to the bench-e2e executable; "
+                        "it does not affect configure/build/install or other modes."
+                    ),
+                },
                 "debug_report": {
                     "type": "boolean",
                     "default": False,
@@ -4580,10 +4657,12 @@ def _handle_tools_call(params: dict) -> dict:
         debug: bool = parse_bool("debug", args.get("debug", False))
         bench_filter = args.get("filter")                       # dict | None
         debug_report: bool = parse_bool("debug_report", args.get("debug_report", False))
+        bench_e2e_config = args.get("bench_e2e_config")
         text = tool_start_build(mode, build_only=build_only, debug=debug,
                                 bench_filter=bench_filter,
                                 debug_report=debug_report,
-                                debug_report_supplied="debug_report" in args)
+                                debug_report_supplied="debug_report" in args,
+                                bench_e2e_config=bench_e2e_config)
     elif name == "status":
         mode = args.get("mode", "")
         text = tool_status(mode)
@@ -4751,6 +4830,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--bench-e2e-config",
+        default="",
+        help=(
+            "(internal) canonical workspace-contained E2E config path. "
+            "Forwarded only to the local bench-e2e executable environment."
+        ),
+    )
+    parser.add_argument(
         "--run-subagent",
         action="store_true",
         default=False,
@@ -4779,7 +4866,9 @@ def main() -> int:
             return 2
         return _run_build_worker(args.run_build, build_only=build_only,
                                  debug=debug, bench_flags=bench_flags,
-                                 test_flags=test_flags)
+                                 test_flags=test_flags,
+                                 bench_e2e_config=(
+                                     args.bench_e2e_config or None))
     if args.run_build_sync is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)

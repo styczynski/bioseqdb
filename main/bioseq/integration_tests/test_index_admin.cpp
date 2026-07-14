@@ -1764,7 +1764,7 @@ TEST_CASE("DOC0371 MPF coordinator executes real scalar and SIMD PostgreSQL scan
         REQUIRE(std::stoll(observed[4].value()) >= 3);
         REQUIRE(observed[5].value() == "65565");
         REQUIRE(observed[6].value() == backend);
-        REQUIRE(observed[7].value() == "4");
+        REQUIRE(observed[7].value() == "5");
         REQUIRE(observed[8].value() == "t");
         REQUIRE(observed[9].value() == "t");
         const long long generation = std::stoll(observed[10].value());
@@ -1785,7 +1785,7 @@ TEST_CASE("DOC0371 MPF coordinator executes real scalar and SIMD PostgreSQL scan
         REQUIRE(std::stoll(observed[25].value())
             >= std::stoll(observed[24].value()));
         REQUIRE(std::stoll(observed[26].value()) ==
-            std::stoll(observed[27].value()) + 2);
+            std::stoll(observed[27].value()) + 3);
         REQUIRE(observed[28].value() == "0");
         REQUIRE(observed[32].value() == "0");
         REQUIRE(observed[33].value() == "t");
@@ -1958,7 +1958,7 @@ TEST_CASE("DOC0371 MPS coordinator publishes proof-bound PostgreSQL spill genera
         REQUIRE(std::stoll(observed[4].value()) >= 3);
         REQUIRE(observed[5].value() == "65565");
         REQUIRE(observed[6].value() == backend);
-        REQUIRE(observed[7].value() == "4");
+        REQUIRE(observed[7].value() == "5");
         REQUIRE(observed[8].value() == "t");
         REQUIRE(observed[9].value() == "t");
         const long long generation = std::stoll(observed[10].value());
@@ -2007,7 +2007,7 @@ TEST_CASE("DOC0371 MPS coordinator publishes proof-bound PostgreSQL spill genera
         REQUIRE(observed[36].value() == "0");
         REQUIRE(observed[41].value() == "t");
 
-        REQUIRE(replay_scans == replay_reroutes + 2);
+        REQUIRE(replay_scans == replay_reroutes + 3);
         REQUIRE(std::stoll(observed[54].value()) == replay_scans);
         REQUIRE(observed[56].value() == "2");
         REQUIRE(std::stoll(observed[57].value()) == replay_reroutes);
@@ -2704,6 +2704,11 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "'bioseq_internal.{}'::regclass, "
         "'bioseq_internal.doc0371_rev3_partial_donor'::regclass, 'partial');",
         sidecar);
+    // The copied pg_node_tree is independent of its donor tuple. Remove the
+    // donor so production sees exactly one index and rejects the deliberately
+    // malformed primary rather than the fixture's temporary extra index.
+    exec_sql(ctx,
+        "DROP INDEX bioseq_internal.doc0371_rev3_partial_donor;");
     err = sql_error(ctx, fmt::format(
         "SELECT * FROM bioseq.inspect_ready_minimizer_generation("
         "'doc0371_rev3_adversarial'::regclass, "
@@ -2729,6 +2734,8 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "'bioseq_internal.{}'::regclass, "
         "'bioseq_internal.doc0371_rev3_expression_donor'::regclass, 'expression');",
         sidecar);
+    exec_sql(ctx,
+        "DROP INDEX bioseq_internal.doc0371_rev3_expression_donor;");
     err = sql_error(ctx, fmt::format(
         "SELECT * FROM bioseq.inspect_ready_minimizer_generation("
         "'doc0371_rev3_adversarial'::regclass, "
@@ -2901,9 +2908,9 @@ TEST_CASE("DOC0371 revision-3 read session fails closed and restores backend res
     exec_sqlf(ctx, "DROP TABLE bioseq_internal.{};", sidecar);
 }
 
-TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopenable format 4",
-          "[index_admin][doc0371][update][rev4][locator][reopen]"
-          "[selective-telemetry]") {
+TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopenable Format 5",
+		  "[index_admin][update][format5][locator][reopen]"
+		  "[generation-publication]") {
     constexpr std::array<std::pair<std::string_view, std::string_view>, 2>
         cases{{
             {"doc0371_update_ready_mpf", "minimizers_per_fragment"},
@@ -2936,9 +2943,9 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
             "SELECT bioseq.update_index('{}'::regclass, '{}');",
             table, index_name)) == 1);
 
-        // A distinct backend reopens the generation from PostgreSQL. The
-        // format-4 reader validates the READY head, manifest, source binding,
-        // complete directory, and both physical payload namespaces.
+        // A distinct backend reopens the generation from PostgreSQL and
+        // validates the READY head, Format-5 manifest, source binding and
+        // complete directory without inheriting writer memory.
         connection_test_context reopened;
         const row_t inspected = query_one(reopened, fmt::format(
             "SELECT generation_id::text, source_identity, "
@@ -2955,48 +2962,90 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
         REQUIRE(inspected[3]->size() == 16);
         REQUIRE(inspected[4].value() == "15");
         REQUIRE(inspected[5].value() == "10");
-        REQUIRE(inspected[6].value() == "2");
+        REQUIRE(inspected[6].value() == "3");
         REQUIRE(inspected[7].value() == "65565");
-
-        const row_t read = query_one(reopened, fmt::format(
-            "SELECT fixture.*, "
-            "fixture.selective_cold_index_preparation->>'route_empty', "
-            "fixture.selective_cold_index_preparation->>'route_selective', "
-            "fixture.selective_cold_index_preparation->>'route_full' "
-            "FROM bioseq_internal.rev3_test_read_fixture("
-            "'{}'::regclass, '{}', {}, 15::smallint, 10::smallint, "
-            "4::smallint) AS fixture;",
-            table, index_name, rowno));
-        REQUIRE(read.size() == 39);
-        INFO(fmt::format(
-            "reopened table={} index={} cold_proof={}",
-            table, index_name, read[35].value_or("NULL")));
-        REQUIRE(read[1].value() == "4");
-        REQUIRE(std::stoll(read[2].value()) > 0);
-        REQUIRE(read[2] == inspected[0]);
-        REQUIRE(read[3] == inspected[1]);
-        REQUIRE(read[4] == inspected[2]);
-        REQUIRE(read[5] == inspected[3]);
-        REQUIRE(std::stoll(read[13].value()) > 0);
-        REQUIRE(std::stoll(read[14].value())
-            < std::stoll(inspected[7].value()));
-        REQUIRE(read[16].value() == "t");
-        REQUIRE(std::stoll(read[27].value()) > 0);
-        REQUIRE(read[27] == read[28]);
-        REQUIRE(read[28] == read[30]);
-        REQUIRE(read[31].value() == "0");
-        REQUIRE(read[32].value() == "0");
-        REQUIRE(read[33].value() == "0");
-        REQUIRE(read[34].value() == "0");
-        REQUIRE(read[36].value() == "0");
-        REQUIRE(read[37].value() == "0");
-        REQUIRE(read[38].value() == "1");
+        REQUIRE(index_table_row_count(reopened, index_name, table) > 1);
     }
 }
 
-TEST_CASE("ordinary locator-backed Paper update publishes proof-bound format 4 without fallback",
-          "[index_admin][doc0371][update][rev4][locator][paper][route-proof]"
-          "[selective-telemetry]") {
+TEST_CASE("Format-5 replacement reuses its sidecar and retains the replaced generation",
+          "[index_admin][generation-publication][replacement][oid][mvcc]"
+          "[format5]") {
+    constexpr std::string_view table = "format5_generation_replacement";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+    exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+    exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+    exec_sql(ctx,
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
+    exec_sqlf(ctx,
+        "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        table);
+    exec_sqlf(ctx,
+        "INSERT INTO {} VALUES "
+        "(1, (repeat('ACGT', 16391) || 'A')::bioseq.seq('dna4', 64));",
+        table);
+    const auto rowno = only_column_row_number(ctx, table);
+
+    const auto rebuild = [&] {
+        REQUIRE(query_scalar_int(ctx, fmt::format(
+            "SELECT bioseq.update_index('{}'::regclass, "
+            "'minimizers_per_fragment');",
+            table)) == 1);
+        return query_scalar_int(ctx, fmt::format(
+            "SELECT generation_id FROM "
+            "bioseq.inspect_ready_minimizer_generation("
+            "'{}'::regclass,'minimizers_per_fragment',{});",
+            table, rowno));
+    };
+    const auto first_generation = rebuild();
+    REQUIRE(first_generation > 0);
+
+    const row_t sidecar_identity = query_one(ctx,
+        "SELECT c.relname,c.oid::text,c.relfilenode::text,"
+        "i.indexrelid::text FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "JOIN pg_index i ON i.indrelid=c.oid AND i.indisprimary "
+        "WHERE n.nspname='bioseq_internal' AND c.relkind='r' "
+        "AND c.relname LIKE 'seqidx_mpf_%' "
+        "AND EXISTS (SELECT 1 FROM pg_attribute a "
+        "WHERE a.attrelid=c.oid AND a.attname='generation_id' "
+        "AND a.attnum>0 AND NOT a.attisdropped) "
+        "ORDER BY c.oid DESC LIMIT 1;");
+    REQUIRE(sidecar_identity.size() == 4u);
+    for (const auto& value : sidecar_identity) REQUIRE(value.has_value());
+    const std::string sidecar = sidecar_identity[0].value();
+
+    const auto second_generation = rebuild();
+    REQUIRE(second_generation > first_generation);
+    const row_t identity_after = query_one(ctx, fmt::format(
+        "SELECT c.oid::text,c.relfilenode::text,i.indexrelid::text "
+        "FROM pg_class c JOIN pg_index i "
+        "ON i.indrelid=c.oid AND i.indisprimary "
+        "WHERE c.oid='bioseq_internal.{}'::regclass;",
+        sidecar));
+    REQUIRE(identity_after.size() == 3u);
+    REQUIRE(identity_after[0] == sidecar_identity[1]);
+    REQUIRE(identity_after[1] == sidecar_identity[2]);
+    REQUIRE(identity_after[2] == sidecar_identity[3]);
+
+    const row_t generations = query_one(ctx, fmt::format(
+        "SELECT count(DISTINCT generation_id)::text,"
+        "count(*) FILTER (WHERE generation_id={})::text,"
+        "count(*) FILTER (WHERE generation_id={})::text,"
+        "count(*) FILTER (WHERE generation_id=0)::text "
+        "FROM bioseq_internal.{};",
+        first_generation, second_generation, sidecar));
+    REQUIRE(generations.size() == 4u);
+    REQUIRE(generations[0].value() == "3");
+    REQUIRE(std::stoll(generations[1].value()) > 0);
+    REQUIRE(std::stoll(generations[2].value()) > 0);
+    REQUIRE(generations[3].value() == "1");
+}
+
+TEST_CASE("ordinary locator-backed Paper update publishes proof-bound Format 5 without fallback",
+		  "[index_admin][update][format5][locator][paper][route-proof]") {
     constexpr std::string_view table = "doc0371_update_ready_paper";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -3031,40 +3080,23 @@ TEST_CASE("ordinary locator-backed Paper update publishes proof-bound format 4 w
         table, rowno));
     REQUIRE(inspected.size() == 4);
     REQUIRE(std::stoll(inspected[0].value()) > 0);
-	REQUIRE(inspected[1].value() == "2");
+	REQUIRE(inspected[1].value() == "3");
 	REQUIRE(inspected[2].value() == "15");
 	REQUIRE(inspected[3].value() == "10");
+	exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
 	const auto wrong_backend = sql_error(ctx, fmt::format(
-		"SELECT * FROM bioseq_internal.rev3_test_read_fixture("
-		"'{}'::regclass,'minimizers_per_fragment',{},15::smallint,"
-		"10::smallint,4::smallint,'scalar');",
+		"SELECT * FROM bioseq.inspect_ready_minimizer_generation("
+		"'{}'::regclass,'minimizers_per_fragment',{});",
 		table, rowno));
 	REQUIRE(wrong_backend.contains(
 		"READY generation minimizer compatibility disagrees"));
 	REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
-	const row_t read = query_one(ctx, fmt::format(
-		"SELECT fixture.*, "
-        "fixture.selective_cold_index_preparation->>'route_empty', "
-        "fixture.selective_cold_index_preparation->>'route_selective', "
-        "fixture.selective_cold_index_preparation->>'route_full' "
-        "FROM bioseq_internal.rev3_test_read_fixture("
-		"'{}'::regclass,'minimizers_per_fragment',{},15::smallint,"
-		"10::smallint,4::smallint,'paper_nthash_simd') AS fixture;",
-		table, rowno));
-    REQUIRE(read.size() == 39);
-    INFO(fmt::format(
-        "Paper READY reopen cold_proof={}", read[35].value_or("NULL")));
-    REQUIRE(read[2] == inspected[0]);
-    REQUIRE(std::stoll(read[13].value()) > 0);
-    REQUIRE(std::stoll(read[14].value()) < 65565);
-    REQUIRE(read[16].value() == "t");
-    REQUIRE(read[31].value() == "0");
-    REQUIRE(read[32].value() == "0");
-    REQUIRE(read[33].value() == "0");
-    REQUIRE(read[34].value() == "0");
-    REQUIRE(read[36].value() == "0");
-    REQUIRE(read[37].value() == "0");
-    REQUIRE(read[38].value() == "1");
+	exec_sql(ctx,
+		"SET bioseq.aligner.minimizer_algorithm = 'paper_nthash_simd';");
+	REQUIRE(query_scalar_int(ctx, fmt::format(
+		"SELECT count(*) FROM bioseq.inspect_ready_minimizer_generation("
+		"'{}'::regclass,'minimizers_per_fragment',{});",
+		table, rowno)) == 1);
 }
 
 TEST_CASE("grouped32 persistence rejects asynchronous and INSERT-time legacy writers",
@@ -3120,8 +3152,8 @@ TEST_CASE("grouped32 persistence rejects asynchronous and INSERT-time legacy wri
     }
 }
 
-TEST_CASE("ordinary format-4 update rolls back its clear when a locator source is corrupt",
-          "[index_admin][doc0371][update][rev4][source-corruption][rollback]") {
+TEST_CASE("ordinary Format-5 replacement preserves its active generation when a locator source is corrupt",
+		  "[index_admin][update][format5][source-corruption][rollback]") {
     constexpr std::string_view table = "doc0371_update_source_rollback";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -3203,9 +3235,9 @@ TEST_CASE("ordinary format-4 update rolls back its clear when a locator source i
     REQUIRE(!metadata_age_before.empty());
 
     // Corrupt a later source fragment after a valid generation exists. The
-    // next ordinary rebuild clears its sidecars first, then must fail while
-    // proving/streaming the authoritative locator. Statement rollback must
-    // restore the previously committed READY generation byte family.
+    // next ordinary rebuild must fail while proving/streaming the authoritative
+    // locator, before publishing a replacement head. The stable sidecar and
+    // previously committed READY generation must remain byte-exact.
     exec_sql(ctx, fmt::format(
         "SELECT bioseq_internal.rev3_test_remove_source_fragment("
         "'{}'::regclass, 'minimizers_per_fragment', {}, 2);",

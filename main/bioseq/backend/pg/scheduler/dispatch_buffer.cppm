@@ -2022,7 +2022,8 @@ public:
 				merge_cold_index_preparation_stats(
 					operational, join_cold_policy_stats);
 				for (const auto& group : join_cpu_prepared_target.groups) {
-					if (!group.persisted_grouped32_reader) continue;
+					if (!group.persisted_grouped32_reader
+						&& !group.persisted_shape_v5_reader) continue;
 					const auto& read = group.persisted_read_stats;
 					::bioseq::pipeline_stats::PipelineOperationalStats read_delta{};
 					read_delta.persisted_generation_read_sessions = 1;
@@ -2117,7 +2118,8 @@ public:
 					join_cpu_prepared_target.groups.end(),
 					[](const auto& group) noexcept {
 						return (group.target_index != nullptr
-								|| group.persisted_grouped32_reader.has_value())
+								|| group.persisted_grouped32_reader.has_value()
+								|| group.persisted_shape_v5_reader.has_value())
 							&& group.build_set_checksum_present
 							&& group.build_set_checksum
 								== group.key_set_checksum;

@@ -30,6 +30,7 @@ import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.shader_layout;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.gpu.vulkan.phase_c_abi;
+import bioseq.gpu.vulkan.runtime;
 
 namespace {
 
@@ -1219,7 +1220,7 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 36);
+    REQUIRE(keys.size() == 38);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         return gv::cache_file_stem(a) < gv::cache_file_stem(b);
@@ -1239,6 +1240,10 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         gv::ShaderKind::phase_c_coordinate_vote_reduce_batch, 384u, 128u, 1u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::phase_c_persisted_directory_select, 384u, 128u, 1u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::phase_c_shape_v5_seed_count, 384u, 128u, 3u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::phase_c_shape_v5_seed_emit, 384u, 128u, 3u)));
     CHECK_FALSE(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::phase_c_grouped32_validate, 384u, 128u, 2u)));
     CHECK(contains_key(keys, gv::make_shader_key(
@@ -1370,6 +1375,155 @@ TEST_CASE("format-4 grouped32 ABI2 pins every device wire",
         gv::ShaderKind::phase_c_grouped32_validate, 384u, 128u, 1u)));
     CHECK(gv::valid_shader_variant_key(gv::make_shader_key(
         gv::ShaderKind::phase_c_grouped32_validate, 384u, 128u, 2u)));
+}
+
+TEST_CASE("format-5 ABI3 direct seed shaders pin raw SoA and local-position ABI",
+          "[shader_cache][shape_v5][abi3][reflection]") {
+    STATIC_REQUIRE(gv::k_gpu_shape_v5_abi_version == 3u);
+    STATIC_REQUIRE(gv::k_gpu_shape_v5_partition_required_flags == 7u);
+    STATIC_REQUIRE(sizeof(
+        gv::GpuShapeV5ResidentPartitionDescriptor) == 104u);
+    STATIC_REQUIRE(alignof(
+        gv::GpuShapeV5ResidentPartitionDescriptor) == 8u);
+    STATIC_REQUIRE(offsetof(
+        gv::GpuShapeV5ResidentPartitionDescriptor, hash_byte_offset) == 16u);
+    STATIC_REQUIRE(offsetof(
+        gv::GpuShapeV5ResidentPartitionDescriptor, control_count) == 48u);
+    STATIC_REQUIRE(offsetof(
+        gv::GpuShapeV5ResidentPartitionDescriptor, low_hash) == 72u);
+    STATIC_REQUIRE(offsetof(
+        gv::GpuShapeV5ResidentPartitionDescriptor, segment_end_bp) == 96u);
+    STATIC_REQUIRE(sizeof(gv::GpuShapeV5SeedPush) == 72u);
+    STATIC_REQUIRE(offsetof(gv::GpuShapeV5SeedPush, status_index) == 68u);
+    STATIC_REQUIRE(gv::gpu_shape_v5_seed_status_bit(
+        gv::GpuShapeV5SeedStatus::contract) == 1u);
+    STATIC_REQUIRE(gv::gpu_shape_v5_seed_status_bit(
+        gv::GpuShapeV5SeedStatus::emission) == 16u);
+    STATIC_REQUIRE(std::is_standard_layout_v<
+        gv::GpuShapeV5ResidentPartitionDescriptor>);
+    constexpr gv::GpuShapeV5ResidentPartitionDescriptor descriptor{
+        .partition_id = 3u,
+        .directory_ordinal = 0u,
+        .position_segment = 0u,
+        .flags = gv::k_gpu_shape_v5_partition_required_flags,
+        .hash_byte_offset = 0u,
+        .prefix_byte_offset = 4u,
+        .count_byte_offset = 12u,
+        .position_byte_offset = 0u,
+        .control_count = 2u,
+        .position_count = 3u,
+        .hash_width = 2u,
+        .offset_width = 2u,
+        .count_width = 2u,
+        .position_width = 2u,
+        .low_hash = 7u,
+        .high_hash = 11u,
+        .segment_base_bp = 100u,
+        .segment_end_bp = 200u,
+    };
+    STATIC_REQUIRE(gv::gpu_shape_v5_partition_descriptor_valid(
+        descriptor, 16u, 6u));
+    constexpr auto invalid_descriptor = [](auto value) {
+        value.position_width = 1u;
+        return value;
+    }(descriptor);
+    STATIC_REQUIRE_FALSE(gv::gpu_shape_v5_partition_descriptor_valid(
+        invalid_descriptor, 16u, 6u));
+
+    CHECK(gv::descriptor_binding_count(
+        gv::DescriptorLayoutKind::phase_c_shape_v5_seed) == 9u);
+    CHECK(gv::descriptor_layout_for(
+        gv::ShaderKind::phase_c_shape_v5_seed_count)
+        == gv::DescriptorLayoutKind::phase_c_shape_v5_seed);
+    CHECK(gv::descriptor_layout_for(
+        gv::ShaderKind::phase_c_shape_v5_seed_emit)
+        == gv::DescriptorLayoutKind::phase_c_shape_v5_seed);
+    CHECK(gv::push_constant_size(
+        gv::ShaderKind::phase_c_shape_v5_seed_count) == 72u);
+    CHECK(gv::push_constant_size(
+        gv::ShaderKind::phase_c_shape_v5_seed_emit) == 72u);
+
+    const std::array kinds{
+        gv::ShaderKind::phase_c_shape_v5_seed_count,
+        gv::ShaderKind::phase_c_shape_v5_seed_emit,
+    };
+    std::vector<gv::ShaderVariantKey> static_keys;
+    gv::for_each_static_shader_variant(
+        gv::VulkanStaticVariantInputs{},
+        [&](gv::ShaderVariantKey key) { static_keys.push_back(key); });
+    for (const gv::ShaderKind kind : kinds) {
+        const auto key = gv::make_shader_key(kind, 384u, 128u, 3u);
+        CHECK(gv::checked_shader_kind(key.kind) == kind);
+        CHECK(gv::valid_shader_variant_key(key));
+        CHECK_FALSE(gv::valid_shader_variant_key(
+            gv::make_shader_key(kind, 384u, 128u, 1u)));
+        CHECK(std::count(static_keys.begin(), static_keys.end(), key) == 1);
+        const gv::ShaderCompileRequest request{
+            .kind = kind,
+            .tile_size = 384u,
+            .local_size = 128u,
+            .max_span = 3u,
+        };
+        const auto spirv = gv::compile_shader_spirv(request);
+        REQUIRE_FALSE(spirv.empty());
+        CHECK(spirv_opcode_count(spirv, 241u) > 0u);  // OpAtomicOr status.
+        const auto layout = gv::scan_spirv_layout(spirv);
+        CHECK(layout.has_binding_array_stride(0u, 1u, 104u));
+        CHECK(layout.has_binding_struct_offsets(
+            0u, 1u, std::array<std::uint32_t, 18>{
+                0u, 4u, 8u, 12u, 16u, 24u, 32u, 40u, 48u,
+                52u, 56u, 60u, 64u, 68u, 72u, 80u, 88u, 96u}));
+        CHECK(layout.has_push_constant_offsets(
+            std::array<std::uint32_t, 18>{
+                0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u,
+                36u, 40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u}));
+    }
+}
+
+TEST_CASE("format-5 seed jobs require strict XOR resident representation",
+          "[vulkan][phase_c][shape_v5][route]") {
+    gv::Buffer legacy_slots;
+    gv::Buffer legacy_positions;
+    gv::PhaseCShapeV5ResidentView shape_view{};
+
+    const gv::PhaseCSeedCoordinateJob legacy{
+        .slots = &legacy_slots,
+        .positions = &legacy_positions,
+        .target_len = 100u,
+    };
+    CHECK(gv::phase_c_seed_index_representation(legacy)
+          == gv::PhaseCSeedIndexRepresentation::legacy_slot_table);
+
+    const gv::PhaseCSeedCoordinateJob shape{
+        .target_len = 100u,
+        .shape_v5 = &shape_view,
+    };
+    CHECK(gv::phase_c_seed_index_representation(shape)
+          == gv::PhaseCSeedIndexRepresentation::shape_v5);
+
+    const gv::PhaseCSeedCoordinateJob ambiguous{
+        .slots = &legacy_slots,
+        .positions = &legacy_positions,
+        .target_len = 100u,
+        .shape_v5 = &shape_view,
+    };
+    CHECK(gv::phase_c_seed_index_representation(ambiguous)
+          == gv::PhaseCSeedIndexRepresentation::invalid);
+
+    const gv::PhaseCSeedCoordinateJob shape_with_legacy_metadata{
+        .target_len = 100u,
+        .position_count = 1u,
+        .shape_v5 = &shape_view,
+    };
+    CHECK(gv::phase_c_seed_index_representation(shape_with_legacy_metadata)
+          == gv::PhaseCSeedIndexRepresentation::invalid);
+
+    const gv::PhaseCSeedCoordinateJob incomplete_legacy{
+        .slots = &legacy_slots,
+        .target_len = 100u,
+    };
+    CHECK(gv::phase_c_seed_index_representation(incomplete_legacy)
+          == gv::PhaseCSeedIndexRepresentation::invalid);
 }
 
 TEST_CASE("format-4 bounded stream kernels compile and reflect exact raw ABI",

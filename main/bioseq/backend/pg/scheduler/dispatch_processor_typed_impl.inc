@@ -2921,9 +2921,16 @@ template <class S>
 					"BioseqBatchJoin prepared query group is missing");
 			}
 			if (persisted_required) {
+				const bool has_grouped32_reader = prepared_group != nullptr
+					&& prepared_group->persisted_grouped32_reader.has_value();
+				const bool has_shape_v5_reader = prepared_group != nullptr
+					&& prepared_group->persisted_shape_v5_reader.has_value();
 				if (prepared_group == nullptr
-					|| !prepared_group->persisted_grouped32_reader
-					|| !prepared_group->persisted_grouped32_reader->ready()
+					|| has_grouped32_reader == has_shape_v5_reader
+					|| (has_grouped32_reader
+						&& !prepared_group->persisted_grouped32_reader->ready())
+					|| (has_shape_v5_reader
+						&& !prepared_group->persisted_shape_v5_reader->ready())
 					|| prepared_group->target_index
 					|| prepared_group->target_index_source
 						!= ::bioseq::pipeline_stats::TargetIndexSource::persisted
@@ -2932,18 +2939,29 @@ template <class S>
 					raise_required_persisted_index_error(
 						scanner_pg_ctx,
 						scanner_pg_ctx->target_rownos[i],
-						"the exact READY grouped32 reader is absent, incomplete, or "
+						"the exact READY native persisted reader is absent, incomplete, duplicated, or "
 						"mixed with a legacy assembled index");
 				}
 				ensure_q();
-				collection = minimap2_port_with_index_pg_checked(
-					fq_pg,
-					ft_pg,
-					*query_minimizers,
-					*prepared_group->persisted_grouped32_reader,
-					idx_params,
-					/*gpu_index_cache=*/nullptr,
-					bioseq::indexing::GpuIndexCacheIdentity{});
+				if (has_shape_v5_reader) {
+					collection = minimap2_port_with_index_pg_checked(
+						fq_pg,
+						ft_pg,
+						*query_minimizers,
+						*prepared_group->persisted_shape_v5_reader,
+						idx_params,
+						/*gpu_index_cache=*/nullptr,
+						bioseq::indexing::GpuIndexCacheIdentity{});
+				} else {
+					collection = minimap2_port_with_index_pg_checked(
+						fq_pg,
+						ft_pg,
+						*query_minimizers,
+						*prepared_group->persisted_grouped32_reader,
+						idx_params,
+						/*gpu_index_cache=*/nullptr,
+						bioseq::indexing::GpuIndexCacheIdentity{});
+				}
 				++prepared_group->persisted_reader_queries;
 				assembled = true;
 				scanner_pg_ctx->target_index_sources[i] =

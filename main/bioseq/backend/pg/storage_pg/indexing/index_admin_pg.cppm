@@ -1020,22 +1020,29 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
     }
 
-    // clear the index for EVERY SEQ column first (idempotent rebuild).
-    for (std::int16_t a : seq_attnos) {
-        acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name);
-        auto f = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
-        auto q = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
-        auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, nullptr, work);
-        try {
-            idx.clear_index(f, q, tb, name);
-            f.close_checked();
-            q.close_checked();
-            tb.close_checked();
-        } catch (...) {
-            f.abandon_after_pg_error_noexcept();
-            q.abandon_after_pg_error_noexcept();
-            tb.abandon_after_pg_error_noexcept();
-            throw;
+    // Legacy layouts are replace-in-place and still require a destructive
+    // clear.  Generation-backed minimizers instead append a new immutable
+    // positive generation to the existing canonical sidecar and atomically
+    // replace only generation zero's head.  Clearing here would drop the
+    // relation, invalidate its OID/relfilenode, and erase the rollback/GC
+    // predecessor before publication.
+    if (!use_grouped32_generation) {
+        for (std::int16_t a : seq_attnos) {
+            acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name);
+            auto f = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
+            auto q = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
+            auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, nullptr, work);
+            try {
+                idx.clear_index(f, q, tb, name);
+                f.close_checked();
+                q.close_checked();
+                tb.close_checked();
+            } catch (...) {
+                f.abandon_after_pg_error_noexcept();
+                q.abandon_after_pg_error_noexcept();
+                tb.abandon_after_pg_error_noexcept();
+                throw;
+            }
         }
     }
 
@@ -1857,7 +1864,7 @@ static_assert(!publicly_relabelable_ready_minimizer_publication<
     pg_unreachable();
 }
 
-/// Build, completely reread, and atomically publish one format-4 MPF or MPS
+/// Build, completely reread, and atomically publish one Format-5 MPF or MPS
 /// generation from an already-authoritative PostgreSQL-backed lazy sequence.
 ///
 /// Ordinary update_index uses this route for PostgreSQL locator-backed MPF/MPS
@@ -1935,6 +1942,11 @@ build_and_publish_grouped32_minimizer_generation_pg(
 
     constexpr std::uint16_t kWindowSize = 10u;
     constexpr std::uint16_t kKmerSize = 15u;
+    constexpr std::uint64_t kMaxOccCap =
+        bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap;
+    constexpr std::uint16_t kAlphabetCode =
+        pgseq_supported_alphabets::index_of<
+            typename Traits::alphabet_type>();
     constexpr std::uint64_t letters_per_unit = Traits::letters_per_unit;
     static_assert(letters_per_unit != 0);
     const std::uint64_t expected_units = locator.total_bp_size / letters_per_unit
@@ -1992,13 +2004,14 @@ build_and_publish_grouped32_minimizer_generation_pg(
         const auto derived_profile =
             bioseq::indexing::minimizer_generation_payload_profile(
                 bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32,
-                scheme,
-                kKmerSize);
+                    grouped_shape_soa_segment_local,
+                scheme, kAlphabetCode, kKmerSize,
+                bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
+                kMaxOccCap);
         if (!derived_profile) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
-                "READY minimizer backend has no canonical format-4 profile",
+                "READY minimizer backend has no canonical Format-5 profile",
                 fmt::format("backend={} wire_error={}",
                     bioseq::simd::HWY_NAMESPACE::
                         minimizer_sketch_backend_name(backend),
@@ -2021,7 +2034,6 @@ build_and_publish_grouped32_minimizer_generation_pg(
         bioseq::indexing::MpfGenerationExecutionEvidence mpf_execution{};
         bioseq::indexing::MpsGenerationExecutionEvidence mps_execution{};
         ReadyMinimizerGenerationExecutionEvidencePg execution{};
-        std::optional<std::uint64_t> replaced_generation_id{};
         bool mps_spill_started = false;
     };
     auto* state = new BuildState{
@@ -2050,6 +2062,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend =
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
         ReadyMinimizerGenerationExecutionEvidencePg execution{};
+        std::optional<std::uint64_t> replaced_generation_id{};
         std::uint64_t mps_spill_generation_token = 0;
         std::uint64_t mps_spill_mutation_before_release = 0;
         std::uint64_t mps_spill_mutation_after_release = 0;
@@ -2108,7 +2121,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
             const bioseq::indexing::MinimizerGenerationEncodeOptions options{
                 .wire_format = bioseq::indexing::
                     MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32,
+                        grouped_shape_soa_segment_local,
                 .generation_id = result.generation_id,
                 .source_identity = result.source_identity,
                 .source_content_checksum =
@@ -2121,6 +2134,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 .window_size = kWindowSize,
                 .minimizer_scheme_id = scheme.id,
                 .minimizer_scheme_version = scheme.version,
+                .max_occ_cap = kMaxOccCap,
             };
             if (is_mpf) {
                 auto encoded = MpfIndex::encode_persisted_generation(
@@ -2283,7 +2297,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 result.compatibility_checksum;
             if (manifest.wire_format != bioseq::indexing::
                     MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32
+                        grouped_shape_soa_segment_local
                 || manifest.generation_id != result.generation_id
                 || manifest.source_identity != result.source_identity
                 || manifest.source_content_checksum
@@ -2300,6 +2314,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 || manifest.producer_backend_identity_version
                     != producer_backend.version
                 || manifest.gpu_abi_version != profile.gpu_abi_version
+                || !manifest.shape_v5
+                || manifest.shape_v5->max_occ_cap != kMaxOccCap
                 || manifest.position_segment_span_bp == 0
                 || manifest.position_segment_span_bp
                     > bioseq::indexing::kMinimizerPreferredSegmentSpanBp
@@ -2351,10 +2367,10 @@ build_and_publish_grouped32_minimizer_generation_pg(
             const auto reread_expected = bioseq::indexing::
                 expected_minimizer_compatibility_for_backend(
                     bioseq::indexing::MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32,
+                        grouped_shape_soa_segment_local,
                     backend, state->source.alphabet_code,
                     state->source.storage_unit_byte_width,
-                    kKmerSize, kWindowSize);
+                    kKmerSize, kWindowSize, kMaxOccCap);
             if (!reread_expected) {
                 ready_minimizer_error_as_cpp(
                     ERRCODE_DATA_CORRUPTED,
@@ -3091,9 +3107,10 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
         const auto expected = bioseq::indexing::
             expected_minimizer_compatibility_for_backend(
                 bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32,
+                    grouped_shape_soa_segment_local,
                 backend, result.alphabet_code,
-                result.storage_unit_byte_width, kKmerSize, kWindowSize);
+                result.storage_unit_byte_width, kKmerSize, kWindowSize,
+                bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap);
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
@@ -3115,7 +3132,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
             minimizer_producer_backend_identity_for_backend(backend);
         if (result.head.wire_format
                 != bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32
+                    grouped_shape_soa_segment_local
             || result.head.generation_id
                 != result.publication->generation_id()
             || result.head.source_identity
@@ -5908,7 +5925,10 @@ inspect_ready_minimizer_generation_impl(
                     grouped_hash32_segment_local32
             && preliminary_head.wire_format
                 != bioseq::indexing::MinimizerGenerationWireFormat::
-                    sorted_dense_global64) {
+                    sorted_dense_global64
+            && preliminary_head.wire_format
+                != bioseq::indexing::MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
                 "bioseq minimizer generation wire format is unsupported");
@@ -5920,7 +5940,14 @@ inspect_ready_minimizer_generation_impl(
                 result.source.alphabet_code,
                 result.source.storage_unit_byte_width,
                 static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
-                static_cast<std::uint16_t>(bioseq_aligner_window_size));
+                static_cast<std::uint16_t>(bioseq_aligner_window_size),
+                preliminary_head.wire_format
+                        == bioseq::indexing::MinimizerGenerationWireFormat::
+                            grouped_shape_soa_segment_local
+                    ? std::optional<std::uint64_t>{
+                        bioseq::indexing::
+                            kMinimizerShapeV5DefaultMaxOccCap}
+                    : std::nullopt);
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,

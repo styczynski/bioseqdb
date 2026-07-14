@@ -2883,15 +2883,50 @@ Datum bioseq_internal_rev3_test_copy_primary_index_shape(PG_FUNCTION_ARGS) {
 	const Oid table_oid = PG_GETARG_OID(0);
 	const Oid donor_index_oid = PG_GETARG_OID(1);
 	text* mode_text = PG_GETARG_TEXT_PP(2);
-	const std::string mode(
+	const std::string_view mode(
 		VARDATA_ANY(mode_text), VARSIZE_ANY_EXHDR(mode_text));
 	if (mode != "partial" && mode != "expression") {
 		ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			 errmsg("bioseq rev3 index-shape mode must be partial or expression")));
 	}
-	bioseq::storage::indexing::rev3_test_copy_primary_index_shape_pg(
-		table_oid, donor_index_oid, mode == "partial");
+	ErrorData* postgres_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char error_detail[512] = "std::exception without detail";
+	try {
+		bioseq::storage::indexing::rev3_test_copy_primary_index_shape_pg(
+			table_oid, donor_index_oid, mode == "partial");
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		postgres_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			error_detail,
+			error.what() == nullptr
+				? "std::exception without detail"
+				: error.what(),
+			sizeof(error_detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+	// The corruption seam can raise PostgreSQL ERROR through the C++ cleanup
+	// bridge.  Translate it back only after that C++ stack has unwound; every
+	// local still alive here is trivially destructible.
+	if (postgres_error != nullptr) {
+		ReThrowError(postgres_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq rev3 index-shape fixture raised a C++ exception"),
+			 errdetail_internal("%s", error_detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq rev3 index-shape fixture raised an unknown C++ exception")));
+	}
 	PG_RETURN_VOID();
 }
 CXX_PG_FUNCTION_INFO_V1(bioseq_internal_rev3_test_rewrite_source_checksum);

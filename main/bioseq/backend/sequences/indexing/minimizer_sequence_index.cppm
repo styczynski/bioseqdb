@@ -897,9 +897,10 @@ public:
 };
 }  // namespace mps_evidence_detail
 
-/// Operation-owned proof for one inactive format-4 MPS generation.  Native
-/// collection is performed exactly once into PostgreSQL-owned spill runs;
-/// planning and emission then replay those same runs.  The two phases therefore
+/// Operation-owned proof for one persisted MPS generation. Native collection
+/// is performed exactly once into PostgreSQL-owned spill runs; planning and
+/// emission then replay those same runs. Format-5 performs one planning replay
+/// plus separate control and position emission replays. The phases therefore
 /// have deliberately separate route and replay evidence.
 class MpsGenerationExecutionEvidence {
 public:
@@ -2772,8 +2773,9 @@ struct MinimizerSequenceMergedIndex {
             evidence.spill_storage_binding};
     }
 
-    /// Concrete external-spill construction seam. The current revision-2
-    /// writer/reader remains live and fail-closed for ordinal 2.
+    /// Concrete external-spill construction seam. Both the frozen Format-4
+    /// layout and the canonical Format-5 shape layout consume the same sealed
+    /// MPS spill. Other wire formats are not an implicit compatibility route.
     template <MinimizerGenerationRowSink Sink>
     [[nodiscard]] static std::expected<
         EncodedMinimizerGeneration,
@@ -2788,8 +2790,12 @@ struct MinimizerSequenceMergedIndex {
         if (execution_evidence_out != nullptr) {
             *execution_evidence_out = {};
         }
-        if (options.wire_format != MinimizerGenerationWireFormat::
+        const bool supported_mps_wire_format =
+            options.wire_format == MinimizerGenerationWireFormat::
                 grouped_hash32_segment_local32
+            || options.wire_format == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local;
+        if (!supported_mps_wire_format
             || options.window_size != 10 || options.kmer_size != 15
             || spill.position_segment_span_bp_
                 != kMinimizerPreferredSegmentSpanBp
@@ -2816,9 +2822,9 @@ struct MinimizerSequenceMergedIndex {
             evidence.manifest_position_segment_span_bp =
                 encoded->manifest.position_segment_span_bp;
             evidence.manifest_bound =
-                encoded->manifest.wire_format
-                    == MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32
+                encoded->manifest.wire_format == options.wire_format
+                && encoded->manifest.wire_format
+                    == evidence.generation_wire_format
                 && encoded->manifest.target_length == evidence.target_length
                 && encoded->manifest.position_count
                     == evidence.spilled_event_count

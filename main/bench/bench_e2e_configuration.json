@@ -50,7 +50,7 @@
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
-        "cigar_projection": true,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna4 2 Gbp reference, 16 independent ~5 Mbp HiFi-error query rows through BioseqBatchJoin (DOC0283 seed)" },
 
@@ -60,7 +60,7 @@
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
-        "cigar_projection": true,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna5 2 Gbp reference with deterministic N bases and 16 query rows; same biological parameters as dna4" },
 
@@ -70,7 +70,7 @@
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
-        "cigar_projection": true,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna4 4 Gbp reference, 16 independent ~5 Mbp query rows; minimap2 ref split into two records" },
 
@@ -80,7 +80,7 @@
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
-        "cigar_projection": true,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna5 4 Gbp reference with deterministic N bases and 16 query rows; same biological parameters as dna4" }
     ,
@@ -168,6 +168,13 @@
         "alignment_partial": { "type": "evaluation", "rules": [] },
         "alignment_fully_drained": { "type": "evaluation", "rules": [] },
         "persisted_generation_id": { "type": "evaluation", "rules": [] },
+        "pre_restart_persisted_gpu_abi_version": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_rows_read": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_bytes_read": { "type": "evaluation", "rules": [] },
+        "persisted_format5_manifest_contract_valid": { "type": "evaluation", "rules": [] },
+        "persisted_generation_read_sessions": { "type": "evaluation", "rules": [] },
+        "persisted_relation_opens": { "type": "evaluation", "rules": [] },
+        "persisted_index_scans": { "type": "evaluation", "rules": [] },
         "persisted_source_identity_present": { "type": "evaluation", "rules": [] },
         "gpu_environment_present": { "type": "evaluation", "rules": [] },
         "gpu_pipeline_cache_seed_size": { "type": "evaluation", "rules": [] },
@@ -248,6 +255,7 @@
         "min_tmp_available_gib":  { "type": "evaluation", "rules": [] },
         "peak_swap_used_mb":      { "type": "evaluation", "rules": [] },
         "just_index_restart_performed": { "type": "evaluation", "rules": [] },
+        "just_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
         "cold_no_index_restart_performed": { "type": "evaluation", "rules": [] },
         "cold_no_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
         "cold_no_index_pre_restart_target_rows": { "type": "evaluation", "rules": [] },
@@ -453,6 +461,34 @@
           "rules": []
         },
         "persisted_generation_id": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "pre_restart_persisted_gpu_abi_version": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_manifest_rows_read": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_manifest_bytes_read": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_format5_manifest_contract_valid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_generation_read_sessions": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_relation_opens": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_index_scans": {
           "type": "evaluation",
           "rules": []
         },
@@ -689,6 +725,10 @@
           "type": "evaluation",
           "rules": []
         },
+        "just_index_restart_identity_changed": {
+          "type": "evaluation",
+          "rules": []
+        },
         "cold_no_index_restart_performed": {
           "type": "evaluation",
           "rules": []
@@ -824,6 +864,10 @@
         "alignment_partial": { "type": "evaluation", "rules": [] },
         "alignment_fully_drained": { "type": "evaluation", "rules": [] },
         "persisted_generation_id": { "type": "evaluation", "rules": [] },
+        "pre_restart_persisted_gpu_abi_version": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_rows_read": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_bytes_read": { "type": "evaluation", "rules": [] },
+        "persisted_format5_manifest_contract_valid": { "type": "evaluation", "rules": [] },
         "persisted_source_identity_present": { "type": "evaluation", "rules": [] },
         "gpu_environment_present": { "type": "evaluation", "rules": [] },
         "gpu_pipeline_cache_seed_size": { "type": "evaluation", "rules": [] },

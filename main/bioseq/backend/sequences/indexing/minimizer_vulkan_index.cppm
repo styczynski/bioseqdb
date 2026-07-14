@@ -2447,6 +2447,810 @@ private:
     std::vector<GpuResidentPartitionDeviceView> views_;
 };
 
+// ===========================================================================
+// Format-5 / ABI3 full-generation cold resident (scheduler routing follows)
+// ===========================================================================
+
+static_assert(kMinimizerShapeV5GpuAbiVersion
+    == bioseq::gpu::vulkan::k_gpu_shape_v5_abi_version);
+
+/// Immutable identity of one restart-cold Format-5 upload.  The opaque
+/// cold_load_identity is supplied by the PostgreSQL/scheduler owner; it is not
+/// derived from a host pointer or from query contents.
+struct GpuShapeV5ResidentIdentity {
+    MinimizerGenerationWireFormat wire_format =
+        MinimizerGenerationWireFormat::invalid;
+    std::uint64_t generation_id = 0u;
+    std::uint64_t source_identity = 0u;
+    std::uint64_t source_content_checksum = 0u;
+    std::uint64_t compatibility_checksum = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    std::uint64_t directory_checksum = 0u;
+    std::uint64_t payload_checksum = 0u;
+    std::uint64_t cold_load_identity = 0u;
+    std::uint64_t directory_bytes = 0u;
+    std::uint64_t control_bytes = 0u;
+    std::uint64_t position_bytes = 0u;
+    std::uint64_t descriptor_bytes = 0u;
+    std::uint64_t control_count = 0u;
+    std::uint64_t position_count = 0u;
+    std::uint32_t descriptor_count = 0u;
+    GpuDeviceUuid device_uuid{};
+    std::uint32_t gpu_abi_version = 0u;
+
+    [[nodiscard]] bool operator==(
+        const GpuShapeV5ResidentIdentity&) const = default;
+};
+
+[[nodiscard]] inline bool valid_gpu_shape_v5_resident_identity(
+    const GpuShapeV5ResidentIdentity& identity) noexcept
+{
+    return identity.wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local
+        && identity.generation_id != 0u
+        && identity.source_identity != 0u
+        && identity.cold_load_identity != 0u
+        && gpu_device_uuid_is_bound(identity.device_uuid)
+        && identity.gpu_abi_version == kMinimizerShapeV5GpuAbiVersion;
+}
+
+/// Positive and prohibited-work evidence owned by a completed cold upload.
+/// Counts describe bytes copied directly into their final device buffers; no
+/// decoded host index or temporary pair array is part of this representation.
+struct GpuShapeV5ColdLoadProof {
+    std::uint64_t cold_cache_misses = 0u;
+    std::uint64_t full_generations_ingested = 0u;
+    std::uint64_t control_extents_validated = 0u;
+    std::uint64_t position_extents_validated = 0u;
+    std::uint64_t control_bytes_copied = 0u;
+    std::uint64_t position_bytes_copied = 0u;
+    std::uint64_t descriptor_bytes_copied = 0u;
+    std::uint64_t device_allocation_bytes = 0u;
+    std::uint64_t admitted_device_bytes = 0u;
+    std::uint64_t validated_receipt_rows = 0u;
+    std::uint64_t raw_rehashed_rows = 0u;
+    std::uint64_t payload_hash_byte_visits = 0u;
+    std::uint64_t forbidden_host_control_decodes = 0u;
+    std::uint64_t forbidden_host_position_decodes = 0u;
+    std::uint64_t forbidden_host_position_globalizations = 0u;
+    std::uint64_t forbidden_host_index_rebuilds = 0u;
+    std::uint64_t forbidden_cpu_or_simd_fallbacks = 0u;
+
+    [[nodiscard]] bool has_forbidden_work() const noexcept {
+        return forbidden_host_control_decodes != 0u
+            || forbidden_host_position_decodes != 0u
+            || forbidden_host_position_globalizations != 0u
+            || forbidden_host_index_rebuilds != 0u
+            || forbidden_cpu_or_simd_fallbacks != 0u;
+    }
+};
+
+class GpuShapeV5FullGenerationIngest;
+
+/// Cacheable, immutable Format-5 target.  `controls` retains each persisted
+/// SoA extent byte-for-byte and `positions` retains the persisted segment-local
+/// scalar lanes byte-for-byte.  The descriptor buffer is the only derived
+/// device object and contains metadata/byte offsets, never decoded payload.
+class GpuResidentShapeV5Target {
+private:
+    struct ConstructionToken {};
+
+public:
+    GpuResidentShapeV5Target(
+        ConstructionToken,
+        bioseq::parallelism::MemoryPermit permit,
+        bioseq::gpu::vulkan::Buffer controls,
+        bioseq::gpu::vulkan::Buffer positions,
+        bioseq::gpu::vulkan::Buffer descriptors,
+        GpuShapeV5ResidentIdentity identity,
+        std::uint64_t directory_bytes,
+        std::uint64_t control_bytes,
+        std::uint64_t position_bytes,
+        std::uint64_t descriptor_bytes,
+        std::uint64_t control_count,
+        std::uint64_t position_count,
+        std::uint32_t descriptor_count) noexcept
+        : permit_(std::move(permit)),
+          controls_(std::move(controls)),
+          positions_(std::move(positions)),
+          descriptors_(std::move(descriptors)),
+          identity_(identity),
+          directory_bytes_(directory_bytes),
+          control_bytes_(control_bytes),
+          position_bytes_(position_bytes),
+          descriptor_bytes_(descriptor_bytes),
+          control_count_(control_count),
+          position_count_(position_count),
+          descriptor_count_(descriptor_count) {}
+
+    [[nodiscard]] const bioseq::gpu::vulkan::Buffer& controls() const noexcept {
+        return controls_;
+    }
+    [[nodiscard]] const bioseq::gpu::vulkan::Buffer& positions() const noexcept {
+        return positions_;
+    }
+    [[nodiscard]] const bioseq::gpu::vulkan::Buffer& descriptors() const noexcept {
+        return descriptors_;
+    }
+    [[nodiscard]] const GpuShapeV5ResidentIdentity& identity() const noexcept {
+        return identity_;
+    }
+    [[nodiscard]] const GpuShapeV5ColdLoadProof& cold_load_proof() const noexcept {
+        return proof_;
+    }
+    [[nodiscard]] std::uint64_t admitted_device_bytes() const noexcept {
+        return permit_.bytes();
+    }
+    [[nodiscard]] std::uint64_t directory_bytes() const noexcept {
+        return directory_bytes_;
+    }
+    [[nodiscard]] std::uint64_t control_bytes() const noexcept {
+        return control_bytes_;
+    }
+    [[nodiscard]] std::uint64_t position_bytes() const noexcept {
+        return position_bytes_;
+    }
+    [[nodiscard]] std::uint64_t descriptor_bytes() const noexcept {
+        return descriptor_bytes_;
+    }
+    [[nodiscard]] std::uint64_t control_count() const noexcept {
+        return control_count_;
+    }
+    [[nodiscard]] std::uint64_t position_count() const noexcept {
+        return position_count_;
+    }
+    [[nodiscard]] std::uint32_t descriptor_count() const noexcept {
+        return descriptor_count_;
+    }
+
+    /// This slice is an index-residency proof, not a scheduler execution proof.
+    [[nodiscard]] static constexpr bool
+    qualifies_as_all_gpu_execution() noexcept { return false; }
+    [[nodiscard]] static constexpr bool
+    permits_host_decode_or_rebuild() noexcept { return false; }
+
+    [[nodiscard]] bool validated() const noexcept {
+        const std::uint64_t payload_bytes =
+            bioseq::parallelism::saturating_add(
+                control_bytes_, position_bytes_);
+        const std::uint64_t expected_directory_bytes =
+            bioseq::parallelism::saturating_mul(
+                descriptor_count_,
+                MinimizerBucketDirEntry::format5_encoded_bytes);
+        const std::uint64_t expected_descriptor_bytes =
+            bioseq::parallelism::saturating_mul(
+                descriptor_count_,
+                sizeof(bioseq::gpu::vulkan::
+                    GpuShapeV5ResidentPartitionDescriptor));
+        const std::uint64_t allocation_bytes =
+            bioseq::parallelism::saturating_add(
+                controls_.allocation_bytes,
+                bioseq::parallelism::saturating_add(
+                    positions_.allocation_bytes,
+                    descriptors_.allocation_bytes));
+        return valid_gpu_shape_v5_resident_identity(identity_)
+            && controls_.valid() && positions_.valid() && descriptors_.valid()
+            && payload_bytes
+                != (std::numeric_limits<std::uint64_t>::max)()
+            && expected_directory_bytes == directory_bytes_
+            && expected_descriptor_bytes == descriptor_bytes_
+            && identity_.directory_bytes == directory_bytes_
+            && identity_.control_bytes == control_bytes_
+            && identity_.position_bytes == position_bytes_
+            && identity_.descriptor_bytes == descriptor_bytes_
+            && identity_.control_count == control_count_
+            && identity_.position_count == position_count_
+            && identity_.descriptor_count == descriptor_count_
+            && control_bytes_ <= controls_.bytes
+            && position_bytes_ <= positions_.bytes
+            && descriptor_bytes_ <= descriptors_.bytes
+            && allocation_bytes
+                != (std::numeric_limits<std::uint64_t>::max)()
+            && allocation_bytes == permit_.bytes()
+            && proof_.cold_cache_misses == 1u
+            && proof_.full_generations_ingested == 1u
+            && proof_.control_extents_validated == descriptor_count_
+            && proof_.position_extents_validated == descriptor_count_
+            && proof_.control_bytes_copied == control_bytes_
+            && proof_.position_bytes_copied == position_bytes_
+            && proof_.descriptor_bytes_copied == descriptor_bytes_
+            && proof_.device_allocation_bytes == allocation_bytes
+            && proof_.admitted_device_bytes == permit_.bytes()
+            && proof_.validated_receipt_rows != 0u
+            && proof_.raw_rehashed_rows == 0u
+            && proof_.payload_hash_byte_visits == 0u
+            && !proof_.has_forbidden_work();
+    }
+
+private:
+    // First declaration ensures buffers are destroyed before their admission.
+    bioseq::parallelism::MemoryPermit permit_{};
+    bioseq::gpu::vulkan::Buffer controls_{};
+    bioseq::gpu::vulkan::Buffer positions_{};
+    bioseq::gpu::vulkan::Buffer descriptors_{};
+    GpuShapeV5ResidentIdentity identity_{};
+    GpuShapeV5ColdLoadProof proof_{};
+    std::uint64_t directory_bytes_ = 0u;
+    std::uint64_t control_bytes_ = 0u;
+    std::uint64_t position_bytes_ = 0u;
+    std::uint64_t descriptor_bytes_ = 0u;
+    std::uint64_t control_count_ = 0u;
+    std::uint64_t position_count_ = 0u;
+    std::uint32_t descriptor_count_ = 0u;
+
+    friend class GpuShapeV5FullGenerationIngest;
+};
+
+/// Direct full-generation receiver for the first restart-cold measurement.
+/// Requests follow PostgreSQL's physical Format-5 order: every control extent,
+/// then every position extent. Chunks are copied once into final resident
+/// buffers. PostgreSQL's validated-row receipts supply already-checked row
+/// checksums, avoiding a second payload-byte hash pass. The raw entry point is
+/// deliberately test-only and cannot publish a resident.
+class GpuShapeV5FullGenerationIngest {
+public:
+    GpuShapeV5FullGenerationIngest(
+        const GpuShapeV5FullGenerationIngest&) = delete;
+    GpuShapeV5FullGenerationIngest& operator=(
+        const GpuShapeV5FullGenerationIngest&) = delete;
+    GpuShapeV5FullGenerationIngest(
+        GpuShapeV5FullGenerationIngest&&) noexcept = default;
+    GpuShapeV5FullGenerationIngest& operator=(
+        GpuShapeV5FullGenerationIngest&&) = delete;
+
+    [[nodiscard]] static std::expected<
+        GpuShapeV5FullGenerationIngest,
+        GpuPersistedIndexFoundationError>
+    begin(
+        bioseq::gpu::vulkan::Runtime& runtime,
+        const MinimizerGenerationHead& head,
+        const MinimizerGenerationManifest& manifest,
+        const ExpectedMinimizerCompatibility& expected,
+        const DirView& directory,
+        std::uint64_t cold_load_identity)
+    {
+        if constexpr (std::endian::native != std::endian::little) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::unsupported_endianness);
+        }
+        if (!runtime.usable()
+            || !gpu_device_uuid_is_bound(runtime.features().device_uuid)
+            || cold_load_identity == 0u) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::invalid_identity);
+        }
+        const bool format5 = manifest.wire_format
+                == MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local
+            && manifest.gpu_abi_version == kMinimizerShapeV5GpuAbiVersion
+            && directory.profile().wire_format
+                == MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local
+            && directory.profile().gpu_abi_version
+                == kMinimizerShapeV5GpuAbiVersion
+            && manifest.shape_v5.has_value()
+            && directory.profile().shape_v5 == manifest.shape_v5;
+        if (!format5
+            || !validate_minimizer_generation_compatibility(
+                manifest, expected)
+            || !validate_minimizer_generation_metadata(
+                head, manifest, directory)) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::metadata_mismatch);
+        }
+        const auto entries = directory.entries();
+        if (entries.size()
+                > (std::numeric_limits<std::uint32_t>::max)()
+            || entries.size()
+                > (std::numeric_limits<std::size_t>::max)() / 2u) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::arithmetic_overflow);
+        }
+
+        std::vector<std::uint64_t> control_offsets(entries.size());
+        std::vector<std::uint64_t> position_offsets(entries.size());
+        std::vector<bioseq::gpu::vulkan::
+            GpuShapeV5ResidentPartitionDescriptor> descriptors;
+        descriptors.reserve(entries.size());
+        std::uint64_t control_bytes = 0u;
+        std::uint64_t position_bytes = 0u;
+        std::uint64_t control_count = 0u;
+        std::uint64_t position_count = 0u;
+        for (std::size_t ordinal = 0u; ordinal < entries.size(); ++ordinal) {
+            const MinimizerBucketDirEntry& entry = entries[ordinal];
+            if (validate_minimizer_bucket_dir_entry(
+                    entry, directory.profile()).has_value()
+                || entry.partition_id != ordinal
+                || entry.control_element_count
+                    > (std::numeric_limits<std::uint32_t>::max)()
+                || entry.position_element_count
+                    > (std::numeric_limits<std::uint32_t>::max)()) {
+                return std::unexpected(
+                    GpuPersistedIndexFoundationError::partition_mismatch);
+            }
+            const auto core = minimizer_position_segment_core(
+                manifest, static_cast<std::uint32_t>(entry.position_segment));
+            const auto layout = minimizer_shape_v5_control_layout(
+                entry.control_element_count,
+                manifest.shape_v5->hash_width,
+                entry.shape_offset_width,
+                manifest.shape_v5->count_width);
+            if (!core || !layout
+                || control_bytes
+                    % static_cast<std::uint8_t>(
+                        manifest.shape_v5->hash_width) != 0u
+                || position_bytes
+                    % static_cast<std::uint8_t>(
+                        manifest.shape_v5->position_width) != 0u
+                || control_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - entry.control_encoded_bytes
+                || position_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - entry.position_encoded_bytes
+                || control_count
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - entry.control_element_count
+                || position_count
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - entry.position_element_count) {
+                return std::unexpected(
+                    GpuPersistedIndexFoundationError::arithmetic_overflow);
+            }
+            control_offsets[ordinal] = control_bytes;
+            position_offsets[ordinal] = position_bytes;
+            descriptors.push_back(
+                bioseq::gpu::vulkan::GpuShapeV5ResidentPartitionDescriptor{
+                    .partition_id = entry.partition_id,
+                    .directory_ordinal = static_cast<std::uint32_t>(ordinal),
+                    .position_segment = static_cast<std::uint32_t>(
+                        entry.position_segment),
+                    .flags = bioseq::gpu::vulkan::
+                        k_gpu_shape_v5_partition_required_flags,
+                    .hash_byte_offset = control_bytes + layout->hash_offset,
+                    .prefix_byte_offset =
+                        control_bytes + layout->prefix_offset,
+                    .count_byte_offset = control_bytes + layout->count_offset,
+                    .position_byte_offset = position_bytes,
+                    .control_count = static_cast<std::uint32_t>(
+                        entry.control_element_count),
+                    .position_count = static_cast<std::uint32_t>(
+                        entry.position_element_count),
+                    .hash_width = static_cast<std::uint32_t>(
+                        manifest.shape_v5->hash_width),
+                    .offset_width = static_cast<std::uint32_t>(
+                        entry.shape_offset_width),
+                    .count_width = static_cast<std::uint32_t>(
+                        manifest.shape_v5->count_width),
+                    .position_width = static_cast<std::uint32_t>(
+                        manifest.shape_v5->position_width),
+                    .low_hash = entry.lo_hash,
+                    .high_hash = entry.hi_hash,
+                    .segment_base_bp = core->begin_bp,
+                    .segment_end_bp = core->end_bp,
+                });
+            control_bytes += entry.control_encoded_bytes;
+            position_bytes += entry.position_encoded_bytes;
+            control_count += entry.control_element_count;
+            position_count += entry.position_element_count;
+        }
+        const std::uint64_t payload_bytes =
+            bioseq::parallelism::saturating_add(
+                control_bytes, position_bytes);
+        const std::uint64_t descriptor_bytes =
+            bioseq::parallelism::saturating_mul(
+                descriptors.size(),
+                sizeof(bioseq::gpu::vulkan::
+                    GpuShapeV5ResidentPartitionDescriptor));
+        if (payload_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || descriptor_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || payload_bytes != manifest.payload_bytes
+            || control_count != manifest.control_count
+            || position_count != manifest.position_count
+            || directory.encoded_bytes().size() != manifest.directory_bytes
+            || manifest.directory_bytes
+                != static_cast<std::uint64_t>(entries.size())
+                    * MinimizerBucketDirEntry::format5_encoded_bytes) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::metadata_mismatch);
+        }
+
+        const std::uint64_t control_request =
+            std::max<std::uint64_t>(control_bytes, 16u);
+        const std::uint64_t position_request =
+            std::max<std::uint64_t>(position_bytes, 16u);
+        const std::uint64_t descriptor_request =
+            std::max<std::uint64_t>(descriptor_bytes, 16u);
+        if (control_request > runtime.features().max_storage_buffer_range
+            || position_request > runtime.features().max_storage_buffer_range
+            || descriptor_request > runtime.features().max_storage_buffer_range) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::arithmetic_overflow);
+        }
+        constexpr VkBufferUsageFlags usage =
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        const std::uint64_t control_admission =
+            runtime.buffer_allocation_requirement(control_request, usage);
+        const std::uint64_t position_admission =
+            runtime.buffer_allocation_requirement(position_request, usage);
+        const std::uint64_t descriptor_admission =
+            runtime.buffer_allocation_requirement(descriptor_request, usage);
+        const std::uint64_t admitted_bytes =
+            bioseq::parallelism::saturating_add(
+                control_admission,
+                bioseq::parallelism::saturating_add(
+                    position_admission, descriptor_admission));
+        if (admitted_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::arithmetic_overflow);
+        }
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(admitted_bytes);
+        if (!permit) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::admission);
+        }
+        auto control_buffer = runtime.create_device_buffer(
+            control_request, usage);
+        auto position_buffer = runtime.create_device_buffer(
+            position_request, usage);
+        auto descriptor_buffer = runtime.create_device_buffer(
+            descriptor_request, usage);
+        const std::uint64_t allocation_bytes =
+            bioseq::parallelism::saturating_add(
+                control_buffer.allocation_bytes,
+                bioseq::parallelism::saturating_add(
+                    position_buffer.allocation_bytes,
+                    descriptor_buffer.allocation_bytes));
+        if (allocation_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || allocation_bytes > admitted_bytes) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::admission);
+        }
+        if (control_buffer.mapped == nullptr
+            || position_buffer.mapped == nullptr
+            || descriptor_buffer.mapped == nullptr) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::non_mappable_device_memory);
+        }
+        permit->shrink_to(allocation_bytes);
+        std::memset(control_buffer.mapped, 0,
+            static_cast<std::size_t>(control_buffer.bytes));
+        std::memset(position_buffer.mapped, 0,
+            static_cast<std::size_t>(position_buffer.bytes));
+        std::memset(descriptor_buffer.mapped, 0,
+            static_cast<std::size_t>(descriptor_buffer.bytes));
+        if (descriptor_bytes != 0u) {
+            std::memcpy(descriptor_buffer.mapped, descriptors.data(),
+                static_cast<std::size_t>(descriptor_bytes));
+        }
+
+        const GpuShapeV5ResidentIdentity identity{
+            .wire_format = manifest.wire_format,
+            .generation_id = manifest.generation_id,
+            .source_identity = manifest.source_identity,
+            .source_content_checksum = manifest.source_content_checksum,
+            .compatibility_checksum = head.compatibility_checksum,
+            .manifest_checksum = head.manifest_checksum,
+            .directory_checksum = manifest.directory_checksum,
+            .payload_checksum = manifest.payload_checksum,
+            .cold_load_identity = cold_load_identity,
+            .directory_bytes = manifest.directory_bytes,
+            .control_bytes = control_bytes,
+            .position_bytes = position_bytes,
+            .descriptor_bytes = descriptor_bytes,
+            .control_count = control_count,
+            .position_count = position_count,
+            .descriptor_count = static_cast<std::uint32_t>(entries.size()),
+            .device_uuid = runtime.features().device_uuid,
+            .gpu_abi_version = manifest.gpu_abi_version,
+        };
+        auto resident = std::make_shared<GpuResidentShapeV5Target>(
+            GpuResidentShapeV5Target::ConstructionToken{},
+            std::move(*permit), std::move(control_buffer),
+            std::move(position_buffer), std::move(descriptor_buffer),
+            identity, manifest.directory_bytes, control_bytes,
+            position_bytes, descriptor_bytes, control_count,
+            position_count, static_cast<std::uint32_t>(entries.size()));
+        resident->proof_.descriptor_bytes_copied = descriptor_bytes;
+
+        std::vector<ExtentPlan> plans;
+        std::vector<IndexSubKeyRequest> requests;
+        plans.reserve(entries.size() * 2u);
+        requests.reserve(entries.size() * 2u);
+        const auto append_plan = [entries, &manifest, &control_offsets,
+                                  &position_offsets](
+                                     std::size_t ordinal, bool position,
+                                     auto& plan_out, auto& request_out)
+                -> bool {
+            const MinimizerBucketDirEntry& entry = entries[ordinal];
+            const auto position_sub_key =
+                derive_minimizer_position_extent_sub_key(entry.sub_key);
+            if (!position_sub_key) return false;
+            const IndexSubKeyRequest request{
+                .generation_id = manifest.generation_id,
+                .position_segment = entry.position_segment,
+                .sub_key = position ? *position_sub_key : entry.sub_key,
+                .first_chunk_no = position
+                    ? entry.position_first_chunk : entry.control_first_chunk,
+                .expected_chunk_count = position
+                    ? entry.position_chunk_count : entry.control_chunk_count,
+                .expected_total_bytes = position
+                    ? entry.position_encoded_bytes : entry.control_encoded_bytes,
+                .expected_checksum = position
+                    ? entry.position_checksum : entry.control_checksum,
+            };
+            plan_out.push_back(ExtentPlan{
+                .request = request,
+                .destination_offset = position
+                    ? position_offsets[ordinal] : control_offsets[ordinal],
+                .position = position,
+            });
+            request_out.push_back(request);
+            return true;
+        };
+        for (std::size_t ordinal = 0u; ordinal < entries.size(); ++ordinal) {
+            if (!append_plan(ordinal, false, plans, requests)) {
+                return std::unexpected(
+                    GpuPersistedIndexFoundationError::partition_mismatch);
+            }
+        }
+        for (std::size_t ordinal = 0u; ordinal < entries.size(); ++ordinal) {
+            if (!append_plan(ordinal, true, plans, requests)) {
+                return std::unexpected(
+                    GpuPersistedIndexFoundationError::partition_mismatch);
+            }
+        }
+        std::uint64_t expected_payload_rows = 0u;
+        for (const IndexSubKeyRequest& request : requests) {
+            if (expected_payload_rows
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - request.expected_chunk_count) {
+                return std::unexpected(
+                    GpuPersistedIndexFoundationError::arithmetic_overflow);
+            }
+            expected_payload_rows += request.expected_chunk_count;
+        }
+        return GpuShapeV5FullGenerationIngest{
+            std::move(resident), std::move(plans), std::move(requests),
+            manifest.payload_checksum, expected_payload_rows};
+    }
+
+    [[nodiscard]] std::span<const IndexSubKeyRequest> requests() const noexcept {
+        return requests_;
+    }
+
+    [[nodiscard]] std::expected<void, GpuPersistedIndexFoundationError>
+    accept_validated_row(
+        const ValidatedMinimizerGenerationRowReceipt& receipt) noexcept
+    {
+        std::expected<void, GpuPersistedIndexFoundationError> accepted{};
+        const bool visited = visit_validated_minimizer_generation_row(
+            receipt,
+            [this, &accepted](
+                const IndexChunkAddress& address,
+                std::span<const std::byte> bytes,
+                std::uint64_t row_checksum) noexcept {
+                accepted = accept_chunk_impl(
+                    address, bytes, row_checksum,
+                    InputAuthority::validated_receipt);
+            });
+        if (!visited) {
+            return fail<void>(
+                GpuPersistedIndexFoundationError::unauthorized_extent);
+        }
+        return accepted;
+    }
+
+    /// Standalone corruption-test path. Production full-generation loading
+    /// must pass ValidatedMinimizerGenerationRowReceipt instead.
+    [[nodiscard]] std::expected<void, GpuPersistedIndexFoundationError>
+    accept_raw_chunk_for_test(
+        const IndexChunkAddress& address,
+        std::span<const std::byte> bytes) noexcept
+    {
+        if (bytes.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+            return fail<void>(GpuPersistedIndexFoundationError::byte_count);
+        }
+        const std::uint64_t row_checksum = crc64_index_chunk_row(
+            address.generation_id, address.position_segment,
+            address.sub_key, address.chunk_no,
+            static_cast<std::uint32_t>(bytes.size()), bytes);
+        return accept_chunk_impl(
+            address, bytes, row_checksum, InputAuthority::raw_rehashed);
+    }
+
+    [[nodiscard]] std::expected<void, GpuPersistedIndexFoundationError>
+    accept_raw_chunk_for_test(
+        const IndexChunkAddress& address,
+        const char* payload,
+        std::size_t payload_bytes) noexcept
+    {
+        if (payload == nullptr && payload_bytes != 0u) {
+            return fail<void>(GpuPersistedIndexFoundationError::byte_count);
+        }
+        return accept_raw_chunk_for_test(address, std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(payload), payload_bytes});
+    }
+
+    [[nodiscard]] std::expected<
+        std::shared_ptr<const GpuResidentShapeV5Target>,
+        GpuPersistedIndexFoundationError>
+    finish()
+    {
+        if (failure_) return std::unexpected(*failure_);
+        if (!resident_ || extent_cursor_ != plans_.size()
+            || chunk_cursor_ != 0u) {
+            return fail<std::shared_ptr<const GpuResidentShapeV5Target>>(
+                GpuPersistedIndexFoundationError::byte_count);
+        }
+        // Only the receipt path is publishable. It proves that PostgreSQL's
+        // single scan already checked each row while the aggregate below binds
+        // the exact ordered checksum sequence to this manifest.
+        if (input_authority_ != InputAuthority::validated_receipt
+            || resident_->proof_.validated_receipt_rows
+                != expected_payload_rows_
+            || resident_->proof_.raw_rehashed_rows != 0u
+            || resident_->proof_.payload_hash_byte_visits != 0u) {
+            return fail<std::shared_ptr<const GpuResidentShapeV5Target>>(
+                GpuPersistedIndexFoundationError::completion_mismatch);
+        }
+        if (payload_row_crc_.checksum() != payload_checksum_expected_) {
+            return fail<std::shared_ptr<const GpuResidentShapeV5Target>>(
+                GpuPersistedIndexFoundationError::checksum);
+        }
+        resident_->proof_.cold_cache_misses = 1u;
+        resident_->proof_.full_generations_ingested = 1u;
+        resident_->proof_.device_allocation_bytes =
+            resident_->controls_.allocation_bytes
+            + resident_->positions_.allocation_bytes
+            + resident_->descriptors_.allocation_bytes;
+        resident_->proof_.admitted_device_bytes = resident_->permit_.bytes();
+        if (!resident_->validated()) {
+            return fail<std::shared_ptr<const GpuResidentShapeV5Target>>(
+                GpuPersistedIndexFoundationError::completion_mismatch);
+        }
+        std::shared_ptr<const GpuResidentShapeV5Target> published = resident_;
+        resident_.reset();
+        return published;
+    }
+
+private:
+    enum class InputAuthority : std::uint8_t {
+        unset,
+        validated_receipt,
+        raw_rehashed,
+    };
+
+    [[nodiscard]] std::expected<void, GpuPersistedIndexFoundationError>
+    accept_chunk_impl(
+        const IndexChunkAddress& address,
+        std::span<const std::byte> bytes,
+        std::uint64_t admitted_row_checksum,
+        InputAuthority authority) noexcept
+    {
+        if (failure_) {
+            return std::unexpected(
+                GpuPersistedIndexFoundationError::poisoned_stream);
+        }
+        if (input_authority_ == InputAuthority::unset) {
+            input_authority_ = authority;
+        } else if (input_authority_ != authority) {
+            return fail<void>(
+                GpuPersistedIndexFoundationError::unauthorized_extent);
+        }
+        if (!resident_ || extent_cursor_ >= plans_.size()) {
+            return fail<void>(GpuPersistedIndexFoundationError::byte_count);
+        }
+        const ExtentPlan& plan = plans_[extent_cursor_];
+        const IndexSubKeyRequest& request = plan.request;
+        if (chunk_cursor_ >= request.expected_chunk_count
+            || address.generation_id != request.generation_id
+            || address.position_segment != request.position_segment
+            || address.sub_key != request.sub_key
+            || address.chunk_no != request.first_chunk_no + chunk_cursor_) {
+            return fail<void>(
+                GpuPersistedIndexFoundationError::unauthorized_extent);
+        }
+        const std::uint64_t quantum = kMinimizerFormat5ExtentPayloadBytes;
+        const std::uint64_t chunk_offset =
+            static_cast<std::uint64_t>(chunk_cursor_) * quantum;
+        if (chunk_offset >= request.expected_total_bytes) {
+            return fail<void>(GpuPersistedIndexFoundationError::byte_count);
+        }
+        const std::uint64_t expected_bytes = std::min<std::uint64_t>(
+            quantum, request.expected_total_bytes - chunk_offset);
+        bioseq::gpu::vulkan::Buffer& destination = plan.position
+            ? resident_->positions_ : resident_->controls_;
+        const std::uint64_t destination_offset =
+            bioseq::parallelism::saturating_add(
+                plan.destination_offset, chunk_offset);
+        if (bytes.size() != expected_bytes
+            || destination_offset
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || bytes.size() > destination.bytes
+            || destination_offset
+                > destination.bytes - bytes.size()) {
+            return fail<void>(GpuPersistedIndexFoundationError::byte_count);
+        }
+        std::memcpy(
+            static_cast<std::byte*>(destination.mapped)
+                + destination_offset,
+            bytes.data(), bytes.size());
+        if (authority == InputAuthority::raw_rehashed) {
+            extent_crc_.update(bytes);
+            resident_->proof_.raw_rehashed_rows++;
+            resident_->proof_.payload_hash_byte_visits += bytes.size() * 2u;
+        } else {
+            resident_->proof_.validated_receipt_rows++;
+        }
+        payload_row_crc_.update_little_endian(admitted_row_checksum);
+        if (plan.position) {
+            resident_->proof_.position_bytes_copied += bytes.size();
+        } else {
+            resident_->proof_.control_bytes_copied += bytes.size();
+        }
+        ++chunk_cursor_;
+        if (chunk_cursor_ == request.expected_chunk_count) {
+            if (authority == InputAuthority::raw_rehashed
+                && extent_crc_.checksum() != request.expected_checksum) {
+                return fail<void>(GpuPersistedIndexFoundationError::checksum);
+            }
+            if (plan.position) {
+                ++resident_->proof_.position_extents_validated;
+            } else {
+                ++resident_->proof_.control_extents_validated;
+            }
+            ++extent_cursor_;
+            chunk_cursor_ = 0u;
+            extent_crc_ = {};
+        }
+        return {};
+    }
+    struct ExtentPlan {
+        IndexSubKeyRequest request{};
+        std::uint64_t destination_offset = 0u;
+        bool position = false;
+    };
+
+    GpuShapeV5FullGenerationIngest(
+        std::shared_ptr<GpuResidentShapeV5Target> resident,
+        std::vector<ExtentPlan> plans,
+        std::vector<IndexSubKeyRequest> requests,
+        std::uint64_t payload_checksum_expected,
+        std::uint64_t expected_payload_rows) noexcept
+        : resident_(std::move(resident)), plans_(std::move(plans)),
+          requests_(std::move(requests)),
+          payload_checksum_expected_(payload_checksum_expected),
+          expected_payload_rows_(expected_payload_rows) {}
+
+    template <class T>
+    [[nodiscard]] std::expected<T, GpuPersistedIndexFoundationError>
+    fail(GpuPersistedIndexFoundationError error) noexcept {
+        failure_ = error;
+        return std::unexpected(error);
+    }
+
+    std::shared_ptr<GpuResidentShapeV5Target> resident_{};
+    std::vector<ExtentPlan> plans_{};
+    std::vector<IndexSubKeyRequest> requests_{};
+    std::size_t extent_cursor_ = 0u;
+    std::uint32_t chunk_cursor_ = 0u;
+    Crc64Ecma182 extent_crc_{};
+    Crc64Ecma182 payload_row_crc_{};
+    std::uint64_t payload_checksum_expected_ = 0u;
+    std::uint64_t expected_payload_rows_ = 0u;
+    InputAuthority input_authority_ = InputAuthority::unset;
+    std::optional<GpuPersistedIndexFoundationError> failure_{};
+};
+
 /// Phase of the bounded format-4 persisted stream.  This is intentionally a
 /// protocol state, not an execution-mode proof: runtime kernels do not yet
 /// produce the completion receipts consumed below.

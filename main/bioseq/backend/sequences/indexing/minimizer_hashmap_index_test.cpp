@@ -351,6 +351,8 @@ test_shape_v5_generation_options(
     auto options = test_generation_options(target_length);
     options.wire_format = bioseq::indexing::MinimizerGenerationWireFormat::
         grouped_shape_soa_segment_local;
+    options.alphabet_code =
+        bioseq::indexing::kMinimizerPersistedDna4AlphabetCode;
     options.max_occ_cap = max_occ_cap;
     return options;
 }
@@ -405,6 +407,8 @@ test_shape_v5_expected_compatibility(
     auto expected = test_expected_compatibility();
     expected.wire_format = bioseq::indexing::MinimizerGenerationWireFormat::
         grouped_shape_soa_segment_local;
+    expected.alphabet_code =
+        bioseq::indexing::kMinimizerPersistedDna4AlphabetCode;
     expected.gpu_abi_version =
         bioseq::indexing::kMinimizerShapeV5GpuAbiVersion;
     expected.max_occ_cap = max_occ_cap;
@@ -3206,6 +3210,134 @@ TEST_CASE("inactive format-4 MPS evidence binds Scalar and Exact spill replay",
     }
     SECTION("Exact SIMD") {
         verify_backend(MinimizerSketchBackend::ExactSimd);
+    }
+}
+
+TEST_CASE("Format-5 MPS exact SIMD binds the canonical shape profile",
+          "[indexing][minimizer-hashmap][wire][encoder][mps][v5]"
+          "[exact-simd][fail-closed]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_units = 128;
+    constexpr std::uint64_t fragment_bp = fragment_units * 32u;
+    using chunked = sequence_scanner_test_chunked<
+        std::uint64_t, fragment_units>;
+    using MpsIndex = MinimizerSequenceMergedIndex<FakeFragmentStorage<>>;
+    auto data = make_dna4(18013, 0x4D5053464D543556ULL);
+    range_t range(data);
+
+    const auto spill_exact = [&](FakeFragmentStorage<>& storage) {
+        lazy_compact_sequence<dna4_u64, chunked> lazy{
+            chunked::from_range(range)};
+        return MpsIndex::spill_generation_replay_runs_serial(
+            storage,
+            lazy,
+            MinimizerSketchBackend::ExactSimd,
+            fragment_bp,
+            kMinimizerPreferredSegmentSpanBp);
+    };
+
+    SECTION("canonical Format-5 profile is published with native SIMD proof") {
+        FakeFragmentStorage<> storage;
+        auto spill = spill_exact(storage);
+        REQUIRE(spill.has_value());
+        REQUIRE(spill->execution_evidence().spill_accepted());
+
+        const auto options =
+            test_shape_v5_generation_options(range.bp_size());
+        CollectingMinimizerRowSink sink;
+        MpsGenerationExecutionEvidence execution;
+        const auto encoded = MpsIndex::encode_persisted_generation(
+            storage,
+            sink,
+            std::move(*spill),
+            options,
+            {},
+            &execution);
+        REQUIRE(encoded.has_value());
+        REQUIRE(encoded->manifest.wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+        REQUIRE(encoded->manifest.alphabet_code
+            == kMinimizerPersistedDna4AlphabetCode);
+        REQUIRE(encoded->manifest.gpu_abi_version
+            == kMinimizerShapeV5GpuAbiVersion);
+        REQUIRE(encoded->manifest.shape_v5.has_value());
+        REQUIRE(encoded->manifest.shape_v5->max_occ_cap
+            == options.max_occ_cap);
+
+        const auto canonical_profile = minimizer_generation_payload_profile(
+            options.wire_format,
+            kLegacyMinimapV1SchemeIdentity,
+            options.alphabet_code,
+            options.kmer_size,
+            encoded->manifest.position_segment_span_bp,
+            options.max_occ_cap);
+        REQUIRE(canonical_profile.has_value());
+        REQUIRE(encoded->directory.profile() == *canonical_profile);
+        REQUIRE(encoded->manifest.shape_v5
+            == canonical_profile->shape_v5);
+
+        REQUIRE(execution.accepted());
+        REQUIRE(execution.generation_wire_format
+            == options.wire_format);
+        REQUIRE(execution.selected_backend
+            == MinimizerSketchBackend::ExactSimd);
+        REQUIRE(execution.scalar_core_runs == 0u);
+        REQUIRE(execution.exact_simd_core_runs > 0u);
+        REQUIRE(execution.exact_simd_proof_present);
+        REQUIRE(execution.exact_simd_proof.accepted(true));
+        REQUIRE(execution.paper_nthash_core_runs == 0u);
+        REQUIRE(execution.vulkan_core_runs == 0u);
+        REQUIRE(execution.replay_scan_count == 3u);
+        REQUIRE(execution.replay_merge_pass_count == 3u);
+        REQUIRE(execution.replay_completed_scan_count == 3u);
+        REQUIRE(execution.replay_failed_scan_count == 0u);
+        REQUIRE(execution.replay_visited_event_count
+            == 3u * execution.spilled_event_count);
+        REQUIRE(sink.format5_payload_write_calls > 0u);
+        REQUIRE(sink.format5_row_crc_bytes
+            == encoded->manifest.payload_bytes);
+        require_complete_generation_rows(*encoded, sink.rows);
+    }
+
+    const auto require_profile_rejection = [
+            &](MinimizerGenerationEncodeOptions options) {
+        FakeFragmentStorage<> storage;
+        auto spill = spill_exact(storage);
+        REQUIRE(spill.has_value());
+        CollectingMinimizerRowSink sink;
+        MpsGenerationExecutionEvidence execution;
+        require_wire_error(
+            MpsIndex::encode_persisted_generation(
+                storage,
+                sink,
+                std::move(*spill),
+                options,
+                {},
+                &execution),
+            MinimizerGenerationWireError::compatibility_mismatch);
+        REQUIRE(sink.rows.empty());
+        REQUIRE_FALSE(execution.accepted());
+    };
+
+    SECTION("noncanonical DNA4 cardinality cannot masquerade as pack code") {
+        auto options = test_shape_v5_generation_options(range.bp_size());
+        options.alphabet_code = 4u;
+        require_profile_rejection(options);
+    }
+
+    SECTION("invalid Format-5 count profile has no legacy fallback") {
+        auto options = test_shape_v5_generation_options(range.bp_size());
+        options.max_occ_cap =
+            (std::numeric_limits<std::uint64_t>::max)();
+        require_profile_rejection(options);
+    }
+
+    SECTION("unapproved MPS wire formats remain rejected") {
+        auto options = test_shape_v5_generation_options(range.bp_size());
+        options.wire_format =
+            MinimizerGenerationWireFormat::sorted_dense_global64;
+        require_profile_rejection(options);
     }
 }
 
@@ -7774,11 +7906,17 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
     constexpr auto shape = [](std::uint16_t k, std::uint64_t span,
                               std::uint64_t cap) {
         return minimizer_shape_profile_v5(
-            kLegacyMinimapV1SchemeIdentity, 4u, k, span, cap);
+            kLegacyMinimapV1SchemeIdentity,
+            kMinimizerPersistedDna4AlphabetCode,
+            k,
+            span,
+            cap);
     };
     STATIC_REQUIRE(shape(8u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u16);
     STATIC_REQUIRE(shape(9u, 32'768u, 65'534u)->hash_width
+        == MinimizerScalarWidth::u32);
+    STATIC_REQUIRE(shape(15u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u32);
     STATIC_REQUIRE(shape(16u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u32);
@@ -7787,18 +7925,45 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
     STATIC_REQUIRE(shape(28u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE_FALSE(shape(29u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
-        kLegacyMinimapV1SchemeIdentity, 5u, 15u, 32'768u, 65'534u)
+        kLegacyMinimapV1SchemeIdentity, 1u, 15u, 32'768u, 65'534u)
+        .has_value());
+    STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
+        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 32'768u, 65'534u)
         .has_value());
     STATIC_REQUIRE(minimizer_shape_profile_v5(
         kPaperNtHashU32R7SumV1SchemeIdentity,
-        4u, 15u, 32'768u, 65'534u)->hash_width
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u32);
     STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
         kPaperNtHashU32R7SumV1SchemeIdentity,
-        4u, 14u, 32'768u, 65'534u).has_value());
+        kMinimizerPersistedDna4AlphabetCode,
+        14u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
         kPaperNtHashU32R7SumV1SchemeIdentity,
-        4u, 16u, 32'768u, 65'534u).has_value());
+        kMinimizerPersistedDna4AlphabetCode,
+        16u, 32'768u, 65'534u).has_value());
+
+    constexpr auto scalar_expected =
+        expected_minimizer_compatibility_for_backend(
+            MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
+            MinimizerSketchBackend::Scalar,
+            kMinimizerPersistedDna4AlphabetCode,
+            8u,
+            15u,
+            10u,
+            65'534u);
+    STATIC_REQUIRE(scalar_expected.has_value());
+    constexpr auto exact_simd_expected =
+        expected_minimizer_compatibility_for_backend(
+            MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
+            MinimizerSketchBackend::ExactSimd,
+            kMinimizerPersistedDna4AlphabetCode,
+            8u,
+            15u,
+            10u,
+            65'534u);
+    STATIC_REQUIRE(exact_simd_expected.has_value());
     STATIC_REQUIRE(shape(15u, 32'768u, 65'534u)->position_width
         == MinimizerScalarWidth::u16);
     STATIC_REQUIRE(shape(15u, 32'769u, 65'534u)->position_width
@@ -7853,7 +8018,9 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
 
     constexpr auto profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 65'534u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 65'534u);
     STATIC_REQUIRE(profile.has_value());
     constexpr auto chunks = [](std::uint64_t bytes) {
         constexpr std::uint32_t extent_payload_bytes =
@@ -7903,7 +8070,8 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
     constexpr auto o64_profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
         kLegacyMinimapV1SchemeIdentity,
-        4u, 15u, o64_span, 65'534u);
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, o64_span, 65'534u);
     STATIC_REQUIRE(o64_profile.has_value());
     STATIC_REQUIRE(o64_profile->shape_v5->position_width
         == MinimizerScalarWidth::u64);
@@ -7983,17 +8151,21 @@ TEST_CASE("DOC0373 Format-5 fixed records use exact 160 and 128 byte ABIs",
         return static_cast<std::byte>(value);
     };
     constexpr auto shape = minimizer_shape_profile_v5(
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     STATIC_REQUIRE(shape.has_value());
     constexpr auto profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     STATIC_REQUIRE(profile.has_value());
     constexpr auto manifest = [shape] {
         auto value = golden_generation_manifest();
         value.wire_format = MinimizerGenerationWireFormat::
             grouped_shape_soa_segment_local;
-        value.alphabet_code = 4u;
+        value.alphabet_code = kMinimizerPersistedDna4AlphabetCode;
         value.kmer_size = 15u;
         value.gpu_abi_version = kMinimizerShapeV5GpuAbiVersion;
         value.shape_v5 = *shape;
@@ -8016,7 +8188,7 @@ TEST_CASE("DOC0373 Format-5 fixed records use exact 160 and 128 byte ABIs",
         b(0x78), b(0x77), b(0x76), b(0x75), b(0x74), b(0x73), b(0x72), b(0x71),
         b(0x10), b(0x0f), b(0x0e), b(0x0d), b(0x0c), b(0x0b), b(0x0a), b(0x09),
         b(0x03), b(0x00), b(0x00), b(0x00), b(0x44), b(0x33), b(0x22), b(0x11),
-        b(0x88), b(0x77), b(0x66), b(0x55), b(0x04), b(0x00), b(0x44), b(0x33),
+        b(0x88), b(0x77), b(0x66), b(0x55), b(0x00), b(0x00), b(0x44), b(0x33),
         b(0x0f), b(0x00), b(0x88), b(0x77), b(0x03), b(0x00), b(0x00), b(0x00),
         b(0x08), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
         b(0x02), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x01), b(0x01),
@@ -8106,16 +8278,20 @@ TEST_CASE("DOC0373 Format-5 fixed records reject every extension corruption clas
           "[indexing][minimizer-hashmap][wire][v5][corruption]") {
     using namespace bioseq::indexing;
     const auto shape = minimizer_shape_profile_v5(
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     REQUIRE(shape.has_value());
     const auto profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     REQUIRE(profile.has_value());
     auto manifest = golden_generation_manifest();
     manifest.wire_format = MinimizerGenerationWireFormat::
         grouped_shape_soa_segment_local;
-    manifest.alphabet_code = 4u;
+    manifest.alphabet_code = kMinimizerPersistedDna4AlphabetCode;
     manifest.kmer_size = 15u;
     manifest.gpu_abi_version = kMinimizerShapeV5GpuAbiVersion;
     manifest.shape_v5 = *shape;
@@ -8501,11 +8677,16 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
         test_shape_v5_generation_options(position_count + 1u, 65'534u));
     REQUIRE(generation.has_value());
     REQUIRE(generation->manifest_row.byte_count == 160u);
+    REQUIRE(generation->manifest.position_segment_span_bp
+        == kMinimizerPreferredSegmentSpanBp);
+    REQUIRE(generation->manifest.shape_v5.has_value());
+    REQUIRE(generation->manifest.shape_v5->position_width
+        == MinimizerScalarWidth::u32);
     REQUIRE(generation->directory.entries().size() == 1u);
     const MinimizerBucketDirEntry& entry =
         generation->directory.entries().front();
-    REQUIRE(entry.position_encoded_bytes == position_count * 2u);
-    REQUIRE(entry.position_chunk_count == 2u);
+    REQUIRE(entry.position_encoded_bytes == position_count * 4u);
+    REQUIRE(entry.position_chunk_count == 3u);
     REQUIRE(sink.format5_payload_write_calls
             == static_cast<std::uint64_t>(entry.control_chunk_count)
                 + entry.position_chunk_count);
@@ -8522,6 +8703,64 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     REQUIRE(first_position != sink.rows.end());
     REQUIRE(first_position->bytes.size() == 8064u);
     REQUIRE(sink.max_callback_bytes == 8064u);
+    require_complete_generation_rows(*generation, sink.rows);
+}
+
+TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",
+          "[indexing][minimizer-hashmap][wire][v5][position-width]"
+          "[geometry][overflow-retry]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t narrow_span = std::uint64_t{1} << 15u;
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
+        {7u, 0u},
+        {8u, narrow_span << 1u},
+    };
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    MinimizerGenerationFixedWidthLimits one_control_per_segment;
+    one_control_per_segment.max_segment_control_count = 1u;
+
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(narrow_span + 1u, 65'534u),
+        one_control_per_segment);
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.position_segment_span_bp == narrow_span);
+    REQUIRE(generation->manifest.position_segment_count == 2u);
+    REQUIRE(generation->manifest.gpu_abi_version
+        == kMinimizerShapeV5GpuAbiVersion);
+    REQUIRE(generation->manifest.shape_v5.has_value());
+    REQUIRE(generation->manifest.shape_v5->position_width
+        == MinimizerScalarWidth::u16);
+
+    const auto canonical_profile = minimizer_generation_payload_profile(
+        generation->manifest.wire_format,
+        kLegacyMinimapV1SchemeIdentity,
+        generation->manifest.alphabet_code,
+        generation->manifest.kmer_size,
+        generation->manifest.position_segment_span_bp,
+        generation->manifest.shape_v5->max_occ_cap);
+    REQUIRE(canonical_profile.has_value());
+    REQUIRE(generation->directory.profile() == *canonical_profile);
+    REQUIRE(generation->manifest.shape_v5
+        == canonical_profile->shape_v5);
+
+    REQUIRE(generation->directory.entries().size() == 2u);
+    std::uint64_t position_count = 0u;
+    std::uint64_t position_bytes = 0u;
+    for (const MinimizerBucketDirEntry& entry :
+         generation->directory.entries()) {
+        REQUIRE(entry.position_element_count == 1u);
+        REQUIRE(entry.position_encoded_bytes == 2u);
+        REQUIRE(entry.position_chunk_count == 1u);
+        position_count += entry.position_element_count;
+        position_bytes += entry.position_encoded_bytes;
+    }
+    REQUIRE(position_count == generation->manifest.position_count);
+    REQUIRE(position_bytes == generation->manifest.position_count * 2u);
+    REQUIRE(sink.format5_row_crc_bytes
+        == generation->manifest.payload_bytes);
     require_complete_generation_rows(*generation, sink.rows);
 }
 

@@ -223,6 +223,11 @@ public:
 		 * positions through the legacy pair/hashmap assembly path. */
 		std::optional<bioseq::indexing::PreparedGrouped32QueryReader>
 			persisted_grouped32_reader{};
+		/* Production Format-5 is consumed in its native shape/SoA form.  Keep
+		 * it distinct from the frozen Format-4 reader so a row can never be
+		 * silently relabelled or transcoded through the legacy hashmap. */
+		std::optional<bioseq::indexing::PreparedShapeV5QueryReader>
+			persisted_shape_v5_reader{};
 		::bioseq::pipeline_stats::TargetIndexSource target_index_source =
 			::bioseq::pipeline_stats::TargetIndexSource::none;
 		std::uint64_t key_set_checksum = 0;

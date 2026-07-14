@@ -88,6 +88,8 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_authorize):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_position):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_seal):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_shape_v5_seed_count):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_shape_v5_seed_emit):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_histogram):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scan):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scatter):
@@ -221,6 +223,12 @@ struct VulkanStaticVariantInputs {
             // biological span: value 2 means grouped32 GPU ABI2.
             return key.tile_size == 384u && key.local_size == 128u
                 && key.max_span == 2u;
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            // max_span is an ABI identity axis: value 3 is persisted Shape
+            // Format-5 GPU ABI3, not a biological seed span.
+            return key.tile_size == 384u && key.local_size == 128u
+                && key.max_span == 3u;
         case ShaderKind::phase_c_chain_range_build:
             return key.tile_size == 384u && key.local_size == 1u && key.max_span == 1u;
         case ShaderKind::phase_c_coordinate_reduce:
@@ -287,6 +295,10 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_count, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_emit, 384u, 128u, 1u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_shape_v5_seed_count, 384u, 128u, 3u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_shape_v5_seed_emit, 384u, 128u, 3u));
     emit(make_shader_key(
         ShaderKind::phase_c_persisted_directory_select, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u));

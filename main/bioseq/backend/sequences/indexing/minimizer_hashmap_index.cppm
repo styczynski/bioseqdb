@@ -57,10 +57,6 @@ namespace bioseq::indexing::detail {
 struct MinimizerHashmapFragmentIndexTable;
 }
 
-namespace bioseq::storage::indexing {
-struct Rev3ValidatedMinimizerRowReceiptFactory;
-}
-
 export namespace bioseq::indexing {
 using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
@@ -767,6 +763,9 @@ inline constexpr std::uint32_t kMinimizerShapeV5GpuAbiVersion = 3u;
 inline constexpr std::uint32_t kMinimizerShapeV5ExtensionMagic = 0x42494f53u;
 inline constexpr std::uint16_t kMinimizerShapeV5ExtensionVersion = 1u;
 inline constexpr std::uint16_t kMinimizerShapeV5ExtensionBytes = 32u;
+/// Persisted supported_alphabets pack index for DNA4. This is an on-wire code,
+/// not the alphabet cardinality.
+inline constexpr std::uint16_t kMinimizerPersistedDna4AlphabetCode = 0u;
 inline constexpr std::size_t kMinimizerGrouped32ControlEncodedBytes = 12u;
 inline constexpr std::size_t kMinimizerGrouped32PositionEncodedBytes = 4u;
 inline constexpr std::uint32_t kMinimizerGrouped32MaxLocalBp = 0x7fffffffu;
@@ -1214,10 +1213,11 @@ minimizer_shape_v5_hash_width(
         MinimizerSchemeIdentity scheme,
         std::uint16_t alphabet_code,
         std::uint16_t kmer_size) noexcept {
-    // Frozen registry: current persisted producers prove only DNA4 (the
-    // generation metadata code 4). Paper-u32 has proof only for its existing
-    // K=15 identity; it is not a generic arbitrary-K u32 escape hatch.
-    if (alphabet_code != 4u || kmer_size == 0) {
+    // Frozen registry: current persisted producers prove only DNA4. Paper-u32
+    // has proof only for its existing K=15 identity; it is not a generic
+    // arbitrary-K u32 escape hatch.
+    if (alphabet_code != kMinimizerPersistedDna4AlphabetCode
+        || kmer_size == 0) {
         return std::unexpected(
             MinimizerGenerationWireError::compatibility_mismatch);
     }
@@ -3946,8 +3946,8 @@ class TraitDrivenPreparedQueryCore;
 /// Unforgeable proof that the address-bound row checksum was checked before
 /// callback-scoped bytes reached a prepared reader. Ordinary importers can
 /// obtain one only through validate_minimizer_generation_row_receipt(), which
-/// performs that check; PostgreSQL additionally has a non-exported validator
-/// friend for its scan-time validation path.
+/// performs that check. PostgreSQL retains that same receipt beside the loaded
+/// row, so consumers reuse the single validation pass without special access.
 
 class ValidatedMinimizerGenerationRowReceipt {
 private:
@@ -3997,8 +3997,6 @@ private:
         live_ = false;
     }
 
-    friend struct bioseq::storage::indexing::
-        Rev3ValidatedMinimizerRowReceiptFactory;
     friend std::expected<
         ValidatedMinimizerGenerationRowReceipt,
         MinimizerGenerationWireError>
@@ -4007,6 +4005,12 @@ private:
     template <class Traits>
     friend class minimizer_prepared_reader_detail::
         TraitDrivenPreparedQueryCore;
+    template <class Visitor>
+    friend bool visit_validated_minimizer_generation_row(
+        const ValidatedMinimizerGenerationRowReceipt&,
+        Visitor&&) noexcept(std::is_nothrow_invocable_v<
+            Visitor&, const IndexChunkAddress&,
+            std::span<const std::byte>, std::uint64_t>);
 
 public:
     ValidatedMinimizerGenerationRowReceipt() = delete;
@@ -4048,6 +4052,22 @@ private:
         return row_checksum_;
     }
 };
+
+/// Visit an authenticated row without exporting the receipt's representation.
+/// The byte span remains callback-scoped; callers cannot retain authority or
+/// mutate the receipt, and an invalid/moved-from receipt is never visited.
+template <class Visitor>
+[[nodiscard]] bool visit_validated_minimizer_generation_row(
+    const ValidatedMinimizerGenerationRowReceipt& receipt,
+    Visitor&& visitor) noexcept(std::is_nothrow_invocable_v<
+        Visitor&, const IndexChunkAddress&,
+        std::span<const std::byte>, std::uint64_t>)
+{
+    if (!receipt.has_valid_authority()) return false;
+    std::forward<Visitor>(visitor)(
+        receipt.address_, receipt.bytes_, receipt.row_checksum_);
+    return true;
+}
 
 /// Authenticate one callback-scoped row before granting the trusted-reader
 /// fast path. This is deliberately the only exported receipt construction
@@ -5497,6 +5517,38 @@ public:
         };
     }
 
+    /// Direct seed-consumer surface.  As with the Format-4 reader, a hash that
+    /// was not part of the immutable query union is a caller error rather than
+    /// an authenticated absence.  This keeps minimap_port on the native
+    /// persisted representation and makes legacy assembly impossible.
+    [[nodiscard]] MinimizerLookupSpans lookup_spans(
+            std::uint64_t hash) const {
+        if (!ready()) {
+            throw PersistedMinimizerLookupError(
+                "Format-5 persisted lookup is not ready");
+        }
+        if (hash > this->profile_.max_hash
+            || this->query_index_for_hash(hash)
+                == (std::numeric_limits<std::size_t>::max)()) {
+            throw PersistedMinimizerLookupError(
+                "Format-5 persisted lookup hash was not prepared");
+        }
+        const auto found = this->protocol_lookup(hash);
+        if (found.global_occurrence_count == 0) {
+            return MinimizerLookupSpans::contiguous(
+                std::span<const std::uint64_t>{});
+        }
+        if (!found.positions_complete) {
+            return MinimizerLookupSpans::positions_unavailable(
+                found.global_occurrence_count);
+        }
+        if (found.positions.size() != found.global_occurrence_count) {
+            throw PersistedMinimizerLookupError(
+                "Format-5 persisted lookup retained span is inconsistent");
+        }
+        return MinimizerLookupSpans::contiguous(found.positions);
+    }
+
     [[nodiscard]] bool failed() const noexcept {
         return this->protocol_failed_;
     }
@@ -5513,6 +5565,7 @@ public:
         return this->permit_.bytes();
     }
 };
+static_assert(MinimizerLookupIndex<PreparedShapeV5QueryReader>);
 struct PreparedGrouped32QueryLookup {
     std::uint64_t global_occurrence_count = 0;
     bool positions_complete = true;

@@ -1226,20 +1226,26 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-4 empty and selective cold routes
 	}
 }
 
-TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
-			  "[mmsearch][batch-join][just-index][rev3][grouped32][simd]"
-			  "[doc0373][p1][one-open][cold-route][full]") {
+TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS",
+			  "[mmsearch][batch-join][just-index][format5][simd]"
+			  "[generation-publication][one-open][cold-route][full]") {
 	for (const std::string_view index_name : {
 			std::string_view{"minimizers_per_fragment"},
 			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
+			// Disable the legacy INSERT-time writer before the target row is
+			// created. Setting this after seed_batch_join_target() leaves a
+			// same-name logged legacy sidecar that the strict UNLOGGED Format-5
+			// creator must correctly reject rather than silently replace.
+			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 			seed_batch_join_target(ctx);
 			load_batch_join_queries(ctx, 2);
-			exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
 			exec_sql(ctx, "SET bioseq.index_async_persist = off;");
 			exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
 			exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+			exec_sql(ctx,
+				"SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
 			exec_sql(ctx,
 				"SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash';");
 			exec_sql(ctx,
@@ -1260,14 +1266,17 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
 					kBatchJoinTarget, index_name);
 			}
+			REQUIRE(query_scalar_int(ctx, fmt::format(
+				"SELECT bioseq.update_index('{}'::regclass, '{}');",
+				kBatchJoinTarget, index_name)) == 1);
 			const row_t publication = query_one(ctx, fmt::format(
-				"SELECT * FROM bioseq_internal.rev3_test_build_ready_{}_generation("
-				"'{}'::regclass, '{}', {}, 'exact_simd');",
-				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
+				"SELECT generation_id::text, gpu_abi_version::text "
+				"FROM bioseq.inspect_ready_minimizer_generation("
+				"'{}'::regclass, '{}', {});",
 				kBatchJoinTarget, index_name, rowno));
-			REQUIRE(!publication.empty());
-			REQUIRE(publication[8].value_or("") == "t");
-			REQUIRE(publication[9].value_or("") == "t");
+			REQUIRE(publication.size() == 2u);
+			REQUIRE(std::stoll(publication[0].value()) > 0);
+			REQUIRE(publication[1].value_or("") == "3");
 
 			require_batch_join_aligned_query_rows(
 				ctx,
@@ -1400,18 +1409,16 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"(cold->>'route_empty')::bigint = 0 "
 				" AND (cold->>'route_selective')::bigint = 0 "
 				" AND (cold->>'route_full')::bigint = 1, "
-				"(cold->>'route_candidate_rows')::bigint > 0 "
-				" AND (cold->>'route_candidate_rows')::bigint "
-				" <= (cold->>'route_full_rows')::bigint "
-				" AND (cold->>'route_candidate_bytes')::bigint > 0 "
-				" AND (cold->>'route_candidate_bytes')::bigint "
-				" <= (cold->>'route_full_bytes')::bigint, "
+				/* Format 5 currently has only its authenticated one-scan full
+				 * reader. Unlike grouped32, it does not run the selective-route
+				 * planner, so candidate estimates must remain explicitly zero. */
+				"(cold->>'route_candidate_rows')::bigint = 0 "
+				" AND (cold->>'route_candidate_bytes')::bigint = 0, "
 				"(cold->>'route_full_rows')::bigint > 0 "
 				" AND (cold->>'route_full_bytes')::bigint > 0 "
 				" AND (cold->>'route_full_cost')::bigint "
 				" > (cold->>'route_full_rows')::bigint "
-				" AND (cold->>'route_selective_cost')::bigint "
-				" >= (cold->>'route_full_cost')::bigint, "
+				" AND (cold->>'route_selective_cost')::bigint = 0, "
 				"(cold->>'memory_reroutes')::bigint = 0, "
 				"(cold->>'payload_bytes_requested')::bigint "
 				" = (cold->>'payload_bytes_delivered')::bigint "

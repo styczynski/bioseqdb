@@ -295,6 +295,9 @@ struct E2eOutput {
     std::int64_t persisted_generation_read_sessions = -1;
     std::int64_t persisted_relation_opens = -1;
     std::int64_t persisted_index_scans = -1;
+    std::int64_t persisted_manifest_rows_read = -1;
+    std::int64_t persisted_manifest_bytes_read = -1;
+    std::int64_t persisted_format5_manifest_contract_valid = -1;
     std::int64_t cold_index_schema_valid = -1;
     std::int64_t cold_index_route_empty = -1;
     std::int64_t cold_index_route_selective = -1;
@@ -343,6 +346,7 @@ struct E2eOutput {
     std::int64_t post_restart_database_oid = -1;
     std::int64_t cold_restart_identity_changed = -1;
     std::int64_t pre_restart_persisted_generation_id = -1;
+    std::int64_t pre_restart_persisted_gpu_abi_version = -1;
     std::string pre_restart_persisted_source_identity;
     // Dedicated no-index lifecycle evidence.  Do not overload the persisted
     // just_index fields: no_index proves an untimed base-data load with no
@@ -1849,6 +1853,8 @@ void capture_alignment_statement_stats(
     out.persisted_generation_read_sessions = required_i64(48);
     out.persisted_relation_opens = required_i64(49);
     out.persisted_index_scans = required_i64(50);
+    out.persisted_manifest_rows_read = required_i64(55);
+    out.persisted_manifest_bytes_read = required_i64(56);
     out.host_query_hash_readbacks = required_i64(87);
     out.host_query_symbol_packing_calls = required_i64(88);
     out.host_target_symbol_packing_calls = required_i64(89);
@@ -2252,19 +2258,19 @@ inline void require_pipeline_execution_proof(
         return static_cast<__int128>(total)
             == static_cast<__int128>(count) * static_cast<__int128>(width);
     };
-    // Formats 3/4 retain the 128-byte manifest ABI, while Format 5 appends
-    // its frozen 32-byte shape extension.  The six-row comparison includes
-    // both the current SIMD Format-4 reader and the persisted-GPU Format-5
-    // route; accepting only 128 bytes would reject an otherwise authentic
-    // GPU just_index sample before its backend proof is evaluated.
+    // Production just_index is Format 5 for every backend. A compatibility
+    // Format-4 read must never make an E2E SIMD/GPU performance sample pass.
     const bool persisted_manifest_size_valid =
         scaled_equal(
             counter(56), counter(55),
-            bioseq::indexing::MinimizerGenerationManifest::encoded_bytes)
-        || scaled_equal(
-            counter(56), counter(55),
             bioseq::indexing::MinimizerGenerationManifest::
                 format5_encoded_bytes);
+    out.persisted_format5_manifest_contract_valid = expect_persisted
+        && out.pre_restart_persisted_gpu_abi_version == 3
+        && counter(55) == out.persisted_generation_read_sessions
+        && persisted_manifest_size_valid
+            ? 1
+            : 0;
     const bool cold_payload_equations =
         out.cold_index_payload_rows_requested
             == out.cold_index_payload_rows_delivered
@@ -2332,6 +2338,9 @@ inline void require_pipeline_execution_proof(
             && scaled_equal(counter(53), counter(52), 64)
             && counter(54) == out.persisted_generation_read_sessions
             && counter(55) == out.persisted_generation_read_sessions
+            && out.persisted_manifest_rows_read == counter(55)
+            && out.persisted_manifest_bytes_read == counter(56)
+            && out.persisted_format5_manifest_contract_valid == 1
             && persisted_manifest_size_valid
             && counter(57) > 0
             && counter(58) > 0
@@ -3797,7 +3806,7 @@ template <sequence_alphabet A>
                 || async_persist_disabled != 1
                 || recompute_persist_disabled != 1
                 || generation_id <= 0
-                || gpu_abi_version <= 0
+                || gpu_abi_version != 3
                 || persisted_bp != in.target_bp
                 || persisted_k != in.kmer_size
                 || persisted_w != in.window_size) {
@@ -3969,25 +3978,30 @@ void capture_pre_restart_persisted_identity(
     const auto rows = it::query_rows(
         connection,
         fmt::format(
-            "SELECT generation_id, source_identity "
+            "SELECT generation_id, source_identity, gpu_abi_version "
             "FROM bioseq.inspect_ready_minimizer_generation("
             "'{}'::regclass, '{}', 0)",
             table,
             minimizer_index));
-    if (rows.size() != 1 || rows.front().size() != 2
+    if (rows.size() != 1 || rows.front().size() != 3
         || !rows.front()[0].has_value()
-        || !rows.front()[1].has_value()) {
+        || !rows.front()[1].has_value()
+        || !rows.front()[2].has_value()) {
         abort_pipeline_proof_capture(
             "pre-restart persisted generation identity has an invalid row shape");
     }
     const auto generation = parse_snapshot_i64(rows.front()[0]);
+    const auto gpu_abi_version = parse_snapshot_i64(rows.front()[2]);
     if (!generation.has_value() || *generation == 0
         || !fixed_lower_hex(*rows.front()[1], 16)
-        || *rows.front()[1] == "0000000000000000") {
+        || *rows.front()[1] == "0000000000000000"
+        || !gpu_abi_version.has_value()
+        || *gpu_abi_version != 3) {
         abort_pipeline_proof_capture(
-            "pre-restart persisted generation identity is missing or invalid");
+            "pre-restart persisted generation is not production Format-5 ABI3");
     }
     out.pre_restart_persisted_generation_id = *generation;
+    out.pre_restart_persisted_gpu_abi_version = *gpu_abi_version;
     out.pre_restart_persisted_source_identity = *rows.front()[1];
 }
 
@@ -4645,6 +4659,20 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"alignment_partial", static_cast<double>(o.alignment_partial)},
         {"alignment_fully_drained", static_cast<double>(o.alignment_fully_drained)},
         {"persisted_generation_id", static_cast<double>(o.persisted_generation_id)},
+        {"pre_restart_persisted_gpu_abi_version",
+            static_cast<double>(o.pre_restart_persisted_gpu_abi_version)},
+        {"persisted_manifest_rows_read",
+            static_cast<double>(o.persisted_manifest_rows_read)},
+        {"persisted_manifest_bytes_read",
+            static_cast<double>(o.persisted_manifest_bytes_read)},
+        {"persisted_format5_manifest_contract_valid",
+            static_cast<double>(o.persisted_format5_manifest_contract_valid)},
+        {"persisted_generation_read_sessions",
+            static_cast<double>(o.persisted_generation_read_sessions)},
+        {"persisted_relation_opens",
+            static_cast<double>(o.persisted_relation_opens)},
+        {"persisted_index_scans",
+            static_cast<double>(o.persisted_index_scans)},
         {"persisted_source_identity_present",
             o.persisted_source_identity.empty()
                 || o.persisted_source_identity == "0000000000000000" ? 0.0 : 1.0},
@@ -4728,6 +4756,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"min_tmp_available_gib",   static_cast<double>(o.min_tmp_available_kb) / (1024.0 * 1024.0)},
         {"peak_swap_used_mb",       o.peak_swap_used_mb},
         {"just_index_restart_performed", static_cast<double>(o.just_index_restart_performed)},
+        {"just_index_restart_identity_changed",
+            static_cast<double>(o.cold_restart_identity_changed)},
         {"cold_no_index_restart_performed", static_cast<double>(o.cold_no_index_restart_performed)},
         {"cold_no_index_restart_identity_changed", static_cast<double>(o.cold_no_index_restart_identity_changed)},
         {"cold_no_index_pre_restart_target_rows", static_cast<double>(o.cold_no_index_pre_restart_target_rows)},
@@ -4960,6 +4990,20 @@ void load_e2e_query_table(const it::connection_test_context& c,
             {"expected_source_identity", expected_source},
             {"actual_generation", out.persisted_generation_id},
             {"actual_source_identity", out.persisted_source_identity},
+            {"persisted_format", just_index
+                ? nlohmann::json{
+                    {"ready_generation_gpu_abi_version",
+                        out.pre_restart_persisted_gpu_abi_version},
+                    {"manifest_rows_read",
+                        out.persisted_manifest_rows_read},
+                    {"manifest_bytes_read",
+                        out.persisted_manifest_bytes_read},
+                    {"read_sessions",
+                        out.persisted_generation_read_sessions},
+                    {"format5_manifest_contract_valid",
+                        out.persisted_format5_manifest_contract_valid},
+                }
+                : nlohmann::json{nullptr}},
             {"restart_performed", just_index
                 ? out.just_index_restart_performed
                 : out.cold_no_index_restart_performed},
