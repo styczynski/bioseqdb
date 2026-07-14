@@ -8652,6 +8652,63 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     }
 }
 
+TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
+          "[indexing][minimizer-hashmap][wire][v5][reader][admission]"
+          "[cold-load][memory-evidence]") {
+    using namespace bioseq::indexing;
+    // Model the report_83 shape: a wide query union whose mostly-unique hashes
+    // each retain one target position.  The former per-QueryRecord vectors
+    // performed two complete ownership walks and fresh OS memory probes for
+    // each first append, making this shape quadratic in query-union size.
+    constexpr std::uint64_t query_count = 2048u;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
+    std::vector<std::uint64_t> queries;
+    minimizers.reserve(query_count);
+    queries.reserve(query_count);
+    for (std::uint64_t index = 0; index < query_count; ++index) {
+        const std::uint64_t hash = index + 1u;
+        minimizers.emplace_back(hash, index << 1u);
+        queries.push_back(hash);
+    }
+
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink,
+        test_shape_v5_generation_options(query_count + 1u, 10u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->directory.entries().size() == 1u);
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    auto reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        queries,
+        10u);
+    REQUIRE(reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(reader->finish().has_value());
+
+    const auto evidence = reader->memory_evidence();
+    REQUIRE(evidence.global_position_storage_preparations == 1u);
+    REQUIRE(evidence.global_position_storage_allocations == 1u);
+    REQUIRE(evidence.position_append_growth_reservations == 0u);
+    REQUIRE(evidence.retained_position_count == query_count);
+    REQUIRE(evidence.retained_position_capacity >= query_count);
+    REQUIRE(evidence.capacity_accounting_passes <= 16u);
+    REQUIRE_FALSE(evidence.saturated);
+    REQUIRE(reader->lookup(1u).positions.front() == 0u);
+    REQUIRE(reader->lookup(query_count).positions.front()
+        == (query_count - 1u) << 1u);
+}
+
 TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
           "[indexing][minimizer-hashmap][wire][v5][chunk-equation]") {
     using namespace bioseq::indexing;

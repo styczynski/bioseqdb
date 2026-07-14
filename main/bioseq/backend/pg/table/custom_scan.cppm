@@ -7292,17 +7292,15 @@ static void BioseqBatchJoin_BeginCustomScan(
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("BioseqBatchJoin index requirement marker disagrees with options")));
 		}
-		if (runtime->index_read_requirement
-				== bioseq::indexing::IndexReadRequirement::
-				require_compatible_persisted
-			&& bioseq::simd::active_target::pipe::
-				vulkan_components_requested(prevalidated_params)
-			&& !runtime->explain_only) {
-			ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("required compatible persisted minimizer index unavailable"),
-				 errdetail("ordinal 2 requires a revision-3 READY generation and has no live Vulkan grouped32 reader; the CPU direct reader cannot attest GPU execution and no child was initialized")));
-		}
+		/* A selected Vulkan BatchJoin is allowed to initialize its children and
+		 * reach TupleDispatchBuffer's production Format-5 preparation path.  That
+		 * path opens the exact PostgreSQL-owned MPS generation, validates READY,
+		 * revision/ABI/source/device identity, and retains its three resident GPU
+		 * buffers.  Missing or incompatible data still fails there before typed
+		 * dispatch; the typed processor independently requires that exact GPU
+		 * prepared target and has no CPU/SIMD/recompute fallback.  The older
+		 * column-scan path remains rejected separately because it has no such
+		 * prepared-target owner. */
 
 		TupleDesc scan_desc = node->ss.ss_ScanTupleSlot == nullptr
 			? nullptr : node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
