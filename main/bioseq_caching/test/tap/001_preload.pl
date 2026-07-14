@@ -51,5 +51,43 @@ is(
 	'0',
 	'production schema contains no persistent metadata table');
 
+$preloaded->safe_psql(
+	'postgres',
+	q{CREATE ROLE cache_monitor_granted;
+	  CREATE ROLE cache_monitor_execute_only;
+	  GRANT EXECUTE ON FUNCTION bioseq_cache.entries()
+	    TO cache_monitor_granted, cache_monitor_execute_only;
+	  GRANT USAGE ON SCHEMA bioseq_cache TO cache_monitor_granted;
+	  CREATE VIEW public.cache_entries_count
+	    WITH (security_invoker = true)
+	    AS SELECT count(*) AS entry_count FROM bioseq_cache.entries();
+	  GRANT SELECT ON public.cache_entries_count
+	    TO cache_monitor_granted, cache_monitor_execute_only;});
+
+is(
+	$preloaded->safe_psql(
+		'postgres',
+		q{SET ROLE cache_monitor_granted;
+		  SELECT entry_count FROM public.cache_entries_count;}),
+	'0',
+	'explicit schema and function grants pass the C diagnostics boundary');
+
+my ($acl_ret, $acl_out, $acl_err) = $preloaded->psql(
+	'postgres',
+	q{SET ROLE cache_monitor_execute_only;
+	  SELECT entry_count FROM public.cache_entries_count;});
+isnt(
+	$acl_ret,
+	0,
+	'stored function OID cannot bypass the C-side schema privilege check');
+like(
+	$acl_err,
+	qr/permission denied to inspect bioseq_cache/,
+	'C-side denial is distinct from parser name-resolution denial');
+like(
+	$acl_err,
+	qr/Grant USAGE on schema bioseq_cache and EXECUTE/,
+	'C-side denial explains the documented two-part grant policy');
+
 $preloaded->stop;
 done_testing();
