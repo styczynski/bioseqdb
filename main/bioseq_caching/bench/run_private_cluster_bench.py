@@ -289,13 +289,22 @@ def _throughput_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
     def rate(quantity: int, elapsed_ns: int) -> int:
         return int(quantity * 1_000_000_000 / max(1, elapsed_ns))
 
+    def summary(samples: Sequence[int], unit: str) -> dict[str, Any]:
+        return {
+            "raw_samples": list(samples),
+            "p50": int(_percentile(samples, 0.50)),
+            "p95": int(_percentile(samples, 0.95)),
+            "p99": int(_percentile(samples, 0.99)),
+            "unit": unit,
+        }
+
+    row_rates = [rate(output.rows, output.elapsed_ns) for output in outputs]
+    byte_rates = [
+        rate(output.stdout_bytes, output.elapsed_ns) for output in outputs
+    ]
     return {
-        "rows_per_second": _sample_summary(
-            [rate(output.rows, output.elapsed_ns) for output in outputs]
-        ),
-        "output_bytes_per_second": _sample_summary(
-            [rate(output.stdout_bytes, output.elapsed_ns) for output in outputs]
-        ),
+        "rows_per_second": summary(row_rates, "rows/s"),
+        "output_bytes_per_second": summary(byte_rates, "bytes/s"),
     }
 
 
