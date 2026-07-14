@@ -317,11 +317,49 @@ void set_diagnostic(
 }
 
 [[nodiscard]] bool provider_available(
-    const provider_registry::ProviderV1* provider) noexcept {
+        const provider_registry::ProviderV1* provider) noexcept {
     return provider != nullptr
         && provider_registry::validate_provider_v1(provider)
         && provider_registry::find_provider_v1(provider->provider_id)
             == provider;
+}
+
+[[nodiscard]] bool provider_private_version(
+        const List* nodes,
+        std::uint32_t* version) noexcept {
+    if (nodes == nullptr || version == nullptr || list_length(nodes) <= 0
+        || !IsA(list_nth(nodes, 0), Integer)) {
+        return false;
+    }
+    const int value = intVal(list_nth(nodes, 0));
+    if (value <= 0) {
+        return false;
+    }
+    *version = static_cast<std::uint32_t>(value);
+    return true;
+}
+
+/** Mapping-private v1 is NIL or one bounded canonical flat Integer list. */
+[[nodiscard]] bool mapping_private_nodes_valid(
+        const List* nodes,
+        std::uint32_t expected_version) noexcept {
+    if (nodes == nullptr) {
+        return true;
+    }
+    const int count = list_length(nodes);
+    if (count <= 0
+        || static_cast<std::uint32_t>(count)
+            > kMaxProviderBoundaryColumns) {
+        return false;
+    }
+    for (int index = 0; index < count; ++index) {
+        if (!IsA(list_nth(nodes, index), Integer)) {
+            return false;
+        }
+    }
+    std::uint32_t version = 0;
+    return provider_private_version(nodes, &version)
+        && version == expected_version;
 }
 
 [[nodiscard]] bool copy_node_bounded(
@@ -463,6 +501,13 @@ struct DescribeBodyV1 {
             body.diagnostic, ProviderCallFailureV1::MalformedOutput, status);
         return false;
     }
+    std::uint32_t private_version = 0;
+    if (!provider_private_version(
+            raw.provider_private_nodes, &private_version)) {
+        set_diagnostic(
+            body.diagnostic, ProviderCallFailureV1::MalformedOutput, status);
+        return false;
+    }
 
     body.out->value = raw;
     body.out->value.boundary_columns = copy_array(
@@ -567,8 +612,19 @@ struct MapBodyV1 {
         },
         .capability_mask = body.source->capability_mask,
     };
+    std::uint32_t consumer_private_version = 0;
+    std::uint32_t source_private_version = 0;
     if (!validate_source_map(
-            consumer_contract, source_contract, raw).has_value()) {
+            consumer_contract, source_contract, raw).has_value()
+        || !provider_private_version(
+            body.consumer->provider_private_nodes,
+            &consumer_private_version)
+        || !provider_private_version(
+            body.source->provider_private_nodes,
+            &source_private_version)
+        || consumer_private_version != source_private_version
+        || !mapping_private_nodes_valid(
+            raw.provider_private_nodes, consumer_private_version)) {
         set_diagnostic(
             body.diagnostic, ProviderCallFailureV1::SchemaMismatch, status);
         return false;
@@ -632,6 +688,19 @@ struct DecorateBodyV1 {
     if (!validate_decorated_path(body.domain, &raw).has_value()
         || raw.path->parent != body.rel
         || raw.path->param_info != nullptr) {
+        set_diagnostic(
+            body.diagnostic, ProviderCallFailureV1::SchemaMismatch, status);
+        return false;
+    }
+    std::uint32_t domain_private_version = 0;
+    std::uint32_t decorated_private_version = 0;
+    if (!provider_private_version(
+            body.domain->provider_private_nodes,
+            &domain_private_version)
+        || !provider_private_version(
+            raw.provider_private_nodes,
+            &decorated_private_version)
+        || domain_private_version != decorated_private_version) {
         set_diagnostic(
             body.diagnostic, ProviderCallFailureV1::SchemaMismatch, status);
         return false;
