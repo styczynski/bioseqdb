@@ -1872,7 +1872,8 @@ namespace bioseq::cache::pg::test_provider {
         .abi_version = bioseq::cache::kProviderAbiVersion,
         .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
         .provider_id = kProviderId,
-        .provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE,
+        .provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE
+            | BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION,
         .reserved = 0,
         .provider_name = "generic_nullable_occurrence_test_provider",
         .provider_scan_methods = &provider_scan_methods(),

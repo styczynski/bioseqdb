@@ -483,6 +483,10 @@ TEST_CASE("provider registration enforces callbacks implied by flags") {
     provider.late_fetch_batch = late_fetch;
     REQUIRE(provider_registration_valid(&provider, 18));
 
+    provider.provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE
+        | BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION;
+    REQUIRE(provider_registration_valid(&provider, 18));
+
     provider.provider_flags = BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE;
     REQUIRE(provider_registration_valid(&provider, 18));
 
