@@ -2059,11 +2059,25 @@ void release_planner_pin_noerror(
         std::span<const reuse::CoverageCandidateViewV1>{
             candidate_views.data(), candidates->candidate_count});
     std::array<bool, kMaxCoverageGenerationsPerDomain> selected_mask{};
-    for (std::size_t index = 0; index < selected.selected_count; ++index) {
+    const std::size_t selected_count = std::min<std::size_t>(
+        selected.selected_count, kMaxSourcesPerCoverageNode - 1U);
+    for (std::size_t index = 0; index < selected_count; ++index) {
         selected_mask[selected.indices[index]] = true;
     }
 
-    List* gate_expressions = NIL;
+    reuse::PlannerGateNodesV1 current_gate{};
+    if (!reuse::build_planner_gate_nodes(
+            root, described.value.coverage_predicate, &current_gate)) {
+        for (std::size_t index = 0;
+             index < candidates->candidate_count;
+             ++index) {
+            reuse::release_candidate_reference_noerror(
+                release_records[index]);
+        }
+        return false;
+    }
+    List* gate_expressions = list_make1(
+        copyObject(current_gate.residual_gate));
     List* candidate_private = NIL;
     for (std::size_t index = 0; index < candidates->candidate_count; ++index) {
         if (!selected_mask[index]) {
@@ -2153,6 +2167,8 @@ void release_planner_pin_noerror(
         current_plan,
         candidate_private,
         copyObject(described.value.coverage_predicate));
+    private_nodes = lappend(
+        private_nodes, makeInteger(current_gate.param_id));
     const Cost overhead = cpu_tuple_cost
         * (provider_path->rows > 0 ? provider_path->rows : 1.0)
         * 0.0001;
@@ -4967,8 +4983,9 @@ void coverage_begin_custom_scan(
             && list_length(scan->custom_private) >= 4
         ? static_cast<List*>(list_nth(scan->custom_private, 3))
         : NIL;
-    const int source_count = list_length(candidates);
-    if (source_count < 0
+    const int older_source_count = list_length(candidates);
+    const int source_count = older_source_count + 1;
+    if (older_source_count < 0
         || source_count > static_cast<int>(kMaxSourcesPerCoverageNode)) {
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
@@ -4977,7 +4994,15 @@ void coverage_begin_custom_scan(
     state->source_count = static_cast<std::uint16_t>(source_count);
 
     std::array<int, kMaxSourcesPerCoverageNode> gate_ids{};
+    if (scan->custom_private == NIL
+        || list_length(scan->custom_private) < 7
+        || !IsA(list_nth(scan->custom_private, 5), Integer)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqReusableCoverageScan current gate is invalid")));
+    }
     int gate_index = 0;
+    gate_ids[gate_index++] = intVal(list_nth(scan->custom_private, 5));
     ListCell* cell = nullptr;
     foreach(cell, candidates) {
         const auto* source = static_cast<const List*>(lfirst(cell));
@@ -5000,8 +5025,8 @@ void coverage_begin_custom_scan(
             static_cast<std::uint32_t>(provider_id))
         : nullptr;
     List* recipe_private = scan->custom_private != NIL
-            && list_length(scan->custom_private) >= 6
-        ? static_cast<List*>(list_nth(scan->custom_private, 5))
+            && list_length(scan->custom_private) >= 7
+        ? static_cast<List*>(list_nth(scan->custom_private, 6))
         : NIL;
     if (provider != nullptr && recipe_private != NIL
         && list_length(recipe_private) == 4
@@ -5136,7 +5161,7 @@ Plan* coverage_plan_custom_path(
         List* custom_plans) {
     if (root == nullptr || relation == nullptr || best_path == nullptr
         || list_length(custom_plans) != 1
-        || list_length(best_path->custom_private) != 5
+        || list_length(best_path->custom_private) != 6
         || !IsA(list_nth(best_path->custom_private, 0), Integer)
         || intVal(list_nth(best_path->custom_private, 0))
             != static_cast<int>(reuse::kReusablePlanFormatVersionV1)
