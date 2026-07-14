@@ -755,14 +755,19 @@ reusable_partition_callbacks() noexcept {
 }
 
 /**
- * Relation-path integration is enabled only after its complete planner
- * metadata contract is installed.  Keeping this definition fail-open makes
- * intermediate extension builds preload-safe while readiness remains below
- * ReusableCoverageReady.
+ * The bridge definition remains before the implementation so provider hooks
+ * can call it without exposing planner internals through the rendezvous ABI.
  */
+void consider_provider_reusable_paths_impl(
+    PlannerInfo*, RelOptInfo*, unsigned int, RangeTblEntry*,
+    const provider_registry::ProviderV1*) noexcept;
+
 void consider_provider_reusable_paths(
-        PlannerInfo*, RelOptInfo*, unsigned int, RangeTblEntry*,
-        const provider_registry::ProviderV1*) noexcept {
+        PlannerInfo* root, RelOptInfo* relation,
+        unsigned int range_table_index, RangeTblEntry* range_entry,
+        const provider_registry::ProviderV1* provider) noexcept {
+    consider_provider_reusable_paths_impl(
+        root, relation, range_table_index, range_entry, provider);
 }
 
 [[nodiscard]] std::uint64_t reusable_monotonic_now_ns() noexcept {
@@ -1576,6 +1581,331 @@ struct CoverageMappingHeaderV1 {
     }
     return make_binary_node(
         std::span<const std::byte>{packed, static_cast<std::size_t>(total)});
+}
+
+struct PlannerPinReleaseV1 {
+    ReusableReferenceTokenV1 token{};
+};
+
+/** Planner-context callback target; idempotent token clearing prevents leaks. */
+void release_planner_pin_noerror(
+        void* opaque, const CacheEntryId&,
+        reuse::CandidateReferenceKindV1 kind) noexcept {
+    auto* owner = static_cast<PlannerPinReleaseV1*>(opaque);
+    if (owner == nullptr
+        || kind != reuse::CandidateReferenceKindV1::ProvisionalPin
+        || !owner->token.active || !g_reusable_registry) {
+        return;
+    }
+    static_cast<void>(release_reusable_reference(
+        g_reusable_registry,
+        owner->token,
+        reusable_partition_callbacks()));
+}
+
+[[nodiscard]] const CustomPathMethods& coverage_path_methods();
+
+/**
+ * Build one coverage wrapper from a provider-owned path.  Candidate pins are
+ * copied into planner-context cleanup records before any provider callback;
+ * every callback then releases its pin after copying validated output.
+ */
+[[nodiscard]] bool wrap_one_provider_path(
+        PlannerInfo* root,
+        RelOptInfo* relation,
+        Path* provider_path,
+        const provider_registry::ProviderV1* provider,
+        const BioseqCacheQueryIntentV1& intent,
+        MemoryContext planner_context) {
+    reuse::ProviderCallDiagnosticV1 diagnostic{};
+    reuse::PlannerOwnedDomainV1 described{};
+    if (!reuse::invoke_describe_path_fail_open(
+            provider,
+            root,
+            relation,
+            provider_path,
+            &intent,
+            planner_context,
+            &described,
+            &diagnostic)) {
+        return false;
+    }
+    PlannerSemanticKeysV1 keys{};
+    if (!capture_planner_semantic_keys_fail_open(
+            provider,
+            described.value,
+            planner_context,
+            &keys)) {
+        return false;
+    }
+    bytea* descriptor = serialize_coverage_descriptor_fail_open(
+        described.value, planner_context);
+    Const* current_plan = descriptor == nullptr
+        ? nullptr
+        : make_current_coverage_plan_node(
+            *provider, described.value, keys, descriptor);
+    if (current_plan == nullptr) {
+        return false;
+    }
+
+    auto* release_owners = static_cast<PlannerPinReleaseV1*>(
+        MemoryContextAllocZero(
+            planner_context,
+            sizeof(PlannerPinReleaseV1)
+                * kMaxCoverageGenerationsPerDomain));
+    auto* release_records = static_cast<
+        reuse::PlannerCandidateCleanupRecordV1*>(MemoryContextAllocZero(
+            planner_context,
+            sizeof(reuse::PlannerCandidateCleanupRecordV1)
+                * kMaxCoverageGenerationsPerDomain));
+    for (std::size_t index = 0;
+         index < kMaxCoverageGenerationsPerDomain;
+         ++index) {
+        if (reuse::register_candidate_context_cleanup(
+                planner_context, &release_records[index]) == nullptr) {
+            return false;
+        }
+    }
+
+    const ReusableCandidateRequestV1 request{
+        .coverage_directory_key = {
+            .security_namespace = current_reusable_security_namespace(),
+            .coverage_domain_digest = keys.domain_digest,
+        },
+        .canonical_domain_key = bytea_payload(keys.canonical_domain_key),
+        .provider_id = provider->provider_id,
+        .compatibility_family_id = described.value.compatibility_family_id,
+        .required_capability_mask = described.value.capability_mask,
+    };
+    auto candidate_result = snapshot_reusable_candidates(
+        g_reusable_registry, request, reusable_partition_callbacks());
+    if (!candidate_result.has_value()) {
+        return false;
+    }
+    ReusableCandidateBatchV1 candidates = *candidate_result;
+    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+        release_owners[index].token = candidates.candidates[index].planner_pin;
+        candidates.candidates[index].planner_pin.active = false;
+        if (!reuse::activate_candidate_reference(
+                release_records[index],
+                candidates.candidates[index].generation.reference.id,
+                reuse::CandidateReferenceKindV1::ProvisionalPin,
+                &release_planner_pin_noerror,
+                &release_owners[index])) {
+            static_cast<void>(release_reusable_reference(
+                g_reusable_registry,
+                release_owners[index].token,
+                reusable_partition_callbacks()));
+            for (std::size_t release_index = 0;
+                 release_index < index;
+                 ++release_index) {
+                reuse::release_candidate_reference_noerror(
+                    release_records[release_index]);
+            }
+            return false;
+        }
+    }
+
+    std::array<reuse::CoverageCandidateViewV1,
+        kMaxCoverageGenerationsPerDomain> candidate_views{};
+    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+        const ReusableCandidateSnapshotV1& candidate =
+            candidates.candidates[index];
+        const auto domain_bytes = reusable_shared_bytes(
+            g_reusable_registry,
+            candidate.generation.canonical_domain_key);
+        const auto generation_bytes = reusable_shared_bytes(
+            g_reusable_registry,
+            candidate.generation.canonical_generation_key);
+        const bool is_current_exact = reuse::exact_current_key_equal(
+            keys.generation_digest,
+            bytea_payload(keys.canonical_generation_key),
+            candidate.generation.reference.id.digest,
+            generation_bytes);
+        candidate_views[index] = reuse::CoverageCandidateViewV1{
+            .entry_id = candidate.generation.reference.id,
+            .domain_digest = candidate.generation.coverage_directory_key
+                .coverage_domain_digest,
+            .canonical_domain_key = domain_bytes,
+            .canonical_generation_key = generation_bytes,
+            .security_namespace = planner_security_namespace(
+                candidate.generation.coverage_directory_key
+                    .security_namespace),
+            .provider_id = candidate.generation.metadata.provider_id,
+            .compatibility_family_id = candidate.generation.metadata
+                .compatibility_family_id,
+            .capability_mask = candidate.generation.metadata.capability_mask,
+            .complete = candidate.complete && !is_current_exact,
+            .in_flight = candidate.in_flight && !is_current_exact,
+            .estimated_covered_rows = candidate.generation.metadata
+                .estimated_covered_rows,
+            .stored_bytes = candidate.generation.metadata.stored_bytes,
+        };
+    }
+    const reuse::CoverageCandidateProbeV1 probe{
+        .domain_digest = keys.domain_digest,
+        .canonical_domain_key = bytea_payload(keys.canonical_domain_key),
+        .security_namespace = planner_security_namespace(
+            request.coverage_directory_key.security_namespace),
+        .provider_id = provider->provider_id,
+        .compatibility_family_id = described.value.compatibility_family_id,
+        .required_capability_mask = described.value.capability_mask,
+    };
+    const auto selected = reuse::select_candidates(
+        probe,
+        std::span<const reuse::CoverageCandidateViewV1>{
+            candidate_views.data(), candidates.candidate_count});
+    std::array<bool, kMaxCoverageGenerationsPerDomain> selected_mask{};
+    for (std::size_t index = 0; index < selected.selected_count; ++index) {
+        selected_mask[selected.indices[index]] = true;
+    }
+
+    List* gate_expressions = NIL;
+    List* candidate_private = NIL;
+    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+        if (!selected_mask[index]) {
+            reuse::release_candidate_reference_noerror(
+                release_records[index]);
+            continue;
+        }
+        const ReusableCandidateSnapshotV1& candidate =
+            candidates.candidates[index];
+        const auto descriptor_bytes = reusable_shared_bytes(
+            g_reusable_registry,
+            candidate.generation.coverage_descriptor);
+        PlannerDecodedCoverageV1 decoded{};
+        if (!decode_coverage_descriptor_fail_open(
+                descriptor_bytes, planner_context, &decoded)) {
+            reuse::release_candidate_reference_noerror(
+                release_records[index]);
+            continue;
+        }
+        Const* reference_node = make_binary_node(
+            std::as_bytes(std::span{
+                &candidate.generation.reference,
+                std::size_t{1}}));
+        Const* descriptor_node = make_binary_node(descriptor_bytes);
+        reuse::PlannerGateNodesV1 gate{};
+        if (reference_node == nullptr || descriptor_node == nullptr
+            || !reuse::build_planner_gate_nodes(
+                root, decoded.domain.coverage_predicate, &gate)) {
+            reuse::release_candidate_reference_noerror(
+                release_records[index]);
+            continue;
+        }
+        reuse::PlannerOwnedSourceMappingV1 mapping{};
+        if (!reuse::invoke_map_source_fail_open(
+                provider,
+                root,
+                &described.value,
+                &decoded.source,
+                planner_context,
+                &mapping,
+                &diagnostic,
+                &release_records[index])) {
+            continue;
+        }
+        Const* mapping_node = make_source_mapping_node(mapping.value);
+        if (mapping_node == nullptr) {
+            continue;
+        }
+        List* source_private = list_make5(
+            reference_node,
+            descriptor_node,
+            mapping_node,
+            copyObject(mapping.value.provider_private_nodes),
+            makeInteger(gate.param_id));
+        source_private = lappend(
+            source_private,
+            copyObject(decoded.domain.coverage_predicate));
+        candidate_private = lappend(candidate_private, source_private);
+        gate_expressions = lappend(
+            gate_expressions, copyObject(gate.residual_gate));
+    }
+    for (std::size_t index = 0; index < candidates.candidate_count; ++index) {
+        reuse::release_candidate_reference_noerror(release_records[index]);
+    }
+
+    reuse::PlannerOwnedDecoratedPathV1 decorated{};
+    if (!reuse::invoke_decorate_path_fail_open(
+            provider,
+            root,
+            relation,
+            provider_path,
+            &described.value,
+            gate_expressions,
+            planner_context,
+            &decorated,
+            &diagnostic)) {
+        return false;
+    }
+    List* private_nodes = list_make5(
+        makeInteger(reuse::kReusablePlanFormatVersionV1),
+        makeInteger(static_cast<std::int32_t>(provider->provider_id)),
+        current_plan,
+        candidate_private,
+        copyObject(described.value.coverage_predicate));
+    const Cost overhead = cpu_tuple_cost
+        * (provider_path->rows > 0 ? provider_path->rows : 1.0)
+        * 0.0001;
+    CustomPath* wrapper = reuse::make_coverage_cache_path(
+        relation,
+        provider_path,
+        decorated.value.path,
+        private_nodes,
+        &coverage_path_methods(),
+        reuse::CoveragePathCostsV1{
+            .startup_cost = decorated.value.path->startup_cost,
+            .total_cost = decorated.value.path->total_cost + overhead,
+        });
+    return wrapper != nullptr
+        && reuse::replace_provider_path(relation, provider_path, wrapper);
+}
+
+/** Discover, map, decorate, and replace paths owned by one provider bridge. */
+void consider_provider_reusable_paths_impl(
+        PlannerInfo* root,
+        RelOptInfo* relation,
+        unsigned int range_table_index,
+        RangeTblEntry* range_entry,
+        const provider_registry::ProviderV1* provider) noexcept {
+    PlannerFrame* frame = g_planner_frame;
+    if (frame == nullptr || !frame->eligible || root == nullptr
+        || relation == nullptr || range_entry == nullptr
+        || provider == nullptr || relation->pathlist == NIL
+        || root->parse != frame->delegated_query
+        || range_table_index == 0
+        || range_table_index > static_cast<unsigned int>(
+            list_length(root->parse->rtable))) {
+        return;
+    }
+    const BioseqCacheQueryIntentV1* intent = nullptr;
+    for (std::size_t index = 0; index < frame->provider_intent_count; ++index) {
+        if (frame->providers[index] == provider) {
+            intent = &frame->intents[index].value;
+            break;
+        }
+    }
+    if (intent == nullptr) {
+        return;
+    }
+    MemoryContext planner_context = root->planner_cxt != nullptr
+        ? root->planner_cxt
+        : CurrentMemoryContext;
+    List* original_paths = list_copy(relation->pathlist);
+    ListCell* cell = nullptr;
+    foreach(cell, original_paths) {
+        Path* path = static_cast<Path*>(lfirst(cell));
+        if (path != nullptr && list_member_ptr(relation->pathlist, path)) {
+            static_cast<void>(wrap_one_provider_path(
+                root,
+                relation,
+                path,
+                provider,
+                *intent,
+                planner_context));
+        }
+    }
 }
 
 struct VisibilityTicket {
@@ -3775,6 +4105,317 @@ const CustomPathMethods& cache_path_methods() {
     static const CustomPathMethods methods = {
         .CustomName = "BioseqCacheScan",
         .PlanCustomPath = cache_plan_custom_path,
+    };
+    return methods;
+}
+
+struct ReusableCoverageState {
+    CustomScanState css;
+    bool child_initialized;
+    bool runtime_recipe_valid;
+    std::uint16_t source_count;
+    std::uint16_t reserved;
+};
+
+static_assert(std::is_standard_layout_v<ReusableCoverageState>);
+static_assert(offsetof(ReusableCoverageState, css) == 0);
+
+[[nodiscard]] std::span<const std::byte> binary_node_payload(
+        const void* node) noexcept {
+    if (node == nullptr || !IsA(node, Const)) {
+        return {};
+    }
+    const auto* constant = static_cast<const Const*>(node);
+    if (constant->constisnull || constant->consttype != BYTEAOID
+        || constant->constbyval) {
+        return {};
+    }
+    const auto* value = DatumGetByteaPP(constant->constvalue);
+    return bytea_payload(value);
+}
+
+[[nodiscard]] PlanState* coverage_retained_child(
+        CustomScanState* node) noexcept {
+    return node->custom_ps == NIL
+        ? nullptr
+        : static_cast<PlanState*>(linitial(node->custom_ps));
+}
+
+void initialize_coverage_child(
+        ReusableCoverageState& state,
+        CustomScanState* node,
+        EState* estate,
+        int eflags) {
+    auto* scan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+    if (scan->custom_plans == NIL || list_length(scan->custom_plans) != 1
+        || node->custom_ps != NIL) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqReusableCoverageScan retained child is malformed")));
+    }
+    Plan* child_plan = static_cast<Plan*>(linitial(scan->custom_plans));
+    node->custom_ps = list_make1(ExecInitNode(child_plan, estate, eflags));
+    state.child_initialized = true;
+}
+
+/** Validate finalized provider semantics and close every gate before child init. */
+void coverage_begin_custom_scan(
+        CustomScanState* node, EState* estate, int eflags) {
+    auto* state = reinterpret_cast<ReusableCoverageState*>(node);
+    auto* scan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+    state->child_initialized = false;
+    state->runtime_recipe_valid = false;
+    state->source_count = 0;
+    node->custom_ps = NIL;
+
+    List* candidates = scan->custom_private != NIL
+            && list_length(scan->custom_private) >= 4
+        ? static_cast<List*>(list_nth(scan->custom_private, 3))
+        : NIL;
+    const int source_count = list_length(candidates);
+    if (source_count < 0
+        || source_count > static_cast<int>(kMaxSourcesPerCoverageNode)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqReusableCoverageScan source count is invalid")));
+    }
+    state->source_count = static_cast<std::uint16_t>(source_count);
+
+    std::array<int, kMaxSourcesPerCoverageNode> gate_ids{};
+    int gate_index = 0;
+    ListCell* cell = nullptr;
+    foreach(cell, candidates) {
+        const auto* source = static_cast<const List*>(lfirst(cell));
+        if (source == nullptr || list_length(source) != 6
+            || !IsA(list_nth(source, 4), Integer)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqReusableCoverageScan source metadata is invalid")));
+        }
+        gate_ids[gate_index++] = intVal(list_nth(source, 4));
+    }
+
+    const int provider_id = scan->custom_private != NIL
+            && list_length(scan->custom_private) >= 2
+            && IsA(list_nth(scan->custom_private, 1), Integer)
+        ? intVal(list_nth(scan->custom_private, 1))
+        : 0;
+    const provider_registry::ProviderV1* provider = provider_id > 0
+        ? provider_registry::find_provider_v1(
+            static_cast<std::uint32_t>(provider_id))
+        : nullptr;
+    List* recipe_private = scan->custom_private != NIL
+            && list_length(scan->custom_private) >= 6
+        ? static_cast<List*>(list_nth(scan->custom_private, 5))
+        : NIL;
+    if (provider != nullptr && recipe_private != NIL
+        && list_length(recipe_private) == 4
+        && IsA(list_nth(recipe_private, 0), Integer)
+        && intVal(list_nth(recipe_private, 0)) != 0
+        && IsA(list_nth(recipe_private, 3), Integer)) {
+        const auto expected = binary_node_payload(
+            list_nth(recipe_private, 2));
+        if (expected.size() == CacheDigest256{}.bytes.size()) {
+            BioseqCachePlanDigestRecipeV1 recipe{
+                .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+                .flags = 0,
+                .digest_format_version = static_cast<std::uint32_t>(
+                    intVal(list_nth(recipe_private, 3))),
+                .reserved = 0,
+                .plan_domain_nodes = static_cast<List*>(
+                    list_nth(recipe_private, 1)),
+            };
+            std::memcpy(
+                recipe.expected_generation_digest,
+                expected.data(),
+                expected.size());
+            reuse::ProviderCallDiagnosticV1 diagnostic{};
+            state->runtime_recipe_valid =
+                reuse::validate_runtime_recipe_fail_open(
+                    provider,
+                    &recipe,
+                    estate,
+                    estate->es_query_cxt,
+                    &diagnostic);
+        }
+    }
+
+    if (source_count != 0) {
+        reuse::ReuseGateFreezeV1 gates{};
+        if (!reuse::begin_gate_preflight(gates, source_count)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqReusableCoverageScan gates are malformed")));
+        }
+        reuse::freeze_all_sources_invalid(gates);
+        if (!reuse::publish_frozen_gates(
+                estate,
+                std::span<const int>{
+                    gate_ids.data(), static_cast<std::size_t>(source_count)},
+                gates)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqReusableCoverageScan gates cannot be frozen")));
+        }
+    }
+    initialize_coverage_child(*state, node, estate, eflags);
+}
+
+TupleTableSlot* coverage_exec_custom_scan(CustomScanState* node) {
+    PlanState* child = coverage_retained_child(node);
+    if (child == nullptr) {
+        return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+    }
+    TupleTableSlot* raw = ExecProcNode(child);
+    if (TupIsNull(raw)) {
+        return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+    }
+    ExprContext* expression_context = node->ss.ps.ps_ExprContext;
+    expression_context->ecxt_scantuple = raw;
+    return node->ss.ps.ps_ProjInfo == nullptr
+        ? raw
+        : ExecProject(node->ss.ps.ps_ProjInfo);
+}
+
+void coverage_end_custom_scan(CustomScanState* node) {
+    auto* state = reinterpret_cast<ReusableCoverageState*>(node);
+    if (state->child_initialized && coverage_retained_child(node) != nullptr) {
+        ExecEndNode(coverage_retained_child(node));
+        node->custom_ps = NIL;
+    }
+    state->child_initialized = false;
+}
+
+void coverage_rescan_custom_scan(CustomScanState* node) {
+    if (coverage_retained_child(node) != nullptr) {
+        ExecReScan(coverage_retained_child(node));
+    }
+}
+
+void coverage_explain_custom_scan(
+        CustomScanState* node, List*, ExplainState* explain) {
+    const auto* state = reinterpret_cast<const ReusableCoverageState*>(node);
+    ExplainPropertyText("Cache Entry Kind", "ReusableCoverage", explain);
+    ExplainPropertyInteger(
+        "Reusable Sources", nullptr, state->source_count, explain);
+    ExplainPropertyBool(
+        "Provider Runtime Recipe Valid",
+        state->runtime_recipe_valid,
+        explain);
+}
+
+const CustomExecMethods& coverage_exec_methods() {
+    static const CustomExecMethods methods{
+        .CustomName = "BioseqReusableCoverageScan",
+        .BeginCustomScan = coverage_begin_custom_scan,
+        .ExecCustomScan = coverage_exec_custom_scan,
+        .EndCustomScan = coverage_end_custom_scan,
+        .ReScanCustomScan = coverage_rescan_custom_scan,
+        .ExplainCustomScan = coverage_explain_custom_scan,
+    };
+    return methods;
+}
+
+Node* coverage_create_custom_scan_state(CustomScan*) {
+    auto* state = reinterpret_cast<ReusableCoverageState*>(
+        newNode(sizeof(ReusableCoverageState), T_CustomScanState));
+    state->css.methods = &coverage_exec_methods();
+    return reinterpret_cast<Node*>(&state->css);
+}
+
+const CustomScanMethods& coverage_scan_methods() {
+    static const CustomScanMethods methods{
+        .CustomName = "BioseqReusableCoverageScan",
+        .CreateCustomScanState = coverage_create_custom_scan_state,
+    };
+    return methods;
+}
+
+/** Finalize the provider recipe only after the decorated child Plan exists. */
+Plan* coverage_plan_custom_path(
+        PlannerInfo* root,
+        RelOptInfo* relation,
+        CustomPath* best_path,
+        List* target_list,
+        List*,
+        List* custom_plans) {
+    if (root == nullptr || relation == nullptr || best_path == nullptr
+        || list_length(custom_plans) != 1
+        || list_length(best_path->custom_private) != 5
+        || !IsA(list_nth(best_path->custom_private, 0), Integer)
+        || intVal(list_nth(best_path->custom_private, 0))
+            != static_cast<int>(reuse::kReusablePlanFormatVersionV1)
+        || !IsA(list_nth(best_path->custom_private, 1), Integer)) {
+        return nullptr;
+    }
+    const int provider_id = intVal(list_nth(best_path->custom_private, 1));
+    const provider_registry::ProviderV1* provider = provider_id > 0
+        ? provider_registry::find_provider_v1(
+            static_cast<std::uint32_t>(provider_id))
+        : nullptr;
+    Plan* child = static_cast<Plan*>(linitial(custom_plans));
+    reuse::PlannerOwnedDigestRecipeV1 recipe{};
+    reuse::ProviderCallDiagnosticV1 diagnostic{};
+    const bool recipe_valid = provider != nullptr
+        && reuse::invoke_build_recipe_fail_open(
+            provider,
+            root,
+            child,
+            root->planner_cxt,
+            &recipe,
+            &diagnostic);
+    Const* expected_digest = recipe_valid
+        ? make_binary_node(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(
+                recipe.value.expected_generation_digest),
+            sizeof(recipe.value.expected_generation_digest)})
+        : nullptr;
+    List* recipe_private = list_make4(
+        makeInteger(recipe_valid && expected_digest != nullptr ? 1 : 0),
+        recipe_valid
+            ? copyObject(recipe.value.plan_domain_nodes)
+            : static_cast<void*>(NIL),
+        expected_digest != nullptr
+            ? static_cast<void*>(expected_digest)
+            : static_cast<void*>(makeInteger(0)),
+        makeInteger(recipe_valid
+            ? static_cast<int>(recipe.value.digest_format_version)
+            : 0));
+
+    auto* scan = makeNode(CustomScan);
+    scan->methods = &coverage_scan_methods();
+    scan->flags = best_path->flags;
+    scan->scan.scanrelid = 0;
+    scan->scan.plan.targetlist = target_list;
+    scan->scan.plan.qual = NIL;
+    scan->custom_plans = custom_plans;
+    scan->custom_private = static_cast<List*>(
+        copyObject(best_path->custom_private));
+    scan->custom_private = lappend(scan->custom_private, recipe_private);
+    scan->custom_exprs = list_make1(
+        copyObject(list_nth(best_path->custom_private, 4)));
+    const auto* sources = static_cast<const List*>(
+        list_nth(best_path->custom_private, 3));
+    ListCell* cell = nullptr;
+    foreach(cell, sources) {
+        const auto* source = static_cast<const List*>(lfirst(cell));
+        if (source == nullptr || list_length(source) != 6) {
+            return nullptr;
+        }
+        scan->custom_exprs = lappend(
+            scan->custom_exprs,
+            copyObject(list_nth(source, 5)));
+    }
+    scan->custom_scan_tlist = static_cast<List*>(
+        copyObject(child->targetlist));
+    scan->custom_relids = bms_copy(relation->relids);
+    return &scan->scan.plan;
+}
+
+const CustomPathMethods& coverage_path_methods() {
+    static const CustomPathMethods methods{
+        .CustomName = "BioseqReusableCoverageScan",
+        .PlanCustomPath = coverage_plan_custom_path,
     };
     return methods;
 }
