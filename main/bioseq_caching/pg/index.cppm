@@ -2405,15 +2405,16 @@ void destroy_decoded_source_mapping_plan(
     }
 
     MemoryContext caller_context = CurrentMemoryContext;
-    MemoryContext disposable = AllocSetContextCreate(
-        caller_context,
-        "bioseq cache mapping private canonicalization",
-        ALLOCSET_SMALL_SIZES);
+    volatile MemoryContext disposable = nullptr;
     volatile char* copied = nullptr;
     volatile std::size_t copied_size = 0;
     PG_TRY();
     {
-        MemoryContextSwitchTo(disposable);
+        disposable = AllocSetContextCreate(
+            caller_context,
+            "bioseq cache mapping private canonicalization",
+            ALLOCSET_SMALL_SIZES);
+        MemoryContextSwitchTo(const_cast<MemoryContext>(disposable));
         List* tail = list_copy_tail(const_cast<List*>(nodes), 1);
         char* serialized = nodeToString(tail);
         const std::size_t byte_count = serialized == nullptr
@@ -2432,8 +2433,11 @@ void destroy_decoded_source_mapping_plan(
     {
         const int sqlstate = geterrcode();
         MemoryContextSwitchTo(caller_context);
+        if (disposable != nullptr) {
+            MemoryContextDelete(const_cast<MemoryContext>(disposable));
+            disposable = nullptr;
+        }
         if (cache_interrupt_error(sqlstate)) {
-            MemoryContextDelete(disposable);
             PG_RE_THROW();
         }
         FlushErrorState();
@@ -2441,7 +2445,9 @@ void destroy_decoded_source_mapping_plan(
         copied_size = 0;
     }
     PG_END_TRY();
-    MemoryContextDelete(disposable);
+    if (disposable != nullptr) {
+        MemoryContextDelete(const_cast<MemoryContext>(disposable));
+    }
     if (copied == nullptr) {
         return false;
     }
@@ -3071,6 +3077,16 @@ struct PlannerCandidateBytesV1 {
     bytea* coverage_descriptor = nullptr;
 };
 
+struct PlannerMappedSourceV1 {
+    Const* reference_node = nullptr;
+    Const* generation_key_node = nullptr;
+    Const* descriptor_node = nullptr;
+    BioseqCacheReusableSourceV1 source{};
+    BioseqCacheSourceMappingV1 mapping{};
+    Expr* source_predicate = nullptr;
+    int gate_param_id = 0;
+};
+
 /** Planner-context callback target; idempotent token clearing prevents leaks. */
 void release_planner_pin_noerror(
         void* opaque, const CacheEntryId&,
@@ -3336,7 +3352,9 @@ void release_planner_pin_noerror(
     }
     List* gate_expressions = list_make1(
         copyObject(current_gate.residual_gate));
-    List* candidate_private = NIL;
+    std::array<PlannerMappedSourceV1,
+        kMaxCoverageGenerationsPerDomain> mapped_sources{};
+    std::size_t mapped_source_count = 0;
     for (std::size_t index = 0; index < candidates->candidate_count; ++index) {
         if (!selected_mask[index]) {
             reuse::release_candidate_reference_noerror(
@@ -3385,40 +3403,15 @@ void release_planner_pin_noerror(
                 &release_records[index])) {
             continue;
         }
-        const BioseqCacheDecoratedPathV1 advertised_decorated{
-            .struct_size = sizeof(BioseqCacheDecoratedPathV1),
-            .flags = 0,
-            .path = provider_path,
-            .actual_boundary_columns = described.value.boundary_columns,
-            .actual_boundary_column_count =
-                described.value.boundary_column_count,
-            .actual_lineage_columns = described.value.lineage_columns,
-            .actual_lineage_column_count =
-                described.value.lineage_column_count,
-            .provider_private_nodes =
-                described.value.provider_private_nodes,
+        mapped_sources[mapped_source_count++] = PlannerMappedSourceV1{
+            .reference_node = reference_node,
+            .generation_key_node = generation_key_node,
+            .descriptor_node = descriptor_node,
+            .source = decoded.source,
+            .mapping = mapping.value,
+            .source_predicate = decoded.domain.coverage_predicate,
+            .gate_param_id = gate.param_id,
         };
-        List* mapping_node = make_source_mapping_plan_node(
-            described.value,
-            decoded.source,
-            advertised_decorated,
-            mapping.value);
-        if (mapping_node == nullptr) {
-            continue;
-        }
-        List* source_private = list_make5(
-            reference_node,
-            generation_key_node,
-            descriptor_node,
-            mapping_node,
-            copyObject(mapping.value.provider_private_nodes));
-        source_private = lappend(
-            source_private,
-            makeInteger(gate.param_id));
-        source_private = lappend(
-            source_private,
-            copyObject(decoded.domain.coverage_predicate));
-        candidate_private = lappend(candidate_private, source_private);
         gate_expressions = lappend(
             gate_expressions, copyObject(gate.residual_gate));
     }
@@ -3438,6 +3431,29 @@ void release_planner_pin_noerror(
             &decorated,
             &diagnostic)) {
         return false;
+    }
+    List* candidate_private = NIL;
+    for (std::size_t index = 0; index < mapped_source_count; ++index) {
+        const PlannerMappedSourceV1& mapped = mapped_sources[index];
+        List* mapping_node = make_source_mapping_plan_node(
+            described.value,
+            mapped.source,
+            decorated.value,
+            mapped.mapping);
+        if (mapping_node == nullptr) {
+            return false;
+        }
+        List* source_private = list_make5(
+            mapped.reference_node,
+            mapped.generation_key_node,
+            mapped.descriptor_node,
+            mapping_node,
+            copyObject(mapped.mapping.provider_private_nodes));
+        source_private = lappend(
+            source_private, makeInteger(mapped.gate_param_id));
+        source_private = lappend(
+            source_private, copyObject(mapped.source_predicate));
+        candidate_private = lappend(candidate_private, source_private);
     }
     List* private_nodes = list_make5(
         makeInteger(reuse::kReusablePlanFormatVersionV1),
@@ -9441,44 +9457,10 @@ const CustomScanMethods& coverage_scan_methods() {
     return methods;
 }
 
-[[nodiscard]] bool plan_targetlist_matches_mapping_schema(
-        const Plan& child,
-        const BioseqCacheColumnSchemaV1* columns,
-        std::size_t column_count) {
-    if (column_count > kMaxProviderBoundaryColumns
-        || (column_count != 0 && columns == nullptr)) {
-        return false;
-    }
-    for (std::size_t index = 0; index < column_count; ++index) {
-        const BioseqCacheColumnSchemaV1& column = columns[index];
-        const TargetEntry* matched = nullptr;
-        ListCell* cell = nullptr;
-        foreach(cell, child.targetlist) {
-            const auto* entry = static_cast<const TargetEntry*>(lfirst(cell));
-            if (entry != nullptr && entry->resno
-                    == static_cast<AttrNumber>(column.attno)) {
-                matched = entry;
-                break;
-            }
-        }
-        if (matched == nullptr || matched->expr == nullptr
-            || exprType(reinterpret_cast<const Node*>(matched->expr))
-                != column.type_oid
-            || exprTypmod(reinterpret_cast<const Node*>(matched->expr))
-                != column.typmod
-            || exprCollation(reinterpret_cast<const Node*>(matched->expr))
-                != column.collation_oid) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /** Re-decode every mapping after the final decorated child Plan exists. */
 [[nodiscard]] bool planned_source_mappings_valid(
         PlannerInfo* root,
-        const CustomPath& best_path,
-        const Plan& child) {
+        const CustomPath& best_path) {
     const auto current_bytes = binary_node_payload(
         list_nth(best_path.custom_private, 2));
     CoverageCurrentPlanViewV1 current_plan{};
@@ -9486,15 +9468,7 @@ const CustomScanMethods& coverage_scan_methods() {
     if (root == nullptr
         || !decode_current_coverage_plan(current_bytes, &current_plan)
         || !decode_coverage_descriptor_fail_open(
-            current_plan.coverage_descriptor, root->planner_cxt, &consumer)
-        || !plan_targetlist_matches_mapping_schema(
-            child,
-            consumer.domain.boundary_columns,
-            consumer.domain.boundary_column_count)
-        || !plan_targetlist_matches_mapping_schema(
-            child,
-            consumer.domain.lineage_columns,
-            consumer.domain.lineage_column_count)) {
+            current_plan.coverage_descriptor, root->planner_cxt, &consumer)) {
         return false;
     }
     const void* candidates_node = list_nth(best_path.custom_private, 3);
@@ -9554,12 +9528,11 @@ Plan* coverage_plan_custom_path(
             static_cast<std::uint32_t>(provider_id))
         : nullptr;
     Plan* child = static_cast<Plan*>(linitial(custom_plans));
-    if (!planned_source_mappings_valid(root, *best_path, *child)) {
-        return nullptr;
-    }
+    const bool mappings_valid = planned_source_mappings_valid(
+        root, *best_path);
     reuse::PlannerOwnedDigestRecipeV1 recipe{};
     reuse::ProviderCallDiagnosticV1 diagnostic{};
-    const bool recipe_valid = provider != nullptr
+    const bool recipe_valid = mappings_valid && provider != nullptr
         && reuse::invoke_build_recipe_fail_open(
             provider,
             root,
