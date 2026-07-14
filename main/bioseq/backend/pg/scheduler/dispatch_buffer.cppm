@@ -2180,6 +2180,27 @@ public:
 						read.source_fragment_rows_read;
 					read_delta.persisted_source_decoded_bp =
 						read.source_decoded_bp;
+					if (group.persisted_shape_v5_reader) {
+						const auto memory_evidence =
+							group.persisted_shape_v5_reader->memory_evidence();
+						read_delta.format5_reader_capacity_accounting_passes =
+							memory_evidence.capacity_accounting_passes;
+						read_delta.
+							format5_reader_global_position_storage_preparations =
+							memory_evidence.global_position_storage_preparations;
+						read_delta.
+							format5_reader_global_position_storage_allocations =
+							memory_evidence.global_position_storage_allocations;
+						read_delta.
+							format5_reader_position_append_growth_reservations =
+							memory_evidence.position_append_growth_reservations;
+						read_delta.format5_reader_retained_position_count =
+							memory_evidence.retained_position_count;
+						read_delta.format5_reader_retained_position_capacity =
+							memory_evidence.retained_position_capacity;
+						read_delta.format5_reader_memory_evidence_saturated =
+							memory_evidence.saturated;
+					}
 					operational.merge(read_delta);
 					merge_cold_index_preparation_stats(
 						operational, read.cold);

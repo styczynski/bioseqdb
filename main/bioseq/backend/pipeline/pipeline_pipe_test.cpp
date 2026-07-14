@@ -1515,6 +1515,11 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     first.cold_index_payload_rows_scanned = 3;
     first.cold_index_payload_rows_skipped = 1;
     first.cold_index_shared_blks_read = 3;
+    first.format5_reader_capacity_accounting_passes = 5;
+    first.format5_reader_global_position_storage_preparations = 1;
+    first.format5_reader_global_position_storage_allocations = 1;
+    first.format5_reader_retained_position_count = 37;
+    first.format5_reader_retained_position_capacity = 40;
     aggregate.merge(first);
 
     REQUIRE(aggregate.cold_index_sidecar_heap_opens == 2);
@@ -1526,16 +1531,46 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     REQUIRE(aggregate.cold_index_payload_rows_scanned == 3);
     REQUIRE(aggregate.cold_index_payload_rows_skipped == 1);
     REQUIRE(aggregate.cold_index_shared_blks_read == 3);
+    REQUIRE(aggregate.format5_reader_capacity_accounting_passes == 5);
+    REQUIRE(aggregate.format5_reader_global_position_storage_preparations == 1);
+    REQUIRE(aggregate.format5_reader_global_position_storage_allocations == 1);
+    REQUIRE(aggregate.format5_reader_position_append_growth_reservations == 0);
+    REQUIRE(aggregate.format5_reader_retained_position_count == 37);
+    REQUIRE(aggregate.format5_reader_retained_position_capacity == 40);
+    REQUIRE_FALSE(aggregate.format5_reader_memory_evidence_saturated);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats second{};
+    second.format5_reader_capacity_accounting_passes = 4;
+    second.format5_reader_global_position_storage_preparations = 1;
+    second.format5_reader_global_position_storage_allocations = 1;
+    second.format5_reader_position_append_growth_reservations = 2;
+    second.format5_reader_retained_position_count = 11;
+    second.format5_reader_retained_position_capacity = 16;
+    second.format5_reader_memory_evidence_saturated = true;
+    aggregate.merge(second);
+
+    REQUIRE(aggregate.format5_reader_capacity_accounting_passes == 9);
+    REQUIRE(aggregate.format5_reader_global_position_storage_preparations == 2);
+    REQUIRE(aggregate.format5_reader_global_position_storage_allocations == 2);
+    REQUIRE(aggregate.format5_reader_position_append_growth_reservations == 2);
+    REQUIRE(aggregate.format5_reader_retained_position_count == 48);
+    REQUIRE(aggregate.format5_reader_retained_position_capacity == 56);
+    REQUIRE(aggregate.format5_reader_memory_evidence_saturated);
     REQUIRE_FALSE(aggregate.stats_saturated);
 
     PipelineOperationalStats at_limit{};
     at_limit.cold_index_payload_bytes_scanned = sql_bigint_value_max;
+    at_limit.format5_reader_retained_position_capacity = sql_bigint_value_max;
     PipelineOperationalStats overflow{};
     overflow.cold_index_payload_bytes_scanned = 1;
+    overflow.format5_reader_retained_position_capacity = 1;
     aggregate.merge(at_limit);
     aggregate.merge(overflow);
 
     REQUIRE(aggregate.cold_index_payload_bytes_scanned
+            == sql_bigint_value_max);
+    REQUIRE(aggregate.format5_reader_retained_position_capacity
             == sql_bigint_value_max);
     REQUIRE(aggregate.stats_saturated);
 }

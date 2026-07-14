@@ -832,6 +832,64 @@ template<std::size_t N>
 	return result;
 }
 
+[[nodiscard]] std::string format5_reader_memory_evidence_json(
+		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+{
+	/*
+	 * Keep this post-statement diagnostic separate from both frozen alignment
+	 * stats SRFs and the version-1 cold-index object.  One immutable backend-
+	 * local snapshot supplies the identity, counters and saturation flags.
+	 */
+	const auto& operational = snapshot.pipeline.operational;
+	std::string result =
+		R"({"schema":"bioseq.format5_reader_memory_evidence","version":1)";
+	result.reserve(768);
+	const auto append_signed = [&result](
+			const std::string_view key,
+			const std::int64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	append_signed("execution_id", snapshot.execution_id);
+	append_signed("backend_pid", snapshot.backend_pid);
+	append("database_oid", snapshot.database_oid);
+	append(
+		"format5_reader_capacity_accounting_passes",
+		operational.format5_reader_capacity_accounting_passes);
+	append(
+		"format5_reader_global_position_storage_preparations",
+		operational.format5_reader_global_position_storage_preparations);
+	append(
+		"format5_reader_global_position_storage_allocations",
+		operational.format5_reader_global_position_storage_allocations);
+	append(
+		"format5_reader_position_append_growth_reservations",
+		operational.format5_reader_position_append_growth_reservations);
+	append(
+		"format5_reader_retained_position_count",
+		operational.format5_reader_retained_position_count);
+	append(
+		"format5_reader_retained_position_capacity",
+		operational.format5_reader_retained_position_capacity);
+	result += R"(,"format5_reader_memory_evidence_saturated":)";
+	result += operational.format5_reader_memory_evidence_saturated
+		? "true" : "false";
+	result += R"(,"stats_saturated":)";
+	result += operational.stats_saturated ? "true" : "false";
+	result += '}';
+	return result;
+}
+
 [[nodiscard]] std::string cold_index_selective_probe_json(
 		const bioseq::storage::indexing::ColdIndexPreparationStatsPg& stats)
 {
@@ -1952,6 +2010,22 @@ Datum bioseq_last_alignment_execution_stats_v2(PG_FUNCTION_ARGS) {
 	return materialize_alignment_execution_stats<
 		alignment_stats_v2_column_count>(
 			fcinfo, "bioseq.last_alignment_execution_stats_v2()");
+}
+
+/* DOC0373: exact Format-5 cold-reader allocation proof for the last snapshot. */
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_last_alignment_format5_reader_memory_evidence);
+Datum bioseq_last_alignment_format5_reader_memory_evidence(PG_FUNCTION_ARGS) {
+	if (!last_alignment_execution_snapshot.has_value()) {
+		PG_RETURN_NULL();
+	}
+	const alignment_exec::AlignmentExecutionSnapshot snapshot =
+		*last_alignment_execution_snapshot;
+	(void)validate_alignment_snapshot_environment(snapshot);
+	const std::string encoded =
+		format5_reader_memory_evidence_json(snapshot);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
 }
 
 /*

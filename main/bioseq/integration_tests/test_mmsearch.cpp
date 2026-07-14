@@ -551,8 +551,13 @@ TEST_CASE("alignment execution SRF publishes one exact stage row set",
 TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proof",
           "[mmsearch][pipeline-stats][statement][srf][v2][doc0372]") {
     auto ctx = fresh_context({kBatchJoinTarget});
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_format5_reader_memory_evidence() IS NULL)::int;")
+        == 1);
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 2);
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
     require_batch_join_aligned_query_rows(
         ctx,
         batch_join_sql(1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
@@ -656,6 +661,79 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         "FROM s;");
     REQUIRE(schema.size() == 10u);
     for (const auto& assertion : schema) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t memory = query_one(ctx,
+        "WITH first_read AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence()"
+        "        AS evidence"
+        "), second_read AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence()"
+        "        AS evidence"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, stats_saturated,"
+        "        actual_target_index_source"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "first_read.evidence = second_read.evidence, "
+        "jsonb_typeof(first_read.evidence) = 'object', "
+        "(SELECT count(*) FROM jsonb_object_keys(first_read.evidence)) = 13 "
+        "AND first_read.evidence ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'format5_reader_capacity_accounting_passes',"
+        " 'format5_reader_global_position_storage_preparations',"
+        " 'format5_reader_global_position_storage_allocations',"
+        " 'format5_reader_position_append_growth_reservations',"
+        " 'format5_reader_retained_position_count',"
+        " 'format5_reader_retained_position_capacity',"
+        " 'format5_reader_memory_evidence_saturated','stats_saturated'"
+        "]::text[], "
+        "first_read.evidence->>'schema' = "
+        " 'bioseq.format5_reader_memory_evidence' "
+        "AND jsonb_typeof(first_read.evidence->'schema') = 'string' "
+        "AND (first_read.evidence->>'version')::bigint = 1 "
+        "AND jsonb_typeof(first_read.evidence->'version') = 'number', "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(first_read.evidence) AS entry"
+        " WHERE entry.key IN ("
+        "  'version','execution_id','backend_pid','database_oid',"
+        "  'format5_reader_capacity_accounting_passes',"
+        "  'format5_reader_global_position_storage_preparations',"
+        "  'format5_reader_global_position_storage_allocations',"
+        "  'format5_reader_position_append_growth_reservations',"
+        "  'format5_reader_retained_position_count',"
+        "  'format5_reader_retained_position_capacity'"
+        " ) AND jsonb_typeof(entry.value) <> 'number'"
+        "), "
+        "(first_read.evidence->>'execution_id')::bigint = stats.execution_id "
+        "AND (first_read.evidence->>'backend_pid')::bigint = stats.backend_pid "
+        "AND (first_read.evidence->>'database_oid')::bigint = stats.database_oid, "
+        "(first_read.evidence->>'format5_reader_capacity_accounting_passes')"
+        "::bigint = 0 "
+        "AND (first_read.evidence->>"
+        "'format5_reader_global_position_storage_preparations')::bigint = 0 "
+        "AND (first_read.evidence->>"
+        "'format5_reader_global_position_storage_allocations')::bigint = 0 "
+        "AND (first_read.evidence->>"
+        "'format5_reader_position_append_growth_reservations')::bigint = 0 "
+        "AND (first_read.evidence->>'format5_reader_retained_position_count')"
+        "::bigint = 0 "
+        "AND (first_read.evidence->>'format5_reader_retained_position_capacity')"
+        "::bigint = 0 "
+        "AND stats.actual_target_index_source = 'recomputed', "
+        "jsonb_typeof(first_read.evidence->"
+        "'format5_reader_memory_evidence_saturated') = 'boolean' "
+        "AND NOT (first_read.evidence->>"
+        "'format5_reader_memory_evidence_saturated')::boolean "
+        "AND jsonb_typeof(first_read.evidence->'stats_saturated') = 'boolean' "
+        "AND (first_read.evidence->>'stats_saturated')::boolean "
+        "    = stats.stats_saturated "
+        "AND NOT (first_read.evidence->>'stats_saturated')::boolean "
+        "FROM first_read CROSS JOIN second_read CROSS JOIN stats;");
+    REQUIRE(memory.size() == 8u);
+    for (const auto& assertion : memory) {
         REQUIRE(assertion.value_or("") == "t");
     }
 }
@@ -1477,6 +1555,81 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS
 				"FROM stats;");
 			REQUIRE(cold.size() == 35);
 			for (const auto& assertion : cold) {
+				REQUIRE(assertion.value_or("") == "t");
+			}
+
+			const row_t memory = query_one(ctx,
+				"WITH stats AS ("
+				" SELECT execution_id, backend_pid, database_oid,"
+				" persisted_generation_read_sessions, stats_saturated"
+				" FROM bioseq.last_alignment_execution_stats_v2()"
+				" WHERE stage='query_sketch'"
+				"), evidence AS MATERIALIZED ("
+				" SELECT bioseq."
+				"last_alignment_format5_reader_memory_evidence() AS value"
+				") SELECT "
+				"jsonb_typeof(evidence.value) = 'object', "
+				"(SELECT count(*) FROM jsonb_object_keys(evidence.value)) = 13 "
+				"AND evidence.value ?& ARRAY["
+				" 'schema','version','execution_id','backend_pid','database_oid',"
+				" 'format5_reader_capacity_accounting_passes',"
+				" 'format5_reader_global_position_storage_preparations',"
+				" 'format5_reader_global_position_storage_allocations',"
+				" 'format5_reader_position_append_growth_reservations',"
+				" 'format5_reader_retained_position_count',"
+				" 'format5_reader_retained_position_capacity',"
+				" 'format5_reader_memory_evidence_saturated','stats_saturated'"
+				"]::text[], "
+				"evidence.value->>'schema' = "
+				" 'bioseq.format5_reader_memory_evidence' "
+				"AND jsonb_typeof(evidence.value->'schema') = 'string' "
+				"AND (evidence.value->>'version')::bigint = 1 "
+				"AND jsonb_typeof(evidence.value->'version') = 'number', "
+				"NOT EXISTS ("
+				" SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+				" WHERE entry.key IN ("
+				"  'version','execution_id','backend_pid','database_oid',"
+				"  'format5_reader_capacity_accounting_passes',"
+				"  'format5_reader_global_position_storage_preparations',"
+				"  'format5_reader_global_position_storage_allocations',"
+				"  'format5_reader_position_append_growth_reservations',"
+				"  'format5_reader_retained_position_count',"
+				"  'format5_reader_retained_position_capacity'"
+				" ) AND jsonb_typeof(entry.value) <> 'number'"
+				"), "
+				"(evidence.value->>'execution_id')::bigint = stats.execution_id "
+				"AND (evidence.value->>'backend_pid')::bigint = stats.backend_pid "
+				"AND (evidence.value->>'database_oid')::bigint = stats.database_oid, "
+				"(evidence.value->>"
+				"'format5_reader_global_position_storage_preparations')::bigint "
+				" = stats.persisted_generation_read_sessions "
+				"AND (evidence.value->>"
+				"'format5_reader_global_position_storage_allocations')::bigint "
+				" = stats.persisted_generation_read_sessions "
+				"AND stats.persisted_generation_read_sessions = 1, "
+				"(evidence.value->>"
+				"'format5_reader_position_append_growth_reservations')::bigint = 0 "
+				"AND (evidence.value->>'format5_reader_retained_position_count')"
+				"::bigint > 0 "
+				"AND (evidence.value->>'format5_reader_retained_position_capacity')"
+				"::bigint >= (evidence.value->>"
+				"'format5_reader_retained_position_count')::bigint, "
+				"(evidence.value->>'format5_reader_capacity_accounting_passes')"
+				"::bigint >= stats.persisted_generation_read_sessions "
+				"AND (evidence.value->>"
+				"'format5_reader_capacity_accounting_passes')::bigint "
+				"<= 16 * stats.persisted_generation_read_sessions, "
+				"jsonb_typeof(evidence.value->"
+				"'format5_reader_memory_evidence_saturated') = 'boolean' "
+				"AND NOT (evidence.value->>"
+				"'format5_reader_memory_evidence_saturated')::boolean "
+				"AND jsonb_typeof(evidence.value->'stats_saturated') = 'boolean' "
+				"AND (evidence.value->>'stats_saturated')::boolean "
+				"    = stats.stats_saturated "
+				"AND NOT (evidence.value->>'stats_saturated')::boolean "
+				"FROM stats CROSS JOIN evidence;");
+			REQUIRE(memory.size() == 9u);
+			for (const auto& assertion : memory) {
 				REQUIRE(assertion.value_or("") == "t");
 			}
 

@@ -2004,6 +2004,12 @@ RETURNS TABLE (
 LANGUAGE C VOLATILE PARALLEL UNSAFE
 AS 'MODULE_PATHNAME', 'bioseq_last_alignment_execution_stats_v2';
 
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format5_reader_memory_evidence()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format5_reader_memory_evidence';
+
 CREATE OR REPLACE FUNCTION bioseq_internal.reset_active_read_policy_debug()
 RETURNS void
 AS 'MODULE_PATHNAME', 'bioseq_internal_reset_active_read_policy_debug'

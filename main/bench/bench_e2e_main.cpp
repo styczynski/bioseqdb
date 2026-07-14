@@ -331,6 +331,14 @@ struct E2eOutput {
     std::int64_t cold_index_payload_bytes_requested = -1;
     std::int64_t cold_index_payload_bytes_delivered = -1;
     std::int64_t cold_index_payload_bytes_scanned = -1;
+    std::int64_t format5_reader_capacity_accounting_passes = -1;
+    std::int64_t format5_reader_global_position_storage_preparations = -1;
+    std::int64_t format5_reader_global_position_storage_allocations = -1;
+    std::int64_t format5_reader_position_append_growth_reservations = -1;
+    std::int64_t format5_reader_retained_position_count = -1;
+    std::int64_t format5_reader_retained_position_capacity = -1;
+    std::int64_t format5_reader_memory_evidence_saturated = -1;
+    nlohmann::json format5_reader_memory_evidence = nullptr;
     std::int64_t cold_index_stats_saturated = -1;
     std::int64_t gpu_persisted_resident_uploads = -1;
     std::int64_t gpu_persisted_resident_cache_hits = -1;
@@ -1534,6 +1542,19 @@ inline constexpr auto kColdIndexEvidenceKeys =
     });
 static_assert(kColdIndexEvidenceKeys.size() == 56);
 
+inline constexpr auto kFormat5ReaderMemoryEvidenceKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "execution_id", "backend_pid", "database_oid",
+        "format5_reader_capacity_accounting_passes",
+        "format5_reader_global_position_storage_preparations",
+        "format5_reader_global_position_storage_allocations",
+        "format5_reader_position_append_growth_reservations",
+        "format5_reader_retained_position_count",
+        "format5_reader_retained_position_capacity",
+        "format5_reader_memory_evidence_saturated", "stats_saturated",
+    });
+static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 13);
+
 inline constexpr auto kSimdExecutionEvidenceKeys =
     std::to_array<std::string_view>({
         "schema", "version", "requested_policy", "observed_policy",
@@ -1770,6 +1791,70 @@ void capture_versioned_alignment_json(
         block["saturated"].get<bool>() ? 1 : 0;
 }
 
+void capture_format5_reader_memory_evidence(
+        const it::connection_test_context& connection,
+        E2eOutput& out) {
+    const it::row_t row = it::query_one(
+        connection,
+        "SELECT bioseq.last_alignment_format5_reader_memory_evidence();");
+    if (row.size() != 1) {
+        abort_pipeline_proof_capture(
+            "Format-5 reader memory evidence has an invalid scalar shape");
+    }
+    const nlohmann::json evidence = parse_exact_json_cell(
+        row.front(), "Format-5 reader memory evidence JSON failed to parse");
+    const bool header_valid = json_has_exact_keys(
+            evidence, kFormat5ReaderMemoryEvidenceKeys)
+        && evidence["schema"].is_string()
+        && evidence["schema"] == "bioseq.format5_reader_memory_evidence"
+        && evidence["version"].is_number_integer()
+        && evidence["version"] == 1
+        && evidence["format5_reader_memory_evidence_saturated"].is_boolean()
+        && evidence["stats_saturated"].is_boolean();
+    if (!header_valid) {
+        abort_pipeline_proof_capture(
+            "Format-5 reader memory evidence has the wrong exact schema or types");
+    }
+
+    const std::int64_t execution_id =
+        required_json_counter(evidence, "execution_id");
+    const std::int64_t backend_pid =
+        required_json_counter(evidence, "backend_pid");
+    const std::int64_t database_oid =
+        required_json_counter(evidence, "database_oid");
+    if (execution_id != out.alignment_execution_id
+        || backend_pid != out.alignment_backend_pid
+        || database_oid != out.alignment_database_oid
+        || evidence["stats_saturated"].get<bool>()
+            != (out.stats_saturated != 0)) {
+        abort_pipeline_proof_capture(
+            "Format-5 reader memory evidence identity/saturation does not match v2");
+    }
+
+    out.format5_reader_capacity_accounting_passes = required_json_counter(
+        evidence, "format5_reader_capacity_accounting_passes");
+    out.format5_reader_global_position_storage_preparations =
+        required_json_counter(
+            evidence,
+            "format5_reader_global_position_storage_preparations");
+    out.format5_reader_global_position_storage_allocations =
+        required_json_counter(
+            evidence,
+            "format5_reader_global_position_storage_allocations");
+    out.format5_reader_position_append_growth_reservations =
+        required_json_counter(
+            evidence,
+            "format5_reader_position_append_growth_reservations");
+    out.format5_reader_retained_position_count = required_json_counter(
+        evidence, "format5_reader_retained_position_count");
+    out.format5_reader_retained_position_capacity = required_json_counter(
+        evidence, "format5_reader_retained_position_capacity");
+    out.format5_reader_memory_evidence_saturated =
+        evidence["format5_reader_memory_evidence_saturated"].get<bool>()
+            ? 1 : 0;
+    out.format5_reader_memory_evidence = evidence;
+}
+
 void capture_alignment_statement_stats(
         const it::connection_test_context& connection,
         const AlignmentSnapshotIdentity& prior,
@@ -1942,6 +2027,7 @@ void capture_alignment_statement_stats(
     out.backend_declines = required_i64(139);
     out.backend_fallbacks = required_i64(140);
     out.stats_saturated = required_bool(141);
+    capture_format5_reader_memory_evidence(connection, out);
     out.query_sketch_host_wall_ns = required_i64(30);
     out.target_index_build_host_wall_ns = [&rows] {
         const auto parsed = parse_snapshot_i64(rows[2][30]);
@@ -2531,6 +2617,32 @@ inline void require_pipeline_execution_proof(
         && counter(82) == 0
         && counter(84) == 0
         && counter(85) == 0;
+    const bool no_format5_reader_memory_evidence =
+        out.format5_reader_capacity_accounting_passes == 0
+        && out.format5_reader_global_position_storage_preparations == 0
+        && out.format5_reader_global_position_storage_allocations == 0
+        && out.format5_reader_position_append_growth_reservations == 0
+        && out.format5_reader_retained_position_count == 0
+        && out.format5_reader_retained_position_capacity == 0
+        && out.format5_reader_memory_evidence_saturated == 0;
+    const bool format5_reader_memory_gate = expect_persisted && !expect_gpu
+        ? out.format5_reader_global_position_storage_preparations
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_global_position_storage_allocations
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_position_append_growth_reservations == 0
+            && out.format5_reader_retained_position_count > 0
+            && out.format5_reader_retained_position_capacity
+                >= out.format5_reader_retained_position_count
+            && out.format5_reader_capacity_accounting_passes
+                >= out.persisted_generation_read_sessions
+            && static_cast<__int128>(
+                    out.format5_reader_capacity_accounting_passes)
+                <= static_cast<__int128>(16)
+                    * static_cast<__int128>(
+                        out.persisted_generation_read_sessions)
+            && out.format5_reader_memory_evidence_saturated == 0
+        : no_format5_reader_memory_evidence;
     // Format 5 is consumed directly from the authenticated persisted reader.
     // That path prepares a key set and matching reader checksum, but it does
     // not construct or reuse the legacy in-memory target-index hashmap.
@@ -2726,6 +2838,7 @@ inline void require_pipeline_execution_proof(
         && source_valid
         && persisted_identity_valid
         && persisted_read_gate
+        && format5_reader_memory_gate
         && cpu_prepared_gate
         && gpu_residency_gate
         && simd_operational_gate
@@ -2791,7 +2904,8 @@ inline void require_pipeline_execution_proof(
         "[bench_e2e] PIPELINE-PROOF-FAIL-GATES "
         "proof_envelope=%d attested_cardinality=%d backend_identity=%d "
         "row_equation=%d source_valid=%d persisted_identity=%d "
-        "persisted_read=%d cpu_prepared=%d gpu_residency=%d "
+        "persisted_read=%d format5_reader_memory=%d cpu_prepared=%d "
+        "gpu_residency=%d "
         "simd_operational=%d scalar_operational=%d gpu_operational=%d "
         "cold_restart=%d cold_no_index=%d persisted_policy=%d "
         "backend_specific=%d manifest_size=%d cold_payload_equations=%d "
@@ -2804,6 +2918,7 @@ inline void require_pipeline_execution_proof(
         static_cast<int>(source_valid),
         static_cast<int>(persisted_identity_valid),
         static_cast<int>(persisted_read_gate),
+        static_cast<int>(format5_reader_memory_gate),
         static_cast<int>(cpu_prepared_gate),
         static_cast<int>(gpu_residency_gate),
         static_cast<int>(simd_operational_gate),
@@ -2827,7 +2942,10 @@ inline void require_pipeline_execution_proof(
             "route=%d session=%d head=%d manifest=%d directory=%d "
             "payload=%d scan_equations=%d zero_work=%d "
             "cold_schema=%lld pre_restart_gpu_abi=%lld "
-            "format5_contract=%lld target_rows=%lld\n",
+            "format5_contract=%lld target_rows=%lld "
+            "memory_passes=%lld memory_preparations=%lld "
+            "memory_allocations=%lld append_growth=%lld retained=%lld/%lld "
+            "memory_saturated=%lld\n",
             static_cast<int>(persisted_read_route_proof),
             static_cast<int>(persisted_read_session_proof),
             static_cast<int>(persisted_read_head_proof),
@@ -2840,7 +2958,19 @@ inline void require_pipeline_execution_proof(
             static_cast<long long>(out.pre_restart_persisted_gpu_abi_version),
             static_cast<long long>(
                 out.persisted_format5_manifest_contract_valid),
-            static_cast<long long>(out.target_rows));
+            static_cast<long long>(out.target_rows),
+            static_cast<long long>(
+                out.format5_reader_capacity_accounting_passes),
+            static_cast<long long>(
+                out.format5_reader_global_position_storage_preparations),
+            static_cast<long long>(
+                out.format5_reader_global_position_storage_allocations),
+            static_cast<long long>(
+                out.format5_reader_position_append_growth_reservations),
+            static_cast<long long>(out.format5_reader_retained_position_count),
+            static_cast<long long>(out.format5_reader_retained_position_capacity),
+            static_cast<long long>(
+                out.format5_reader_memory_evidence_saturated));
         std::fputs(
             "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-COUNTERS",
             stderr);
@@ -5144,6 +5274,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"cold_index_payload_bytes_requested", static_cast<double>(o.cold_index_payload_bytes_requested)},
         {"cold_index_payload_bytes_delivered", static_cast<double>(o.cold_index_payload_bytes_delivered)},
         {"cold_index_payload_bytes_scanned", static_cast<double>(o.cold_index_payload_bytes_scanned)},
+        {"format5_reader_capacity_accounting_passes", static_cast<double>(o.format5_reader_capacity_accounting_passes)},
+        {"format5_reader_global_position_storage_preparations", static_cast<double>(o.format5_reader_global_position_storage_preparations)},
+        {"format5_reader_global_position_storage_allocations", static_cast<double>(o.format5_reader_global_position_storage_allocations)},
+        {"format5_reader_position_append_growth_reservations", static_cast<double>(o.format5_reader_position_append_growth_reservations)},
+        {"format5_reader_retained_position_count", static_cast<double>(o.format5_reader_retained_position_count)},
+        {"format5_reader_retained_position_capacity", static_cast<double>(o.format5_reader_retained_position_capacity)},
+        {"format5_reader_memory_evidence_saturated", static_cast<double>(o.format5_reader_memory_evidence_saturated)},
         {"gpu_seed_dispatches", static_cast<double>(o.gpu_seed_dispatches)},
         {"gpu_chain_dispatches", static_cast<double>(o.gpu_chain_dispatches)},
         {"gpu_chain_backtrack_dispatches", static_cast<double>(o.gpu_chain_backtrack_dispatches)},
@@ -5580,6 +5717,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"backend_declines", out.backend_declines},
         {"backend_fallbacks", out.backend_fallbacks},
         {"stats_saturated", out.stats_saturated},
+        {"format5_reader_memory_evidence", postgres_sample
+            ? out.format5_reader_memory_evidence
+            : nlohmann::json{nullptr}},
     };
     return payload.dump();
 }

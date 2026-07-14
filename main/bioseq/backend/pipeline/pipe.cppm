@@ -578,6 +578,13 @@ struct PipelineOperationalStats {
     std::uint64_t persisted_skip_budget_rows = 0;
     std::uint64_t persisted_hash_build_calls = 0;
     std::uint64_t persisted_assembly_ns = 0;
+    std::uint64_t format5_reader_capacity_accounting_passes = 0;
+    std::uint64_t format5_reader_global_position_storage_preparations = 0;
+    std::uint64_t format5_reader_global_position_storage_allocations = 0;
+    std::uint64_t format5_reader_position_append_growth_reservations = 0;
+    std::uint64_t format5_reader_retained_position_count = 0;
+    std::uint64_t format5_reader_retained_position_capacity = 0;
+    bool format5_reader_memory_evidence_saturated = false;
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
     // authenticity witness use has_nthash_vector_activity() instead of
@@ -816,6 +823,21 @@ struct PipelineOperationalStats {
         add(persisted_skip_budget_rows, rhs.persisted_skip_budget_rows);
         add(persisted_hash_build_calls, rhs.persisted_hash_build_calls);
         add(persisted_assembly_ns, rhs.persisted_assembly_ns);
+        add(format5_reader_capacity_accounting_passes,
+            rhs.format5_reader_capacity_accounting_passes);
+        add(format5_reader_global_position_storage_preparations,
+            rhs.format5_reader_global_position_storage_preparations);
+        add(format5_reader_global_position_storage_allocations,
+            rhs.format5_reader_global_position_storage_allocations);
+        add(format5_reader_position_append_growth_reservations,
+            rhs.format5_reader_position_append_growth_reservations);
+        add(format5_reader_retained_position_count,
+            rhs.format5_reader_retained_position_count);
+        add(format5_reader_retained_position_capacity,
+            rhs.format5_reader_retained_position_capacity);
+        format5_reader_memory_evidence_saturated =
+            format5_reader_memory_evidence_saturated
+            || rhs.format5_reader_memory_evidence_saturated;
         add(nthash_vector_batches, rhs.nthash_vector_batches);
         add(nthash_resident_vector_stream_kernel_calls,
             rhs.nthash_resident_vector_stream_kernel_calls);

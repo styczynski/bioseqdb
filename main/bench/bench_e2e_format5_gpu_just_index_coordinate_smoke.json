@@ -142,6 +142,27 @@
         "cold_index_payload_bytes_delivered": {
           "type": "evaluation"
         },
+        "format5_reader_capacity_accounting_passes": {
+          "type": "evaluation"
+        },
+        "format5_reader_global_position_storage_preparations": {
+          "type": "evaluation"
+        },
+        "format5_reader_global_position_storage_allocations": {
+          "type": "evaluation"
+        },
+        "format5_reader_position_append_growth_reservations": {
+          "type": "evaluation"
+        },
+        "format5_reader_retained_position_count": {
+          "type": "evaluation"
+        },
+        "format5_reader_retained_position_capacity": {
+          "type": "evaluation"
+        },
+        "format5_reader_memory_evidence_saturated": {
+          "type": "evaluation"
+        },
         "measured_region_ns_manual": {
           "type": "evaluation",
           "rules": []
