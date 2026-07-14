@@ -944,6 +944,354 @@ void cache_shmem_startup() {
         || ProcDiePending;
 }
 
+inline constexpr std::uint32_t kCoverageDescriptorMagicV1 = 0x42434431U;
+inline constexpr std::uint32_t kCoverageDescriptorFormatV1 = 1;
+
+/** Pointer-free persisted provider contract stored in the reusable registry. */
+struct CoverageDescriptorHeaderV1 {
+    std::uint32_t magic = kCoverageDescriptorMagicV1;
+    std::uint32_t format_version = kCoverageDescriptorFormatV1;
+    std::uint32_t provider_id = 0;
+    std::uint32_t flags = 0;
+    std::uint64_t compatibility_family_id = 0;
+    std::uint64_t capability_mask = 0;
+    std::uint32_t boundary_count = 0;
+    std::uint32_t lineage_count = 0;
+    std::uint32_t required_boundary_count = 0;
+    std::uint32_t required_lineage_count = 0;
+    std::uint32_t predicate_bytes = 0;
+    std::uint32_t dependency_node_bytes = 0;
+    std::uint32_t provider_private_node_bytes = 0;
+    std::uint32_t reserved = 0;
+};
+
+static_assert(std::is_standard_layout_v<CoverageDescriptorHeaderV1>);
+static_assert(std::is_trivially_copyable_v<CoverageDescriptorHeaderV1>);
+
+/** Planner-owned reconstruction of one pointer-free coverage descriptor. */
+struct PlannerDecodedCoverageV1 {
+    MemoryContext owner_context = nullptr;
+    BioseqCachePathDomainV1 domain{};
+    BioseqCacheReusableSourceV1 source{};
+};
+
+[[nodiscard]] bool add_coverage_descriptor_size(
+        std::uint64_t& total, std::uint64_t count,
+        std::uint64_t width) noexcept {
+    if (width != 0
+        && count > (std::numeric_limits<std::uint64_t>::max)() / width) {
+        return false;
+    }
+    const std::uint64_t bytes = count * width;
+    if (total > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+        return false;
+    }
+    total += bytes;
+    return total <= kMaxProviderRecipeBytes;
+}
+
+[[nodiscard]] bool coverage_descriptor_size(
+        const CoverageDescriptorHeaderV1& header,
+        std::uint64_t* total) noexcept {
+    if (total == nullptr
+        || header.magic != kCoverageDescriptorMagicV1
+        || header.format_version != kCoverageDescriptorFormatV1
+        || header.provider_id == 0 || header.flags != 0
+        || header.compatibility_family_id == 0 || header.reserved != 0
+        || header.boundary_count > kMaxProviderBoundaryColumns
+        || header.lineage_count > kMaxProviderBoundaryColumns
+        || header.required_boundary_count > kMaxProviderBoundaryColumns
+        || header.required_lineage_count > kMaxProviderBoundaryColumns
+        || header.predicate_bytes == 0) {
+        return false;
+    }
+    std::uint64_t bytes = sizeof(CoverageDescriptorHeaderV1);
+    if (!add_coverage_descriptor_size(
+            bytes, header.boundary_count,
+            sizeof(BioseqCacheColumnSchemaV1))
+        || !add_coverage_descriptor_size(
+            bytes, header.lineage_count,
+            sizeof(BioseqCacheColumnSchemaV1))
+        || !add_coverage_descriptor_size(
+            bytes, header.required_boundary_count,
+            sizeof(std::uint32_t))
+        || !add_coverage_descriptor_size(
+            bytes, header.required_lineage_count,
+            sizeof(std::uint32_t))
+        || !add_coverage_descriptor_size(
+            bytes, 1, header.predicate_bytes)
+        || !add_coverage_descriptor_size(
+            bytes, 1, header.dependency_node_bytes)
+        || !add_coverage_descriptor_size(
+            bytes, 1, header.provider_private_node_bytes)) {
+        return false;
+    }
+    *total = bytes;
+    return true;
+}
+
+/** Serialize validated provider POD and Nodes without retaining any pointer. */
+[[nodiscard]] bytea* serialize_coverage_descriptor_fail_open(
+        const BioseqCachePathDomainV1& domain,
+        MemoryContext planner_context) noexcept {
+    if (planner_context == nullptr
+        || !reuse::validate_path_domain(
+                domain.provider_id, &domain).has_value()) {
+        return nullptr;
+    }
+    MemoryContext old_context = CurrentMemoryContext;
+    volatile bytea* accepted = nullptr;
+    PG_TRY();
+    {
+        MemoryContextSwitchTo(planner_context);
+        char* predicate = nodeToString(domain.coverage_predicate);
+        char* dependencies = nodeToString(domain.dependency_nodes);
+        char* provider_private = nodeToString(domain.provider_private_nodes);
+        if (predicate == nullptr || dependencies == nullptr
+            || provider_private == nullptr) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq cache provider descriptor is not serializable")));
+        }
+        const std::size_t predicate_bytes = std::strlen(predicate);
+        const std::size_t dependency_bytes = std::strlen(dependencies);
+        const std::size_t provider_private_bytes =
+            std::strlen(provider_private);
+        if (predicate_bytes > (std::numeric_limits<std::uint32_t>::max)()
+            || dependency_bytes
+                > (std::numeric_limits<std::uint32_t>::max)()
+            || provider_private_bytes
+                > (std::numeric_limits<std::uint32_t>::max)()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq cache provider descriptor is too large")));
+        }
+        const CoverageDescriptorHeaderV1 header{
+            .provider_id = domain.provider_id,
+            .compatibility_family_id = domain.compatibility_family_id,
+            .capability_mask = domain.capability_mask,
+            .boundary_count = static_cast<std::uint32_t>(
+                domain.boundary_column_count),
+            .lineage_count = static_cast<std::uint32_t>(
+                domain.lineage_column_count),
+            .required_boundary_count = static_cast<std::uint32_t>(
+                domain.required_boundary_attno_count),
+            .required_lineage_count = static_cast<std::uint32_t>(
+                domain.required_lineage_attno_count),
+            .predicate_bytes = static_cast<std::uint32_t>(predicate_bytes),
+            .dependency_node_bytes = static_cast<std::uint32_t>(
+                dependency_bytes),
+            .provider_private_node_bytes = static_cast<std::uint32_t>(
+                provider_private_bytes),
+        };
+        std::uint64_t raw_size = 0;
+        if (!coverage_descriptor_size(header, &raw_size)
+            || raw_size > static_cast<std::uint64_t>(MaxAllocSize - VARHDRSZ)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq cache provider descriptor exceeds its bound")));
+        }
+        auto* descriptor = static_cast<bytea*>(
+            palloc(VARHDRSZ + static_cast<std::size_t>(raw_size)));
+        SET_VARSIZE(
+            descriptor, VARHDRSZ + static_cast<std::size_t>(raw_size));
+        std::byte* destination = reinterpret_cast<std::byte*>(
+            VARDATA(descriptor));
+        std::size_t offset = 0;
+        const auto append = [&](const void* source, std::size_t size) {
+            if (size != 0) {
+                std::memcpy(destination + offset, source, size);
+                offset += size;
+            }
+        };
+        append(&header, sizeof(header));
+        append(
+            domain.boundary_columns,
+            domain.boundary_column_count
+                * sizeof(BioseqCacheColumnSchemaV1));
+        append(
+            domain.lineage_columns,
+            domain.lineage_column_count
+                * sizeof(BioseqCacheColumnSchemaV1));
+        append(
+            domain.required_boundary_attnos,
+            domain.required_boundary_attno_count * sizeof(std::uint32_t));
+        append(
+            domain.required_lineage_attnos,
+            domain.required_lineage_attno_count * sizeof(std::uint32_t));
+        append(predicate, predicate_bytes);
+        append(dependencies, dependency_bytes);
+        append(provider_private, provider_private_bytes);
+        if (offset != raw_size) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq cache provider descriptor size changed")));
+        }
+        accepted = descriptor;
+        MemoryContextSwitchTo(old_context);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(old_context);
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        accepted = nullptr;
+    }
+    PG_END_TRY();
+    return const_cast<bytea*>(accepted);
+}
+
+[[nodiscard]] void* parse_coverage_node_field(
+        std::span<const std::byte> bytes,
+        std::size_t& offset,
+        std::uint32_t length) {
+    if (length == 0 || offset > bytes.size()
+        || length > bytes.size() - offset
+        || std::memchr(bytes.data() + offset, 0, length) != nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq cache coverage descriptor node is malformed")));
+    }
+    auto* serialized = static_cast<char*>(palloc(length + 1U));
+    std::memcpy(serialized, bytes.data() + offset, length);
+    serialized[length] = '\0';
+    offset += length;
+    return stringToNode(serialized);
+}
+
+/** Reconstruct one source in disposable planner memory before releasing pin. */
+[[nodiscard]] bool decode_coverage_descriptor_fail_open(
+        std::span<const std::byte> bytes,
+        MemoryContext planner_context,
+        PlannerDecodedCoverageV1* output) noexcept {
+    if (planner_context == nullptr || output == nullptr
+        || bytes.size() < sizeof(CoverageDescriptorHeaderV1)
+        || bytes.size() > kMaxProviderRecipeBytes) {
+        return false;
+    }
+    CoverageDescriptorHeaderV1 header{};
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    std::uint64_t expected_size = 0;
+    if (!coverage_descriptor_size(header, &expected_size)
+        || expected_size != bytes.size()) {
+        return false;
+    }
+
+    MemoryContext old_context = CurrentMemoryContext;
+    volatile MemoryContext child_context = nullptr;
+    volatile PlannerDecodedCoverageV1* accepted = nullptr;
+    PG_TRY();
+    {
+        child_context = AllocSetContextCreate(
+            planner_context,
+            "bioseq cache coverage descriptor",
+            ALLOCSET_SMALL_SIZES);
+        MemoryContextSwitchTo(child_context);
+        auto* decoded = static_cast<PlannerDecodedCoverageV1*>(
+            palloc0(sizeof(PlannerDecodedCoverageV1)));
+        std::size_t offset = sizeof(CoverageDescriptorHeaderV1);
+        auto copy_array = [&](std::size_t count, std::size_t width) -> void* {
+            if (count == 0) {
+                return nullptr;
+            }
+            const std::size_t size = count * width;
+            if (offset > bytes.size() || size > bytes.size() - offset) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq cache coverage descriptor is truncated")));
+            }
+            void* copy = palloc(size);
+            std::memcpy(copy, bytes.data() + offset, size);
+            offset += size;
+            return copy;
+        };
+        auto* boundary = static_cast<BioseqCacheColumnSchemaV1*>(copy_array(
+            header.boundary_count, sizeof(BioseqCacheColumnSchemaV1)));
+        auto* lineage = static_cast<BioseqCacheColumnSchemaV1*>(copy_array(
+            header.lineage_count, sizeof(BioseqCacheColumnSchemaV1)));
+        auto* required_boundary = static_cast<std::uint32_t*>(copy_array(
+            header.required_boundary_count, sizeof(std::uint32_t)));
+        auto* required_lineage = static_cast<std::uint32_t*>(copy_array(
+            header.required_lineage_count, sizeof(std::uint32_t)));
+        void* predicate = parse_coverage_node_field(
+            bytes, offset, header.predicate_bytes);
+        void* dependencies = parse_coverage_node_field(
+            bytes, offset, header.dependency_node_bytes);
+        void* provider_private = parse_coverage_node_field(
+            bytes, offset, header.provider_private_node_bytes);
+        if (offset != bytes.size() || predicate == nullptr
+            || (dependencies != nullptr && !IsA(dependencies, List))
+            || (provider_private != nullptr && !IsA(provider_private, List))) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq cache coverage descriptor has invalid Nodes")));
+        }
+        decoded->owner_context = child_context;
+        decoded->domain = BioseqCachePathDomainV1{
+            .struct_size = sizeof(BioseqCachePathDomainV1),
+            .provider_id = header.provider_id,
+            .compatibility_family_id = header.compatibility_family_id,
+            .capability_mask = header.capability_mask,
+            .coverage_predicate = static_cast<Expr*>(predicate),
+            .boundary_columns = boundary,
+            .boundary_column_count = header.boundary_count,
+            .lineage_columns = lineage,
+            .lineage_column_count = header.lineage_count,
+            .required_boundary_attnos = required_boundary,
+            .required_boundary_attno_count = header.required_boundary_count,
+            .required_lineage_attnos = required_lineage,
+            .required_lineage_attno_count = header.required_lineage_count,
+            .dependency_nodes = static_cast<List*>(dependencies),
+            .provider_private_nodes = static_cast<List*>(provider_private),
+        };
+        decoded->source = BioseqCacheReusableSourceV1{
+            .struct_size = sizeof(BioseqCacheReusableSourceV1),
+            .provider_id = header.provider_id,
+            .compatibility_family_id = header.compatibility_family_id,
+            .capability_mask = header.capability_mask,
+            .boundary_columns = boundary,
+            .boundary_column_count = header.boundary_count,
+            .lineage_columns = lineage,
+            .lineage_column_count = header.lineage_count,
+            .provider_private_nodes = static_cast<List*>(provider_private),
+        };
+        if (!reuse::validate_path_domain(
+                header.provider_id, &decoded->domain).has_value()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq cache coverage descriptor contract is invalid")));
+        }
+        accepted = decoded;
+        MemoryContextSwitchTo(old_context);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(old_context);
+        if (cache_interrupt_error(sqlstate)) {
+            if (child_context != nullptr) {
+                MemoryContextDelete(child_context);
+            }
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        if (child_context != nullptr) {
+            MemoryContextDelete(child_context);
+        }
+        child_context = nullptr;
+        accepted = nullptr;
+    }
+    PG_END_TRY();
+    if (accepted == nullptr) {
+        return false;
+    }
+    *output = *const_cast<PlannerDecodedCoverageV1*>(accepted);
+    return true;
+}
+
 struct VisibilityTicket {
     std::uint64_t database_epoch = 0;
     TransactionId last_committed_write_xid = InvalidTransactionId;
