@@ -1102,7 +1102,7 @@ void cache_shmem_startup() {
             storage::WorkerLifecycle::Registered, 0);
     }
     if (!storage::publish_correctness_readiness(
-            CacheCorrectnessReadiness::GenericMvccReady)) {
+            CacheCorrectnessReadiness::ReusableCoverageReady)) {
         pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
         pg_atomic_write_u32(&g_shared->ready, 0);
     }
