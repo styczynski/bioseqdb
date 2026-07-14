@@ -55,6 +55,7 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/plancache.h"
+#include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
@@ -469,14 +470,22 @@ void observe_provider_relation_write(
     }
 }
 
-/** Provider-owned path hook rendezvous; unsupported reuse remains fail-open. */
+/** Implemented after the reusable-registry lock adapters are available. */
+void consider_provider_reusable_paths(
+    PlannerInfo*, RelOptInfo*, unsigned int, RangeTblEntry*,
+    const provider_registry::ProviderV1*) noexcept;
+
+/** Provider-owned path hook rendezvous; every optional failure is fail-open. */
 void observe_provider_rel_paths(
-        PlannerInfo*, RelOptInfo*, unsigned int, RangeTblEntry*,
-        const provider_registry::ProviderV1*) noexcept {
+        PlannerInfo* root, RelOptInfo* relation,
+        unsigned int range_table_index, RangeTblEntry* range_entry,
+        const provider_registry::ProviderV1* provider) noexcept {
     if (g_query_cache_mode != static_cast<int>(QueryCacheMode::Reuse)
         || !g_reusable_registry) {
         return;
     }
+    consider_provider_reusable_paths(
+        root, relation, range_table_index, range_entry, provider);
 }
 
 /** True when at least one non-aborted savepoint performed a write. */
@@ -3465,8 +3474,7 @@ struct EntrySnapshot {
             && entry.waiter_count == 0
             && entry.reader_count == 0;
         const bool terminal_reclaimable =
-            (entry.state == SharedEntryState::Failed
-             || entry.state == SharedEntryState::Retired)
+            entry.state == SharedEntryState::Retired
             && entry.waiter_count == 0
             && entry.reader_count == 0;
         if (!dead_producer && !expired && !terminal_reclaimable) {
@@ -3479,8 +3487,7 @@ struct EntrySnapshot {
             ConditionVariableBroadcast(&entry.changed);
         }
         const bool reclaimable =
-            (entry.state == SharedEntryState::Failed
-             || entry.state == SharedEntryState::Retired)
+            entry.state == SharedEntryState::Retired
             && entry.waiter_count == 0
             && entry.reader_count == 0;
         if (storage_attached && reclaimable && entry.manifest_handle) {
