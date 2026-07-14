@@ -1,5 +1,4 @@
-# Cache-only exact/generic isolation tests. Provider-complete tests use the
-# combined provider schedule and must not be added here.
+# Cache-only exact/generic isolation tests, including the generic provider.
 test: cache_same_wait
 test: cache_waiter_cancel
 test: cache_producer_failure
@@ -11,3 +10,4 @@ test: cache_producer_cancel
 test: cache_sql_error
 test: cache_wait_timeout
 test: cache_unrelated_completion
+test: cache_reuse_provider_current
