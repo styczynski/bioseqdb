@@ -207,7 +207,7 @@ class _PauseController:
         process = self._process
         if process is None or process.stdin is None or process.stdout is None:
             raise self._error("pause controller has no psql pipes")
-        process.stdin.write(sql + "\n" + f"SELECT '{marker}';\n")
+        process.stdin.write(sql + "\n")
         process.stdin.flush()
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
@@ -237,7 +237,8 @@ class _PauseController:
             bufsize=1,
         )
         self._command(
-            f"SELECT bioseq_cache_test.arm_pause('{self._point}');",
+            "SELECT 'BIOSEQ_CACHE_PAUSE_ARMED' FROM "
+            f"(SELECT bioseq_cache_test.arm_pause('{self._point}')) AS command;",
             "BIOSEQ_CACHE_PAUSE_ARMED",
         )
         return self
@@ -246,7 +247,8 @@ class _PauseController:
         if self._released:
             return
         self._command(
-            f"SELECT bioseq_cache_test.release_pause('{self._point}');",
+            "SELECT 'BIOSEQ_CACHE_PAUSE_RELEASED' FROM "
+            f"(SELECT bioseq_cache_test.release_pause('{self._point}')) AS command;",
             "BIOSEQ_CACHE_PAUSE_RELEASED",
         )
         self._released = True
