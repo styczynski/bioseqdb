@@ -58,10 +58,12 @@ plotly
 postgres
 postgres-query
 postgres-ux
+prefilter
 profiling
 refactor
 seal
 sequence-database
+sequence-slices
 setup
 sidecar
 simd-sort
