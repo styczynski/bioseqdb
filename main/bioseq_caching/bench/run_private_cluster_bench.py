@@ -683,6 +683,30 @@ def _entry_runtime_snapshot(cluster: Any) -> dict[str, Any]:
     }
 
 
+def _exact_child_execution_snapshot(cluster: Any) -> dict[str, Any]:
+    stdout, _ = _run_sql(
+        cluster,
+        "SELECT exact_child_executions "
+        "FROM bioseq_cache_test.runtime_counters()",
+    )
+    value = stdout.strip()
+    try:
+        measured = int(value)
+    except ValueError as error:
+        raise BenchmarkError(
+            f"unexpected exact-child execution counter: {stdout!r}"
+        ) from error
+    if measured < 0:
+        raise BenchmarkError(
+            f"negative exact-child execution counter: {measured}"
+        )
+    return {
+        "status": "measured",
+        "value": measured,
+        "source": "bioseq_cache_test.runtime_counters.exact_child_executions",
+    }
+
+
 def _test_storage_tier_snapshot(cluster: Any) -> dict[str, Any]:
     stdout, _ = _run_sql(
         cluster,
@@ -1464,6 +1488,191 @@ def _wait_for_waiters(
     raise BenchmarkError(f"waiter count did not reach {count}")
 
 
+def _wait_for_waiter_cleanup(
+    cluster: Any, timeout_seconds: float = 30.0
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        stdout, _ = _run_sql(
+            cluster,
+            "SELECT COALESCE(max(waiter_count), 0) "
+            "FROM bioseq_cache_test.entry_states()",
+        )
+        if int(stdout.strip()) == 0:
+            return
+        time.sleep(0.02)
+    raise BenchmarkError("cancelled waiter did not release its registry claim")
+
+
+def _cancel_waiter_backend(cluster: Any, process: subprocess.Popen[str],
+                           application_name: str) -> None:
+    deadline = time.monotonic() + 30.0
+    backend_pid = 0
+    while time.monotonic() < deadline:
+        stdout, _ = _run_sql(
+            cluster,
+            "SELECT COALESCE(max(pid), 0) FROM pg_stat_activity "
+            f"WHERE application_name = '{application_name}'",
+        )
+        backend_pid = int(stdout.strip())
+        if backend_pid != 0:
+            break
+        if process.poll() is not None:
+            raise BenchmarkError("waiter psql exited before cancellation")
+        time.sleep(0.02)
+    if backend_pid == 0:
+        raise BenchmarkError("waiter backend did not appear in pg_stat_activity")
+    stdout, _ = _run_sql(
+        cluster, f"SELECT pg_cancel_backend({backend_pid})"
+    )
+    if stdout.strip() != "t":
+        raise BenchmarkError(
+            f"pg_cancel_backend({backend_pid}) returned {stdout!r}"
+        )
+    try:
+        _, error = process.communicate(timeout=30.0)
+    except subprocess.TimeoutExpired as timeout:
+        process.kill()
+        process.communicate()
+        raise BenchmarkError("cancelled waiter psql did not exit") from timeout
+    if process.returncode == 0 or "canceling statement" not in error:
+        raise BenchmarkError(
+            "waiter cancellation did not surface query cancellation: "
+            f"returncode={process.returncode}, stderr={error!r}"
+        )
+    _wait_for_waiter_cleanup(cluster)
+
+
+def _measure_waiter_cancel_latency(
+    cluster: Any, sql: str, sample_count: int
+) -> dict[str, Any]:
+    trials = max(3, min(sample_count, 5))
+
+    def trial(
+        cancel_waiter: bool, sequence: int
+    ) -> tuple[QueryOutput, int, dict[str, int], dict[str, Any]]:
+        _reset_case(cluster)
+        waiter: subprocess.Popen[str] | None = None
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) \
+                    as executor, _PauseController(
+                        cluster, "after_building_publish"
+                    ) as pause:
+                producer = executor.submit(
+                    _execute_query, cluster, mode="same", sql=sql
+                )
+                _run_sql(
+                    cluster,
+                    "SELECT bioseq_cache_test.wait_until_paused("
+                    "'after_building_publish')",
+                )
+                if cancel_waiter:
+                    application_name = (
+                        f"bioseq_cache_cancel_{os.getpid()}_{sequence}"
+                    )
+                    environment = cluster.environment()
+                    environment["PGAPPNAME"] = application_name
+                    waiter = subprocess.Popen(
+                        _psql_command(
+                            cluster,
+                            "SET bioseq.query_cache_optimisation_mode = 'same'; "
+                            + sql,
+                        ),
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    _wait_for_waiters(cluster, 1)
+                    _cancel_waiter_backend(
+                        cluster, waiter, application_name
+                    )
+                released_at = time.perf_counter_ns()
+                pause.release()
+                output = producer.result()
+                return (
+                    output,
+                    output.completed_at_ns - released_at,
+                    _stats(cluster),
+                    _exact_child_execution_snapshot(cluster),
+                )
+        finally:
+            if waiter is not None and waiter.poll() is None:
+                waiter.kill()
+                waiter.communicate()
+
+    baseline: list[
+        tuple[QueryOutput, int, dict[str, int], dict[str, Any]]
+    ] = [
+        trial(False, index) for index in range(trials)
+    ]
+    cancelled: list[
+        tuple[QueryOutput, int, dict[str, int], dict[str, Any]]
+    ] = [
+        trial(True, index) for index in range(trials)
+    ]
+    baseline_latency = [sample[1] for sample in baseline]
+    cancelled_latency = [sample[1] for sample in cancelled]
+    baseline_p95 = int(_percentile(baseline_latency, 0.95))
+    cancelled_p95 = int(_percentile(cancelled_latency, 0.95))
+    tolerance_ns = max(int(baseline_p95 * 0.25), 5_000_000)
+    correctness = all(
+        _same_result(baseline[0][0], sample[0], False)
+        for sample in [*baseline[1:], *cancelled]
+    )
+
+    def behavior_matches(
+        sample: tuple[QueryOutput, int, dict[str, int], dict[str, Any]],
+        *,
+        cancelled_waiter: bool,
+    ) -> bool:
+        stats = sample[2]
+        child_executions = sample[3]
+        return (
+            stats["produced"] == 1
+            and stats["completed_hits"] == 0
+            and stats["inflight_waits"] == int(cancelled_waiter)
+            and stats["fallbacks"] == 0
+            and stats["invalidations"] == 0
+            and child_executions["status"] == "measured"
+            and child_executions["value"] == 1
+        )
+
+    behavior_passed = all(
+        behavior_matches(sample, cancelled_waiter=False)
+        for sample in baseline
+    ) and all(
+        behavior_matches(sample, cancelled_waiter=True)
+        for sample in cancelled
+    )
+    return {
+        "trials": trials,
+        "baseline_release_to_complete": _sample_summary(baseline_latency),
+        "cancelled_release_to_complete": _sample_summary(cancelled_latency),
+        "p95_delta_ns": cancelled_p95 - baseline_p95,
+        "tolerance_ns": tolerance_ns,
+        "correctness": {"passed": correctness},
+        "cache_behavior": {
+            "passed": behavior_passed,
+            "baseline_stats": [sample[2] for sample in baseline],
+            "cancelled_stats": [sample[2] for sample in cancelled],
+            "baseline_child_executions": [sample[3] for sample in baseline],
+            "cancelled_child_executions": [sample[3] for sample in cancelled],
+        },
+        "passed": (
+            correctness
+            and behavior_passed
+            and cancelled_p95 <= baseline_p95 + tolerance_ns
+        ),
+        "detail": (
+            "Producer release-to-completion p95 after a registered waiter is "
+            "cancelled before release; tolerance is 25% or 5 ms, whichever "
+            "is larger."
+        ),
+    }
+
+
 def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
     _reset_case(cluster)
     reference = _execute_query(cluster, mode="disabled", sql=sql)
@@ -1491,18 +1700,7 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
     fanout_stats = _stats(cluster)
     runtime = _entry_runtime_snapshot(cluster)
     correct = all(_same_result(reference, output, False) for output in outputs)
-    measured_children = runtime["child_executions"]
-    child_executions = measured_children
-    if measured_children["status"] != "measured":
-        child_executions = {
-            "status": "inferred",
-            "value": fanout_stats["produced"],
-            "detail": (
-                "The admin API exposes successful publications, not child Begin "
-                "or source execution counts; this value cannot prove that a "
-                "waiter never initialized its child."
-            ),
-        }
+    child_executions = _exact_child_execution_snapshot(cluster)
     return {
         "key": f"inflight_fanout_{clients}",
         "clients": clients,
@@ -1869,6 +2067,7 @@ def _evaluate_thresholds(
     cases: Sequence[Mapping[str, Any]],
     generic_provider: Mapping[str, Any],
     fanout: Sequence[Mapping[str, Any]],
+    waiter_cancel: Mapping[str, Any],
     invalidation: Sequence[Mapping[str, Any]],
     eviction_pressure: Mapping[str, Any],
     unrelated_commit: Mapping[str, Any],
@@ -1925,7 +2124,7 @@ def _evaluate_thresholds(
     fanout_passed = (
         all(item["child_execution_count"]["value"] == 1 for item in fanout)
         if child_counts_measured
-        else None
+        else False
     )
     thresholds.append(
         _threshold(
@@ -1937,8 +2136,8 @@ def _evaluate_thresholds(
             passed=fanout_passed,
             detail=(
                 "Successful publication counts are not treated as direct child "
-                "execution measurements. The threshold becomes applicable only "
-                "when the runtime exposes an executor counter."
+                "execution measurements. Sign-off requires a measured executor "
+                "counter for every fanout size."
             ),
         )
     )
@@ -2131,18 +2330,17 @@ def _evaluate_thresholds(
         )
     )
     overlap = generic_provider["overlapping_predicate_reuse"]
-    overlap_passed = (
-        overlap["behavior"]["passed"]
-        if overlap["status"] == "measured"
-        else None
+    overlap_passed = bool(
+        overlap["status"] == "measured"
+        and overlap["behavior"]["passed"]
     )
     thresholds.append(
         _threshold(
             "generic_overlapping_predicate_reuse",
             actual=overlap["behavior"],
             limit=(
-                "when mapped older-source reuse is supported, preserve the "
-                "ordered bag and reduce provider residual work"
+                "mapped older-source reuse must preserve the ordered bag and "
+                "reduce provider residual work"
             ),
             passed=overlap_passed,
             detail=overlap["detail"],
@@ -2168,10 +2366,16 @@ def _evaluate_thresholds(
     thresholds.append(
         _threshold(
             "waiter_cancel_producer_latency",
-            actual=None,
-            limit="no material producer latency change",
-            passed=None,
-            detail="Correctness is covered by isolation/TAP; provider-scale latency belongs to the provider report.",
+            actual={
+                "baseline": waiter_cancel["baseline_release_to_complete"],
+                "cancelled": waiter_cancel["cancelled_release_to_complete"],
+                "p95_delta_ns": waiter_cancel["p95_delta_ns"],
+            },
+            limit={
+                "p95_delta_ns": f"<={waiter_cancel['tolerance_ns']}"
+            },
+            passed=bool(waiter_cancel["passed"]),
+            detail=str(waiter_cancel["detail"]),
         )
     )
     return thresholds
@@ -2257,6 +2461,9 @@ def run(argv: Sequence[str]) -> int:
             _measure_fanout(cluster, clients, fanout_sql)
             for clients in (2, 8, 32)
         ]
+        waiter_cancel = _measure_waiter_cancel_latency(
+            cluster, fanout_sql, sample_count
+        )
         invalidation = _measure_invalidation(cluster)
         eviction_pressure = _measure_eviction_pressure(cluster)
         unrelated_commit = _measure_unrelated_commit(cluster, fanout_sql)
@@ -2267,6 +2474,7 @@ def run(argv: Sequence[str]) -> int:
             cases,
             generic_provider,
             fanout,
+            waiter_cancel,
             invalidation,
             eviction_pressure,
             unrelated_commit,
@@ -2289,6 +2497,7 @@ def run(argv: Sequence[str]) -> int:
             "generic_provider_reuse": generic_provider,
             "cases": cases,
             "fanout": fanout,
+            "waiter_cancel": waiter_cancel,
             "invalidation": invalidation,
             "eviction_pressure": eviction_pressure,
             "unrelated_commit": unrelated_commit,

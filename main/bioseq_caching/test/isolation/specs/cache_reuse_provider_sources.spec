@@ -1,7 +1,7 @@
-# Generic provider fixture for DOC0371 42.11 and 42.13.  Three distinct
-# exact keys overlap in one reusable domain while terminal publication is
-# paused.  The consumer may wait only on older claims and must finish without
-# PostgreSQL's deadlock detector.
+# Generic provider fixture for DOC0371 42.11 and 42.13.  Two projected-only
+# sources overlap in one reusable domain while terminal publication is paused.
+# The consumer must preserve NULL/UNKNOWN semantics, deduplicate overlap, late
+# fetch predicate-only attributes, and finish without PostgreSQL deadlock.
 setup
 {
   CREATE TABLE cache_provider_iso_sources(
@@ -38,31 +38,54 @@ step "sources_state" {
 step "sources_release" { SELECT bioseq_cache_test.release_pause('after_building_publish'); }
 
 session "source_a"
-step "sources_a_init" { SELECT bioseq_cache_test.provider_init(); }
+step "sources_a_init" {
+  SELECT bioseq_cache_test.provider_init();
+  SELECT bioseq_cache_test.provider_reset();
+}
 step "sources_a_relation" { SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_sources'); }
 step "sources_a_mode" { SET bioseq.query_cache_optimisation_mode = 'reuse'; }
 step "sources_a_query" {
-  SELECT count(*) AS rows, sum(row_id) AS row_sum
+  SELECT count(*) AS rows, sum(row_id) AS row_sum,
+         array_agg(row_id ORDER BY row_id) AS ids
   FROM cache_provider_iso_sources WHERE nullable_value <= 10;
 }
 
 session "source_b"
-step "sources_b_init" { SELECT bioseq_cache_test.provider_init(); }
+step "sources_b_init" {
+  SELECT bioseq_cache_test.provider_init();
+  SELECT bioseq_cache_test.provider_reset();
+  SELECT bioseq_cache_test.provider_set_mapping_fault('provider_error');
+}
 step "sources_b_relation" { SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_sources'); }
 step "sources_b_mode" { SET bioseq.query_cache_optimisation_mode = 'reuse'; }
 step "sources_b_query" {
-  SELECT count(*) AS rows, sum(row_id) AS row_sum
+  SELECT count(*) AS rows, sum(row_id) AS row_sum,
+         array_agg(row_id ORDER BY row_id) AS ids
   FROM cache_provider_iso_sources WHERE nullable_value >= 5;
 }
 
 session "consumer"
-step "sources_c_init" { SELECT bioseq_cache_test.provider_init(); }
+step "sources_c_init" {
+  SELECT bioseq_cache_test.provider_init();
+  SELECT bioseq_cache_test.provider_reset();
+}
 step "sources_c_relation" { SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_sources'); }
 step "sources_c_mode" { SET bioseq.query_cache_optimisation_mode = 'reuse'; }
 step "sources_c_query" {
-  SELECT count(*) AS rows, sum(row_id) AS row_sum
+  SELECT count(*) AS rows, sum(row_id) AS row_sum,
+         array_agg(row_id ORDER BY row_id) AS ids
   FROM cache_provider_iso_sources
-  WHERE nullable_value BETWEEN 5 AND 20;
+  WHERE nullable_value IS NULL OR nullable_value BETWEEN 5 AND 20;
+}
+step "sources_c_stats" {
+  SELECT
+    (stats->>'late_fetch_batch')::bigint AS late_fetch_batches,
+    (stats->>'late_fetch_references')::bigint AS late_fetch_references,
+    (stats->>'late_fetch_values')::bigint AS late_fetch_values,
+    (stats->>'executor_rows')::bigint AS residual_rows,
+    (stats->>'last_required_boundary_count')::bigint
+      AS required_boundary_columns
+  FROM (SELECT bioseq_cache_test.provider_stats() AS stats) AS provider;
 }
 
 permutation "sources_arm"
@@ -71,4 +94,4 @@ permutation "sources_arm"
   "sources_c_init" "sources_c_relation" "sources_c_mode"
   "sources_a_query" "sources_a_paused"
   "sources_b_query" "sources_c_query" "sources_state"
-  "sources_release"
+  "sources_release" "sources_c_stats"

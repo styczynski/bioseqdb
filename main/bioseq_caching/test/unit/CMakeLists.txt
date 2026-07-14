@@ -6,7 +6,8 @@ add_executable(bioseq_cache_unit_tests
   test_admission_provider.cpp
   test_column_format.cpp
   test_reusable_planning.cpp
-  test_reusable_registry.cpp)
+  test_reusable_registry.cpp
+  test_write_observation.cpp)
 
 set_target_properties(bioseq_cache_unit_tests PROPERTIES
   CXX_STANDARD 26

@@ -55,6 +55,21 @@ RETURNS TABLE (
 AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_entry_states'
 LANGUAGE C VOLATILE PARALLEL RESTRICTED;
 
+CREATE FUNCTION bioseq_cache_test.runtime_counters()
+RETURNS TABLE (exact_child_executions bigint)
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_runtime_counters'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
+CREATE FUNCTION bioseq_cache_test.transition_state()
+RETURNS TABLE (
+    database_transitions bigint,
+    coarse_transitions bigint,
+    prepared_xacts boolean,
+    snapshot_completion bigint,
+    global_completion bigint)
+AS '@BIOSEQ_CACHE_MODULE_PATH@', 'bioseq_cache_test_transition_state'
+LANGUAGE C VOLATILE PARALLEL RESTRICTED;
+
 CREATE FUNCTION bioseq_cache_test.planner_reference_counts()
 RETURNS TABLE (
     reader_pins bigint,

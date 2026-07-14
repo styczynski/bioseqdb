@@ -45,6 +45,11 @@ BEGIN
     IF position('BioseqCacheGenericTestProvider' in plan_text) = 0 THEN
         RAISE EXCEPTION 'generic provider CustomScan was not chosen: %', plan_text;
     END IF;
+    IF plan_text !~
+            'BioseqReusableCoverageScan\) on public\.cache_provider_rows' THEN
+        RAISE EXCEPTION
+            'reusable coverage scan lost its relation identity: %', plan_text;
+    END IF;
 END
 $$;
 
@@ -52,14 +57,15 @@ $$;
 -- entering the provider's gated executor on the identical second request.
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache_test.request_janitor_sweep();
-SELECT bioseq_cache_test.provider_reset();
-SELECT bioseq_cache.reset_stats();
 DO $$
 DECLARE
     plan_line text;
     plan_text text := '';
     plan jsonb;
     cache_node jsonb;
+    cache_nodes jsonb;
+    exact_node_count bigint;
+    reusable_node_count bigint;
 BEGIN
     FOR plan_line IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF) '
@@ -95,6 +101,9 @@ BEGIN
        OR cache_node->>'Planned Cache Action' IS NULL
        OR cache_node ? 'Actual Cache Action'
        OR length(cache_node->>'Cache Entry') <> 16
+       OR cache_node->>'Schema' <> 'public'
+       OR cache_node->>'Relation Name' <> 'cache_provider_rows'
+       OR cache_node->>'Alias' <> 'cache_provider_rows'
        OR cache_node->>'SQL' IS NULL
        OR cache_node->>'State' <> 'planned/provisional'
        OR jsonb_typeof(
@@ -104,8 +113,55 @@ BEGIN
         RAISE EXCEPTION
             'structured reusable EXPLAIN contract is incomplete: %', plan;
     END IF;
+    WITH RECURSIVE plan_nodes(node, parent_path) AS (
+        SELECT plan->0->'Plan', ARRAY[]::text[]
+        UNION ALL
+        SELECT child.value,
+               plan_nodes.parent_path
+                   || COALESCE(plan_nodes.node->>'Node Type', '<unknown>')
+        FROM plan_nodes
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ExactFinalResult'),
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'),
+        jsonb_agg(jsonb_build_object(
+        'cache_entry_kind', node->>'Cache Entry Kind',
+        'node_type', node->>'Node Type',
+        'parent_path', to_jsonb(parent_path),
+        'child_node_types', COALESCE((
+            SELECT jsonb_agg(child.value->>'Node Type')
+            FROM jsonb_array_elements(
+                COALESCE(node->'Plans', '[]'::jsonb)) AS child
+        ), '[]'::jsonb),
+        'child_paths', COALESCE((
+            SELECT jsonb_agg(to_jsonb(
+                parent_path
+                    || COALESCE(node->>'Node Type', '<unknown>')
+                    || COALESCE(child.value->>'Node Type', '<unknown>')))
+            FROM jsonb_array_elements(
+                COALESCE(node->'Plans', '[]'::jsonb)) AS child
+        ), '[]'::jsonb),
+        'cache_force_bypass', node->>'Cache Force Bypass'))
+    INTO exact_node_count, reusable_node_count, cache_nodes
+    FROM plan_nodes
+    WHERE node->>'Cache Entry Kind' IN (
+        'ExactFinalResult', 'ReusableCoverage');
+    IF exact_node_count <> 0 OR reusable_node_count <> 1 THEN
+        RAISE EXCEPTION
+            'cold reusable plan cache-kind counts exact=%, reusable=%: %',
+            exact_node_count, reusable_node_count, cache_nodes;
+    END IF;
 END
 $$;
+
+-- Planning diagnostics can legitimately bypass exact-result caching. Reset
+-- observable counters after proving the plan and before measuring execution.
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
 
 \o
 SELECT row_id, base_id, occurrence_no, nullable_value, payload,
@@ -145,6 +201,20 @@ FROM bioseq_cache.stats() AS cache_stats
 CROSS JOIN LATERAL (
     SELECT bioseq_cache_test.provider_stats() AS stats
 ) AS provider;
+
+DO $$
+DECLARE
+    stats jsonb := bioseq_cache_test.provider_stats();
+BEGIN
+    IF (stats->>'last_boundary_column_count')::bigint <> 6
+       OR (stats->>'last_required_boundary_count')::bigint <> 6
+       OR (stats->>'last_lineage_column_count')::bigint <> 3
+       OR (stats->>'last_required_lineage_count')::bigint <> 3
+       OR (stats->>'last_recipe_required_boundary_count')::bigint <> 6 THEN
+        RAISE EXCEPTION 'all-column provider contract mismatch: %', stats;
+    END IF;
+END
+$$;
 \o /dev/null
 
 -- A retained coverage alternative must not suppress exact caching when the
@@ -335,6 +405,45 @@ BEGIN
     PERFORM bioseq_cache_test.provider_set_mapping_fault('none');
 END
 $$;
+
+-- Freeze a correct prepared plan, then corrupt each serialized source mapping
+-- immediately before BeginCustomScan.  Every malformed List must close the
+-- cached-source gate and execute the complete retained provider child.
+SET plan_cache_mode = force_generic_plan;
+\set mapping_fault persisted_wrong_top_tag
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_short_top
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_long_top
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_magic
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_version
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_count_overflow
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_wrong_entry_tag
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_short_entry
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_long_entry
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_semantic_size
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_fingerprint_size
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_entry_metadata
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_source_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_consumer_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_decorated_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_map_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\unset mapping_fault
+RESET plan_cache_mode;
 
 -- Capability-superset rejection and plan/runtime digest mismatches also
 -- expand to the complete residual without changing rows.

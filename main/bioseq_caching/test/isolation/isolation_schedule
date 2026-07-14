@@ -4,6 +4,7 @@ test: cache_waiter_cancel
 test: cache_producer_failure
 test: cache_mvcc_publish
 test: cache_mvcc_rollback
+test: cache_prepared_transition
 test: cache_ttl_zero
 test: cache_ten_waiters
 test: cache_producer_cancel

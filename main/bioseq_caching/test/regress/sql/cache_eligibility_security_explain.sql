@@ -69,7 +69,9 @@ BEGIN
             FROM bioseq_cache.entries()
             WHERE state = 'COMPLETE'
               AND (jsonb_array_length(dependencies->'relation_oids') <> 0
-                   OR producer_plan IS NOT NULL)) THEN
+                   OR producer_plan IS NULL
+                   OR dependencies->>'canonical_plan_status' <> 'Planned'
+                   OR dependencies->>'producer_plan_status' <> 'Planned')) THEN
         RAISE EXCEPTION 'relation-free dependency diagnostics are invalid';
     END IF;
 END
@@ -346,6 +348,9 @@ SELECT bioseq_cache.reset_stats();
 SELECT id, value FROM qc_elig ORDER BY id;
 SELECT id, value FROM qc_elig ORDER BY id;
 
+CREATE TEMP TABLE qc_explain_stats_before AS
+SELECT to_jsonb(stats) AS stats
+FROM bioseq_cache.stats() AS stats;
 CREATE TEMP TABLE qc_explain_json(plan jsonb);
 DO $$
 DECLARE
@@ -360,6 +365,38 @@ BEGIN
 END
 $$;
 
+CREATE TEMP TABLE qc_explain_yaml(plan text);
+DO $$
+DECLARE
+    plan_line text;
+BEGIN
+    FOR plan_line IN EXECUTE
+        'EXPLAIN (FORMAT YAML, VERBOSE, COSTS OFF) '
+        'SELECT id, value FROM qc_elig ORDER BY id'
+    LOOP
+        INSERT INTO qc_explain_yaml VALUES (plan_line);
+    END LOOP;
+END
+$$;
+
+CREATE TEMP TABLE qc_explain_xml(plan text);
+DO $$
+DECLARE
+    plan_line text;
+BEGIN
+    FOR plan_line IN EXECUTE
+        'EXPLAIN (FORMAT XML, VERBOSE, COSTS OFF) '
+        'SELECT id, value FROM qc_elig ORDER BY id'
+    LOOP
+        INSERT INTO qc_explain_xml VALUES (plan_line);
+    END LOOP;
+END
+$$;
+
+CREATE TEMP TABLE qc_explain_stats_after_plain AS
+SELECT to_jsonb(stats) AS stats
+FROM bioseq_cache.stats() AS stats;
+
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT id, value FROM qc_elig ORDER BY id;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, BUFFERS)
@@ -370,6 +407,10 @@ EXPLAIN (FORMAT XML, VERBOSE, COSTS OFF)
 SELECT id, value FROM qc_elig ORDER BY id;
 
 DO $$
+DECLARE
+    cache_node jsonb;
+    before_stats jsonb;
+    after_stats jsonb;
 BEGIN
     IF EXISTS (
         SELECT 1 FROM qc_explain_json
@@ -384,6 +425,48 @@ BEGIN
         WHERE root ? 'Plan')
     THEN
         RAISE EXCEPTION 'structured EXPLAIN lacks typed Plan field';
+    END IF;
+
+    WITH RECURSIVE plan_nodes(node) AS (
+        SELECT root->'Plan'
+        FROM qc_explain_json,
+             jsonb_array_elements(plan) AS root
+      UNION ALL
+        SELECT child
+        FROM plan_nodes,
+             LATERAL jsonb_array_elements(
+                 COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT node INTO cache_node
+    FROM plan_nodes
+    WHERE node->>'Node Type' = 'Custom Scan'
+      AND node->>'Custom Plan Provider' = 'BioseqCacheScan'
+    LIMIT 1;
+
+    IF cache_node IS NULL
+       OR jsonb_typeof(cache_node->'Cache Mode') <> 'string'
+       OR jsonb_typeof(cache_node->'Planned Cache Action') <> 'string'
+       OR jsonb_typeof(cache_node->'Cache Force Bypass') <> 'boolean'
+       OR jsonb_typeof(cache_node->'Cache Parameter Count') <> 'number'
+       OR jsonb_typeof(cache_node->'Cache Dependency Count') <> 'number'
+       OR jsonb_typeof(cache_node->'Cache Entry Kind') <> 'string'
+       OR jsonb_typeof(cache_node->'Cache Readiness') <> 'string' THEN
+        RAISE EXCEPTION 'structured EXPLAIN cache properties are absent or untyped: %',
+            cache_node;
+    END IF;
+
+    IF (SELECT string_agg(plan, E'\n') FROM qc_explain_yaml)
+           !~ 'Cache Mode: "same"'
+       OR (SELECT string_agg(plan, E'\n') FROM qc_explain_xml)
+           !~ '<Cache-Mode>same</Cache-Mode>' THEN
+        RAISE EXCEPTION 'YAML/XML EXPLAIN omitted structured cache properties';
+    END IF;
+
+    SELECT stats INTO before_stats FROM qc_explain_stats_before;
+    SELECT stats INTO after_stats FROM qc_explain_stats_after_plain;
+    IF before_stats <> after_stats THEN
+        RAISE EXCEPTION 'plain structured EXPLAIN changed cache state: before %, after %',
+            before_stats, after_stats;
     END IF;
 END
 $$;

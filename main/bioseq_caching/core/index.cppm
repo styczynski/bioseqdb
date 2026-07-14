@@ -15,3 +15,4 @@ export import :readiness;
 export import :provider_validation;
 export import :column_format;
 export import :reusable_registry;
+export import :write_observation;

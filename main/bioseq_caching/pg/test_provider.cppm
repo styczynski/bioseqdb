@@ -22,6 +22,7 @@ extern "C" {
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
+#include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
@@ -61,7 +62,12 @@ inline constexpr std::uint32_t kProviderId = 0x54535431U;
 inline constexpr std::uint64_t kCompatibilityFamily =
     0x746573745f763031ULL;
 inline constexpr std::int32_t kPlanMagic = 0x54535031;
-inline constexpr std::int32_t kPlanVersion = 1;
+inline constexpr std::int32_t kPlanVersion = 2;
+inline constexpr std::uint32_t kGenerationSemanticVersion = 2;
+inline constexpr std::size_t kPlanFixedNodeCount = 11;
+inline constexpr std::size_t kMaximumPlanNodeCount = 1024;
+inline constexpr std::size_t kMaximumRequiredBoundaryCount =
+    kMaximumPlanNodeCount - kPlanFixedNodeCount;
 inline constexpr std::size_t kDigestBytes = 32;
 inline constexpr char kApiRendezvousName[] = "bioseq_cache.api.v1";
 inline constexpr char kBridgeRendezvousName[] =
@@ -132,9 +138,15 @@ struct CallbackCounters {
     std::uint64_t extract_occurrence = 0;
     std::uint64_t late_fetch_batch = 0;
     std::uint64_t late_fetch_references = 0;
+    std::uint64_t late_fetch_values = 0;
     std::uint64_t planner_bridge_calls = 0;
     std::uint64_t executor_rows = 0;
     std::uint64_t gated_expensive_rows = 0;
+    std::uint64_t last_boundary_column_count = 0;
+    std::uint64_t last_required_boundary_count = 0;
+    std::uint64_t last_lineage_column_count = 0;
+    std::uint64_t last_required_lineage_count = 0;
+    std::uint64_t last_recipe_required_boundary_count = 0;
 };
 
 inline Oid g_target_relation_oid = InvalidOid;
@@ -218,13 +230,106 @@ digest_plan_nodes(const List* nodes) noexcept {
     return result;
 }
 
+struct ProjectedBoundaryWalkV1 {
+    Index relation_index = 0;
+    Bitmapset* attnos = nullptr;
+    bool whole_row = false;
+    bool invalid = false;
+};
+
+/** Collect only output-boundary Vars; base restriction Vars stay late-fetchable. */
+[[nodiscard]] bool projected_boundary_walker(Node* node, void* opaque) {
+    if (node == nullptr) {
+        return false;
+    }
+    auto* context = static_cast<ProjectedBoundaryWalkV1*>(opaque);
+    if (context == nullptr) {
+        return true;
+    }
+    if (IsA(node, Var)) {
+        const auto* variable = reinterpret_cast<const Var*>(node);
+        if (variable->varlevelsup != 0
+            || variable->varno != context->relation_index) {
+            return false;
+        }
+        if (variable->varattno == InvalidAttrNumber) {
+            context->whole_row = true;
+        } else if (variable->varattno > 0) {
+            context->attnos = bms_add_member(
+                context->attnos, variable->varattno);
+        } else {
+            context->invalid = true;
+        }
+        return false;
+    }
+    return expression_tree_walker(node, projected_boundary_walker, opaque);
+}
+
+/** Freeze projected physical attributes in stable table order. */
+[[nodiscard]] bool collect_projected_boundary_attnos(
+    RelOptInfo* relation_info,
+    Index relation_index,
+    Oid relation_oid,
+    std::uint32_t** output,
+    std::size_t* output_count) {
+    if (relation_info == nullptr || relation_info->reltarget == nullptr
+        || relation_index == 0 || !OidIsValid(relation_oid)
+        || output == nullptr || output_count == nullptr) {
+        return false;
+    }
+    *output = nullptr;
+    *output_count = 0;
+    ProjectedBoundaryWalkV1 context{.relation_index = relation_index};
+    static_cast<void>(projected_boundary_walker(
+        reinterpret_cast<Node*>(relation_info->reltarget->exprs), &context));
+    if (context.invalid) {
+        bms_free(context.attnos);
+        return false;
+    }
+
+    Relation relation = table_open(relation_oid, NoLock);
+    TupleDesc descriptor = RelationGetDescr(relation);
+    std::size_t count = 0;
+    for (int index = 0; index < descriptor->natts; ++index) {
+        if (!TupleDescAttr(descriptor, index)->attisdropped
+            && (context.whole_row
+                || bms_is_member(index + 1, context.attnos))) {
+            ++count;
+        }
+    }
+    if (count > kMaximumRequiredBoundaryCount) {
+        table_close(relation, NoLock);
+        bms_free(context.attnos);
+        return false;
+    }
+    auto* attnos = count == 0
+        ? nullptr
+        : static_cast<std::uint32_t*>(
+            palloc0(count * sizeof(std::uint32_t)));
+    std::size_t output_index = 0;
+    for (int index = 0; index < descriptor->natts; ++index) {
+        if (!TupleDescAttr(descriptor, index)->attisdropped
+            && (context.whole_row
+                || bms_is_member(index + 1, context.attnos))) {
+            attnos[output_index++] = static_cast<std::uint32_t>(index + 1);
+        }
+    }
+    table_close(relation, NoLock);
+    bms_free(context.attnos);
+    *output = attnos;
+    *output_count = count;
+    return true;
+}
+
 /** Provider raw-plan metadata; every value is a copyable PostgreSQL Node. */
 [[nodiscard]] List* make_plan_nodes(
     Oid relation_oid,
     AttrNumber row_identity_attno,
     AttrNumber base_identity_attno,
     AttrNumber occurrence_attno,
-    AttrNumber capability_attno) {
+    AttrNumber capability_attno,
+    const std::uint32_t* required_boundary_attnos,
+    std::size_t required_boundary_count) {
     List* nodes = list_make3(
         makeInteger(kPlanVersion),
         makeInteger(kPlanMagic),
@@ -236,7 +341,23 @@ digest_plan_nodes(const List* nodes) noexcept {
     nodes = lappend(nodes, makeInteger(base_identity_attno));
     nodes = lappend(nodes, makeInteger(occurrence_attno));
     nodes = lappend(nodes, makeInteger(capability_attno));
+    nodes = lappend(nodes, makeInteger(
+        static_cast<std::int32_t>(required_boundary_count)));
+    for (std::size_t index = 0; index < required_boundary_count; ++index) {
+        const std::size_t source_index =
+            g_projection_order == ProjectionOrder::Natural
+            ? index
+            : required_boundary_count - index - 1;
+        nodes = lappend(nodes, makeInteger(static_cast<std::int32_t>(
+            required_boundary_attnos[source_index])));
+    }
     return nodes;
+}
+
+[[nodiscard]] std::uint32_t plan_required_boundary_attno(
+    const List* nodes, std::size_t index) noexcept {
+    return static_cast<std::uint32_t>(intVal(list_nth(
+        nodes, static_cast<int>(kPlanFixedNodeCount + index))));
 }
 
 /** Parse and validate the fixed test-provider plan recipe. */
@@ -246,11 +367,13 @@ digest_plan_nodes(const List* nodes) noexcept {
     AttrNumber* row_identity_attno,
     AttrNumber* base_identity_attno,
     AttrNumber* occurrence_attno,
-    AttrNumber* capability_attno) noexcept {
-    if (nodes == nullptr || list_length(nodes) != 10) {
+    AttrNumber* capability_attno,
+    std::size_t* required_boundary_count) noexcept {
+    if (nodes == nullptr
+        || list_length(nodes) < static_cast<int>(kPlanFixedNodeCount)) {
         return false;
     }
-    for (int index = 0; index < 10; ++index) {
+    for (int index = 0; index < list_length(nodes); ++index) {
         const auto* node = static_cast<const Node*>(list_nth(nodes, index));
         if (node == nullptr || !IsA(node, Integer)) {
             return false;
@@ -262,17 +385,46 @@ digest_plan_nodes(const List* nodes) noexcept {
     }
     const auto relation = static_cast<Oid>(
         static_cast<std::uint32_t>(intVal(list_nth(nodes, 2))));
-    const auto row_attno = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 6)));
-    const auto base_attno = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 7)));
-    const auto occurrence_column = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 8)));
-    const auto capability_column = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 9)));
-    if (!OidIsValid(relation) || row_attno <= 0 || base_attno <= 0
-        || occurrence_column <= 0 || capability_column <= 0) {
+    const int raw_row_attno = intVal(list_nth(nodes, 6));
+    const int raw_base_attno = intVal(list_nth(nodes, 7));
+    const int raw_occurrence_attno = intVal(list_nth(nodes, 8));
+    const int raw_capability_attno = intVal(list_nth(nodes, 9));
+    const int required_count = intVal(list_nth(nodes, 10));
+    if (!OidIsValid(relation)
+        || raw_row_attno <= 0
+        || raw_row_attno > MaxTupleAttributeNumber
+        || raw_base_attno <= 0
+        || raw_base_attno > MaxTupleAttributeNumber
+        || raw_occurrence_attno <= 0
+        || raw_occurrence_attno > MaxTupleAttributeNumber
+        || raw_capability_attno <= 0
+        || raw_capability_attno > MaxTupleAttributeNumber
+        || required_count < 0
+        || required_count
+            > static_cast<int>(kMaximumRequiredBoundaryCount)
+        || list_length(nodes)
+            != static_cast<int>(kPlanFixedNodeCount) + required_count) {
         return false;
+    }
+    const auto row_attno = static_cast<AttrNumber>(raw_row_attno);
+    const auto base_attno = static_cast<AttrNumber>(raw_base_attno);
+    const auto occurrence_column = static_cast<AttrNumber>(
+        raw_occurrence_attno);
+    const auto capability_column = static_cast<AttrNumber>(
+        raw_capability_attno);
+    for (int index = 0; index < required_count; ++index) {
+        const std::uint32_t attno = plan_required_boundary_attno(
+            nodes, static_cast<std::size_t>(index));
+        if (attno == 0
+            || attno > static_cast<std::uint32_t>(MaxTupleAttributeNumber)) {
+            return false;
+        }
+        for (int prior = 0; prior < index; ++prior) {
+            if (plan_required_boundary_attno(
+                    nodes, static_cast<std::size_t>(prior)) == attno) {
+                return false;
+            }
+        }
     }
     if (relation_oid != nullptr) {
         *relation_oid = relation;
@@ -288,6 +440,9 @@ digest_plan_nodes(const List* nodes) noexcept {
     }
     if (capability_attno != nullptr) {
         *capability_attno = capability_column;
+    }
+    if (required_boundary_count != nullptr) {
+        *required_boundary_count = static_cast<std::size_t>(required_count);
     }
     return true;
 }
@@ -590,6 +745,20 @@ void fill_column_schema(
         || range_entry->relid != g_target_relation_oid) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
+    Oid recipe_relation_oid = InvalidOid;
+    std::size_t required_boundary_count = 0;
+    const auto* provider_custom = reinterpret_cast<CustomPath*>(provider_path);
+    if (!parse_plan_nodes(
+            provider_custom->custom_private,
+            &recipe_relation_oid,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            &required_boundary_count)
+        || recipe_relation_oid != range_entry->relid) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
 
     List* clauses = extract_actual_clauses(
         relation_info->baserestrictinfo, false);
@@ -625,8 +794,10 @@ void fill_column_schema(
 
     auto* boundary = static_cast<BioseqCacheColumnSchemaV1*>(
         palloc0(boundary_count * sizeof(BioseqCacheColumnSchemaV1)));
-    auto* required_boundary = static_cast<std::uint32_t*>(
-        palloc0(boundary_count * sizeof(std::uint32_t)));
+    auto* required_boundary = required_boundary_count == 0
+        ? nullptr
+        : static_cast<std::uint32_t*>(palloc0(
+            required_boundary_count * sizeof(std::uint32_t)));
     std::size_t boundary_index = 0;
     for (int index = 0; index < descriptor->natts; ++index) {
         Form_pg_attribute attribute = TupleDescAttr(descriptor, index);
@@ -638,12 +809,14 @@ void fill_column_schema(
             boundary[boundary_index], attno, attribute, false);
         ++boundary_index;
     }
-    for (std::size_t index = 0; index < boundary_count; ++index) {
-        const std::size_t schema_index =
-            g_projection_order == ProjectionOrder::Natural
-            ? index
-            : boundary_count - index - 1;
-        required_boundary[index] = boundary[schema_index].attno;
+    for (std::size_t index = 0; index < required_boundary_count; ++index) {
+        const std::uint32_t attno = plan_required_boundary_attno(
+            provider_custom->custom_private, index);
+        if (find_schema_column(boundary, boundary_count, attno) == nullptr) {
+            table_close(relation, NoLock);
+            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        }
+        required_boundary[index] = attno;
     }
 
     constexpr std::array<const char*, 3> lineage_names{
@@ -678,7 +851,7 @@ void fill_column_schema(
     output->lineage_columns = lineage;
     output->lineage_column_count = lineage_names.size();
     output->required_boundary_attnos = required_boundary;
-    output->required_boundary_attno_count = boundary_count;
+    output->required_boundary_attno_count = required_boundary_count;
     output->required_lineage_attnos = required_lineage;
     output->required_lineage_attno_count = lineage_names.size();
     output->dependency_nodes = list_make1(
@@ -692,6 +865,10 @@ void fill_column_schema(
         output->provider_security_digest,
         g_provider_security_digest.data(),
         sizeof(output->provider_security_digest));
+    g_counters.last_boundary_column_count = boundary_count;
+    g_counters.last_required_boundary_count = required_boundary_count;
+    g_counters.last_lineage_column_count = lineage_names.size();
+    g_counters.last_required_lineage_count = lineage_names.size();
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
@@ -730,7 +907,8 @@ void fill_column_schema(
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno,
+            nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     const std::uint64_t header = g_force_domain_digest_collision
@@ -776,6 +954,19 @@ void fill_column_schema(
             sink, &domain->capability_mask, sizeof(domain->capability_mask))) {
         return BIOSEQ_CACHE_STATUS_ERROR;
     }
+    const std::array<std::uint32_t, 5> semantic_shape{
+        kGenerationSemanticVersion,
+        static_cast<std::uint32_t>(domain->boundary_column_count),
+        static_cast<std::uint32_t>(domain->lineage_column_count),
+        static_cast<std::uint32_t>(domain->required_boundary_attno_count),
+        static_cast<std::uint32_t>(domain->required_lineage_attno_count),
+    };
+    if (!append_digest_bytes(
+            sink,
+            semantic_shape.data(),
+            semantic_shape.size() * sizeof(semantic_shape[0]))) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
     for (std::size_t index = 0; index < domain->boundary_column_count; ++index) {
         if (!append_digest_bytes(
                 sink, &domain->boundary_columns[index],
@@ -789,6 +980,18 @@ void fill_column_schema(
                 sizeof(BioseqCacheColumnSchemaV1))) {
             return BIOSEQ_CACHE_STATUS_ERROR;
         }
+    }
+    if (!append_digest_bytes(
+            sink,
+            domain->required_boundary_attnos,
+            domain->required_boundary_attno_count
+                * sizeof(std::uint32_t))
+        || !append_digest_bytes(
+            sink,
+            domain->required_lineage_attnos,
+            domain->required_lineage_attno_count
+                * sizeof(std::uint32_t))) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
     }
     return BIOSEQ_CACHE_STATUS_OK;
 }
@@ -926,12 +1129,20 @@ void provider_set_rel_pathlist_hook(
     AttrNumber base_attno = 0;
     AttrNumber occurrence_attno = 0;
     AttrNumber capability_attno = 0;
+    std::uint32_t* required_boundary_attnos = nullptr;
+    std::size_t required_boundary_count = 0;
     if (!relation_contract_attnos(
             range_entry->relid,
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno)
+        || !collect_projected_boundary_attnos(
+            relation,
+            range_table_index,
+            range_entry->relid,
+            &required_boundary_attnos,
+            &required_boundary_count)) {
         return;
     }
     Path* child = make_provider_child(root, relation);
@@ -972,7 +1183,9 @@ void provider_set_rel_pathlist_hook(
         row_attno,
         base_attno,
         occurrence_attno,
-        capability_attno);
+        capability_attno,
+        required_boundary_attnos,
+        required_boundary_count);
     provider_path->methods = &provider_path_methods();
     add_path(relation, &provider_path->path);
     set_cheapest(relation);
@@ -1281,8 +1494,14 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
         "\"runtime_digest\":%llu,\"map_source\":%llu,"
         "\"decorate_path\":%llu,\"build_recipe\":%llu,"
         "\"extract_occurrence\":%llu,\"late_fetch_batch\":%llu,"
-        "\"late_fetch_references\":%llu,\"planner_bridge_calls\":%llu,"
-        "\"executor_rows\":%llu,\"gated_expensive_rows\":%llu}",
+        "\"late_fetch_references\":%llu,\"late_fetch_values\":%llu,"
+        "\"planner_bridge_calls\":%llu,\"executor_rows\":%llu,"
+        "\"gated_expensive_rows\":%llu,"
+        "\"last_boundary_column_count\":%llu,"
+        "\"last_required_boundary_count\":%llu,"
+        "\"last_lineage_column_count\":%llu,"
+        "\"last_required_lineage_count\":%llu,"
+        "\"last_recipe_required_boundary_count\":%llu}",
         g_provider_registered ? "true" : "false",
         g_target_relation_oid,
         static_cast<unsigned long long>(g_counters.analyze_query),
@@ -1296,9 +1515,20 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
         static_cast<unsigned long long>(g_counters.extract_occurrence),
         static_cast<unsigned long long>(g_counters.late_fetch_batch),
         static_cast<unsigned long long>(g_counters.late_fetch_references),
+        static_cast<unsigned long long>(g_counters.late_fetch_values),
         static_cast<unsigned long long>(g_counters.planner_bridge_calls),
         static_cast<unsigned long long>(g_counters.executor_rows),
-        static_cast<unsigned long long>(g_counters.gated_expensive_rows));
+        static_cast<unsigned long long>(g_counters.gated_expensive_rows),
+        static_cast<unsigned long long>(
+            g_counters.last_boundary_column_count),
+        static_cast<unsigned long long>(
+            g_counters.last_required_boundary_count),
+        static_cast<unsigned long long>(
+            g_counters.last_lineage_column_count),
+        static_cast<unsigned long long>(
+            g_counters.last_required_lineage_count),
+        static_cast<unsigned long long>(
+            g_counters.last_recipe_required_boundary_count));
     Datum result = DirectFunctionCall1(
         jsonb_in, CStringGetDatum(json.data));
     pfree(json.data);
@@ -1328,7 +1558,8 @@ namespace bioseq::cache::pg::test_provider {
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno,
+            nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     bool row_is_null = false;
@@ -1408,7 +1639,8 @@ void emit_batch_failure_statuses(
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno,
+            nullptr)) {
         emit_batch_failure_statuses(
             sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
@@ -1505,6 +1737,7 @@ void emit_batch_failure_statuses(
                     terminal[reference] = status;
                     break;
                 }
+                ++g_counters.late_fetch_values;
             }
         }
         ExecClearTuple(slot);
@@ -1533,7 +1766,13 @@ void provider_explain_domain(
         return;
     }
     const bool valid = parse_plan_nodes(
-        plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr);
+        plan_domain_nodes,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr);
     if (sink->property_text != nullptr) {
         sink->property_text(
             sink->opaque,
@@ -1764,7 +2003,13 @@ void replace_list_node(List* list, int index, void* node) noexcept {
         return BIOSEQ_CACHE_STATUS_ERROR;
     }
     if (!parse_plan_nodes(
-            plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+            plan_domain_nodes,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     auto digest = digest_plan_nodes(plan_domain_nodes);
@@ -2108,6 +2353,7 @@ void apply_mapping_fault(
     const Plan* provider_plan,
     BioseqCachePlanDigestRecipeV1* output) {
     ++g_counters.build_recipe;
+    std::size_t required_boundary_count = 0;
     if (provider_plan == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)
         || !IsA(provider_plan, CustomScan)) {
@@ -2116,9 +2362,17 @@ void apply_mapping_fault(
     const auto* scan = reinterpret_cast<const CustomScan*>(provider_plan);
     if (scan->methods != &provider_scan_methods()
         || !parse_plan_nodes(
-            scan->custom_private, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+            scan->custom_private,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            &required_boundary_count)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
+    g_counters.last_recipe_required_boundary_count =
+        required_boundary_count;
     const auto digest = digest_plan_nodes(scan->custom_private);
     output->struct_size = sizeof(*output);
     output->flags = 0;
