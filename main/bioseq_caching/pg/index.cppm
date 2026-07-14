@@ -1831,6 +1831,11 @@ struct CoverageDependencyTicketV1 {
     if (!digest.has_value()) {
         return ticket;
     }
+    if (pg_atomic_read_u32(&g_shared->database_transition_count) != 0
+        || current_transaction_touches_dependency(
+            relation_oids[0], ticket.physical_identity)) {
+        return ticket;
+    }
     ticket.fingerprint = *digest;
     ticket.dependency_count = dependency_count;
     ticket.observability = WriteObservability::ProviderComplete;
@@ -2771,6 +2776,51 @@ struct VisibilityTicket {
     pg_read_barrier();
     return pg_atomic_read_u64(&g_shared->database_write_epoch)
         == ticket.database_epoch;
+}
+
+/** Sweep reusable owners under registry locks; wake and retire after unlock. */
+void reusable_registry_janitor_sweep_v1() noexcept {
+    if (!g_reusable_registry || g_reusable_membership_lock == nullptr
+        || g_reusable_exact_locks == nullptr
+        || g_reusable_coverage_locks == nullptr
+        || g_reusable_wait_slots == nullptr
+        || g_reusable_wait_slot_count == 0
+        || ProcGlobal == nullptr) {
+        return;
+    }
+    LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
+    const ReusableJanitorSweepResultV1 sweep = janitor_reusable_registry(
+        g_reusable_registry,
+        reusable_monotonic_now_ns(),
+        kMaximumReusableJanitorBatchV1,
+        ReusableJanitorCallbacksV1{
+            .producer_alive = reusable_producer_alive,
+            .reference_owner_alive = reusable_producer_alive,
+        },
+        reusable_partition_callbacks());
+    LWLockRelease(g_reusable_membership_lock);
+
+    for (std::size_t index = 0;
+         index < sweep.affected_reference_count; ++index) {
+        broadcast_reusable_generation(sweep.affected_references[index]);
+    }
+    for (std::size_t index = 0;
+         index < sweep.retired_manifest_count; ++index) {
+        const storage::ManifestHandle manifest = storage_manifest_handle(
+            sweep.retired_manifests[index]);
+        if (manifest) {
+            static_cast<void>(storage::retire_manifest(manifest));
+        }
+    }
+    if (sweep.error != ReusableRegistryErrorV1::None && g_shared != nullptr) {
+        pg_atomic_write_u32(&g_shared->bootstrap_failure, 1);
+        pg_atomic_write_u32(&g_shared->ready, 0);
+        for (std::uint32_t index = 0;
+             index < g_reusable_wait_slot_count; ++index) {
+            ConditionVariableBroadcast(
+                &g_reusable_wait_slots[index].state_changed);
+        }
+    }
 }
 
 /** Reject non-disabled use when the library was not preloaded. */
@@ -7785,6 +7835,11 @@ Datum bioseq_cache_test_direct_heap_insert(PG_FUNCTION_ARGS) {
 void _PG_init() {
     using namespace bioseq::cache::pg;
     register_cache_gucs();
+    if (!maintenance::register_reusable_janitor_callback_v1(
+            reusable_registry_janitor_sweep_v1)) {
+        ereport(ERROR,
+            (errmsg("bioseq_cache could not register reusable maintenance")));
+    }
     provider_registry::install_relation_write_observer_v1(
         observe_provider_relation_write);
     provider_registry::install_planner_bridge_observer_v1(
@@ -7815,6 +7870,8 @@ void _PG_init() {
 
 void _PG_fini() {
     using namespace bioseq::cache::pg;
+    maintenance::unregister_reusable_janitor_callback_v1(
+        reusable_registry_janitor_sweep_v1);
     provider_registry::install_relation_write_observer_v1(nullptr);
     provider_registry::install_planner_bridge_observer_v1(nullptr);
     provider_registry::unpublish_provider_registry_v1();
