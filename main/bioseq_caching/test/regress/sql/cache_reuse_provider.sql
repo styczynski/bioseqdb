@@ -34,6 +34,7 @@ DO $$
 DECLARE
     plan_line text;
     plan_text text := '';
+    plan jsonb;
 BEGIN
     FOR plan_line IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF) '
@@ -69,6 +70,25 @@ BEGIN
     IF position('BioseqReusableCoverageScan' in plan_text) = 0
        OR position('Cache Entry Kind: ReusableCoverage' in plan_text) = 0 THEN
         RAISE EXCEPTION 'reusable-current plan proof is absent: %', plan_text;
+    END IF;
+    EXECUTE
+        'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
+        'SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask '
+        'FROM cache_provider_rows WHERE nullable_value <= 10 ORDER BY row_id'
+        INTO plan_text;
+    plan := plan_text::jsonb;
+    IF plan->0->'Plan'->>'Cache Mode' <> 'reuse'
+       OR plan->0->'Plan'->>'Planned Cache Action' IS NULL
+       OR plan->0->'Plan' ? 'Actual Cache Action'
+       OR length(plan->0->'Plan'->>'Cache Entry') <> 16
+       OR plan->0->'Plan'->>'SQL' IS NULL
+       OR plan->0->'Plan'->>'State' <> 'planned/provisional'
+       OR jsonb_typeof(
+            plan->0->'Plan'->'Selected Cache Branches') <> 'number'
+       OR jsonb_typeof(plan->0->'Plan'->'Residual Child') <> 'object'
+       OR plan->0->'Plan'->'Provider'->>'Generic Provider' IS NULL THEN
+        RAISE EXCEPTION
+            'structured reusable EXPLAIN contract is incomplete: %', plan;
     END IF;
 END
 $$;
