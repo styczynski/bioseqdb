@@ -361,6 +361,11 @@ struct PlannerFrame {
     char* display_sql = nullptr;
     List* referenced_parameter_ids = NIL;
     List* referenced_relation_oids = NIL;
+    std::array<const provider_registry::ProviderV1*,
+        provider_registry::kMaximumRegisteredProvidersV1> providers{};
+    std::array<reuse::PlannerOwnedIntentV1,
+        provider_registry::kMaximumRegisteredProvidersV1> intents{};
+    std::size_t provider_intent_count = 0;
     bool eligible = false;
 };
 
@@ -3210,6 +3215,34 @@ PlannedStmt* cache_planner(
             frame.referenced_relation_oids = collect_relation_oids(
                 *query, relation_overflow);
             frame.eligible = !relation_overflow;
+            if (frame.eligible
+                && g_query_cache_mode
+                    == static_cast<int>(QueryCacheMode::Reuse)) {
+                const auto providers =
+                    provider_registry::snapshot_providers_v1();
+                for (std::uint32_t provider_index = 0;
+                     provider_index < providers.provider_count
+                     && frame.provider_intent_count
+                         < frame.providers.size();
+                     ++provider_index) {
+                    const provider_registry::ProviderV1* provider =
+                        providers.providers[provider_index];
+                    reuse::ProviderCallDiagnosticV1 diagnostic{};
+                    reuse::PlannerOwnedIntentV1 intent{};
+                    if (!reuse::invoke_analyze_query_fail_open(
+                            provider,
+                            query,
+                            planner_context,
+                            &intent,
+                            &diagnostic)) {
+                        continue;
+                    }
+                    const std::size_t destination =
+                        frame.provider_intent_count++;
+                    frame.providers[destination] = provider;
+                    frame.intents[destination] = intent;
+                }
+            }
         }
         result = g_previous_planner_hook != nullptr
             ? g_previous_planner_hook(

@@ -104,6 +104,11 @@ struct CoveragePathCostsV1 {
     Cost total_cost = 0;
 };
 
+enum class SemanticDigestKindV1 : std::uint8_t {
+    Domain = 1,
+    Generation = 2,
+};
+
 /** Register this before a provisional reference is activated. */
 struct CandidateContextCleanupV1 {
     MemoryContextCallback callback{};
@@ -155,6 +160,16 @@ struct CandidateContextCleanupV1 {
     const Plan* provider_plan,
     MemoryContext planner_context,
     PlannerOwnedDigestRecipeV1* out,
+    ProviderCallDiagnosticV1* diagnostic) noexcept;
+
+/** Capture provider-defined canonical semantic bytes under a PG error boundary. */
+[[nodiscard]] bool invoke_semantic_digest_fail_open(
+    const provider_registry::ProviderV1* provider,
+    const BioseqCachePathDomainV1* domain,
+    SemanticDigestKindV1 kind,
+    std::span<std::byte> output,
+    std::size_t* output_size,
+    MemoryContext parent_context,
     ProviderCallDiagnosticV1* diagnostic) noexcept;
 
 /** Validate runtime bytes before any coverage registry action or child init. */
@@ -699,6 +714,39 @@ struct RuntimeBodyV1 {
     ProviderCallDiagnosticV1* diagnostic;
 };
 
+struct SemanticDigestBodyV1 {
+    const provider_registry::ProviderV1* provider;
+    const BioseqCachePathDomainV1* domain;
+    SemanticDigestKindV1 kind;
+    std::span<std::byte> output;
+    std::size_t* output_size;
+    ProviderCallDiagnosticV1* diagnostic;
+};
+
+[[nodiscard]] bool semantic_digest_body(void* opaque) {
+    auto& body = *static_cast<SemanticDigestBodyV1*>(opaque);
+    BoundedDigestSinkBufferV1 buffer{.bytes = body.output};
+    BioseqCacheDigestSinkV1 sink = make_digest_sink(buffer);
+    const BioseqCacheStatusV1 status =
+        body.kind == SemanticDigestKindV1::Domain
+        ? body.provider->append_domain_semantic_digest(
+            body.domain, &sink)
+        : body.provider->append_generation_semantic_digest(
+            body.domain, &sink);
+    if (status != BIOSEQ_CACHE_STATUS_OK || buffer.failed
+        || buffer.size == 0) {
+        set_diagnostic(
+            body.diagnostic,
+            status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
+                ? ProviderCallFailureV1::Unsupported
+                : ProviderCallFailureV1::MalformedOutput,
+            status);
+        return false;
+    }
+    *body.output_size = buffer.size;
+    return true;
+}
+
 [[nodiscard]] bool runtime_body(void* opaque) {
     auto& body = *static_cast<RuntimeBodyV1*>(opaque);
     void* copied_nodes = nullptr;
@@ -937,6 +985,40 @@ bool invoke_build_recipe_fail_open(
     }
     out->owner_context = accepted;
     return true;
+}
+
+bool invoke_semantic_digest_fail_open(
+    const provider_registry::ProviderV1* provider,
+    const BioseqCachePathDomainV1* domain,
+    SemanticDigestKindV1 kind,
+    std::span<std::byte> output,
+    std::size_t* output_size,
+    MemoryContext parent_context,
+    ProviderCallDiagnosticV1* diagnostic) noexcept {
+    if (domain == nullptr || output.empty() || output_size == nullptr
+        || (kind != SemanticDigestKindV1::Domain
+            && kind != SemanticDigestKindV1::Generation)
+        || !detail::provider_available(provider)
+        || !validate_path_domain(provider->provider_id, domain).has_value()) {
+        detail::set_diagnostic(
+            diagnostic, ProviderCallFailureV1::MalformedOutput);
+        return false;
+    }
+    *output_size = 0;
+    detail::SemanticDigestBodyV1 body{
+        provider, domain, kind, output, output_size, diagnostic};
+    MemoryContext disposable = nullptr;
+    const bool valid = detail::run_provider_boundary(
+        parent_context,
+        "bioseq cache provider semantic digest",
+        &detail::semantic_digest_body,
+        &body,
+        &disposable,
+        diagnostic);
+    if (disposable != nullptr) {
+        MemoryContextDelete(disposable);
+    }
+    return valid;
 }
 
 bool validate_runtime_recipe_fail_open(
