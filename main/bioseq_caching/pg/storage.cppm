@@ -261,6 +261,23 @@ struct StorageRuntimeSnapshot {
     int worker_pid = 0;
 };
 
+#if defined(BIOSEQ_CACHE_TESTING)
+/** Test-only shared override and live ledger evidence for tier assertions. */
+struct StorageTierTestSnapshot {
+    bool force_file_tier = false;
+    std::uint64_t dsa_blocks = 0;
+    std::uint64_t file_blocks = 0;
+    std::uint64_t reserved_hot_bytes = 0;
+    std::uint64_t reserved_file_bytes = 0;
+};
+
+/** Force later block reservations to bypass DSA in testing builds only. */
+[[nodiscard]] bool set_test_force_file_tier(bool enabled) noexcept;
+
+/** Snapshot backing tiers without exposing paths or mutable ledger records. */
+[[nodiscard]] StorageTierTestSnapshot test_storage_tier_snapshot() noexcept;
+#endif
+
 /** Return the main-shmem bytes that request_storage_resources() will request. */
 [[nodiscard]] std::size_t storage_shared_memory_size(
     const StorageConfig& config = {}) noexcept;
@@ -446,6 +463,9 @@ struct StorageSharedState {
     pg_atomic_uint32 worker_proc_number;
     pg_atomic_uint32 sweep_requested;
     pg_atomic_uint32 reserved_atomic;
+#if defined(BIOSEQ_CACHE_TESTING)
+    pg_atomic_uint32 force_file_tier;
+#endif
     int sweep_owner_pid;
     std::uint32_t sweep_owner_proc_number;
     BlockLedgerEntry block_ledger[kBlockLedgerCapacity];
@@ -917,6 +937,9 @@ void initialize_shared_state(
     pg_atomic_init_u32(&shared.worker_proc_number, INVALID_PROC_NUMBER);
     pg_atomic_init_u32(&shared.sweep_requested, 0);
     pg_atomic_init_u32(&shared.reserved_atomic, 0);
+#if defined(BIOSEQ_CACHE_TESTING)
+    pg_atomic_init_u32(&shared.force_file_tier, 0);
+#endif
     shared.sweep_owner_pid = 0;
     shared.sweep_owner_proc_number =
         static_cast<std::uint32_t>(INVALID_PROC_NUMBER);
@@ -1649,7 +1672,13 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
 
     BlockReferenceV1 reference{};
     bool hot_reserved = false;
-    if (!system_memory_under_pressure()) {
+    const bool force_file_tier =
+#if defined(BIOSEQ_CACHE_TESTING)
+        pg_atomic_read_u32(&g_shared->force_file_tier) != 0;
+#else
+        false;
+#endif
+    if (!force_file_tier && !system_memory_under_pressure()) {
         hot_reserved = reserve_counter(
             g_shared->reserved_hot_bytes,
             bytes.size(),
@@ -2520,3 +2549,46 @@ std::uint32_t janitor_interval_ms() noexcept {
 }
 
 } // namespace bioseq::cache::pg::storage
+
+#if defined(BIOSEQ_CACHE_TESTING)
+namespace bioseq::cache::pg::storage {
+
+bool set_test_force_file_tier(bool enabled) noexcept {
+    if (!attach_storage()) {
+        return false;
+    }
+    pg_atomic_write_u32(&g_shared->force_file_tier, enabled ? 1U : 0U);
+    return true;
+}
+
+StorageTierTestSnapshot test_storage_tier_snapshot() noexcept {
+    StorageTierTestSnapshot snapshot{};
+    if (!attach_storage()) {
+        return snapshot;
+    }
+    snapshot.force_file_tier =
+        pg_atomic_read_u32(&g_shared->force_file_tier) != 0;
+    snapshot.reserved_hot_bytes =
+        pg_atomic_read_u64(&g_shared->reserved_hot_bytes);
+    snapshot.reserved_file_bytes =
+        pg_atomic_read_u64(&g_shared->reserved_file_bytes);
+    LWLockAcquire(g_storage_lock, LW_SHARED);
+    for (const BlockLedgerEntry& entry : g_shared->block_ledger) {
+        if ((entry.state != BlockLedgerState::Stored
+             && entry.state != BlockLedgerState::Referenced
+             && entry.state != BlockLedgerState::Retiring)
+            || entry.reference.length == 0) {
+            continue;
+        }
+        if (entry.reference.tier == BlockBackingTierV1::Dsa) {
+            ++snapshot.dsa_blocks;
+        } else if (entry.reference.tier == BlockBackingTierV1::File) {
+            ++snapshot.file_blocks;
+        }
+    }
+    LWLockRelease(g_storage_lock);
+    return snapshot;
+}
+
+} // namespace bioseq::cache::pg::storage
+#endif

@@ -483,6 +483,25 @@ def _entry_runtime_snapshot(cluster: Any) -> dict[str, Any]:
     }
 
 
+def _test_storage_tier_snapshot(cluster: Any) -> dict[str, Any]:
+    stdout, _ = _run_sql(
+        cluster,
+        "SELECT force_file_tier, dsa_blocks, file_blocks, "
+        "reserved_hot_bytes, reserved_file_bytes "
+        "FROM bioseq_cache_test.storage_tier_stats()",
+    )
+    values = stdout.strip().split("\t")
+    if len(values) != 5 or values[0] not in {"t", "f"}:
+        raise BenchmarkError(f"unexpected storage tier test output: {stdout!r}")
+    return {
+        "force_file_tier": values[0] == "t",
+        "dsa_blocks": int(values[1]),
+        "file_blocks": int(values[2]),
+        "reserved_hot_bytes": int(values[3]),
+        "reserved_file_bytes": int(values[4]),
+    }
+
+
 def _same_result(reference: QueryOutput, candidate: QueryOutput, ordered: bool) -> bool:
     expected_digest = (
         reference.ordered_sha256 if ordered else reference.multiset_sha256
@@ -518,6 +537,7 @@ def _stats(cluster: Any) -> dict[str, int]:
 def _reset_case(cluster: Any, *, ttl_ms: int = 3_600_000) -> None:
     _run_sql(
         cluster,
+        "SELECT bioseq_cache_test.set_force_file_tier(false); "
         "SET bioseq.query_cache_optimisation_mode = 'disabled'; "
         "SELECT bioseq_cache.invalidate_all(); "
         "SELECT bioseq_cache.reset_stats(); "
@@ -664,19 +684,31 @@ def _measure_case(
     )
 
     _reset_case(cluster)
-    producer = _execute_query(cluster, mode="same", sql=sql)
-    hit_samples = [
-        _execute_query(cluster, mode="same", sql=sql)
-        for _ in range(sample_count)
-    ]
-    same_explain = _measure_explain_samples(
-        cluster,
-        mode="same",
-        sql=sql,
-        sample_count=sample_count,
-    )
-    case_stats = _stats(cluster)
-    runtime = _entry_runtime_snapshot(cluster)
+    force_file_tier = str(case["category"]) == "file_tier_candidate"
+    if force_file_tier:
+        _run_sql(
+            cluster, "SELECT bioseq_cache_test.set_force_file_tier(true)"
+        )
+    try:
+        producer = _execute_query(cluster, mode="same", sql=sql)
+        hit_samples = [
+            _execute_query(cluster, mode="same", sql=sql)
+            for _ in range(sample_count)
+        ]
+        same_explain = _measure_explain_samples(
+            cluster,
+            mode="same",
+            sql=sql,
+            sample_count=sample_count,
+        )
+        case_stats = _stats(cluster)
+        runtime = _entry_runtime_snapshot(cluster)
+        runtime["test_tier_evidence"] = _test_storage_tier_snapshot(cluster)
+    finally:
+        if force_file_tier:
+            _run_sql(
+                cluster, "SELECT bioseq_cache_test.set_force_file_tier(false)"
+            )
     runtime["storage_explain"] = same_explain["cache_storage"]
     correctness = _same_result(reference, producer, ordered) and all(
         _same_result(reference, sample, ordered) for sample in hit_samples
@@ -1309,6 +1341,8 @@ def _evaluate_thresholds(
     compact_storage = compact["completed_hit"]["cache_storage"]
     toast = next(case for case in cases if case["key"] == "large_toasted_values")
     toast_storage = toast["completed_hit"]["cache_storage"]
+    compact_tier_evidence = compact["runtime_storage"]["test_tier_evidence"]
+    toast_tier_evidence = toast["runtime_storage"]["test_tier_evidence"]
     tier_samples = [
         case["completed_hit"]["cache_storage"] for case in cases
     ]
@@ -1324,6 +1358,10 @@ def _evaluate_thresholds(
         tiers_measured
         and compact_storage["peak_reserved_hot_bytes"] > 0
         and toast_storage["peak_reserved_file_bytes"] > 0
+        and not compact_tier_evidence["force_file_tier"]
+        and compact_tier_evidence["dsa_blocks"] > 0
+        and toast_tier_evidence["force_file_tier"]
+        and toast_tier_evidence["file_blocks"] > 0
     )
     thresholds.append(
         _threshold(
@@ -1331,6 +1369,8 @@ def _evaluate_thresholds(
             actual={
                 "compact": compact_storage,
                 "large_toasted": toast_storage,
+                "compact_test_evidence": compact_tier_evidence,
+                "large_toasted_test_evidence": toast_tier_evidence,
             },
             limit=(
                 "all reservations within ceilings; compact observes DSA and "
@@ -1338,8 +1378,9 @@ def _evaluate_thresholds(
             ),
             passed=tiers_bounded and tier_cases_observed,
             detail=(
-                "Values come from structured EXPLAIN's production storage "
-                "runtime snapshot after mandatory hit prevalidation."
+                "Ceilings come from structured EXPLAIN after mandatory hit "
+                "prevalidation; test-only ledger counts prove both physical "
+                "backing branches without adding a production GUC."
             ),
         )
     )

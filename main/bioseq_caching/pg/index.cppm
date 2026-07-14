@@ -1877,6 +1877,41 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
     ConditionVariableBroadcast(&entry.changed);
 }
 
+/** Make one unreferenced terminal slot reusable without resetting its ABA id. */
+void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
+    const std::uint64_t generation = entry.generation;
+    entry.key_size = 0;
+    entry.claim_sequence = 0;
+    entry.key_hash = 0;
+    entry.key_digest = {};
+    entry.database_epoch = 0;
+    entry.database_oid = InvalidOid;
+    entry.current_role_oid = InvalidOid;
+    entry.session_user_oid = InvalidOid;
+    entry.producer_pid = 0;
+    entry.producer_proc_number = INVALID_PROC_NUMBER;
+    entry.waiter_count = 0;
+    entry.reader_count = 0;
+    std::memset(entry.waiters, 0, sizeof(entry.waiters));
+    entry.created_at = 0;
+    entry.completed_at = 0;
+    entry.expires_at = 0;
+    entry.row_count = 0;
+    entry.logical_bytes = 0;
+    entry.stored_bytes = 0;
+    entry.hits = 0;
+    entry.relation_count = 0;
+    entry.reserved = 0;
+    std::memset(entry.relation_oids, 0, sizeof(entry.relation_oids));
+    entry.manifest_handle = {};
+    std::memset(entry.display_sql, 0, sizeof(entry.display_sql));
+    std::memset(entry.key, 0, sizeof(entry.key));
+    entry.generation = generation;
+    pg_write_barrier();
+    entry.state = SharedEntryState::Empty;
+    ConditionVariableBroadcast(&entry.changed);
+}
+
 /** Wait for a matching producer; pre-existing waiters may consume TTL-zero. */
 [[nodiscard]] RegistryDecision wait_for_producer(
         int index, std::uint64_t generation,
@@ -3405,7 +3440,7 @@ struct EntrySnapshot {
     return "UNKNOWN";
 }
 
-/** Reap dead owners and optionally TTL-expired generations without I/O locks. */
+/** Reap dead owners and converge unreferenced terminal slots to EMPTY. */
 [[nodiscard]] std::uint64_t sweep_registry(bool expire_completed) noexcept {
     if (g_shared == nullptr) {
         return 0;
@@ -3429,19 +3464,34 @@ struct EntrySnapshot {
             && entry.expires_at <= now
             && entry.waiter_count == 0
             && entry.reader_count == 0;
-        if (!dead_producer && !expired) {
+        const bool terminal_reclaimable =
+            (entry.state == SharedEntryState::Failed
+             || entry.state == SharedEntryState::Retired)
+            && entry.waiter_count == 0
+            && entry.reader_count == 0;
+        if (!dead_producer && !expired && !terminal_reclaimable) {
             continue;
         }
         if (dead_producer) {
             fail_abandoned_producer(entry);
-        } else {
+        } else if (expired) {
             entry.state = SharedEntryState::Retired;
             ConditionVariableBroadcast(&entry.changed);
         }
-        if (storage_attached && entry.reader_count == 0
-            && entry.manifest_handle) {
+        const bool reclaimable =
+            (entry.state == SharedEntryState::Failed
+             || entry.state == SharedEntryState::Retired)
+            && entry.waiter_count == 0
+            && entry.reader_count == 0;
+        if (storage_attached && reclaimable && entry.manifest_handle) {
             manifests[manifest_count++] = entry.manifest_handle;
             entry.manifest_handle = {};
+        }
+        if (reclaimable && !entry.manifest_handle) {
+            recycle_registry_entry_locked(entry);
+        }
+        if (expired) {
+            pg_atomic_fetch_add_u64(&g_shared->stats.evictions, 1);
         }
         ++swept;
     }
@@ -3457,7 +3507,7 @@ struct EntrySnapshot {
     if (g_shared == nullptr) {
         return 0;
     }
-    static_cast<void>(sweep_registry(false));
+    static_cast<void>(sweep_registry(true));
     int count = 0;
     LWLockAcquire(g_registry_lock, LW_SHARED);
     for (const CacheEntry& entry : g_shared->entries) {
@@ -3882,6 +3932,40 @@ Datum bioseq_cache_test_fail_next_write(PG_FUNCTION_ARGS) {
     pfree(failure);
     pg_atomic_write_u32(&g_shared->test_control.fail_next_write, 1);
     PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(bioseq_cache_test_set_force_file_tier);
+Datum bioseq_cache_test_set_force_file_tier(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg;
+    require_cache_test_superuser();
+    if (!storage::set_test_force_file_tier(PG_GETARG_BOOL(0))) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq_cache storage is unavailable")));
+    }
+    PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(bioseq_cache_test_storage_tier_stats);
+Datum bioseq_cache_test_storage_tier_stats(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg;
+    require_cache_test_superuser();
+    Tuplestorestate* store = nullptr;
+    TupleDesc descriptor = initialize_srf(fcinfo, &store);
+    const storage::StorageTierTestSnapshot snapshot =
+        storage::test_storage_tier_snapshot();
+    Datum values[5]{
+        BoolGetDatum(snapshot.force_file_tier),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.dsa_blocks)),
+        Int64GetDatum(static_cast<std::int64_t>(snapshot.file_blocks)),
+        Int64GetDatum(
+            static_cast<std::int64_t>(snapshot.reserved_hot_bytes)),
+        Int64GetDatum(
+            static_cast<std::int64_t>(snapshot.reserved_file_bytes)),
+    };
+    bool nulls[5]{};
+    tuplestore_putvalues(store, descriptor, values, nulls);
+    PG_RETURN_NULL();
 }
 
 PG_FUNCTION_INFO_V1(bioseq_cache_test_entry_states);
