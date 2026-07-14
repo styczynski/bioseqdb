@@ -1045,12 +1045,32 @@ struct ReusableJanitorSweepResultV1 {
   std::uint32_t reaped_waiters = 0;
   std::uint32_t reaped_planner_pins = 0;
   std::uint32_t reaped_reader_pins = 0;
+  std::array<ReusableGenerationReferenceV1, kMaximumReusableJanitorBatchV1>
+      affected_references{};
+  std::size_t affected_reference_count = 0;
   std::array<ReusableManifestHandleV1, kMaximumReusableJanitorBatchV1>
       retired_manifests{};
   std::size_t retired_manifest_count = 0;
 };
 
 namespace reusable_registry_detail {
+
+/** Remember one ABA-safe state transition exactly once for lock-drop wakeup. */
+[[nodiscard]] inline bool remember_janitor_affected_reference(
+    ReusableJanitorSweepResultV1 &result,
+    const ReusableGenerationReferenceV1 &reference) noexcept {
+  for (std::size_t index = 0; index < result.affected_reference_count;
+       ++index) {
+    if (result.affected_references[index] == reference) {
+      return true;
+    }
+  }
+  if (result.affected_reference_count >= result.affected_references.size()) {
+    return false;
+  }
+  result.affected_references[result.affected_reference_count++] = reference;
+  return true;
+}
 
 struct DirectoryProbeV1 {
   std::uint32_t slot = kInvalidReusableRegistrySlotV1;
@@ -3090,6 +3110,10 @@ reclaim_retired_reusable_generations(
         result.error = failure_error;
         return result;
       }
+      if (!remember_janitor_affected_reference(result, reference)) {
+        result.error = ReusableRegistryErrorV1::CorruptLayout;
+        return result;
+      }
       ++result.failed_dead_producers;
     }
 
@@ -3131,6 +3155,10 @@ reclaim_retired_reusable_generations(
         continue;
       }
       result.error = manifest.error();
+      return result;
+    }
+    if (!remember_janitor_affected_reference(result, reference)) {
+      result.error = ReusableRegistryErrorV1::CorruptLayout;
       return result;
     }
     if (static_cast<bool>(*manifest) &&

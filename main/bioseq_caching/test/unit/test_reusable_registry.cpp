@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -754,6 +755,10 @@ TEST_CASE("janitor fails dead owners and retires expired manifests") {
   REQUIRE(dead);
   REQUIRE(begin_reusable_build(fixture.attachment, dead.reference) ==
           ReusableRegistryErrorV1::None);
+  auto live_waiter = claim(fixture, key, digest(50), "domain", "dead", 2);
+  REQUIRE(live_waiter.disposition ==
+          ReusableClaimDispositionV1::ExistingInFlight);
+  REQUIRE(live_waiter.token.kind == ReusableReferenceKindV1::Waiter);
 
   auto dead_sweep = janitor_reusable_registry(
       fixture.attachment, 1'000, kMaximumReusableJanitorBatchV1,
@@ -762,8 +767,25 @@ TEST_CASE("janitor fails dead owners and retires expired manifests") {
       });
   REQUIRE(dead_sweep.error == ReusableRegistryErrorV1::None);
   REQUIRE(dead_sweep.failed_dead_producers == 1);
-  REQUIRE(dead_sweep.retired_failed == 1);
+  REQUIRE(dead_sweep.retired_failed == 0);
   REQUIRE(dead_sweep.retired_manifest_count == 0);
+  REQUIRE(dead_sweep.affected_reference_count == 1);
+  REQUIRE(dead_sweep.affected_references[0] == dead.reference);
+  const auto failed = snapshot_reusable_generation(
+      fixture.attachment, dead.reference);
+  REQUIRE(failed.has_value());
+  REQUIRE(failed->state == CacheEntryState::Failed);
+  REQUIRE(failed->waiter_count == 1);
+  REQUIRE(release_reusable_reference(
+              fixture.attachment, live_waiter.token) ==
+          ReusableRegistryErrorV1::None);
+
+  const auto failed_retirement =
+      janitor_reusable_registry(fixture.attachment, 1'001);
+  REQUIRE(failed_retirement.error == ReusableRegistryErrorV1::None);
+  REQUIRE(failed_retirement.retired_failed == 1);
+  REQUIRE(failed_retirement.affected_reference_count == 1);
+  REQUIRE(failed_retirement.affected_references[0] == dead.reference);
   REQUIRE(validate_reusable_registry(fixture.attachment) ==
           ReusableRegistryErrorV1::None);
 
@@ -778,6 +800,8 @@ TEST_CASE("janitor fails dead owners and retires expired manifests") {
   REQUIRE(expiry_sweep.retired_expired == 1);
   REQUIRE(expiry_sweep.retired_manifest_count == 1);
   REQUIRE(expiry_sweep.retired_manifests[0].id == expiring.reference.id);
+  REQUIRE(expiry_sweep.affected_reference_count == 1);
+  REQUIRE(expiry_sweep.affected_references[0] == expiring.reference);
   REQUIRE(validate_reusable_registry(fixture.attachment) ==
           ReusableRegistryErrorV1::None);
 
@@ -789,6 +813,46 @@ TEST_CASE("janitor fails dead owners and retires expired manifests") {
   REQUIRE(snapshot.retired_generations == 0);
   REQUIRE(snapshot.free_generations == 4);
   REQUIRE(snapshot.arena_free_bytes == 16U << 10);
+  REQUIRE(validate_reusable_registry(fixture.attachment) ==
+          ReusableRegistryErrorV1::None);
+}
+
+TEST_CASE("janitor wake references are bounded and deduplicated") {
+  RegistryFixture fixture{8, 32U << 10, 1};
+  const auto key = coverage_key(52);
+  std::array<ReusableGenerationReferenceV1, 4> references{};
+  for (std::size_t index = 0; index < references.size(); ++index) {
+    const std::string generation = "dead-" + std::to_string(index);
+    auto claimed = claim(
+        fixture, key,
+        digest(static_cast<std::uint8_t>(60 + index)),
+        "domain", generation, static_cast<std::uint32_t>(index + 1));
+    REQUIRE(claimed);
+    REQUIRE(begin_reusable_build(fixture.attachment, claimed.reference) ==
+            ReusableRegistryErrorV1::None);
+    references[index] = claimed.reference;
+  }
+
+  constexpr std::uint32_t maximum = 3;
+  const auto sweep = janitor_reusable_registry(
+      fixture.attachment, 1'000, maximum,
+      ReusableJanitorCallbacksV1{
+          .producer_alive = producer_is_dead,
+      });
+  REQUIRE(sweep.error == ReusableRegistryErrorV1::None);
+  REQUIRE(sweep.failed_dead_producers == maximum);
+  REQUIRE(sweep.retired_failed == maximum);
+  REQUIRE(sweep.affected_reference_count == maximum);
+  REQUIRE(sweep.affected_reference_count <= sweep.affected_references.size());
+  for (std::size_t index = 0; index < sweep.affected_reference_count;
+       ++index) {
+    REQUIRE(std::find(references.begin(), references.end(),
+                      sweep.affected_references[index]) != references.end());
+    for (std::size_t prior = 0; prior < index; ++prior) {
+      REQUIRE(sweep.affected_references[prior] !=
+              sweep.affected_references[index]);
+    }
+  }
   REQUIRE(validate_reusable_registry(fixture.attachment) ==
           ReusableRegistryErrorV1::None);
 }
