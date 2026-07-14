@@ -360,6 +360,7 @@ inline shmem_startup_hook_type g_previous_shmem_startup_hook = nullptr;
 inline planner_hook_type g_previous_planner_hook = nullptr;
 inline create_upper_paths_hook_type g_previous_create_upper_paths_hook = nullptr;
 inline ExecutorStart_hook_type g_previous_executor_start_hook = nullptr;
+inline ExecutorFinish_hook_type g_previous_executor_finish_hook = nullptr;
 inline ProcessUtility_hook_type g_previous_process_utility_hook = nullptr;
 inline bool g_preload_requested = false;
 inline bool g_gucs_registered = false;
@@ -426,6 +427,18 @@ struct PlannerFrame {
 
 inline PlannerFrame* g_planner_frame = nullptr;
 inline bool g_producer_plan_capture_active = false;
+inline MemoryContext g_plan_capture_context = nullptr;
+
+struct ReusableCoverageState;
+
+/** Query-context producers claimed while one chained ExecutorStart runs. */
+struct ExecutorStartClaimFrameV1 {
+    ExecutorStartClaimFrameV1* previous = nullptr;
+    std::array<ReusableCoverageState*, kRegistryCapacity> producers{};
+    std::size_t producer_count = 0;
+};
+
+inline ExecutorStartClaimFrameV1* g_executor_start_claim_frame = nullptr;
 
 /** Initialize all shared atomics exactly once. */
 void initialize_shared_state(CacheSharedState& shared) noexcept {
@@ -2165,6 +2178,44 @@ void invalidate_dirty_reusable_generations() noexcept {
     if (result == ReusableRegistryErrorV1::None) {
         broadcast_reusable_generation(diagnostics.reference);
     }
+    return result;
+}
+
+/** ABA-refresh producer diagnostics while membership remains stable. */
+[[nodiscard]] ReusableRegistryErrorV1 store_current_reusable_diagnostics(
+        const ReusableDiagnosticTextUpdateV1& diagnostics) noexcept {
+    if (!diagnostics.reference || g_reusable_membership_lock == nullptr) {
+        return ReusableRegistryErrorV1::InvalidArgument;
+    }
+    ReusableRegistryErrorV1 result = ReusableRegistryErrorV1::InvalidState;
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
+        membership_owned = true;
+        result = store_reusable_diagnostic_text(
+            g_reusable_registry,
+            diagnostics,
+            reusable_partition_callbacks());
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        result = ReusableRegistryErrorV1::InvalidState;
+    }
+    PG_END_TRY();
     return result;
 }
 
@@ -5503,6 +5554,11 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         state->cleanup_registered = true;
     }
 
+    if (g_producer_plan_capture_active) {
+        initialize_retained_child(*state, node, estate, eflags);
+        return;
+    }
+
     const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
     const bool force_bypass = private_force_bypass(*scan);
     const VisibilityTicket visibility = explain_only || force_bypass
@@ -6027,7 +6083,7 @@ struct ReusableCoverageState {
     bool cleanup_done;
     bool current_manifest_pin_owned;
     bool older_preflight_ready;
-    std::array<std::uint8_t, 1> reserved_flags;
+    bool planned_diagnostics_published;
     std::uint16_t source_count;
     std::uint16_t active_source_count;
     std::uint16_t replay_source_index;
@@ -6071,6 +6127,25 @@ struct ReusableCoverageState {
 
 static_assert(std::is_standard_layout_v<ReusableCoverageState>);
 static_assert(offsetof(ReusableCoverageState, css) == 0);
+
+/** Register a new CLAIMED producer for the enclosing ExecutorStart cleanup. */
+[[nodiscard]] bool register_executor_start_claim(
+        ReusableCoverageState& state) noexcept {
+    ExecutorStartClaimFrameV1* frame = g_executor_start_claim_frame;
+    if (frame == nullptr) {
+        return false;
+    }
+    for (std::size_t index = 0; index < frame->producer_count; ++index) {
+        if (frame->producers[index] == &state) {
+            return true;
+        }
+    }
+    if (frame->producer_count >= frame->producers.size()) {
+        return false;
+    }
+    frame->producers[frame->producer_count++] = &state;
+    return true;
+}
 
 struct CoverageSemanticFingerprintsV1 {
     CacheDigest256 schema{};
@@ -8346,7 +8421,13 @@ struct BoundedDiagnosticTextV1 {
     std::size_t size = 0;
     bool available = false;
     bool truncated = false;
+    ReusablePlanSnapshotStatusV1 status =
+        ReusablePlanSnapshotStatusV1::Unavailable;
 };
+
+inline constexpr int kDiagnosticDisplaySqlTruncatedV1 = 1 << 0;
+inline constexpr int kDiagnosticCanonicalPlanTruncatedV1 = 1 << 1;
+inline constexpr int kDiagnosticCanonicalPlanUnavailableV1 = 1 << 2;
 
 /** Copy diagnostics into planner/query memory with an explicit byte bound. */
 [[nodiscard]] bool copy_bounded_diagnostic_text(
@@ -8365,6 +8446,48 @@ struct BoundedDiagnosticTextV1 {
     return output->available;
 }
 
+/** Reuse one resettable backend context for transient serialization trees. */
+[[nodiscard]] MemoryContext reusable_plan_capture_context() {
+    if (g_plan_capture_context == nullptr) {
+        MemoryContext previous = MemoryContextSwitchTo(TopMemoryContext);
+        g_plan_capture_context = AllocSetContextCreate(
+            TopMemoryContext,
+            "bioseq reusable plan capture",
+            ALLOCSET_SMALL_SIZES);
+        MemoryContextSwitchTo(previous);
+    }
+    return g_plan_capture_context;
+}
+
+/** Preserve the bounded SQLSTATE and class when diagnostics fail open. */
+void set_plan_capture_unavailable_marker(
+        int sqlstate,
+        std::size_t capacity,
+        BoundedDiagnosticTextV1* output) {
+    if (output == nullptr) {
+        return;
+    }
+    *output = {};
+    const int effective_sqlstate = sqlstate == 0
+        ? ERRCODE_INTERNAL_ERROR
+        : sqlstate;
+    const char* unpacked = unpack_sql_state(effective_sqlstate);
+    char code[6] = "XX000";
+    if (unpacked != nullptr) {
+        strlcpy(code, unpacked, sizeof(code));
+    }
+    char marker[96]{};
+    static_cast<void>(snprintf(
+        marker,
+        sizeof(marker),
+        "plan capture unavailable [SQLSTATE %.5s, class %.2s]",
+        code,
+        code));
+    static_cast<void>(copy_bounded_diagnostic_text(
+        marker, capacity, output));
+    output->status = ReusablePlanSnapshotStatusV1::Unavailable;
+}
+
 /** Canonical child Plan text is diagnostics only and fails open. */
 [[nodiscard]] bool capture_canonical_child_plan_fail_open(
         const Plan* child,
@@ -8378,18 +8501,29 @@ struct BoundedDiagnosticTextV1 {
     volatile bool capture_active = false;
     PG_TRY();
     {
+        MemoryContext capture_context = reusable_plan_capture_context();
+        MemoryContextReset(capture_context);
+        MemoryContextSwitchTo(capture_context);
         g_producer_plan_capture_active = true;
         capture_active = true;
         char* serialized = nodeToString(child);
-        static_cast<void>(copy_bounded_diagnostic_text(
+        MemoryContextSwitchTo(caller_context);
+        const bool copied = copy_bounded_diagnostic_text(
             serialized,
             kReusableCanonicalPlanCapacityV1,
-            output));
-        if (serialized != nullptr) {
-            pfree(serialized);
+            output);
+        if (copied) {
+            output->status = ReusablePlanSnapshotStatusV1::Planned;
         }
         g_producer_plan_capture_active = false;
         capture_active = false;
+        MemoryContextReset(capture_context);
+        if (!copied) {
+            set_plan_capture_unavailable_marker(
+                ERRCODE_INTERNAL_ERROR,
+                kReusableCanonicalPlanCapacityV1,
+                output);
+        }
     }
     PG_CATCH();
     {
@@ -8399,14 +8533,18 @@ struct BoundedDiagnosticTextV1 {
             g_producer_plan_capture_active = false;
             capture_active = false;
         }
+        if (g_plan_capture_context != nullptr) {
+            MemoryContextReset(g_plan_capture_context);
+        }
         if (cache_interrupt_error(sqlstate)) {
             PG_RE_THROW();
         }
         FlushErrorState();
-        *output = {};
+        set_plan_capture_unavailable_marker(
+            sqlstate, kReusableCanonicalPlanCapacityV1, output);
     }
     PG_END_TRY();
-    return output->available;
+    return output->status == ReusablePlanSnapshotStatusV1::Planned;
 }
 
 /** Render an initialized producer child without mutating the live QueryDesc. */
@@ -8414,6 +8552,7 @@ struct BoundedDiagnosticTextV1 {
         CustomScanState* node,
         EState* estate,
         const char* display_sql,
+        bool analyze,
         BoundedDiagnosticTextV1* output) {
     PlanState* child_state = node == nullptr
         ? nullptr
@@ -8434,6 +8573,9 @@ struct BoundedDiagnosticTextV1 {
     volatile bool capture_active = false;
     PG_TRY();
     {
+        MemoryContext capture_context = reusable_plan_capture_context();
+        MemoryContextReset(capture_context);
+        MemoryContextSwitchTo(capture_context);
         g_producer_plan_capture_active = true;
         capture_active = true;
         PlannedStmt planned = *estate->es_plannedstmt;
@@ -8450,28 +8592,46 @@ struct BoundedDiagnosticTextV1 {
         view.tupDesc = child_state->ps_ResultTupleDesc;
         view.estate = estate;
         view.planstate = child_state;
+        view.already_executed = analyze;
 
         ExplainState* explain = NewExplainState();
         explain->format = EXPLAIN_FORMAT_TEXT;
         explain->verbose = true;
         explain->costs = true;
-        explain->analyze = false;
-        explain->buffers = false;
-        explain->wal = false;
-        explain->timing = false;
+        explain->analyze = analyze;
+        explain->buffers = analyze
+            && (estate->es_instrument & INSTRUMENT_BUFFERS) != 0;
+        explain->wal = analyze
+            && (estate->es_instrument & INSTRUMENT_WAL) != 0;
+        explain->timing = analyze
+            && (estate->es_instrument & INSTRUMENT_TIMER) != 0;
         explain->summary = false;
         explain->settings = false;
         ExplainBeginOutput(explain);
         ExplainPrintPlan(explain, &view);
         ExplainEndOutput(explain);
+        MemoryContextSwitchTo(caller_context);
+        bool copied = false;
         if (explain->str != nullptr && explain->str->data != nullptr) {
-            static_cast<void>(copy_bounded_diagnostic_text(
+            copied = copy_bounded_diagnostic_text(
                 explain->str->data,
                 kReusableProducerPlanCapacityV1,
-                output));
+                output);
+        }
+        if (copied) {
+            output->status = analyze
+                ? ReusablePlanSnapshotStatusV1::Analyzed
+                : ReusablePlanSnapshotStatusV1::Planned;
         }
         g_producer_plan_capture_active = false;
         capture_active = false;
+        MemoryContextReset(capture_context);
+        if (!copied) {
+            set_plan_capture_unavailable_marker(
+                ERRCODE_INTERNAL_ERROR,
+                kReusableProducerPlanCapacityV1,
+                output);
+        }
     }
     PG_CATCH();
     {
@@ -8481,14 +8641,20 @@ struct BoundedDiagnosticTextV1 {
             g_producer_plan_capture_active = false;
             capture_active = false;
         }
+        if (g_plan_capture_context != nullptr) {
+            MemoryContextReset(g_plan_capture_context);
+        }
         if (cache_interrupt_error(sqlstate)) {
             PG_RE_THROW();
         }
         FlushErrorState();
-        *output = {};
+        set_plan_capture_unavailable_marker(
+            sqlstate, kReusableProducerPlanCapacityV1, output);
     }
     PG_END_TRY();
-    return output->available;
+    return output->status == (analyze
+        ? ReusablePlanSnapshotStatusV1::Analyzed
+        : ReusablePlanSnapshotStatusV1::Planned);
 }
 
 void initialize_coverage_child(
@@ -8522,6 +8688,7 @@ void coverage_begin_custom_scan(
     state->cleanup_done = false;
     state->current_manifest_pin_owned = false;
     state->older_preflight_ready = false;
+    state->planned_diagnostics_published = false;
     state->source_count = 0;
     state->active_source_count = 0;
     state->replay_source_index = 0;
@@ -8565,6 +8732,11 @@ void coverage_begin_custom_scan(
         MemoryContextRegisterResetCallback(
             estate->es_query_cxt, &state->cleanup_callback);
         state->cleanup_registered = true;
+    }
+
+    if (g_producer_plan_capture_active) {
+        initialize_coverage_child(*state, node, estate, eflags);
+        return;
     }
 
     List* candidates = scan->custom_private != NIL
@@ -8670,15 +8842,6 @@ void coverage_begin_custom_scan(
         && IsA(list_nth(scan->custom_private, 7), String)
         && IsA(list_nth(scan->custom_private, 8), String)
         && IsA(list_nth(scan->custom_private, 9), Integer);
-    const char* producer_display_sql = diagnostic_private_valid
-        ? strVal(list_nth(scan->custom_private, 7))
-        : "<query text unavailable>";
-    const char* canonical_child_plan = diagnostic_private_valid
-        ? strVal(list_nth(scan->custom_private, 8))
-        : "";
-    const int producer_diagnostic_flags = diagnostic_private_valid
-        ? intVal(list_nth(scan->custom_private, 9))
-        : 0;
 
     const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
     const bool runtime_allowed = !explain_only
@@ -8802,7 +8965,7 @@ void coverage_begin_custom_scan(
                             CoverageRuntimeRoleV1::Producer;
                         state->current_producer_owned = true;
                         state->producer_started_at = GetCurrentTimestamp();
-                        if (state->current_producer_owned
+                        if (register_executor_start_claim(*state)
                             && begin_coverage_capture(*state)) {
                             PG_TRY();
                             {
@@ -8825,58 +8988,7 @@ void coverage_begin_custom_scan(
                                 PG_RE_THROW();
                             }
                             PG_END_TRY();
-                            BoundedDiagnosticTextV1 human_plan{};
-                            static_cast<void>(
-                                capture_initialized_child_plan_fail_open(
-                                    node,
-                                    estate,
-                                    producer_display_sql,
-                                    &human_plan));
-                            constexpr int display_sql_truncated_flag = 1 << 0;
-                            constexpr int canonical_plan_truncated_flag =
-                                1 << 1;
-                            const std::size_t display_sql_bytes = strnlen(
-                                producer_display_sql,
-                                kReusableDisplaySqlCapacityV1);
-                            const std::size_t canonical_plan_bytes = strnlen(
-                                canonical_child_plan,
-                                kReusableCanonicalPlanCapacityV1);
-                            const ReusableDiagnosticTextUpdateV1 diagnostics{
-                                .reference = state->current_reference,
-                                .producer = owner,
-                                .display_sql = std::span<const char>{
-                                    producer_display_sql,
-                                    display_sql_bytes},
-                                .canonical_plan = std::span<const char>{
-                                    canonical_child_plan,
-                                    canonical_plan_bytes},
-                                .producer_plan = human_plan.available
-                                    ? std::span<const char>{
-                                        human_plan.data, human_plan.size}
-                                    : std::span<const char>{},
-                                .canonical_plan_status =
-                                    canonical_plan_bytes == 0
-                                    ? ReusablePlanSnapshotStatusV1::Unavailable
-                                    : ReusablePlanSnapshotStatusV1::Planned,
-                                .plan_status = human_plan.available
-                                    ? ReusablePlanSnapshotStatusV1::Planned
-                                    : ReusablePlanSnapshotStatusV1::Unavailable,
-                                .display_sql_truncated =
-                                    (producer_diagnostic_flags
-                                        & display_sql_truncated_flag) != 0,
-                                .canonical_plan_truncated =
-                                    (producer_diagnostic_flags
-                                        & canonical_plan_truncated_flag) != 0,
-                                .producer_plan_truncated = human_plan.truncated,
-                            };
-                            if (begin_current_reusable_generation(diagnostics)
-                                    == ReusableRegistryErrorV1::None) {
-                                maybe_pause(
-                                    TestPausePoint::AfterBuildingPublish);
-                                runtime_selected = true;
-                            } else {
-                                fail_coverage_producer(*state);
-                            }
+                            runtime_selected = true;
                         } else {
                             if (state->current_producer_owned) {
                                 fail_coverage_producer(*state);
@@ -9569,16 +9681,17 @@ Plan* coverage_plan_custom_path(
             &display_sql));
     }
     BoundedDiagnosticTextV1 canonical_plan{};
-    static_cast<void>(capture_canonical_child_plan_fail_open(
-        child, &canonical_plan));
-    constexpr int display_sql_truncated_flag = 1 << 0;
-    constexpr int canonical_plan_truncated_flag = 1 << 1;
+    const bool canonical_plan_captured = capture_canonical_child_plan_fail_open(
+        child, &canonical_plan);
     int diagnostic_flags = 0;
     if (display_sql.truncated) {
-        diagnostic_flags |= display_sql_truncated_flag;
+        diagnostic_flags |= kDiagnosticDisplaySqlTruncatedV1;
     }
     if (canonical_plan.truncated) {
-        diagnostic_flags |= canonical_plan_truncated_flag;
+        diagnostic_flags |= kDiagnosticCanonicalPlanTruncatedV1;
+    }
+    if (!canonical_plan_captured) {
+        diagnostic_flags |= kDiagnosticCanonicalPlanUnavailableV1;
     }
 
     auto* scan = makeNode(CustomScan);
@@ -10189,7 +10302,7 @@ void verify_exact_cache_plan_fail_open(PlannedStmt& statement) {
 PlannedStmt* cache_planner(
         Query* query, const char* query_string,
         int cursor_options, ParamListInfo bound_parameters) {
-    if (g_internal_planning
+    if (g_internal_planning || g_producer_plan_capture_active
         || g_query_cache_mode == static_cast<int>(QueryCacheMode::Disabled)
         || !shared_cache_ready()) {
         return g_previous_planner_hook != nullptr
@@ -10305,17 +10418,268 @@ void mark_planned_result_relations(PlannedStmt& statement) {
     }
 }
 
-void cache_executor_start(QueryDesc* query_description, int eflags) {
-    if (query_description != nullptr
-        && query_description->plannedstmt != nullptr
-        && (query_description->plannedstmt->commandType != CMD_SELECT
-            || query_description->plannedstmt->hasModifyingCTE)) {
-        mark_planned_result_relations(*query_description->plannedstmt);
+struct CoverageDiagnosticPrivateV1 {
+    const char* display_sql = nullptr;
+    const char* canonical_plan = nullptr;
+    int flags = 0;
+};
+
+[[nodiscard]] bool coverage_diagnostic_private(
+        const ReusableCoverageState& state,
+        CoverageDiagnosticPrivateV1* output) noexcept {
+    const auto* scan = reinterpret_cast<const CustomScan*>(
+        state.css.ss.ps.plan);
+    if (scan == nullptr || output == nullptr
+        || scan->custom_private == NIL
+        || list_length(scan->custom_private) < 10
+        || !IsA(list_nth(scan->custom_private, 7), String)
+        || !IsA(list_nth(scan->custom_private, 8), String)
+        || !IsA(list_nth(scan->custom_private, 9), Integer)) {
+        return false;
     }
-    if (g_previous_executor_start_hook != nullptr) {
-        g_previous_executor_start_hook(query_description, eflags);
+    *output = CoverageDiagnosticPrivateV1{
+        .display_sql = strVal(list_nth(scan->custom_private, 7)),
+        .canonical_plan = strVal(list_nth(scan->custom_private, 8)),
+        .flags = intVal(list_nth(scan->custom_private, 9)),
+    };
+    return output->display_sql != nullptr
+        && output->display_sql[0] != '\0'
+        && output->canonical_plan != nullptr;
+}
+
+/** Publish BUILDING only after the complete chained PlanState tree exists. */
+[[nodiscard]] bool publish_planned_coverage_diagnostics(
+        ReusableCoverageState& state) {
+    if (!state.current_producer_owned || state.producer_completed
+        || state.planned_diagnostics_published
+        || !state.child_initialized || !state.current_reference) {
+        return false;
+    }
+    CoverageDiagnosticPrivateV1 private_text{};
+    if (!coverage_diagnostic_private(state, &private_text)) {
+        return false;
+    }
+    BoundedDiagnosticTextV1 human_plan{};
+    static_cast<void>(capture_initialized_child_plan_fail_open(
+        &state.css,
+        state.css.ss.ps.state,
+        private_text.display_sql,
+        false,
+        &human_plan));
+    const std::size_t display_sql_bytes = strnlen(
+        private_text.display_sql, kReusableDisplaySqlCapacityV1);
+    const std::size_t canonical_plan_bytes = strnlen(
+        private_text.canonical_plan, kReusableCanonicalPlanCapacityV1);
+    const bool canonical_unavailable = canonical_plan_bytes == 0
+        || (private_text.flags
+            & kDiagnosticCanonicalPlanUnavailableV1) != 0;
+    const ReusableDiagnosticTextUpdateV1 diagnostics{
+        .reference = state.current_reference,
+        .producer = current_reusable_producer_identity(),
+        .display_sql = std::span<const char>{
+            private_text.display_sql, display_sql_bytes},
+        .canonical_plan = std::span<const char>{
+            private_text.canonical_plan, canonical_plan_bytes},
+        .producer_plan = human_plan.available
+            ? std::span<const char>{human_plan.data, human_plan.size}
+            : std::span<const char>{},
+        .canonical_plan_status = canonical_unavailable
+            ? ReusablePlanSnapshotStatusV1::Unavailable
+            : ReusablePlanSnapshotStatusV1::Planned,
+        .plan_status = human_plan.status,
+        .display_sql_truncated =
+            (private_text.flags & kDiagnosticDisplaySqlTruncatedV1) != 0,
+        .canonical_plan_truncated =
+            (private_text.flags & kDiagnosticCanonicalPlanTruncatedV1) != 0,
+        .producer_plan_truncated = human_plan.truncated,
+    };
+    if (begin_current_reusable_generation(diagnostics)
+            != ReusableRegistryErrorV1::None) {
+        return false;
+    }
+    state.planned_diagnostics_published = true;
+    maybe_pause(TestPausePoint::AfterBuildingPublish);
+    return true;
+}
+
+/** Upgrade Planned text only when EXPLAIN ANALYZE instrumentation is live. */
+void refresh_analyzed_coverage_diagnostics(
+        ReusableCoverageState& state) {
+    PlanState* child = coverage_retained_child(&state.css);
+    EState* estate = state.css.ss.ps.state;
+    if (!state.planned_diagnostics_published || state.capture_failed
+        || (!state.current_producer_owned && !state.producer_completed)
+        || !state.current_reference || child == nullptr
+        || child->instrument == nullptr || estate == nullptr
+        || estate->es_instrument == 0) {
+        return;
+    }
+    CoverageDiagnosticPrivateV1 private_text{};
+    if (!coverage_diagnostic_private(state, &private_text)) {
+        return;
+    }
+    BoundedDiagnosticTextV1 human_plan{};
+    if (!capture_initialized_child_plan_fail_open(
+            &state.css,
+            estate,
+            private_text.display_sql,
+            true,
+            &human_plan)) {
+        return;
+    }
+    const std::size_t display_sql_bytes = strnlen(
+        private_text.display_sql, kReusableDisplaySqlCapacityV1);
+    const std::size_t canonical_plan_bytes = strnlen(
+        private_text.canonical_plan, kReusableCanonicalPlanCapacityV1);
+    const bool canonical_unavailable = canonical_plan_bytes == 0
+        || (private_text.flags
+            & kDiagnosticCanonicalPlanUnavailableV1) != 0;
+    static_cast<void>(store_current_reusable_diagnostics(
+        ReusableDiagnosticTextUpdateV1{
+            .reference = state.current_reference,
+            .producer = current_reusable_producer_identity(),
+            .display_sql = std::span<const char>{
+                private_text.display_sql, display_sql_bytes},
+            .canonical_plan = std::span<const char>{
+                private_text.canonical_plan, canonical_plan_bytes},
+            .producer_plan = std::span<const char>{
+                human_plan.data, human_plan.size},
+            .canonical_plan_status = canonical_unavailable
+                ? ReusablePlanSnapshotStatusV1::Unavailable
+                : ReusablePlanSnapshotStatusV1::Planned,
+            .plan_status = ReusablePlanSnapshotStatusV1::Analyzed,
+            .display_sql_truncated =
+                (private_text.flags & kDiagnosticDisplaySqlTruncatedV1) != 0,
+            .canonical_plan_truncated =
+                (private_text.flags
+                    & kDiagnosticCanonicalPlanTruncatedV1) != 0,
+            .producer_plan_truncated = human_plan.truncated,
+        }));
+}
+
+enum class ProducerPlanWalkPhaseV1 : std::uint8_t {
+    Planned,
+    Analyzed,
+};
+
+inline constexpr std::size_t kMaximumProducerPlanWalkNodesV1 = 256;
+
+struct ProducerPlanWalkContextV1 {
+    ProducerPlanWalkPhaseV1 phase = ProducerPlanWalkPhaseV1::Planned;
+    std::array<PlanState*, kMaximumProducerPlanWalkNodesV1> visited{};
+    std::size_t visited_count = 0;
+    bool overflow = false;
+};
+
+/** Traverse init plans, subplans, and custom children without revisiting DAGs. */
+bool visit_reusable_producer_planstate(
+        PlanState* planstate, void* opaque) {
+    auto* context = static_cast<ProducerPlanWalkContextV1*>(opaque);
+    if (planstate == nullptr || context == nullptr) {
+        return false;
+    }
+    for (std::size_t index = 0; index < context->visited_count; ++index) {
+        if (context->visited[index] == planstate) {
+            return false;
+        }
+    }
+    if (context->visited_count >= context->visited.size()) {
+        context->overflow = true;
+        return true;
+    }
+    context->visited[context->visited_count++] = planstate;
+    if (IsA(planstate, CustomScanState)) {
+        auto* custom = reinterpret_cast<CustomScanState*>(planstate);
+        if (custom->methods == &coverage_exec_methods()) {
+            auto* state = reinterpret_cast<ReusableCoverageState*>(custom);
+            if (context->phase == ProducerPlanWalkPhaseV1::Planned) {
+                if (state->current_producer_owned
+                    && !publish_planned_coverage_diagnostics(*state)) {
+                    fail_coverage_producer(*state);
+                    if (g_shared != nullptr) {
+                        pg_atomic_fetch_add_u64(
+                            &g_shared->stats.fallbacks, 1);
+                    }
+                }
+            } else {
+                refresh_analyzed_coverage_diagnostics(*state);
+            }
+        }
+    }
+    return planstate_tree_walker(
+        planstate, visit_reusable_producer_planstate, context);
+}
+
+void walk_reusable_producer_planstates(
+        QueryDesc* query_description,
+        ProducerPlanWalkPhaseV1 phase) {
+    if (query_description == nullptr || query_description->planstate == nullptr) {
+        return;
+    }
+    ProducerPlanWalkContextV1 context{.phase = phase};
+    static_cast<void>(visit_reusable_producer_planstate(
+        query_description->planstate, &context));
+}
+
+void fail_executor_start_claims(
+        ExecutorStartClaimFrameV1& frame,
+        bool only_unpublished) noexcept {
+    for (std::size_t index = 0; index < frame.producer_count; ++index) {
+        ReusableCoverageState* state = frame.producers[index];
+        if (state != nullptr && state->current_producer_owned
+            && (!only_unpublished
+                || !state->planned_diagnostics_published)
+            && !state->producer_completed) {
+            fail_coverage_producer(*state);
+            if (only_unpublished && g_shared != nullptr) {
+                pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
+            }
+        }
+    }
+}
+
+void cache_executor_start(QueryDesc* query_description, int eflags) {
+    ExecutorStartClaimFrameV1 frame{
+        .previous = g_executor_start_claim_frame,
+    };
+    g_executor_start_claim_frame = &frame;
+    PG_TRY();
+    {
+        if (query_description != nullptr
+            && query_description->plannedstmt != nullptr
+            && (query_description->plannedstmt->commandType != CMD_SELECT
+                || query_description->plannedstmt->hasModifyingCTE)) {
+            mark_planned_result_relations(*query_description->plannedstmt);
+        }
+        if (g_previous_executor_start_hook != nullptr) {
+            g_previous_executor_start_hook(query_description, eflags);
+        } else {
+            standard_ExecutorStart(query_description, eflags);
+        }
+        walk_reusable_producer_planstates(
+            query_description, ProducerPlanWalkPhaseV1::Planned);
+        fail_executor_start_claims(frame, true);
+        g_executor_start_claim_frame = frame.previous;
+    }
+    PG_CATCH();
+    {
+        g_executor_start_claim_frame = frame.previous;
+        fail_executor_start_claims(frame, false);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
+void cache_executor_finish(QueryDesc* query_description) {
+    if (query_description != nullptr && query_description->estate != nullptr
+        && !query_description->estate->es_finished) {
+        walk_reusable_producer_planstates(
+            query_description, ProducerPlanWalkPhaseV1::Analyzed);
+    }
+    if (g_previous_executor_finish_hook != nullptr) {
+        g_previous_executor_finish_hook(query_description);
     } else {
-        standard_ExecutorStart(query_description, eflags);
+        standard_ExecutorFinish(query_description);
     }
 }
 
@@ -10385,6 +10749,8 @@ void install_cache_hooks() {
     create_upper_paths_hook = cache_create_upper_paths;
     g_previous_executor_start_hook = ExecutorStart_hook;
     ExecutorStart_hook = cache_executor_start;
+    g_previous_executor_finish_hook = ExecutorFinish_hook;
+    ExecutorFinish_hook = cache_executor_finish;
     g_previous_process_utility_hook = ProcessUtility_hook;
     ProcessUtility_hook = cache_process_utility;
     g_hooks_installed = true;
