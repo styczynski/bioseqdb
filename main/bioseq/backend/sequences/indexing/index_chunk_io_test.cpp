@@ -155,9 +155,11 @@ TEST_CASE("DOC0373 Format-5 PostgreSQL tuple batching flushes before row nine",
     using bioseq::indexing::plan_revision3_tuple_batch_append;
     constexpr std::uint64_t max_rows = 4096;
     constexpr std::uint64_t max_bytes = 65'535;
-    constexpr std::uint64_t formed_tuple_bytes = 8'140;
-    constexpr std::uint64_t tuple_bytes = formed_tuple_bytes
-        + sizeof(TupleTableSlot*) + sizeof(HeapTupleData);
+    // This is the PostgreSQL writer's admitted size for one maximally filled
+    // Format-5 row: 8,140 formed-tuple bytes plus its 32-byte slot/tuple
+    // admission overhead.  Keep PostgreSQL-only types out of this portable
+    // unit target; the PG integration fixture checks the runtime equation.
+    constexpr std::uint64_t tuple_bytes = 8'172;
     STATIC_REQUIRE(tuple_bytes == 8'172);
 
     std::uint64_t pending_rows = 0;
@@ -166,7 +168,9 @@ TEST_CASE("DOC0373 Format-5 PostgreSQL tuple batching flushes before row nine",
     std::uint64_t multirow_flush_count = 0;
     std::uint64_t maximum_observed_rows = 0;
     std::uint64_t maximum_observed_bytes = 0;
-    const auto flush = [&] {
+    const auto flush = [&pending_rows, &pending_bytes, &flush_count,
+                        &multirow_flush_count, &maximum_observed_rows,
+                        &maximum_observed_bytes] {
         REQUIRE(pending_rows > 0);
         REQUIRE(pending_rows <= max_rows);
         REQUIRE(pending_bytes <= max_bytes);

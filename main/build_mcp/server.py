@@ -1048,11 +1048,31 @@ def _postgresql_e2e_restart_shell_command(active_build_dir: Path,
 # --------------------------- build worker ----------------------------------
 
 def _report_index(filename: str) -> int:
-    # filenames look like report_build_<N>.json
-    try:
-        return int(filename.removeprefix("report_build_").removesuffix(".json"))
-    except (ValueError, AttributeError):
+    """Return the ordinal of an exact benchmark report filename.
+
+    The benchmark framework writes ``report_<N>.json``.  Keep accepting the
+    older MCP-owned ``report_build_<N>.json`` spelling so an older benchmark
+    target or a mixed build tree does not lose its report path.  Exact suffix
+    validation deliberately excludes crash/debug sidecars such as
+    ``report_debug_<N>.jsonl`` and ``report_<N>.raw.jsonl``.
+    """
+    if not filename.endswith(".json"):
         return -1
+    stem = filename[:-len(".json")]
+    for prefix in ("report_build_", "report_"):
+        if stem.startswith(prefix):
+            ordinal = stem[len(prefix):]
+            return int(ordinal) if ordinal.isascii() and ordinal.isdigit() else -1
+    return -1
+
+
+def _report_paths(reporting_dir: Path) -> set[Path]:
+    """Snapshot only final JSON reports understood by :func:`_report_index`."""
+    return {
+        path
+        for path in reporting_dir.glob("report_*.json")
+        if _report_index(path.name) >= 0
+    }
 
 
 def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
@@ -1061,11 +1081,19 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
     mode_details = MODES[mode]
     if not mode_details.reporting_dir.exists():
         return None
-    current = set(mode_details.reporting_dir.glob("report_build_*.json"))
+    current = _report_paths(mode_details.reporting_dir)
     new = current - snapshot_paths
     if not new:
         return None
-    return max(new, key=lambda p: _report_index(p.name))
+    # Prefer the framework-native report_<N>.json on the unlikely tie where a
+    # directory contains both spellings for the same ordinal.
+    return max(
+        new,
+        key=lambda p: (
+            _report_index(p.name),
+            not p.name.startswith("report_build_"),
+        ),
+    )
 
 
 def _run_build_worker(mode: str, build_only: bool = False,
@@ -1122,7 +1150,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     pre_reports: set[Path] = set()
     if mode_details.is_bench_mode and mode_details.reporting_dir.exists():
-        pre_reports = set(mode_details.reporting_dir.glob("report_build_*.json"))
+        pre_reports = _report_paths(mode_details.reporting_dir)
 
     env = os.environ.copy()
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
@@ -3614,8 +3642,9 @@ TOOL_DEFINITIONS = [
             "Report the status of a previously scheduled run for `mode`. "
             "While running, returns current step + predicted finish. After "
             "completion, returns total duration, log file path, and (for "
-            "bench modes) the path to the new report_build_<N>.json under "
-            "main/reporting/. Focused unit/integration runs also display the "
+            "bench modes) the path to the new framework report_<N>.json under "
+            "main/reporting/ (legacy report_build_<N>.json is also accepted). "
+            "Focused unit/integration runs also display the "
             "exact Catch2 args persisted for both executables."
         ),
         "inputSchema": {

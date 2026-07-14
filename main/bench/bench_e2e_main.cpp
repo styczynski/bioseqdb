@@ -3722,32 +3722,103 @@ template <sequence_alphabet A>
                     "END $$;");
             }
             configure_bioseq_minimizer_policy(*in.conn, table, index_name);
-            it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = on;");
+            // A just_index sample owns a fully published PostgreSQL generation
+            // before timing starts.  Load only the base sequence first, then
+            // build the selected minimizer index explicitly: relying on the
+            // INSERT hook writes the legacy layout and does not establish the
+            // READY-generation identity that the post-restart reader proves.
+            it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
+            it::exec_sql(
+                *in.conn,
+                "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+            it::exec_sql(*in.conn, "SET bioseq.index_async_persist = off;");
+            it::exec_sql(*in.conn, "SET bioseq.recompute_async_persist = off;");
             it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
             it::exec_sqlf(
                 *in.conn,
                 "SELECT bioseq.load('{}'::regclass, '{}');",
                 table,
                 in.target_fasta);
+            const std::int64_t indexed_sequences = it::query_scalar_int(
+                *in.conn,
+                fmt::format(
+                    "SELECT bioseq.update_index('{}'::regclass, '{}');",
+                    table,
+                    index_name));
             const std::string audit_sql = fmt::format(
                 "SELECT current_setting('bioseq.aligner.minimizer_algorithm'), "
                 "current_setting('bioseq.aligner.vulkan_enabled'), "
                 "current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled'), "
-                "bioseq.index_table_row_count('{}'::regclass, '{}')",
+                "(current_setting('bioseq.aligner.grouped32_persisted_generation_enabled') "
+                " = 'on')::int, "
+                "(current_setting('bioseq.update_index_on_insert') = 'off')::int, "
+                "(current_setting('bioseq.index_async_persist') = 'off')::int, "
+                "(current_setting('bioseq.recompute_async_persist') = 'off')::int, "
+                "generation_id, gpu_abi_version, total_bp_size, "
+                "kmer_size, window_size "
+                "FROM bioseq.inspect_ready_minimizer_generation("
+                "'{}'::regclass, '{}', 0)",
                 table,
                 index_name);
             const auto audit_rows = it::query_rows(*in.conn, audit_sql);
-            const std::int64_t setup_rows =
-                audit_rows.empty() || audit_rows.front().size() < 4
-                    || !audit_rows.front()[3].has_value()
-                    ? -1
-                    : parse_i64(*audit_rows.front()[3]);
-            if (audit_rows.empty() || setup_rows <= 0) {
+            const bool audit_shape_valid =
+                audit_rows.size() == 1 && audit_rows.front().size() == 12;
+            const std::int64_t grouped32_enabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 3)
+                : -1;
+            const std::int64_t insert_maintenance_disabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 4)
+                : -1;
+            const std::int64_t async_persist_disabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 5)
+                : -1;
+            const std::int64_t recompute_persist_disabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 6)
+                : -1;
+            const std::int64_t generation_id = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 7)
+                : -1;
+            const std::int64_t gpu_abi_version = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 8)
+                : -1;
+            const std::int64_t persisted_bp = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 9)
+                : -1;
+            const std::int64_t persisted_k = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 10)
+                : -1;
+            const std::int64_t persisted_w = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 11)
+                : -1;
+            if (!audit_shape_valid
+                || indexed_sequences <= 0
+                || grouped32_enabled != 1
+                || insert_maintenance_disabled != 1
+                || async_persist_disabled != 1
+                || recompute_persist_disabled != 1
+                || generation_id <= 0
+                || gpu_abi_version <= 0
+                || persisted_bp != in.target_bp
+                || persisted_k != in.kmer_size
+                || persisted_w != in.window_size) {
                 bioseq_log<ERR>(
-                    "[bench_e2e] invalid just_index setup audit for table={} index={} rows={}",
+                    "[bench_e2e] invalid just_index READY-generation setup "
+                    "for table={} index={} indexed_sequences={} generation={} "
+                    "gpu_abi={} persisted_bp={} expected_bp={} k={} w={} "
+                    "grouped32={} insert_off={} async_off={} recompute_off={}",
                     table,
                     index_name,
-                    setup_rows);
+                    indexed_sequences,
+                    generation_id,
+                    gpu_abi_version,
+                    persisted_bp,
+                    in.target_bp,
+                    persisted_k,
+                    persisted_w,
+                    grouped32_enabled,
+                    insert_maintenance_disabled,
+                    async_persist_disabled,
+                    recompute_persist_disabled);
                 std::abort();
             }
         };

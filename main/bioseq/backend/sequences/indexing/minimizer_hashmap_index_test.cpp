@@ -420,6 +420,8 @@ struct CollectedMinimizerRow {
 struct CollectingMinimizerRowSink {
     std::vector<CollectedMinimizerRow> rows;
     std::size_t max_callback_bytes = 0;
+    std::uint64_t format5_payload_write_calls = 0;
+    std::uint64_t format5_row_crc_bytes = 0;
 
     [[nodiscard]] std::expected<void, bioseq::indexing::MinimizerGenerationWireError>
     write(const bioseq::indexing::MinimizerGenerationRowView& row) {
@@ -430,6 +432,35 @@ struct CollectingMinimizerRowSink {
             .row_checksum = row.row_checksum,
         });
         return {};
+    }
+
+    [[nodiscard]] std::expected<
+        bioseq::indexing::MinimizerGenerationRowWriteReceipt,
+        bioseq::indexing::MinimizerGenerationWireError>
+    write_format5_payload(
+            const bioseq::indexing::
+                UnchecksummedMinimizerGenerationRowView& row) {
+        const std::uint64_t row_checksum =
+            bioseq::indexing::crc64_index_chunk_row(
+                row.address.generation_id,
+                row.address.position_segment,
+                row.address.sub_key,
+                row.address.chunk_no,
+                static_cast<std::uint32_t>(row.bytes.size()),
+                row.bytes);
+        if (auto written = write(
+                bioseq::indexing::MinimizerGenerationRowView{
+                    .address = row.address,
+                    .bytes = row.bytes,
+                    .row_checksum = row_checksum,
+                }); !written) {
+            return std::unexpected(written.error());
+        }
+        ++format5_payload_write_calls;
+        format5_row_crc_bytes += row.bytes.size();
+        return bioseq::indexing::MinimizerGenerationRowWriteReceipt{
+            .row_checksum = row_checksum,
+        };
     }
 };
 
@@ -8475,6 +8506,11 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
         generation->directory.entries().front();
     REQUIRE(entry.position_encoded_bytes == position_count * 2u);
     REQUIRE(entry.position_chunk_count == 2u);
+    REQUIRE(sink.format5_payload_write_calls
+            == static_cast<std::uint64_t>(entry.control_chunk_count)
+                + entry.position_chunk_count);
+    REQUIRE(sink.format5_row_crc_bytes
+            == generation->manifest.payload_bytes);
     const auto position_sub_key =
         derive_minimizer_position_extent_sub_key(entry.sub_key);
     REQUIRE(position_sub_key.has_value());

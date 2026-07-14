@@ -959,6 +959,11 @@ inline constexpr std::uint32_t kMinimizerLegacyExtentPayloadBytes =
 /// PostgreSQL S1 page-dense quantum selected semantically by wire format 5.
 inline constexpr std::uint32_t kMinimizerFormat5ExtentPayloadBytes = 8064u;
 
+/// Production Format-5 count saturation threshold.  The value preserves a
+/// 16-bit count lane while reserving 65,535 as the persisted "cap exceeded"
+/// sentinel.
+inline constexpr std::uint64_t kMinimizerShapeV5DefaultMaxOccCap = 65'534u;
+
 /// Compatibility spelling retained for format-3/4-only code and goldens.
 inline constexpr std::uint32_t kMinimizerExtentPayloadBytes =
     kMinimizerLegacyExtentPayloadBytes;
@@ -5496,6 +5501,14 @@ public:
         return this->protocol_failed_;
     }
 
+    [[nodiscard]] bool ready() const noexcept {
+        return this->protocol_ready_ && !this->protocol_failed_;
+    }
+
+    [[nodiscard]] std::uint64_t target_length() const noexcept {
+        return this->manifest_.target_length;
+    }
+
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return this->permit_.bytes();
     }
@@ -7833,7 +7846,7 @@ struct MinimizerGenerationEncodeOptions {
     std::uint16_t minimizer_scheme_id = kInvalidMinimizerSchemeId;
     std::uint16_t minimizer_scheme_version = kInvalidMinimizerSchemeVersion;
     /// Format-5 count saturation threshold; ignored by frozen formats 3/4.
-    std::uint64_t max_occ_cap = 65'534u;
+    std::uint64_t max_occ_cap = kMinimizerShapeV5DefaultMaxOccCap;
 };
 
 /// One canonical event supplied in `(segment,hash,encoded_position)` order.
@@ -7881,10 +7894,38 @@ concept MinimizerGenerationRowSink = requires(
         -> std::same_as<std::expected<void, MinimizerGenerationWireError>>;
 };
 
+/// Format-5 payload handoff before the address-bound row CRC exists. A sink
+/// which implements the optional ownership method below becomes the sole CRC
+/// calculator; legacy/non-PostgreSQL sinks use the checked adapter fallback.
+struct UnchecksummedMinimizerGenerationRowView {
+    IndexChunkAddress address{};
+    std::span<const std::byte> bytes;
+};
+
+/// Authoritative checksum returned by the sink which accepted one Format-5
+/// payload row. CRC zero is valid, so success is represented by expected rather
+/// than a sentinel value.
+struct MinimizerGenerationRowWriteReceipt {
+    std::uint64_t row_checksum = 0;
+};
+
+template <class Sink>
+concept Format5MinimizerGenerationPayloadSink = requires(
+        Sink& sink,
+        const UnchecksummedMinimizerGenerationRowView& row) {
+    { sink.write_format5_payload(row) }
+        -> std::same_as<std::expected<
+            MinimizerGenerationRowWriteReceipt,
+            MinimizerGenerationWireError>>;
+};
+
 struct MinimizerGenerationRowSinkRef {
     void* context = nullptr;
     std::expected<void, MinimizerGenerationWireError> (*write_fn)(
         void*, const MinimizerGenerationRowView&) = nullptr;
+    std::expected<MinimizerGenerationRowWriteReceipt,
+        MinimizerGenerationWireError> (*write_format5_payload_fn)(
+            void*, const UnchecksummedMinimizerGenerationRowView&) = nullptr;
 
     [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
     write(const MinimizerGenerationRowView& row) const {
@@ -7892,6 +7933,38 @@ struct MinimizerGenerationRowSinkRef {
             return std::unexpected(MinimizerGenerationWireError::row_count);
         }
         return write_fn(context, row);
+    }
+
+    /// Let an ownership-aware sink compute the Format-5 row CRC exactly once.
+    /// The fallback preserves existing non-PostgreSQL sinks by computing once
+    /// here and forwarding their unchanged checksummed row API.
+    [[nodiscard]] std::expected<MinimizerGenerationRowWriteReceipt,
+        MinimizerGenerationWireError>
+    write_format5_payload(
+            const UnchecksummedMinimizerGenerationRowView& row) const {
+        if (context == nullptr || write_fn == nullptr) {
+            return std::unexpected(MinimizerGenerationWireError::row_count);
+        }
+        if (write_format5_payload_fn != nullptr) {
+            return write_format5_payload_fn(context, row);
+        }
+        const std::uint64_t row_checksum = crc64_index_chunk_row(
+            row.address.generation_id,
+            row.address.position_segment,
+            row.address.sub_key,
+            row.address.chunk_no,
+            static_cast<std::uint32_t>(row.bytes.size()),
+            row.bytes);
+        if (auto written = write(MinimizerGenerationRowView{
+                .address = row.address,
+                .bytes = row.bytes,
+                .row_checksum = row_checksum,
+            }); !written) {
+            return std::unexpected(written.error());
+        }
+        return MinimizerGenerationRowWriteReceipt{
+            .row_checksum = row_checksum,
+        };
     }
 };
 
@@ -8305,9 +8378,15 @@ struct PlanPass<
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
         const std::uint64_t control_chunks =
-            payload_chunk_count<WireFormat>(layout->encoded_bytes);
+            payload_chunk_count<
+                MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local>(
+                layout->encoded_bytes);
         const std::uint64_t position_chunks =
-            payload_chunk_count<WireFormat>(*position_bytes);
+            payload_chunk_count<
+                MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local>(
+                *position_bytes);
         if (control_chunks
                 > (std::numeric_limits<std::uint32_t>::max)()
             || position_chunks
@@ -9094,21 +9173,16 @@ struct ShapeV5ExtentPageWriter {
         };
         const auto bytes = std::span<const std::byte>{
             page.data(), page_size};
-        const std::uint64_t row_checksum = crc64_index_chunk_row(
-            address.generation_id,
-            address.position_segment,
-            address.sub_key,
-            address.chunk_no,
-            static_cast<std::uint32_t>(bytes.size()),
-            bytes);
-        if (auto written = sink.write(MinimizerGenerationRowView{
+        auto written = sink.write_format5_payload(
+            UnchecksummedMinimizerGenerationRowView{
                 .address = address,
                 .bytes = bytes,
-                .row_checksum = row_checksum,
-            }); !written) {
-            return written;
+            });
+        if (!written) {
+            return std::unexpected(written.error());
         }
-        payload_row_checksums->update_little_endian(row_checksum);
+        payload_row_checksums->update_little_endian(
+            written->row_checksum);
         ++chunk_no;
         page_size = 0;
         return {};
@@ -10060,12 +10134,19 @@ encode_minimizer_generation(
         return std::unexpected(
             MinimizerGenerationWireError::compatibility_mismatch);
     }
-    const MinimizerGenerationRowSinkRef sink_ref{
+    MinimizerGenerationRowSinkRef sink_ref{
         .context = &sink,
         .write_fn = [](void* context, const MinimizerGenerationRowView& row) {
             return static_cast<Sink*>(context)->write(row);
         },
     };
+    if constexpr (Format5MinimizerGenerationPayloadSink<Sink>) {
+        sink_ref.write_format5_payload_fn = [](
+                void* context,
+                const UnchecksummedMinimizerGenerationRowView& row) {
+            return static_cast<Sink*>(context)->write_format5_payload(row);
+        };
+    }
     std::expected<std::uint64_t, MinimizerGenerationWireError>
         payload_checksum = std::unexpected(
             MinimizerGenerationWireError::compatibility_mismatch);

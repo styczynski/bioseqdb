@@ -1675,6 +1675,7 @@ private:
     bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend_ =
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
     ReadyMinimizerGenerationExecutionEvidencePg execution_{};
+    std::optional<std::uint64_t> replaced_generation_id_{};
     std::uint64_t mps_spill_generation_token_ = 0;
     std::uint64_t mps_spill_mutation_before_release_ = 0;
     std::uint64_t mps_spill_mutation_after_release_ = 0;
@@ -1690,6 +1691,7 @@ private:
             std::uint64_t writer_batches,
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
             ReadyMinimizerGenerationExecutionEvidencePg execution,
+            std::optional<std::uint64_t> replaced_generation_id,
             std::uint64_t mps_spill_generation_token,
             std::uint64_t mps_spill_mutation_before_release,
             std::uint64_t mps_spill_mutation_after_release,
@@ -1702,6 +1704,7 @@ private:
           writer_batches_(writer_batches),
           selected_backend_(backend),
           execution_(std::move(execution)),
+          replaced_generation_id_(replaced_generation_id),
           mps_spill_generation_token_(mps_spill_generation_token),
           mps_spill_mutation_before_release_(
               mps_spill_mutation_before_release),
@@ -1751,6 +1754,10 @@ public:
     selected_backend() const noexcept { return selected_backend_; }
     [[nodiscard]] const ReadyMinimizerGenerationExecutionEvidencePg&
     execution() const noexcept { return execution_; }
+    [[nodiscard]] std::optional<std::uint64_t>
+    replaced_generation_id() const noexcept {
+        return replaced_generation_id_;
+    }
     [[nodiscard]] std::uint64_t
     mps_spill_generation_token() const noexcept {
         return mps_spill_generation_token_;
@@ -2014,6 +2021,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         bioseq::indexing::MpfGenerationExecutionEvidence mpf_execution{};
         bioseq::indexing::MpsGenerationExecutionEvidence mps_execution{};
         ReadyMinimizerGenerationExecutionEvidencePg execution{};
+        std::optional<std::uint64_t> replaced_generation_id{};
         bool mps_spill_started = false;
     };
     auto* state = new BuildState{
@@ -2325,6 +2333,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 publish_ready_minimizer_generation_head_pg(
                     std::move(*state->ready_token));
             state->ready_token.reset();
+            result.replaced_generation_id =
+                publication_receipt.replaced_generation_id;
 
             bioseq::pg_utils::invoke_pg_as_cpp(
                 [] { CommandCounterIncrement(); });
@@ -2356,6 +2366,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                     publication_receipt.query_key,
                     verification_snapshot,
                     *reread_expected,
+                    state->identity.tablespace_oid,
                     Rev3SnapshotRegistration::borrow_registered};
                 const MinimizerGenerationHead reread_head =
                     reader.read_active_head_once();
@@ -2416,6 +2427,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         result.writer_batches,
         result.selected_backend,
         std::move(result.execution),
+        result.replaced_generation_id,
         result.mps_spill_generation_token,
         result.mps_spill_mutation_before_release,
         result.mps_spill_mutation_after_release,
@@ -3090,6 +3102,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
         state->verification_session.emplace(
             result.table_name, sequence_rowno,
             state->verification_snapshot, *expected,
+            relation_identity.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         result.head = state->verification_session->read_active_head_once();
         result.manifest = state->verification_session
@@ -3725,6 +3738,7 @@ read_rev3_pg_integration_fixture_impl(
             sequence_rowno,
             state->registered_snapshot,
             *expected,
+            rid.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& session =
             *state->session;
@@ -4271,6 +4285,7 @@ read_rev3_pg_integration_fixture_impl(
             sequence_rowno,
             state->registered_snapshot,
             *expected,
+            rid.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& probe_session =
             *state->session;
@@ -4590,7 +4605,8 @@ read_rev3_pg_full_generation_fixture_impl(
         }
         state->session.emplace(
             result.table_name, sequence_rowno, state->registered_snapshot,
-            *expected, Rev3SnapshotRegistration::borrow_registered);
+            *expected, rid.tablespace_oid,
+            Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& session =
             *state->session;
         const MinimizerGenerationHead head = session.read_active_head_once();
@@ -4949,6 +4965,7 @@ inline void exercise_rev3_pg_session_failure_impl(
         state->read_session.emplace(
             identity.table_name, sequence_rowno, state->registered_snapshot,
             *expected,
+            rid.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& session =
             *state->read_session;
@@ -5881,6 +5898,7 @@ inspect_ready_minimizer_generation_impl(
             IndexStorageFragmentGenerationReadSessionPg discovery{
                 table_name, sequence_rowno, state->registered_snapshot,
                 *discovery_expected,
+                relation_identity.tablespace_oid,
                 Rev3SnapshotRegistration::borrow_registered};
             preliminary_head =
                 discovery.discover_active_head_wire_format_and_close();
@@ -5912,6 +5930,7 @@ inspect_ready_minimizer_generation_impl(
             IndexStorageFragmentGenerationReadSessionPg preliminary{
                 table_name, sequence_rowno, state->registered_snapshot,
                 *expected,
+                relation_identity.tablespace_oid,
                 Rev3SnapshotRegistration::borrow_registered};
             const MinimizerGenerationHead exact_head =
                 preliminary.read_active_head_once();
