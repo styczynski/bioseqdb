@@ -8734,11 +8734,6 @@ void coverage_begin_custom_scan(
         state->cleanup_registered = true;
     }
 
-    if (g_producer_plan_capture_active) {
-        initialize_coverage_child(*state, node, estate, eflags);
-        return;
-    }
-
     List* candidates = scan->custom_private != NIL
             && list_length(scan->custom_private) >= 4
         ? static_cast<List*>(list_nth(scan->custom_private, 3))
@@ -8788,6 +8783,11 @@ void coverage_begin_custom_scan(
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("BioseqReusableCoverageScan gates cannot be frozen")));
+    }
+
+    if (g_producer_plan_capture_active) {
+        initialize_coverage_child(*state, node, estate, eflags);
+        return;
     }
 
     const int provider_id = scan->custom_private != NIL
