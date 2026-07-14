@@ -6,3 +6,4 @@ test: cache_producer_failure
 test: cache_mvcc_publish
 test: cache_mvcc_rollback
 test: cache_ttl_zero
+test: cache_ten_waiters
