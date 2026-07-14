@@ -724,6 +724,13 @@ void cache_shmem_startup() {
         >= CacheCorrectnessReadiness::GenericMvccReady;
 }
 
+[[nodiscard]] bool cache_interrupt_error(int sqlstate) noexcept {
+    return sqlstate == ERRCODE_QUERY_CANCELED
+        || sqlstate == ERRCODE_ADMIN_SHUTDOWN
+        || sqlstate == ERRCODE_CRASH_SHUTDOWN
+        || ProcDiePending;
+}
+
 struct VisibilityTicket {
     std::uint64_t database_epoch = 0;
     TransactionId last_committed_write_xid = InvalidTransactionId;
@@ -1789,7 +1796,9 @@ void fail_abandoned_producer(CacheEntry& entry) noexcept {
 
 /** Release a short reader pin after full preflight/materialization. */
 void release_registry_reader(
-        int index, std::uint64_t generation, bool successful) noexcept {
+        int index, std::uint64_t generation, bool successful,
+        bool invalidate_failure = true,
+        bool count_outcome = true) noexcept {
     if (g_shared == nullptr || index < 0) {
         return;
     }
@@ -1806,7 +1815,8 @@ void release_registry_reader(
             retired_manifest = entry.manifest_handle;
             entry.manifest_handle = {};
         }
-        if (!successful && entry.state == SharedEntryState::Complete) {
+        if (!successful && invalidate_failure
+            && entry.state == SharedEntryState::Complete) {
             entry.state = SharedEntryState::Retired;
             if (entry.reader_count == 0 && entry.manifest_handle) {
                 retired_manifest = entry.manifest_handle;
@@ -1818,6 +1828,9 @@ void release_registry_reader(
     LWLockRelease(g_registry_lock);
     if (retired_manifest) {
         static_cast<void>(storage::retire_manifest(retired_manifest));
+    }
+    if (!count_outcome) {
+        return;
     }
     if (successful) {
         pg_atomic_fetch_add_u64(&g_shared->stats.completed_hits, 1);
@@ -2227,7 +2240,17 @@ void cache_state_cleanup(void* argument) noexcept {
     }
     PG_CATCH();
     {
+        const int sqlstate = geterrcode();
         MemoryContextSwitchTo(caller_context);
+        if (cache_interrupt_error(sqlstate)) {
+            MemoryContextDelete(row_context);
+            pfree(values);
+            pfree(nulls);
+            delete view;
+            pfree(store);
+            tuplestore_end(result);
+            PG_RE_THROW();
+        }
         FlushErrorState();
         valid = false;
     }
@@ -2322,7 +2345,11 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
         }
         PG_CATCH();
         {
+            const int sqlstate = geterrcode();
             MemoryContextSwitchTo(caller_context);
+            if (cache_interrupt_error(sqlstate)) {
+                PG_RE_THROW();
+            }
             FlushErrorState();
             key = nullptr;
         }
@@ -2381,8 +2408,8 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             }
             PG_CATCH();
             {
+                const int sqlstate = geterrcode();
                 MemoryContextSwitchTo(load_context);
-                FlushErrorState();
                 if (state->replay_store != nullptr) {
                     tuplestore_end(state->replay_store);
                 }
@@ -2391,6 +2418,20 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                 }
                 state->replay_store = nullptr;
                 state->replay_slot = nullptr;
+                if (cache_interrupt_error(sqlstate)) {
+                    release_storage_reader_claims(*state);
+                    if (state->registry_reader_owned) {
+                        release_registry_reader(
+                            state->registry_index,
+                            state->generation,
+                            false,
+                            false,
+                            false);
+                        state->registry_reader_owned = false;
+                    }
+                    PG_RE_THROW();
+                }
+                FlushErrorState();
             }
             PG_END_TRY();
             const bool loaded = state->replay_store != nullptr
@@ -2460,13 +2501,22 @@ TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
             }
             PG_CATCH();
             {
+                const int sqlstate = geterrcode();
                 MemoryContextSwitchTo(caller_context);
+                if (cache_interrupt_error(sqlstate)) {
+                    fail_registry_producer(*state);
+                    PG_RE_THROW();
+                }
                 FlushErrorState();
                 completed = false;
             }
             PG_END_TRY();
             if (!completed) {
                 fail_registry_producer(*state);
+                if (g_shared != nullptr) {
+                    pg_atomic_fetch_add_u64(
+                        &g_shared->stats.fallbacks, 1);
+                }
             } else {
                 state->runtime_role = RuntimeRole::Bypass;
             }
@@ -2487,7 +2537,12 @@ TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
         }
         PG_CATCH();
         {
+            const int sqlstate = geterrcode();
             MemoryContextSwitchTo(caller_context);
+            if (cache_interrupt_error(sqlstate)) {
+                fail_registry_producer(*state);
+                PG_RE_THROW();
+            }
             FlushErrorState();
             captured = false;
         }
@@ -2967,6 +3022,8 @@ struct EntrySnapshot {
     if (g_shared == nullptr) {
         return 0;
     }
+    const bool storage_attached = storage::storage_ready()
+        || storage::attach_storage();
     storage::ManifestHandle manifests[kRegistryCapacity]{};
     std::size_t manifest_count = 0;
     std::uint64_t swept = 0;
@@ -2992,7 +3049,8 @@ struct EntrySnapshot {
             entry.state = SharedEntryState::Retired;
             ConditionVariableBroadcast(&entry.changed);
         }
-        if (entry.reader_count == 0 && entry.manifest_handle) {
+        if (storage_attached && entry.reader_count == 0
+            && entry.manifest_handle) {
             manifests[manifest_count++] = entry.manifest_handle;
             entry.manifest_handle = {};
         }
@@ -3046,6 +3104,8 @@ struct EntrySnapshot {
     if (g_shared == nullptr) {
         return 0;
     }
+    const bool storage_attached = storage::storage_ready()
+        || storage::attach_storage();
     storage::ManifestHandle manifests[kRegistryCapacity]{};
     std::size_t manifest_count = 0;
     std::uint64_t invalidated = 0;
@@ -3056,7 +3116,8 @@ struct EntrySnapshot {
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
             ++invalidated;
-            if (entry.reader_count == 0 && entry.manifest_handle) {
+            if (storage_attached && entry.reader_count == 0
+                && entry.manifest_handle) {
                 manifests[manifest_count++] = entry.manifest_handle;
                 entry.manifest_handle = {};
             }
@@ -3067,7 +3128,8 @@ struct EntrySnapshot {
         }
         entry.state = SharedEntryState::Retired;
         ++invalidated;
-        if (entry.reader_count == 0 && entry.manifest_handle) {
+        if (storage_attached && entry.reader_count == 0
+            && entry.manifest_handle) {
             manifests[manifest_count++] = entry.manifest_handle;
             entry.manifest_handle = {};
         }
@@ -3104,6 +3166,8 @@ struct EntrySnapshot {
     if (g_shared == nullptr || !OidIsValid(relation_oid)) {
         return 0;
     }
+    const bool storage_attached = storage::storage_ready()
+        || storage::attach_storage();
     storage::ManifestHandle manifests[kRegistryCapacity]{};
     std::size_t manifest_count = 0;
     std::uint64_t invalidated = 0;
@@ -3119,7 +3183,8 @@ struct EntrySnapshot {
         if (entry.state == SharedEntryState::Producing) {
             fail_abandoned_producer(entry);
             ++invalidated;
-            if (entry.reader_count == 0 && entry.manifest_handle) {
+            if (storage_attached && entry.reader_count == 0
+                && entry.manifest_handle) {
                 manifests[manifest_count++] = entry.manifest_handle;
                 entry.manifest_handle = {};
             }
@@ -3130,7 +3195,8 @@ struct EntrySnapshot {
         }
         entry.state = SharedEntryState::Retired;
         ++invalidated;
-        if (entry.reader_count == 0 && entry.manifest_handle) {
+        if (storage_attached && entry.reader_count == 0
+            && entry.manifest_handle) {
             manifests[manifest_count++] = entry.manifest_handle;
             entry.manifest_handle = {};
         }
