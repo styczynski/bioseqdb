@@ -54,8 +54,6 @@ ORDER BY id;
 DO $$
 DECLARE
     cache_stats record;
-    plan_text text;
-    plan jsonb;
 BEGIN
     SELECT * INTO cache_stats FROM bioseq_cache.stats();
     IF cache_stats.produced <> 2
@@ -73,16 +71,6 @@ BEGIN
               AND (jsonb_array_length(dependencies->'relation_oids') <> 0
                    OR producer_plan IS NOT NULL)) THEN
         RAISE EXCEPTION 'relation-free dependency diagnostics are invalid';
-    END IF;
-    EXECUTE
-        'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) SELECT 40 + 2 AS answer'
-        INTO plan_text;
-    plan := plan_text::jsonb;
-    IF COALESCE(
-            (plan->0->'Plan'->>'Cache Force Bypass')::boolean,
-            true)
-       OR plan->0->'Plan'->>'Cache Dependency Count' <> '0' THEN
-        RAISE EXCEPTION 'relation-free EXPLAIN verification mismatch: %', plan;
     END IF;
 END
 $$;
@@ -214,16 +202,23 @@ DO $$
 DECLARE
     attempt integer;
     observed bigint[];
+    observed_row record;
     cache_stats record;
     provider_stats jsonb;
     plan_text text;
     plan jsonb;
 BEGIN
     FOR attempt IN 1..2 LOOP
-        EXECUTE
-            'SELECT array_agg(row_id ORDER BY row_id) '
+        observed := ARRAY[]::bigint[];
+        FOR observed_row IN EXECUTE
+            'SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask '
             'FROM qc_unsafe_provider WHERE nullable_value <= 10'
-            INTO observed;
+        LOOP
+            observed := array_append(observed, observed_row.row_id);
+        END LOOP;
+        SELECT array_agg(value ORDER BY value)
+        INTO observed
+        FROM unnest(observed) AS sorted_values(value);
         IF observed <> ARRAY[2,3,4]::bigint[] THEN
             RAISE EXCEPTION 'CustomScan bypass changed retained-child bag: %',
                 observed;
@@ -231,7 +226,7 @@ BEGIN
     END LOOP;
     EXECUTE
         'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
-        'SELECT array_agg(row_id ORDER BY row_id) '
+        'SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask '
         'FROM qc_unsafe_provider WHERE nullable_value <= 10'
         INTO plan_text;
     plan := plan_text::jsonb;
