@@ -751,14 +751,23 @@ template<std::size_t N>
 	 */
 	const auto& operational = stats.operational;
 	std::string result =
-		R"({"schema":"bioseq.simd_execution_evidence","version":1)";
-	result.reserve(768);
+		R"({"schema":"bioseq.simd_execution_evidence","version":2)";
+	result.reserve(1152);
 	result += R"(,"requested_policy":")";
 	result.append(bioseq::pipeline_stats::simd_chaining_policy_identity_name(
 		stats.requested_simd_chaining_policy));
 	result += R"(","observed_policy":")";
 	result.append(bioseq::pipeline_stats::simd_chaining_policy_identity_name(
 		stats.observed_simd_chaining_policy));
+	result += '"';
+	result += R"(,"requested_alignment_algorithm":")";
+	result.append(
+		bioseq::pipeline_stats::simd_alignment_algorithm_identity_name(
+			stats.requested_simd_alignment_algorithm));
+	result += R"(","observed_alignment_algorithm":")";
+	result.append(
+		bioseq::pipeline_stats::simd_alignment_algorithm_identity_name(
+			stats.observed_simd_alignment_algorithm));
 	result += '"';
 	const auto append = [&result](
 			const std::string_view key,
@@ -793,6 +802,32 @@ template<std::size_t N>
 	result += R"(,"simd_chaining_policy_evidence_saturated":)";
 	result += operational.simd_chaining_policy_evidence_saturated
 		? "true" : "false";
+	const auto& block = operational.block_aligner_execution_evidence;
+	result += R"(,"block_aligner_execution_proof":{"present":)";
+	result += block.present ? "true" : "false";
+	result += R"(,"accepted":)";
+	result += block.accepted ? "true" : "false";
+	const auto append_block = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	append_block("executed_calls", block.executed_calls);
+	append_block("nonempty_calls", block.nonempty_calls);
+	append_block(
+		"nonempty_calls_with_simd", block.nonempty_calls_with_simd);
+	append_block("simd_dp_vector_batches", block.simd_dp_vector_batches);
+	append_block("simd_dp_cells", block.simd_dp_cells);
+	append_block("forbidden_ksw2_calls", block.forbidden_ksw2_calls);
+	append_block(
+		"forbidden_scalar_biological_fallbacks",
+		block.forbidden_scalar_biological_fallbacks);
+	result += R"(,"saturated":)";
+	result += block.saturated ? "true" : "false";
+	result += '}';
 	result += '}';
 	return result;
 }
@@ -2709,7 +2744,8 @@ Datum bioseq_internal_rev3_test_read_full_generation_fixture(
 	const std::int16_t signed_wire_format = PG_GETARG_INT16(5);
 	text* backend_text = PG_GETARG_TEXT_PP(6);
 	if (signed_query_key < 0 || signed_k <= 0 || signed_w <= 0
-		|| (signed_wire_format != 3 && signed_wire_format != 4)) {
+		|| (signed_wire_format != 3 && signed_wire_format != 4
+			&& signed_wire_format != 5)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			 errmsg("bioseq rev3 full-generation fixture parameters are invalid")));
@@ -3012,14 +3048,54 @@ Datum bioseq_internal_rev3_test_generation_storage_state(PG_FUNCTION_ARGS) {
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			 errmsg("bioseq generation-storage fixture query key is negative")));
 	}
-	const std::string index_name(
-		VARDATA_ANY(index_text), VARSIZE_ANY_EXHDR(index_text));
-	const std::string operation(
-		VARDATA_ANY(operation_text), VARSIZE_ANY_EXHDR(operation_text));
-	const auto state =
-		bioseq::storage::indexing::exercise_rev3_generation_storage_state_impl(
-			rel, index_name, static_cast<std::uint64_t>(signed_query_key),
-			operation);
+	const std::string_view index_name{
+		VARDATA_ANY(index_text),
+		static_cast<std::size_t>(VARSIZE_ANY_EXHDR(index_text))};
+	const std::string_view operation{
+		VARDATA_ANY(operation_text),
+		static_cast<std::size_t>(VARSIZE_ANY_EXHDR(operation_text))};
+	static_assert(std::is_trivially_destructible_v<
+		bioseq::storage::indexing::Rev3GenerationStorageStateResult>);
+	bioseq::storage::indexing::Rev3GenerationStorageStateResult state{};
+	ErrorData* postgres_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char error_detail[512] = "std::exception without detail";
+	try {
+		state = bioseq::storage::indexing::
+			exercise_rev3_generation_storage_state_impl(
+				rel, index_name,
+				static_cast<std::uint64_t>(signed_query_key), operation);
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		postgres_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			error_detail,
+			error.what() == nullptr
+				? "std::exception without detail"
+				: error.what(),
+			sizeof(error_detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+	// The fixture translates PostgreSQL ERROR into C++ while its storage and
+	// snapshot owners unwind. Re-enter PostgreSQL only after that stack is gone;
+	// every local still alive here is trivially destructible.
+	if (postgres_error != nullptr) {
+		ReThrowError(postgres_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq generation-storage fixture raised a C++ exception"),
+			 errdetail_internal("%s", error_detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq generation-storage fixture raised an unknown C++ exception")));
+	}
 
 	TupleDesc tupdesc = nullptr;
 	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {

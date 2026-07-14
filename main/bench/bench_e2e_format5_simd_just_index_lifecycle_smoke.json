@@ -125,6 +125,7 @@
         "backend_fallbacks": {"type": "evaluation", "rules": []},
         "just_index_restart_performed": {"type": "evaluation", "rules": []},
         "just_index_restart_identity_changed": {"type": "evaluation", "rules": []},
+        "persisted_policy_audit_accepted": {"type": "evaluation", "rules": []},
         "peak_postgres_rss_mb": {"type": "evaluation", "rules": []},
         "peak_bench_rss_mb": {"type": "evaluation", "rules": []},
         "peak_swap_used_mb": {"type": "evaluation", "rules": []}

@@ -186,6 +186,10 @@ struct E2eInput {
     std::string just_index_table_scalar_per_sequence;
     std::string just_index_table_gpu_per_fragment;
     std::string just_index_table_gpu_per_sequence;
+    // The BIOSEQ table AM owns this identity.  It is not a zero-based ordinal:
+    // capture it from the loaded row's ctid and carry that exact query key into
+    // every READY-generation inspection before and after setup.
+    std::map<std::string, std::int64_t> just_index_sequence_rowno_by_table;
     std::string no_index_table;                  // base target loaded untimed; no minimizer sidecar
     std::string target_fasta;                    // single-record, for bioseq.load
     std::string target_fasta_split;              // <=split_bp records, for minimap2
@@ -238,6 +242,8 @@ struct E2eOutput {
     std::string actual_target_index_source;
     std::string requested_simd_chaining_policy;
     std::string observed_simd_chaining_policy;
+    std::string requested_simd_alignment_algorithm;
+    std::string observed_simd_alignment_algorithm;
     std::int64_t simd_evidence_schema_valid = -1;
     std::int64_t nthash_vector_batches = -1;
     std::int64_t nthash_resident_vector_stream_kernel_calls = -1;
@@ -248,6 +254,16 @@ struct E2eOutput {
     std::int64_t simd_chaining_bounded_candidates_skipped = -1;
     std::int64_t simd_chaining_policy_rejections = -1;
     std::int64_t simd_chaining_policy_evidence_saturated = -1;
+    std::int64_t block_aligner_execution_proof_present = -1;
+    std::int64_t block_aligner_execution_proof_accepted = -1;
+    std::int64_t block_aligner_executed_calls = -1;
+    std::int64_t block_aligner_nonempty_calls = -1;
+    std::int64_t block_aligner_nonempty_calls_with_simd = -1;
+    std::int64_t block_aligner_simd_dp_vector_batches = -1;
+    std::int64_t block_aligner_simd_dp_cells = -1;
+    std::int64_t block_aligner_forbidden_ksw2_calls = -1;
+    std::int64_t block_aligner_forbidden_scalar_biological_fallbacks = -1;
+    std::int64_t block_aligner_execution_proof_saturated = -1;
     std::int64_t pipeline_proof_present = 0;
     std::int64_t pipeline_proof_attached_to_measurement = 0;
     std::int64_t pipeline_proof_accepted = 0;
@@ -379,6 +395,7 @@ struct E2eOutput {
     ColdNoIndexPolicyAbsenceEvidence cold_no_index_measured_mpf{};
     ColdNoIndexPolicyAbsenceEvidence cold_no_index_measured_mps{};
     std::int64_t cold_no_index_lifecycle_accepted = 0;
+    std::int64_t persisted_policy_audit_accepted = -1;
     std::int64_t audit_selected_minimizer_is_sequence = -1;
     std::int64_t audit_mpf_rows = -1;
     std::int64_t audit_mps_rows = -1;
@@ -1520,6 +1537,7 @@ static_assert(kColdIndexEvidenceKeys.size() == 56);
 inline constexpr auto kSimdExecutionEvidenceKeys =
     std::to_array<std::string_view>({
         "schema", "version", "requested_policy", "observed_policy",
+        "requested_alignment_algorithm", "observed_alignment_algorithm",
         "nthash_vector_batches",
         "nthash_resident_vector_stream_kernel_calls",
         "simd_chaining_exact_policy_calls",
@@ -1529,8 +1547,18 @@ inline constexpr auto kSimdExecutionEvidenceKeys =
         "simd_chaining_bounded_candidates_skipped",
         "simd_chaining_policy_rejections",
         "simd_chaining_policy_evidence_saturated",
+        "block_aligner_execution_proof",
     });
-static_assert(kSimdExecutionEvidenceKeys.size() == 13);
+static_assert(kSimdExecutionEvidenceKeys.size() == 16);
+
+inline constexpr auto kBlockAlignerExecutionProofKeys =
+    std::to_array<std::string_view>({
+        "present", "accepted", "executed_calls", "nonempty_calls",
+        "nonempty_calls_with_simd", "simd_dp_vector_batches",
+        "simd_dp_cells", "forbidden_ksw2_calls",
+        "forbidden_scalar_biological_fallbacks", "saturated",
+    });
+static_assert(kBlockAlignerExecutionProofKeys.size() == 10);
 
 template<std::size_t N>
 [[nodiscard]] bool json_has_exact_keys(
@@ -1659,24 +1687,48 @@ void capture_versioned_alignment_json(
             || policy == "bounded_batch_approximate"
             || policy == "mixed_invalid";
     };
+    const auto valid_alignment_algorithm_name = [](
+            const nlohmann::json& value) {
+        if (!value.is_string()) return false;
+        const std::string& algorithm =
+            value.get_ref<const std::string&>();
+        return algorithm == "none" || algorithm == "block_aligner"
+            || algorithm == "mixed_invalid";
+    };
     const bool simd_header_valid = json_has_exact_keys(
             simd, kSimdExecutionEvidenceKeys)
         && simd["schema"].is_string()
         && simd["schema"] == "bioseq.simd_execution_evidence"
         && simd["version"].is_number_integer()
-        && simd["version"] == 1
+        && simd["version"] == 2
         && valid_policy_name(simd["requested_policy"])
         && valid_policy_name(simd["observed_policy"])
-        && simd["simd_chaining_policy_evidence_saturated"].is_boolean();
+        && valid_alignment_algorithm_name(
+            simd["requested_alignment_algorithm"])
+        && valid_alignment_algorithm_name(
+            simd["observed_alignment_algorithm"])
+        && simd["simd_chaining_policy_evidence_saturated"].is_boolean()
+        && json_has_exact_keys(
+            simd["block_aligner_execution_proof"],
+            kBlockAlignerExecutionProofKeys)
+        && simd["block_aligner_execution_proof"]["present"].is_boolean()
+        && simd["block_aligner_execution_proof"]["accepted"].is_boolean()
+        && simd["block_aligner_execution_proof"]["saturated"].is_boolean();
     if (!simd_header_valid) {
         abort_pipeline_proof_capture(
             "SIMD execution evidence JSON has the wrong exact schema or types");
     }
+    const nlohmann::json& block =
+        simd["block_aligner_execution_proof"];
     out.simd_evidence_schema_valid = 1;
     out.requested_simd_chaining_policy =
         simd["requested_policy"].get<std::string>();
     out.observed_simd_chaining_policy =
         simd["observed_policy"].get<std::string>();
+    out.requested_simd_alignment_algorithm =
+        simd["requested_alignment_algorithm"].get<std::string>();
+    out.observed_simd_alignment_algorithm =
+        simd["observed_alignment_algorithm"].get<std::string>();
     out.nthash_vector_batches =
         required_json_counter(simd, "nthash_vector_batches");
     out.nthash_resident_vector_stream_kernel_calls = required_json_counter(
@@ -1695,6 +1747,27 @@ void capture_versioned_alignment_json(
         simd, "simd_chaining_policy_rejections");
     out.simd_chaining_policy_evidence_saturated =
         simd["simd_chaining_policy_evidence_saturated"].get<bool>() ? 1 : 0;
+    out.block_aligner_execution_proof_present =
+        block["present"].get<bool>() ? 1 : 0;
+    out.block_aligner_execution_proof_accepted =
+        block["accepted"].get<bool>() ? 1 : 0;
+    out.block_aligner_executed_calls =
+        required_json_counter(block, "executed_calls");
+    out.block_aligner_nonempty_calls =
+        required_json_counter(block, "nonempty_calls");
+    out.block_aligner_nonempty_calls_with_simd =
+        required_json_counter(block, "nonempty_calls_with_simd");
+    out.block_aligner_simd_dp_vector_batches =
+        required_json_counter(block, "simd_dp_vector_batches");
+    out.block_aligner_simd_dp_cells =
+        required_json_counter(block, "simd_dp_cells");
+    out.block_aligner_forbidden_ksw2_calls =
+        required_json_counter(block, "forbidden_ksw2_calls");
+    out.block_aligner_forbidden_scalar_biological_fallbacks =
+        required_json_counter(
+            block, "forbidden_scalar_biological_fallbacks");
+    out.block_aligner_execution_proof_saturated =
+        block["saturated"].get<bool>() ? 1 : 0;
 }
 
 void capture_alignment_statement_stats(
@@ -2370,7 +2443,10 @@ inline void require_pipeline_execution_proof(
                     + static_cast<__int128>(counter(54))
                     + static_cast<__int128>(counter(80))
             && sum_equal(counter(64), counter(60), counter(62))
-            && sum_equal(counter(76), counter(61), counter(63))
+            // persisted_bytes_read is the authenticated payload delivered to
+            // the reader, not metadata+payload physical I/O. Metadata remains
+            // accounted independently by counter(61).
+            && counter(76) == out.cold_index_payload_bytes_delivered
             && counter(65) == 0
             && counter(66) == 0
             && counter(73) == 0
@@ -2392,10 +2468,75 @@ inline void require_pipeline_execution_proof(
                 out.alignment_snapshot_numeric_columns.begin() + 48,
                 out.alignment_snapshot_numeric_columns.begin() + 84,
                 [](const std::int64_t value) noexcept { return value == 0; });
+    // Keep these diagnostic groups mathematically identical to the persisted
+    // branch above.  They do not participate in acceptance; they only make a
+    // failed cold-reader proof identify its exact class of disagreement
+    // without another opaque E2E run.
+    const bool persisted_read_route_proof =
+        out.cold_index_schema_valid == 1
+        && one_cold_route
+        && (selective_read_gate || full_read_gate)
+        && cold_payload_equations;
+    const bool persisted_read_session_proof =
+        out.persisted_generation_read_sessions == 1
+        && out.persisted_generation_read_sessions == out.target_rows
+        && out.persisted_relation_opens == out.target_rows;
+    const bool persisted_read_head_proof =
+        counter(51) == out.persisted_generation_read_sessions
+        && counter(52) == out.persisted_generation_read_sessions
+        && scaled_equal(counter(53), counter(52), 64);
+    const bool persisted_read_manifest_proof =
+        counter(54) == out.persisted_generation_read_sessions
+        && counter(55) == out.persisted_generation_read_sessions
+        && out.persisted_manifest_rows_read == counter(55)
+        && out.persisted_manifest_bytes_read == counter(56)
+        && out.persisted_format5_manifest_contract_valid == 1
+        && persisted_manifest_size_valid;
+    const bool persisted_read_directory_proof =
+        counter(57) > 0
+        && counter(58) > 0
+        && counter(59) == 0
+        && static_cast<__int128>(counter(60))
+            == static_cast<__int128>(counter(52))
+                + static_cast<__int128>(counter(55))
+                + static_cast<__int128>(counter(57))
+        && static_cast<__int128>(counter(61))
+            == static_cast<__int128>(counter(53))
+                + static_cast<__int128>(counter(56))
+                + static_cast<__int128>(counter(58));
+    const bool persisted_read_payload_proof =
+        counter(62) == out.cold_index_payload_rows_delivered
+        && counter(63) == out.cold_index_payload_bytes_delivered
+        && counter(63) > 0
+        && counter(67) > 0
+        && counter(68) > 0
+        && counter(68) == counter(69)
+        && counter(70) > 0
+        && counter(70) == counter(74)
+        && counter(71) > 0
+        && counter(71) == counter(75)
+        && counter(76) > 0
+        && counter(77) >= 1;
+    const bool persisted_read_scan_equations =
+        static_cast<__int128>(out.persisted_index_scans)
+            == static_cast<__int128>(counter(51))
+                + static_cast<__int128>(counter(54))
+                + static_cast<__int128>(counter(80))
+        && sum_equal(counter(64), counter(60), counter(62))
+        && counter(76) == out.cold_index_payload_bytes_delivered;
+    const bool persisted_read_zero_work_proof =
+        counter(65) == 0
+        && counter(66) == 0
+        && counter(73) == 0
+        && counter(82) == 0
+        && counter(84) == 0
+        && counter(85) == 0;
+    // Format 5 is consumed directly from the authenticated persisted reader.
+    // That path prepares a key set and matching reader checksum, but it does
+    // not construct or reuse the legacy in-memory target-index hashmap.
     const bool cpu_prepared_gate = expect_persisted && !expect_gpu
-        ? out.cpu_prepared_index_builds == 1
-            && out.cpu_prepared_index_reuses
-                == expectation.attempted_alignment_jobs - 1
+        ? out.cpu_prepared_index_builds == 0
+            && out.cpu_prepared_index_reuses == 0
             && out.cpu_prepared_unique_keys > 0
             && out.cpu_prepared_duplicate_build_attempts == 0
             && fixed_lower_hex(out.cpu_prepared_key_set_checksum, 16)
@@ -2417,6 +2558,33 @@ inline void require_pipeline_execution_proof(
     const bool simd_json_counters_match_prefix =
         out.simd_evidence_schema_valid == 1
         && out.nthash_vector_batches == counter(94);
+    const bool no_block_aligner_execution_evidence =
+        out.requested_simd_alignment_algorithm == "none"
+        && out.observed_simd_alignment_algorithm == "none"
+        && out.block_aligner_execution_proof_present == 0
+        && out.block_aligner_execution_proof_accepted == 0
+        && out.block_aligner_executed_calls == 0
+        && out.block_aligner_nonempty_calls == 0
+        && out.block_aligner_nonempty_calls_with_simd == 0
+        && out.block_aligner_simd_dp_vector_batches == 0
+        && out.block_aligner_simd_dp_cells == 0
+        && out.block_aligner_forbidden_ksw2_calls == 0
+        && out.block_aligner_forbidden_scalar_biological_fallbacks == 0
+        && out.block_aligner_execution_proof_saturated == 0;
+    const bool accepted_block_aligner_execution_evidence =
+        out.requested_simd_alignment_algorithm == "block_aligner"
+        && out.observed_simd_alignment_algorithm == "block_aligner"
+        && out.block_aligner_execution_proof_present == 1
+        && out.block_aligner_execution_proof_accepted == 1
+        && out.block_aligner_executed_calls > 0
+        && out.block_aligner_nonempty_calls > 0
+        && out.block_aligner_nonempty_calls_with_simd
+            == out.block_aligner_nonempty_calls
+        && out.block_aligner_simd_dp_vector_batches > 0
+        && out.block_aligner_simd_dp_cells > 0
+        && out.block_aligner_forbidden_ksw2_calls == 0
+        && out.block_aligner_forbidden_scalar_biological_fallbacks == 0
+        && out.block_aligner_execution_proof_saturated == 0;
     const bool no_simd_policy_evidence =
         simd_json_counters_match_prefix
         && out.requested_simd_chaining_policy == "none"
@@ -2429,7 +2597,8 @@ inline void require_pipeline_execution_proof(
         && out.simd_chaining_bounded_cutoff_stops == 0
         && out.simd_chaining_bounded_candidates_skipped == 0
         && out.simd_chaining_policy_rejections == 0
-        && out.simd_chaining_policy_evidence_saturated == 0;
+        && out.simd_chaining_policy_evidence_saturated == 0
+        && no_block_aligner_execution_evidence;
     const bool bounded_simd_policy_evidence =
         simd_json_counters_match_prefix
         && out.requested_simd_chaining_policy
@@ -2442,7 +2611,8 @@ inline void require_pipeline_execution_proof(
         && out.simd_chaining_bounded_policy_calls > 0
         && out.simd_chaining_bounded_score_batches > 0
         && out.simd_chaining_policy_rejections == 0
-        && out.simd_chaining_policy_evidence_saturated == 0;
+        && out.simd_chaining_policy_evidence_saturated == 0
+        && accepted_block_aligner_execution_evidence;
     const bool simd_operational_gate = !expect_simd
         || (bounded_simd_policy_evidence
             && counter(93) == 0
@@ -2514,7 +2684,9 @@ inline void require_pipeline_execution_proof(
                 == out.persisted_source_identity);
     const bool cold_no_index_gate = expect_persisted
         || out.cold_no_index_lifecycle_accepted == 1;
-    const bool accepted =
+    const bool persisted_policy_gate = !expect_persisted
+        || out.persisted_policy_audit_accepted == 1;
+    const bool proof_envelope_gate =
         out.pipeline_proof_present == 1
         && out.pipeline_proof_attached_to_measurement == 1
         && out.stage_engine_matrix_valid == 1
@@ -2527,23 +2699,29 @@ inline void require_pipeline_execution_proof(
         && out.alignment_completed == 1
         && out.alignment_partial == 0
         && out.alignment_fully_drained == 1
-        && expectation.attempted_alignment_jobs > 0
+        && out.stats_saturated == 0
+        && out.cold_index_stats_saturated == out.stats_saturated
+        && out.backend_declines == 0
+        && out.backend_fallbacks == 0;
+    const bool attested_cardinality_gate =
+        expectation.attempted_alignment_jobs > 0
         && exact_cardinality
         && gpu_signoff_shape
         && out.fully_attested_alignment_jobs
             == out.attempted_alignment_jobs
-        && out.unattested_alignment_jobs == 0
-        && out.requested_backend == expected_backend
+        && out.unattested_alignment_jobs == 0;
+    const bool backend_identity_gate =
+        out.requested_backend == expected_backend
         && out.actual_backend == expected_backend
         && out.requested_target_index_source == expected_source
         && out.actual_target_index_source == expected_source
         && out.environment_mixed_invalid == 0
         && out.mixed_persisted_identity == 0
-        && out.operational_identity_conflict == 0
-        && out.stats_saturated == 0
-        && out.cold_index_stats_saturated == out.stats_saturated
-        && out.backend_declines == 0
-        && out.backend_fallbacks == 0
+        && out.operational_identity_conflict == 0;
+    const bool accepted =
+        proof_envelope_gate
+        && attested_cardinality_gate
+        && backend_identity_gate
         && row_equation
         && source_valid
         && persisted_identity_valid
@@ -2555,6 +2733,7 @@ inline void require_pipeline_execution_proof(
         && gpu_operational_gate
         && cold_restart_gate
         && cold_no_index_gate
+        && persisted_policy_gate
         && backend_specific;
     out.pipeline_proof_accepted = accepted ? 1 : 0;
     if (accepted) {
@@ -2572,6 +2751,7 @@ inline void require_pipeline_execution_proof(
         "prepared_builds=%lld prepared_reuses=%lld prepared_unique=%lld "
         "prepared_duplicates=%lld generation_reads=%lld relation_opens=%lld "
         "index_scans=%lld gpu_uploads=%lld gpu_hits=%lld restart_changed=%lld "
+        "persisted_policy_accepted=%lld "
         "declines=%lld fallbacks=%lld\n",
         static_cast<int>(algo.size()), algo.data(),
         static_cast<long long>(out.pipeline_proof_present),
@@ -2603,8 +2783,108 @@ inline void require_pipeline_execution_proof(
         static_cast<long long>(out.gpu_persisted_resident_uploads),
         static_cast<long long>(out.gpu_persisted_resident_cache_hits),
         static_cast<long long>(out.cold_restart_identity_changed),
+        static_cast<long long>(out.persisted_policy_audit_accepted),
         static_cast<long long>(out.backend_declines),
         static_cast<long long>(out.backend_fallbacks));
+    std::fprintf(
+        stderr,
+        "[bench_e2e] PIPELINE-PROOF-FAIL-GATES "
+        "proof_envelope=%d attested_cardinality=%d backend_identity=%d "
+        "row_equation=%d source_valid=%d persisted_identity=%d "
+        "persisted_read=%d cpu_prepared=%d gpu_residency=%d "
+        "simd_operational=%d scalar_operational=%d gpu_operational=%d "
+        "cold_restart=%d cold_no_index=%d persisted_policy=%d "
+        "backend_specific=%d manifest_size=%d cold_payload_equations=%d "
+        "one_cold_route=%d selective_read=%d full_read=%d "
+        "prepared_key_checksum=%s prepared_reader_checksum=%s\n",
+        static_cast<int>(proof_envelope_gate),
+        static_cast<int>(attested_cardinality_gate),
+        static_cast<int>(backend_identity_gate),
+        static_cast<int>(row_equation),
+        static_cast<int>(source_valid),
+        static_cast<int>(persisted_identity_valid),
+        static_cast<int>(persisted_read_gate),
+        static_cast<int>(cpu_prepared_gate),
+        static_cast<int>(gpu_residency_gate),
+        static_cast<int>(simd_operational_gate),
+        static_cast<int>(scalar_operational_gate),
+        static_cast<int>(gpu_operational_gate),
+        static_cast<int>(cold_restart_gate),
+        static_cast<int>(cold_no_index_gate),
+        static_cast<int>(persisted_policy_gate),
+        static_cast<int>(backend_specific),
+        static_cast<int>(persisted_manifest_size_valid),
+        static_cast<int>(cold_payload_equations),
+        static_cast<int>(one_cold_route),
+        static_cast<int>(selective_read_gate),
+        static_cast<int>(full_read_gate),
+        out.cpu_prepared_key_set_checksum.c_str(),
+        out.cpu_prepared_build_set_checksum.c_str());
+    if (expect_persisted) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-READ "
+            "route=%d session=%d head=%d manifest=%d directory=%d "
+            "payload=%d scan_equations=%d zero_work=%d "
+            "cold_schema=%lld pre_restart_gpu_abi=%lld "
+            "format5_contract=%lld target_rows=%lld\n",
+            static_cast<int>(persisted_read_route_proof),
+            static_cast<int>(persisted_read_session_proof),
+            static_cast<int>(persisted_read_head_proof),
+            static_cast<int>(persisted_read_manifest_proof),
+            static_cast<int>(persisted_read_directory_proof),
+            static_cast<int>(persisted_read_payload_proof),
+            static_cast<int>(persisted_read_scan_equations),
+            static_cast<int>(persisted_read_zero_work_proof),
+            static_cast<long long>(out.cold_index_schema_valid),
+            static_cast<long long>(out.pre_restart_persisted_gpu_abi_version),
+            static_cast<long long>(
+                out.persisted_format5_manifest_contract_valid),
+            static_cast<long long>(out.target_rows));
+        std::fputs(
+            "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-COUNTERS",
+            stderr);
+        for (std::size_t column = 48; column <= 85; ++column) {
+            const std::string_view name =
+                kAlignmentSnapshotColumnNames[column];
+            std::fprintf(
+                stderr, " %.*s=%lld",
+                static_cast<int>(name.size()), name.data(),
+                static_cast<long long>(counter(column)));
+        }
+        std::fputc('\n', stderr);
+    }
+    std::fprintf(
+        stderr,
+        "[bench_e2e] PIPELINE-PROOF-FAIL-SIMD "
+        "requested_policy=%s observed_policy=%s "
+        "requested_alignment=%s observed_alignment=%s "
+        "json_matches_prefix=%d no_simd_evidence=%d bounded_simd_evidence=%d "
+        "no_block_evidence=%d accepted_block_evidence=%d "
+        "block_present=%lld block_accepted=%lld block_calls=%lld "
+        "block_nonempty=%lld block_nonempty_simd=%lld "
+        "block_vector_batches=%lld block_cells=%lld block_ksw2=%lld "
+        "block_scalar_fallbacks=%lld block_saturated=%lld\n",
+        out.requested_simd_chaining_policy.c_str(),
+        out.observed_simd_chaining_policy.c_str(),
+        out.requested_simd_alignment_algorithm.c_str(),
+        out.observed_simd_alignment_algorithm.c_str(),
+        static_cast<int>(simd_json_counters_match_prefix),
+        static_cast<int>(no_simd_policy_evidence),
+        static_cast<int>(bounded_simd_policy_evidence),
+        static_cast<int>(no_block_aligner_execution_evidence),
+        static_cast<int>(accepted_block_aligner_execution_evidence),
+        static_cast<long long>(out.block_aligner_execution_proof_present),
+        static_cast<long long>(out.block_aligner_execution_proof_accepted),
+        static_cast<long long>(out.block_aligner_executed_calls),
+        static_cast<long long>(out.block_aligner_nonempty_calls),
+        static_cast<long long>(out.block_aligner_nonempty_calls_with_simd),
+        static_cast<long long>(out.block_aligner_simd_dp_vector_batches),
+        static_cast<long long>(out.block_aligner_simd_dp_cells),
+        static_cast<long long>(out.block_aligner_forbidden_ksw2_calls),
+        static_cast<long long>(
+            out.block_aligner_forbidden_scalar_biological_fallbacks),
+        static_cast<long long>(out.block_aligner_execution_proof_saturated));
     std::fflush(stderr);
     std::abort();
 }
@@ -2851,6 +3131,51 @@ void configure_bioseq_minimizer_policy(
         return -1;
     }
     return parse_i64(*row[col]);
+}
+
+[[nodiscard]] std::int64_t capture_only_sequence_rowno(
+        const it::connection_test_context& connection,
+        const std::string& table) {
+    const auto rows = it::query_rows(
+        connection,
+        fmt::format(
+            "SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+            "FROM {} ORDER BY ctid;",
+            table,
+            table));
+    const std::int64_t sequence_rowno = rows.size() == 1
+        ? row_i64_or_minus_one(rows.front(), 0)
+        : -1;
+    if (sequence_rowno > 0) {
+        return sequence_rowno;
+    }
+    std::fprintf(
+        stderr,
+        "[bench_e2e] READY-generation setup requires exactly one visible "
+        "source row with a valid table-AM row number; table=%s rows=%zu "
+        "sequence_rowno=%lld\n",
+        table.c_str(),
+        rows.size(),
+        static_cast<long long>(sequence_rowno));
+    std::fflush(stderr);
+    std::abort();
+}
+
+[[nodiscard]] std::int64_t just_index_sequence_rowno_for(
+        const E2eInput& in,
+        const std::string& table) {
+    const auto found = in.just_index_sequence_rowno_by_table.find(table);
+    if (found != in.just_index_sequence_rowno_by_table.end()
+        && found->second > 0) {
+        return found->second;
+    }
+    std::fprintf(
+        stderr,
+        "[bench_e2e] missing captured table-AM source row identity for "
+        "just_index table=%s\n",
+        table.c_str());
+    std::fflush(stderr);
+    std::abort();
 }
 
 void capture_mps_build_stats(
@@ -3296,6 +3621,47 @@ void capture_index_audit(
     const auto stats = it::query_rows(c,
         "SELECT async_persist_jobs_waiting FROM bioseq.scheduler_stats();");
     out.audit_async_persist_jobs_waiting = first_i64_or_minus_one(stats);
+}
+
+// Validate the policy that setup persisted before the cold restart.  This is
+// deliberately called only after the measured statement: validating policy in
+// the fresh backend before the timer would warm the exact relation/catalog
+// metadata whose cold cost the just_index benchmark is intended to include.
+void finalize_post_measure_persisted_policy_audit(
+        std::string_view minimizer_index,
+        E2eOutput& out) {
+    const bool expect_sequence =
+        minimizer_index == kMinimizersPerSequenceIndex;
+    const bool mpf_selected = !expect_sequence;
+    const bool accepted =
+        out.audit_selected_minimizer_is_sequence
+            == (expect_sequence ? 1 : 0)
+        && out.audit_mpf_update_on_insert == (mpf_selected ? 1 : 0)
+        && out.audit_mps_update_on_insert == (expect_sequence ? 1 : 0)
+        && out.audit_mpf_active_read == (mpf_selected ? 1 : 0)
+        && out.audit_mps_active_read == (expect_sequence ? 1 : 0)
+        && (mpf_selected ? out.audit_mpf_rows > 0 : out.audit_mpf_rows == 0)
+        && (expect_sequence ? out.audit_mps_rows > 0 : out.audit_mps_rows == 0)
+        && out.audit_async_persist_jobs_waiting == 0
+        && out.audit_index_rows_wait_attempts == 0;
+    out.persisted_policy_audit_accepted = accepted ? 1 : 0;
+    if (!accepted) {
+        bioseq_log<ERR>(
+            "[bench_e2e] post-measure persisted-policy audit failed "
+            "index={} selected_is_sequence={} mpf_rows={} mps_rows={} "
+            "mpf_update={} mps_update={} mpf_active={} mps_active={} "
+            "async_waiting={} wait_attempts={}",
+            minimizer_index,
+            out.audit_selected_minimizer_is_sequence,
+            out.audit_mpf_rows,
+            out.audit_mps_rows,
+            out.audit_mpf_update_on_insert,
+            out.audit_mps_update_on_insert,
+            out.audit_mpf_active_read,
+            out.audit_mps_active_read,
+            out.audit_async_persist_jobs_waiting,
+            out.audit_index_rows_wait_attempts);
+    }
 }
 
 void capture_async_persist_waiting(
@@ -3748,6 +4114,8 @@ template <sequence_alphabet A>
                 "SELECT bioseq.load('{}'::regclass, '{}');",
                 table,
                 in.target_fasta);
+            const std::int64_t sequence_rowno =
+                capture_only_sequence_rowno(*in.conn, table);
             const std::int64_t indexed_sequences = it::query_scalar_int(
                 *in.conn,
                 fmt::format(
@@ -3763,15 +4131,16 @@ template <sequence_alphabet A>
                 "(current_setting('bioseq.update_index_on_insert') = 'off')::int, "
                 "(current_setting('bioseq.index_async_persist') = 'off')::int, "
                 "(current_setting('bioseq.recompute_async_persist') = 'off')::int, "
-                "generation_id, gpu_abi_version, total_bp_size, "
+                "generation_id, sequence_rowno, gpu_abi_version, total_bp_size, "
                 "kmer_size, window_size "
                 "FROM bioseq.inspect_ready_minimizer_generation("
-                "'{}'::regclass, '{}', 0)",
+                "'{}'::regclass, '{}', {})",
                 table,
-                index_name);
+                index_name,
+                sequence_rowno);
             const auto audit_rows = it::query_rows(*in.conn, audit_sql);
             const bool audit_shape_valid =
-                audit_rows.size() == 1 && audit_rows.front().size() == 12;
+                audit_rows.size() == 1 && audit_rows.front().size() == 13;
             const std::int64_t grouped32_enabled = audit_shape_valid
                 ? row_i64_or_minus_one(audit_rows.front(), 3)
                 : -1;
@@ -3787,17 +4156,20 @@ template <sequence_alphabet A>
             const std::int64_t generation_id = audit_shape_valid
                 ? row_i64_or_minus_one(audit_rows.front(), 7)
                 : -1;
-            const std::int64_t gpu_abi_version = audit_shape_valid
+            const std::int64_t observed_sequence_rowno = audit_shape_valid
                 ? row_i64_or_minus_one(audit_rows.front(), 8)
                 : -1;
-            const std::int64_t persisted_bp = audit_shape_valid
+            const std::int64_t gpu_abi_version = audit_shape_valid
                 ? row_i64_or_minus_one(audit_rows.front(), 9)
                 : -1;
-            const std::int64_t persisted_k = audit_shape_valid
+            const std::int64_t persisted_bp = audit_shape_valid
                 ? row_i64_or_minus_one(audit_rows.front(), 10)
                 : -1;
-            const std::int64_t persisted_w = audit_shape_valid
+            const std::int64_t persisted_k = audit_shape_valid
                 ? row_i64_or_minus_one(audit_rows.front(), 11)
+                : -1;
+            const std::int64_t persisted_w = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 12)
                 : -1;
             if (!audit_shape_valid
                 || indexed_sequences <= 0
@@ -3806,6 +4178,7 @@ template <sequence_alphabet A>
                 || async_persist_disabled != 1
                 || recompute_persist_disabled != 1
                 || generation_id <= 0
+                || observed_sequence_rowno != sequence_rowno
                 || gpu_abi_version != 3
                 || persisted_bp != in.target_bp
                 || persisted_k != in.kmer_size
@@ -3813,12 +4186,15 @@ template <sequence_alphabet A>
                 bioseq_log<ERR>(
                     "[bench_e2e] invalid just_index READY-generation setup "
                     "for table={} index={} indexed_sequences={} generation={} "
-                    "gpu_abi={} persisted_bp={} expected_bp={} k={} w={} "
+                    "sequence_rowno={}/{} gpu_abi={} persisted_bp={} "
+                    "expected_bp={} k={} w={} "
                     "grouped32={} insert_off={} async_off={} recompute_off={}",
                     table,
                     index_name,
                     indexed_sequences,
                     generation_id,
+                    observed_sequence_rowno,
+                    sequence_rowno,
                     gpu_abi_version,
                     persisted_bp,
                     in.target_bp,
@@ -3828,6 +4204,18 @@ template <sequence_alphabet A>
                     insert_maintenance_disabled,
                     async_persist_disabled,
                     recompute_persist_disabled);
+                std::abort();
+            }
+            const bool inserted =
+                in.just_index_sequence_rowno_by_table.emplace(
+                    table, sequence_rowno).second;
+            if (!inserted) {
+                std::fprintf(
+                    stderr,
+                    "[bench_e2e] duplicate captured source row identity for "
+                    "just_index table=%s\n",
+                    table.c_str());
+                std::fflush(stderr);
                 std::abort();
             }
         };
@@ -3974,29 +4362,36 @@ void capture_pre_restart_persisted_identity(
         const it::connection_test_context& connection,
         const std::string& table,
         const std::string_view minimizer_index,
+        const std::int64_t sequence_rowno,
         E2eOutput& out) {
     const auto rows = it::query_rows(
         connection,
         fmt::format(
-            "SELECT generation_id, source_identity, gpu_abi_version "
+            "SELECT generation_id, source_identity, gpu_abi_version, "
+            "sequence_rowno "
             "FROM bioseq.inspect_ready_minimizer_generation("
-            "'{}'::regclass, '{}', 0)",
+            "'{}'::regclass, '{}', {})",
             table,
-            minimizer_index));
-    if (rows.size() != 1 || rows.front().size() != 3
+            minimizer_index,
+            sequence_rowno));
+    if (rows.size() != 1 || rows.front().size() != 4
         || !rows.front()[0].has_value()
         || !rows.front()[1].has_value()
-        || !rows.front()[2].has_value()) {
+        || !rows.front()[2].has_value()
+        || !rows.front()[3].has_value()) {
         abort_pipeline_proof_capture(
             "pre-restart persisted generation identity has an invalid row shape");
     }
     const auto generation = parse_snapshot_i64(rows.front()[0]);
     const auto gpu_abi_version = parse_snapshot_i64(rows.front()[2]);
+    const auto observed_sequence_rowno = parse_snapshot_i64(rows.front()[3]);
     if (!generation.has_value() || *generation == 0
         || !fixed_lower_hex(*rows.front()[1], 16)
         || *rows.front()[1] == "0000000000000000"
         || !gpu_abi_version.has_value()
-        || *gpu_abi_version != 3) {
+        || *gpu_abi_version != 3
+        || !observed_sequence_rowno.has_value()
+        || *observed_sequence_rowno != sequence_rowno) {
         abort_pipeline_proof_capture(
             "pre-restart persisted generation is not production Format-5 ABI3");
     }
@@ -4228,15 +4623,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_scalar_session(
             *in.conn, in.kmer_size, in.window_size);
         capture_pre_restart_persisted_identity(
-            *in.conn, table, minimizer_index, out);
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), out);
         out.just_index_restart_performed =
             restart_postgres_for_cold_just_index(in, out) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         configure_bioseq_scalar_session(
             *in.conn, in.kmer_size, in.window_size);
-        configure_bioseq_minimizer_policy(
-            *in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         load_e2e_query_table(*in.conn, in);
         const std::string sql = batched_coord_sql(table, proj, 2);
@@ -4255,12 +4649,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
             pipeline_proof_expectation(in, true, fair_workers));
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
-        capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out,
             minimizer_index);
@@ -4272,7 +4667,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_simd_session(
             *in.conn, in.kmer_size, in.window_size);
         capture_pre_restart_persisted_identity(
-            *in.conn, table, minimizer_index, out);
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), out);
         // Restart PostgreSQL first so the prebuilt index (built untimed in
         // on_input) is assembled cold from storage rather than served warm.
         out.just_index_restart_performed =
@@ -4280,8 +4676,6 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
-        configure_bioseq_minimizer_policy(
-            *in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         load_e2e_query_table(*in.conn, in);
         const std::string sql = batched_coord_sql(table, proj, 2);
@@ -4297,12 +4691,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
             pipeline_proof_expectation(in, true, fair_workers));
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
-        capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
@@ -4316,7 +4711,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             in.window_size,
             in.cigar_projection);
         capture_pre_restart_persisted_identity(
-            *in.conn, table, minimizer_index, out);
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), out);
         // DOC0310 Phase C resident two-submit Vulkan frontend applied to the
         // just_index e2e path: index is prebuilt (untimed), only the Vulkan-driven
         // alignment is timed. Same Vulkan settings as bench_v10's
@@ -4327,7 +4723,6 @@ void load_e2e_query_table(const it::connection_test_context& c,
             restart_postgres_for_cold_just_index(in, out) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
-        configure_bioseq_minimizer_policy(*in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         configure_bioseq_vulkan_index_session(
             *in.conn,
@@ -4348,12 +4743,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
             pipeline_proof_expectation(in, true, fair_workers));
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
-        capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_ksw2_scalar_dp_scalar_mm_no_index") {
@@ -4703,6 +5099,18 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"observed_simd_policy_exact_visited", o.observed_simd_chaining_policy == "exact_visited" ? 1.0 : 0.0},
         {"observed_simd_policy_bounded_batch_approximate", o.observed_simd_chaining_policy == "bounded_batch_approximate" ? 1.0 : 0.0},
         {"observed_simd_policy_mixed_invalid", o.observed_simd_chaining_policy == "mixed_invalid" ? 1.0 : 0.0},
+        {"requested_simd_alignment_block_aligner", o.requested_simd_alignment_algorithm == "block_aligner" ? 1.0 : 0.0},
+        {"observed_simd_alignment_block_aligner", o.observed_simd_alignment_algorithm == "block_aligner" ? 1.0 : 0.0},
+        {"block_aligner_execution_proof_present", static_cast<double>(o.block_aligner_execution_proof_present)},
+        {"block_aligner_execution_proof_accepted", static_cast<double>(o.block_aligner_execution_proof_accepted)},
+        {"block_aligner_executed_calls", static_cast<double>(o.block_aligner_executed_calls)},
+        {"block_aligner_nonempty_calls", static_cast<double>(o.block_aligner_nonempty_calls)},
+        {"block_aligner_nonempty_calls_with_simd", static_cast<double>(o.block_aligner_nonempty_calls_with_simd)},
+        {"block_aligner_simd_dp_vector_batches", static_cast<double>(o.block_aligner_simd_dp_vector_batches)},
+        {"block_aligner_simd_dp_cells", static_cast<double>(o.block_aligner_simd_dp_cells)},
+        {"block_aligner_forbidden_ksw2_calls", static_cast<double>(o.block_aligner_forbidden_ksw2_calls)},
+        {"block_aligner_forbidden_scalar_biological_fallbacks", static_cast<double>(o.block_aligner_forbidden_scalar_biological_fallbacks)},
+        {"block_aligner_execution_proof_saturated", static_cast<double>(o.block_aligner_execution_proof_saturated)},
         {"nthash_vector_batches", static_cast<double>(o.nthash_vector_batches)},
         {"nthash_resident_vector_stream_kernel_calls", static_cast<double>(o.nthash_resident_vector_stream_kernel_calls)},
         {"simd_chaining_exact_policy_calls", static_cast<double>(o.simd_chaining_exact_policy_calls)},
@@ -4771,6 +5179,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"cold_no_index_pre_restart_gucs_off", static_cast<double>(o.cold_no_index_pre_restart_gucs_off)},
         {"cold_no_index_post_restart_gucs_off", static_cast<double>(o.cold_no_index_post_restart_gucs_off)},
         {"cold_no_index_lifecycle_accepted", static_cast<double>(o.cold_no_index_lifecycle_accepted)},
+        {"persisted_policy_audit_accepted",
+            static_cast<double>(o.persisted_policy_audit_accepted)},
         {"audit_selected_minimizer_is_sequence", static_cast<double>(o.audit_selected_minimizer_is_sequence)},
         {"audit_mpf_rows",          static_cast<double>(o.audit_mpf_rows)},
         {"audit_mps_rows",          static_cast<double>(o.audit_mps_rows)},
@@ -4931,10 +5341,15 @@ void load_e2e_query_table(const it::connection_test_context& c,
         abort_raw_evidence_serialization(
             "no_index sample lacks accepted cold lifecycle evidence");
     }
+    if (postgres_sample && algorithm.ends_with("_just_index")
+        && out.persisted_policy_audit_accepted != 1) {
+        abort_raw_evidence_serialization(
+            "just_index sample lacks accepted post-measure persisted-policy evidence");
+    }
 
     nlohmann::json payload = nlohmann::json::object();
     payload["payload_schema"] = "bioseq.e2e.raw-sample";
-    payload["payload_schema_version"] = 1;
+    payload["payload_schema_version"] = 2;
     payload["index_and_map_ns"] = out.measured_region_ns;
     payload["cache_policy"] = "process-cold-os-cache-unspecified";
     payload["benchmark_shape"] = nlohmann::json{
@@ -4980,6 +5395,66 @@ void load_e2e_query_table(const it::connection_test_context& c,
         const std::string expected_source = just_index
             ? out.pre_restart_persisted_source_identity
             : std::string{"0000000000000000"};
+        const std::string& restart_before_start = just_index
+            ? out.pre_restart_postmaster_start_time
+            : out.cold_no_index_pre_restart_postmaster_start_time;
+        const std::string& restart_after_start = just_index
+            ? out.post_restart_postmaster_start_time
+            : out.cold_no_index_post_restart_postmaster_start_time;
+        const std::int64_t restart_before_pid = just_index
+            ? out.pre_restart_backend_pid
+            : out.cold_no_index_pre_restart_backend_pid;
+        const std::int64_t restart_after_pid = just_index
+            ? out.post_restart_backend_pid
+            : out.cold_no_index_post_restart_backend_pid;
+        const std::int64_t restart_before_database_oid = just_index
+            ? out.pre_restart_database_oid
+            : out.cold_no_index_pre_restart_database_oid;
+        const std::int64_t restart_after_database_oid = just_index
+            ? out.post_restart_database_oid
+            : out.cold_no_index_post_restart_database_oid;
+        const nlohmann::json restart_identity = nlohmann::json{
+            {"before", nlohmann::json{
+                {"postmaster_start", restart_before_start},
+                {"backend_pid", restart_before_pid},
+                {"database_oid", restart_before_database_oid},
+            }},
+            {"after", nlohmann::json{
+                {"postmaster_start", restart_after_start},
+                {"backend_pid", restart_after_pid},
+                {"database_oid", restart_after_database_oid},
+            }},
+            {"timed_statement", nlohmann::json{
+                {"postmaster_start", out.timed_postmaster_start_time},
+                {"backend_pid", out.alignment_backend_pid},
+                {"database_oid", out.alignment_database_oid},
+            }},
+        };
+        const nlohmann::json persisted_policy = just_index
+            ? nlohmann::json{
+                {"accepted", out.persisted_policy_audit_accepted},
+                {"captured_after_timed_statement", true},
+                {"selected_index",
+                    out.audit_selected_minimizer_is_sequence == 1
+                        ? "minimizers_per_sequence"
+                        : "minimizers_per_fragment"},
+                {"selected_minimizer_is_sequence",
+                    out.audit_selected_minimizer_is_sequence},
+                {"minimizers_per_fragment", nlohmann::json{
+                    {"rows", out.audit_mpf_rows},
+                    {"update_on_insert", out.audit_mpf_update_on_insert},
+                    {"active_read", out.audit_mpf_active_read},
+                }},
+                {"minimizers_per_sequence", nlohmann::json{
+                    {"rows", out.audit_mps_rows},
+                    {"update_on_insert", out.audit_mps_update_on_insert},
+                    {"active_read", out.audit_mps_active_read},
+                }},
+                {"async_persist_jobs_waiting",
+                    out.audit_async_persist_jobs_waiting},
+                {"index_rows_wait_attempts", out.audit_index_rows_wait_attempts},
+            }
+            : nlohmann::json{nullptr};
         payload["postgres"] = nlohmann::json{
             {"postmaster_start", out.timed_postmaster_start_time},
             {"backend_pid", out.alignment_backend_pid},
@@ -4990,6 +5465,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             {"expected_source_identity", expected_source},
             {"actual_generation", out.persisted_generation_id},
             {"actual_source_identity", out.persisted_source_identity},
+            {"restart_identity", restart_identity},
+            {"persisted_policy", persisted_policy},
             {"persisted_format", just_index
                 ? nlohmann::json{
                     {"ready_generation_gpu_abi_version",
@@ -5077,9 +5554,29 @@ void load_e2e_query_table(const it::connection_test_context& c,
             out.requested_simd_chaining_policy},
         {"observed_simd_chaining_policy",
             out.observed_simd_chaining_policy},
+        {"requested_simd_alignment_algorithm",
+            out.requested_simd_alignment_algorithm},
+        {"observed_simd_alignment_algorithm",
+            out.observed_simd_alignment_algorithm},
         {"nthash_vector_activity",
             out.nthash_vector_batches > 0
                 || out.nthash_resident_vector_stream_kernel_calls > 0},
+        {"block_aligner_execution_proof", nlohmann::json{
+            {"present", out.block_aligner_execution_proof_present},
+            {"accepted", out.block_aligner_execution_proof_accepted},
+            {"executed_calls", out.block_aligner_executed_calls},
+            {"nonempty_calls", out.block_aligner_nonempty_calls},
+            {"nonempty_calls_with_simd",
+                out.block_aligner_nonempty_calls_with_simd},
+            {"simd_dp_vector_batches",
+                out.block_aligner_simd_dp_vector_batches},
+            {"simd_dp_cells", out.block_aligner_simd_dp_cells},
+            {"forbidden_ksw2_calls",
+                out.block_aligner_forbidden_ksw2_calls},
+            {"forbidden_scalar_biological_fallbacks",
+                out.block_aligner_forbidden_scalar_biological_fallbacks},
+            {"saturated", out.block_aligner_execution_proof_saturated},
+        }},
         {"backend_declines", out.backend_declines},
         {"backend_fallbacks", out.backend_fallbacks},
         {"stats_saturated", out.stats_saturated},

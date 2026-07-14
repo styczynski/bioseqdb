@@ -240,6 +240,7 @@ using bioseq::pipeline_stats::OptionalProofBool;
 using bioseq::pipeline_stats::PipelineCachePolicy;
 using bioseq::pipeline_stats::PipelineJobExecutionStats;
 using bioseq::pipeline_stats::PipelineStage;
+using bioseq::pipeline_stats::SimdAlignmentAlgorithmIdentity;
 using bioseq::pipeline_stats::SimdChainingPolicyIdentity;
 using bioseq::pipeline_stats::TargetIndexSource;
 
@@ -278,6 +279,10 @@ using bioseq::pipeline_stats::TargetIndexSource;
             SimdChainingPolicyIdentity::bounded_batch_approximate;
         job.observed_simd_chaining_policy =
             SimdChainingPolicyIdentity::bounded_batch_approximate;
+        job.requested_simd_alignment_algorithm =
+            SimdAlignmentAlgorithmIdentity::block_aligner;
+        job.observed_simd_alignment_algorithm =
+            SimdAlignmentAlgorithmIdentity::block_aligner;
     }
     job.requested_target_index_source = source;
     job.actual_target_index_source = source;
@@ -472,6 +477,14 @@ TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
                 SimdChainingPolicyIdentity::exact_visited,
                 SimdChainingPolicyIdentity::bounded_batch_approximate)
             == SimdChainingPolicyIdentity::mixed_invalid);
+    REQUIRE(merge_simd_alignment_algorithm_identity(
+                SimdAlignmentAlgorithmIdentity::none,
+                SimdAlignmentAlgorithmIdentity::block_aligner)
+            == SimdAlignmentAlgorithmIdentity::block_aligner);
+    REQUIRE(merge_simd_alignment_algorithm_identity(
+                SimdAlignmentAlgorithmIdentity::block_aligner,
+                SimdAlignmentAlgorithmIdentity::mixed_invalid)
+            == SimdAlignmentAlgorithmIdentity::mixed_invalid);
 
     ExecutionEnvironmentProof merged{};
     const ExecutionEnvironmentProof cpu = make_cpu_environment(3);
@@ -500,6 +513,11 @@ TEST_CASE("DOC0372 pipeline stats retain policy identity and distinct vector act
         SimdChainingPolicyIdentity::exact_visited;
     REQUIRE_FALSE(validate_job_execution_stats(mismatched));
 
+    auto missing_block_identity = bounded;
+    missing_block_identity.observed_simd_alignment_algorithm =
+        SimdAlignmentAlgorithmIdentity::none;
+    REQUIRE_FALSE(validate_job_execution_stats(missing_block_identity));
+
     auto scalar_with_leaked_policy = make_attested_job(
         ExecutedBackend::scalar_cpu, TargetIndexSource::recomputed);
     scalar_with_leaked_policy.requested_simd_chaining_policy =
@@ -515,6 +533,10 @@ TEST_CASE("DOC0372 pipeline stats retain policy identity and distinct vector act
             == SimdChainingPolicyIdentity::bounded_batch_approximate);
     REQUIRE(aggregate.observed_simd_chaining_policy
             == SimdChainingPolicyIdentity::bounded_batch_approximate);
+    REQUIRE(aggregate.requested_simd_alignment_algorithm
+            == SimdAlignmentAlgorithmIdentity::block_aligner);
+    REQUIRE(aggregate.observed_simd_alignment_algorithm
+            == SimdAlignmentAlgorithmIdentity::block_aligner);
 
     auto exact = bounded;
     exact.logical_target_row = 1;
@@ -568,6 +590,40 @@ TEST_CASE("DOC0372 pipeline stats retain policy identity and distinct vector act
     resident_only.nthash_resident_vector_stream_kernel_calls = 1;
     REQUIRE(resident_only.has_nthash_vector_activity());
     REQUIRE(resident_only.nthash_vector_batches == 0);
+
+    BlockAlignerExecutionEvidence first_block{};
+    first_block.present = true;
+    first_block.accepted = true;
+    first_block.executed_calls = 2;
+    first_block.nonempty_calls = 2;
+    first_block.nonempty_calls_with_simd = 2;
+    first_block.simd_dp_vector_batches = 9;
+    first_block.simd_dp_cells = 144;
+    BlockAlignerExecutionEvidence second_block = first_block;
+    second_block.executed_calls = 1;
+    second_block.nonempty_calls = 1;
+    second_block.nonempty_calls_with_simd = 1;
+    second_block.simd_dp_vector_batches = 4;
+    second_block.simd_dp_cells = 64;
+    REQUIRE_FALSE(first_block.merge(second_block));
+    REQUIRE(first_block.present);
+    REQUIRE(first_block.accepted);
+    REQUIRE(first_block.executed_calls == 3);
+    REQUIRE(first_block.nonempty_calls == 3);
+    REQUIRE(first_block.nonempty_calls_with_simd == 3);
+    REQUIRE(first_block.simd_dp_vector_batches == 13);
+    REQUIRE(first_block.simd_dp_cells == 208);
+    REQUIRE(first_block.forbidden_ksw2_calls == 0);
+    REQUIRE(first_block.forbidden_scalar_biological_fallbacks == 0);
+    REQUIRE_FALSE(first_block.saturated);
+
+    BlockAlignerExecutionEvidence forbidden_block{};
+    forbidden_block.present = true;
+    forbidden_block.accepted = false;
+    forbidden_block.forbidden_ksw2_calls = 1;
+    REQUIRE_FALSE(first_block.merge(forbidden_block));
+    REQUIRE_FALSE(first_block.accepted);
+    REQUIRE(first_block.forbidden_ksw2_calls == 1);
 
     for (const bool saturated_policy : {false, true}) {
         PipelineExecutionStats rejected{};

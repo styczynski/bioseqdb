@@ -1365,6 +1365,7 @@ TEST_CASE("DOC0371 generation clear savepoint restores relation head and exact a
           "[index_admin][doc0371][generation-clear][savepoint][rollback]") {
     constexpr std::string_view table = "doc0371_generation_clear_rollback";
     auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
         table);
@@ -1461,11 +1462,10 @@ TEST_CASE("DOC0371 generation clear savepoint restores relation head and exact a
         "WHERE user_relid='{}'::regclass "
         "ORDER BY main_relfilenode, column_attno, index_name;",
         table));
-    // INSERT populated the default symbol_counts age row. The three explicit
-    // upserts above update the existing MPF row and add MPS plus the hostile
-    // adjacent-attno MPF row, leaving four exact rows whose rollback image must
-    // be preserved byte-for-byte below.
-    REQUIRE(age_before.size() == 4);
+    // The three explicit rows cover the exact MPF age plus MPS and the hostile
+    // adjacent-attno MPF collateral. Their rollback image must be preserved
+    // byte-for-byte below.
+    REQUIRE(age_before.size() == 3);
 
     const auto cleared = query_one(ctx, fmt::format(
         "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
@@ -1514,6 +1514,7 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
           "[index_admin][doc0371][generation-clear][commit][sinval][idempotent]") {
     constexpr std::string_view table = "doc0371_generation_clear_commit";
     auto setup = fresh_context({table});
+    exec_sql(setup, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(setup,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
         table);
@@ -1609,9 +1610,8 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
         "AND NOT attisdropped)) "
         "ORDER BY main_relfilenode, column_attno, index_name;",
         table, table));
-    // The default symbol_counts row is collateral too, alongside the exact
-    // MPS row and the hostile adjacent-attno MPF row inserted above.
-    REQUIRE(collateral_age_before.size() == 3);
+    // The exact MPS row and hostile adjacent-attno MPF row are collateral.
+    REQUIRE(collateral_age_before.size() == 2);
 
     connection_test_context session_a;
     connection_test_context session_b;
@@ -1716,7 +1716,7 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
         "FROM bioseq_internal.metadata_age_log m "
         "WHERE m.user_relid='{}'::regclass "
         "ORDER BY main_relfilenode, column_attno, index_name;",
-        table)).size() == 3); // symbol_counts + exact-attno MPS + adjacent-attno MPF
+        table)).size() == 2); // exact-attno MPS + adjacent-attno MPF
     exec_sqlf(session_b,
         "DROP TABLE bioseq_internal.{};", commit_lookalike);
     REQUIRE(query_scalar_int(session_b, "SELECT 1;") == 1);
@@ -1726,6 +1726,7 @@ TEST_CASE("DOC0371 MPF coordinator executes real scalar and SIMD PostgreSQL scan
           "[index_admin][doc0371][rev4][coordinator][scalar][simd][route-proof]") {
     constexpr std::string_view table = "doc0371_ready_mpf_coordinator";
     auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
         table);
@@ -1866,6 +1867,7 @@ TEST_CASE("DOC0371 PostgreSQL full-generation reader rejects same-scheme produce
 	constexpr std::string_view table =
 		"doc0371_ready_same_scheme_producer_negative";
 	auto ctx = fresh_context({table});
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 	exec_sqlf(ctx,
 		"CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
 		table);
@@ -1886,7 +1888,7 @@ TEST_CASE("DOC0371 PostgreSQL full-generation reader rejects same-scheme produce
 			"SELECT * FROM "
 			"bioseq_internal.rev3_test_read_full_generation_fixture("
 			"'{}'::regclass, 'minimizers_per_fragment', {}, "
-			"15::smallint, 10::smallint, 4::smallint, '{}');",
+			"15::smallint, 10::smallint, 5::smallint, '{}');",
 			table, rowno, backend);
 	};
 	const auto expect_producer_rejection = [&](std::string_view backend) {
@@ -1915,6 +1917,7 @@ TEST_CASE("DOC0371 MPS coordinator publishes proof-bound PostgreSQL spill genera
           "[index_admin][doc0371][rev4][coordinator][mps][spill][route-proof]") {
     constexpr std::string_view table = "doc0371_ready_mps_coordinator";
     auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
         table);
@@ -2009,7 +2012,10 @@ TEST_CASE("DOC0371 MPS coordinator publishes proof-bound PostgreSQL spill genera
 
         REQUIRE(replay_scans == replay_reroutes + 3);
         REQUIRE(std::stoll(observed[54].value()) == replay_scans);
-        REQUIRE(observed[56].value() == "2");
+        // Format-5 replays the immutable PostgreSQL spill three times: once
+        // for planning, once for control emission, and once for position
+        // emission. All three scans must complete over the same payload.
+        REQUIRE(observed[56].value() == "3");
         REQUIRE(std::stoll(observed[57].value()) == replay_reroutes);
         REQUIRE(observed[58] == observed[57]);
         REQUIRE(observed[59].value() == "0");
@@ -2108,6 +2114,7 @@ TEST_CASE("DOC0371 bridged PostgreSQL build and publication leaves preserve READ
           "[index_admin][doc0371][rev4][coordinator][mps][pg-error][recovery]") {
     constexpr std::string_view table = "doc0371_ready_mps_pg_recovery";
     auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
         table);

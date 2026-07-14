@@ -256,6 +256,7 @@
         "peak_swap_used_mb":      { "type": "evaluation", "rules": [] },
         "just_index_restart_performed": { "type": "evaluation", "rules": [] },
         "just_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
+        "persisted_policy_audit_accepted": { "type": "evaluation", "rules": [] },
         "cold_no_index_restart_performed": { "type": "evaluation", "rules": [] },
         "cold_no_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
         "cold_no_index_pre_restart_target_rows": { "type": "evaluation", "rules": [] },
@@ -726,6 +727,10 @@
           "rules": []
         },
         "just_index_restart_identity_changed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_policy_audit_accepted": {
           "type": "evaluation",
           "rules": []
         },

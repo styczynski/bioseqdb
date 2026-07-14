@@ -576,6 +576,44 @@ observed_simd_chaining_policy_identity(
                  : Identity::bounded_batch_approximate;
 }
 
+[[nodiscard]] inline ::bioseq::pipeline_stats::SimdAlignmentAlgorithmIdentity
+requested_simd_alignment_algorithm_identity(
+        const Minimap2Params& params) noexcept {
+    using Identity =
+        ::bioseq::pipeline_stats::SimdAlignmentAlgorithmIdentity;
+    return backend_from_selected_params(params)
+            == ::bioseq::pipeline_stats::ExecutedBackend::simd_cpu
+        ? Identity::block_aligner
+        : Identity::none;
+}
+
+[[nodiscard]] inline ::bioseq::pipeline_stats::SimdAlignmentAlgorithmIdentity
+observed_simd_alignment_algorithm_identity(
+        const MatchResultCollection* execution_proof) noexcept {
+    using Identity =
+        ::bioseq::pipeline_stats::SimdAlignmentAlgorithmIdentity;
+    if (execution_proof == nullptr) return Identity::none;
+
+    const bool block_present =
+        execution_proof->block_aligner_execution_proof_present;
+    const auto& block = execution_proof->block_aligner_execution_proof;
+    const auto& scalar = execution_proof->scalar_pipeline_execution_proof;
+    const bool scalar_alignment_observed =
+        execution_proof->scalar_pipeline_execution_proof_present
+        && (scalar.ksw2_left_calls != 0
+            || scalar.ksw2_gap_calls != 0
+            || scalar.ksw2_right_calls != 0);
+    const bool forbidden_alignment_observed = scalar_alignment_observed
+        || execution_proof->ksw2_batched_execution_proof_present
+        || (block_present
+            && (block.forbidden_ksw2_calls != 0
+                || block.forbidden_scalar_biological_fallbacks != 0));
+    if (block_present && forbidden_alignment_observed) {
+        return Identity::mixed_invalid;
+    }
+    return block_present ? Identity::block_aligner : Identity::none;
+}
+
 inline void add_operational_counter(
         ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         std::uint64_t& destination,
@@ -592,6 +630,31 @@ inline void add_stage_host_time(
     auto& destination = stats.operational.timing[
         ::bioseq::pipeline_stats::stage_index(stage)].host_wall_ns;
     add_operational_counter(stats, destination, elapsed_ns);
+}
+
+inline void record_block_aligner_execution_evidence(
+        ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
+        const MatchResultCollection* execution_proof) noexcept {
+    if (execution_proof == nullptr
+        || !execution_proof->block_aligner_execution_proof_present) {
+        return;
+    }
+    const auto& proof = execution_proof->block_aligner_execution_proof;
+    ::bioseq::pipeline_stats::BlockAlignerExecutionEvidence evidence{};
+    evidence.present = true;
+    evidence.accepted = proof.accepted();
+    evidence.executed_calls = proof.executed_calls();
+    evidence.nonempty_calls = proof.nonempty_calls;
+    evidence.nonempty_calls_with_simd = proof.nonempty_calls_with_simd;
+    evidence.simd_dp_vector_batches = proof.simd_dp_vector_batches;
+    evidence.simd_dp_cells = proof.simd_dp_cells;
+    evidence.forbidden_ksw2_calls = proof.forbidden_ksw2_calls;
+    evidence.forbidden_scalar_biological_fallbacks =
+        proof.forbidden_scalar_biological_fallbacks;
+    evidence.saturated = proof.saturated;
+    stats.operational.stats_saturated =
+        stats.operational.block_aligner_execution_evidence.merge(evidence)
+        || stats.operational.stats_saturated;
 }
 
 inline void record_unattested_job(
@@ -612,6 +675,10 @@ inline void record_unattested_job(
         requested_simd_chaining_policy_identity(params);
     job.observed_simd_chaining_policy =
         observed_simd_chaining_policy_identity(execution_proof);
+    job.requested_simd_alignment_algorithm =
+        requested_simd_alignment_algorithm_identity(params);
+    job.observed_simd_alignment_algorithm =
+        observed_simd_alignment_algorithm_identity(execution_proof);
     const bool selected_all_simd =
         job.requested_backend
             == ::bioseq::pipeline_stats::ExecutedBackend::simd_cpu;
@@ -665,6 +732,7 @@ inline void record_unattested_job(
             stats.operational.simd_chaining_policy_evidence_saturated
             || policy.saturated;
     }
+    record_block_aligner_execution_evidence(stats, execution_proof);
     const auto record_exact_nthash_vector_activity = [&stats](
             const auto& proof) noexcept {
         // Continuation batches and whole-range resident vector_stream calls
@@ -4082,15 +4150,24 @@ template <class S>
 					"index_read_requirement=require_absent contract violation",
 					"typed processor received read_index_active=true");
             }
+			const bool selected_vulkan =
+				selected_vulkan_execution(dispatch_params);
+			const bool cpu_persisted_prepared = scanner_pg_ctx != nullptr
+				&& scanner_pg_ctx->cpu_prepared_target != nullptr
+				&& scanner_pg_ctx->gpu_prepared_shape_v5_target == nullptr;
+			const bool gpu_persisted_prepared = scanner_pg_ctx != nullptr
+				&& scanner_pg_ctx->cpu_prepared_target == nullptr
+				&& scanner_pg_ctx->gpu_prepared_shape_v5_target != nullptr
+				&& scanner_pg_ctx->gpu_prepared_shape_v5_target->ready();
             if (persisted_required
-				&& (scanner_pg_ctx == nullptr
-					|| scanner_pg_ctx->cpu_prepared_target == nullptr
-					|| selected_vulkan_execution(dispatch_params))) {
+				&& (selected_vulkan
+					? !gpu_persisted_prepared : !cpu_persisted_prepared)) {
                 raise_required_persisted_index_error(
                     scanner_pg_ctx,
                     -1,
-					"ordinal 2 requires a retained CPU grouped32 prepared target; "
-					"GPU and non-prepared dispatch remain fail closed");
+					selected_vulkan
+						? "ordinal 2 GPU execution requires one retained authenticated Format-5/ABI3 target and forbids a CPU prepared target"
+						: "ordinal 2 CPU execution requires one retained native persisted reader and forbids a GPU prepared target");
             }
 			bioseq_log<DBG>("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={} per_row_query={} use_scanner_pg={} chunked={} inmemory_forced={} active_index={} active_index_policy_source={}",
                     static_cast<unsigned>(alphabet_code),
@@ -4174,6 +4251,19 @@ template <class S>
                     raise_vulkan_pg_error(
                         "Vulkan batched resident coordinate", err.what());
                 }
+				if (gpu_persisted_prepared
+					&& (dispatch_params.do_cigar
+						|| !pipe::phase_c_coordinate_only_active(
+							dispatch_params))) {
+					raise_typed_dispatch_pg_error_as_cpp(
+						ERRCODE_FEATURE_NOT_SUPPORTED,
+						"persisted GPU Format-5 execution does not yet support CIGAR projection",
+						"the direct path can execute query sketching, persisted Shape lookup, "
+						"GPU chaining, backtracking, and coordinate projection, but no genuine "
+						"GPU target-window reader is wired for alignment extension",
+						"Use coordinate-only projection; CPU target hydration or SIMD/CPU "
+						"alignment fallback is intentionally forbidden.");
+				}
 
                 using MinimizerT = MinimapSketchData;
                 struct GpuBatchQuerySidecar {
@@ -4283,6 +4373,233 @@ template <class S>
                         stats,
                         ::bioseq::pipeline_stats::PipelineStage::query_sketch,
                         gpu_batch_now_ns() - gpu_query_sketch_begin_ns);
+
+					/* A restart-cold persisted GPU target arrives here as three
+					 * authenticated PostgreSQL-owned Format-5 buffers.  Consume that
+					 * representation directly: do not materialize the target sequence,
+					 * fingerprint it, rebuild a legacy slot table, or read target symbols
+					 * on the host. */
+					auto* const prepared_gpu_target = scanner_pg_ctx != nullptr
+						? scanner_pg_ctx->gpu_prepared_shape_v5_target : nullptr;
+					if (prepared_gpu_target != nullptr) {
+						if (!gpu_persisted_prepared
+							|| !prepared_gpu_target->ready()
+							|| prepared_gpu_target->resident == nullptr
+							|| query_records.size() != query_sidecars.size()
+							|| prepared_gpu_target->target_bp_size
+								> static_cast<std::uint64_t>(
+									(std::numeric_limits<sequence_size_t>::max)())) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 prepared-target identity is invalid");
+						}
+						const auto requested_source =
+							requested_target_index_source(scanner_pg_ctx);
+						if (requested_source
+								!= ::bioseq::pipeline_stats::TargetIndexSource::persisted
+							|| dispatch_params.max_occ < 0
+							|| static_cast<std::uint64_t>(dispatch_params.max_occ)
+								> prepared_gpu_target->resident_view.max_occ_cap) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 source or max_occ contract is invalid");
+						}
+
+						std::vector<bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>
+							direct_jobs;
+						std::vector<std::size_t> direct_job_rows;
+						direct_jobs.reserve(query_sidecars.size());
+						direct_job_rows.reserve(query_sidecars.size());
+						for (const GpuBatchQuerySidecar& query : query_sidecars) {
+							const std::size_t row = query.row_index;
+							const std::uint32_t query_index =
+								row_to_query_index[row];
+							if (query_index
+									== std::numeric_limits<std::uint32_t>::max()
+								|| query_index >= query_records.size()
+								|| scanner_pg_ctx->target_rownos[row]
+									!= prepared_gpu_target->target_rowno) {
+								throw bioseq::gpu::vulkan::VulkanRuntimeError(
+									"persisted GPU Format-5 query/target row identity is inconsistent");
+							}
+							direct_jobs.push_back(
+								bioseq::gpu::vulkan::PhaseCSeedCoordinateJob{
+									.slots = nullptr,
+									.positions = nullptr,
+									.target_len =
+										prepared_gpu_target->target_bp_size,
+									.slot_mask = 0u,
+									.position_count = 0u,
+									.bucket_count = 0u,
+									.target_position_offset = 0u,
+									.query_index = query_index,
+									.shape_v5 =
+										&prepared_gpu_target->resident_view,
+								});
+							direct_job_rows.push_back(row);
+						}
+						if (direct_jobs.empty()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 batch has no admissible GPU query job");
+						}
+						if (query_minimizer_device_span.count()
+								> static_cast<std::uint64_t>(
+									(std::numeric_limits<std::uint32_t>::max)())) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 query minimizer count exceeds ABI");
+						}
+
+						bioseq::gpu::vulkan::PhaseCSeedQueryInputs query_inputs{
+							.host_minimizer_bytes = {},
+							.device_minimizer_words =
+								query_minimizer_device_span.words(),
+							.minimizer_count = static_cast<std::uint32_t>(
+								query_minimizer_device_span.count()),
+							.minimizer_word_kind = static_cast<std::uint32_t>(
+								bioseq::gpu::vulkan::minimizer_wire_traits<
+									MinimizerT>::word_kind),
+							.minimizer_words32_per_record =
+								bioseq::gpu::vulkan::minimizer_wire_traits<
+									MinimizerT>::words32_per_minimizer,
+							.hash_shift = bioseq::gpu::vulkan::minimizer_wire_traits<
+								MinimizerT>::hash_shift,
+							.pos_bits = bioseq::gpu::vulkan::minimizer_wire_traits<
+								MinimizerT>::pos_bits,
+							.host_query_records = std::span<const
+								bioseq::gpu::vulkan::PhaseCSeedQueryRecordWire>{
+								query_records.data(), query_records.size()},
+							.device_query_records = nullptr,
+						};
+						auto cp = dispatch_params.to_chaining_params();
+						const std::int32_t max_dist_x =
+							std::max(cp.max_gap, cp.bandwidth);
+						const std::int32_t max_dist_y =
+							std::max(cp.max_gap, cp.bandwidth);
+						const auto chain_key =
+							bioseq::chaining::choose_vulkan_chaining_pipeline(
+								runtime.features());
+						const auto coord_run = runtime.
+							run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
+								query_inputs,
+								std::span<const bioseq::gpu::vulkan::
+									PhaseCSeedCoordinateJob>{
+									direct_jobs.data(), direct_jobs.size()},
+								static_cast<std::uint32_t>(
+									dispatch_params.kmer_size),
+								dispatch_params.max_occ,
+								bioseq::gpu::vulkan::
+									PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp,
+								chain_key,
+								max_dist_x,
+								max_dist_y,
+								cp.bandwidth,
+								std::min<std::int32_t>(cp.max_chain_iter, 3000),
+								cp.gap_penalty,
+								cp.skip_penalty,
+								cp.max_chain_skip,
+								cp.min_chain_score,
+								cp.min_seed_count,
+								16u);
+
+						const auto& direct = coord_run.shape_v5_direct;
+						const bool direct_proof_valid = direct.selected
+							&& direct.direct_count_scan_emit_completed
+							&& direct.problem_count == direct_jobs.size()
+							&& coord_run.stats.problem_count == direct_jobs.size()
+							&& coord_run.results.size() == direct_jobs.size()
+							&& direct.generation_id
+								== prepared_gpu_target->resident_view.generation_id
+							&& direct.source_identity
+								== prepared_gpu_target->resident_view.source_identity
+							&& direct.cold_load_identity
+								== prepared_gpu_target->resident_view.cold_load_identity
+							&& direct.count_dispatches
+								== coord_run.stats.seed_count_dispatches
+							&& direct.emit_dispatches
+								== coord_run.stats.seed_emit_dispatches
+							&& direct.count_status_checks == direct.count_dispatches
+							&& direct.emit_status_checks == direct.emit_dispatches
+							&& direct.status_or == 0u
+							&& direct.cpu_or_simd_fallbacks == 0u
+							&& coord_run.stats.coordinate_vote_dispatches == 0u;
+						if (!direct_proof_valid) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 direct-route proof is incomplete or inconsistent");
+						}
+
+						add_operational_counter(
+							stats,
+							stats.operational.gpu_seed_dispatches,
+							coord_run.stats.seed_count_dispatches
+								+ coord_run.stats.seed_emit_dispatches);
+						add_operational_counter(
+							stats,
+							stats.operational.gpu_chain_dispatches,
+							coord_run.stats.chain_dispatches);
+						add_operational_counter(
+							stats,
+							stats.operational.gpu_chain_backtrack_dispatches,
+							coord_run.stats.chain_backtrack_dispatches);
+						const std::uint64_t resident_cache_hits =
+							static_cast<std::uint64_t>(direct_jobs.size())
+							- (prepared_gpu_target->dispatch_waves == 0u ? 1u : 0u);
+						add_operational_counter(
+							stats,
+							stats.operational.gpu_persisted_resident_cache_hits,
+							resident_cache_hits);
+
+						for (std::size_t problem_index = 0;
+							 problem_index < direct_jobs.size();
+							 ++problem_index) {
+							const std::size_t row = direct_job_rows[problem_index];
+							scanner_pg_ctx->target_index_sources[row] =
+								::bioseq::pipeline_stats::TargetIndexSource::persisted;
+							scanner_pg_ctx->persisted_generation_ids[row] =
+								prepared_gpu_target->resident_view.generation_id;
+							scanner_pg_ctx->persisted_source_identities[row] =
+								prepared_gpu_target->resident_view.source_identity;
+							const auto& coord = coord_run.results[problem_index];
+							if (coord.valid != 0u) {
+								const std::uint32_t query_index =
+									direct_jobs[problem_index].query_index;
+								results[query_ids[row]].push_back(
+									pipe::phase_c_coordinate_to_match_result(
+										coord,
+										query_sidecars[query_index].query_len,
+										static_cast<sequence_size_t>(
+											prepared_gpu_target->target_bp_size)));
+							}
+							record_unattested_job(
+								stats,
+								dispatch_params,
+								requested_source,
+								::bioseq::pipeline_stats::TargetIndexSource::persisted,
+								scanner_pg_ctx,
+								row,
+								per_row_query_mode,
+								broadcast_query_ordinal,
+								/*execution_proof=*/nullptr,
+								/*consumed_shared_cached_query_proof=*/false,
+								cached_query_minimizer_proof_operation_accounted);
+						}
+						if (record_target_operational_outcomes) {
+							record_target_row(stats);
+							record_target_index_outcome(
+								stats,
+								requested_source,
+								::bioseq::pipeline_stats::TargetIndexSource::persisted);
+						}
+						if (prepared_gpu_target->dispatched_query_count
+								> (std::numeric_limits<std::uint64_t>::max)()
+									- direct_jobs.size()
+							|| prepared_gpu_target->dispatch_waves
+								== (std::numeric_limits<std::uint64_t>::max)()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 lifecycle counters overflow");
+						}
+						prepared_gpu_target->dispatched_query_count +=
+							direct_jobs.size();
+						++prepared_gpu_target->dispatch_waves;
+						return results;
+					}
 
                     std::vector<GpuBatchTargetSidecar> targets;
                     std::vector<std::uint32_t> row_to_target_index(

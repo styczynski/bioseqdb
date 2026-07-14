@@ -159,6 +159,61 @@ inline void merge_cold_index_preparation_stats(
     destination.merge(delta);
 }
 
+/// Publish one authenticated generation-session read exactly once.  GPU and
+/// CPU prepared targets use the same PostgreSQL reader, so their physical I/O
+/// proof must be mapped identically instead of being inferred from backend
+/// selection labels.
+inline void merge_generation_read_stats(
+		::bioseq::pipeline_stats::PipelineOperationalStats& destination,
+		const bioseq::storage::indexing::MinimizerGenerationReadStats& source)
+		noexcept {
+	::bioseq::pipeline_stats::PipelineOperationalStats delta{};
+	delta.persisted_generation_read_sessions = 1;
+	delta.persisted_relation_opens = source.relation_opens;
+	delta.persisted_index_scans = source.index_scans;
+	delta.persisted_head_scans = source.head_scans;
+	delta.persisted_head_rows_read = source.head_rows_read;
+	delta.persisted_head_bytes_read = source.head_bytes_read;
+	delta.persisted_manifest_directory_scans =
+		source.manifest_directory_scans;
+	delta.persisted_manifest_rows_read = source.manifest_rows_read;
+	delta.persisted_manifest_bytes_read = source.manifest_bytes_read;
+	delta.persisted_directory_chunks_read = source.directory_chunks_read;
+	delta.persisted_directory_bytes_read = source.directory_bytes_read;
+	delta.persisted_metadata_repeated_reads = source.metadata_repeated_reads;
+	delta.persisted_metadata_heap_rows_read = source.metadata_heap_rows_read;
+	delta.persisted_metadata_bytes_read = source.metadata_bytes_read;
+	delta.persisted_payload_heap_rows_read = source.payload_heap_rows_read;
+	delta.persisted_payload_bytes_read = source.payload_bytes_read;
+	delta.persisted_heap_rows_read = source.total_heap_rows_read;
+	delta.persisted_toast_values_read = source.toast_values_read;
+	delta.persisted_detoast_bytes = source.detoast_bytes;
+	delta.persisted_explicit_copy_bytes = source.explicit_copy_bytes;
+	delta.persisted_wanted_subkeys = source.payload.wanted_subkeys;
+	delta.persisted_read_subkeys = source.payload.read_subkeys;
+	delta.persisted_wanted_extents = source.payload.wanted_extents;
+	delta.persisted_wanted_chunks = source.payload.wanted_chunks;
+	delta.persisted_skipped_rows = source.payload.skipped_rows;
+	delta.persisted_repeated_chunk_reads = source.payload.repeated_chunk_reads;
+	delta.persisted_extents_read = source.payload.read_extents;
+	delta.persisted_chunks_read = source.payload.delivered_chunks;
+	delta.persisted_bytes_read = source.payload.delivered_bytes;
+	delta.persisted_bulk_read_calls = source.bulk_read_calls;
+	delta.persisted_planned_request_groups = source.planned_request_groups;
+	delta.persisted_executed_request_groups = source.executed_request_groups;
+	delta.persisted_range_scan_calls = source.range_scan_calls;
+	delta.persisted_skip_budget_rows = source.payload.skip_budget_rows;
+	delta.persisted_source_parent_rows_read = source.source_parent_rows_read;
+	delta.persisted_source_catalog_rows_read = source.source_catalog_rows_read;
+	delta.persisted_source_catalog_index_scans =
+		source.source_catalog_index_scans;
+	delta.persisted_source_fragment_rows_read =
+		source.source_fragment_rows_read;
+	delta.persisted_source_decoded_bp = source.source_decoded_bp;
+	destination.merge(delta);
+	merge_cold_index_preparation_stats(destination, source.cold);
+}
+
 inline void install_active_read_policy_dispatch_proof(
 		::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext& context,
 		bioseq::storage::indexing::ActiveReadPolicyResolution resolution,
@@ -751,6 +806,8 @@ private:
 		join_cold_policy_stats{};
 	::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget
 		join_cpu_prepared_target{};
+	::bioseq::simd::HWY_NAMESPACE::BatchProcessor::GpuPreparedShapeV5Target
+		join_gpu_prepared_shape_v5_target{};
     std::array<const pgseq_t*, kDispatchBatchCapacity> join_target_hdrs{};
     std::array<const pgseq_t*, kDispatchBatchCapacity> join_query_hdrs{};
     std::array<int32_t, kDispatchBatchCapacity> join_query_ids{};
@@ -1129,6 +1186,10 @@ public:
 		join_cpu_prepared_target =
 			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
 		join_cpu_prepared_target.target_rowno = rowno;
+		join_gpu_prepared_shape_v5_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+				GpuPreparedShapeV5Target{};
+		join_gpu_prepared_shape_v5_target.target_rowno = rowno;
     }
 
     void prepare_join_target_queries(std::span<const JoinQueryRef> all_queries) {
@@ -1162,13 +1223,9 @@ public:
 			policy_begin_ns);
 		bioseq::storage::indexing::add_cold_index_buffer_usage(
 			join_cold_policy_stats, policy_buffer_begin);
-		if (::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested(
-				base_params)) {
-			ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Vulkan BioseqBatchJoin locator execution remains fail closed"),
-				 errdetail("CPU prepared-target construction is forbidden when biological Vulkan components are requested")));
-		}
+		const bool vulkan_requested =
+			::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested(
+				base_params);
         std::vector<const pgseq_t*> query_headers;
         std::vector<pgseq_t*> detoast_copies;
         query_headers.reserve(all_queries.size());
@@ -1234,18 +1291,8 @@ public:
 			PG_TRY();
 			{
 				try {
-					processor.prepare_cpu_shared_query_unions(
-						mmsearch_context.alphabet_code,
-						mmsearch_context.storage_unit_byte_width,
-						target_bp_size,
-						query_headers,
-						base_params,
-						/*include_persisted_parameter_group=*/true,
-						join_cpu_prepared_target);
-					if (index_read_requirement
-							== bioseq::indexing::IndexReadRequirement::
-								require_compatible_persisted) {
-						processor.prepare_cpu_persisted_grouped32_target(
+					if (vulkan_requested) {
+						processor.prepare_gpu_persisted_shape_v5_target(
 							user_main_database_oid,
 							user_main_tablespace_oid,
 							user_main_relfilenode,
@@ -1254,9 +1301,39 @@ public:
 								join_target_storage_seq_attno),
 							join_active_read_policy->index_name,
 							static_cast<std::uint64_t>(
-								join_cpu_prepared_target.target_rowno),
+								join_gpu_prepared_shape_v5_target.target_rowno),
+							target_bp_size,
+							query_headers.size(),
+							mmsearch_context.alphabet_code,
+							mmsearch_context.storage_unit_byte_width,
+							base_params,
 							*executor_read_context,
+							join_gpu_prepared_shape_v5_target);
+					} else {
+						processor.prepare_cpu_shared_query_unions(
+							mmsearch_context.alphabet_code,
+							mmsearch_context.storage_unit_byte_width,
+							target_bp_size,
+							query_headers,
+							base_params,
+							/*include_persisted_parameter_group=*/true,
 							join_cpu_prepared_target);
+						if (index_read_requirement
+								== bioseq::indexing::IndexReadRequirement::
+									require_compatible_persisted) {
+							processor.prepare_cpu_persisted_grouped32_target(
+								user_main_database_oid,
+								user_main_tablespace_oid,
+								user_main_relfilenode,
+								user_relid,
+								static_cast<std::int16_t>(
+									join_target_storage_seq_attno),
+								join_active_read_policy->index_name,
+								static_cast<std::uint64_t>(
+									join_cpu_prepared_target.target_rowno),
+								*executor_read_context,
+								join_cpu_prepared_target);
+						}
 					}
 				} catch (...) {
 					cpp_error = std::current_exception();
@@ -1283,14 +1360,18 @@ public:
 				std::rethrow_exception(cpp_error);
 			}
 		} else {
-			/* no_index must retain the requested all-SIMD nthash pipeline.
-			 * Persistent builders currently expose only Scalar/Vulkan target
-			 * sketch backends, so constructing a CPU prepared index here would be
-			 * a silent scalar fallback and a critical acceptance failure. */
+			/* no_index starts without a retained prepared target.  Building one
+			 * in this pre-measurement lifecycle would invalidate cold semantics;
+			 * the selected CPU/SIMD/GPU route must construct its own transient
+			 * target index after timing begins and may not cross-fallback. */
 			join_cpu_prepared_target.target_bp_size = target_bp_size;
 			join_cpu_prepared_target.query_count = query_headers.size();
 			join_cpu_prepared_target.unions_ready = false;
-			bioseq_log<DBG>("[bioseq] pg: BatchJoin no_index prepared target disabled: ExactSimd target-sketch backend is unavailable");
+			join_gpu_prepared_shape_v5_target.target_bp_size = target_bp_size;
+			join_gpu_prepared_shape_v5_target.query_count = query_headers.size();
+			bioseq_log<DBG>(
+				"[bioseq] pg: BatchJoin no_index retains no prepared target; "
+				"the selected backend must use its authentic transient index route");
 		}
 		for (pgseq_t* copy : detoast_copies) {
 			bioseq::pg_utils::invoke_pg_as_cpp(
@@ -1974,6 +2055,9 @@ public:
 			scanner_pg_ctx.cpu_prepared_target =
 				join_cpu_prepared_target.unions_ready
 					? &join_cpu_prepared_target : nullptr;
+			scanner_pg_ctx.gpu_prepared_shape_v5_target =
+				join_gpu_prepared_shape_v5_target.ready()
+					? &join_gpu_prepared_shape_v5_target : nullptr;
             for (std::size_t i = 0; i < batch_size; ++i) {
                 scanner_pg_ctx.target_locators[i] = target.seq_loc;
                 scanner_pg_ctx.target_rownos[i] = target.sequence_rowno;
@@ -2018,7 +2102,8 @@ public:
 			prepared_delta.cpu_prepared_duplicate_build_attempts =
 				prepared_after[2] - prepared_before[2];
 			operational.merge(prepared_delta);
-			if (!join_cpu_prepared_target.persisted_read_stats_published) {
+			if (!join_cpu_prepared_target.persisted_read_stats_published
+				&& !join_gpu_prepared_shape_v5_target.ready()) {
 				merge_cold_index_preparation_stats(
 					operational, join_cold_policy_stats);
 				for (const auto& group : join_cpu_prepared_target.groups) {
@@ -2100,6 +2185,22 @@ public:
 						operational, read.cold);
 				}
 				join_cpu_prepared_target.persisted_read_stats_published = true;
+			}
+			if (join_gpu_prepared_shape_v5_target.ready()
+				&& !join_gpu_prepared_shape_v5_target
+					.persisted_read_stats_published) {
+				merge_cold_index_preparation_stats(
+					operational, join_cold_policy_stats);
+				merge_generation_read_stats(
+					operational,
+					join_gpu_prepared_shape_v5_target.persisted_read_stats);
+				::bioseq::pipeline_stats::PipelineOperationalStats gpu_load{};
+				gpu_load.gpu_persisted_resident_uploads = 1;
+				gpu_load.gpu_buffer_creates = 3;
+				gpu_load.gpu_memory_allocations = 3;
+				operational.merge(gpu_load);
+				join_gpu_prepared_shape_v5_target
+					.persisted_read_stats_published = true;
 			}
 			if (join_cpu_prepared_target.unions_ready
 				&& !join_cpu_prepared_target.groups.empty()
@@ -2217,6 +2318,31 @@ public:
         if (!join_mode) {
             return;
         }
+		if (join_gpu_prepared_shape_v5_target.resident != nullptr) {
+			const bool gpu_equation_valid =
+				join_gpu_prepared_shape_v5_target.ready()
+				&& join_gpu_prepared_shape_v5_target.query_count != 0
+				&& join_gpu_prepared_shape_v5_target.dispatched_query_count
+					<= join_gpu_prepared_shape_v5_target.query_count
+				&& (join_gpu_prepared_shape_v5_target.dispatched_query_count == 0
+					? join_gpu_prepared_shape_v5_target.dispatch_waves == 0
+					: join_gpu_prepared_shape_v5_target.dispatch_waves != 0);
+			if (!gpu_equation_valid) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqBatchJoin GPU Format-5 target lifecycle equation failed"),
+					 errdetail("prepared_queries=%llu dispatched_queries=%llu waves=%llu ready=%s",
+						static_cast<unsigned long long>(
+							join_gpu_prepared_shape_v5_target.query_count),
+						static_cast<unsigned long long>(
+							join_gpu_prepared_shape_v5_target
+								.dispatched_query_count),
+						static_cast<unsigned long long>(
+							join_gpu_prepared_shape_v5_target.dispatch_waves),
+						join_gpu_prepared_shape_v5_target.ready()
+							? "true" : "false")));
+			}
+		}
 		std::uint64_t builds = 0;
 		std::uint64_t reuses = 0;
 		std::uint64_t duplicate_build_attempts = 0;
@@ -2283,6 +2409,9 @@ public:
 		join_cold_policy_stats = {};
 		join_cpu_prepared_target =
 			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+		join_gpu_prepared_shape_v5_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+				GpuPreparedShapeV5Target{};
         clear_slots();
     }
 
@@ -2326,6 +2455,9 @@ public:
         join_cpu_prepared_target =
             ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
                 CpuPreparedTarget{};
+		join_gpu_prepared_shape_v5_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+				GpuPreparedShapeV5Target{};
         for (auto& entry : buffered_entries) {
             entry.scan_slot_copy = nullptr;
         }
@@ -2356,6 +2488,9 @@ public:
 		join_cold_policy_stats = {};
 		join_cpu_prepared_target =
 			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+		join_gpu_prepared_shape_v5_target =
+			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+				GpuPreparedShapeV5Target{};
         clear_slots();
         last_stats = ::bioseq::pipeline_stats::PipelineExecutionStats{};
     }

@@ -174,6 +174,16 @@ enum class SimdChainingPolicyIdentity : std::uint8_t {
     mixed_invalid,
 };
 
+/// Statement-stable identity for the SIMD base-alignment algorithm.  This is
+/// intentionally narrower than BaseAlignmentAlgorithmType: the SIMD evidence
+/// object only needs to distinguish an authentic Block Aligner execution from
+/// absence or a mixed/forbidden alignment route.
+enum class SimdAlignmentAlgorithmIdentity : std::uint8_t {
+    none,
+    block_aligner,
+    mixed_invalid,
+};
+
 /// Stable public spelling used by PostgreSQL/report evidence. Keep this on the
 /// aggregate identity rather than translating through the algorithm-local enum:
 /// `none` and `mixed_invalid` are statement-level states that the local policy
@@ -189,6 +199,20 @@ enum class SimdChainingPolicyIdentity : std::uint8_t {
         case SimdChainingPolicyIdentity::bounded_batch_approximate:
             return "bounded_batch_approximate";
         case SimdChainingPolicyIdentity::mixed_invalid:
+            return "mixed_invalid";
+    }
+    return "mixed_invalid";
+}
+
+[[nodiscard]] constexpr std::string_view simd_alignment_algorithm_identity_name(
+    SimdAlignmentAlgorithmIdentity algorithm) noexcept
+{
+    switch (algorithm) {
+        case SimdAlignmentAlgorithmIdentity::none:
+            return "none";
+        case SimdAlignmentAlgorithmIdentity::block_aligner:
+            return "block_aligner";
+        case SimdAlignmentAlgorithmIdentity::mixed_invalid:
             return "mixed_invalid";
     }
     return "mixed_invalid";
@@ -338,6 +362,78 @@ inline constexpr std::uint32_t sql_integer_value_max =
     destination = bioseq::parallelism::saturating_add(destination, increment);
     return false;
 }
+
+/// Target-independent projection of the operation-local Block Aligner proof.
+/// Every field is copied at the dispatch boundary from
+/// BlockAlignerExecutionProof; stage coverage and generic SIMD counters are
+/// never used to manufacture this evidence.
+struct BlockAlignerExecutionEvidence {
+    bool present = false;
+    bool accepted = false;
+    std::uint64_t executed_calls = 0;
+    std::uint64_t nonempty_calls = 0;
+    std::uint64_t nonempty_calls_with_simd = 0;
+    std::uint64_t simd_dp_vector_batches = 0;
+    std::uint64_t simd_dp_cells = 0;
+    std::uint64_t forbidden_ksw2_calls = 0;
+    std::uint64_t forbidden_scalar_biological_fallbacks = 0;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool operator==(
+        const BlockAlignerExecutionEvidence&) const noexcept = default;
+
+    /// Merge independently captured operation proofs.  `accepted` means every
+    /// present operand was accepted; SQL-bound counter overflow revokes it.
+    [[nodiscard]] bool merge(
+        const BlockAlignerExecutionEvidence& rhs) noexcept {
+        if (!rhs.present) {
+            const bool malformed_absence = rhs.accepted
+                || rhs.executed_calls != 0
+                || rhs.nonempty_calls != 0
+                || rhs.nonempty_calls_with_simd != 0
+                || rhs.simd_dp_vector_batches != 0
+                || rhs.simd_dp_cells != 0
+                || rhs.forbidden_ksw2_calls != 0
+                || rhs.forbidden_scalar_biological_fallbacks != 0
+                || rhs.saturated;
+            if (malformed_absence) {
+                saturated = true;
+                accepted = false;
+            }
+            return saturated;
+        }
+
+        if (!present) {
+            present = true;
+            accepted = rhs.accepted;
+        } else {
+            accepted = accepted && rhs.accepted;
+        }
+        bool overflow = saturated || rhs.saturated;
+        overflow = merge_counter(executed_calls, rhs.executed_calls)
+            || overflow;
+        overflow = merge_counter(nonempty_calls, rhs.nonempty_calls)
+            || overflow;
+        overflow = merge_counter(
+            nonempty_calls_with_simd, rhs.nonempty_calls_with_simd)
+            || overflow;
+        overflow = merge_counter(
+            simd_dp_vector_batches, rhs.simd_dp_vector_batches)
+            || overflow;
+        overflow = merge_counter(simd_dp_cells, rhs.simd_dp_cells)
+            || overflow;
+        overflow = merge_counter(
+            forbidden_ksw2_calls, rhs.forbidden_ksw2_calls)
+            || overflow;
+        overflow = merge_counter(
+            forbidden_scalar_biological_fallbacks,
+            rhs.forbidden_scalar_biological_fallbacks)
+            || overflow;
+        saturated = overflow;
+        if (saturated) accepted = false;
+        return saturated;
+    }
+};
 
 /// Count distinct logical target-row identities in-place. Physical payload
 /// coalescing is deliberately irrelevant: two relation rows with identical
@@ -502,6 +598,7 @@ struct PipelineOperationalStats {
     std::uint64_t simd_chaining_bounded_candidates_skipped = 0;
     std::uint64_t simd_chaining_policy_rejections = 0;
     bool simd_chaining_policy_evidence_saturated = false;
+    BlockAlignerExecutionEvidence block_aligner_execution_evidence{};
     std::uint64_t cpu_seed_positions_rejected_outside_collection = 0;
     std::uint64_t gpu_partition_select_dispatches = 0;
     std::uint64_t gpu_partition_anchor_merge_dispatches = 0;
@@ -747,6 +844,8 @@ struct PipelineOperationalStats {
         simd_chaining_policy_evidence_saturated =
             simd_chaining_policy_evidence_saturated
             || rhs.simd_chaining_policy_evidence_saturated;
+        saturated = block_aligner_execution_evidence.merge(
+            rhs.block_aligner_execution_evidence) || saturated;
         add(cpu_seed_positions_rejected_outside_collection,
             rhs.cpu_seed_positions_rejected_outside_collection);
         add(gpu_partition_select_dispatches,
@@ -1041,6 +1140,10 @@ struct PipelineJobExecutionStats {
         SimdChainingPolicyIdentity::none;
     SimdChainingPolicyIdentity observed_simd_chaining_policy =
         SimdChainingPolicyIdentity::none;
+    SimdAlignmentAlgorithmIdentity requested_simd_alignment_algorithm =
+        SimdAlignmentAlgorithmIdentity::none;
+    SimdAlignmentAlgorithmIdentity observed_simd_alignment_algorithm =
+        SimdAlignmentAlgorithmIdentity::none;
     TargetIndexSource requested_target_index_source = TargetIndexSource::none;
     TargetIndexSource actual_target_index_source = TargetIndexSource::none;
     std::uint64_t persisted_generation_id = 0;
@@ -1103,6 +1206,35 @@ merge_simd_chaining_policy_identity(
     if (rhs == SimdChainingPolicyIdentity::none) return lhs;
     if (lhs == rhs) return lhs;
     return SimdChainingPolicyIdentity::mixed_invalid;
+}
+
+[[nodiscard]] constexpr bool is_concrete_simd_alignment_algorithm_identity(
+    SimdAlignmentAlgorithmIdentity algorithm) noexcept {
+    return algorithm == SimdAlignmentAlgorithmIdentity::block_aligner;
+}
+
+[[nodiscard]] constexpr SimdAlignmentAlgorithmIdentity
+merge_simd_alignment_algorithm_identity(
+    SimdAlignmentAlgorithmIdentity lhs,
+    SimdAlignmentAlgorithmIdentity rhs) noexcept {
+    if (lhs == SimdAlignmentAlgorithmIdentity::none) return rhs;
+    if (rhs == SimdAlignmentAlgorithmIdentity::none) return lhs;
+    if (lhs == rhs) return lhs;
+    return SimdAlignmentAlgorithmIdentity::mixed_invalid;
+}
+
+/// Only an all-SIMD backend may publish SIMD base-alignment identity, and its
+/// requested and operation-observed identities must both be Block Aligner.
+[[nodiscard]] constexpr bool simd_alignment_algorithm_identity_valid_for_backend(
+    ExecutedBackend backend,
+    SimdAlignmentAlgorithmIdentity requested,
+    SimdAlignmentAlgorithmIdentity observed) noexcept {
+    if (backend == ExecutedBackend::simd_cpu) {
+        return is_concrete_simd_alignment_algorithm_identity(requested)
+            && requested == observed;
+    }
+    return requested == SimdAlignmentAlgorithmIdentity::none
+        && observed == SimdAlignmentAlgorithmIdentity::none;
 }
 
 /// A concrete all-SIMD job must retain the same requested and observed
@@ -1344,6 +1476,10 @@ merge_simd_chaining_policy_identity(
             job.actual_backend,
             job.requested_simd_chaining_policy,
             job.observed_simd_chaining_policy)
+        || !simd_alignment_algorithm_identity_valid_for_backend(
+            job.actual_backend,
+            job.requested_simd_alignment_algorithm,
+            job.observed_simd_alignment_algorithm)
         || !is_concrete_target_index_source(job.requested_target_index_source)
         || job.requested_target_index_source != job.actual_target_index_source
         || !environment_is_valid_for_backend(job.environment, job.actual_backend)) {
@@ -1389,6 +1525,10 @@ struct PipelineExecutionStats {
         SimdChainingPolicyIdentity::none;
     SimdChainingPolicyIdentity observed_simd_chaining_policy =
         SimdChainingPolicyIdentity::none;
+    SimdAlignmentAlgorithmIdentity requested_simd_alignment_algorithm =
+        SimdAlignmentAlgorithmIdentity::none;
+    SimdAlignmentAlgorithmIdentity observed_simd_alignment_algorithm =
+        SimdAlignmentAlgorithmIdentity::none;
     TargetIndexSource requested_target_index_source = TargetIndexSource::none;
     TargetIndexSource actual_target_index_source = TargetIndexSource::none;
     std::uint64_t persisted_generation_id = 0;
@@ -1438,6 +1578,14 @@ struct PipelineExecutionStats {
                     != SimdChainingPolicyIdentity::none
                 && observed_simd_chaining_policy
                     != job.observed_simd_chaining_policy)
+            || (requested_simd_alignment_algorithm
+                    != SimdAlignmentAlgorithmIdentity::none
+                && requested_simd_alignment_algorithm
+                    != job.requested_simd_alignment_algorithm)
+            || (observed_simd_alignment_algorithm
+                    != SimdAlignmentAlgorithmIdentity::none
+                && observed_simd_alignment_algorithm
+                    != job.observed_simd_alignment_algorithm)
             || (requested_target_index_source != TargetIndexSource::none
                 && requested_target_index_source != job.requested_target_index_source)
             || (actual_target_index_source != TargetIndexSource::none
@@ -1477,6 +1625,14 @@ struct PipelineExecutionStats {
         observed_simd_chaining_policy = merge_simd_chaining_policy_identity(
             observed_simd_chaining_policy,
             job.observed_simd_chaining_policy);
+        requested_simd_alignment_algorithm =
+            merge_simd_alignment_algorithm_identity(
+                requested_simd_alignment_algorithm,
+                job.requested_simd_alignment_algorithm);
+        observed_simd_alignment_algorithm =
+            merge_simd_alignment_algorithm_identity(
+                observed_simd_alignment_algorithm,
+                job.observed_simd_alignment_algorithm);
         requested_target_index_source = merge_target_index_identity(
             requested_target_index_source, job.requested_target_index_source);
         actual_target_index_source = merge_target_index_identity(
@@ -1675,6 +1831,10 @@ struct PipelineExecutionStats {
                 == SimdChainingPolicyIdentity::none
             && stats.observed_simd_chaining_policy
                 == SimdChainingPolicyIdentity::none
+            && stats.requested_simd_alignment_algorithm
+                == SimdAlignmentAlgorithmIdentity::none
+            && stats.observed_simd_alignment_algorithm
+                == SimdAlignmentAlgorithmIdentity::none
             && stats.requested_target_index_source == TargetIndexSource::none
             && stats.actual_target_index_source == TargetIndexSource::none
             && stats.persisted_generation_id == 0
@@ -1709,6 +1869,10 @@ struct PipelineExecutionStats {
                 stats.actual_backend,
                 stats.requested_simd_chaining_policy,
                 stats.observed_simd_chaining_policy)
+            || !simd_alignment_algorithm_identity_valid_for_backend(
+                stats.actual_backend,
+                stats.requested_simd_alignment_algorithm,
+                stats.observed_simd_alignment_algorithm)
             || stats.requested_target_index_source
                 != stats.actual_target_index_source
             || !is_concrete_target_index_source(
@@ -1758,6 +1922,11 @@ struct PipelineExecutionStats {
                     == rhs.requested_simd_chaining_policy
                 && observed_simd_chaining_policy
                     == rhs.observed_simd_chaining_policy);
+        const bool simd_alignment_identity_compatible = lhs_empty || rhs_empty
+            || (requested_simd_alignment_algorithm
+                    == rhs.requested_simd_alignment_algorithm
+                && observed_simd_alignment_algorithm
+                    == rhs.observed_simd_alignment_algorithm);
         const bool source_identity_compatible = lhs_empty || rhs_empty
             || (requested_target_index_source
                     == rhs.requested_target_index_source
@@ -1775,6 +1944,7 @@ struct PipelineExecutionStats {
             && !environment_drift
             && backend_identity_compatible
             && simd_policy_identity_compatible
+            && simd_alignment_identity_compatible
             && source_identity_compatible
             && persisted_identity_compatible;
 
@@ -1842,6 +2012,14 @@ struct PipelineExecutionStats {
         observed_simd_chaining_policy = merge_simd_chaining_policy_identity(
             observed_simd_chaining_policy,
             rhs.observed_simd_chaining_policy);
+        requested_simd_alignment_algorithm =
+            merge_simd_alignment_algorithm_identity(
+                requested_simd_alignment_algorithm,
+                rhs.requested_simd_alignment_algorithm);
+        observed_simd_alignment_algorithm =
+            merge_simd_alignment_algorithm_identity(
+                observed_simd_alignment_algorithm,
+                rhs.observed_simd_alignment_algorithm);
         requested_target_index_source = merge_target_index_identity(
             requested_target_index_source, rhs.requested_target_index_source);
         actual_target_index_source = merge_target_index_identity(
@@ -1898,7 +2076,11 @@ struct PipelineExecutionStats {
             || requested_simd_chaining_policy
                 == SimdChainingPolicyIdentity::mixed_invalid
             || observed_simd_chaining_policy
-                == SimdChainingPolicyIdentity::mixed_invalid) {
+                == SimdChainingPolicyIdentity::mixed_invalid
+            || requested_simd_alignment_algorithm
+                == SimdAlignmentAlgorithmIdentity::mixed_invalid
+            || observed_simd_alignment_algorithm
+                == SimdAlignmentAlgorithmIdentity::mixed_invalid) {
             reclassify_all_attempted_jobs();
         }
     }

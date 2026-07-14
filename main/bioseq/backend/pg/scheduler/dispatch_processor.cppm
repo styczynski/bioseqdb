@@ -286,6 +286,48 @@ public:
 				MinimizerSketchBackend sketch_backend) noexcept;
 	};
 
+	/* One restart-cold, PostgreSQL-authenticated Format-5 generation retained
+	 * for the complete BatchJoin target lifecycle.  The resident owns the three
+	 * Vulkan buffers; resident_view contains only stable pointers into that
+	 * shared object and is never a publication/cache authority of its own. */
+	struct GpuPreparedShapeV5Target {
+		std::int64_t target_rowno = -1;
+		std::uint64_t target_bp_size = 0;
+		std::uint64_t query_count = 0;
+		std::shared_ptr<const bioseq::indexing::GpuResidentShapeV5Target>
+			resident{};
+		bioseq::gpu::vulkan::PhaseCShapeV5ResidentView resident_view{};
+		bioseq::storage::indexing::MinimizerGenerationReadStats
+			persisted_read_stats{};
+		std::uint64_t dispatched_query_count = 0;
+		std::uint64_t dispatch_waves = 0;
+		bool persisted_read_stats_published = false;
+
+		GpuPreparedShapeV5Target() = default;
+		GpuPreparedShapeV5Target(const GpuPreparedShapeV5Target&) = delete;
+		GpuPreparedShapeV5Target& operator=(
+			const GpuPreparedShapeV5Target&) = delete;
+		GpuPreparedShapeV5Target(GpuPreparedShapeV5Target&&) noexcept = default;
+		GpuPreparedShapeV5Target& operator=(
+			GpuPreparedShapeV5Target&&) noexcept = default;
+
+		[[nodiscard]] bool ready() const noexcept {
+			return target_rowno >= 0
+				&& target_bp_size != 0
+				&& resident != nullptr
+				&& resident->validated()
+				&& resident_view.descriptors == &resident->descriptors()
+				&& resident_view.controls == &resident->controls()
+				&& resident_view.positions == &resident->positions()
+				&& resident_view.generation_id
+					== resident->identity().generation_id
+				&& resident_view.source_identity
+					== resident->identity().source_identity
+				&& resident_view.cold_load_identity
+					== resident->identity().cold_load_identity;
+		}
+	};
+
 	/**
 	 * Narrow SQL-test seam for the deallocate-before-permit reprepare contract.
 	 * It deliberately populates one CpuPreparedTarget object twice instead of
@@ -401,6 +443,23 @@ public:
 				executor_read,
 			CpuPreparedTarget& prepared_target);
 
+	void prepare_gpu_persisted_shape_v5_target(
+		Oid database_oid,
+		Oid tablespace_oid,
+		Oid main_relfilenode,
+		Oid user_relid,
+		std::int16_t column_attno,
+		std::string_view index_name,
+		std::uint64_t sequence_rowno,
+		std::uint64_t target_bp_size,
+		std::uint64_t query_count,
+		std::uint8_t alphabet_code,
+		std::uint8_t storage_unit_byte_width,
+		const Minimap2Params& params,
+		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
+			executor_read,
+		GpuPreparedShapeV5Target& prepared_target);
+
     /*
      * DOC0264 / DOC0274 — context required to wire scanner_pg into the
      * per-row pipeline dispatch. When non-null, the dispatch loop uses
@@ -431,6 +490,7 @@ public:
         bool                                              shared_target_batch = false;
         bool                                              record_target_operational_outcomes = true;
 		CpuPreparedTarget*                                cpu_prepared_target = nullptr;
+		GpuPreparedShapeV5Target*                         gpu_prepared_shape_v5_target = nullptr;
         // Explicit per-row outcome written by the scanner helper. Match
         // production and index-source accounting must never infer one another.
 		std::array<::bioseq::pipeline_stats::TargetIndexSource,

@@ -1669,5 +1669,254 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	++prepared_target.physical_target_index_reads;
 }
 
+void BatchProcessor::prepare_gpu_persisted_shape_v5_target(
+		const Oid database_oid,
+		const Oid tablespace_oid,
+		const Oid main_relfilenode,
+		const Oid user_relid,
+		const std::int16_t column_attno,
+		const std::string_view index_name,
+		const std::uint64_t sequence_rowno,
+		const std::uint64_t target_bp_size,
+		const std::uint64_t query_count,
+		const std::uint8_t alphabet_code,
+		const std::uint8_t storage_unit_byte_width,
+		const Minimap2Params& params,
+		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
+			executor_read,
+		GpuPreparedShapeV5Target& prepared_target) {
+	using namespace bioseq::storage::indexing;
+	using bioseq::indexing::GpuPersistedIndexFoundationError;
+	using bioseq::indexing::MinimizerGenerationWireFormat;
+	const auto fail = [](const int sqlstate, std::string message) -> void {
+		bioseq::pg_utils::invoke_pg_as_cpp([sqlstate, &message] {
+			ereport(ERROR,
+				(errcode(sqlstate),
+				 errmsg("required persisted GPU Format-5 target is unavailable"),
+				 errdetail("%s", message.c_str()),
+				 errhint("Publish a matching Format-5/ABI3 READY generation; "
+					"GPU preparation has no CPU, SIMD, recompute, or legacy-index fallback.")));
+		});
+	};
+	prepared_target = GpuPreparedShapeV5Target{};
+	const MinimizerSketchBackend backend =
+		pipe::target_index_sketch_backend_from_params(params);
+	if (database_oid != MyDatabaseId
+		|| !OidIsValid(user_relid)
+		|| !OidIsValid(tablespace_oid)
+		|| !OidIsValid(main_relfilenode)
+		|| column_attno <= 0
+		|| sequence_rowno
+			> static_cast<std::uint64_t>(
+				(std::numeric_limits<std::int64_t>::max)())
+		|| target_bp_size == 0
+		|| query_count == 0
+		|| alphabet_code == 0
+		|| storage_unit_byte_width == 0
+		|| params.kmer_size != 15
+		|| params.window_size != 10
+		|| backend != MinimizerSketchBackend::VulkanSegment
+		|| !pipe::complete_all_gpu_tuple_selected(params)
+		|| !executor_read.matches(
+			database_oid, tablespace_oid, main_relfilenode, user_relid)) {
+		fail(ERRCODE_INVALID_PARAMETER_VALUE,
+			"GPU prepared-target identity, pinned k/w, or all-GPU selector is invalid");
+		return;
+	}
+
+	Rev3IndexAdministrationIdentity identity{
+		.database_oid = database_oid,
+		.tablespace_oid = tablespace_oid,
+		.main_relfilenode = main_relfilenode,
+		.user_relid = user_relid,
+		.column_attno = column_attno,
+		.index_name = std::string{index_name},
+	};
+	auto source_proof = derive_rev3_catalog_source_proof_pg(
+		identity, sequence_rowno, executor_read);
+	const Rev3AuthoritativeSourceLocator source =
+		source_proof.source_for_diagnostics();
+	const Rev3CatalogSourceProofCounters source_counters =
+		source_proof.counters_for_diagnostics();
+	if (source.alphabet_code != alphabet_code
+		|| source.storage_unit_byte_width != storage_unit_byte_width
+		|| source.locator.total_bp_size != target_bp_size) {
+		fail(ERRCODE_DATA_CORRUPTED,
+			"authoritative source identity disagrees with the BatchJoin target typmod or length");
+		return;
+	}
+	identity.table_name = format_seqidx_name(
+		index_name, database_oid, tablespace_oid, main_relfilenode,
+		column_attno, source.locator.bucket_idx, source.locator.shard_idx);
+	const auto expected =
+		bioseq::indexing::expected_minimizer_compatibility_for_backend(
+			MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
+			backend, source.alphabet_code, source.storage_unit_byte_width,
+			static_cast<std::uint16_t>(params.kmer_size),
+			static_cast<std::uint16_t>(params.window_size),
+			bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap);
+	if (!expected) {
+		fail(ERRCODE_DATA_CORRUPTED, fmt::format(
+			"GPU Format-5 compatibility rejected wire_error={}",
+			static_cast<unsigned>(expected.error())));
+		return;
+	}
+	auto opened = open_exact_minimizer_generation_read_session_pg(
+		identity.table_name, index_name, sequence_rowno, executor_read,
+		*expected);
+	if (!opened) {
+		const int sqlstate = opened.failure.kind
+			== MinimizerGenerationRelationKind::missing
+			|| opened.failure.kind
+				== MinimizerGenerationRelationKind::legacy_exact
+			? ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+			: ERRCODE_DATA_CORRUPTED;
+		fail(sqlstate, fmt::format(
+			"generation relation {} rejected kind={} schema_error={}",
+			identity.table_name,
+			static_cast<unsigned>(opened.failure.kind),
+			static_cast<unsigned>(opened.failure.revision3_error)));
+		return;
+	}
+	IndexStorageFragmentGenerationReadSessionPg& session = *opened.session;
+	const auto head = session.read_active_head_once();
+	const auto& metadata = session.read_manifest_directory_once(head);
+	const auto manifest = metadata.manifest;
+	session.validate_source_attestation(std::move(source_proof));
+
+	auto& runtime = bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
+	std::uint64_t cold_load_identity = 14695981039346656037ull;
+	cold_load_identity = bioseq::common::hash_combine_64(
+		cold_load_identity, head.generation_id);
+	cold_load_identity = bioseq::common::hash_combine_64(
+		cold_load_identity, head.source_identity);
+	cold_load_identity = bioseq::common::hash_combine_64(
+		cold_load_identity, head.manifest_checksum);
+	cold_load_identity = bioseq::common::hash_combine_64(
+		cold_load_identity, manifest.directory_checksum);
+	cold_load_identity = bioseq::common::hash_combine_64(
+		cold_load_identity, manifest.payload_checksum);
+	cold_load_identity = bioseq::common::hash_combine_64(
+		cold_load_identity, sequence_rowno);
+	for (const std::uint8_t byte : runtime.features().device_uuid) {
+		cold_load_identity = bioseq::common::hash_combine_64(
+			cold_load_identity, byte);
+	}
+	if (cold_load_identity == 0u) cold_load_identity = 1u;
+
+	auto ingest = bioseq::indexing::GpuShapeV5FullGenerationIngest::begin(
+		runtime, head, manifest, *expected, metadata.directory,
+		cold_load_identity);
+	if (!ingest) {
+		fail(ERRCODE_FEATURE_NOT_SUPPORTED, fmt::format(
+			"GPU Format-5 resident admission rejected foundation_error={}",
+			static_cast<unsigned>(ingest.error())));
+		return;
+	}
+	std::optional<GpuPersistedIndexFoundationError> callback_error;
+	std::exception_ptr callback_exception;
+	const auto accept = [&](const bioseq::indexing::
+			ValidatedMinimizerGenerationRowReceipt& receipt) noexcept {
+		if (callback_error || callback_exception) return;
+		try {
+			auto accepted = ingest->accept_validated_row(receipt);
+			if (!accepted) callback_error = accepted.error();
+		} catch (...) {
+			callback_exception = std::current_exception();
+		}
+	};
+	(void)session.read_full_generation_payload_once(accept, accept);
+	if (callback_exception) std::rethrow_exception(callback_exception);
+	if (callback_error) {
+		fail(ERRCODE_DATA_CORRUPTED, fmt::format(
+			"GPU Format-5 payload ingest rejected foundation_error={}",
+			static_cast<unsigned>(*callback_error)));
+		return;
+	}
+	auto finished = ingest->finish();
+	if (!finished) {
+		fail(ERRCODE_DATA_CORRUPTED, fmt::format(
+			"GPU Format-5 resident publication rejected foundation_error={}",
+			static_cast<unsigned>(finished.error())));
+		return;
+	}
+	std::shared_ptr<const bioseq::indexing::GpuResidentShapeV5Target>
+		resident = std::move(*finished);
+	const MinimizerGenerationReadStats read_stats = session.finish();
+	const auto& resident_identity = resident->identity();
+	const bool proof_matches = resident->validated()
+		&& resident_identity.generation_id == head.generation_id
+		&& resident_identity.source_identity == head.source_identity
+		&& resident_identity.source_content_checksum
+			== head.source_content_checksum
+		&& resident_identity.manifest_checksum == head.manifest_checksum
+		&& resident_identity.directory_checksum
+			== manifest.directory_checksum
+		&& resident_identity.payload_checksum == manifest.payload_checksum
+		&& resident_identity.cold_load_identity == cold_load_identity
+		&& resident_identity.device_uuid == runtime.features().device_uuid
+		&& manifest.target_length == target_bp_size
+		&& manifest.alphabet_code == alphabet_code
+		&& manifest.storage_unit_byte_width == storage_unit_byte_width
+		&& manifest.gpu_abi_version
+			== bioseq::indexing::kMinimizerShapeV5GpuAbiVersion
+		&& manifest.shape_v5
+		&& manifest.shape_v5->max_occ_cap
+			== bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap
+		&& read_stats.relation_opens == 1
+		&& read_stats.head_scans == 1
+		&& read_stats.manifest_directory_scans == 1
+		&& read_stats.metadata_repeated_reads == 0
+		&& read_stats.full_generation.scan_calls == 1
+		&& read_stats.bulk_read_calls == 1
+		&& read_stats.range_scan_calls == 1
+		&& read_stats.index_scans == 3
+		&& read_stats.payload.delivered_chunks
+			== read_stats.payload.heap_rows_read
+		&& read_stats.payload.delivered_bytes == manifest.payload_bytes
+		&& read_stats.cold.route_empty == 0
+		&& read_stats.cold.route_selective == 0
+		&& read_stats.cold.route_full == 1
+		&& read_stats.source_parent_rows_read == 1
+		&& read_stats.source_catalog_rows_read == 1
+		&& read_stats.source_catalog_index_scans == 1
+		&& read_stats.source_fragment_rows_read == 0
+		&& read_stats.source_decoded_bp == 0
+		&& source_counters.timed_equation_holds();
+	if (!proof_matches) {
+		fail(ERRCODE_DATA_CORRUPTED,
+			"GPU Format-5 READY identity, read-work, upload, or source proof disagrees");
+		return;
+	}
+
+	prepared_target.target_rowno = static_cast<std::int64_t>(sequence_rowno);
+	prepared_target.target_bp_size = target_bp_size;
+	prepared_target.query_count = query_count;
+	prepared_target.persisted_read_stats = read_stats;
+	prepared_target.resident = std::move(resident);
+	prepared_target.resident_view =
+		bioseq::gpu::vulkan::PhaseCShapeV5ResidentView{
+			.descriptors = &prepared_target.resident->descriptors(),
+			.controls = &prepared_target.resident->controls(),
+			.positions = &prepared_target.resident->positions(),
+			.descriptor_bytes = prepared_target.resident->descriptor_bytes(),
+			.control_bytes = prepared_target.resident->control_bytes(),
+			.position_bytes = prepared_target.resident->position_bytes(),
+			.position_count = prepared_target.resident->position_count(),
+			.max_occ_cap =
+				bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap,
+			.generation_id = resident_identity.generation_id,
+			.source_identity = resident_identity.source_identity,
+			.cold_load_identity = resident_identity.cold_load_identity,
+			.partition_count = prepared_target.resident->descriptor_count(),
+			.abi_version = resident_identity.gpu_abi_version,
+			.device_uuid = resident_identity.device_uuid,
+		};
+	if (!prepared_target.ready()) {
+		fail(ERRCODE_DATA_CORRUPTED,
+			"GPU Format-5 prepared-target view failed its final ownership check");
+	}
+}
+
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

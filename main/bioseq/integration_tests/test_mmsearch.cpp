@@ -581,9 +581,10 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         " WHERE stage='query_sketch'"
         ") SELECT "
         "jsonb_typeof(simd)='object', "
-        "(SELECT count(*) FROM jsonb_object_keys(simd))=13, "
+        "(SELECT count(*) FROM jsonb_object_keys(simd))=16, "
         "simd ?& ARRAY["
         " 'schema','version','requested_policy','observed_policy',"
+        " 'requested_alignment_algorithm','observed_alignment_algorithm',"
         " 'nthash_vector_batches',"
         " 'nthash_resident_vector_stream_kernel_calls',"
         " 'simd_chaining_exact_policy_calls',"
@@ -592,24 +593,43 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         " 'simd_chaining_bounded_cutoff_stops',"
         " 'simd_chaining_bounded_candidates_skipped',"
         " 'simd_chaining_policy_rejections',"
-        " 'simd_chaining_policy_evidence_saturated'], "
+        " 'simd_chaining_policy_evidence_saturated',"
+        " 'block_aligner_execution_proof'], "
         "simd->>'schema'='bioseq.simd_execution_evidence' "
         " AND jsonb_typeof(simd->'schema')='string' "
-        " AND (simd->>'version')::bigint=1 "
+        " AND (simd->>'version')::bigint=2 "
         " AND jsonb_typeof(simd->'version')='number', "
         "simd->>'requested_policy'='bounded_batch_approximate' "
         " AND simd->>'observed_policy'='bounded_batch_approximate' "
+        " AND simd->>'requested_alignment_algorithm'='block_aligner' "
+        " AND simd->>'observed_alignment_algorithm'='block_aligner' "
         " AND jsonb_typeof(simd->'requested_policy')='string' "
-        " AND jsonb_typeof(simd->'observed_policy')='string', "
-        "(simd->>'nthash_vector_batches')::bigint > 0 "
-        " OR (simd->>'nthash_resident_vector_stream_kernel_calls')::bigint > 0, "
+        " AND jsonb_typeof(simd->'observed_policy')='string' "
+        " AND jsonb_typeof(simd->'requested_alignment_algorithm')='string' "
+        " AND jsonb_typeof(simd->'observed_alignment_algorithm')='string', "
+        "((simd->>'nthash_vector_batches')::bigint > 0 "
+        " OR (simd->>'nthash_resident_vector_stream_kernel_calls')::bigint > 0) "
+        " AND jsonb_typeof(simd->'block_aligner_execution_proof')='object' "
+        " AND (SELECT count(*) FROM jsonb_object_keys("
+        "      simd->'block_aligner_execution_proof'))=10 "
+        " AND (simd->'block_aligner_execution_proof'->>'present')::boolean "
+        " AND (simd->'block_aligner_execution_proof'->>'accepted')::boolean "
+        " AND (simd->'block_aligner_execution_proof'->>'executed_calls')::bigint>0 "
+        " AND (simd->'block_aligner_execution_proof'->>'nonempty_calls')::bigint>0 "
+        " AND (simd->'block_aligner_execution_proof'->>'simd_dp_vector_batches')::bigint>0 "
+        " AND (simd->'block_aligner_execution_proof'->>'simd_dp_cells')::bigint>0, "
         "(simd->>'simd_chaining_exact_policy_calls')::bigint=0 "
         " AND (simd->>'simd_chaining_bounded_policy_calls')::bigint>0 "
         " AND (simd->>'simd_chaining_bounded_score_batches')::bigint>0 "
         " AND (simd->>'simd_chaining_policy_rejections')::bigint=0 "
         " AND jsonb_typeof(simd->'simd_chaining_policy_evidence_saturated')="
         "     'boolean' "
-        " AND NOT (simd->>'simd_chaining_policy_evidence_saturated')::boolean, "
+        " AND NOT (simd->>'simd_chaining_policy_evidence_saturated')::boolean "
+        " AND (simd->'block_aligner_execution_proof'->>'nonempty_calls_with_simd')::bigint"
+        "     =(simd->'block_aligner_execution_proof'->>'nonempty_calls')::bigint "
+        " AND (simd->'block_aligner_execution_proof'->>'forbidden_ksw2_calls')::bigint=0 "
+        " AND (simd->'block_aligner_execution_proof'->>'forbidden_scalar_biological_fallbacks')::bigint=0 "
+        " AND NOT (simd->'block_aligner_execution_proof'->>'saturated')::boolean, "
         "jsonb_typeof(cold)='object', "
         "(SELECT count(*) FROM jsonb_object_keys(cold))=56, "
         "cold ?& ARRAY["
@@ -997,9 +1017,9 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
 
-TEST_CASE("ordinal-2 BatchJoin executes Format-4 empty and selective cold routes",
-				  "[mmsearch][batch-join][just-index][rev3][grouped32][simd]"
-				  "[cold-route][empty][selective][zero-work-authenticity]") {
+TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and selective query unions",
+				  "[mmsearch][batch-join][just-index][rev3][format5][simd]"
+				  "[cold-route][full][empty][selective][zero-work-authenticity]") {
 	struct RouteCase {
 		std::string_view name;
 		std::string query;
@@ -1033,6 +1053,7 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-4 empty and selective cold routes
 			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
+			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 			seed_batch_join_target(ctx, target);
 			exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
 			exec_sql(ctx, "SET bioseq.index_async_persist = off;");
@@ -1057,6 +1078,12 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-4 empty and selective cold routes
 				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
 				kBatchJoinTarget, index_name, rowno));
 			REQUIRE(publication.size() > 25u);
+			/* The production fixture now publishes Format 5 / ABI 3.  Format 5
+			 * currently authenticates and streams the complete payload in one
+			 * PostgreSQL index scan for every query union; it does not use the
+			 * Format-4 compatibility path's two-phase selective reader. */
+			REQUIRE(publication[7].value_or("") == "5");
+			REQUIRE(publication[19].value_or("") == "3");
 			REQUIRE(publication[8].value_or("") == "t");
 			REQUIRE(publication[9].value_or("") == "t");
 			REQUIRE(std::stoull(publication[14].value()) == target.size());
@@ -1141,44 +1168,33 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-4 empty and selective cold routes
 				}
 				REQUIRE(number(8) == 1);
 				REQUIRE(number(9) == 1);
-				REQUIRE(number(11) == 2);
-				REQUIRE(number(12) == number(13));
-				REQUIRE(number(15) + number(16) + number(17) == 1);
+				REQUIRE(number(10) == 3);
+				REQUIRE(number(11) == 1);
+				REQUIRE(number(12) == 1);
+				REQUIRE(number(13) == 1);
+				REQUIRE(number(14) == 1);
+				REQUIRE(number(15) == 0);
+				REQUIRE(number(16) == 0);
+				REQUIRE(number(17) == 1);
+				REQUIRE(number(18) == 0);
 				REQUIRE(number(19) > 0);
+				REQUIRE(number(20) == 0);
 				REQUIRE(number(21) > 0);
+				REQUIRE(number(22) == 0);
+				REQUIRE(number(23) > number(19));
+				REQUIRE(number(24) == number(19));
+				REQUIRE(number(25) == number(21));
 				REQUIRE(proof[26].value() == "t");
 
 				if (route.empty) {
 					for (const std::size_t zero : {28u, 29u, 30u, 31u}) {
 						REQUIRE(number(zero) == 0);
 					}
-					REQUIRE(number(10) == 2);
-					for (const std::size_t zero : {
-							12u, 13u, 14u, 16u, 17u, 18u, 20u, 22u,
-							24u, 25u}) {
-						REQUIRE(number(zero) == 0);
-					}
-					REQUIRE(number(15) == 1);
 				} else {
 					REQUIRE(number(28) == 0);
 					REQUIRE(number(29) > 0);
 					REQUIRE(number(30) == 0);
 					REQUIRE(number(31) == 0);
-					REQUIRE(number(15) == 0);
-					REQUIRE(number(16) == 1);
-					REQUIRE(number(17) == 0);
-					REQUIRE(number(13) > 0);
-					REQUIRE(number(10) == 2 + number(13));
-					REQUIRE(number(14) == number(13));
-					REQUIRE(number(18) > 0);
-					REQUIRE(number(18) < number(19));
-					REQUIRE(number(20) > 0);
-					REQUIRE(number(20) < number(21));
-					REQUIRE(number(22) < number(23));
-					REQUIRE(number(24) > 0);
-					REQUIRE(number(24) <= number(18));
-					REQUIRE(number(25) > 0);
-					REQUIRE(number(25) <= number(20));
 
 					/* The aggregate identity is accepted only after real
 					 * algorithm-local proofs.  Inspect the complete 20-row SRF
@@ -1495,6 +1511,7 @@ TEST_CASE("DOC0373 P1 releases cold sidecar/catalog locks before later work",
 			  "[mmsearch][batch-join][just-index][doc0373][p1]"
 			  "[one-open][lock-order][concurrency]") {
 	auto reader = fresh_context({kBatchJoinTarget});
+	exec_sql(reader, "SET bioseq.update_index_on_insert = off;");
 	seed_batch_join_target(reader);
 	load_batch_join_queries(reader, 2);
 	exec_sql(reader, "SET bioseq.update_index_on_insert = on;");
@@ -1762,6 +1779,7 @@ TEST_CASE("ordinal-2 BatchJoin rejects a malformed revision-3 relation without f
 			  "[mmsearch][batch-join][just-index][rev3][schema][malformed]"
 			  "[doc0373][p1][cleanup]") {
 	auto ctx = fresh_context({kBatchJoinTarget});
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 	seed_batch_join_target(ctx);
 	load_batch_join_queries(ctx, 2);
 	exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
@@ -1796,6 +1814,7 @@ TEST_CASE("ordinal-2 BatchJoin rejects a malformed revision-3 relation without f
 TEST_CASE("ordinal-2 BatchJoin LIMIT cleans up an undrained 8193-query reader",
 		  "[mmsearch][batch-join][just-index][rev3][grouped32][limit][partial]") {
 	auto ctx = fresh_context({kBatchJoinTarget});
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 	seed_batch_join_target(ctx);
 	load_batch_join_queries(ctx, 8193);
 	exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");

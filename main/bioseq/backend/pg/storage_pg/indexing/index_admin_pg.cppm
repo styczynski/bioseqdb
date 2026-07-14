@@ -4554,12 +4554,8 @@ read_rev3_pg_full_generation_fixture_impl(
     }
     if (kmer_size == 0 || window_size == 0
         || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
-        || (wire_format
-                != bioseq::indexing::MinimizerGenerationWireFormat::
-                    sorted_dense_global64
-            && wire_format
-                != bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32)) {
+        || !bioseq::indexing::is_supported_minimizer_generation_wire_format(
+            wire_format)) {
         ready_minimizer_error_as_cpp(
             ERRCODE_INVALID_PARAMETER_VALUE,
             "bioseq rev3 full-generation reader parameters are invalid");
@@ -4612,7 +4608,12 @@ read_rev3_pg_full_generation_fixture_impl(
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 kmer_size,
-                window_size);
+                window_size,
+                wire_format == bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local
+                    ? std::optional<std::uint64_t>{bioseq::indexing::
+                        kMinimizerShapeV5DefaultMaxOccCap}
+                    : std::nullopt);
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_INVALID_PARAMETER_VALUE,
@@ -5375,10 +5376,13 @@ exercise_rev3_generation_storage_state_impl(
         } else if (ensure_generation) {
             if (!rev3_generation_storage_test_detail::
                     relation_has_generation_schema(result.before_oid)) {
-                const MinimizerGenerationClearResult cleared =
-                    storage.clear_minimizer_generation_storage();
-                if (cleared.dropped_relation_count == 0
-                    || OidIsValid(resolve_table_oid())) {
+                // This is the fixture's explicit legacy-to-generation
+                // cutover.  The production generation clear deliberately
+                // ignores noncanonical same-name relations, so use the
+                // existing broad index reset seam before exercising normal
+                // non-destructive generation ensure.
+                storage.clear(state->identity.index_name);
+                if (OidIsValid(resolve_table_oid())) {
                     rev3_storage_error(
                         "generation-storage fixture explicit cutover clear failed");
                 }
@@ -5533,10 +5537,11 @@ exercise_rev3_generation_storage_state_impl(
                 });
             std::exception_ptr subxact_error;
             try {
-                const MinimizerGenerationClearResult cleared =
-                    storage.clear_minimizer_generation_storage();
-                if (cleared.dropped_relation_count == 0
-                    || OidIsValid(resolve_table_oid())) {
+                // Savepoint rollback starts from the legacy five-column
+                // relation and must restore that exact object.  The strict
+                // generation-only clear cannot remove this legacy input.
+                storage.clear(state->identity.index_name);
+                if (OidIsValid(resolve_table_oid())) {
                     rev3_storage_error(
                         "generation-storage rollback fixture explicit clear failed");
                 }

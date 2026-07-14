@@ -3823,6 +3823,8 @@ TEST_CASE("default and signoff E2E matrices are exact eight-cell cold MPF compar
         REQUIRE(block.at("tags") == expected_tags);
 
         const auto& matrix = block.at("matrix");
+        REQUIRE(matrix.at("metrics").contains(
+            "persisted_policy_audit_accepted"));
         REQUIRE(matrix.at("for").size() == expected_cases.size());
         std::set<std::string> configured_cases;
         for (const auto& [test_case, count] : matrix.at("for").items()) {
