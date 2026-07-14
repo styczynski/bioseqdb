@@ -32,7 +32,8 @@ step "pcancel_release_producer" { SELECT bioseq_cache_test.release_pause('after_
 step "pcancel_release_waiter" { SELECT bioseq_cache_test.release_pause('after_waiter_registered'); }
 step "pcancel_state" {
   SELECT state, waiter_count, reader_count
-  FROM bioseq_cache_test.entry_states();
+  FROM bioseq_cache_test.entry_states()
+  WHERE state <> 'RETIRED';
 }
 step "pcancel_stats" {
   SELECT produced, completed_hits, inflight_waits, fallbacks

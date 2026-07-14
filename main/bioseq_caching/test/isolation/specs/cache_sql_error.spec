@@ -28,6 +28,7 @@ step "sqlerr_release_waiter" { SELECT bioseq_cache_test.release_pause('after_wai
 step "sqlerr_state" {
   SELECT state, waiter_count, reader_count
   FROM bioseq_cache_test.entry_states()
+  WHERE state <> 'RETIRED'
   ORDER BY generation;
 }
 

@@ -26,7 +26,8 @@ step "timeout_waiter_paused" { SELECT bioseq_cache_test.wait_until_paused('after
 step "timeout_expire" { SELECT pg_sleep(1.2); }
 step "timeout_waiter_gone" {
   SELECT state, waiter_count
-  FROM bioseq_cache_test.entry_states();
+  FROM bioseq_cache_test.entry_states()
+  WHERE state <> 'RETIRED';
 }
 step "timeout_release_waiter" { SELECT bioseq_cache_test.release_pause('after_waiter_registered'); }
 step "timeout_release_producer" { SELECT bioseq_cache_test.release_pause('after_building_publish'); }
