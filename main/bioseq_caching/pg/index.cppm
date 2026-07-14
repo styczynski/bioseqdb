@@ -6996,6 +6996,8 @@ void coverage_begin_custom_scan(
                                 pg_atomic_fetch_add_u64(
                                     &g_shared->stats.inflight_waits, 1);
                             }
+                            maybe_pause(
+                                TestPausePoint::AfterWaiterRegistered);
                             complete = wait_for_current_reusable_generation(
                                 *state,
                                 current_plan,
