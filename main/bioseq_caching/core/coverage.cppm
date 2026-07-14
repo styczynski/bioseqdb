@@ -188,11 +188,11 @@ struct CoverageSourceOrderKey {
 [[nodiscard]] inline bool coverage_source_precedes(
     const CoverageSourceOrderKey& left,
     const CoverageSourceOrderKey& right) noexcept {
-    if (left.complete != right.complete) {
-        return left.complete;
-    }
     if (left.estimated_covered_rows != right.estimated_covered_rows) {
         return left.estimated_covered_rows > right.estimated_covered_rows;
+    }
+    if (left.complete != right.complete) {
+        return left.complete;
     }
     const auto density_less = [](const CoverageSourceOrderKey& first,
                                  const CoverageSourceOrderKey& second) {

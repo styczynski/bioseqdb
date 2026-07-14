@@ -97,14 +97,18 @@ public:
     }
 
     /** Invalidate a matching complete/building generation. */
-    [[nodiscard]] bool invalidate(std::uint64_t generation) noexcept {
-        return generation_ == generation
+    [[nodiscard]] bool invalidate(
+        std::uint64_t generation,
+        std::uint64_t claim_sequence) noexcept {
+        return identity_matches(generation, claim_sequence)
             && transition(CacheEntryState::Invalidated);
     }
 
     /** Register one reader pin unless eviction/absence has begun. */
-    [[nodiscard]] bool pin_reader(std::uint64_t generation) noexcept {
-        if (generation_ != generation
+    [[nodiscard]] bool pin_reader(
+        std::uint64_t generation,
+        std::uint64_t claim_sequence) noexcept {
+        if (!identity_matches(generation, claim_sequence)
             || state_ != CacheEntryState::Complete
             || reader_pins_ == (std::numeric_limits<std::uint32_t>::max)()) {
             return false;
@@ -114,8 +118,11 @@ public:
     }
 
     /** Drop exactly one reader pin from a matching generation. */
-    [[nodiscard]] bool unpin_reader(std::uint64_t generation) noexcept {
-        if (generation_ != generation || reader_pins_ == 0) {
+    [[nodiscard]] bool unpin_reader(
+        std::uint64_t generation,
+        std::uint64_t claim_sequence) noexcept {
+        if (!identity_matches(generation, claim_sequence)
+            || reader_pins_ == 0) {
             return false;
         }
         --reader_pins_;
@@ -165,8 +172,10 @@ public:
     }
 
     /** Begin physical eviction only after every reference drains. */
-    [[nodiscard]] bool begin_evict(std::uint64_t generation) noexcept {
-        if (generation_ != generation
+    [[nodiscard]] bool begin_evict(
+        std::uint64_t generation,
+        std::uint64_t claim_sequence) noexcept {
+        if (!identity_matches(generation, claim_sequence)
             || reader_pins_ != 0
             || waiter_references_ != 0) {
             return false;
@@ -175,8 +184,10 @@ public:
     }
 
     /** Finish eviction and clear the slot while preserving ABA monotonicity externally. */
-    [[nodiscard]] bool finish_evict(std::uint64_t generation) noexcept {
-        if (generation_ != generation
+    [[nodiscard]] bool finish_evict(
+        std::uint64_t generation,
+        std::uint64_t claim_sequence) noexcept {
+        if (!identity_matches(generation, claim_sequence)
             || !transition(CacheEntryState::Absent)) {
             return false;
         }
@@ -255,9 +266,7 @@ private:
 [[nodiscard]] constexpr bool failure_allows_takeover(
     CacheFailureCode failure) noexcept {
     return failure == CacheFailureCode::ProducerCancelled
-        || failure == CacheFailureCode::ProducerExited
-        || failure == CacheFailureCode::AdmissionDenied
-        || failure == CacheFailureCode::StorageFailure;
+        || failure == CacheFailureCode::ProducerExited;
 }
 
 } // namespace bioseq::cache

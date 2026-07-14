@@ -724,6 +724,12 @@ AddCommonTargetX(
   HWY 1.3.0
 )
 
+# The Bioseq DSO always owns the provider half of the cache rendezvous ABI and
+# the small PG lifecycle helpers, even when the sibling cache DSO is disabled.
+target_link_libraries(postgresql_bioseq PRIVATE
+  bioseq_cache_provider_api
+  bioseq_pg_support)
+
 if(TARGET bioseq_gpu_archive_builder)
   add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
 endif()

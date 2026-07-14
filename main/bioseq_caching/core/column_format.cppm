@@ -12,6 +12,7 @@ module;
 #include <cstring>
 #include <expected>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -32,10 +33,13 @@ enum class ChecksumError : std::uint8_t {
 template <class Policy>
 concept column_checksum_policy = requires(
     Policy policy,
-    std::span<const std::byte> bytes) {
+    std::span<const std::byte> bytes,
+    std::span<const CacheDigest256> block_digests) {
     { policy.block_crc32c(bytes) }
         -> std::same_as<std::expected<std::uint32_t, ChecksumError>>;
     { policy.sha256(bytes) }
+        -> std::same_as<std::expected<CacheDigest256, ChecksumError>>;
+    { policy.manifest_sha256(block_digests) }
         -> std::same_as<std::expected<CacheDigest256, ChecksumError>>;
 };
 
@@ -178,7 +182,11 @@ decode_validity(
     const bool known_tier = reference.tier == BlockBackingTierV1::Dsa
         || reference.tier == BlockBackingTierV1::File;
     return known_tier
+        && reference.flags == 0
+        && reference.reserved == 0
+        && reference.reserved2 == 0
         && reference.handle_or_file_id != 0
+        && reference.length != 0
         && checked_range(reference.offset, reference.length, backing_size);
 }
 
@@ -230,13 +238,41 @@ void write_little_endian_at(
 /** Append zero padding to reach a checked power-of-two alignment. */
 [[nodiscard]] inline std::expected<void, FormatError> align_vector(
     std::vector<std::byte>& bytes,
-    std::uint64_t alignment) {
-    const auto aligned = checked_align_up(bytes.size(), alignment);
+    std::uint64_t alignment,
+    std::uint64_t base_offset = 0) {
+    const auto absolute_offset = checked_add(
+        base_offset, static_cast<std::uint64_t>(bytes.size()));
+    if (!absolute_offset.has_value()) {
+        return std::unexpected(FormatError::ArithmeticOverflow);
+    }
+    const auto aligned = checked_align_up(*absolute_offset, alignment);
     if (!aligned.has_value()) {
         return std::unexpected(FormatError::InvalidAlignment);
     }
-    bytes.resize(static_cast<std::size_t>(*aligned), std::byte{0});
+    const std::uint64_t relative = *aligned - base_offset;
+    if (relative > (std::numeric_limits<std::size_t>::max)()) {
+        return std::unexpected(FormatError::ArithmeticOverflow);
+    }
+    bytes.resize(static_cast<std::size_t>(relative), std::byte{0});
     return {};
+}
+
+/** Return the dense or aligned-stride width for a fixed encoding. */
+[[nodiscard]] inline std::expected<std::uint64_t, FormatError>
+fixed_value_stride(const ColumnDescriptorV1& descriptor) noexcept {
+    if (descriptor.type_length <= 0) {
+        return std::unexpected(FormatError::InvalidFixedWidth);
+    }
+    const std::uint64_t width = static_cast<std::uint64_t>(
+        descriptor.type_length);
+    if (descriptor.encoding != ColumnEncoding::FixedByReference) {
+        return width;
+    }
+    const auto stride = checked_align_up(width, descriptor.type_alignment);
+    if (!stride.has_value()) {
+        return std::unexpected(FormatError::InvalidAlignment);
+    }
+    return *stride;
 }
 
 /** Build the exact canonical descriptor block used for the schema digest. */
@@ -265,6 +301,7 @@ serialize_schema(std::span<const ColumnSchema> schema) {
                 != 0
             || descriptor.by_value > 1
             || descriptor.reserved != 0
+            || descriptor.name_offset != 0
             || (descriptor.flags & ~kColumnFlagNullable) != 0) {
             return std::unexpected(FormatError::InvalidSchema);
         }
@@ -277,7 +314,11 @@ serialize_schema(std::span<const ColumnSchema> schema) {
         }
         if ((fixed_encoding && descriptor.type_length <= 0)
             || (descriptor.encoding == ColumnEncoding::BooleanBits
-                && descriptor.type_length != 1)) {
+                && (descriptor.type_length != 1 || descriptor.by_value != 1))
+            || (descriptor.encoding == ColumnEncoding::FixedByValue
+                && descriptor.by_value != 1)
+            || (descriptor.encoding == ColumnEncoding::FixedByReference
+                && descriptor.by_value != 0)) {
             return std::unexpected(FormatError::InvalidFixedWidth);
         }
         const std::uint64_t name_offset = bytes.size() + 64u;
@@ -300,6 +341,9 @@ serialize_schema(std::span<const ColumnSchema> schema) {
         for (const char character : column.name) {
             bytes.push_back(static_cast<std::byte>(
                 static_cast<unsigned char>(character)));
+        }
+        if (bytes.size() > kMaxCanonicalKeyBytes) {
+            return std::unexpected(FormatError::InvalidSchema);
         }
     }
     return bytes;
@@ -474,7 +518,8 @@ public:
         std::vector<detail::GroupIndexEntry> group_index;
         group_index.reserve(groups_.size());
         for (const detail::PendingGroup& group : groups_) {
-            auto encoded = serialize_group(group, policy);
+            auto encoded = serialize_group(
+                group, static_cast<std::uint64_t>(store.size()), policy);
             if (!encoded.has_value()) {
                 return std::unexpected(encoded.error());
             }
@@ -581,7 +626,7 @@ public:
                 digest_bytes.push_back(static_cast<std::byte>(byte));
             }
         }
-        auto manifest = policy.sha256(digest_bytes);
+        auto manifest = policy.manifest_sha256(block_digests);
         if (!manifest.has_value()) {
             return std::unexpected(FormatError::ChecksumUnavailable);
         }
@@ -609,6 +654,7 @@ private:
     [[nodiscard]] std::expected<std::vector<std::byte>, FormatError>
     serialize_group(
         const detail::PendingGroup& group,
+        std::uint64_t store_offset,
         Policy& policy) const {
         const auto chunk_table_bytes = checked_mul(
             static_cast<std::uint64_t>(schema_.size()),
@@ -698,33 +744,52 @@ private:
                 chunk.logical_values_bytes = group.rows.size();
             } else {
                 const auto alignment = detail::align_vector(
-                    bytes, schema.descriptor.type_alignment);
+                    bytes,
+                    schema.descriptor.type_alignment,
+                    store_offset);
                 if (!alignment.has_value()) {
                     return std::unexpected(alignment.error());
                 }
                 chunk.values_offset = bytes.size();
                 const std::size_t width = static_cast<std::size_t>(
                     schema.descriptor.type_length);
+                const auto stride = detail::fixed_value_stride(
+                    schema.descriptor);
+                if (!stride.has_value()) {
+                    return std::unexpected(stride.error());
+                }
                 const auto required_values = checked_mul(
+                    *stride,
+                    static_cast<std::uint64_t>(group.rows.size()));
+                const auto logical_values = checked_mul(
                     static_cast<std::uint64_t>(width),
                     static_cast<std::uint64_t>(group.rows.size()));
                 if (!required_values.has_value()
-                    || *required_values
-                        > (std::numeric_limits<std::size_t>::max)()) {
+                    || !logical_values.has_value()
+                    || !checked_range(
+                        static_cast<std::uint64_t>(bytes.size()),
+                        *required_values,
+                        (std::numeric_limits<std::size_t>::max)())) {
                     return std::unexpected(FormatError::ArithmeticOverflow);
                 }
                 for (const auto& row : group.rows) {
                     if (row[column_index].is_null) {
-                        bytes.resize(bytes.size() + width, std::byte{0});
+                        bytes.resize(
+                            bytes.size() + static_cast<std::size_t>(*stride),
+                            std::byte{0});
                     } else {
                         bytes.insert(
                             bytes.end(),
                             row[column_index].bytes.begin(),
                             row[column_index].bytes.end());
+                        bytes.resize(
+                            bytes.size()
+                                + static_cast<std::size_t>(*stride) - width,
+                            std::byte{0});
                     }
                 }
                 chunk.values_bytes = *required_values;
-                chunk.logical_values_bytes = chunk.values_bytes;
+                chunk.logical_values_bytes = *logical_values;
             }
             auto checksum_input = detail::chunk_checksum_bytes(bytes, chunk);
             if (!checksum_input.has_value()) {
@@ -903,7 +968,12 @@ public:
         } else {
             const std::uint64_t width = static_cast<std::uint64_t>(
                 schema_[column_index].descriptor.type_length);
-            const auto offset = checked_mul(local_row, width);
+            const auto stride = detail::fixed_value_stride(
+                schema_[column_index].descriptor);
+            if (!stride.has_value()) {
+                return std::unexpected(stride.error());
+            }
+            const auto offset = checked_mul(local_row, *stride);
             if (!offset.has_value()) {
                 return std::unexpected(FormatError::ArithmeticOverflow);
             }
@@ -937,6 +1007,7 @@ template <column_checksum_policy Policy>
 validate_column_store(
     std::span<const std::byte> store,
     const ColumnStoreIdentity& expected_identity,
+    std::span<const ColumnSchema> expected_schema,
     Policy& policy) {
     if (store.size() < kColumnStoreHeaderBytes + kFooterPrefixBytes + 32u) {
         return std::unexpected(FormatError::Truncated);
@@ -1015,6 +1086,24 @@ validate_column_store(
         || *index_offset >= store.size()) {
         return std::unexpected(FormatError::OffsetOutOfBounds);
     }
+    if (expected_schema.size() != *column_count) {
+        return std::unexpected(FormatError::SchemaMismatch);
+    }
+    auto expected_descriptor_block = detail::serialize_schema(expected_schema);
+    if (!expected_descriptor_block.has_value()) {
+        return std::unexpected(FormatError::InvalidSchema);
+    }
+    auto stored_expected_descriptor = checked_subspan(
+        store, *descriptor_offset, expected_descriptor_block->size());
+    if (!stored_expected_descriptor.has_value()
+        || *descriptor_offset + expected_descriptor_block->size()
+            > *index_offset
+        || !std::equal(
+            expected_descriptor_block->begin(),
+            expected_descriptor_block->end(),
+            stored_expected_descriptor->begin())) {
+        return std::unexpected(FormatError::SchemaMismatch);
+    }
 
     std::size_t schema_cursor = static_cast<std::size_t>(*descriptor_offset);
     auto descriptor_count = read_little_endian<std::uint32_t>(
@@ -1077,7 +1166,10 @@ validate_column_store(
         }
         if ((fixed_encoding && *type_length <= 0)
             || (*encoding == ColumnEncoding::BooleanBits
-                && *type_length != 1)) {
+                && (*type_length != 1 || *by_value != 1))
+            || (*encoding == ColumnEncoding::FixedByValue && *by_value != 1)
+            || (*encoding == ColumnEncoding::FixedByReference
+                && *by_value != 0)) {
             return std::unexpected(FormatError::InvalidFixedWidth);
         }
         column.name.reserve(*name_length);
@@ -1098,7 +1190,7 @@ validate_column_store(
             .receive_function_oid = *receive_oid,
             .receive_type_io_param = *io_param,
             .reserved = *reserved,
-            .name_offset = *name_offset,
+            .name_offset = 0,
         };
         column.semantic_id = SemanticId128{
             .high = *semantic_high,
@@ -1113,7 +1205,17 @@ validate_column_store(
         store, index_cursor);
     if (!indexed_group_count || *indexed_group_count != *group_count
         || *indexed_group_count
-            > (std::numeric_limits<std::uint32_t>::max)()) {
+            > (std::numeric_limits<std::uint32_t>::max)() - 3u) {
+        return std::unexpected(FormatError::InvalidOffsets);
+    }
+    const auto index_entries_bytes = checked_mul(
+        *indexed_group_count,
+        static_cast<std::uint64_t>(kRowGroupIndexEntryBytes));
+    const auto index_total_bytes = index_entries_bytes.has_value()
+        ? checked_add(std::uint64_t{8}, *index_entries_bytes)
+        : std::optional<std::uint64_t>{};
+    if (!index_total_bytes.has_value()
+        || !checked_range(*index_offset, *index_total_bytes, store.size())) {
         return std::unexpected(FormatError::InvalidOffsets);
     }
     std::vector<detail::GroupIndexEntry> group_index;
@@ -1170,17 +1272,27 @@ validate_column_store(
     if (*computed_schema_digest != stored_schema_digest) {
         return std::unexpected(FormatError::SchemaMismatch);
     }
-
-    if (group_index.size()
-        > (std::numeric_limits<std::uint32_t>::max)() - 3u) {
-        return std::unexpected(FormatError::ArithmeticOverflow);
+    if (expected_descriptor_block->size() != descriptor_block->size()
+        || !std::equal(
+            expected_descriptor_block->begin(),
+            expected_descriptor_block->end(),
+            descriptor_block->begin())) {
+        return std::unexpected(FormatError::SchemaMismatch);
     }
+
     const std::uint32_t expected_block_count = static_cast<std::uint32_t>(
         group_index.size() + 3u);
+    const auto footer_digest_bytes = checked_mul(
+        static_cast<std::uint64_t>(expected_block_count),
+        std::uint64_t{32});
     const auto footer_bytes = checked_add(
         static_cast<std::uint64_t>(kFooterPrefixBytes + 32u),
-        static_cast<std::uint64_t>(expected_block_count) * 32u);
-    if (!footer_bytes.has_value()
+        footer_digest_bytes.value_or(
+            (std::numeric_limits<std::uint64_t>::max)()));
+    const auto footer_digest_size = footer_digest_bytes.has_value()
+        ? checked_narrow<std::size_t>(*footer_digest_bytes)
+        : std::optional<std::size_t>{};
+    if (!footer_digest_size.has_value() || !footer_bytes.has_value()
         || !checked_range(footer_offset, *footer_bytes, store.size())
         || footer_offset + *footer_bytes != store.size()) {
         return std::unexpected(FormatError::Truncated);
@@ -1202,13 +1314,23 @@ validate_column_store(
     }
     std::vector<std::byte> stored_digest_bytes(
         store.begin() + footer_cursor,
-        store.begin() + footer_cursor + expected_block_count * 32u);
-    footer_cursor += expected_block_count * 32u;
+        store.begin() + footer_cursor + *footer_digest_size);
+    footer_cursor += *footer_digest_size;
+    std::vector<CacheDigest256> stored_block_digests(expected_block_count);
+    for (std::size_t block = 0; block < stored_block_digests.size(); ++block) {
+        for (std::size_t byte = 0;
+             byte < stored_block_digests[block].bytes.size();
+             ++byte) {
+            stored_block_digests[block].bytes[byte] =
+                std::to_integer<std::uint8_t>(
+                    stored_digest_bytes[block * 32u + byte]);
+        }
+    }
     CacheDigest256 stored_manifest{};
     for (std::uint8_t& byte : stored_manifest.bytes) {
         byte = std::to_integer<std::uint8_t>(store[footer_cursor++]);
     }
-    auto computed_manifest = policy.sha256(stored_digest_bytes);
+    auto computed_manifest = policy.manifest_sha256(stored_block_digests);
     if (!computed_manifest.has_value()) {
         return std::unexpected(FormatError::ChecksumUnavailable);
     }
@@ -1298,6 +1420,12 @@ validate_column_store(
         const std::uint64_t payload_start = kRowGroupHeaderBytes
             + schema.size() * kColumnChunkBytes;
         std::uint64_t expected_payload_offset = payload_start;
+        const auto bitmap_numerator = checked_add(
+            static_cast<std::uint64_t>(*rows), std::uint64_t{7});
+        if (!bitmap_numerator.has_value()) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        const std::uint64_t expected_bitmap_bytes = *bitmap_numerator / 8u;
         for (std::size_t column_index = 0;
              column_index < schema.size();
              ++column_index) {
@@ -1354,7 +1482,7 @@ validate_column_store(
                 return std::unexpected(FormatError::InvalidNullBitmap);
             }
             if (chunk.null_bitmap_bytes != 0) {
-                if (chunk.null_bitmap_bytes != (*rows + 7u) / 8u) {
+                if (chunk.null_bitmap_bytes != expected_bitmap_bytes) {
                     return std::unexpected(FormatError::InvalidNullBitmap);
                 }
                 auto bitmap = checked_subspan(
@@ -1407,7 +1535,9 @@ validate_column_store(
                 for (std::uint64_t row = 0; row <= *rows; ++row) {
                     auto offset = read_little_endian<std::uint64_t>(
                         *offsets, offsets_cursor);
-                    if (!offset.has_value() || *offset < prior
+                    if (!offset.has_value()
+                        || (row == 0 && *offset != 0)
+                        || *offset < prior
                         || *offset > chunk.values_bytes) {
                         return std::unexpected(FormatError::InvalidOffsets);
                     }
@@ -1453,7 +1583,7 @@ validate_column_store(
                 if (chunk.offsets_bytes != 0
                     || chunk.offsets_offset != 0
                     || chunk.values_offset != expected_payload_offset
-                    || chunk.values_bytes != (*rows + 7u) / 8u
+                    || chunk.values_bytes != expected_bitmap_bytes
                     || chunk.logical_values_bytes != *rows) {
                     return std::unexpected(FormatError::InvalidOffsets);
                 }
@@ -1489,38 +1619,70 @@ validate_column_store(
                 }
                 expected_payload_offset = *next_payload;
             } else {
+                const auto stride = detail::fixed_value_stride(
+                    column.descriptor);
                 const auto required_values = checked_mul(
                     static_cast<std::uint64_t>(*rows),
-                    static_cast<std::uint64_t>(column.descriptor.type_length));
-                if (!required_values.has_value()
+                    stride.has_value() ? *stride : 0);
+                const auto required_logical_values = checked_mul(
+                    static_cast<std::uint64_t>(*rows),
+                    column.descriptor.type_length > 0
+                        ? static_cast<std::uint64_t>(
+                            column.descriptor.type_length)
+                        : 0);
+                if (!stride.has_value() || !required_values.has_value()
+                    || !required_logical_values.has_value()
                     || column.descriptor.type_length <= 0
                     || chunk.offsets_bytes != 0
                     || chunk.offsets_offset != 0
                     || chunk.values_bytes != *required_values
-                    || chunk.logical_values_bytes != chunk.values_bytes
-                    || chunk.values_offset
-                        % column.descriptor.type_alignment != 0) {
+                    || chunk.logical_values_bytes != *required_logical_values) {
                     return std::unexpected(FormatError::InvalidFixedWidth);
                 }
-                const auto aligned = checked_align_up(
-                    expected_payload_offset,
+                const auto absolute_payload_offset = checked_add(
+                    entry.offset, expected_payload_offset);
+                if (!absolute_payload_offset.has_value()) {
+                    return std::unexpected(FormatError::ArithmeticOverflow);
+                }
+                const auto aligned_absolute = checked_align_up(
+                    *absolute_payload_offset,
                     column.descriptor.type_alignment);
-                if (!aligned.has_value()) {
+                if (!aligned_absolute.has_value()
+                    || *aligned_absolute < entry.offset) {
                     return std::unexpected(FormatError::InvalidAlignment);
                 }
+                const std::uint64_t aligned =
+                    *aligned_absolute - entry.offset;
                 const auto next_payload = checked_add(
-                    *aligned, chunk.values_bytes);
+                    aligned, chunk.values_bytes);
                 if (!next_payload.has_value()) {
                     return std::unexpected(FormatError::ArithmeticOverflow);
                 }
-                if (chunk.values_offset != *aligned) {
+                if (chunk.values_offset != aligned) {
                     return std::unexpected(FormatError::InvalidFixedWidth);
                 }
                 for (std::uint64_t padding = expected_payload_offset;
-                     padding < *aligned;
+                     padding < aligned;
                      ++padding) {
                     if ((*group)[padding] != std::byte{0}) {
                         return std::unexpected(FormatError::CorruptBlock);
+                    }
+                }
+                auto values = checked_subspan(
+                    *group, chunk.values_offset, chunk.values_bytes);
+                if (!values.has_value()) {
+                    return std::unexpected(FormatError::OffsetOutOfBounds);
+                }
+                const std::uint64_t width = static_cast<std::uint64_t>(
+                    column.descriptor.type_length);
+                for (std::uint64_t row = 0; row < *rows; ++row) {
+                    const std::uint64_t row_offset = row * *stride;
+                    for (std::uint64_t byte = width;
+                         byte < *stride;
+                         ++byte) {
+                        if ((*values)[row_offset + byte] != std::byte{0}) {
+                            return std::unexpected(FormatError::CorruptBlock);
+                        }
                     }
                 }
                 if (chunk.null_bitmap_bytes != 0) {
@@ -1528,10 +1690,6 @@ validate_column_store(
                         *group,
                         chunk.null_bitmap_offset,
                         chunk.null_bitmap_bytes);
-                    auto values = checked_subspan(
-                        *group, chunk.values_offset, chunk.values_bytes);
-                    const std::uint64_t width = static_cast<std::uint64_t>(
-                        column.descriptor.type_length);
                     for (std::uint64_t row = 0; row < *rows; ++row) {
                         const bool valid =
                             (std::to_integer<unsigned int>(
@@ -1540,8 +1698,11 @@ validate_column_store(
                         if (valid) {
                             continue;
                         }
-                        for (std::uint64_t byte = 0; byte < width; ++byte) {
-                            if ((*values)[row * width + byte]
+                        const std::uint64_t row_offset = row * *stride;
+                        for (std::uint64_t byte = 0;
+                             byte < *stride;
+                             ++byte) {
+                            if ((*values)[row_offset + byte]
                                 != std::byte{0}) {
                                 return std::unexpected(FormatError::CorruptBlock);
                             }

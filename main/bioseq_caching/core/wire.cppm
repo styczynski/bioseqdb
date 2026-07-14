@@ -249,6 +249,9 @@ struct ColumnDescriptorV1 {
     std::uint32_t receive_type_io_param = 0;
     std::uint32_t reserved = 0;
     std::uint64_t name_offset = 0;
+
+    [[nodiscard]] bool operator==(
+        const ColumnDescriptorV1&) const noexcept = default;
 };
 
 struct ColumnSchemaWireV1 {

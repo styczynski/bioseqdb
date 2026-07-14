@@ -9,7 +9,9 @@ set_target_properties(bioseq_cache_core PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_link_libraries(bioseq_cache_core
-  PUBLIC bioseq_cache_provider_api)
+  PUBLIC
+    bioseq_cache_provider_api
+    bioseq_memory_budget)
 
 target_sources(bioseq_cache_core
   PUBLIC FILE_SET CXX_MODULES

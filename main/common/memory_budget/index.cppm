@@ -26,8 +26,8 @@ module;
 #endif
 
 #if defined(_WIN32)
-#  include <psapi.h>
 #  include <windows.h>
+#  include <psapi.h>
 #endif
 
 export module bioseq.common.memory_budget;

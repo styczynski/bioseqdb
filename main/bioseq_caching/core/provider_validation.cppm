@@ -81,7 +81,8 @@ validate_provider_schema(const ProviderSchemaView& schema) noexcept {
     for (std::size_t index = 0; index < schema.column_count; ++index) {
         const auto& column = schema.columns[index];
         if (column.struct_size < sizeof(BioseqCacheColumnSchemaV1)
-            || column.attno == 0) {
+            || column.attno == 0
+            || column.attno > schema.column_count) {
             return std::unexpected(
                 column.struct_size < sizeof(BioseqCacheColumnSchemaV1)
                     ? SourceMapError::StructSize
@@ -90,6 +91,17 @@ validate_provider_schema(const ProviderSchemaView& schema) noexcept {
         for (std::size_t prior = 0; prior < index; ++prior) {
             if (schema.columns[prior].attno == column.attno) {
                 return std::unexpected(SourceMapError::DuplicateAttno);
+            }
+            const auto& previous = schema.columns[prior];
+            const bool same_semantic_id =
+                previous.semantic_id_high == column.semantic_id_high
+                && previous.semantic_id_low == column.semantic_id_low;
+            if (same_semantic_id
+                && (previous.type_oid != column.type_oid
+                    || previous.typmod != column.typmod
+                    || previous.collation_oid != column.collation_oid
+                    || previous.flags != column.flags)) {
+                return std::unexpected(SourceMapError::SemanticIdMismatch);
             }
         }
     }
@@ -331,6 +343,7 @@ inline void append_provider_digest_frame(
         || provider->provider_id == 0
         || provider->reserved != 0
         || provider->provider_name == nullptr
+        || provider->provider_scan_methods == nullptr
         || provider->analyze_query == nullptr
         || provider->describe_path == nullptr
         || provider->append_generation_semantic_digest == nullptr
@@ -356,10 +369,7 @@ inline void append_provider_digest_frame(
             || provider->late_fetch_batch == nullptr)) {
         return false;
     }
-    const bool source_elision =
-        (provider->provider_flags
-         & BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE) != 0;
-    return !source_elision || provider->provider_scan_methods != nullptr;
+    return true;
 }
 
 /** Preserve self-join binding identity in addition to physical row identity. */
@@ -411,6 +421,19 @@ struct SemanticSettingRecord {
     std::uint8_t class_mask = 0;
 };
 
+/** Accept only one of the four version-one semantic setting classes. */
+[[nodiscard]] constexpr bool known_semantic_setting_class(
+    std::uint8_t class_mask) noexcept {
+    return class_mask
+            == static_cast<std::uint8_t>(SemanticSettingClass::PlanChoice)
+        || class_mask == static_cast<std::uint8_t>(
+            SemanticSettingClass::CapturedResultSemantic)
+        || class_mask == static_cast<std::uint8_t>(
+            SemanticSettingClass::ProjectionCapability)
+        || class_mask
+            == static_cast<std::uint8_t>(SemanticSettingClass::CacheOnly);
+}
+
 /** Require every result-affecting setting to appear exactly once in one class. */
 [[nodiscard]] inline bool semantic_setting_inventory_complete(
     std::span<const std::uint32_t> required_setting_ids,
@@ -426,9 +449,12 @@ struct SemanticSettingRecord {
         }
         std::size_t matches = 0;
         for (const SemanticSettingRecord& record : records) {
-            if (record.setting_id == required
-                && std::has_single_bit(record.class_mask)) {
-                ++matches;
+            if (record.setting_id != required) {
+                continue;
+            }
+            ++matches;
+            if (!known_semantic_setting_class(record.class_mask)) {
+                return false;
             }
         }
         if (matches != 1) {
