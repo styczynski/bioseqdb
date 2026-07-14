@@ -2307,105 +2307,758 @@ void fail_current_reusable_generation(
         std::span<const std::byte>{packed, static_cast<std::size_t>(total)});
 }
 
-inline constexpr std::uint32_t kCoverageMappingMagicV1 = 0x42434d31U;
+inline constexpr std::uint32_t kSourceMappingPlanMagicV1 = 0x42534d31U;
+inline constexpr std::uint32_t kSourceMappingPlanVersionV1 = 1;
+inline constexpr std::size_t kSourceMappingEntryNodeCountV1 = 9;
+inline constexpr std::uint32_t kSourceSchemaFingerprintTagV1 = 0x534d5331U;
+inline constexpr std::uint32_t kConsumerContractFingerprintTagV1 = 0x534d4331U;
+inline constexpr std::uint32_t kDecoratedSchemaFingerprintTagV1 = 0x534d4431U;
+inline constexpr std::uint32_t kSourceMapFingerprintTagV1 = 0x534d4d31U;
 
-struct CoverageMappingHeaderV1 {
-    std::uint32_t magic = kCoverageMappingMagicV1;
-    std::uint32_t format_version = reuse::kReusablePlanFormatVersionV1;
-    std::uint32_t boundary_count = 0;
-    std::uint32_t lineage_count = 0;
+struct DecodedSourceMappingPlanV1 {
+    BioseqCacheColumnMapEntryV1* boundary_map = nullptr;
+    BioseqCacheColumnMapEntryV1* lineage_map = nullptr;
+    std::uint32_t boundary_map_count = 0;
+    std::uint32_t lineage_map_count = 0;
+    CacheDigest256 source_fingerprint{};
+    CacheDigest256 consumer_fingerprint{};
+    CacheDigest256 decorated_fingerprint{};
+    CacheDigest256 map_fingerprint{};
 };
 
-struct CoverageMappingViewV1 {
-    CoverageMappingHeaderV1 header{};
-    std::span<const std::byte> boundary{};
-    std::span<const std::byte> lineage{};
-};
+void destroy_decoded_source_mapping_plan(
+        DecodedSourceMappingPlanV1& plan) noexcept {
+    if (plan.boundary_map != nullptr) {
+        pfree(plan.boundary_map);
+    }
+    if (plan.lineage_map != nullptr) {
+        pfree(plan.lineage_map);
+    }
+    plan = {};
+}
 
-/** Decode the unaligned bytea payload without aliasing provider ABI structs. */
-[[nodiscard]] bool decode_source_mapping(
-        std::span<const std::byte> bytes,
-        CoverageMappingViewV1* output) noexcept {
-    if (output == nullptr || bytes.size() < sizeof(CoverageMappingHeaderV1)) {
+[[nodiscard]] std::span<const std::byte> source_mapping_const_payload(
+        const void* node) noexcept {
+    if (node == nullptr || !IsA(node, Const)) {
+        return {};
+    }
+    const auto* constant = static_cast<const Const*>(node);
+    if (constant->constisnull || constant->consttype != BYTEAOID
+        || constant->constlen != -1 || constant->consttypmod != -1
+        || constant->constcollid != InvalidOid || constant->constbyval
+        || constant->constvalue == static_cast<Datum>(0)) {
+        return {};
+    }
+    const auto* value = reinterpret_cast<const bytea*>(
+        DatumGetPointer(constant->constvalue));
+    if (value == nullptr || VARSIZE_ANY_EXHDR(value) == 0) {
+        return {};
+    }
+    return std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(VARDATA_ANY(value)),
+        static_cast<std::size_t>(VARSIZE_ANY_EXHDR(value)),
+    };
+}
+
+/** NIL is the provider-independent sentinel; otherwise node zero is version. */
+[[nodiscard]] bool source_mapping_private_version(
+        const List* nodes,
+        std::uint32_t* version) noexcept {
+    if (version == nullptr) {
         return false;
     }
-    CoverageMappingHeaderV1 header{};
-    std::memcpy(&header, bytes.data(), sizeof(header));
-    if (header.magic != kCoverageMappingMagicV1
-        || header.format_version != reuse::kReusablePlanFormatVersionV1
-        || header.boundary_count > kMaxProviderBoundaryColumns
-        || header.lineage_count > kMaxProviderBoundaryColumns) {
+    *version = 0;
+    if (nodes == nullptr) {
+        return true;
+    }
+    const int count = list_length(nodes);
+    if (count <= 0
+        || static_cast<std::uint32_t>(count)
+            > kMaxProviderBoundaryColumns
+        || !IsA(list_nth(nodes, 0), Integer)) {
         return false;
     }
-    std::uint64_t expected = sizeof(header);
-    if (!add_coverage_descriptor_size(
-            expected,
-            header.boundary_count,
-            sizeof(BioseqCacheColumnMapEntryV1))
-        || !add_coverage_descriptor_size(
-            expected,
-            header.lineage_count,
-            sizeof(BioseqCacheColumnMapEntryV1))
-        || expected != bytes.size()) {
+    const int raw_version = intVal(list_nth(nodes, 0));
+    if (raw_version <= 0) {
         return false;
     }
-    const std::size_t boundary_bytes =
-        static_cast<std::size_t>(header.boundary_count)
-        * sizeof(BioseqCacheColumnMapEntryV1);
-    const std::size_t lineage_bytes =
-        static_cast<std::size_t>(header.lineage_count)
-        * sizeof(BioseqCacheColumnMapEntryV1);
-    output->header = header;
-    output->boundary = bytes.subspan(sizeof(header), boundary_bytes);
-    output->lineage = bytes.subspan(
-        sizeof(header) + boundary_bytes, lineage_bytes);
+    *version = static_cast<std::uint32_t>(raw_version);
     return true;
 }
 
-/** Persist validated source-column maps as POD; private Nodes stay separate. */
-[[nodiscard]] Const* make_source_mapping_node(
-        const BioseqCacheSourceMappingV1& mapping) {
+/** Canonicalize the opaque tail under the same generic Node byte budget. */
+[[nodiscard]] bool append_source_mapping_private_bytes(
+        std::vector<std::byte>& destination,
+        const List* nodes) {
+    std::uint32_t version = 0;
+    if (!source_mapping_private_version(nodes, &version)) {
+        return false;
+    }
+    append_little_endian(destination, nodes == nullptr
+        ? std::uint32_t{0} : std::uint32_t{1});
+    append_little_endian(destination, version);
+    append_little_endian(destination, static_cast<std::uint32_t>(
+        nodes == nullptr ? 0 : list_length(nodes)));
+    if (nodes == nullptr) {
+        append_little_endian(destination, std::uint64_t{0});
+        return true;
+    }
+
+    MemoryContext caller_context = CurrentMemoryContext;
+    MemoryContext disposable = AllocSetContextCreate(
+        caller_context,
+        "bioseq cache mapping private canonicalization",
+        ALLOCSET_SMALL_SIZES);
+    volatile char* copied = nullptr;
+    volatile std::size_t copied_size = 0;
+    PG_TRY();
+    {
+        MemoryContextSwitchTo(disposable);
+        List* tail = list_copy_tail(const_cast<List*>(nodes), 1);
+        char* serialized = nodeToString(tail);
+        const std::size_t byte_count = serialized == nullptr
+            ? static_cast<std::size_t>(kMaxProviderRecipeBytes) + 1U
+            : strnlen(
+                serialized,
+                static_cast<std::size_t>(kMaxProviderRecipeBytes) + 1U);
+        if (byte_count <= kMaxProviderRecipeBytes) {
+            MemoryContextSwitchTo(caller_context);
+            copied = pnstrdup(serialized, byte_count);
+            copied_size = byte_count;
+        }
+        MemoryContextSwitchTo(caller_context);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (cache_interrupt_error(sqlstate)) {
+            MemoryContextDelete(disposable);
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        copied = nullptr;
+        copied_size = 0;
+    }
+    PG_END_TRY();
+    MemoryContextDelete(disposable);
+    if (copied == nullptr) {
+        return false;
+    }
+    append_little_endian(
+        destination, static_cast<std::uint64_t>(copied_size));
+    const auto* first = reinterpret_cast<const std::byte*>(
+        const_cast<const char*>(copied));
+    destination.insert(destination.end(), first, first + copied_size);
+    pfree(const_cast<char*>(copied));
+    return destination.size() <= kMaxProviderRecipeBytes;
+}
+
+void append_source_mapping_schema_columns(
+        std::vector<std::byte>& destination,
+        const BioseqCacheColumnSchemaV1* columns,
+        std::size_t count) {
+    append_little_endian(destination, static_cast<std::uint32_t>(count));
+    for (std::size_t index = 0; index < count; ++index) {
+        const BioseqCacheColumnSchemaV1& column = columns[index];
+        append_little_endian(destination, static_cast<std::uint32_t>(
+            sizeof(BioseqCacheColumnSchemaV1)));
+        append_little_endian(destination, column.attno);
+        append_little_endian(destination, column.semantic_id_high);
+        append_little_endian(destination, column.semantic_id_low);
+        append_little_endian(destination, column.type_oid);
+        append_little_endian(destination, column.typmod);
+        append_little_endian(destination, column.collation_oid);
+        append_little_endian(destination, column.flags);
+    }
+}
+
+void append_source_mapping_required_attnos(
+        std::vector<std::byte>& destination,
+        const std::uint32_t* attnos,
+        std::size_t count) {
+    append_little_endian(destination, static_cast<std::uint32_t>(count));
+    for (std::size_t index = 0; index < count; ++index) {
+        append_little_endian(destination, attnos[index]);
+    }
+}
+
+[[nodiscard]] std::optional<CacheDigest256> source_mapping_digest(
+        const std::vector<std::byte>& bytes) noexcept {
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+    PostgreSqlColumnChecksumPolicy policy;
+    const auto digest = policy.sha256(bytes);
+    return digest.has_value()
+        ? std::optional<CacheDigest256>{*digest}
+        : std::nullopt;
+}
+
+[[nodiscard]] std::optional<CacheDigest256>
+fingerprint_source_mapping_contract(
+        const BioseqCacheReusableSourceV1& source) noexcept {
+    const ProviderSchemaView boundary{
+        .columns = source.boundary_columns,
+        .column_count = source.boundary_column_count,
+    };
+    const ProviderSchemaView lineage{
+        .columns = source.lineage_columns,
+        .column_count = source.lineage_column_count,
+    };
+    std::uint32_t private_version = 0;
+    if (!validate_provider_schema(boundary).has_value()
+        || !validate_provider_schema(lineage).has_value()
+        || !source_mapping_private_version(
+            source.provider_private_nodes, &private_version)) {
+        return std::nullopt;
+    }
+    try {
+        std::vector<std::byte> bytes;
+        append_little_endian(bytes, kSourceSchemaFingerprintTagV1);
+        append_little_endian(bytes, kSourceMappingPlanVersionV1);
+        append_little_endian(bytes, source.provider_id);
+        append_little_endian(bytes, source.compatibility_family_id);
+        append_little_endian(bytes, source.capability_mask);
+        append_source_mapping_schema_columns(
+            bytes, source.boundary_columns, source.boundary_column_count);
+        append_source_mapping_schema_columns(
+            bytes, source.lineage_columns, source.lineage_column_count);
+        append_source_mapping_required_attnos(bytes, nullptr, 0);
+        append_source_mapping_required_attnos(bytes, nullptr, 0);
+        append_little_endian(bytes, private_version);
+        return source_mapping_digest(bytes);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<CacheDigest256>
+fingerprint_consumer_mapping_contract(
+        const BioseqCachePathDomainV1& consumer) noexcept {
+    const ProviderSchemaView boundary{
+        .columns = consumer.boundary_columns,
+        .column_count = consumer.boundary_column_count,
+        .required_attnos = consumer.required_boundary_attnos,
+        .required_attno_count = consumer.required_boundary_attno_count,
+    };
+    const ProviderSchemaView lineage{
+        .columns = consumer.lineage_columns,
+        .column_count = consumer.lineage_column_count,
+        .required_attnos = consumer.required_lineage_attnos,
+        .required_attno_count = consumer.required_lineage_attno_count,
+    };
+    std::uint32_t private_version = 0;
+    if (!validate_provider_schema(boundary).has_value()
+        || !validate_provider_schema(lineage).has_value()
+        || !source_mapping_private_version(
+            consumer.provider_private_nodes, &private_version)) {
+        return std::nullopt;
+    }
+    try {
+        std::vector<std::byte> bytes;
+        append_little_endian(bytes, kConsumerContractFingerprintTagV1);
+        append_little_endian(bytes, kSourceMappingPlanVersionV1);
+        append_little_endian(bytes, consumer.provider_id);
+        append_little_endian(bytes, consumer.compatibility_family_id);
+        append_little_endian(bytes, consumer.capability_mask);
+        append_source_mapping_schema_columns(
+            bytes, consumer.boundary_columns, consumer.boundary_column_count);
+        append_source_mapping_schema_columns(
+            bytes, consumer.lineage_columns, consumer.lineage_column_count);
+        append_source_mapping_required_attnos(
+            bytes,
+            consumer.required_boundary_attnos,
+            consumer.required_boundary_attno_count);
+        append_source_mapping_required_attnos(
+            bytes,
+            consumer.required_lineage_attnos,
+            consumer.required_lineage_attno_count);
+        append_little_endian(bytes, private_version);
+        return source_mapping_digest(bytes);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<CacheDigest256>
+fingerprint_decorated_mapping_contract(
+        const BioseqCachePathDomainV1& consumer,
+        const BioseqCacheColumnSchemaV1* boundary_columns,
+        std::size_t boundary_column_count,
+        const BioseqCacheColumnSchemaV1* lineage_columns,
+        std::size_t lineage_column_count,
+        const List* provider_private_nodes) noexcept {
+    const ProviderSchemaView boundary{
+        .columns = boundary_columns,
+        .column_count = boundary_column_count,
+    };
+    const ProviderSchemaView lineage{
+        .columns = lineage_columns,
+        .column_count = lineage_column_count,
+    };
+    std::uint32_t private_version = 0;
+    if (!validate_provider_schema(boundary).has_value()
+        || !validate_provider_schema(lineage).has_value()
+        || !source_mapping_private_version(
+            provider_private_nodes, &private_version)) {
+        return std::nullopt;
+    }
+    try {
+        std::vector<std::byte> bytes;
+        append_little_endian(bytes, kDecoratedSchemaFingerprintTagV1);
+        append_little_endian(bytes, kSourceMappingPlanVersionV1);
+        append_little_endian(bytes, consumer.provider_id);
+        append_little_endian(bytes, consumer.compatibility_family_id);
+        append_little_endian(bytes, consumer.capability_mask);
+        append_source_mapping_schema_columns(
+            bytes, boundary_columns, boundary_column_count);
+        append_source_mapping_schema_columns(
+            bytes, lineage_columns, lineage_column_count);
+        append_source_mapping_required_attnos(bytes, nullptr, 0);
+        append_source_mapping_required_attnos(bytes, nullptr, 0);
+        append_little_endian(bytes, private_version);
+        return source_mapping_digest(bytes);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void append_source_mapping_entry_bytes(
+        std::vector<std::byte>& destination,
+        const BioseqCacheColumnMapEntryV1& entry) {
+    append_little_endian(destination, static_cast<std::uint32_t>(
+        sizeof(BioseqCacheColumnMapEntryV1)));
+    append_little_endian(destination, entry.consumer_attno);
+    append_little_endian(destination, entry.source_attno);
+    append_little_endian(destination, entry.flags);
+    append_little_endian(destination, entry.semantic_id_high);
+    append_little_endian(destination, entry.semantic_id_low);
+    append_little_endian(destination, entry.type_oid);
+    append_little_endian(destination, entry.typmod);
+    append_little_endian(destination, entry.collation_oid);
+    append_little_endian(destination, entry.reserved);
+}
+
+[[nodiscard]] std::optional<CacheDigest256> fingerprint_source_mapping(
+        const BioseqCacheSourceMappingV1& mapping) noexcept {
     if (mapping.boundary_map_count > kMaxProviderBoundaryColumns
         || mapping.lineage_map_count > kMaxProviderBoundaryColumns
         || (mapping.boundary_map_count != 0
             && mapping.boundary_map == nullptr)
         || (mapping.lineage_map_count != 0
             && mapping.lineage_map == nullptr)) {
+        return std::nullopt;
+    }
+    try {
+        std::vector<std::byte> bytes;
+        append_little_endian(bytes, kSourceMapFingerprintTagV1);
+        append_little_endian(bytes, kSourceMappingPlanVersionV1);
+        append_little_endian(bytes, static_cast<std::uint32_t>(
+            mapping.boundary_map_count));
+        append_little_endian(bytes, static_cast<std::uint32_t>(
+            mapping.lineage_map_count));
+        for (std::size_t index = 0;
+             index < mapping.boundary_map_count;
+             ++index) {
+            append_source_mapping_entry_bytes(bytes, mapping.boundary_map[index]);
+        }
+        for (std::size_t index = 0;
+             index < mapping.lineage_map_count;
+             ++index) {
+            append_source_mapping_entry_bytes(bytes, mapping.lineage_map[index]);
+        }
+        if (!append_source_mapping_private_bytes(
+                bytes, mapping.provider_private_nodes)) {
+            return std::nullopt;
+        }
+        return source_mapping_digest(bytes);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] bool source_mapping_private_versions_match(
+        const BioseqCachePathDomainV1& consumer,
+        const BioseqCacheReusableSourceV1& source,
+        const List* decorated_private,
+        const List* mapping_private) noexcept {
+    std::uint32_t consumer_version = 0;
+    std::uint32_t source_version = 0;
+    std::uint32_t decorated_version = 0;
+    std::uint32_t mapping_version = 0;
+    return source_mapping_private_version(
+            consumer.provider_private_nodes, &consumer_version)
+        && source_mapping_private_version(
+            source.provider_private_nodes, &source_version)
+        && source_mapping_private_version(
+            decorated_private, &decorated_version)
+        && source_mapping_private_version(mapping_private, &mapping_version)
+        && consumer_version == source_version
+        && consumer_version == decorated_version
+        && (mapping_private == nullptr
+            || (consumer_version != 0
+                && mapping_version == consumer_version));
+}
+
+[[nodiscard]] List* make_source_mapping_entry_node(
+        const BioseqCacheColumnMapEntryV1& entry) {
+    std::vector<std::byte> semantic;
+    semantic.reserve(16);
+    append_little_endian(semantic, entry.semantic_id_high);
+    append_little_endian(semantic, entry.semantic_id_low);
+    Const* semantic_node = make_binary_node(semantic);
+    if (semantic_node == nullptr) {
         return nullptr;
     }
-    const CoverageMappingHeaderV1 header{
-        .boundary_count = static_cast<std::uint32_t>(
-            mapping.boundary_map_count),
-        .lineage_count = static_cast<std::uint32_t>(
-            mapping.lineage_map_count),
+    List* result = list_make4(
+        makeInteger(static_cast<int>(sizeof(BioseqCacheColumnMapEntryV1))),
+        makeInteger(static_cast<std::int32_t>(entry.consumer_attno)),
+        makeInteger(static_cast<std::int32_t>(entry.source_attno)),
+        makeInteger(static_cast<std::int32_t>(entry.flags)));
+    result = lappend(result, semantic_node);
+    result = lappend(result,
+        makeInteger(static_cast<std::int32_t>(entry.type_oid)));
+    result = lappend(result, makeInteger(entry.typmod));
+    result = lappend(result,
+        makeInteger(static_cast<std::int32_t>(entry.collation_oid)));
+    return lappend(result,
+        makeInteger(static_cast<std::int32_t>(entry.reserved)));
+}
+
+/** Build the exact fixed-shape, self-authenticating mapping plan List. */
+[[nodiscard]] List* make_source_mapping_plan_node(
+        const BioseqCachePathDomainV1& consumer,
+        const BioseqCacheReusableSourceV1& source,
+        const BioseqCacheDecoratedPathV1& decorated,
+        const BioseqCacheSourceMappingV1& mapping) {
+    if (!validate_source_map(
+            ProviderContractView{
+                .boundary = {
+                    .columns = consumer.boundary_columns,
+                    .column_count = consumer.boundary_column_count,
+                    .required_attnos = consumer.required_boundary_attnos,
+                    .required_attno_count = consumer.required_boundary_attno_count,
+                },
+                .lineage = {
+                    .columns = consumer.lineage_columns,
+                    .column_count = consumer.lineage_column_count,
+                    .required_attnos = consumer.required_lineage_attnos,
+                    .required_attno_count = consumer.required_lineage_attno_count,
+                },
+                .capability_mask = consumer.capability_mask,
+            },
+            ProviderContractView{
+                .boundary = {
+                    .columns = source.boundary_columns,
+                    .column_count = source.boundary_column_count,
+                },
+                .lineage = {
+                    .columns = source.lineage_columns,
+                    .column_count = source.lineage_column_count,
+                },
+                .capability_mask = source.capability_mask,
+            },
+            mapping).has_value()
+        || !reuse::validate_decorated_path(&consumer, &decorated).has_value()
+        || !source_mapping_private_versions_match(
+            consumer,
+            source,
+            decorated.provider_private_nodes,
+            mapping.provider_private_nodes)) {
+        return nullptr;
+    }
+    const auto source_fingerprint =
+        fingerprint_source_mapping_contract(source);
+    const auto consumer_fingerprint =
+        fingerprint_consumer_mapping_contract(consumer);
+    const auto decorated_fingerprint =
+        fingerprint_decorated_mapping_contract(
+            consumer,
+            decorated.actual_boundary_columns,
+            decorated.actual_boundary_column_count,
+            decorated.actual_lineage_columns,
+            decorated.actual_lineage_column_count,
+            decorated.provider_private_nodes);
+    const auto map_fingerprint = fingerprint_source_mapping(mapping);
+    if (!source_fingerprint.has_value()
+        || !consumer_fingerprint.has_value()
+        || !decorated_fingerprint.has_value()
+        || !map_fingerprint.has_value()) {
+        return nullptr;
+    }
+    List* result = list_make4(
+        makeInteger(static_cast<std::int32_t>(kSourceMappingPlanMagicV1)),
+        makeInteger(static_cast<int>(kSourceMappingPlanVersionV1)),
+        makeInteger(static_cast<int>(mapping.boundary_map_count)),
+        makeInteger(static_cast<int>(mapping.lineage_map_count)));
+    for (std::size_t index = 0;
+         index < mapping.boundary_map_count;
+         ++index) {
+        List* entry = make_source_mapping_entry_node(mapping.boundary_map[index]);
+        if (entry == nullptr) {
+            return nullptr;
+        }
+        result = lappend(result, entry);
+    }
+    for (std::size_t index = 0;
+         index < mapping.lineage_map_count;
+         ++index) {
+        List* entry = make_source_mapping_entry_node(mapping.lineage_map[index]);
+        if (entry == nullptr) {
+            return nullptr;
+        }
+        result = lappend(result, entry);
+    }
+    const std::array<CacheDigest256, 4> fingerprints{
+        *source_fingerprint,
+        *consumer_fingerprint,
+        *decorated_fingerprint,
+        *map_fingerprint,
     };
-    std::uint64_t total = sizeof(header);
-    if (!add_coverage_descriptor_size(
-            total, mapping.boundary_map_count,
-            sizeof(BioseqCacheColumnMapEntryV1))
-        || !add_coverage_descriptor_size(
-            total, mapping.lineage_map_count,
-            sizeof(BioseqCacheColumnMapEntryV1))) {
-        return nullptr;
+    for (const CacheDigest256& fingerprint : fingerprints) {
+        Const* node = make_binary_node(std::as_bytes(
+            std::span<const std::uint8_t>{
+                fingerprint.bytes.data(), fingerprint.bytes.size()}));
+        if (node == nullptr) {
+            return nullptr;
+        }
+        result = lappend(result, node);
     }
-    auto* packed = static_cast<std::byte*>(palloc(total));
-    std::size_t offset = 0;
-    std::memcpy(packed + offset, &header, sizeof(header));
-    offset += sizeof(header);
-    const std::size_t boundary_bytes = mapping.boundary_map_count
-        * sizeof(BioseqCacheColumnMapEntryV1);
-    const std::size_t lineage_bytes = mapping.lineage_map_count
-        * sizeof(BioseqCacheColumnMapEntryV1);
-    if (boundary_bytes != 0) {
-        std::memcpy(packed + offset, mapping.boundary_map, boundary_bytes);
-        offset += boundary_bytes;
+    return result;
+}
+
+[[nodiscard]] bool decode_source_mapping_entry_node(
+        const void* node,
+        BioseqCacheColumnMapEntryV1* output) noexcept {
+    if (node == nullptr || output == nullptr || !IsA(node, List)) {
+        return false;
     }
-    if (lineage_bytes != 0) {
-        std::memcpy(packed + offset, mapping.lineage_map, lineage_bytes);
-        offset += lineage_bytes;
+    const auto* fields = static_cast<const List*>(node);
+    if (list_length(fields)
+            != static_cast<int>(kSourceMappingEntryNodeCountV1)) {
+        return false;
     }
-    return make_binary_node(
-        std::span<const std::byte>{packed, static_cast<std::size_t>(total)});
+    constexpr std::array<int, 8> integer_fields{0, 1, 2, 3, 5, 6, 7, 8};
+    for (const int index : integer_fields) {
+        if (!IsA(list_nth(fields, index), Integer)) {
+            return false;
+        }
+    }
+    const int struct_size = intVal(list_nth(fields, 0));
+    const int consumer_attno = intVal(list_nth(fields, 1));
+    const int source_attno = intVal(list_nth(fields, 2));
+    const std::uint32_t flags = static_cast<std::uint32_t>(
+        intVal(list_nth(fields, 3)));
+    const std::uint32_t type_oid = static_cast<std::uint32_t>(
+        intVal(list_nth(fields, 5)));
+    const int typmod = intVal(list_nth(fields, 6));
+    const std::uint32_t collation_oid = static_cast<std::uint32_t>(
+        intVal(list_nth(fields, 7)));
+    const std::uint32_t reserved = static_cast<std::uint32_t>(
+        intVal(list_nth(fields, 8)));
+    const auto semantic = source_mapping_const_payload(
+        list_nth(fields, 4));
+    if (struct_size != static_cast<int>(sizeof(BioseqCacheColumnMapEntryV1))
+        || consumer_attno <= 0 || source_attno <= 0
+        || flags != 0 || reserved != 0 || !OidIsValid(type_oid)
+        || semantic.size() != 16) {
+        return false;
+    }
+    std::size_t cursor = 0;
+    const auto semantic_high = read_little_endian<std::uint64_t>(
+        semantic, cursor);
+    const auto semantic_low = read_little_endian<std::uint64_t>(
+        semantic, cursor);
+    if (!semantic_high.has_value() || !semantic_low.has_value()
+        || cursor != semantic.size()) {
+        return false;
+    }
+    *output = BioseqCacheColumnMapEntryV1{
+        .struct_size = sizeof(BioseqCacheColumnMapEntryV1),
+        .consumer_attno = static_cast<std::uint32_t>(consumer_attno),
+        .source_attno = static_cast<std::uint32_t>(source_attno),
+        .flags = flags,
+        .semantic_id_high = *semantic_high,
+        .semantic_id_low = *semantic_low,
+        .type_oid = type_oid,
+        .typmod = typmod,
+        .collation_oid = collation_oid,
+        .reserved = reserved,
+    };
+    return true;
+}
+
+/** Strictly decode fixed tags, lengths, counts, entry Nodes, and digests. */
+[[nodiscard]] bool decode_source_mapping_plan_node(
+        const void* node,
+        DecodedSourceMappingPlanV1* output) {
+    if (node == nullptr || output == nullptr || !IsA(node, List)) {
+        return false;
+    }
+    const auto* plan = static_cast<const List*>(node);
+    if (list_length(plan) < 8
+        || !IsA(list_nth(plan, 0), Integer)
+        || !IsA(list_nth(plan, 1), Integer)
+        || !IsA(list_nth(plan, 2), Integer)
+        || !IsA(list_nth(plan, 3), Integer)
+        || static_cast<std::uint32_t>(intVal(list_nth(plan, 0)))
+            != kSourceMappingPlanMagicV1
+        || intVal(list_nth(plan, 1))
+            != static_cast<int>(kSourceMappingPlanVersionV1)) {
+        return false;
+    }
+    const int boundary_count = intVal(list_nth(plan, 2));
+    const int lineage_count = intVal(list_nth(plan, 3));
+    if (boundary_count < 0 || lineage_count < 0
+        || static_cast<std::uint32_t>(boundary_count)
+            > kMaxProviderBoundaryColumns
+        || static_cast<std::uint32_t>(lineage_count)
+            > kMaxProviderBoundaryColumns
+        || list_length(plan) != 8 + boundary_count + lineage_count) {
+        return false;
+    }
+
+    DecodedSourceMappingPlanV1 decoded{};
+    decoded.boundary_map_count = static_cast<std::uint32_t>(boundary_count);
+    decoded.lineage_map_count = static_cast<std::uint32_t>(lineage_count);
+    if (boundary_count != 0) {
+        decoded.boundary_map = static_cast<BioseqCacheColumnMapEntryV1*>(
+            palloc0(sizeof(BioseqCacheColumnMapEntryV1)
+                * static_cast<std::size_t>(boundary_count)));
+    }
+    if (lineage_count != 0) {
+        decoded.lineage_map = static_cast<BioseqCacheColumnMapEntryV1*>(
+            palloc0(sizeof(BioseqCacheColumnMapEntryV1)
+                * static_cast<std::size_t>(lineage_count)));
+    }
+    int cursor = 4;
+    for (int index = 0; index < boundary_count; ++index) {
+        if (!decode_source_mapping_entry_node(
+                list_nth(plan, cursor++), &decoded.boundary_map[index])) {
+            destroy_decoded_source_mapping_plan(decoded);
+            return false;
+        }
+    }
+    for (int index = 0; index < lineage_count; ++index) {
+        if (!decode_source_mapping_entry_node(
+                list_nth(plan, cursor++), &decoded.lineage_map[index])) {
+            destroy_decoded_source_mapping_plan(decoded);
+            return false;
+        }
+    }
+    std::array<CacheDigest256*, 4> fingerprints{
+        &decoded.source_fingerprint,
+        &decoded.consumer_fingerprint,
+        &decoded.decorated_fingerprint,
+        &decoded.map_fingerprint,
+    };
+    for (CacheDigest256* fingerprint : fingerprints) {
+        const auto bytes = source_mapping_const_payload(
+            list_nth(plan, cursor++));
+        if (bytes.size() != fingerprint->bytes.size()) {
+            destroy_decoded_source_mapping_plan(decoded);
+            return false;
+        }
+        std::memcpy(
+            fingerprint->bytes.data(), bytes.data(), bytes.size());
+    }
+    *output = decoded;
+    return true;
+}
+
+/** Recompute every fingerprint and the generic semantic map validator. */
+[[nodiscard]] bool validate_source_mapping_plan_node(
+        const void* node,
+        const BioseqCachePathDomainV1& consumer,
+        const BioseqCacheReusableSourceV1& source,
+        const BioseqCacheColumnSchemaV1* decorated_boundary_columns,
+        std::size_t decorated_boundary_column_count,
+        const BioseqCacheColumnSchemaV1* decorated_lineage_columns,
+        std::size_t decorated_lineage_column_count,
+        const List* decorated_private_nodes,
+        const void* mapping_private_node,
+        DecodedSourceMappingPlanV1* output) {
+    if (output == nullptr
+        || (mapping_private_node != nullptr
+            && !IsA(mapping_private_node, List))) {
+        return false;
+    }
+    const auto* mapping_private = static_cast<const List*>(
+        mapping_private_node);
+    DecodedSourceMappingPlanV1 decoded{};
+    if (!decode_source_mapping_plan_node(node, &decoded)) {
+        return false;
+    }
+    const BioseqCacheSourceMappingV1 mapping{
+        .struct_size = sizeof(BioseqCacheSourceMappingV1),
+        .flags = 0,
+        .boundary_map = decoded.boundary_map,
+        .boundary_map_count = decoded.boundary_map_count,
+        .lineage_map = decoded.lineage_map,
+        .lineage_map_count = decoded.lineage_map_count,
+        .provider_private_nodes = const_cast<List*>(mapping_private),
+    };
+    const ProviderContractView consumer_contract{
+        .boundary = {
+            .columns = consumer.boundary_columns,
+            .column_count = consumer.boundary_column_count,
+            .required_attnos = consumer.required_boundary_attnos,
+            .required_attno_count = consumer.required_boundary_attno_count,
+        },
+        .lineage = {
+            .columns = consumer.lineage_columns,
+            .column_count = consumer.lineage_column_count,
+            .required_attnos = consumer.required_lineage_attnos,
+            .required_attno_count = consumer.required_lineage_attno_count,
+        },
+        .capability_mask = consumer.capability_mask,
+    };
+    const ProviderContractView source_contract{
+        .boundary = {
+            .columns = source.boundary_columns,
+            .column_count = source.boundary_column_count,
+        },
+        .lineage = {
+            .columns = source.lineage_columns,
+            .column_count = source.lineage_column_count,
+        },
+        .capability_mask = source.capability_mask,
+    };
+    const auto source_fingerprint =
+        fingerprint_source_mapping_contract(source);
+    const auto consumer_fingerprint =
+        fingerprint_consumer_mapping_contract(consumer);
+    const auto decorated_fingerprint =
+        fingerprint_decorated_mapping_contract(
+            consumer,
+            decorated_boundary_columns,
+            decorated_boundary_column_count,
+            decorated_lineage_columns,
+            decorated_lineage_column_count,
+            decorated_private_nodes);
+    const auto map_fingerprint = fingerprint_source_mapping(mapping);
+    const bool valid = validate_source_map(
+            consumer_contract, source_contract, mapping).has_value()
+        && source_mapping_private_versions_match(
+            consumer,
+            source,
+            decorated_private_nodes,
+            mapping_private)
+        && source_fingerprint.has_value()
+        && consumer_fingerprint.has_value()
+        && decorated_fingerprint.has_value()
+        && map_fingerprint.has_value()
+        && decoded.source_fingerprint == *source_fingerprint
+        && decoded.consumer_fingerprint == *consumer_fingerprint
+        && decoded.decorated_fingerprint == *decorated_fingerprint
+        && decoded.map_fingerprint == *map_fingerprint;
+    if (!valid) {
+        destroy_decoded_source_mapping_plan(decoded);
+        return false;
+    }
+    *output = decoded;
+    return true;
 }
 
 struct PlannerPinReleaseV1 {
@@ -2732,7 +3385,24 @@ void release_planner_pin_noerror(
                 &release_records[index])) {
             continue;
         }
-        Const* mapping_node = make_source_mapping_node(mapping.value);
+        const BioseqCacheDecoratedPathV1 advertised_decorated{
+            .struct_size = sizeof(BioseqCacheDecoratedPathV1),
+            .flags = 0,
+            .path = provider_path,
+            .actual_boundary_columns = described.value.boundary_columns,
+            .actual_boundary_column_count =
+                described.value.boundary_column_count,
+            .actual_lineage_columns = described.value.lineage_columns,
+            .actual_lineage_column_count =
+                described.value.lineage_column_count,
+            .provider_private_nodes =
+                described.value.provider_private_nodes,
+        };
+        List* mapping_node = make_source_mapping_plan_node(
+            described.value,
+            decoded.source,
+            advertised_decorated,
+            mapping.value);
         if (mapping_node == nullptr) {
             continue;
         }
@@ -6363,52 +7033,6 @@ void coverage_state_cleanup(void* opaque) noexcept {
     return true;
 }
 
-/** Recheck the opaque provider payload under the same bounded node budget. */
-[[nodiscard]] bool validate_provider_private_nodes_fail_open(
-        const void* nodes) {
-    MemoryContext caller_context = CurrentMemoryContext;
-    MemoryContext disposable = AllocSetContextCreate(
-        caller_context,
-        "bioseq cache source private validation",
-        ALLOCSET_SMALL_SIZES);
-    volatile bool accepted = false;
-    PG_TRY();
-    {
-        MemoryContextSwitchTo(disposable);
-        if (nodes == nullptr) {
-            accepted = true;
-        } else if (IsA(nodes, List)
-            && list_length(static_cast<const List*>(nodes)) >= 0
-            && static_cast<std::uint32_t>(
-                list_length(static_cast<const List*>(nodes)))
-                <= kMaxProviderBoundaryColumns) {
-            char* serialized = nodeToString(nodes);
-            if (serialized != nullptr) {
-                accepted = strnlen(
-                    serialized,
-                    static_cast<std::size_t>(kMaxProviderRecipeBytes) + 1U)
-                    <= kMaxProviderRecipeBytes;
-                pfree(serialized);
-            }
-        }
-        MemoryContextSwitchTo(caller_context);
-    }
-    PG_CATCH();
-    {
-        const int sqlstate = geterrcode();
-        MemoryContextSwitchTo(caller_context);
-        if (cache_interrupt_error(sqlstate)) {
-            MemoryContextDelete(disposable);
-            PG_RE_THROW();
-        }
-        FlushErrorState();
-        accepted = false;
-    }
-    PG_END_TRY();
-    MemoryContextDelete(disposable);
-    return accepted;
-}
-
 [[nodiscard]] ProviderContractView coverage_provider_contract(
         const BioseqCachePathDomainV1& domain) noexcept {
     return ProviderContractView{
@@ -6443,53 +7067,60 @@ void coverage_state_cleanup(void* opaque) noexcept {
     };
 }
 
-/** Copy unaligned persisted entries, then rerun the generic map validator. */
+[[nodiscard]] bool tuple_descriptor_matches_mapping_schema(
+        TupleDesc descriptor,
+        const BioseqCacheColumnSchemaV1* columns,
+        std::size_t column_count) noexcept {
+    if (descriptor == nullptr || column_count > kMaxProviderBoundaryColumns
+        || (column_count != 0 && columns == nullptr)) {
+        return false;
+    }
+    for (std::size_t index = 0; index < column_count; ++index) {
+        const BioseqCacheColumnSchemaV1& column = columns[index];
+        if (column.attno == 0
+            || column.attno > static_cast<std::uint32_t>(descriptor->natts)) {
+            return false;
+        }
+        Form_pg_attribute attribute = TupleDescAttr(
+            descriptor, static_cast<int>(column.attno - 1U));
+        if (attribute->attisdropped || attribute->atttypid != column.type_oid
+            || attribute->atttypmod != column.typmod
+            || attribute->attcollation != column.collation_oid) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Decode the frozen mapping List and recompute all four fingerprints. */
 [[nodiscard]] bool decode_and_validate_runtime_source_mapping(
         CoverageRuntimeSourceV1& source,
         const BioseqCachePathDomainV1& consumer,
         const void* mapping_node,
         const void* provider_private_nodes) {
-    CoverageMappingViewV1 view{};
-    if (!decode_source_mapping(binary_node_payload(mapping_node), &view)
-        || !validate_provider_private_nodes_fail_open(
-            provider_private_nodes)) {
+    DecodedSourceMappingPlanV1 decoded{};
+    if (!validate_source_mapping_plan_node(
+            mapping_node,
+            consumer,
+            source.contract.source,
+            consumer.boundary_columns,
+            consumer.boundary_column_count,
+            consumer.lineage_columns,
+            consumer.lineage_column_count,
+            consumer.provider_private_nodes,
+            provider_private_nodes,
+            &decoded)) {
         return false;
     }
-    if (view.header.boundary_count != 0) {
-        source.boundary_map = static_cast<BioseqCacheColumnMapEntryV1*>(
-            palloc(sizeof(BioseqCacheColumnMapEntryV1)
-                * view.header.boundary_count));
-        std::memcpy(
-            source.boundary_map,
-            view.boundary.data(),
-            view.boundary.size());
-    }
-    if (view.header.lineage_count != 0) {
-        source.lineage_map = static_cast<BioseqCacheColumnMapEntryV1*>(
-            palloc(sizeof(BioseqCacheColumnMapEntryV1)
-                * view.header.lineage_count));
-        std::memcpy(
-            source.lineage_map,
-            view.lineage.data(),
-            view.lineage.size());
-    }
-    source.boundary_map_count = view.header.boundary_count;
-    source.lineage_map_count = view.header.lineage_count;
+    source.boundary_map = decoded.boundary_map;
+    source.lineage_map = decoded.lineage_map;
+    source.boundary_map_count = decoded.boundary_map_count;
+    source.lineage_map_count = decoded.lineage_map_count;
+    decoded.boundary_map = nullptr;
+    decoded.lineage_map = nullptr;
     source.provider_private_nodes = const_cast<List*>(
         static_cast<const List*>(provider_private_nodes));
-    const BioseqCacheSourceMappingV1 mapping{
-        .struct_size = sizeof(BioseqCacheSourceMappingV1),
-        .flags = 0,
-        .boundary_map = source.boundary_map,
-        .boundary_map_count = source.boundary_map_count,
-        .lineage_map = source.lineage_map,
-        .lineage_map_count = source.lineage_map_count,
-        .provider_private_nodes = source.provider_private_nodes,
-    };
-    return validate_source_map(
-        coverage_provider_contract(consumer),
-        coverage_provider_contract(source.contract.source),
-        mapping).has_value();
+    return true;
 }
 
 /** Reprove all shared metadata and collision bytes after executor reacquire. */
@@ -7129,6 +7760,14 @@ void release_all_older_coverage_sources(
         || !state.current_reference
         || state.current_reference.id.claim_sequence == 0
         || raw_descriptor == nullptr
+        || !tuple_descriptor_matches_mapping_schema(
+            raw_descriptor,
+            state.current_contract.domain.boundary_columns,
+            state.current_contract.domain.boundary_column_count)
+        || !tuple_descriptor_matches_mapping_schema(
+            raw_descriptor,
+            state.current_contract.domain.lineage_columns,
+            state.current_contract.domain.lineage_column_count)
         || !visibility_ticket_still_bound(visibility)) {
         return false;
     }
@@ -8802,6 +9441,96 @@ const CustomScanMethods& coverage_scan_methods() {
     return methods;
 }
 
+[[nodiscard]] bool plan_targetlist_matches_mapping_schema(
+        const Plan& child,
+        const BioseqCacheColumnSchemaV1* columns,
+        std::size_t column_count) {
+    if (column_count > kMaxProviderBoundaryColumns
+        || (column_count != 0 && columns == nullptr)) {
+        return false;
+    }
+    for (std::size_t index = 0; index < column_count; ++index) {
+        const BioseqCacheColumnSchemaV1& column = columns[index];
+        const TargetEntry* matched = nullptr;
+        ListCell* cell = nullptr;
+        foreach(cell, child.targetlist) {
+            const auto* entry = static_cast<const TargetEntry*>(lfirst(cell));
+            if (entry != nullptr && entry->resno
+                    == static_cast<AttrNumber>(column.attno)) {
+                matched = entry;
+                break;
+            }
+        }
+        if (matched == nullptr || matched->expr == nullptr
+            || exprType(reinterpret_cast<const Node*>(matched->expr))
+                != column.type_oid
+            || exprTypmod(reinterpret_cast<const Node*>(matched->expr))
+                != column.typmod
+            || exprCollation(reinterpret_cast<const Node*>(matched->expr))
+                != column.collation_oid) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Re-decode every mapping after the final decorated child Plan exists. */
+[[nodiscard]] bool planned_source_mappings_valid(
+        PlannerInfo* root,
+        const CustomPath& best_path,
+        const Plan& child) {
+    const auto current_bytes = binary_node_payload(
+        list_nth(best_path.custom_private, 2));
+    CoverageCurrentPlanViewV1 current_plan{};
+    PlannerDecodedCoverageV1 consumer{};
+    if (root == nullptr
+        || !decode_current_coverage_plan(current_bytes, &current_plan)
+        || !decode_coverage_descriptor_fail_open(
+            current_plan.coverage_descriptor, root->planner_cxt, &consumer)
+        || !plan_targetlist_matches_mapping_schema(
+            child,
+            consumer.domain.boundary_columns,
+            consumer.domain.boundary_column_count)
+        || !plan_targetlist_matches_mapping_schema(
+            child,
+            consumer.domain.lineage_columns,
+            consumer.domain.lineage_column_count)) {
+        return false;
+    }
+    const void* candidates_node = list_nth(best_path.custom_private, 3);
+    if (candidates_node != nullptr && !IsA(candidates_node, List)) {
+        return false;
+    }
+    ListCell* cell = nullptr;
+    foreach(cell, static_cast<List*>(const_cast<void*>(candidates_node))) {
+        const auto* candidate = static_cast<const List*>(lfirst(cell));
+        if (candidate == nullptr || !IsA(candidate, List)
+            || list_length(candidate) != 7) {
+            return false;
+        }
+        PlannerDecodedCoverageV1 source{};
+        const auto descriptor = binary_node_payload(list_nth(candidate, 2));
+        DecodedSourceMappingPlanV1 mapping{};
+        if (!decode_coverage_descriptor_fail_open(
+                descriptor, root->planner_cxt, &source)
+            || !validate_source_mapping_plan_node(
+                list_nth(candidate, 3),
+                consumer.domain,
+                source.source,
+                consumer.domain.boundary_columns,
+                consumer.domain.boundary_column_count,
+                consumer.domain.lineage_columns,
+                consumer.domain.lineage_column_count,
+                consumer.domain.provider_private_nodes,
+                list_nth(candidate, 4),
+                &mapping)) {
+            return false;
+        }
+        destroy_decoded_source_mapping_plan(mapping);
+    }
+    return true;
+}
+
 /** Finalize the provider recipe only after the decorated child Plan exists. */
 Plan* coverage_plan_custom_path(
         PlannerInfo* root,
@@ -8825,6 +9554,9 @@ Plan* coverage_plan_custom_path(
             static_cast<std::uint32_t>(provider_id))
         : nullptr;
     Plan* child = static_cast<Plan*>(linitial(custom_plans));
+    if (!planned_source_mappings_valid(root, *best_path, *child)) {
+        return nullptr;
+    }
     reuse::PlannerOwnedDigestRecipeV1 recipe{};
     reuse::ProviderCallDiagnosticV1 diagnostic{};
     const bool recipe_valid = provider != nullptr
