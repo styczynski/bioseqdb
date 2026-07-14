@@ -151,6 +151,13 @@ TEST_DEBUG_BUILD_PRESET = os.environ.get(
     "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
     _default_test_preset(DEBUG_BUILD_PRESET),
 )
+CACHE_BUILD_PRESET_OVERRIDE = os.environ.get("BIOSEQ_CACHE_BUILD_PRESET")
+CACHE_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
+    "BIOSEQ_CACHE_BUILD_PRESET_DEBUG")
+CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE = os.environ.get(
+    "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET")
+CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
+    "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET_DEBUG")
 EXTERNAL_API_BUILD_PRESET = os.environ.get(
     "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
@@ -158,46 +165,76 @@ DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
 
 
-def preset_for(debug: bool) -> str:
-    return DEBUG_BUILD_PRESET if debug else DEFAULT_BUILD_PRESET
+def _default_cache_preset(core_preset: str, *, combined: bool) -> str:
+    """Map a complete core toolchain preset to its inherited cache variant."""
+    mapped = {
+        ("bench-opt", False): "cache-opt",
+        ("bench-opt-debug", False): "cache-opt-debug",
+        ("bench-opt", True): "cache-bioseq-opt",
+        ("bench-opt-debug", True): "cache-bioseq-opt-debug",
+        ("aws-x64-linux", False): "aws-x64-linux-cache",
+        ("aws-x64-linux-debug", False): "aws-x64-linux-cache-debug",
+        ("aws-x64-linux", True): "aws-x64-linux-cache-bioseq",
+        ("aws-x64-linux-debug", True): "aws-x64-linux-cache-bioseq-debug",
+        ("aws-x64-linux-gcc161", False): "aws-x64-linux-gcc161-cache",
+        ("aws-x64-linux-gcc161-debug", False):
+            "aws-x64-linux-gcc161-cache-debug",
+        ("aws-x64-linux-gcc161", True):
+            "aws-x64-linux-gcc161-cache-bioseq",
+        ("aws-x64-linux-gcc161-debug", True):
+            "aws-x64-linux-gcc161-cache-bioseq-debug",
+    }.get((core_preset, combined))
+    if mapped is not None:
+        return mapped
+
+    debug_suffix = "-debug" if core_preset.endswith("-debug") else ""
+    base = core_preset.removesuffix("-debug")
+    family_suffix = "-cache-bioseq" if combined else "-cache"
+    return f"{base}{family_suffix}{debug_suffix}"
 
 
-def build_dir_for(debug: bool) -> Path:
-    return DEBUG_BUILD_DIR if debug else DEFAULT_BUILD_DIR
-
-
-def bin_dir_for(debug: bool) -> Path:
-    return build_dir_for(debug) / "bioseq"
-
-
-def preset_for_mode(mode: str, debug: bool) -> str:
+def preset_for(mode: str, debug: bool) -> str:
     # A mode may pin an explicit preset (e.g. external-api → GCC16 toolchain);
     # an override wins outright and is not split into debug/production families.
     mode_details = MODES.get(mode)
-    if mode_details is not None and mode_details.preset_override:
+    if mode_details is None:
+        raise RuntimeError(f"unknown build mode {mode!r}")
+    if mode_details.preset_override:
         return mode_details.preset_override
-    # unit+integration builds against the isolated test preset family so the
-    # guarded failure hooks / test-only indexes never leak into a production
-    # (benchmark) tree.
-    if mode == "unit+integration":
+
+    family = mode_details.preset_family
+    production = DEBUG_BUILD_PRESET if debug else DEFAULT_BUILD_PRESET
+    if family == "core":
+        return production
+    if family == "test":
         selected = TEST_DEBUG_BUILD_PRESET if debug else TEST_BUILD_PRESET
-        production = preset_for(debug)
         if selected == production:
             raise RuntimeError(
-                "unit+integration requires an isolated test preset; "
+                f"{mode} requires an isolated test preset; "
                 f"selected test preset equals production preset {production!r}. "
                 "Set BIOSEQ_TEST_BUILD_PRESET[_DEBUG] to a distinct preset "
                 "whose BIOSEQ_TEST_INDEXES cache value is ON.")
         return selected
-    return preset_for(debug)
+    if family == "cache":
+        override = (CACHE_DEBUG_BUILD_PRESET_OVERRIDE if debug
+                    else CACHE_BUILD_PRESET_OVERRIDE)
+        return override or _default_cache_preset(
+            production, combined=False)
+    if family == "cache-bioseq":
+        override = (CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE if debug
+                    else CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE)
+        return override or _default_cache_preset(
+            production, combined=True)
+    raise RuntimeError(
+        f"mode {mode!r} has unsupported preset family {family!r}")
 
 
-def build_dir_for_mode(mode: str, debug: bool) -> Path:
-    return PROJECT_ROOT / "build" / preset_for_mode(mode, debug)
+def build_dir_for(mode: str, debug: bool) -> Path:
+    return PROJECT_ROOT / "build" / preset_for(mode, debug)
 
 
-def bin_dir_for_mode(mode: str, debug: bool) -> Path:
-    return build_dir_for_mode(mode, debug) / "bioseq"
+def bin_dir_for(mode: str, debug: bool) -> Path:
+    return build_dir_for(mode, debug) / MODES[mode].binary_subdir
 
 
 # Backwards-compatible aliases — the old module-level constants are still
@@ -481,7 +518,7 @@ class ModeDefinition:
     """
     Commands we want to run. First element of each command is the binary
     basename — resolved against the active build tree's `bioseq/` directory
-    at run time (see `bin_dir_for_mode(mode, debug)`). This lets the same MODE
+    at run time (see `bin_dir_for(mode, debug)`). This lets the same MODE
     definition drive isolated production and test preset families, including
     their debug/inspect variants.
     """
@@ -503,6 +540,24 @@ class ModeDefinition:
     preset_override: Optional[str] = None
     """Cache entries that must be set before this mode's targets exist."""
     required_cache_variables: Optional[Dict[str, str]] = None
+    """Preset family: core, isolated core tests, cache-only, or combined."""
+    preset_family: str = "core"
+    """Subdirectory below the active build tree containing command binaries."""
+    binary_subdir: str = "bioseq"
+    """CMake-owned test/benchmark targets run only after ordinary compilation."""
+    post_build_targets: tuple[str, ...] = ()
+    """True when all PostgreSQL work occurs in a disposable private cluster."""
+    uses_private_cluster: bool = False
+
+    def __post_init__(self) -> None:
+        if self.preset_family not in {
+                "core", "test", "cache", "cache-bioseq"}:
+            raise ValueError(
+                f"unsupported preset family {self.preset_family!r}")
+        if self.uses_private_cluster and self.install_extension:
+            raise ValueError(
+                "private-cluster modes must not install/restart the shared "
+                "PostgreSQL extension")
 
     @property
     def verb_is(self) -> str:
@@ -555,6 +610,7 @@ MODES: Dict[str, ModeDefinition] = {
             ["bioseq_aligner_int_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
+        preset_family="test",
     ),
     "bench": ModeDefinition(
         lock_group="bench",
@@ -612,13 +668,138 @@ MODES: Dict[str, ModeDefinition] = {
         reporting_subdir_name="bioseq_bench_e2e",
         is_bench_mode=True,
     ),
+    "cache-unit": ModeDefinition(
+        lock_group="cache-tests",
+        expected_duration_min=2.0,
+        build_only_expected_duration_min=1.0,
+        label="bioseq_cache unit tests",
+        docs="Build bioseq_cache and run no-Postgres unit tests",
+        is_verb_plular=True,
+        preset_family="cache",
+        binary_subdir="bioseq_caching",
+        targets=["postgresql_bioseq_cache", "bioseq_cache_unit_tests"],
+        commands=[
+            ["bioseq_cache_unit_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+        ],
+    ),
+    "cache-integration": ModeDefinition(
+        lock_group="cache-tests",
+        expected_duration_min=8.0,
+        build_only_expected_duration_min=1.0,
+        label="bioseq_cache temporary-cluster tests",
+        docs="Run cache regression, isolation and TAP tests in private clusters",
+        is_verb_plular=True,
+        preset_family="cache",
+        binary_subdir="bioseq_caching",
+        targets=["postgresql_bioseq_cache"],
+        commands=[],
+        post_build_targets=(
+            "test_bioseq_cache_regress",
+            "test_bioseq_cache_isolation",
+            "test_bioseq_cache_tap",
+        ),
+        uses_private_cluster=True,
+    ),
+    "cache-bench": ModeDefinition(
+        lock_group="bench",
+        expected_duration_min=20.0,
+        build_only_expected_duration_min=1.0,
+        label="bioseq_cache benchmark",
+        docs="Run cache core and private-cluster SQL benchmarks",
+        is_verb_plular=False,
+        preset_family="cache",
+        binary_subdir="bioseq_caching",
+        targets=["postgresql_bioseq_cache", "bioseq_cache_bench"],
+        commands=[],
+        post_build_targets=("run_bioseq_cache_bench",),
+        reporting_subdir_name="bioseq_cache_bench",
+        is_bench_mode=True,
+        uses_private_cluster=True,
+    ),
+    "cache-bioseq-integration": ModeDefinition(
+        lock_group="cache-tests",
+        expected_duration_min=120.0,
+        build_only_expected_duration_min=10.0,
+        label="bioseq_cache provider integration tests",
+        docs="Build both DSOs and run Bioseq cache tests in a private cluster",
+        is_verb_plular=True,
+        preset_family="cache-bioseq",
+        binary_subdir="bioseq_caching",
+        targets=["postgresql_bioseq_cache", "postgresql_bioseq"],
+        commands=[],
+        post_build_targets=("test_bioseq_cache_bioseq_private",),
+        uses_private_cluster=True,
+    ),
+    "cache-bioseq-bench": ModeDefinition(
+        lock_group="bench",
+        expected_duration_min=180.0,
+        build_only_expected_duration_min=10.0,
+        label="bioseq_cache provider benchmark",
+        docs="Run Bioseq cache benchmarks with both DSOs in a private cluster",
+        is_verb_plular=False,
+        preset_family="cache-bioseq",
+        binary_subdir="bioseq_caching",
+        targets=["postgresql_bioseq_cache", "postgresql_bioseq"],
+        commands=[],
+        post_build_targets=("run_bioseq_cache_bioseq_bench",),
+        reporting_subdir_name="bioseq_cache_bioseq_bench",
+        is_bench_mode=True,
+        uses_private_cluster=True,
+    ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
 
 
+@dataclass(frozen=True)
+class InspectTargetDefinition:
+    mode: str
+    artifact_names: tuple[str, ...]
+    shared_target_names: tuple[str, ...] = ()
+
+
+INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
+    "bioseq_bench": InspectTargetDefinition(
+        mode="bench", artifact_names=("bioseq_bench",),
+        shared_target_names=("bioseq_modules_nopg",)),
+    "bioseq_io_bench": InspectTargetDefinition(
+        mode="bench", artifact_names=("bioseq_io_bench",),
+        shared_target_names=("bioseq_modules_nopg",)),
+    "bioseq_aligner_tests_exec": InspectTargetDefinition(
+        mode="unit+integration", artifact_names=("bioseq_aligner_tests_exec",),
+        shared_target_names=("bioseq_modules_nopg",)),
+    "bioseq_aligner_int_tests_exec": InspectTargetDefinition(
+        mode="unit+integration",
+        artifact_names=("bioseq_aligner_int_tests_exec",),
+        shared_target_names=("bioseq_modules_nopg",)),
+    "postgresql_bioseq_cache": InspectTargetDefinition(
+        mode="cache-unit",
+        artifact_names=("bioseq_cache.dylib", "bioseq_cache.so",
+                        "bioseq_cache.dll"),
+        shared_target_names=("bioseq_cache_core",)),
+    "bioseq_cache_unit_tests": InspectTargetDefinition(
+        mode="cache-unit", artifact_names=("bioseq_cache_unit_tests",),
+        shared_target_names=("bioseq_cache_core",)),
+    "bioseq_cache_bench": InspectTargetDefinition(
+        mode="cache-bench", artifact_names=("bioseq_cache_bench",),
+        shared_target_names=("bioseq_cache_core",)),
+}
+
+
 def get_modes_short_documentation() -> str:
-    modes_list_str = ", ".join([f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min and ~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)" for mode in VALID_MODES])
+    modes_list_str = ", ".join(
+        f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min and "
+        f"~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)"
+        for mode in sorted(VALID_MODES)
+    )
     return f"Modes: {modes_list_str}";
+
+
+def post_build_targets_for(mode: str, build_only: bool) -> tuple[str, ...]:
+    """Return CMake-owned run targets, suppressing all execution for build-only."""
+    if build_only:
+        return ()
+    return MODES[mode].post_build_targets
 
 def _log(msg: str) -> None:
     """Server-side log line. Always stderr — stdout is JSON-RPC only."""
@@ -1126,9 +1307,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     log_path = Path(entry["log_file"])
     deadline = started_at + HARD_TIMEOUT_SEC
 
-    active_preset = preset_for_mode(mode, debug)
-    active_build_dir = build_dir_for_mode(mode, debug)
-    active_bin_dir = bin_dir_for_mode(mode, debug)
+    active_preset = preset_for(mode, debug)
+    active_build_dir = build_dir_for(mode, debug)
+    active_bin_dir = bin_dir_for(mode, debug)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", buffering=1)
@@ -1144,6 +1325,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     log_handle.flush()
 
     mode_details = MODES[mode]
+    if mode_details.uses_private_cluster and mode_details.install_extension:
+        raise AssertionError(
+            "private-cluster mode reached shared extension install routing")
 
     pre_reports: set[Path] = set()
     if mode_details.is_bench_mode and mode_details.reporting_dir.exists():
@@ -1167,7 +1351,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     try:
         _update_entry(mode, step="configuring", build_only=build_only,
                       debug=debug, preset=active_preset,
-                      build_dir=str(active_build_dir))
+                      build_dir=str(active_build_dir),
+                      preset_family=mode_details.preset_family,
+                      binary_subdir=mode_details.binary_subdir,
+                      uses_private_cluster=mode_details.uses_private_cluster)
         # Only run the (expensive) configure when the tree isn't configured yet.
         # Re-running `cmake --preset` on an already-configured C++-modules tree
         # regenerates the Ninja dyndep/modmap graph and invalidates EVERY module
@@ -1181,7 +1368,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             f"-D{name}={value}" for name, value in required_cache.items()
         ]
         build_ninja = active_build_dir / "build.ninja"
-        expected_test_indexes = mode == "unit+integration"
+        expected_test_indexes = mode_details.preset_family == "test"
         if not build_ninja.exists():
             if (active_build_dir / "CMakeCache.txt").exists():
                 _clear_cmake_configure_cache(
@@ -1445,7 +1632,27 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 _prepare_aws_postgresql_test_database(
                     active_preset, log_handle, deadline)
 
-            _update_entry(mode, step="running")
+            for post_target in post_build_targets_for(mode, build_only):
+                _update_entry(
+                    mode,
+                    step=f"running CMake target {post_target}",
+                    uses_private_cluster=mode_details.uses_private_cluster,
+                )
+                rc = _stream_subprocess(
+                    ["cmake", "--build", str(active_build_dir),
+                     "--target", post_target,
+                     "--parallel", str(CMAKE_PARALLEL_JOBS)],
+                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        f"post-build target '{post_target}' exited with code {rc}")
+
+            _update_entry(
+                mode,
+                step="running",
+                uses_private_cluster=mode_details.uses_private_cluster,
+            )
             if mode == "bench-e2e":
                 env.setdefault(
                     "BIOSEQ_E2E_PG_RESTART_CMD",
@@ -1615,7 +1822,7 @@ def tool_start_build(mode: str, build_only: bool = False,
 
     mode_details = MODES[mode]
     try:
-        selected_preset = preset_for_mode(mode, debug)
+        selected_preset = preset_for(mode, debug)
     except RuntimeError as exc:
         return f"Build preset isolation error: {exc}"
 
@@ -1691,6 +1898,9 @@ def tool_start_build(mode: str, build_only: bool = False,
             "build_only": build_only,
             "preset": selected_preset,
             "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
+            "preset_family": mode_details.preset_family,
+            "binary_subdir": mode_details.binary_subdir,
+            "uses_private_cluster": mode_details.uses_private_cluster,
             "bench_flags": bench_flags,
         }
         _save_state(state)
@@ -1729,7 +1939,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
         _log(f"--run-build-sync: invalid mode '{mode}'")
         return 2
     try:
-        selected_preset = preset_for_mode(mode, debug)
+        selected_preset = preset_for(mode, debug)
     except RuntimeError as exc:
         _log(f"--run-build-sync: build preset isolation error: {exc}")
         return 2
@@ -1765,6 +1975,9 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "build_only": build_only,
             "preset": selected_preset,
             "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
+            "preset_family": MODES[mode].preset_family,
+            "binary_subdir": MODES[mode].binary_subdir,
+            "uses_private_cluster": MODES[mode].uses_private_cluster,
             "bench_flags": list(bench_flags or []),
         }
         _save_state(state)
@@ -1827,23 +2040,27 @@ def tool_inspect(arguments: dict) -> str:
         # contract) instead of bubbling up as a JSON-RPC -32000.
         return json.dumps({"error": str(e)}, indent=2)
 
+    target_definition = INSPECT_TARGETS.get(target)
+    if target_definition is None:
+        return json.dumps(
+            {"error": f"unsupported inspect target {target!r}",
+             "supported_targets": sorted(INSPECT_TARGETS)},
+            indent=2,
+        )
+
     # Resolve which preset family owns the requested binary. `debug` is an
     # explicit override; without it, prefer that family's debug tree if built.
-    test_targets = {
-        "bioseq_aligner_tests_exec",
-        "bioseq_aligner_int_tests_exec",
-    }
-    inspect_mode = "unit+integration" if target in test_targets else "bench"
+    inspect_mode = target_definition.mode
     debug_raw = arguments.get("debug")
     try:
         if debug_raw is None:
             debug_chosen = (
-                build_dir_for_mode(inspect_mode, True) / "build.ninja"
+                build_dir_for(inspect_mode, True) / "build.ninja"
             ).exists()
         else:
             debug_chosen = parse_bool("debug", debug_raw)
-        inspect_build_dir = build_dir_for_mode(inspect_mode, debug_chosen)
-        inspect_preset = preset_for_mode(inspect_mode, debug_chosen)
+        inspect_build_dir = build_dir_for(inspect_mode, debug_chosen)
+        inspect_preset = preset_for(inspect_mode, debug_chosen)
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -1856,13 +2073,18 @@ def tool_inspect(arguments: dict) -> str:
         source_basename=source_basename,
         llc_on_bc=llc_on_bc,
         max_llc_bc_files=max_llc_bc_files,
+        binary_subdir=MODES[inspect_mode].binary_subdir,
+        artifact_names=target_definition.artifact_names,
+        shared_target_names=target_definition.shared_target_names,
     )
     # Surface which tree was inspected so the AI agent can act on
     # "no .s files" results by re-running with debug=true.
     out.setdefault("build_metadata", {})["debug_tree_used"] = debug_chosen
     out["build_metadata"]["preset_used"] = inspect_preset
     out["build_metadata"]["test_indexes_expected"] = (
-        inspect_mode == "unit+integration")
+        MODES[inspect_mode].preset_family == "test")
+    out["build_metadata"]["preset_family"] = (
+        MODES[inspect_mode].preset_family)
     return json.dumps(out, indent=2)
 
 
@@ -1884,8 +2106,13 @@ def tool_status(mode: str) -> str:
     build_only: bool = entry.get("build_only", False)
     debug_used: bool = bool(entry.get("debug", False))
     selected_preset = entry.get(
-        "preset", preset_for_mode(mode, debug_used))
-    preset_suffix = f" preset={selected_preset}"
+        "preset", preset_for(mode, debug_used))
+    private_cluster = bool(entry.get(
+        "uses_private_cluster", mode_details.uses_private_cluster))
+    preset_suffix = (
+        f" preset={selected_preset}"
+        + (" private-cluster=yes" if private_cluster else "")
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -1908,11 +2135,12 @@ def tool_status(mode: str) -> str:
         if entry.get("report_file"):
             msg += f". Report: {entry['report_file']}"
         if entry.get("build_only", False):
-            msg += f". This was build-only job so targets were built, but not run (for faster iteration)."
+            msg += (". This was a build-only job, so compile targets were built "
+                    "but commands and post-build/private-cluster targets were not run.")
         if debug_used:
             msg += (f". This was a debug build (preset={selected_preset}); "
                     "DWARF + per-TU .s/.bc artefacts are available under "
-                    f"{entry.get('build_dir', str(build_dir_for_mode(mode, True)))} for the "
+                    f"{entry.get('build_dir', str(build_dir_for(mode, True)))} for the "
                     "`inspect` tool.")
         return msg
 
@@ -1922,9 +2150,14 @@ def tool_status(mode: str) -> str:
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
+        private_note = (
+            " The CMake-owned private-cluster runner is responsible for "
+            "capturing logs and cleanup."
+            if private_cluster else ""
+        )
         return (f"{mode_details.label} run failed after "
                 f"{_format_minutes(duration_min)}: {notes}. "
-                f"Log: {log_path}")
+                f"Log: {log_path}.{private_note}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "

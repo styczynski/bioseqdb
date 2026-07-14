@@ -703,6 +703,9 @@ def run_inspect(
     llc_on_bc: bool = True,
     max_llc_bc_files: int = 4,
     scratch_dir: Optional[Path] = None,
+    binary_subdir: str = "bioseq",
+    artifact_names: Optional[tuple[str, ...]] = None,
+    shared_target_names: Optional[tuple[str, ...]] = None,
 ) -> dict:
     """Inspect a function. Returns the JSON-serialisable dict described in
     IMPROVE_BUILD_MCP_IMPL_PLAN_1.md §3.
@@ -717,14 +720,21 @@ def run_inspect(
         return _error("function_name must be a non-empty string")
 
     scratch_dir = scratch_dir or DEFAULT_SCRATCH_DIR
-    binary = build_dir / "bioseq" / target
+    binary_root = build_dir / binary_subdir
+    candidate_names = artifact_names or (target,)
+    binary_candidates = tuple(binary_root / name for name in candidate_names)
+    binary = next((path for path in binary_candidates if path.exists()),
+                  binary_candidates[0])
 
     if not binary.exists():
         return _error(
-            f"target binary not found: {binary}. Run start_build with a "
+            "target binary not found; checked "
+            f"{', '.join(str(path) for path in binary_candidates)}. "
+            "Run start_build with a "
             f"mode that produces target='{target}' first.",
             target=target,
             build_dir=str(build_dir),
+            binary_subdir=binary_subdir,
         )
 
     try:
@@ -797,14 +807,21 @@ def run_inspect(
     total_matches_before_cap = len(all_matches)
     matches = all_matches[:max_matches]
 
-    target_dir = build_dir / "bioseq" / "CMakeFiles" / f"{target}.dir"
+    target_dir = binary_root / "CMakeFiles" / f"{target}.dir"
     # DOC0269 — Domain N shared modules live in `bioseq_modules_nopg.dir`
     # (an OBJECT library linked by every non-PG consumer). Code from those
     # modules ends up in the consumer's binary but the per-TU `.s`/`.bc`
     # artifacts only exist under the lib's build dir. Sweep both.
-    shared_lib_dir = (build_dir / "bioseq" / "CMakeFiles" /
-                      "bioseq_modules_nopg.dir")
-    search_dirs = [d for d in (target_dir, shared_lib_dir) if d.exists()]
+    shared_names = (shared_target_names if shared_target_names is not None
+                    else ("bioseq_modules_nopg",))
+    shared_lib_dirs = tuple(
+        binary_root / "CMakeFiles" / f"{name}.dir"
+        for name in shared_names
+    )
+    search_dirs = [
+        directory for directory in (target_dir, *shared_lib_dirs)
+        if directory.exists()
+    ]
     s_files: list[Path] = []
     for d in search_dirs:
         s_files.extend(d.rglob("*.s"))
@@ -877,6 +894,7 @@ def run_inspect(
             "function_name": function_name,
             "target": target,
             "build_dir": str(build_dir),
+            "binary_subdir": binary_subdir,
             "binary": str(binary),
         },
         "build_metadata": {
@@ -1007,6 +1025,7 @@ def main() -> int:
                     help="Disable the llc-on-.bc fallback (skip the "
                          "pre-LTO view when no .s files are present).")
     ap.add_argument("--max-llc-bc-files", type=int, default=4)
+    ap.add_argument("--binary-subdir", default="bioseq")
     args = ap.parse_args()
 
     out = run_inspect(
@@ -1019,6 +1038,7 @@ def main() -> int:
         llc_on_bc=not args.no_llc,
         max_llc_bc_files=args.max_llc_bc_files,
         scratch_dir=args.scratch_dir,
+        binary_subdir=args.binary_subdir,
     )
     print(json.dumps(out, indent=2))
     return 0 if "error" not in out else 2
