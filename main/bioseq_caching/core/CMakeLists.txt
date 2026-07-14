@@ -15,7 +15,7 @@ target_link_libraries(bioseq_cache_core
 
 target_sources(bioseq_cache_core
   PUBLIC FILE_SET CXX_MODULES
-    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/.."
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/index.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/wire.cppm"
@@ -26,6 +26,7 @@ target_sources(bioseq_cache_core
       "${CMAKE_CURRENT_LIST_DIR}/admission.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/readiness.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/provider_validation.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/column_format.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/column_format.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/../pg/reusable_planning.cppm")
 
 add_library(bioseq::cache_core ALIAS bioseq_cache_core)

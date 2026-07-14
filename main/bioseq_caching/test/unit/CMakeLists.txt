@@ -4,7 +4,8 @@ add_executable(bioseq_cache_unit_tests
   test_checked_state_ttl.cpp
   test_coverage_readiness.cpp
   test_admission_provider.cpp
-  test_column_format.cpp)
+  test_column_format.cpp
+  test_reusable_planning.cpp)
 
 set_target_properties(bioseq_cache_unit_tests PROPERTIES
   CXX_STANDARD 26
