@@ -1066,7 +1066,11 @@ def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
     deadline = time.monotonic() + 10.0
     remaining = -1
     while time.monotonic() < deadline:
-        stdout, _ = _run_sql(cluster, "SELECT count(*) FROM bioseq_cache.entries()")
+        stdout, _ = _run_sql(
+            cluster,
+            "SELECT count(*) FROM bioseq_cache_test.entry_states() "
+            "WHERE state = 'COMPLETE'",
+        )
         remaining = int(stdout.strip())
         if remaining == 0:
             break
