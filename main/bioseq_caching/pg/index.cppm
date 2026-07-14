@@ -61,6 +61,7 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/plancache.h"
 #include "utils/rls.h"
+#include "utils/ruleutils.h"
 #include "utils/relcache.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -8481,16 +8482,297 @@ void coverage_rescan_custom_scan(CustomScanState* node) {
     }
 }
 
+[[nodiscard]] const char* coverage_explain_state_name(
+        CacheEntryState state) noexcept {
+    switch (state) {
+        case CacheEntryState::Absent: return "ABSENT";
+        case CacheEntryState::Claimed: return "CLAIMED";
+        case CacheEntryState::Building: return "BUILDING";
+        case CacheEntryState::Complete: return "COMPLETE";
+        case CacheEntryState::Failed: return "FAILED";
+        case CacheEntryState::Invalidated: return "INVALIDATED";
+        case CacheEntryState::Evicting: return "EVICTING";
+    }
+    return "UNKNOWN";
+}
+
+[[nodiscard]] const char* coverage_actual_action_name(
+        const ReusableCoverageState& state) noexcept {
+    if (state.runtime_role == CoverageRuntimeRoleV1::CurrentConsumer) {
+        return "[Read] Read current reusable generation";
+    }
+    if (state.producer_completed && state.active_source_count != 0) {
+        return "[Reuse] Reused selected branches and produced residual";
+    }
+    if (state.producer_completed
+        || state.runtime_role == CoverageRuntimeRoleV1::Producer) {
+        return "[Produce] Produce current reusable generation";
+    }
+    return "[Bypass] Execute retained provider child";
+}
+
+[[nodiscard]] std::array<char, 17> coverage_digest_prefix(
+        const CacheDigest256& digest) noexcept {
+    constexpr char digits[] = "0123456789abcdef";
+    std::array<char, 17> output{};
+    for (std::size_t index = 0; index < 8; ++index) {
+        output[index * 2] = digits[digest.bytes[index] >> 4U];
+        output[index * 2 + 1] = digits[digest.bytes[index] & 0x0fU];
+    }
+    return output;
+}
+
+[[nodiscard]] char* deparse_cache_expression_fail_open(
+        Node* expression,
+        ExplainState* explain) {
+    if (expression == nullptr || explain == nullptr
+        || explain->deparse_cxt == NIL) {
+        return nullptr;
+    }
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile char* rendered = nullptr;
+    PG_TRY();
+    {
+        rendered = deparse_expression(
+            expression, explain->deparse_cxt, true, false);
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        rendered = nullptr;
+    }
+    PG_END_TRY();
+    return const_cast<char*>(rendered);
+}
+
+struct ProviderExplainContextV1 {
+    ExplainState* explain = nullptr;
+};
+
+void provider_explain_property_text(
+        void* opaque, const char* name, const char* value) {
+    auto* context = static_cast<ProviderExplainContextV1*>(opaque);
+    if (context != nullptr && context->explain != nullptr
+        && name != nullptr && value != nullptr) {
+        ExplainPropertyText(name, value, context->explain);
+    }
+}
+
+void provider_explain_property_uint64(
+        void* opaque, const char* name, std::uint64_t value) {
+    auto* context = static_cast<ProviderExplainContextV1*>(opaque);
+    if (context != nullptr && context->explain != nullptr
+        && name != nullptr) {
+        ExplainPropertyUInteger(name, nullptr, value, context->explain);
+    }
+}
+
+void provider_explain_property_bool(
+        void* opaque, const char* name, bool value) {
+    auto* context = static_cast<ProviderExplainContextV1*>(opaque);
+    if (context != nullptr && context->explain != nullptr
+        && name != nullptr) {
+        ExplainPropertyBool(name, value, context->explain);
+    }
+}
+
+void explain_provider_domain_fail_open(
+        const ReusableCoverageState& state,
+        ExplainState* explain) {
+    if (state.provider == nullptr || state.provider->explain_domain == nullptr
+        || state.plan_domain_nodes == NIL || explain == nullptr) {
+        return;
+    }
+    ProviderExplainContextV1 context{.explain = explain};
+    BioseqCacheExplainSinkV1 sink{
+        .struct_size = sizeof(BioseqCacheExplainSinkV1),
+        .opaque = &context,
+        .property_text = provider_explain_property_text,
+        .property_uint64 = provider_explain_property_uint64,
+        .property_bool = provider_explain_property_bool,
+    };
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool group_open = false;
+    PG_TRY();
+    {
+        ExplainOpenGroup("Provider", "Provider", true, explain);
+        group_open = true;
+        state.provider->explain_domain(state.plan_domain_nodes, &sink);
+        ExplainCloseGroup("Provider", "Provider", true, explain);
+        group_open = false;
+    }
+    PG_CATCH();
+    {
+        const int sqlstate = geterrcode();
+        MemoryContextSwitchTo(caller_context);
+        if (cache_interrupt_error(sqlstate)) {
+            PG_RE_THROW();
+        }
+        FlushErrorState();
+        if (group_open) {
+            ExplainCloseGroup("Provider", "Provider", true, explain);
+            group_open = false;
+        }
+    }
+    PG_END_TRY();
+}
+
 void coverage_explain_custom_scan(
         CustomScanState* node, List*, ExplainState* explain) {
     const auto* state = reinterpret_cast<const ReusableCoverageState*>(node);
+    const auto* scan = node == nullptr
+        ? nullptr
+        : reinterpret_cast<const CustomScan*>(node->ss.ps.plan);
+    CoverageCurrentPlanViewV1 current_plan{};
+    const bool current_plan_valid = scan != nullptr
+        && scan->custom_private != NIL
+        && list_length(scan->custom_private) >= 10
+        && decode_current_coverage_plan(
+            binary_node_payload(list_nth(scan->custom_private, 2)),
+            &current_plan);
+    const auto digest = coverage_digest_prefix(
+        current_plan_valid
+            ? current_plan.header.generation_digest
+            : state->current_header.generation_digest);
+    const char* display_sql = scan != nullptr
+            && scan->custom_private != NIL
+            && list_length(scan->custom_private) >= 8
+            && IsA(list_nth(scan->custom_private, 7), String)
+        ? strVal(list_nth(scan->custom_private, 7))
+        : "<query text unavailable>";
+    const List* candidates = scan != nullptr
+            && scan->custom_private != NIL
+            && list_length(scan->custom_private) >= 4
+        ? static_cast<const List*>(list_nth(scan->custom_private, 3))
+        : NIL;
+    const std::uint64_t planned_branches = static_cast<std::uint64_t>(
+        std::max(list_length(candidates), 0));
+
     ExplainPropertyText("Cache Entry Kind", "ReusableCoverage", explain);
+    ExplainPropertyText("Cache Mode", "reuse", explain);
+    ExplainPropertyText(
+        "Planned Cache Action",
+        planned_branches == 0
+            ? "[Provisional] Revalidate current generation or produce"
+            : "[Provisional] Revalidate cache branches and current generation",
+        explain);
+    if (explain->analyze) {
+        ExplainPropertyText(
+            "Actual Cache Action", coverage_actual_action_name(*state), explain);
+    }
+    ExplainPropertyText("Cache Entry", digest.data(), explain);
+    ExplainPropertyText("SQL", display_sql, explain);
     ExplainPropertyInteger(
         "Reusable Sources", nullptr, state->source_count, explain);
+    ExplainPropertyUInteger(
+        "Selected Cache Branches",
+        nullptr,
+        explain->analyze
+            ? state->active_source_count
+            : planned_branches,
+        explain);
     ExplainPropertyBool(
         "Provider Runtime Recipe Valid",
         state->runtime_recipe_valid,
         explain);
+
+    ReusableGenerationSnapshotV1 snapshot{};
+    const bool snapshot_valid = state->current_reference
+        && snapshot_current_reusable_generation(
+            state->current_reference, &snapshot);
+    if (snapshot_valid) {
+        ExplainPropertyText(
+            "State", coverage_explain_state_name(snapshot.state), explain);
+        const Oid role = static_cast<Oid>(snapshot.coverage_directory_key
+            .security_namespace.current_role_oid);
+        const Oid user = GetUserId();
+        const bool producer_visible = cache_diagnostic_disclosure(
+                superuser_arg(user),
+                OidIsValid(role) && user == role,
+                has_privs_of_role(user, ROLE_PG_READ_ALL_STATS))
+            == CacheDiagnosticDisclosure::FullText;
+        if (producer_visible && snapshot.producer.pid > 0) {
+            ExplainPropertyInteger(
+                "Producer PID", nullptr, snapshot.producer.pid, explain);
+        }
+        const std::uint64_t now_ns = reusable_monotonic_now_ns();
+        const std::uint64_t age_ms = snapshot.started_monotonic_ns != 0
+                && snapshot.started_monotonic_ns <= now_ns
+            ? (now_ns - snapshot.started_monotonic_ns) / 1'000'000U
+            : 0;
+        ExplainPropertyUInteger("Age", "ms", age_ms, explain);
+        ExplainPropertyUInteger(
+            "Effective TTL",
+            "ms",
+            snapshot.metadata.producer_ttl_ms,
+            explain);
+        ExplainPropertyUInteger("Rows", nullptr, snapshot.row_count, explain);
+        ExplainPropertyUInteger(
+            "Logical Bytes", nullptr, snapshot.metadata.logical_bytes, explain);
+        ExplainPropertyUInteger(
+            "Stored Bytes", nullptr, snapshot.metadata.stored_bytes, explain);
+        ExplainPropertyUInteger(
+            "Dependencies",
+            nullptr,
+            snapshot.metadata.dependency_count,
+            explain);
+    } else {
+        ExplainPropertyText("State", "planned/provisional", explain);
+        if (explain->analyze) {
+            ExplainPropertyUInteger("Rows", nullptr, state->row_count, explain);
+            ExplainPropertyUInteger(
+                "Logical Bytes", nullptr, state->logical_bytes, explain);
+            ExplainPropertyUInteger(
+                "Stored Bytes", nullptr, state->payload_bytes, explain);
+        }
+    }
+
+    const int expression_count = scan == nullptr
+        ? 0
+        : list_length(scan->custom_exprs);
+    int emitted_branch = 0;
+    for (int index = 0; index < static_cast<int>(planned_branches); ++index) {
+        const bool selected = !explain->analyze
+            || (index < static_cast<int>(state->sources.size())
+                && state->sources[index].valid);
+        if (!selected) {
+            continue;
+        }
+        ++emitted_branch;
+        char* label = psprintf("Cache Branch %d", emitted_branch);
+        ExplainOpenGroup("Cache Branch", label, true, explain);
+        ExplainPropertyText(
+            "Action",
+            explain->analyze
+                ? "[Read] Read selected reusable source"
+                : "[Provisional] Revalidate reusable source",
+            explain);
+        if (index + 1 < expression_count) {
+            char* recheck = deparse_cache_expression_fail_open(
+                static_cast<Node*>(list_nth(scan->custom_exprs, index + 1)),
+                explain);
+            if (recheck != nullptr) {
+                ExplainPropertyText("Recheck", recheck, explain);
+            }
+        }
+        ExplainCloseGroup("Cache Branch", label, true, explain);
+        pfree(label);
+    }
+    ExplainOpenGroup("Residual Child", "Residual Child", true, explain);
+    if (expression_count != 0) {
+        char* residual = deparse_cache_expression_fail_open(
+            static_cast<Node*>(linitial(scan->custom_exprs)), explain);
+        if (residual != nullptr) {
+            ExplainPropertyText("Predicate", residual, explain);
+        }
+    }
+    ExplainCloseGroup("Residual Child", "Residual Child", true, explain);
+    explain_provider_domain_fail_open(*state, explain);
 }
 
 const CustomExecMethods& coverage_exec_methods() {
