@@ -18,7 +18,9 @@ extern "C" {
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/pg_aggregate.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "common/cryptohash.h"
 #include "common/hashfn.h"
@@ -53,6 +55,7 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/plancache.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
@@ -846,6 +849,35 @@ void register_cache_gucs() {
     g_gucs_registered = true;
 }
 
+/** Aggregates are immutable only when every executor support function is. */
+[[nodiscard]] bool aggregate_has_mutable_support(const Aggref& aggregate) {
+    HeapTuple tuple = SearchSysCache1(
+        AGGFNOID, ObjectIdGetDatum(aggregate.aggfnoid));
+    if (!HeapTupleIsValid(tuple)) {
+        return true;
+    }
+    const auto* metadata = static_cast<const FormData_pg_aggregate*>(
+        GETSTRUCT(tuple));
+    const std::array<Oid, 8> functions{
+        metadata->aggtransfn,
+        metadata->aggfinalfn,
+        metadata->aggcombinefn,
+        metadata->aggserialfn,
+        metadata->aggdeserialfn,
+        metadata->aggmtransfn,
+        metadata->aggminvtransfn,
+        metadata->aggmfinalfn,
+    };
+    bool mutable_support = false;
+    for (const Oid function_oid : functions) {
+        mutable_support = mutable_support
+            || (OidIsValid(function_oid)
+                && func_volatile(function_oid) != PROVOLATILE_IMMUTABLE);
+    }
+    ReleaseSysCache(tuple);
+    return mutable_support;
+}
+
 /** Reject execution state that cannot be represented by the exact key/epoch. */
 bool query_contains_unsafe_state_walker(Node* node, void*) {
     if (node == nullptr) {
@@ -858,6 +890,11 @@ bool query_contains_unsafe_state_walker(Node* node, void*) {
     if (IsA(node, SQLValueFunction)
         || IsA(node, NextValueExpr)
         || IsA(node, CurrentOfExpr)) {
+        return true;
+    }
+    if (IsA(node, Aggref)
+        && aggregate_has_mutable_support(
+            *reinterpret_cast<const Aggref*>(node))) {
         return true;
     }
     if (IsA(node, RangeTblEntry)) {
