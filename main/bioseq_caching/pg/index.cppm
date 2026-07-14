@@ -57,6 +57,7 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/plancache.h"
 #include "utils/rls.h"
+#include "utils/relcache.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
@@ -97,8 +98,8 @@ import bioseq.cache.pg.storage;
 namespace bioseq::cache::pg {
 
 inline constexpr std::uint32_t kSharedMagic = 0x42535143U; /* BSQC */
-inline constexpr std::uint32_t kSharedAbiVersion = 4;
-inline constexpr char kSharedName[] = "bioseq_cache shared state v4";
+inline constexpr std::uint32_t kSharedAbiVersion = 5;
+inline constexpr char kSharedName[] = "bioseq_cache shared state v5";
 inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr char kReusableSharedName[] =
     "bioseq_cache reusable registry v1";
@@ -378,13 +379,21 @@ inline TestExactPlanFault g_test_exact_plan_fault = TestExactPlanFault::None;
 #endif
 
 /** Backend-local dirty state follows savepoint commit and rollback exactly. */
+struct DirtyRelationObservationV1 {
+    Oid relation_oid;
+    bool physical_identity_valid;
+    bool storage_parent;
+    std::array<std::uint8_t, 2> reserved{};
+    PhysicalIdentityV1 physical_identity{};
+};
+
 struct DirtyFrame {
     DirtyFrame* next;
     SubTransactionId subtransaction_id;
     bool dirty;
     bool coarse;
     std::uint16_t relation_count;
-    Oid relation_oids[kMaximumRelationDependencies];
+    DirtyRelationObservationV1 relations[kMaximumRelationDependencies];
 };
 
 inline DirtyFrame* g_dirty_frames = nullptr;
@@ -480,15 +489,106 @@ void mark_current_transaction_dirty() {
     }
 }
 
-/** Record one precise relation dependency, falling back when the set is full. */
-void mark_current_transaction_relation_dirty(Oid relation_oid) {
+enum class RelationPhysicalIdentityStatusV1 : std::uint8_t {
+    Unknown = 0,
+    StorageParent = 1,
+    Precise = 2,
+};
+
+/** Encode PostgreSQL's full relfile locator exactly, without digest aliases. */
+[[nodiscard]] RelationPhysicalIdentityStatusV1
+relation_physical_identity(
+        Oid relation_oid, PhysicalIdentityV1* destination) noexcept {
+    if (!OidIsValid(relation_oid) || destination == nullptr) {
+        return RelationPhysicalIdentityStatusV1::Unknown;
+    }
+    Relation relation = RelationIdGetRelation(relation_oid);
+    if (!RelationIsValid(relation)) {
+        return RelationPhysicalIdentityStatusV1::Unknown;
+    }
+    const bool storage_parent = relation->rd_rel->relkind
+        == RELKIND_PARTITIONED_TABLE;
+    const RelFileLocator locator = relation->rd_locator;
+    RelationClose(relation);
+    if (storage_parent) {
+        return RelationPhysicalIdentityStatusV1::StorageParent;
+    }
+    if (!OidIsValid(locator.dbOid) || !OidIsValid(locator.spcOid)
+        || !RelFileNumberIsValid(locator.relNumber)
+        || sizeof(locator) > destination->bytes.size()) {
+        return RelationPhysicalIdentityStatusV1::Unknown;
+    }
+    *destination = PhysicalIdentityV1{
+        .kind = PhysicalIdentityKind::PgRelFileLocator,
+        .length = sizeof(locator),
+    };
+    std::memcpy(destination->bytes.data(), &locator, sizeof(locator));
+    return RelationPhysicalIdentityStatusV1::Precise;
+}
+
+[[nodiscard]] bool copy_provider_physical_identity(
+        const provider_registry::PhysicalIdentityV1* source,
+        PhysicalIdentityV1* destination) noexcept {
+    if (source == nullptr || destination == nullptr
+        || source->struct_size < sizeof(*source) || source->reserved != 0
+        || source->length == 0 || source->length > sizeof(source->bytes)
+        || (source->kind
+                != static_cast<std::uint32_t>(
+                    PhysicalIdentityKind::PgRelFileLocator)
+            && source->kind
+                != static_cast<std::uint32_t>(
+                    PhysicalIdentityKind::ProviderOpaque))) {
+        return false;
+    }
+    *destination = PhysicalIdentityV1{
+        .kind = static_cast<PhysicalIdentityKind>(source->kind),
+        .length = source->length,
+    };
+    std::memcpy(
+        destination->bytes.data(), source->bytes, source->length);
+    return true;
+}
+
+/** Record one relation/physical write, falling back when the set is full. */
+void mark_current_transaction_relation_dirty(
+        Oid relation_oid,
+        const provider_registry::PhysicalIdentityV1* provider_identity = nullptr) {
     if (!IsTransactionState() || !OidIsValid(relation_oid)) {
         return;
     }
     DirtyFrame* frame = dirty_frame(GetCurrentSubTransactionId());
     frame->dirty = true;
+    PhysicalIdentityV1 physical_identity{};
+    RelationPhysicalIdentityStatusV1 identity_status =
+        RelationPhysicalIdentityStatusV1::Unknown;
+    if (copy_provider_physical_identity(
+            provider_identity, &physical_identity)) {
+        identity_status = RelationPhysicalIdentityStatusV1::Precise;
+    } else if (provider_identity == nullptr) {
+        identity_status = relation_physical_identity(
+            relation_oid, &physical_identity);
+    }
+    const bool physical_identity_valid = identity_status
+        == RelationPhysicalIdentityStatusV1::Precise;
+    const bool storage_parent = identity_status
+        == RelationPhysicalIdentityStatusV1::StorageParent;
     for (std::uint16_t index = 0; index < frame->relation_count; ++index) {
-        if (frame->relation_oids[index] == relation_oid) {
+        DirtyRelationObservationV1& existing = frame->relations[index];
+        if (existing.relation_oid != relation_oid) {
+            continue;
+        }
+        if (physical_identity_valid && !existing.physical_identity_valid) {
+            existing.physical_identity_valid = true;
+            existing.storage_parent = false;
+            existing.physical_identity = physical_identity;
+            return;
+        }
+        if (storage_parent && existing.storage_parent) {
+            return;
+        }
+        if ((!physical_identity_valid && !storage_parent)
+            || (existing.physical_identity_valid
+                && existing.physical_identity == physical_identity)) {
             return;
         }
     }
@@ -496,16 +596,21 @@ void mark_current_transaction_relation_dirty(Oid relation_oid) {
         frame->coarse = true;
         return;
     }
-    frame->relation_oids[frame->relation_count++] = relation_oid;
+    frame->relations[frame->relation_count++] = DirtyRelationObservationV1{
+        .relation_oid = relation_oid,
+        .physical_identity_valid = physical_identity_valid,
+        .storage_parent = storage_parent,
+        .physical_identity = physical_identity,
+    };
 }
 
 /** Provider write observations join the same savepoint-aware epoch ledger. */
 void observe_provider_relation_write(
         std::uint32_t database_oid, std::uint32_t relation_oid,
-        const provider_registry::PhysicalIdentityV1*) noexcept {
+        const provider_registry::PhysicalIdentityV1* physical_identity) noexcept {
     if (database_oid == static_cast<std::uint32_t>(MyDatabaseId)) {
         mark_current_transaction_relation_dirty(
-            static_cast<Oid>(relation_oid));
+            static_cast<Oid>(relation_oid), physical_identity);
     }
 }
 
@@ -566,12 +671,29 @@ void finish_dirty_subtransaction(
         parent->coarse = parent->coarse || child->coarse;
         for (std::uint16_t index = 0;
              index < child->relation_count; ++index) {
-            const Oid relation_oid = child->relation_oids[index];
+            const DirtyRelationObservationV1& observation =
+                child->relations[index];
             bool present = false;
             for (std::uint16_t parent_index = 0;
                  parent_index < parent->relation_count; ++parent_index) {
-                present = present
-                    || parent->relation_oids[parent_index] == relation_oid;
+                DirtyRelationObservationV1& existing =
+                    parent->relations[parent_index];
+                if (existing.relation_oid != observation.relation_oid) {
+                    continue;
+                }
+                if (observation.physical_identity_valid
+                    && !existing.physical_identity_valid) {
+                    existing = observation;
+                    present = true;
+                    break;
+                }
+                if (!observation.physical_identity_valid
+                    || (existing.physical_identity_valid
+                        && existing.physical_identity
+                            == observation.physical_identity)) {
+                    present = true;
+                    break;
+                }
             }
             if (present) {
                 continue;
@@ -580,7 +702,7 @@ void finish_dirty_subtransaction(
                 parent->coarse = true;
                 break;
             }
-            parent->relation_oids[parent->relation_count++] = relation_oid;
+            parent->relations[parent->relation_count++] = observation;
         }
     }
     pfree(child);
@@ -654,7 +776,7 @@ void finish_dirty_subtransaction(
         coarse = coarse || frame->coarse;
         for (std::uint16_t index = 0;
              index < frame->relation_count; ++index) {
-            const Oid relation_oid = frame->relation_oids[index];
+            const Oid relation_oid = frame->relations[index].relation_oid;
             bool duplicate = false;
             for (std::size_t prior = 0; prior < published_count; ++prior) {
                 duplicate = duplicate || published[prior] == relation_oid;
@@ -673,6 +795,9 @@ void finish_dirty_subtransaction(
     LWLockRelease(g_registry_lock);
     return coarse;
 }
+
+/** Defined after reusable lock/CV adapters; called only during commit cleanup. */
+void invalidate_dirty_reusable_generations() noexcept;
 
 /** Announce a commit transition so concurrent captures cannot race visibility. */
 void begin_database_transition() noexcept {
@@ -705,6 +830,7 @@ void finish_database_transition(bool committed) noexcept {
         }
         pg_atomic_fetch_add_u64(&g_shared->database_write_epoch, 1);
         pg_atomic_fetch_add_u64(&g_shared->stats.invalidations, 1);
+        invalidate_dirty_reusable_generations();
     }
     pg_atomic_fetch_sub_u32(&g_shared->database_transition_count, 1);
     g_database_transition_published = false;
@@ -1594,6 +1720,132 @@ void broadcast_reusable_generation(
     if (ConditionVariable* changed = reusable_generation_changed(reference);
         changed != nullptr) {
         ConditionVariableBroadcast(changed);
+    }
+}
+
+/** Commit-time invalidation is bounded, ABA-safe, and wakes after lock drop. */
+void invalidate_dirty_reusable_generations() noexcept {
+    if (!g_reusable_registry || g_reusable_membership_lock == nullptr
+        || MyDatabaseId == InvalidOid) {
+        return;
+    }
+    std::array<PhysicalIdentityV1, kMaximumRelationDependencies> identities{};
+    std::size_t identity_count = 0;
+    bool coarse = g_force_coarse_transition;
+    bool storage_parent_seen = false;
+    for (const DirtyFrame* frame = g_dirty_frames;
+         frame != nullptr; frame = frame->next) {
+        coarse = coarse || frame->coarse;
+        for (std::uint16_t index = 0;
+             index < frame->relation_count; ++index) {
+            const DirtyRelationObservationV1& observation =
+                frame->relations[index];
+            if (!observation.physical_identity_valid) {
+                if (observation.storage_parent) {
+                    storage_parent_seen = true;
+                } else {
+                    coarse = true;
+                }
+                continue;
+            }
+            bool duplicate = false;
+            for (std::size_t prior = 0; prior < identity_count; ++prior) {
+                duplicate = duplicate
+                    || identities[prior] == observation.physical_identity;
+            }
+            if (duplicate) {
+                continue;
+            }
+            if (identity_count >= identities.size()) {
+                coarse = true;
+                break;
+            }
+            identities[identity_count++] = observation.physical_identity;
+        }
+    }
+    coarse = coarse || (storage_parent_seen && identity_count == 0);
+    if (!coarse && identity_count == 0) {
+        return;
+    }
+
+    std::array<ReusableGenerationReferenceV1,
+        kDefaultReusableRegistryGenerationsV1> affected{};
+    std::size_t affected_count = 0;
+    MemoryContext caller_context = CurrentMemoryContext;
+    volatile bool membership_owned = false;
+    PG_TRY();
+    {
+        LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
+        membership_owned = true;
+        const auto collect = [&](const ReusableInvalidationResultV1& result) {
+            for (std::size_t index = 0;
+                 index < result.affected_count; ++index) {
+                const ReusableGenerationReferenceV1& reference =
+                    result.affected_references[index];
+                bool duplicate = false;
+                for (std::size_t prior = 0;
+                     prior < affected_count; ++prior) {
+                    duplicate = duplicate || affected[prior] == reference;
+                }
+                if (!duplicate && affected_count < affected.size()) {
+                    affected[affected_count++] = reference;
+                }
+            }
+        };
+        const auto run_selector = [&](ReusableInvalidationSelectorV1 selector) {
+            for (;;) {
+                const ReusableInvalidationResultV1 result =
+                    invalidate_reusable_generations(
+                        g_reusable_registry,
+                        selector,
+                        reusable_partition_callbacks());
+                if (result.error != ReusableRegistryErrorV1::None) {
+                    return false;
+                }
+                collect(result);
+                if (result.done) {
+                    return true;
+                }
+                if (result.next_cursor <= selector.cursor) {
+                    return false;
+                }
+                selector.cursor = result.next_cursor;
+            }
+        };
+
+        bool precise_ok = true;
+        if (!coarse) {
+            for (std::size_t index = 0;
+                 precise_ok && index < identity_count; ++index) {
+                precise_ok = run_selector(ReusableInvalidationSelectorV1{
+                    .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
+                    .physical_identity = identities[index],
+                    .match_physical_identity = true,
+                });
+            }
+        }
+        if (coarse || !precise_ok) {
+            static_cast<void>(run_selector(ReusableInvalidationSelectorV1{
+                .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
+                .coarse_database_fallback = true,
+            }));
+        }
+        LWLockRelease(g_reusable_membership_lock);
+        membership_owned = false;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(caller_context);
+        if (membership_owned) {
+            LWLockRelease(g_reusable_membership_lock);
+            membership_owned = false;
+        }
+        FlushErrorState();
+        affected_count = 0;
+    }
+    PG_END_TRY();
+    for (std::size_t index = 0; index < affected_count; ++index) {
+        broadcast_reusable_generation(affected[index]);
     }
 }
 
