@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -179,6 +180,97 @@ def _run_sql(cluster: Any, sql: str) -> tuple[str, int]:
             f"{completed.stderr}\nSQL:\n{sql}"
         )
     return completed.stdout, elapsed
+
+
+class _PauseController:
+    """Keep the session-level advisory pause lock until fanout is ready."""
+
+    def __init__(self, cluster: Any, point: str) -> None:
+        self._cluster = cluster
+        self._point = point
+        self._process: subprocess.Popen[str] | None = None
+        self._released = False
+
+    def _error(self, message: str) -> BenchmarkError:
+        error = ""
+        if (
+            self._process is not None
+            and self._process.poll() is not None
+            and self._process.stderr is not None
+        ):
+            with contextlib.suppress(Exception):
+                error = self._process.stderr.read()
+        suffix = f": {error}" if error else ""
+        return BenchmarkError(message + suffix)
+
+    def _command(self, sql: str, marker: str) -> None:
+        process = self._process
+        if process is None or process.stdin is None or process.stdout is None:
+            raise self._error("pause controller has no psql pipes")
+        process.stdin.write(sql + "\n" + f"SELECT '{marker}';\n")
+        process.stdin.flush()
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select(
+                [process.stdout], [], [], min(0.1, deadline - time.monotonic())
+            )
+            if not ready:
+                if process.poll() is not None:
+                    raise self._error("pause controller psql exited early")
+                continue
+            line = process.stdout.readline()
+            if line == "":
+                raise self._error("pause controller psql closed stdout")
+            if line.rstrip("\r\n") == marker:
+                return
+        raise self._error(f"pause controller timed out waiting for {marker}")
+
+    def __enter__(self) -> "_PauseController":
+        command = _psql_command(self._cluster, "")[:-2]
+        self._process = subprocess.Popen(
+            command,
+            env=self._cluster.environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._command(
+            f"SELECT bioseq_cache_test.arm_pause('{self._point}');",
+            "BIOSEQ_CACHE_PAUSE_ARMED",
+        )
+        return self
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._command(
+            f"SELECT bioseq_cache_test.release_pause('{self._point}');",
+            "BIOSEQ_CACHE_PAUSE_RELEASED",
+        )
+        self._released = True
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        process = self._process
+        if process is None:
+            return
+        if not self._released and process.poll() is None:
+            with contextlib.suppress(Exception):
+                self.release()
+        if process.stdin is not None and process.poll() is None:
+            with contextlib.suppress(Exception):
+                process.stdin.write("\\q\n")
+                process.stdin.flush()
+        try:
+            process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        if process.returncode not in (0, None) and exc_type is None:
+            raise self._error(
+                f"pause controller psql exited {process.returncode}"
+            )
 
 
 def _run_query_streaming(cluster: Any, sql: str) -> tuple[str, int, int | None, int]:
@@ -687,12 +779,12 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
     _reset_case(cluster)
     reference = _execute_query(cluster, mode="disabled", sql=sql)
     _reset_case(cluster)
-    _run_sql(cluster, "SELECT bioseq_cache_test.arm_pause('after_building_publish')")
 
     def execute() -> QueryOutput:
         return _execute_query(cluster, mode="same", sql=sql)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as executor, \
+            _PauseController(cluster, "after_building_publish") as pause:
         producer = executor.submit(execute)
         _run_sql(
             cluster,
@@ -701,7 +793,7 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
         waiters = [executor.submit(execute) for _ in range(clients - 1)]
         waiters_observed_at = _wait_for_waiters(cluster, clients - 1)
         released_at = time.perf_counter_ns()
-        _run_sql(cluster, "SELECT bioseq_cache_test.release_pause('after_building_publish')")
+        pause.release()
         producer_output = producer.result()
         waiter_outputs = [waiter.result() for waiter in waiters]
         outputs = [producer_output, *waiter_outputs]
