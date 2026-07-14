@@ -908,7 +908,7 @@ void provider_set_rel_pathlist_hook(
             root, relation, range_table_index, range_entry);
     }
     if (root == nullptr || relation == nullptr || range_entry == nullptr
-        || range_entry->rtekind != RTE_RELATION || range_entry->inh
+        || range_entry->rtekind != RTE_RELATION
         || range_entry->relid != g_target_relation_oid
         || !g_provider_registered) {
         return;
