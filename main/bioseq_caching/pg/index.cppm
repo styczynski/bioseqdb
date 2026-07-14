@@ -754,6 +754,17 @@ reusable_partition_callbacks() noexcept {
     };
 }
 
+/**
+ * Relation-path integration is enabled only after its complete planner
+ * metadata contract is installed.  Keeping this definition fail-open makes
+ * intermediate extension builds preload-safe while readiness remains below
+ * ReusableCoverageReady.
+ */
+void consider_provider_reusable_paths(
+        PlannerInfo*, RelOptInfo*, unsigned int, RangeTblEntry*,
+        const provider_registry::ProviderV1*) noexcept {
+}
+
 [[nodiscard]] std::uint64_t reusable_monotonic_now_ns() noexcept {
     instr_time current{};
     INSTR_TIME_SET_CURRENT(current);
