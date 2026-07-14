@@ -158,15 +158,17 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
     USES_TERMINAL)
 endif()
 
-add_custom_target(run_bioseq_cache_bench
-  COMMAND "${CMAKE_COMMAND}" -E env
-    "BIOSEQ_CACHE_DSO=$<TARGET_FILE:postgresql_bioseq_cache>"
-    "BIOSEQ_CACHE_BOOTSTRAP_SQL=${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-    "BIOSEQ_CACHE_CORE_BENCH=$<TARGET_FILE:bioseq_cache_bench>"
-    "BIOSEQ_CACHE_REPORT_DIR=${CMAKE_SOURCE_DIR}/reporting/bioseq_cache_bench"
-    "POSTGRESQL_BINDIR=${PostgreSQL_BIN_DIR}"
-    "CMAKE_PRESET_NAME=${CMAKE_PRESET_NAME}"
-    "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_LIST_DIR}/bench/run_private_cluster_bench.py"
-  DEPENDS postgresql_bioseq_cache bioseq_cache_bench
-  USES_TERMINAL)
+if(BIOSEQ_CACHE_BUILD_TESTS)
+  add_custom_target(run_bioseq_cache_bench
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "BIOSEQ_CACHE_DSO=$<TARGET_FILE:postgresql_bioseq_cache>"
+      "BIOSEQ_CACHE_BOOTSTRAP_SQL=${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
+      "BIOSEQ_CACHE_CORE_BENCH=$<TARGET_FILE:bioseq_cache_bench>"
+      "BIOSEQ_CACHE_REPORT_DIR=${CMAKE_SOURCE_DIR}/reporting/bioseq_cache_bench"
+      "POSTGRESQL_BINDIR=${PostgreSQL_BIN_DIR}"
+      "CMAKE_PRESET_NAME=${CMAKE_PRESET_NAME}"
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/bench/run_private_cluster_bench.py"
+    DEPENDS postgresql_bioseq_cache bioseq_cache_bench
+    USES_TERMINAL)
+endif()

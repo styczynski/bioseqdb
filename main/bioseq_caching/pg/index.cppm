@@ -12,12 +12,15 @@
  */
 module;
 
+#include <cstdlib>
+
 extern "C" {
 #include "postgres.h"
 
 #include "access/xact.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_type_d.h"
+#include "common/cryptohash.h"
 #include "common/hashfn.h"
 #include "commands/explain.h"
 #include "executor/executor.h"
@@ -62,15 +65,23 @@ PG_MODULE_MAGIC;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <array>
 #include <cerrno>
+#include <expected>
 #include <fcntl.h>
 #include <limits>
+#include <new>
+#include <span>
+#include <string>
 #include <sys/stat.h>
 #include <type_traits>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 export module bioseq.cache.pg;
 
+import bioseq.cache.core;
 import bioseq.cache.pg.provider_registry;
 
 namespace bioseq::cache::pg {
@@ -82,8 +93,66 @@ inline constexpr char kRegistryTrancheName[] = "bioseq_cache registry";
 inline constexpr std::size_t kRegistryCapacity = 64;
 inline constexpr std::size_t kMaximumKeyBytes = 64U * 1024U;
 inline constexpr std::uint64_t kMaximumStoredResultBytes = 256ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint32_t kResultMagic = 0x42535152U; /* BSQR */
-inline constexpr std::uint32_t kResultFormatVersion = 1;
+
+/** PostgreSQL-backed checksums for the shared generic column-store format. */
+struct PostgreSqlColumnChecksumPolicy {
+    [[nodiscard]] std::expected<std::uint32_t, ChecksumError> block_crc32c(
+            std::span<const std::byte> bytes) const noexcept {
+        pg_crc32c checksum = 0;
+        INIT_CRC32C(checksum);
+        if (!bytes.empty()) {
+            COMP_CRC32C(checksum, bytes.data(), bytes.size());
+        }
+        FIN_CRC32C(checksum);
+        return static_cast<std::uint32_t>(checksum);
+    }
+
+    [[nodiscard]] std::expected<CacheDigest256, ChecksumError> sha256(
+            std::span<const std::byte> bytes) const noexcept {
+        pg_cryptohash_ctx* context = pg_cryptohash_create(PG_SHA256);
+        if (context == nullptr) {
+            return std::unexpected(ChecksumError::Unavailable);
+        }
+        CacheDigest256 digest{};
+        const bool success = pg_cryptohash_init(context) >= 0
+            && (bytes.empty()
+                || pg_cryptohash_update(
+                    context,
+                    reinterpret_cast<const std::uint8_t*>(bytes.data()),
+                    bytes.size()) >= 0)
+            && pg_cryptohash_final(
+                context, digest.bytes.data(), digest.bytes.size()) >= 0;
+        pg_cryptohash_free(context);
+        if (!success) {
+            return std::unexpected(ChecksumError::Failed);
+        }
+        return digest;
+    }
+
+    [[nodiscard]] std::expected<CacheDigest256, ChecksumError>
+    manifest_sha256(
+            std::span<const CacheDigest256> digests) const noexcept {
+        pg_cryptohash_ctx* context = pg_cryptohash_create(PG_SHA256);
+        if (context == nullptr) {
+            return std::unexpected(ChecksumError::Unavailable);
+        }
+        bool success = pg_cryptohash_init(context) >= 0;
+        for (const CacheDigest256& digest : digests) {
+            success = success
+                && pg_cryptohash_update(
+                    context, digest.bytes.data(), digest.bytes.size()) >= 0;
+        }
+        CacheDigest256 result{};
+        success = success
+            && pg_cryptohash_final(
+                context, result.bytes.data(), result.bytes.size()) >= 0;
+        pg_cryptohash_free(context);
+        if (!success) {
+            return std::unexpected(ChecksumError::Failed);
+        }
+        return result;
+    }
+};
 
 /** User-visible cache optimization modes. */
 enum class QueryCacheMode : int {
@@ -750,19 +819,6 @@ enum class RuntimeRole : std::uint8_t {
     Consumer,
 };
 
-/** Native postmaster-lifetime result header followed by attribute descriptors. */
-struct StoredResultHeader {
-    std::uint32_t magic;
-    std::uint32_t format_version;
-    std::uint32_t header_bytes;
-    std::uint32_t attribute_count;
-    std::uint64_t row_count;
-    std::uint64_t payload_bytes;
-    std::uint64_t schema_hash;
-    pg_crc32c payload_crc;
-    std::uint32_t reserved;
-};
-
 struct StoredAttribute {
     Oid type_oid;
     std::int32_t type_modifier;
@@ -770,7 +826,6 @@ struct StoredAttribute {
     std::uint32_t reserved;
 };
 
-static_assert(std::is_trivially_copyable_v<StoredResultHeader>);
 static_assert(std::is_trivially_copyable_v<StoredAttribute>);
 
 struct BioseqCacheState {
@@ -785,7 +840,8 @@ struct BioseqCacheState {
     std::uint64_t row_count;
     std::uint64_t payload_bytes;
     std::uint64_t logical_bytes;
-    pg_crc32c payload_crc;
+    ColumnStoreBuilder* column_builder;
+    Oid* send_functions;
     char temporary_path[MAXPGPATH];
     char final_path[MAXPGPATH];
     Tuplestorestate* replay_store;
@@ -850,6 +906,13 @@ template <class Value>
 
 /** Confirm every output column has both binary directions before claiming. */
 void validate_binary_schema(const TupleDesc descriptor) {
+    if (descriptor->natts < 0
+        || static_cast<std::uint32_t>(descriptor->natts)
+            > kMaxProviderBoundaryColumns) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("cache result has too many columns")));
+    }
     for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
         const Form_pg_attribute metadata = TupleDescAttr(descriptor, attribute);
         Oid send_function = InvalidOid;
@@ -865,6 +928,91 @@ void validate_binary_schema(const TupleDesc descriptor) {
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("type %u lacks binary cache I/O", metadata->atttypid)));
         }
+    }
+}
+
+[[nodiscard]] std::uint8_t type_alignment_bytes(char alignment) {
+    switch (alignment) {
+        case TYPALIGN_CHAR: return 1;
+        case TYPALIGN_SHORT: return 2;
+        case TYPALIGN_INT: return 4;
+        case TYPALIGN_DOUBLE: return 8;
+        default:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("unknown PostgreSQL type alignment '%c'", alignment)));
+    }
+    pg_unreachable();
+}
+
+/** Freeze PostgreSQL tuple metadata into the portable column-store schema. */
+[[nodiscard]] std::vector<ColumnSchema> build_column_schema(
+        TupleDesc descriptor, Oid* send_functions) {
+    std::vector<ColumnSchema> schema;
+    schema.reserve(static_cast<std::size_t>(descriptor->natts));
+    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
+        const Form_pg_attribute metadata = TupleDescAttr(descriptor, attribute);
+        Oid send_function = InvalidOid;
+        Oid receive_function = InvalidOid;
+        Oid io_parameter = InvalidOid;
+        bool variable_length = false;
+        getTypeBinaryOutputInfo(
+            metadata->atttypid, &send_function, &variable_length);
+        getTypeBinaryInputInfo(
+            metadata->atttypid, &receive_function, &io_parameter);
+        if (send_functions != nullptr) {
+            send_functions[attribute] = send_function;
+        }
+        const std::uint64_t semantic_high =
+            (static_cast<std::uint64_t>(metadata->atttypid) << 32U)
+            | static_cast<std::uint32_t>(attribute + 1);
+        const std::uint64_t semantic_low =
+            (static_cast<std::uint64_t>(metadata->attcollation) << 32U)
+            | static_cast<std::uint32_t>(metadata->atttypmod);
+        schema.push_back(ColumnSchema{
+            .name = NameStr(metadata->attname),
+            .descriptor = ColumnDescriptorV1{
+                .type_oid = metadata->atttypid,
+                .typmod = metadata->atttypmod,
+                .collation_oid = metadata->attcollation,
+                .type_length = metadata->attlen,
+                .by_value = static_cast<std::uint8_t>(metadata->attbyval),
+                .type_alignment = type_alignment_bytes(metadata->attalign),
+                .encoding = ColumnEncoding::BinarySend,
+                .flags = kColumnFlagNullable,
+                .send_function_oid = send_function,
+                .receive_function_oid = receive_function,
+                .receive_type_io_param = io_parameter,
+                .reserved = 0,
+                .name_offset = 0,
+            },
+            .semantic_id = SemanticId128{
+                .high = semantic_high,
+                .low = semantic_low,
+            },
+        });
+    }
+    return schema;
+}
+
+[[nodiscard]] ColumnStoreIdentity current_column_store_identity() noexcept {
+    return ColumnStoreIdentity{
+        .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
+        .boot_nonce = g_shared == nullptr
+            ? 0
+            : pg_atomic_read_u64(&g_shared->boot_nonce),
+        .database_oid = MyDatabaseId,
+        .owner_role_oid = GetUserId(),
+        .datum_width = static_cast<std::uint8_t>(sizeof(Datum)),
+    };
+}
+
+void destroy_column_builder(BioseqCacheState& state) noexcept {
+    delete state.column_builder;
+    state.column_builder = nullptr;
+    if (state.send_functions != nullptr) {
+        pfree(state.send_functions);
+        state.send_functions = nullptr;
     }
 }
 
@@ -1383,6 +1531,7 @@ void fail_registry_producer(BioseqCacheState& state) noexcept {
     if (state.final_path[0] != '\0' && !state.producer_completed) {
         static_cast<void>(::unlink(state.final_path));
     }
+    destroy_column_builder(state);
     state.capture_failed = true;
     state.runtime_role = RuntimeRole::Bypass;
 }
@@ -1406,9 +1555,10 @@ void cache_state_cleanup(void* argument) noexcept {
         static_cast<void>(::unlink(state->temporary_path));
         state->temporary_path[0] = '\0';
     }
+    destroy_column_builder(*state);
 }
 
-/** Create one generation-private result file and write immutable schema bytes. */
+/** Prepare one generation-private self-validating column-store capture. */
 [[nodiscard]] bool begin_producer_file(
         BioseqCacheState& state, TupleDesc descriptor) {
     char directory[MAXPGPATH]{};
@@ -1432,63 +1582,94 @@ void cache_state_cleanup(void* argument) noexcept {
             >= sizeof(state.temporary_path)) {
         return false;
     }
-    state.output_file = OpenTransientFile(
-        state.temporary_path,
-        O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
-    if (state.output_file < 0) {
+    try {
+        state.send_functions = static_cast<Oid*>(
+            palloc0(sizeof(Oid) * static_cast<std::size_t>(descriptor->natts)));
+        std::vector<ColumnSchema> schema = build_column_schema(
+            descriptor, state.send_functions);
+        state.column_builder = new ColumnStoreBuilder(
+            current_column_store_identity(), schema);
+        return true;
+    } catch (...) {
+        destroy_column_builder(state);
         return false;
     }
-
-    const std::uint32_t attribute_count = static_cast<std::uint32_t>(
-        descriptor->natts);
-    const std::size_t header_bytes = sizeof(StoredResultHeader)
-        + sizeof(StoredAttribute) * attribute_count;
-    if (header_bytes > (std::numeric_limits<std::uint32_t>::max)()) {
-        return false;
-    }
-    StoredResultHeader header{
-        .magic = kResultMagic,
-        .format_version = kResultFormatVersion,
-        .header_bytes = static_cast<std::uint32_t>(header_bytes),
-        .attribute_count = attribute_count,
-        .row_count = 0,
-        .payload_bytes = 0,
-        .schema_hash = output_schema_hash(descriptor),
-        .payload_crc = 0,
-        .reserved = 0,
-    };
-    if (!write_all(state.output_file, &header, sizeof(header))) {
-        return false;
-    }
-    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
-        const Form_pg_attribute metadata = TupleDescAttr(descriptor, attribute);
-        const StoredAttribute stored{
-            .type_oid = metadata->atttypid,
-            .type_modifier = metadata->atttypmod,
-            .collation_oid = metadata->attcollation,
-            .reserved = 0,
-        };
-        if (!write_all(state.output_file, &stored, sizeof(stored))) {
-            return false;
-        }
-    }
-    INIT_CRC32C(state.payload_crc);
-    LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
-    CacheEntry& entry = g_shared->entries[state.registry_index];
-    if (entry.generation == state.generation
-        && entry.state == SharedEntryState::Producing
-        && entry.producer_pid == MyProcPid) {
-        strlcpy(
-            entry.final_path, state.temporary_path,
-            sizeof(entry.final_path));
-    }
-    LWLockRelease(g_registry_lock);
-    return true;
 }
 
-/** Write and checksum one physical payload fragment. */
-[[nodiscard]] bool append_payload_bytes(
-        BioseqCacheState& state, const void* bytes, std::size_t size) {
+/** Capture one projected row through PostgreSQL's lossless binary send ABI. */
+[[nodiscard]] bool capture_projected_row(
+        BioseqCacheState& state, TupleTableSlot* slot) {
+    if (state.column_builder == nullptr || state.send_functions == nullptr) {
+        return false;
+    }
+    slot_getallattrs(slot);
+    TupleDesc descriptor = slot->tts_tupleDescriptor;
+    auto* values = static_cast<EncodedColumnValue*>(palloc0(
+        sizeof(EncodedColumnValue)
+        * static_cast<std::size_t>(descriptor->natts)));
+    auto** encoded = static_cast<bytea**>(palloc0(
+        sizeof(bytea*) * static_cast<std::size_t>(descriptor->natts)));
+    bool success = false;
+    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
+        if (slot->tts_isnull[attribute]) {
+            values[attribute].is_null = true;
+            continue;
+        }
+        encoded[attribute] = OidSendFunctionCall(
+            state.send_functions[attribute], slot->tts_values[attribute]);
+        const std::size_t byte_count = VARSIZE_ANY_EXHDR(encoded[attribute]);
+        values[attribute].bytes = std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(
+                VARDATA_ANY(encoded[attribute])),
+            byte_count,
+        };
+        state.logical_bytes += byte_count;
+    }
+    if (state.logical_bytes <= kMaximumStoredResultBytes) {
+        try {
+            const auto appended = state.column_builder->append_row(
+                std::span<const EncodedColumnValue>{
+                    values, static_cast<std::size_t>(descriptor->natts)});
+            success = appended.has_value();
+        } catch (...) {
+            success = false;
+        }
+    }
+    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
+        if (encoded[attribute] != nullptr) {
+            pfree(encoded[attribute]);
+        }
+    }
+    pfree(encoded);
+    pfree(values);
+    if (success) {
+        ++state.row_count;
+    }
+    return success;
+}
+
+/** Atomically publish a complete file only if no commit raced its capture. */
+[[nodiscard]] bool complete_registry_producer(
+        BioseqCacheState& state, TupleDesc descriptor) {
+    static_cast<void>(descriptor);
+    if (state.column_builder == nullptr
+        || state.column_builder->row_count() != state.row_count) {
+        return false;
+    }
+    std::vector<std::byte> sealed;
+    try {
+        PostgreSqlColumnChecksumPolicy policy;
+        auto result = state.column_builder->seal(policy);
+        if (!result.has_value()) {
+            return false;
+        }
+        sealed = std::move(*result);
+    } catch (...) {
+        return false;
+    }
+    if (sealed.size() > kMaximumStoredResultBytes) {
+        return false;
+    }
 #if defined(BIOSEQ_CACHE_TESTING)
     if (g_shared != nullptr
         && pg_atomic_exchange_u32(
@@ -1496,78 +1677,24 @@ void cache_state_cleanup(void* argument) noexcept {
         return false;
     }
 #endif
-    if (size > (std::numeric_limits<std::uint64_t>::max)()
-            - state.payload_bytes
-        || state.payload_bytes + size > kMaximumStoredResultBytes
-        || !write_all(state.output_file, bytes, size)) {
+    state.payload_bytes = sealed.size();
+    state.output_file = OpenTransientFile(
+        state.temporary_path,
+        O_CREAT | O_EXCL | O_WRONLY | PG_BINARY);
+    if (state.output_file < 0) {
         return false;
     }
-    COMP_CRC32C(state.payload_crc, bytes, size);
-    state.payload_bytes += size;
-    return true;
-}
-
-/** Capture one projected row through PostgreSQL's lossless binary send ABI. */
-[[nodiscard]] bool capture_projected_row(
-        BioseqCacheState& state, TupleTableSlot* slot) {
-    slot_getallattrs(slot);
-    TupleDesc descriptor = slot->tts_tupleDescriptor;
-    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
-        std::int32_t length = -1;
-        if (slot->tts_isnull[attribute]) {
-            if (!append_payload_bytes(state, &length, sizeof(length))) {
-                return false;
-            }
-            continue;
-        }
-        Oid send_function = InvalidOid;
-        bool variable_length = false;
-        getTypeBinaryOutputInfo(
-            TupleDescAttr(descriptor, attribute)->atttypid,
-            &send_function, &variable_length);
-        bytea* bytes = OidSendFunctionCall(
-            send_function, slot->tts_values[attribute]);
-        const std::size_t byte_count = VARSIZE_ANY_EXHDR(bytes);
-        if (byte_count
-            > static_cast<std::size_t>(
-                (std::numeric_limits<std::int32_t>::max)())) {
-            pfree(bytes);
-            return false;
-        }
-        length = static_cast<std::int32_t>(byte_count);
-        const bool written = append_payload_bytes(state, &length, sizeof(length))
-            && append_payload_bytes(state, VARDATA_ANY(bytes), byte_count);
-        pfree(bytes);
-        if (!written) {
-            return false;
-        }
-        state.logical_bytes += byte_count;
+    LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
+    CacheEntry& producing_entry = g_shared->entries[state.registry_index];
+    if (producing_entry.generation == state.generation
+        && producing_entry.state == SharedEntryState::Producing
+        && producing_entry.producer_pid == MyProcPid) {
+        strlcpy(
+            producing_entry.final_path, state.temporary_path,
+            sizeof(producing_entry.final_path));
     }
-    ++state.row_count;
-    return true;
-}
-
-/** Atomically publish a complete file only if no commit raced its capture. */
-[[nodiscard]] bool complete_registry_producer(
-        BioseqCacheState& state, TupleDesc descriptor) {
-    FIN_CRC32C(state.payload_crc);
-    const std::uint64_t schema_hash = output_schema_hash(descriptor);
-    StoredResultHeader header{
-        .magic = kResultMagic,
-        .format_version = kResultFormatVersion,
-        .header_bytes = static_cast<std::uint32_t>(
-            sizeof(StoredResultHeader)
-            + sizeof(StoredAttribute) * descriptor->natts),
-        .attribute_count = static_cast<std::uint32_t>(descriptor->natts),
-        .row_count = state.row_count,
-        .payload_bytes = state.payload_bytes,
-        .schema_hash = schema_hash,
-        .payload_crc = state.payload_crc,
-        .reserved = 0,
-    };
-    const ssize_t patched = pg_pwrite(
-        state.output_file, &header, sizeof(header), 0);
-    if (patched != static_cast<ssize_t>(sizeof(header))
+    LWLockRelease(g_registry_lock);
+    if (!write_all(state.output_file, sealed.data(), sealed.size())
         || pg_fsync(state.output_file) != 0
         || CloseTransientFile(state.output_file) != 0) {
         state.output_file = -1;
@@ -1578,6 +1705,7 @@ void cache_state_cleanup(void* argument) noexcept {
         return false;
     }
     state.temporary_path[0] = '\0';
+    destroy_column_builder(state);
     maybe_pause(TestPausePoint::BeforeTerminalPublish);
 
     bool published = false;
@@ -1602,7 +1730,7 @@ void cache_state_cleanup(void* argument) noexcept {
         entry.expires_at = completed_at + ttl_microseconds;
         entry.row_count = state.row_count;
         entry.logical_bytes = state.logical_bytes;
-        entry.stored_bytes = header.header_bytes + state.payload_bytes;
+        entry.stored_bytes = state.payload_bytes;
         strlcpy(entry.final_path, state.final_path, sizeof(entry.final_path));
         pg_atomic_fetch_add_u64(&g_shared->stats.produced, 1);
         pg_atomic_fetch_add_u64(
@@ -1626,119 +1754,132 @@ void cache_state_cleanup(void* argument) noexcept {
 /** Materialize and validate an entire shared result before exposing row one. */
 [[nodiscard]] Tuplestorestate* load_complete_result(
         const char* path, TupleDesc expected_descriptor) {
+    std::vector<ColumnSchema> expected_schema;
+    try {
+        expected_schema = build_column_schema(expected_descriptor, nullptr);
+    } catch (...) {
+        return nullptr;
+    }
     int file = OpenTransientFile(path, O_RDONLY | PG_BINARY);
     if (file < 0) {
         return nullptr;
     }
     struct stat status{};
-    StoredResultHeader header{};
     if (::fstat(file, &status) != 0
-        || status.st_size < static_cast<off_t>(sizeof(header))
-        || !read_all(file, &header, sizeof(header))
-        || header.magic != kResultMagic
-        || header.format_version != kResultFormatVersion
-        || header.attribute_count
-            != static_cast<std::uint32_t>(expected_descriptor->natts)
-        || header.header_bytes != sizeof(StoredResultHeader)
-            + sizeof(StoredAttribute) * header.attribute_count
-        || header.schema_hash != output_schema_hash(expected_descriptor)
+        || status.st_size <= 0
         || static_cast<std::uint64_t>(status.st_size)
-            != static_cast<std::uint64_t>(header.header_bytes)
-                + header.payload_bytes) {
+            > kMaximumStoredResultBytes) {
         static_cast<void>(CloseTransientFile(file));
         return nullptr;
     }
-
-    for (std::uint32_t attribute = 0;
-         attribute < header.attribute_count; ++attribute) {
-        StoredAttribute stored{};
-        const Form_pg_attribute expected = TupleDescAttr(
-            expected_descriptor, static_cast<int>(attribute));
-        if (!read_all(file, &stored, sizeof(stored))
-            || stored.type_oid != expected->atttypid
-            || stored.type_modifier != expected->atttypmod
-            || stored.collation_oid != expected->attcollation) {
-            static_cast<void>(CloseTransientFile(file));
-            return nullptr;
-        }
+    const std::size_t store_size = static_cast<std::size_t>(status.st_size);
+    auto* store = static_cast<std::byte*>(palloc(store_size));
+    const bool read = read_all(file, store, store_size);
+    static_cast<void>(CloseTransientFile(file));
+    if (!read) {
+        pfree(store);
+        return nullptr;
     }
 
+    ColumnStoreView* view = nullptr;
+    try {
+        PostgreSqlColumnChecksumPolicy policy;
+        auto validated = validate_column_store(
+            std::span<const std::byte>{store, store_size},
+            current_column_store_identity(),
+            expected_schema,
+            policy);
+        if (!validated.has_value()) {
+            pfree(store);
+            return nullptr;
+        }
+        view = new ColumnStoreView(std::move(*validated));
+    } catch (...) {
+        pfree(store);
+        return nullptr;
+    }
+    if (view->column_count()
+        != static_cast<std::size_t>(expected_descriptor->natts)) {
+        delete view;
+        pfree(store);
+        return nullptr;
+    }
     Tuplestorestate* result = tuplestore_begin_heap(true, false, work_mem);
     MemoryContext row_context = AllocSetContextCreate(
         CurrentMemoryContext, "bioseq_cache replay row",
         ALLOCSET_DEFAULT_SIZES);
     Datum* values = static_cast<Datum*>(
-        palloc0(sizeof(Datum) * header.attribute_count));
+        palloc0(sizeof(Datum)
+            * static_cast<std::size_t>(expected_descriptor->natts)));
     bool* nulls = static_cast<bool*>(
-        palloc0(sizeof(bool) * header.attribute_count));
-    pg_crc32c checksum = 0;
-    INIT_CRC32C(checksum);
-    std::uint64_t consumed = 0;
+        palloc0(sizeof(bool)
+            * static_cast<std::size_t>(expected_descriptor->natts)));
     bool valid = true;
-    for (std::uint64_t row = 0; row < header.row_count && valid; ++row) {
-        MemoryContextReset(row_context);
-        MemoryContext old_context = MemoryContextSwitchTo(row_context);
-        for (std::uint32_t attribute = 0;
-             attribute < header.attribute_count; ++attribute) {
-            std::int32_t length = 0;
-            if (consumed + sizeof(length) > header.payload_bytes
-                || !read_all(file, &length, sizeof(length))) {
-                valid = false;
-                break;
+    MemoryContext caller_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        for (std::uint64_t row = 0; row < view->row_count() && valid; ++row) {
+            MemoryContextReset(row_context);
+            MemoryContext old_context = MemoryContextSwitchTo(row_context);
+            for (int attribute = 0;
+                 attribute < expected_descriptor->natts; ++attribute) {
+                auto cell = view->value(
+                    row, static_cast<std::size_t>(attribute));
+                if (!cell.has_value()) {
+                    valid = false;
+                    break;
+                }
+                if (cell->is_null) {
+                    values[attribute] = static_cast<Datum>(0);
+                    nulls[attribute] = true;
+                    continue;
+                }
+                if (cell->bytes.size()
+                    > static_cast<std::size_t>(
+                        (std::numeric_limits<int>::max)())) {
+                    valid = false;
+                    break;
+                }
+                const ColumnDescriptorV1& codec =
+                    expected_schema[static_cast<std::size_t>(attribute)]
+                        .descriptor;
+                StringInfoData input{
+                    .data = const_cast<char*>(reinterpret_cast<const char*>(
+                        cell->bytes.data())),
+                    .len = static_cast<int>(cell->bytes.size()),
+                    .maxlen = static_cast<int>(cell->bytes.size()),
+                    .cursor = 0,
+                };
+                values[attribute] = OidReceiveFunctionCall(
+                    codec.receive_function_oid,
+                    &input,
+                    codec.receive_type_io_param,
+                    codec.typmod);
+                nulls[attribute] = false;
+                if (input.cursor != input.len) {
+                    valid = false;
+                    break;
+                }
             }
-            COMP_CRC32C(checksum, &length, sizeof(length));
-            consumed += sizeof(length);
-            if (length == -1) {
-                values[attribute] = static_cast<Datum>(0);
-                nulls[attribute] = true;
-                continue;
+            MemoryContextSwitchTo(old_context);
+            if (valid) {
+                tuplestore_putvalues(
+                    result, expected_descriptor, values, nulls);
             }
-            if (length < 0
-                || consumed + static_cast<std::uint32_t>(length)
-                    > header.payload_bytes) {
-                valid = false;
-                break;
-            }
-            char* bytes = static_cast<char*>(palloc(length == 0 ? 1 : length));
-            if (!read_all(file, bytes, static_cast<std::size_t>(length))) {
-                valid = false;
-                break;
-            }
-            COMP_CRC32C(checksum, bytes, static_cast<std::size_t>(length));
-            consumed += static_cast<std::uint32_t>(length);
-            const Form_pg_attribute metadata = TupleDescAttr(
-                expected_descriptor, static_cast<int>(attribute));
-            Oid receive_function = InvalidOid;
-            Oid io_parameter = InvalidOid;
-            getTypeBinaryInputInfo(
-                metadata->atttypid, &receive_function, &io_parameter);
-            StringInfoData input{
-                .data = bytes,
-                .len = length,
-                .maxlen = length,
-                .cursor = 0,
-            };
-            values[attribute] = OidReceiveFunctionCall(
-                receive_function, &input, io_parameter, metadata->atttypmod);
-            nulls[attribute] = false;
-            if (input.cursor != length) {
-                valid = false;
-                break;
-            }
-        }
-        MemoryContextSwitchTo(old_context);
-        if (valid) {
-            tuplestore_putvalues(result, expected_descriptor, values, nulls);
         }
     }
-    FIN_CRC32C(checksum);
-    if (consumed != header.payload_bytes || !EQ_CRC32C(checksum, header.payload_crc)) {
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(caller_context);
+        FlushErrorState();
         valid = false;
     }
+    PG_END_TRY();
     MemoryContextDelete(row_context);
     pfree(values);
     pfree(nulls);
-    static_cast<void>(CloseTransientFile(file));
+    delete view;
+    pfree(store);
     if (!valid) {
         tuplestore_end(result);
         return nullptr;
@@ -1781,6 +1922,8 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     state->registry_index = -1;
     state->output_file = -1;
     state->replay_store = nullptr;
+    state->column_builder = nullptr;
+    state->send_functions = nullptr;
     state->capture_failed = false;
     state->producer_completed = false;
     state->temporary_path[0] = '\0';
@@ -2040,6 +2183,8 @@ Node* cache_create_custom_scan_state(CustomScan*) {
     state->runtime_role = RuntimeRole::Bypass;
     state->registry_index = -1;
     state->output_file = -1;
+    state->column_builder = nullptr;
+    state->send_functions = nullptr;
     return reinterpret_cast<Node*>(&state->css);
 }
 
