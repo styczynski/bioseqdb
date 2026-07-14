@@ -34,11 +34,22 @@ inline constexpr char kJanitorWorkerName[] = "bioseq_cache janitor";
 inline constexpr char kJanitorWorkerFunction[] =
     "bioseq_cache_storage_janitor_main";
 
+/** Bounded backend-local maintenance work invoked after each storage sweep. */
+using ReusableJanitorCallbackV1 = void (*)() noexcept;
+
 /** Register exactly one postmaster-managed worker during shared preload. */
 [[nodiscard]] bool register_static_janitor_worker() noexcept;
 
 /** Return whether this process registered the static worker already. */
 [[nodiscard]] bool static_janitor_registered() noexcept;
+
+/** Install one reusable-registry janitor owner, refusing replacement. */
+[[nodiscard]] bool register_reusable_janitor_callback_v1(
+    ReusableJanitorCallbackV1 callback) noexcept;
+
+/** Clear the reusable janitor callback only when the owner matches exactly. */
+void unregister_reusable_janitor_callback_v1(
+    ReusableJanitorCallbackV1 callback) noexcept;
 
 } // namespace bioseq::cache::pg::maintenance
 
@@ -48,6 +59,7 @@ namespace {
 inline bool g_registered = false;
 inline volatile sig_atomic_t g_terminate_requested = 0;
 inline volatile sig_atomic_t g_reload_requested = 0;
+inline ReusableJanitorCallbackV1 g_reusable_janitor_callback = nullptr;
 
 void janitor_sigterm(SIGNAL_ARGS) {
     const int saved_errno = errno;
@@ -61,6 +73,14 @@ void janitor_sighup(SIGNAL_ARGS) {
     g_reload_requested = 1;
     SetLatch(MyLatch);
     errno = saved_errno;
+}
+
+/** Invoke at most one allocation-free reusable-registry maintenance owner. */
+void run_reusable_janitor_callback() noexcept {
+    const ReusableJanitorCallbackV1 callback = g_reusable_janitor_callback;
+    if (callback != nullptr) {
+        callback();
+    }
 }
 
 } // namespace
@@ -99,6 +119,25 @@ bool static_janitor_registered() noexcept {
     return g_registered;
 }
 
+bool register_reusable_janitor_callback_v1(
+        ReusableJanitorCallbackV1 callback) noexcept {
+    if (callback == nullptr) {
+        return false;
+    }
+    if (g_reusable_janitor_callback == nullptr) {
+        g_reusable_janitor_callback = callback;
+        return true;
+    }
+    return g_reusable_janitor_callback == callback;
+}
+
+void unregister_reusable_janitor_callback_v1(
+        ReusableJanitorCallbackV1 callback) noexcept {
+    if (callback != nullptr && g_reusable_janitor_callback == callback) {
+        g_reusable_janitor_callback = nullptr;
+    }
+}
+
 } // namespace bioseq::cache::pg::maintenance
 
 extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
@@ -122,6 +161,7 @@ extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
         }
         publish_worker_heartbeat();
         static_cast<void>(janitor_sweep());
+        run_reusable_janitor_callback();
 
         ResetLatch(MyLatch);
         const int events = WaitLatch(
@@ -136,6 +176,7 @@ extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
 
     publish_worker_lifecycle(WorkerLifecycle::Stopping, MyProcPid);
     static_cast<void>(janitor_sweep());
+    run_reusable_janitor_callback();
     publish_worker_lifecycle(WorkerLifecycle::Stopped, 0);
     proc_exit(0);
 }
