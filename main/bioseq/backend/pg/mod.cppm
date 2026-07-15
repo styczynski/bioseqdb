@@ -1977,6 +1977,15 @@ Datum bioseq_block_length_stub(PG_FUNCTION_ARGS) {
 	PG_RETURN_INT64(-1);
 }
 
+CXX_PG_FUNCTION_INFO_V1(bioseq_edit_stub);
+Datum bioseq_edit_stub(PG_FUNCTION_ARGS) {
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("bioseq.edit requires a bioseq alignment custom scan"),
+		 errhint("Use bioseq.edit(...) in a query whose WHERE clause contains mmsearch(...).")));
+	PG_RETURN_NULL();
+}
+
 CXX_PG_FUNCTION_INFO_V1(bioseq_mapq_stub);
 Datum bioseq_mapq_stub(PG_FUNCTION_ARGS) {
 	bioseq_log<DBG>("[bioseq] pg: bioseq_mapq_stub() UNEXPECTED direct call");

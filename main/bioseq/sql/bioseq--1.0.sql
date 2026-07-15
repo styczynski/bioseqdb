@@ -1192,6 +1192,19 @@ CREATE OR REPLACE FUNCTION bioseq.block_length(el ANYELEMENT)
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
+-- Exact unit-cost edit count for the alignment emitted by the mmsearch custom
+-- scan.  A predicate such as `bioseq.edit(seq) < 10` is split by the custom
+-- planner: SneakySnake receives max_edits=9 before DP, and this exact value is
+-- checked after alignment.  The deliberately high standalone cost prevents a
+-- missed custom scan from looking like a useful scalar execution path.
+CREATE OR REPLACE FUNCTION bioseq.edit(el ANYELEMENT)
+    RETURNS BIGINT
+    AS 'MODULE_PATHNAME', 'bioseq_edit_stub'
+    LANGUAGE C IMMUTABLE STRICT
+    PARALLEL SAFE
+    COST 100000
+    SUPPORT bioseq_placeholder_support;
+
 CREATE OR REPLACE FUNCTION bioseq.mapq(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_mapq_stub'

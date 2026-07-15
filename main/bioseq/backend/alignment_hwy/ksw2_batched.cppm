@@ -82,6 +82,7 @@ struct alignas(16) FillDescriptor {
     /// Per-fill score accumulator — written by the kernel's per-lane
     /// scalar backtrace, accumulated into `region.dp_score` during stitch.
     std::int32_t fill_score;
+    std::uint64_t fill_edit_distance;
 
     /// Per-fill final-coordinates accumulator — used by the stitch phase
     /// to fold the final-position fields back into the region.
@@ -282,7 +283,11 @@ template <bool Reverse,
     const KswAlignResult result = ksw2_align_pair<Reverse>(
         query_seq, target_seq, qs, qe, rs, re,
         scoring_matrix, params, align_bandwidth,
-        end_bonus_for_fill, params.zdrop, flags);
+        end_bonus_for_fill,
+        params.compute_edit_distance && fill.kind == FillKind::GapBetween
+            ? -1
+            : params.zdrop,
+        flags);
 
     fill.zdropped = result.zdropped;
     if (fill.kind == FillKind::GapBetween) {
@@ -312,6 +317,29 @@ template <bool Reverse,
             fill.final_ref_offset   = fill.target_offset + ref_offset;
             fill.final_query_offset = fill.query_offset  + query_offset;
         }
+    }
+
+    if (params.compute_edit_distance) {
+        std::size_t exact_query_start = qs;
+        std::size_t exact_target_start = rs;
+        std::size_t exact_query_end = static_cast<std::size_t>(
+            fill.final_query_offset);
+        std::size_t exact_target_end = static_cast<std::size_t>(
+            fill.final_ref_offset);
+        if (fill.kind == FillKind::LeftExtend) {
+            exact_query_start = static_cast<std::size_t>(
+                fill.final_query_offset);
+            exact_target_start = static_cast<std::size_t>(
+                fill.final_ref_offset);
+            exact_query_end = qe;
+            exact_target_end = re;
+        }
+        fill.fill_edit_distance =
+            exact_edit_distance_from_packed_cigar<Reverse>(
+                query_seq, target_seq,
+                exact_query_start, exact_query_end,
+                exact_target_start, exact_target_end,
+                std::span<const std::uint32_t>(result.cigar));
     }
 
     if (fill.cigar_scratch != nullptr && !result.cigar.empty()) {
@@ -439,7 +467,10 @@ void execute_buckets(
 
 inline void stitch_cigars_into_regions(
     std::span<AlignRegion>                          regions,
-    ::bioseq::chaining::ArenaSlab<FillDescriptor>&  fills)
+    std::span<const ::bioseq::chaining::Anchor>      anchors,
+    ::bioseq::chaining::ArenaSlab<FillDescriptor>&  fills,
+    std::int32_t                                    query_length,
+    bool                                            emit_cigar)
 {
     struct ChainOrder {
         [[nodiscard, gnu::always_inline]] inline bool operator()(
@@ -451,18 +482,115 @@ inline void stitch_cigars_into_regions(
     };
     std::stable_sort(fills.data(), fills.data() + fills.size(), ChainOrder{});
 
-    for (std::size_t i = 0; i < fills.size(); ++i) {
-        const auto& fill = fills.data()[i];
-        const std::size_t ri = static_cast<std::size_t>(fill.region_idx);
-        if (ri >= regions.size()) continue;
-        auto& region = regions[ri];
-        if (fill.cigar_scratch != nullptr && fill.cigar_scratch->size() > 0) {
-            const auto& scratch = *fill.cigar_scratch;
-            region.cigar.insert(region.cigar.end(),
-                                scratch.data(),
-                                scratch.data() + scratch.size());
+    std::size_t fill_index = 0;
+    const sequence_size_t query_extent =
+        static_cast<sequence_size_t>(query_length);
+    for (std::size_t region_index = 0;
+         region_index < regions.size(); ++region_index) {
+        auto& region = regions[region_index];
+        sequence_size_t final_ref_start = region.ref_start;
+        sequence_size_t final_ref_end = region.ref_end;
+        sequence_size_t final_query_start = region.is_reverse
+            ? query_extent - region.query_end
+            : region.query_start;
+        sequence_size_t final_query_end = region.is_reverse
+            ? query_extent - region.query_start
+            : region.query_end;
+        bool implicit_seed_appended = false;
+        bool left_zdropped = false;
+        bool gap_zdropped = false;
+
+        while (fill_index < fills.size()
+               && fills.data()[fill_index].region_idx
+                    < static_cast<std::int32_t>(region_index)) {
+            ++fill_index;
         }
-        region.dp_score += fill.fill_score;
+        while (fill_index < fills.size()
+               && fills.data()[fill_index].region_idx
+                    == static_cast<std::int32_t>(region_index)) {
+            const auto& fill = fills.data()[fill_index++];
+            if (fill.kind == FillKind::RightExtend
+                && region.seed_count == 1
+                && !implicit_seed_appended
+                && emit_cigar) {
+                const auto& anchor =
+                    anchors[static_cast<std::size_t>(region.anchor_start)];
+                const std::size_t span =
+                    static_cast<std::size_t>(anchor.query_span);
+                const std::size_t query_end =
+                    static_cast<std::size_t>(anchor.query_position) + 1u;
+                const std::size_t target_end =
+                    static_cast<std::size_t>(anchor.ref_position) + 1u;
+                append_implicit_seed_cigar(
+                    region.cigar,
+                    std::min(query_end, span),
+                    std::min(target_end, span));
+                implicit_seed_appended = true;
+            }
+
+            const bool suppress_fill =
+                (fill.kind == FillKind::GapBetween && gap_zdropped)
+                || (fill.kind == FillKind::RightExtend
+                    && (region.seed_count == 1
+                        ? left_zdropped
+                        : gap_zdropped));
+            if (suppress_fill) continue;
+
+            if (fill.cigar_scratch != nullptr) {
+                const auto& scratch = *fill.cigar_scratch;
+                for (const CigarOp op : scratch) {
+                    if (!region.cigar.empty()
+                        && region.cigar.back().opcode == op.opcode) {
+                        region.cigar.back().length += op.length;
+                    } else {
+                        region.cigar.push_back(op);
+                    }
+                }
+            }
+            region.dp_score += fill.fill_score;
+            region.edit_distance += fill.fill_edit_distance;
+
+            if (fill.kind == FillKind::LeftExtend) {
+                final_ref_start = static_cast<sequence_size_t>(
+                    fill.final_ref_offset);
+                final_query_start = static_cast<sequence_size_t>(
+                    fill.final_query_offset);
+                left_zdropped = fill.zdropped;
+            } else {
+                final_ref_end = static_cast<sequence_size_t>(
+                    fill.final_ref_offset);
+                final_query_end = static_cast<sequence_size_t>(
+                    fill.final_query_offset);
+                if (fill.kind == FillKind::GapBetween) {
+                    gap_zdropped = fill.zdropped;
+                }
+            }
+        }
+
+        if (region.seed_count == 1 && !implicit_seed_appended && emit_cigar) {
+            const auto& anchor =
+                anchors[static_cast<std::size_t>(region.anchor_start)];
+            const std::size_t span =
+                static_cast<std::size_t>(anchor.query_span);
+            const std::size_t query_end =
+                static_cast<std::size_t>(anchor.query_position) + 1u;
+            const std::size_t target_end =
+                static_cast<std::size_t>(anchor.ref_position) + 1u;
+            append_implicit_seed_cigar(
+                region.cigar,
+                std::min(query_end, span),
+                std::min(target_end, span));
+        }
+
+        region.ref_start = final_ref_start;
+        region.ref_end = final_ref_end;
+        if (region.is_reverse) {
+            region.query_start = query_extent - final_query_end;
+            region.query_end = query_extent - final_query_start;
+        } else {
+            region.query_start = final_query_start;
+            region.query_end = final_query_end;
+        }
     }
 }
 
@@ -501,6 +629,7 @@ namespace detail_ksw2_batched {
     desc.bandwidth         = bandwidth;
     desc.cigar_scratch     = nullptr;
     desc.fill_score        = 0;
+    desc.fill_edit_distance= 0;
     desc.final_ref_offset  = 0;
     desc.final_query_offset= 0;
     desc.zdropped          = false;
@@ -613,6 +742,23 @@ void align_regions_batched(
                 outer_ref_end   - outer_ref_start));
         region.cigar.clear();
         region.dp_score = 0;
+        region.edit_distance = 0;
+
+        if (params.compute_edit_distance && region.seed_count == 1) {
+            region.edit_distance += region.is_reverse
+                ? exact_edit_distance_for_implicit_seed<true>(
+                    query_seq, target_seq,
+                    static_cast<std::size_t>(seed_query_start),
+                    static_cast<std::size_t>(seed_query_end),
+                    static_cast<std::size_t>(seed_ref_start),
+                    static_cast<std::size_t>(seed_ref_end))
+                : exact_edit_distance_for_implicit_seed<false>(
+                    query_seq, target_seq,
+                    static_cast<std::size_t>(seed_query_start),
+                    static_cast<std::size_t>(seed_query_end),
+                    static_cast<std::size_t>(seed_ref_start),
+                    static_cast<std::size_t>(seed_ref_end));
+        }
 
         std::int32_t fill_order = 0;
 
@@ -698,7 +844,9 @@ void align_regions_batched(
     auto buckets = bucket_fills_by_geometry(fills, params);
     execute_buckets<QR, TR>(buckets, query_seq, target_seq,
                             scoring_matrix, params, execution_proof);
-    stitch_cigars_into_regions(regions, fills);
+    stitch_cigars_into_regions(
+        regions, anchors, fills, query_length,
+        params.do_cigar || params.compute_edit_distance);
 
     // Update per-region coordinates and length fields — mirrors the
     // post-fill bookkeeping in `align_regions<KSW2>` (final-coordinates

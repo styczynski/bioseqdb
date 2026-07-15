@@ -1,0 +1,145 @@
+2015.4:
+ * Version 4.1 (Rev. 1)
+ * Fixed unresolved instances of sys_clk_gen used in pipe mode simulations. This module is now delivered in 'source' directory
+
+2015.3:
+ * Version 4.1
+ * For EXTERNAL PIPE INTERFACE mode, a new file xil_sig2pipe.v is delivered in the simulation directory and it replaces the phy_sig_gen.v. BFM/VIP’s should interface with the xil_sig2pipe instance in board.v
+ * IP revision number added to HDL module, library, and include file names, to support designs with both locked and upgraded IP instances
+ * Revision change in one or more subcores
+
+2015.2.1:
+ * Version 4.0 (Rev. 1)
+ * No changes
+
+2015.2:
+ * Version 4.0 (Rev. 1)
+ * Removed EP model user application files from the synthesis list of RP configuration example design
+ * Added support for xq7vx690t-rf1158
+
+2015.1:
+ * Version 4.0
+ * Modified the width of m_axis_cq_tready and m_axis_rc_tready from 22 bits to single bit.
+ * Added non-default input port pipe_txinhibit.
+ * Added support for FLG packages for xc7vh580t and xc7vh870t devices.
+ * Added shared logic support for RP configuration.
+ * Modified the External Pipe Interface as Master for Rootport configuration and Slave for Endpoint and Legacy Endpoint configurations.
+ * Reduced BUFG usage by 1.
+
+2014.4.1:
+ * Version 3.0 (Rev. 4)
+ * No changes
+
+2014.4:
+ * Version 3.0 (Rev. 4)
+ * Added synthesis support for External PIPE Interface mode
+ * Enhancement to allow debug cores to work better within Tandem designs. Build_stage1.tcl now runs befor place_design and handles bscan primitives.
+ * Changed the pipe mode simulation options in GUI to radio buttons (No change in the functionality)
+ * Added interface for powerdown ports which is enabled when Enable Powerdown Interface option on basic page in Adavanced mode is selected
+
+2014.3:
+ * Version 3.0 (Rev. 3)
+ * Fixed CPLL Power spike on power up issue (AR59294)
+
+2014.2:
+ * Version 3.0 (Rev. 2)
+ * Added new module _force_adapt.v for compliance fix
+
+2014.1:
+ * Version 3.0 (Rev. 1)
+ * Enabled Tandem configuration support for 330T and 980T devices
+ * Fixed HDL uniquification issue
+ * Changed the directory structure of the core without affecting the design hierarchy
+
+2013.4:
+ * Version 3.0
+ * Added port level enablement for icap and startup signal interfaces
+ * Updated PIO TX_USERAPP module Device Control Register offset from 'h60 to 'hC8
+ * Added 3 new ports - pipe_rxstatus, pipe_eyescandataerror and pipe_dmonitordout to the transceiver debug interface
+ * Added input port cfg_subsys_vend_id to provide access to Subsystem Vendor ID
+ * Added logic to power down CPLL until it is required during the PCIe link bring-up
+ * Added component name as prefix in the core top level file
+ * Changed the default value of BRAM Configuration Option to "Extreme/16KB" from "Good/8KB" (Xilinx Answer 58071)
+
+2013.3:
+ * Version 2.2
+ * Reduced Warnings in Simulations
+ * Reduced Warnings in Synthesis
+ * Implemented Shared Logic for Clocking and Transeciver GT Common blocks to include either in core or example design
+ * Implemented Tarnsceiver Core Debug interface. Brought the debug signals to the port level
+ * Brought the Ext GT DRP signals upto the core top port level
+ * Added support for IPI integrator
+ * Updated xdc to match IP hierarchy
+ * Added support for Cadence IES and Synopsys VCS Simulators
+ * Added support for upgrade from previous versions
+ * Added new pages Shared Logic and Core interface Parameters in GUI in Advanced mode
+ * Brought PCIE DRP Ports upto the core top and enabled depending on PCIE_DRP parameter (Advanced mode)
+ * PCIe Sideband interface is broken into several smaller interfaces to connect with DMA IP in IPI
+
+2013.2:
+ * Version 2.1
+ * Enhancements in the Tandem Logic - added STARTUP Premitive and new ports related to this premitive (static ports)
+ * Removed the redundant blocks related to Tandem configuration logic
+ * Added option to select the Internal or external clocking module (Parameter PCIE_EXT_CLK)
+ * Added SRIOV feature related parameters in GUI
+ * Shortened the example design xdc file name (PG updated)
+ * IPI Level 0 Support
+ * Added OOC flow support
+ * Fixed CDC issues with GT wrappers
+ * Added the management CFG_WR to enable to Core to ignore LFSR values in SKIP sequence
+
+2013.1:
+ * Version 2.0
+ * Lower case ports for Verilog
+ * Removed DRP Ports from user interface
+ * pipe_mmcm_rst_n has been provided to user interface
+ * Added Production option for all the devices
+ * Added Root Port Configuration Support
+ * Added ASPM support
+ * Enabled the Tandem configuration option for 690t,ffg1761 and PCIe Block X0Y1 irrespective of the development board selection
+
+(c) Copyright 2012 - 2015 Xilinx, Inc. All rights reserved.
+
+This file contains confidential and proprietary information
+of Xilinx, Inc. and is protected under U.S. and
+international copyright and other intellectual property
+laws.
+
+DISCLAIMER
+This disclaimer is not a license and does not grant any
+rights to the materials distributed herewith. Except as
+otherwise provided in a valid license issued to you by
+Xilinx, and to the maximum extent permitted by applicable
+law: (1) THESE MATERIALS ARE MADE AVAILABLE "AS IS" AND
+WITH ALL FAULTS, AND XILINX HEREBY DISCLAIMS ALL WARRANTIES
+AND CONDITIONS, EXPRESS, IMPLIED, OR STATUTORY, INCLUDING
+BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, NON-
+INFRINGEMENT, OR FITNESS FOR ANY PARTICULAR PURPOSE; and
+(2) Xilinx shall not be liable (whether in contract or tort,
+including negligence, or under any other theory of
+liability) for any loss or damage of any kind or nature
+related to, arising under or in connection with these
+materials, including for any direct, or any indirect,
+special, incidental, or consequential loss or damage
+(including loss of data, profits, goodwill, or any type of
+loss or damage suffered as a result of any action brought
+by a third party) even if such damage or loss was
+reasonably foreseeable or Xilinx had been advised of the
+possibility of the same.
+
+CRITICAL APPLICATIONS
+Xilinx products are not designed or intended to be fail-
+safe, or for use in any application requiring fail-safe
+performance, such as life-support or safety devices or
+systems, Class III medical devices, nuclear facilities,
+applications related to the deployment of airbags, or any
+other applications that could lead to death, personal
+injury, or severe property or environmental damage
+(individually and collectively, "Critical
+Applications"). Customer assumes the sole risk and
+liability of any use of Xilinx products in Critical
+Applications, subject only to applicable laws and
+regulations governing limitations on product liability.
+
+THIS COPYRIGHT NOTICE AND DISCLAIMER MUST BE RETAINED AS
+PART OF THIS FILE AT ALL TIMES.

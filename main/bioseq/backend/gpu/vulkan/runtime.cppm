@@ -4811,6 +4811,15 @@ public:
         std::span<const GpuAlignmentExtensionJobWire> jobs,
         const GpuAlignmentExtensionParams& params);
 
+    /// Rank-buffer SneakySnake lower-bound batch. Valid unequal-length and
+    /// unsupported jobs are returned conservatively with an explicit status;
+    /// malformed host ranges fail before dispatch.
+    [[nodiscard]] std::vector<GpuSneakySnakeResultWire>
+    run_sneaky_snake_rank_batch_roundtrip(
+        std::span<const std::uint8_t> query_ranks,
+        std::span<const std::uint8_t> target_ranks,
+        std::span<const GpuSneakySnakeJobWire> jobs);
+
     // DOC0354 Part 2 first slice — CIGAR-capable GPU extension ABI. This
     // exact-match implementation writes packed CIGAR ops on device and rejects
     // unsupported geometry/mismatches; it does not fall back to CPU extension.
@@ -4836,6 +4845,9 @@ public:
     }
     [[nodiscard]] std::uint64_t alignment_extension_dispatch_count() const noexcept {
         return alignment_extension_dispatch_count_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t sneaky_snake_dispatch_count() const noexcept {
+        return sneaky_snake_dispatch_count_.load(std::memory_order_relaxed);
     }
 
     // DOC0310 Phase C — GPU seed count + emit + device anchor sort (§14, §13).
@@ -5211,6 +5223,7 @@ private:
     std::atomic<std::uint64_t> seq_sort_dense_scatter_dispatch_count_{0};  // DOC0360
     std::atomic<std::uint64_t> seq_sort_uploaded_bytes_{0};  // DOC0360 full-payload proof
     std::atomic<std::uint64_t> alignment_extension_dispatch_count_{0};
+    std::atomic<std::uint64_t> sneaky_snake_dispatch_count_{0};
     std::atomic<std::uint64_t> grouped32_stream_identity_{1};
     std::atomic<std::uint64_t> operation_proof_identity_{1};
     std::mutex mu_;
@@ -10143,6 +10156,114 @@ void validate_alignment_extension_inputs(
     }
 }
 
+void validate_sneaky_snake_inputs(
+    std::span<const std::uint8_t> query_ranks,
+    std::span<const std::uint8_t> target_ranks,
+    std::span<const GpuSneakySnakeJobWire> jobs)
+{
+    if (jobs.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError("SneakySnake job_count exceeds uint32");
+    }
+    if (query_ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError(
+            "SneakySnake query rank stream exceeds uint32 offsets");
+    }
+    if (target_ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw VulkanRuntimeError(
+            "SneakySnake target rank stream exceeds uint32 offsets");
+    }
+
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const GpuSneakySnakeJobWire& job = jobs[i];
+        const std::uint64_t query_end =
+            static_cast<std::uint64_t>(job.query_offset)
+            + static_cast<std::uint64_t>(job.query_length);
+        const std::uint64_t target_end =
+            static_cast<std::uint64_t>(job.target_offset)
+            + static_cast<std::uint64_t>(job.target_length);
+        if (job.query_offset > query_ranks.size()
+            || query_end > query_ranks.size()) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake job {} query range [{}, {}) exceeds rank count {}",
+                i, job.query_offset, query_end, query_ranks.size()));
+        }
+        if (job.target_offset > target_ranks.size()
+            || target_end > target_ranks.size()) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake job {} target range [{}, {}) exceeds rank count {}",
+                i, job.target_offset, target_end, target_ranks.size()));
+        }
+    }
+}
+
+void validate_sneaky_snake_results(
+    std::span<const GpuSneakySnakeJobWire> jobs,
+    std::span<const GpuSneakySnakeResultWire> results)
+{
+    if (results.size() != jobs.size()) {
+        throw VulkanRuntimeError("SneakySnake result count mismatch");
+    }
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const GpuSneakySnakeJobWire& job = jobs[i];
+        const GpuSneakySnakeResultWire& result = results[i];
+        if (result.accepted > 1u || result.reserved != 0u) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake shader returned malformed flags for job {}",
+                i));
+        }
+
+        if (result.status == k_gpu_sneaky_snake_status_unsupported) {
+            if (job.max_edits <= k_gpu_sneaky_snake_max_edits
+                || result.lower_bound != 0u || result.accepted != 1u) {
+                throw VulkanRuntimeError(fmt::format(
+                    "SneakySnake shader returned invalid unsupported result for job {}",
+                    i));
+            }
+            continue;
+        }
+
+        if (job.max_edits > k_gpu_sneaky_snake_max_edits) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake shader failed to retain unsupported job {}",
+                i));
+        }
+        if (result.status == k_gpu_sneaky_snake_status_length_difference_only) {
+            if (job.query_length == job.target_length) {
+                throw VulkanRuntimeError(fmt::format(
+                    "SneakySnake shader returned unequal-length status for equal job {}",
+                    i));
+            }
+            const std::uint32_t length_difference =
+                job.query_length > job.target_length
+                ? job.query_length - job.target_length
+                : job.target_length - job.query_length;
+            const std::uint32_t expected_accepted =
+                length_difference <= job.max_edits ? 1u : 0u;
+            if (result.lower_bound != length_difference
+                || result.accepted != expected_accepted) {
+                throw VulkanRuntimeError(fmt::format(
+                    "SneakySnake shader returned invalid length-difference result for job {}",
+                    i));
+            }
+            continue;
+        }
+        if (result.status != k_gpu_sneaky_snake_status_ok
+            || job.query_length != job.target_length) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake shader returned invalid status {} for job {}",
+                result.status, i));
+        }
+        const std::uint32_t expected_accepted =
+            result.lower_bound <= job.max_edits ? 1u : 0u;
+        if (result.accepted != expected_accepted
+            || result.lower_bound > job.max_edits + 1u) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake shader returned invalid equal-length result for job {}",
+                i));
+        }
+    }
+}
+
 void validate_alignment_cigar_score(const char* name, std::int32_t value) {
     constexpr std::int32_t kMaxAbsScore = 1'000'000;
     if (value < 0 || value > kMaxAbsScore) {
@@ -10477,6 +10598,22 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
              !scan.has_array_stride(4) ||
              !scan.has_array_stride(40) || !scan.has_array_stride(48))) {
             throw VulkanRuntimeError("SPIR-V alignment CIGAR extension layout mismatch");
+        }
+        if (kind == ShaderKind::sneaky_snake_rank_batch &&
+            (!scan.has_binding_array_stride(0u, 0u, 4u) ||
+             !scan.has_binding_array_stride(0u, 1u, 4u) ||
+             !scan.has_binding_array_stride(0u, 2u, 20u) ||
+             !scan.has_binding_struct_offsets(
+                 0u, 2u,
+                 std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}) ||
+             !scan.has_binding_array_stride(0u, 3u, 16u) ||
+             !scan.has_binding_struct_offsets(
+                 0u, 3u,
+                 std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}) ||
+             !scan.has_push_constant_offsets(
+                 std::array<std::uint32_t, 1>{0u}))) {
+            throw VulkanRuntimeError(
+                "SPIR-V SneakySnake rank-batch layout mismatch");
         }
 
         VkShaderModuleCreateInfo module_info{};
@@ -13882,6 +14019,137 @@ std::vector<GpuAlignmentExtensionResultWire> Runtime::run_alignment_extension_ro
         }
     }
     alignment_extension_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return results;
+}
+
+std::vector<GpuSneakySnakeResultWire>
+Runtime::run_sneaky_snake_rank_batch_roundtrip(
+    std::span<const std::uint8_t> query_ranks,
+    std::span<const std::uint8_t> target_ranks,
+    std::span<const GpuSneakySnakeJobWire> jobs)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "run_sneaky_snake_rank_batch_roundtrip on unavailable device");
+    }
+    if (jobs.empty()) {
+        return {};
+    }
+    validate_sneaky_snake_inputs(query_ranks, target_ranks, jobs);
+    if (features_.max_workgroup_count_x == 0u) {
+        throw VulkanRuntimeError(
+            "SneakySnake device reports zero max workgroup count");
+    }
+
+    constexpr std::uint32_t kSneakySnakeLocal = 64u;
+    const PhaseBPipeline pipe = get_phase_b_pipeline_locked(
+        ShaderKind::sneaky_snake_rank_batch,
+        kSneakySnakeLocal,
+        k_gpu_sneaky_snake_submaze_length);
+
+    const std::uint64_t query_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(query_ranks.size())
+            * sizeof(std::uint32_t),
+        sizeof(std::uint32_t));
+    const std::uint64_t target_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(target_ranks.size())
+            * sizeof(std::uint32_t),
+        sizeof(std::uint32_t));
+    const std::uint64_t job_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(jobs.size())
+            * sizeof(GpuSneakySnakeJobWire),
+        sizeof(std::uint32_t));
+    const std::uint64_t result_bytes =
+        static_cast<std::uint64_t>(jobs.size())
+        * sizeof(GpuSneakySnakeResultWire);
+
+    for (const auto [label, bytes] : {
+            std::pair{"query ranks", query_bytes},
+            std::pair{"target ranks", target_bytes},
+            std::pair{"jobs", job_bytes},
+            std::pair{"results", result_bytes}}) {
+        if (bytes > features_.max_storage_buffer_range) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake {} buffer {} exceeds maxStorageBufferRange {}",
+                label, bytes, features_.max_storage_buffer_range));
+        }
+    }
+
+    Buffer query_buf = create_device_buffer(query_bytes, kPhaseBBufferUsage);
+    Buffer target_buf = create_device_buffer(target_bytes, kPhaseBBufferUsage);
+    Buffer jobs_buf = create_device_buffer(job_bytes, kPhaseBBufferUsage);
+    Buffer results_buf = create_device_buffer(result_bytes, kPhaseBBufferUsage);
+    if (query_buf.mapped == nullptr || target_buf.mapped == nullptr
+        || jobs_buf.mapped == nullptr || results_buf.mapped == nullptr) {
+        throw VulkanRuntimeError(
+            "run_sneaky_snake_rank_batch_roundtrip: device buffer alloc failed");
+    }
+
+    auto* query_words = static_cast<std::uint32_t*>(query_buf.mapped);
+    for (std::size_t i = 0; i < query_ranks.size(); ++i) {
+        query_words[i] = query_ranks[i];
+    }
+    if (query_ranks.empty()) query_words[0] = 0u;
+    auto* target_words = static_cast<std::uint32_t*>(target_buf.mapped);
+    for (std::size_t i = 0; i < target_ranks.size(); ++i) {
+        target_words[i] = target_ranks[i];
+    }
+    if (target_ranks.empty()) target_words[0] = 0u;
+    std::memcpy(
+        jobs_buf.mapped,
+        jobs.data(),
+        jobs.size() * sizeof(GpuSneakySnakeJobWire));
+    std::memset(
+        results_buf.mapped,
+        0,
+        static_cast<std::size_t>(result_bytes));
+
+    const std::array<VkDescriptorBufferInfo, 4> infos{{
+        {query_buf.buffer, 0, query_buf.bytes},
+        {target_buf.buffer, 0, target_buf.bytes},
+        {jobs_buf.buffer, 0, jobs_buf.bytes},
+        {results_buf.buffer, 0, results_buf.bytes},
+    }};
+    const GpuSneakySnakePush push{
+        static_cast<std::uint32_t>(jobs.size())};
+    const std::uint64_t groups_needed =
+        (static_cast<std::uint64_t>(jobs.size()) + kSneakySnakeLocal - 1u)
+        / kSneakySnakeLocal;
+    const std::uint32_t groups = static_cast<std::uint32_t>(
+        std::min(
+            groups_needed,
+            static_cast<std::uint64_t>(features_.max_workgroup_count_x)));
+    if (groups == 0u) {
+        throw VulkanRuntimeError(
+            "SneakySnake grid-stride dispatch has zero workgroups");
+    }
+
+    reset_phase_c_pool_locked();
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(sneaky_snake)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(
+        vkBeginCommandBuffer(command_buffer_, &begin),
+        "begin(sneaky_snake)");
+    record_host_to_shader(command_buffer_);
+    record_phase_c_dispatch_locked(
+        command_buffer_, pipe, infos, &push, sizeof(push), groups);
+    record_shader_to_host(command_buffer_);
+    submit_and_wait(
+        device_, queue_, command_buffer_, fence_, "submit(sneaky_snake)");
+    check_vk(
+        vkResetCommandBuffer(command_buffer_, 0),
+        "reset(sneaky_snake_post)");
+
+    std::vector<GpuSneakySnakeResultWire> results(jobs.size());
+    std::memcpy(
+        results.data(),
+        results_buf.mapped,
+        static_cast<std::size_t>(result_bytes));
+    validate_sneaky_snake_results(jobs, results);
+    sneaky_snake_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return results;
 }
 

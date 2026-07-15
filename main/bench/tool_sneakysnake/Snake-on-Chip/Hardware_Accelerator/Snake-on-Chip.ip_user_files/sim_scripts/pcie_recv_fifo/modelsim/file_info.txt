@@ -1,0 +1,4 @@
+Language File-Name                     IP              Library                 File-Path                                                                      
+VHDL,    fifo_generator_vhdl_beh.vhd,  pcie_recv_fifo, fifo_generator_v13_0_1, ../../../ipstatic/fifo_generator_v13_0_1/simulation/fifo_generator_vhdl_beh.vhd
+VHDL,    fifo_generator_v13_0_rfs.vhd, pcie_recv_fifo, fifo_generator_v13_0_1, ../../../ipstatic/fifo_generator_v13_0_1/hdl/fifo_generator_v13_0_rfs.vhd      
+VHDL,    pcie_recv_fifo.vhd,           pcie_recv_fifo, xil_defaultlib,         ../../../../GateKeeper.srcs/sources_1/ip/pcie_recv_fifo/sim/pcie_recv_fifo.vhd 

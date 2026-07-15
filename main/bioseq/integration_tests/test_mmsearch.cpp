@@ -35,6 +35,7 @@ constexpr std::string_view kDuplicateTargets = "mmsearch_duplicate_targets_int";
 constexpr std::string_view kMissingIndex = "mmsearch_missing_index_int";
 constexpr std::string_view kBatchJoinTarget = "mmsearch_batch_join_target_int";
 constexpr std::string_view kBatchJoinQueries = "mmsearch_batch_join_queries_int";
+constexpr std::string_view kSneakySnakeEdits = "mmsearch_sneaky_snake_edits_int";
 constexpr std::string_view kAsyncMpsWorkerLeaves =
 	"mmsearch_async_mps_worker_leaves_int";
 
@@ -1061,23 +1062,25 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
         "q.id, t.pk, "
         "bioseq.score(t.pk) + 1 AS adjusted_score, "
         "bioseq.query_end(t.pk) - bioseq.query_start(t.pk) AS query_span, "
-        "bioseq.has_cigar(t.pk) AS has_cigar");
+        "bioseq.has_cigar(t.pk) AS has_cigar, "
+        "bioseq.edit(t.pk) AS edit_distance");
     const auto plan = explain_text<false>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Bioseq Residual Mmsearch Qual: absent"));
 	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
-	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 4"));
+	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 5"));
     REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
 
     const auto rows = query_rows(ctx, sql + " ORDER BY q.id, t.pk;");
     REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
-		REQUIRE(row.size() == 5);
+		REQUIRE(row.size() == 6);
         REQUIRE(row[0].has_value());
         REQUIRE(row[1].has_value());
         REQUIRE(row[2].has_value());
         REQUIRE(row[3].has_value());
 		REQUIRE(row[4].has_value());
+		REQUIRE(row[5].has_value());
 		/* Alignment scores are legitimately zero for this tiny exact fixture, so
 		 * adjusted_score=1 is valid.  The direct-call score stub returns -1 and
 		 * would instead produce the excluded sentinel value zero. */
@@ -1090,6 +1093,9 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
 		/* has_cigar is both an unprunable Block Aligner consumer and a separate
 		 * no-stub guard: the SQL rendezvous stub returns false. */
 		REQUIRE(*row[4] == "t");
+		/* Identical query/target fixtures prove BatchJoin requests and publishes
+		 * the exact edit count rather than executing the fail-closed SQL stub. */
+		REQUIRE(std::stoll(*row[5]) == 0);
     }
     require_batch_join_stats(ctx, 1, 2);
 }
@@ -2686,6 +2692,146 @@ TEST_CASE("mmsearch parity: bioseq.aligner.enable_profiling on/off agree",
     check_single_guc_parity("bioseq.aligner.enable_profiling");
 }
 
+TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter",
+          "[mmsearch][sneaky-snake][edit][integration]") {
+    auto ctx = fresh_context({kSneakySnakeEdits});
+    std::string query(320, 'A');
+    std::uint32_t state = 0x9e3779b9u;
+    constexpr std::string_view alphabet = "ACGT";
+    for (char& base : query) {
+        state ^= state << 13u;
+        state ^= state >> 17u;
+        state ^= state << 5u;
+        base = alphabet[state & 3u];
+    }
+    auto with_substitutions = [&query, alphabet](const std::size_t count) {
+        std::string sequence = query;
+        for (std::size_t index = 0; index < count; ++index) {
+            const std::size_t position = 32u + index * 27u;
+            const std::size_t rank = alphabet.find(sequence[position]);
+            sequence[position] = alphabet[(rank + 1u) & 3u];
+        }
+        return sequence;
+    };
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kSneakySnakeEdits},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 2,
+            .using_bioseq = true,
+        },
+        {
+            seq_row{.pk = 1, .sequences = {query, query}},
+            seq_row{.pk = 2, .sequences = {
+                with_substitutions(9), query}},
+            seq_row{.pk = 3, .sequences = {
+                with_substitutions(10), query}},
+        });
+    exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';");
+    exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 10;");
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+    const std::string exact_projection_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
+        "       bioseq.cigar(seq0) "
+        "FROM {} WHERE mmsearch(seq0, {}) ORDER BY pk;",
+        kSneakySnakeEdits,
+        query_literal);
+    const auto exact_rows = query_rows(ctx, exact_projection_sql);
+    REQUIRE(exact_rows.size() == 3);
+    REQUIRE(exact_rows[0][0] == std::optional<std::string>{"1"});
+    REQUIRE(exact_rows[0][1] == std::optional<std::string>{"0"});
+    REQUIRE(exact_rows[1][0] == std::optional<std::string>{"2"});
+    REQUIRE(exact_rows[1][1] == std::optional<std::string>{"9"});
+    REQUIRE(exact_rows[2][0] == std::optional<std::string>{"3"});
+    REQUIRE(exact_rows[2][1] == std::optional<std::string>{"10"});
+
+    const std::string sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
+        "       bioseq.cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10 "
+        "ORDER BY pk;",
+        kSneakySnakeEdits,
+        query_literal);
+    const auto vectorized = query_rows(ctx, sql);
+    exec_sql(ctx, "SET bioseq.enable_vectorization = off;");
+    const auto scalar = query_rows(ctx, sql);
+    REQUIRE(vectorized == scalar);
+    REQUIRE(vectorized.size() == 2);
+    REQUIRE(vectorized[0][0] == std::optional<std::string>{"1"});
+    REQUIRE(vectorized[0][1] == std::optional<std::string>{"0"});
+    REQUIRE(vectorized[1][0] == std::optional<std::string>{"2"});
+    REQUIRE(vectorized[1][1] == std::optional<std::string>{"9"});
+    for (const auto& row : vectorized) {
+        REQUIRE(row.size() == 4);
+        REQUIRE(row[2].has_value());
+        REQUIRE(row[3].has_value());
+        REQUIRE(is_valid_cigar(*row[3]));
+    }
+
+    const auto plan = explain_text<true>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "SneakySnake edit lower bound"));
+    REQUIRE(plan_contains(plan, "max_edits: 9"));
+
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10;",
+        kSneakySnakeEdits,
+        query_literal)) == 2);
+
+    const auto wrong_column = sql_error(ctx, fmt::format(
+        "SELECT pk FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq1) < 10;",
+        kSneakySnakeEdits,
+        query_literal));
+    REQUIRE(wrong_column.sqlstate == "0A000");
+    REQUIRE(wrong_column.contains(
+        "bioseq.edit predicate must reference the mmsearch target column"));
+
+    const auto wrong_projection = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(seq1) FROM {} WHERE mmsearch(seq0, {});",
+        kSneakySnakeEdits,
+        query_literal));
+    REQUIRE(wrong_projection.sqlstate == "0A000");
+    REQUIRE(wrong_projection.contains(
+        "bioseq.edit projection must reference the mmsearch target column"));
+}
+
+TEST_CASE("bioseq.edit rejects unsupported predicate shapes",
+          "[mmsearch][sneaky-snake][edit][fail-closed]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    const std::string sql = fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0, {}) "
+        "AND bioseq.edit(seq0) <= 10;",
+        kHoe,
+        hoe_probe_literal());
+    const auto error = sql_error(ctx, sql);
+    REQUIRE(error.sqlstate == "0A000");
+    REQUIRE(error.contains("unsupported bioseq.edit predicate"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    const auto direct_error = sql_error(ctx, "SELECT bioseq.edit(1);");
+    REQUIRE(direct_error.sqlstate == "0A000");
+    REQUIRE(direct_error.contains(
+        "bioseq.edit requires a bioseq alignment custom scan"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    const auto scan_without_alignment = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(seq0) FROM {} LIMIT 1;", kHoe));
+    REQUIRE(scan_without_alignment.sqlstate == "0A000");
+    REQUIRE(scan_without_alignment.contains(
+        "bioseq.edit requires mmsearch in the same scan"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
 TEST_CASE("mmsearch with all-NULL aligner_options matches the GUC defaults",
           "[mmsearch][aligner_options]") {
     auto ctx = fresh_context({kHoe});
@@ -3644,7 +3790,7 @@ struct projection_probe {
     std::string_view pg_typename;  // "int4", "bool", "float4", "text"
 };
 
-constexpr std::array<projection_probe, 13> kProjectionHelpers = {{
+constexpr std::array<projection_probe, 14> kProjectionHelpers = {{
     {"bioseq.score(pk)",                  "int4"},
     {"bioseq.dp_score(pk)",               "int4"},
     {"bioseq.dp_max_score(pk)",           "int4"},
@@ -3655,6 +3801,7 @@ constexpr std::array<projection_probe, 13> kProjectionHelpers = {{
     // so the projections RETURN BIGINT (int8), not int4.
     {"bioseq.num_matches(pk)",            "int8"},
     {"bioseq.block_length(pk)",           "int8"},
+    {"bioseq.edit(pk)",                   "int8"},
     {"bioseq.mapq(pk)",                   "int4"},
     {"bioseq.target_len(pk)",             "int8"},
     {"bioseq.query_len(pk)",              "int8"},
@@ -3692,7 +3839,7 @@ TEMPLATE_TEST_CASE_SIG(
     "Every MatchResult projection helper executes and casts to its declared type",
     "[mmsearch][projections][matrix]",
     ((size_t Idx), Idx),
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13) {
     static_assert(Idx < kProjectionHelpers.size());
     check_projection_helper(kProjectionHelpers[Idx]);
 }
