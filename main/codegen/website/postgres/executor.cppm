@@ -55,9 +55,16 @@ public:
             bioseq::libpq::connection connection(conninfo_);
             sql_example_result outcome;
             outcome.example_id = example.canonical_id;
+            // Deterministic session settings (§13.4) precede setup so formatting,
+            // search_path, and the defense-in-depth server timeouts are fixed for
+            // every phase; the fence timeout (capped at 60s) drives statement_timeout.
+            apply_session_settings(connection, example);
             if (!example.setup_sql.empty()) {
                 (void)connection.exec(example.setup_sql);
             }
+            // Only sql_phase::visible notices may render (§13.6); discard the
+            // session-setup and setup-phase notices before the visible phase.
+            (void)connection.take_notices();
             // The visible SQL is where the success/error expectation applies
             // (§13.5): a success example must not raise; an error example must
             // raise the expected SQLSTATE (or any, when unspecified).
@@ -72,19 +79,19 @@ public:
                     connection.exec(example.visible_sql);
                 outcome.visible_results.push_back(project_result(visible));
             }
-            if (!example.teardown_sql.empty()) {
-                try {
-                    (void)connection.exec(example.teardown_sql);
-                } catch (const bioseq::libpq::query_error&) {
-                    // Teardown is best-effort after a captured expected error.
-                }
-            }
             for (const bioseq::libpq::notice& raw : connection.take_notices()) {
                 outcome.notices.push_back(sql_notice{
                     .phase = sql_phase::visible,
                     .severity = raw.severity,
                     .sqlstate = raw.sqlstate,
                     .message = raw.message});
+            }
+            if (!example.teardown_sql.empty()) {
+                try {
+                    (void)connection.exec(example.teardown_sql);
+                } catch (const bioseq::libpq::query_error&) {
+                    // Teardown is best-effort after a captured expected error.
+                }
             }
             return outcome;
         } catch (const bioseq::libpq::query_error& error) {
@@ -93,6 +100,28 @@ public:
     }
 
 private:
+    // Applies the deterministic session settings (§13.4). These are generator-
+    // owned constants — never author SQL — so they are safe to send verbatim. The
+    // server statement_timeout is defense in depth (tutorial SQL can reset it);
+    // the client deadline (§13.5) is the independent authority.
+    static void apply_session_settings(
+        bioseq::libpq::connection& connection, sql_example const& example) {
+        long long timeout_ms = example.timeout.count();
+        if (timeout_ms <= 0 || timeout_ms > 60'000) {
+            timeout_ms = 60'000;
+        }
+        (void)connection.exec("SET TIME ZONE 'UTC'");
+        (void)connection.exec("SET DateStyle = 'ISO, YMD'");
+        (void)connection.exec("SET IntervalStyle = 'iso_8601'");
+        (void)connection.exec("SET bytea_output = 'hex'");
+        (void)connection.exec("SET extra_float_digits = 3");
+        (void)connection.exec("SET client_min_messages = 'notice'");
+        (void)connection.exec("SET search_path = public, bioseq, pg_catalog");
+        (void)connection.exec("SET statement_timeout = " + std::to_string(timeout_ms));
+        (void)connection.exec("SET lock_timeout = '2s'");
+        (void)connection.exec("SET idle_in_transaction_session_timeout = '15s'");
+    }
+
     // Runs the visible SQL of an error example, capturing the raised SQLSTATE.
     // A success (no error) or a wrong SQLSTATE is a failed expectation.
     [[nodiscard]] static std::expected<sql_result_set, diagnostic> run_expected_error(
