@@ -719,6 +719,8 @@ AddCommonTargetX(
     ${SRC_MOD_FILES}
   INSTALLS
     sql/bioseq--1.0.sql
+  PG_ENTRYPOINT_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod.cppm"
   BOOST
     program_options regex serialization iterator integer
   HWY 1.3.0

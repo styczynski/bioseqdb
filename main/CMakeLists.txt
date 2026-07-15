@@ -306,6 +306,17 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   include(CTest)
 endif()
 
+# The website builds on the core extension (module BMIs, the extension DSO, and
+# the private-cluster prerequisites), so require BIOSEQ_BUILD_CORE and export a
+# compile database for the Clang structural pass (§17.1).
+if(BIOSEQ_BUILD_WEBSITE)
+  if(NOT BIOSEQ_BUILD_CORE)
+    message(FATAL_ERROR
+      "BIOSEQ_BUILD_WEBSITE=ON requires BIOSEQ_BUILD_CORE=ON")
+  endif()
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
 # Provision the reusable isolated code generator once for the enabled component
 # union (external API clients + website). The external/website consumers depend
 # on the returned bioseq_codegen / bioseq_codegen_project targets and never
@@ -341,6 +352,12 @@ endif()
 if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
   add_subdirectory(vendor)
+endif()
+
+# The website pipeline consumes postgresql_bioseq's target properties and BMIs,
+# so it is added after add_subdirectory(bioseq) (§17.1).
+if(BIOSEQ_BUILD_WEBSITE)
+  add_subdirectory(website)
 endif()
 
 if(BIOSEQ_BUILD_PAPERS)
