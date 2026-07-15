@@ -5,8 +5,10 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 module bioseq.codegen.website:json;
@@ -331,6 +333,260 @@ namespace {
         items.push_back(serialize_entity(entity));
     }
     root["entities"] = std::move(items);
+    return serialize_canonical(root);
+}
+
+namespace {
+
+// HTML/attribute-escapes a plain-text value (§14 plain_text projection). Because
+// Jinja2Cpp performs no automatic escaping, plain-text bindings must already carry
+// HTML entities so a value containing <, >, &, or a quote cannot break out of its
+// element/attribute context when the template emits it verbatim.
+[[nodiscard]] std::string html_escape(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (const char character : value) {
+        switch (character) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&#39;"; break;
+        default: out.push_back(character); break;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+/// @brief Quotes a JSON string literal safe to embed in an HTML-context artifact.
+///
+/// Applies only the JSON-in-HTML escaping for <, >, &, U+2028, U+2029. The decoded
+/// value is emitted verbatim, so this is for trusted fragments (already-sanitized
+/// HTML) and raw data artifacts — never for a plain-text template binding.
+/// @param value Text to encode.
+/// @return A double-quoted JSON string literal.
+[[nodiscard]] std::string json_quote(std::string_view value) {
+    return apply_html_safe_escapes(boost::json::serialize(boost::json::value(value)));
+}
+
+/// @brief Quotes a JSON string literal whose decoded value is HTML-safe (§14).
+///
+/// HTML/attribute-escapes the plain text first, so the value a template emits
+/// verbatim already carries entities. Use for every untrusted plain-text/URL
+/// binding (titles, descriptions, names, hrefs); use json_quote only for trusted
+/// HTML fragments.
+/// @param value Plain (untrusted) text.
+/// @return A double-quoted JSON string literal of the HTML-escaped value.
+[[nodiscard]] std::string json_text(std::string_view value) {
+    return json_quote(html_escape(value));
+}
+
+namespace {
+
+// Projects an entity onto a template view whose plain-text fields are already
+// HTML-escaped (§14). Distinct from serialize_entity, which keeps raw values for
+// the on-disk data artifact; this view is bound straight into a page context and
+// so must be safe for verbatim template emission. route_path is a same-origin
+// path built by the generator and is attribute-escaped for safety.
+[[nodiscard]] boost::json::value serialize_entity_view(const documented_entity& entity) {
+    boost::json::object object;
+    object["canonical_id"] = entity.canonical_id;
+    object["domain"] = entity.domain == entity_domain::sql ? "sql" : "cpp";
+    object["kind"] = html_escape(entity_kind_name(entity.kind));
+    object["qualified_name"] = html_escape(entity.qualified_name);
+    object["display_name"] = html_escape(entity.display_name);
+    object["normalized_signature"] = html_escape(entity.normalized_signature);
+    object["summary"] = html_escape(entity.summary_text);
+    object["route_path"] = html_escape(entity.route_path);
+    object["return_type"] = entity.return_type
+        ? boost::json::value(html_escape(*entity.return_type)) : boost::json::value(nullptr);
+    boost::json::array parameters;
+    for (const parameter_documentation& parameter : entity.parameters) {
+        boost::json::object item;
+        item["name"] = html_escape(parameter.name);
+        item["type"] = html_escape(parameter.type);
+        parameters.push_back(std::move(item));
+    }
+    object["parameters"] = std::move(parameters);
+    return object;
+}
+
+}  // namespace
+
+/// @brief Serializes one documented entity view object (HTML-escaped) for a page.
+/// @param entity Canonical documented entity.
+/// @return The HTML-safe JSON object text for a single-entity page context.
+[[nodiscard]] std::string serialize_single_entity(const documented_entity& entity) {
+    return apply_html_safe_escapes(boost::json::serialize(serialize_entity_view(entity)));
+}
+
+/// @brief Serializes a documented-entity view array (HTML-escaped) for an index.
+/// @param entities Canonical documented entities.
+/// @return The HTML-safe JSON array text for an entity-index page context.
+[[nodiscard]] std::string serialize_entity_array(
+    const std::vector<documented_entity>& entities) {
+    boost::json::array items;
+    for (const documented_entity& entity : entities) {
+        items.push_back(serialize_entity_view(entity));
+    }
+    return apply_html_safe_escapes(
+        boost::json::serialize(boost::json::value(std::move(items))));
+}
+
+namespace {
+
+[[nodiscard]] entity_kind entity_kind_from_name(std::string_view name) {
+    if (name == "namespace") return entity_kind::namespace_;
+    if (name == "module") return entity_kind::module;
+    if (name == "class") return entity_kind::class_;
+    if (name == "struct") return entity_kind::struct_;
+    if (name == "union") return entity_kind::union_;
+    if (name == "enum") return entity_kind::enum_;
+    if (name == "enum_value") return entity_kind::enum_value;
+    if (name == "concept") return entity_kind::concept_;
+    if (name == "type_alias") return entity_kind::type_alias;
+    if (name == "function") return entity_kind::function;
+    if (name == "variable") return entity_kind::variable;
+    if (name == "sql_schema") return entity_kind::sql_schema;
+    if (name == "sql_type") return entity_kind::sql_type;
+    if (name == "sql_function") return entity_kind::sql_function;
+    return entity_kind::overload_group;
+}
+
+[[nodiscard]] std::optional<std::string> as_optional_string(const boost::json::value& value) {
+    if (value.is_string()) {
+        return std::string(value.get_string());
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+/// @brief Parses a cpp_entities/sql_entities artifact back into the model (§11.3).
+///
+/// Reconstructs the scalar entity fields that reference/search pages bind to
+/// (identity, kind, names, signature, parameters, declaration); the documentation
+/// node forest is not needed for the current entity page shape and is skipped.
+/// @param text Canonical entity-index JSON text.
+/// @return The documented entities in the array's stored order.
+[[nodiscard]] std::vector<documented_entity> deserialize_entities(std::string_view text) {
+    const boost::json::value root = parse_json(text);
+    std::vector<documented_entity> entities;
+    const boost::json::array& items = root.at("entities").as_array();
+    entities.reserve(items.size());
+    for (const boost::json::value& item : items) {
+        const boost::json::object& object = item.as_object();
+        documented_entity entity;
+        entity.canonical_id = std::string(object.at("canonical_id").as_string());
+        entity.domain = std::string(object.at("domain").as_string()) == "sql"
+            ? entity_domain::sql : entity_domain::cpp;
+        entity.kind =
+            entity_kind_from_name(std::string(object.at("kind").as_string()));
+        entity.qualified_name = std::string(object.at("qualified_name").as_string());
+        entity.display_name = std::string(object.at("display_name").as_string());
+        entity.normalized_signature =
+            std::string(object.at("normalized_signature").as_string());
+        entity.summary_text = std::string(object.at("summary").as_string());
+        entity.route_path = std::string(object.at("route_path").as_string());
+        entity.module_name = as_optional_string(object.at("module"));
+        entity.return_type = as_optional_string(object.at("return_type"));
+        if (const boost::json::value& declaration = object.at("declaration");
+            declaration.is_object()) {
+            source_span span;
+            span.path = std::string(declaration.at("path").as_string());
+            span.first_line =
+                static_cast<std::size_t>(declaration.at("line").to_number<std::int64_t>());
+            entity.declaration = span;
+        }
+        for (const boost::json::value& parameter : object.at("parameters").as_array()) {
+            const boost::json::object& fields = parameter.as_object();
+            parameter_documentation documented;
+            documented.name = std::string(fields.at("name").as_string());
+            documented.type = std::string(fields.at("type").as_string());
+            documented.default_value = as_optional_string(fields.at("default"));
+            entity.parameters.push_back(std::move(documented));
+        }
+        if (const boost::json::value& attributes = object.at("attributes");
+            attributes.is_object()) {
+            for (const auto& field : attributes.as_object()) {
+                entity.attributes.emplace(std::string(field.key()),
+                                          std::string(field.value().as_string()));
+            }
+        }
+        entities.push_back(std::move(entity));
+    }
+    return entities;
+}
+
+/// @brief Builds a full page render context from the site view and page fields.
+///
+/// Produces {"site":..,"nav":..,"page":..[,<collection_key>:..]} as one HTML-safe
+/// JSON object. `page_object` and `collection_json` are pre-serialized JSON text
+/// (built by the caller from json_quote / serialize_entity_array), so no raw
+/// string is ever concatenated unescaped into the context (§14).
+/// @param site Resolved site-wide fields (base-path-aware URLs and labels).
+/// @param page_object JSON object text for the per-page `page` binding.
+/// @param collection_key Optional extra top-level key (for example "entities").
+/// @param collection_json JSON value text for that key; ignored when key empty.
+/// @return The serialized page context ready for render_page.
+[[nodiscard]] std::string build_page_context(
+    const site_view& site,
+    std::string_view page_object,
+    std::string_view collection_key,
+    std::string_view collection_json) {
+    boost::json::object site_object;
+    site_object["title"] = site.title;
+    site_object["base_path"] = site.base_path;
+    site_object["repository_url"] = site.repository_url;
+    site_object["copyright_holder"] = site.copyright_holder;
+    site_object["copyright_year"] = static_cast<std::int64_t>(site.copyright_year);
+    site_object["status_label"] = site.status_label
+        ? boost::json::value(*site.status_label) : boost::json::value(nullptr);
+    site_object["version"] = site.version;
+    site_object["css_url"] = site.css_url;
+    site_object["js_url"] = site.js_url;
+    site_object["favicon_url"] = site.favicon_url;
+    boost::json::object nav_labels;
+    nav_labels["documentation"] = site.nav_documentation;
+    nav_labels["tutorials"] = site.nav_tutorials;
+    nav_labels["reference"] = site.nav_reference;
+    site_object["nav"] = std::move(nav_labels);
+
+    boost::json::object nav_object;
+    nav_object["documentation"] = site.documentation_url;
+    nav_object["tutorials"] = site.tutorials_url;
+    nav_object["reference"] = site.reference_url;
+
+    boost::json::object root;
+    root["site"] = std::move(site_object);
+    root["nav"] = std::move(nav_object);
+    root["page"] = parse_json(page_object);
+    if (!collection_key.empty()) {
+        root[std::string(collection_key)] = parse_json(collection_json);
+    }
+    return apply_html_safe_escapes(boost::json::serialize(root));
+}
+
+/// @brief Serializes the versions manifest consumed by the header selector (§16).
+/// @param version_labels Version path components, newest first.
+/// @param base_path Normalized base path used to build each version route.
+/// @return Canonical HTML-safe JSON ending in one newline (schema versions/v1).
+[[nodiscard]] std::string serialize_versions(
+    const std::vector<std::string>& version_labels, std::string_view base_path) {
+    boost::json::object root;
+    root["schema"] = "bioseq.website.versions/v1";
+    root["primary"] = version_labels.empty()
+        ? boost::json::value(nullptr) : boost::json::value(version_labels.front());
+    boost::json::array versions;
+    for (const std::string& label : version_labels) {
+        boost::json::object object;
+        object["label"] = label;
+        object["route"] = std::string(base_path) + label + "/";
+        versions.push_back(std::move(object));
+    }
+    root["versions"] = std::move(versions);
     return serialize_canonical(root);
 }
 

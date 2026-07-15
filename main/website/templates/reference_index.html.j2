@@ -1,0 +1,10 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="reference-index">
+  <h1>API Reference</h1>
+  <ul class="card-grid">
+    <li class="card"><a href="{{ page.cpp_url }}">C++ API</a></li>
+    <li class="card"><a href="{{ page.sql_url }}">SQL API</a></li>
+  </ul>
+</article>
+{% endblock %}

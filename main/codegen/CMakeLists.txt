@@ -214,6 +214,7 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${_codegen_src}/website/doxygen_xml.cppm"
     "${_codegen_src}/website/clang_entity_index.cppm"
     "${_codegen_src}/website/entity_index.cppm"
+    "${_codegen_src}/website/html_render.cppm"
     "${_codegen_src}/website/json.cppm"
     "${_codegen_src}/website/search.cppm"
     "${_codegen_src}/website/template_renderer.cppm"

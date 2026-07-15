@@ -1,0 +1,13 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="coverage">
+  <h1>Documentation coverage</h1>
+  <p>{{ page.documented_total }} of {{ page.public_total }} public entities documented.</p>
+  {% if page.missing %}
+  <h2>Undocumented (warnings)</h2>
+  <ul class="missing-list">
+  {% for id in page.missing %}<li><code>{{ id }}</code></li>{% endfor %}
+  </ul>
+  {% endif %}
+</article>
+{% endblock %}

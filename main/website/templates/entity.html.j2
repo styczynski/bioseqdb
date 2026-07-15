@@ -1,0 +1,18 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="entity">
+  <h1><code>{{ entity.qualified_name }}</code></h1>
+  <p class="kind">{{ entity.domain }} {{ entity.kind }}</p>
+  {% if entity.summary %}<p class="summary">{{ entity.summary }}</p>{% endif %}
+  {% if entity.normalized_signature %}<pre class="signature"><code>{{ entity.normalized_signature }}</code></pre>{% endif %}
+  {% if entity.parameters %}
+  <h2>Parameters</h2>
+  <dl class="parameters">
+  {% for p in entity.parameters %}
+    <dt><code>{{ p.name }}</code> : <code>{{ p.type }}</code></dt>
+  {% endfor %}
+  </dl>
+  {% endif %}
+  {% if entity.return_type %}<p class="returns">Returns <code>{{ entity.return_type }}</code></p>{% endif %}
+</article>
+{% endblock %}

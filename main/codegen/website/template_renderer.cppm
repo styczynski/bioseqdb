@@ -42,6 +42,26 @@ namespace bioseq::codegen::website {
     return result;
 }
 
+/// @brief Renders a named template from a templates root against a JSON context.
+/// @param templates_dir Filesystem root of the template set (§14).
+/// @param template_name Logical template name (for example "landing.html.j2").
+/// @param json_context A JSON object serialized as text (page data).
+/// @return The rendered document; throws on any load/context/render error.
+[[nodiscard]] std::string render_page(
+    std::string_view templates_dir,
+    std::string_view template_name,
+    std::string_view json_context) {
+    std::string result;
+    std::string error;
+    const int status = detail::render_jinja_file(
+        std::string(templates_dir), std::string(template_name),
+        std::string(json_context), result, error);
+    if (status != 0) {
+        throw std::runtime_error("page render failed: " + error);
+    }
+    return result;
+}
+
 /// @brief Renders a template against a structured JSON object context.
 /// @param template_text Jinja template source.
 /// @param json_context A JSON object serialized as text (page data).

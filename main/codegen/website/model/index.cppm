@@ -236,6 +236,27 @@ struct search_record {
     std::vector<std::string> keywords;
 };
 
+// Site-wide fields bound into every rendered page's context (§14, §15.1). All
+// URLs are pre-resolved (base-path aware) so templates never build paths.
+struct site_view {
+    std::string title;
+    std::string base_path;
+    std::string repository_url;
+    std::string copyright_holder;
+    std::uint32_t copyright_year{};
+    std::optional<std::string> status_label;
+    std::string version;
+    std::string css_url;
+    std::string js_url;
+    std::string favicon_url;
+    std::string documentation_url;
+    std::string tutorials_url;
+    std::string reference_url;
+    std::string nav_documentation;
+    std::string nav_tutorials;
+    std::string nav_reference;
+};
+
 struct site_build_request {
     site_version version;
     std::filesystem::path plan_path;

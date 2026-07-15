@@ -1,0 +1,12 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="tutorial">
+  <h1>{{ page.title }}</h1>
+  <p class="description">{{ page.description }}</p>
+  <div class="tutorial-body">{{ page.body_html }}</div>
+  <nav class="pager" aria-label="Tutorial pagination">
+    {% if page.previous_url %}<a class="prev" href="{{ page.previous_url }}">Previous</a>{% endif %}
+    {% if page.next_url %}<a class="next" href="{{ page.next_url }}">Next</a>{% endif %}
+  </nav>
+</article>
+{% endblock %}

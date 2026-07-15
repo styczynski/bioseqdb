@@ -39,4 +39,22 @@ int render_jinja_json(const std::string& template_text,
                       std::string& out_result,
                       std::string& out_error);
 
+/// @brief Renders a named template from a templates root against a JSON context.
+///
+/// Creates one TemplateEnv rooted only at @p templates_dir (§14) so `{% extends
+/// %}`/`{% include %}` resolve against the sibling templates; the JSON object is
+/// reflected in as the render context. Absolute/parent-escaping include paths
+/// are rejected by the loader.
+/// @param templates_dir Filesystem root of the template set.
+/// @param template_name Logical template name (for example "landing.html.j2").
+/// @param json_context A JSON object serialized as text.
+/// @param out_result Receives the rendered document on success.
+/// @param out_error Receives the diagnostic message on failure.
+/// @return Zero on success; one on load, two on render, three on context failure.
+int render_jinja_file(const std::string& templates_dir,
+                      const std::string& template_name,
+                      const std::string& json_context,
+                      std::string& out_result,
+                      std::string& out_error);
+
 }  // namespace bioseq::codegen::website::detail

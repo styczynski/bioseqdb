@@ -1,9 +1,11 @@
 module;
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <fstream>
@@ -11,14 +13,23 @@ module;
 #include <map>
 #include <optional>
 #include <print>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1 << 1)
+#endif
 
 module bioseq.codegen.website:site_builder;
 
@@ -28,6 +39,7 @@ import :markdown_extensions;
 import :doxygen_xml;
 import :clang_entity_index;
 import :entity_index;
+import :html_render;
 import :json;
 import :search;
 import :template_renderer;
@@ -383,40 +395,22 @@ void collect_examples_and_queries(
     }
 }
 
-}  // namespace
-
-/// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
+/// @brief Builds the deterministic website plan from validated source (§10).
 ///
-/// Strictly parses site.yaml and every tutorial's frontmatter/Markdown, extracts
-/// runnable SQL and typed unresolved entity queries, resolves ordering and
-/// previous/next links, and writes the deterministic private plan artifact
-/// (schema bioseq.website.plan/v1) with mode 0600 (§5.1, §10).
-/// @param args Options after the `plan` token.
-/// @return Zero on success; two on CLI usage errors; three on parse/validation.
-[[nodiscard]] int run_plan(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
-        "source", "version", "site-config", "templates", "static",
-        "base-path", "source-revision", "output"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts"};
-    const auto options = parse_options(args, value_keys, flag_keys);
-    const fs::path source = require_option(options, "source");
-    const std::string version_string = require_option(options, "version");
-    const fs::path site_config_path = require_option(options, "site-config");
-    const fs::path output = require_option(options, "output");
-    const bool include_drafts = options.contains("include-drafts");
-
-    const std::string site_yaml = read_file(site_config_path);
-    const site_configuration config =
-        parse_site_config(site_yaml, site_config_path.generic_string());
-    std::string base_path = config.default_base_path;
-    if (const auto found = options.find("base-path"); found != options.end()) {
-        base_path = found->second;
-    }
-    std::string revision;
-    if (const auto found = options.find("source-revision"); found != options.end()) {
-        revision = found->second;
-    }
-
+/// Parses every tutorial's frontmatter/Markdown under <source>/<version>/tutorials,
+/// extracts runnable SQL and typed entity queries, resolves order and prev/next
+/// links, and folds the site config plus every input's content hash into the plan
+/// signature. Shared by `plan` (which serializes it) and `publish` (which renders
+/// from it), so both stages observe an identical model.
+[[nodiscard]] website_plan build_plan_from_source(
+    const fs::path& source,
+    const std::string& version_string,
+    const site_configuration& config,
+    const std::string& site_yaml,
+    const std::string& site_config_relpath,
+    std::string base_path,
+    std::string revision,
+    bool include_drafts) {
     site_version version;
     version.path_component = version_string;
     version.parts = parse_version_parts(version_string);
@@ -432,7 +426,7 @@ void collect_examples_and_queries(
 
     std::vector<plan_input> inputs;
     inputs.push_back(plan_input{
-        .path = plan_relative(site_config_path, source),
+        .path = site_config_relpath,
         .content_hash = hex64(bioseq::common::fnv1a_64(site_yaml))});
 
     std::vector<tutorial> tutorials;
@@ -499,13 +493,53 @@ void collect_examples_and_queries(
     plan.parser_version = "bioseq.website.parser/v1";
     plan.binding_schema_version = "bioseq.website.bindings/v1";
     plan.version = version;
-    plan.base_path = base_path;
-    plan.source_revision = revision;
+    plan.base_path = std::move(base_path);
+    plan.source_revision = std::move(revision);
     plan.site_title = config.title;
     plan.tutorials = std::move(tutorials);
     plan.inputs = std::move(inputs);
     plan.signature = hex64(signature);
+    return plan;
+}
 
+}  // namespace
+
+/// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
+///
+/// Strictly parses site.yaml and every tutorial's frontmatter/Markdown, extracts
+/// runnable SQL and typed unresolved entity queries, resolves ordering and
+/// previous/next links, and writes the deterministic private plan artifact
+/// (schema bioseq.website.plan/v1) with mode 0600 (§5.1, §10).
+/// @param args Options after the `plan` token.
+/// @return Zero on success; two on CLI usage errors; three on parse/validation.
+[[nodiscard]] int run_plan(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "templates", "static",
+        "base-path", "source-revision", "output"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts"};
+    const auto options = parse_options(args, value_keys, flag_keys);
+    const fs::path source = require_option(options, "source");
+    const std::string version_string = require_option(options, "version");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path output = require_option(options, "output");
+    const bool include_drafts = options.contains("include-drafts");
+
+    const std::string site_yaml = read_file(site_config_path);
+    const site_configuration config =
+        parse_site_config(site_yaml, site_config_path.generic_string());
+    std::string base_path = config.default_base_path;
+    if (const auto found = options.find("base-path"); found != options.end()) {
+        base_path = found->second;
+    }
+    std::string revision;
+    if (const auto found = options.find("source-revision"); found != options.end()) {
+        revision = found->second;
+    }
+
+    const website_plan plan = build_plan_from_source(
+        source, version_string, config, site_yaml,
+        plan_relative(site_config_path, source),
+        std::move(base_path), std::move(revision), include_drafts);
     const std::string serialized = serialize_plan(plan);
     write_private_artifact(output, serialized);
     return 0;
@@ -767,6 +801,473 @@ namespace {
     return 3;
 }
 
+namespace {
+
+// One static file discovered under the immutable asset root, with its content
+// and per-file SHA-256, used to derive the content-addressed bundle hash (§16).
+struct static_asset {
+    std::string relative_path;  // normalized forward-slash path under static/
+    std::string content;
+    std::string sha256;
+};
+
+// Walks main/website/static and hashes every regular file. The bundle hash is
+// SHA-256 over sorted `<relpath>\0<file-sha256>\n` records so a byte change in
+// any asset (or a rename) yields a new immutable /assets/<hash>/ directory.
+[[nodiscard]] std::vector<static_asset> collect_static_assets(
+    const fs::path& static_root, std::string& bundle_sha256) {
+    std::vector<static_asset> assets;
+    for (const auto& entry : fs::recursive_directory_iterator(static_root)) {
+        if (entry.is_symlink()) {
+            throw std::runtime_error("static asset tree must not contain symlinks: "
+                                     + entry.path().string());
+        }
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        static_asset asset;
+        asset.relative_path =
+            fs::relative(entry.path(), static_root).generic_string();
+        asset.content = read_file(entry.path());
+        asset.sha256 = bioseq::codegen::sha256_hex(asset.content);
+        assets.push_back(std::move(asset));
+    }
+    std::ranges::sort(assets, [](const static_asset& lhs, const static_asset& rhs) {
+        return lhs.relative_path < rhs.relative_path;
+    });
+    std::string manifest_bytes;
+    for (const static_asset& asset : assets) {
+        manifest_bytes += asset.relative_path;
+        manifest_bytes.push_back('\0');
+        manifest_bytes += asset.sha256;
+        manifest_bytes.push_back('\n');
+    }
+    bundle_sha256 = bioseq::codegen::sha256_hex(manifest_bytes);
+    return assets;
+}
+
+// Collects every regular file under root as site-relative "/" routes. Rejects
+// symlinks and special files so publish set-equality can never bless a tree that
+// smuggles a non-regular entry (§16).
+void collect_site_files(const fs::path& root, std::set<std::string>& routes) {
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        if (entry.is_symlink()) {
+            throw std::runtime_error("site tree must not contain symlinks: "
+                                     + entry.path().string());
+        }
+        if (entry.is_directory()) {
+            continue;
+        }
+        if (!entry.is_regular_file()) {
+            throw std::runtime_error("site tree contains a non-regular file: "
+                                     + entry.path().string());
+        }
+        routes.insert("/" + fs::relative(entry.path(), root).generic_string());
+    }
+}
+
+// Atomically replaces output with staging (§14). When output is absent the
+// staging directory is renamed into place; when it exists the two sibling
+// directories are exchanged with renameat2(RENAME_EXCHANGE) and the now-old tree
+// is removed, so a reader never observes a partially written site.
+void atomic_publish(const fs::path& staging, const fs::path& output) {
+    std::error_code error;
+    if (!fs::exists(output, error)) {
+        fs::rename(staging, output, error);
+        if (error) {
+            throw std::runtime_error("publish rename failed: " + error.message());
+        }
+        return;
+    }
+    const long result = ::syscall(SYS_renameat2, AT_FDCWD, staging.c_str(),
+                                  AT_FDCWD, output.c_str(),
+                                  static_cast<unsigned int>(RENAME_EXCHANGE));
+    if (result != 0) {
+        throw std::runtime_error(std::string("renameat2 exchange failed: ")
+                                 + std::strerror(errno));
+    }
+    fs::remove_all(staging, error);
+}
+
+// Writes one rendered artifact into staging at a site-relative "/" route,
+// recording its route and content SHA-256 for the manifest. The manifest itself
+// is written afterward and is never one of these entries (§16).
+struct staging_writer {
+    fs::path root;
+    std::map<std::string, std::string, std::less<>> manifest;
+
+    void emit(std::string_view route, std::string_view content) {
+        if (!route.starts_with("/")) {
+            throw std::runtime_error("site route must be absolute: " + std::string(route));
+        }
+        const fs::path destination = root / route.substr(1);
+        fs::create_directories(destination.parent_path());
+        {
+            std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                throw std::runtime_error("cannot write " + destination.string());
+            }
+            out.write(content.data(), static_cast<std::streamsize>(content.size()));
+            if (!out) {
+                throw std::runtime_error("cannot finish writing " + destination.string());
+            }
+        }
+        manifest.emplace(std::string(route), bioseq::codegen::sha256_hex(content));
+    }
+};
+
+}  // namespace
+
+/// @brief Runs `website publish`: renders the full content-addressed site tree.
+///
+/// Rebuilds the plan from source, reads the C++/SQL entity artifacts, content-
+/// addresses main/website/static into one immutable /assets/<sha256>/ bundle,
+/// renders every §16 route through the shared template frame, writes the site
+/// manifest (SHA-256 of every output but itself), validates exact set equality
+/// between the manifest and the staged tree, and atomically swaps staging over
+/// the output root (§14, §16).
+/// @param args Options after the `publish` token.
+/// @return Zero on success; two on usage errors; three on parse/validation.
+[[nodiscard]] int run_publish(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "cpp-entities", "sql-entities",
+        "templates", "static", "output", "base-path", "source-revision"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts"};
+    const auto options = parse_options(args, value_keys, flag_keys);
+    const fs::path source = require_option(options, "source");
+    const std::string version_string = require_option(options, "version");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path templates_dir = require_option(options, "templates");
+    const fs::path static_dir = require_option(options, "static");
+    const fs::path output = require_option(options, "output");
+    const bool include_drafts = options.contains("include-drafts");
+
+    const std::string site_yaml = read_file(site_config_path);
+    const site_configuration config =
+        parse_site_config(site_yaml, site_config_path.generic_string());
+    std::string base_path = config.default_base_path;
+    if (const auto found = options.find("base-path"); found != options.end()) {
+        base_path = found->second;
+    }
+    std::string revision;
+    if (const auto found = options.find("source-revision"); found != options.end()) {
+        revision = found->second;
+    }
+
+    const website_plan plan = build_plan_from_source(
+        source, version_string, config, site_yaml,
+        plan_relative(site_config_path, source), base_path, revision, include_drafts);
+
+    std::vector<documented_entity> cpp_entities;
+    if (const auto found = options.find("cpp-entities"); found != options.end()) {
+        cpp_entities = deserialize_entities(read_file(found->second));
+    }
+    std::vector<documented_entity> sql_entities;
+    if (const auto found = options.find("sql-entities"); found != options.end()) {
+        sql_entities = deserialize_entities(read_file(found->second));
+    }
+
+    const std::string version = version_string;
+    const auto url = [&](std::string_view rel) { return base_path + std::string(rel); };
+    const auto route = [&](std::string_view rel) { return "/" + std::string(rel); };
+    const auto canonical = [&](std::string_view rel) {
+        std::string trimmed(rel);
+        if (trimmed.ends_with("index.html")) {
+            trimmed.erase(trimmed.size() - std::string_view("index.html").size());
+        }
+        return config.canonical_origin + url(trimmed);
+    };
+
+    // Content-address the immutable static bundle and stage it (§16).
+    std::string bundle_sha256;
+    const std::vector<static_asset> assets =
+        collect_static_assets(static_dir, bundle_sha256);
+    const std::string bundle_prefix = "assets/" + bundle_sha256 + "/";
+
+    const fs::path staging = output.string() + ".staging";
+    std::error_code staging_error;
+    fs::remove_all(staging, staging_error);
+    fs::create_directories(staging);
+    staging_writer writer{.root = staging, .manifest = {}};
+    for (const static_asset& asset : assets) {
+        writer.emit(route(bundle_prefix + asset.relative_path), asset.content);
+    }
+
+    // Resolve the base-aware site view bound into every page's frame (§15.1).
+    site_view site;
+    site.title = config.title;
+    site.base_path = base_path;
+    site.repository_url = config.repository_url;
+    site.copyright_holder = config.copyright_holder;
+    site.copyright_year = config.copyright_year;
+    site.status_label = config.status_label;
+    site.version = version;
+    site.css_url = url(bundle_prefix + "css/site.css");
+    site.js_url = url(bundle_prefix + "js/main.js");
+    site.favicon_url = url(bundle_prefix + "favicon.svg");
+    site.documentation_url = url(version + "/");
+    site.tutorials_url = url(version + "/tutorials/");
+    site.reference_url = url(version + "/reference/");
+    site.nav_documentation = config.navigation.at("documentation");
+    site.nav_tutorials = config.navigation.at("tutorials");
+    site.nav_reference = config.navigation.at("reference");
+
+    const auto render = [&](std::string_view rel, std::string_view template_name,
+                            std::string_view page_object, std::string_view key,
+                            std::string_view collection) {
+        const std::string context =
+            build_page_context(site, page_object, key, collection);
+        const std::string html =
+            render_page(templates_dir.string(), template_name, context);
+        writer.emit(route(rel), html);
+    };
+
+    // Assign each entity its base-aware route and page location (§16).
+    const auto entity_dir = [&](const documented_entity& entity) {
+        const std::string domain = entity.domain == entity_domain::sql ? "sql" : "cpp";
+        return version + "/reference/" + domain + "/"
+            + bioseq::codegen::sha256_hex(entity.canonical_id) + "/";
+    };
+    for (documented_entity& entity : cpp_entities) {
+        entity.route_path = url(entity_dir(entity));
+    }
+    for (documented_entity& entity : sql_entities) {
+        entity.route_path = url(entity_dir(entity));
+    }
+
+    // Root marketing landing page for the primary version (§16).
+    render("index.html", "landing.html.j2",
+           "{\"title\":" + json_text(config.title)
+               + ",\"description\":" + json_text(config.short_description)
+               + ",\"canonical\":" + json_text(canonical("index.html"))
+               + ",\"eyebrow\":" + json_text("PostgreSQL-native")
+               + ",\"headline\":" + json_text(config.title)
+               + ",\"lede\":" + json_text(config.short_description)
+               + ",\"install\":" + json_text("CREATE EXTENSION bioseq;") + "}",
+           "", "");
+
+    // Version overview / documentation home, distinct from the landing page.
+    render(version + "/index.html", "version_home.html.j2",
+           "{\"title\":" + json_text(config.title + " " + version)
+               + ",\"description\":" + json_text(config.short_description)
+               + ",\"canonical\":" + json_text(canonical(version + "/index.html"))
+               + ",\"coverage_url\":"
+               + json_text(url(version + "/documentation-coverage/")) + "}",
+           "", "");
+
+    // Tutorials index and one page per published tutorial (§10, §16).
+    std::string tutorial_cards = "[";
+    for (std::size_t index = 0; index < plan.tutorials.size(); ++index) {
+        const tutorial& item = plan.tutorials[index];
+        if (index > 0) {
+            tutorial_cards.push_back(',');
+        }
+        tutorial_cards += "{\"route\":"
+            + json_text(url(version + "/tutorials/" + item.metadata.slug + "/"))
+            + ",\"title\":" + json_text(item.metadata.title)
+            + ",\"description\":" + json_text(item.metadata.description) + "}";
+    }
+    tutorial_cards.push_back(']');
+    render(version + "/tutorials/index.html", "tutorials_index.html.j2",
+           "{\"title\":" + json_text("Tutorials")
+               + ",\"description\":" + json_text("Bioseq tutorials for " + version)
+               + ",\"canonical\":"
+               + json_text(canonical(version + "/tutorials/index.html")) + "}",
+           "tutorials", tutorial_cards);
+    for (const tutorial& item : plan.tutorials) {
+        const std::string rel =
+            version + "/tutorials/" + item.metadata.slug + "/index.html";
+        const std::string body = render_document_html(item.content);
+        std::string page = "{\"title\":" + json_text(item.metadata.title)
+            + ",\"description\":" + json_text(item.metadata.description)
+            + ",\"canonical\":" + json_text(canonical(rel))
+            + ",\"body_html\":" + json_quote(body);
+        page += ",\"previous_url\":";
+        page += item.previous_slug
+            ? json_text(url(version + "/tutorials/" + *item.previous_slug + "/"))
+            : "null";
+        page += ",\"next_url\":";
+        page += item.next_slug
+            ? json_text(url(version + "/tutorials/" + *item.next_slug + "/"))
+            : "null";
+        page.push_back('}');
+        render(rel, "tutorial.html.j2", page, "", "");
+    }
+
+    // Reference landing plus per-domain entity indexes and entity pages (§12.3).
+    render(version + "/reference/index.html", "reference_index.html.j2",
+           "{\"title\":" + json_text("API Reference")
+               + ",\"description\":" + json_text("Bioseq C++ and SQL API reference")
+               + ",\"canonical\":"
+               + json_text(canonical(version + "/reference/index.html"))
+               + ",\"cpp_url\":" + json_text(url(version + "/reference/cpp/"))
+               + ",\"sql_url\":" + json_text(url(version + "/reference/sql/")) + "}",
+           "", "");
+    const auto render_domain = [&](std::string_view domain, std::string_view label,
+                                   const std::vector<documented_entity>& entities) {
+        const std::string index_rel =
+            version + "/reference/" + std::string(domain) + "/index.html";
+        render(index_rel, "entity_index.html.j2",
+               "{\"title\":" + json_text(std::string(label) + " API")
+                   + ",\"description\":"
+                   + json_text(std::string(label) + " API reference")
+                   + ",\"canonical\":" + json_text(canonical(index_rel)) + "}",
+               "entities", serialize_entity_array(entities));
+        for (const documented_entity& entity : entities) {
+            const std::string rel = version + "/reference/" + std::string(domain) + "/"
+                + bioseq::codegen::sha256_hex(entity.canonical_id) + "/index.html";
+            render(rel, "entity.html.j2",
+                   "{\"title\":" + json_text(entity.qualified_name)
+                       + ",\"description\":"
+                       + json_text(entity.summary_text.empty()
+                                        ? entity.qualified_name : entity.summary_text)
+                       + ",\"canonical\":" + json_text(canonical(rel)) + "}",
+                   "entity", serialize_single_entity(entity));
+        }
+    };
+    render_domain("cpp", "C++", cpp_entities);
+    render_domain("sql", "SQL", sql_entities);
+
+    // Documentation-coverage page and machine-readable report (§11.4).
+    const coverage_report coverage = compute_coverage(
+        cpp_entities, config.required_documentation_entities, {});
+    std::string missing_json = "[";
+    for (std::size_t index = 0; index < coverage.missing_summary.size(); ++index) {
+        if (index > 0) {
+            missing_json.push_back(',');
+        }
+        missing_json += json_text(coverage.missing_summary[index]);
+    }
+    missing_json.push_back(']');
+    render(version + "/documentation-coverage/index.html", "coverage.html.j2",
+           "{\"title\":" + json_text("Documentation coverage")
+               + ",\"description\":" + json_text("Public API documentation coverage")
+               + ",\"canonical\":"
+               + json_text(canonical(version + "/documentation-coverage/index.html"))
+               + ",\"public_total\":" + std::to_string(coverage.public_total)
+               + ",\"documented_total\":" + std::to_string(coverage.documented_total)
+               + ",\"missing\":" + missing_json + "}",
+           "", "");
+    writer.emit(route(version + "/documentation-coverage.json"),
+                serialize_coverage(coverage.public_total, coverage.documented_total,
+                                   coverage.missing_summary, coverage.fatal_missing));
+
+    // Versions manifest, versions page, and per-version search index (§15.1, §12.5).
+    const std::vector<std::string> version_labels{version};
+    writer.emit(route("versions.json"),
+                serialize_versions(version_labels, base_path));
+    render("versions/index.html", "versions.html.j2",
+           "{\"title\":" + json_text("Versions")
+               + ",\"description\":" + json_text("Documented Bioseq versions")
+               + ",\"canonical\":" + json_text(canonical("versions/index.html")) + "}",
+           "versions",
+           "[{\"route\":" + json_text(url(version + "/")) + ",\"label\":"
+               + json_text(version) + "}]");
+    std::vector<documented_entity> all_entities = cpp_entities;
+    all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
+    writer.emit(route(version + "/search-index.json"),
+                build_search_index(all_entities));
+    if (!sql_entities.empty()) {
+        writer.emit(route(version + "/catalog-inventory.json"),
+                    serialize_sql_entities(sql_entities));
+    }
+
+    // Host-agnostic SEO / security deployment artifacts (§15.5).
+    writer.emit(route("robots.txt"),
+                "User-agent: *\nAllow: /\nSitemap: " + config.canonical_origin
+                    + url("sitemap.xml") + "\n");
+    writer.emit(route("security-headers.txt"),
+                "Content-Security-Policy: default-src 'self'; script-src 'self'; "
+                "style-src 'self'; font-src 'self'; img-src 'self' data:; "
+                "media-src 'self'; connect-src 'self'; object-src 'none'; "
+                "base-uri 'self'; form-action 'none'; frame-ancestors 'none'\n"
+                "X-Content-Type-Options: nosniff\n"
+                "Referrer-Policy: strict-origin-when-cross-origin\n"
+                "Permissions-Policy: geolocation=(), microphone=(), camera=()\n");
+    std::string sitemap =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n";
+    for (const auto& [manifest_route, digest] : writer.manifest) {
+        if (!manifest_route.ends_with("index.html")) {
+            continue;
+        }
+        std::string rel = manifest_route.substr(1);
+        sitemap += "  <url><loc>" + canonical(rel) + "</loc></url>\n";
+    }
+    sitemap += "</urlset>\n";
+    // The sitemap enumerates the pages produced above; it lists itself as a file
+    // but not as a <url>, matching the canonical page set.
+    writer.emit(route("sitemap.xml"), sitemap);
+
+    // Serialize the manifest last, then require exact set equality (§16).
+    {
+        std::string manifest_json;
+        manifest_json += "{\n  \"schema\": \"bioseq.website.site_manifest/v1\",\n";
+        manifest_json += "  \"hash_algorithm\": \"sha256\",\n";
+        manifest_json += "  \"version\": \"" + version + "\",\n";
+        manifest_json += "  \"source_revision\": \"" + revision + "\",\n";
+        manifest_json += "  \"base_path\": \"" + base_path + "\",\n";
+        manifest_json += "  \"generator_signature\": \"" + plan.signature + "\",\n";
+        manifest_json += "  \"parser_version\": \"" + plan.parser_version + "\",\n";
+        manifest_json += "  \"binding_schema\": \"" + plan.binding_schema_version + "\",\n";
+        manifest_json += "  \"asset_bundle_sha256\": \"" + bundle_sha256 + "\",\n";
+        // The live PostgreSQL server/extension identity is captured by the catalog
+        // stage; publish does not open a cluster, so it records null placeholders
+        // that the assembled/full-pipeline manifest fills from that artifact.
+        manifest_json += "  \"postgres_server_version\": null,\n";
+        manifest_json += "  \"extension_version\": null,\n";
+        manifest_json += "  \"staged_extension_sha256\": null,\n";
+        manifest_json += "  \"inputs\": [\n";
+        for (std::size_t index = 0; index < plan.inputs.size(); ++index) {
+            manifest_json += "    {\"path\": \"" + plan.inputs[index].path
+                + "\", \"content_hash\": \"" + plan.inputs[index].content_hash + "\"}";
+            manifest_json += (index + 1 == plan.inputs.size()) ? "\n" : ",\n";
+        }
+        manifest_json += "  ],\n";
+        manifest_json += "  \"outputs\": {\n";
+        std::size_t written = 0;
+        for (const auto& [manifest_route, digest] : writer.manifest) {
+            manifest_json += "    \"" + manifest_route + "\": \"" + digest + "\"";
+            manifest_json += (++written == writer.manifest.size()) ? "\n" : ",\n";
+        }
+        manifest_json += "  }\n}\n";
+        const fs::path manifest_path = staging / "site-manifest.json";
+        std::ofstream manifest_out(manifest_path, std::ios::binary | std::ios::trunc);
+        manifest_out.write(manifest_json.data(),
+                           static_cast<std::streamsize>(manifest_json.size()));
+        if (!manifest_out) {
+            throw std::runtime_error("cannot write site-manifest.json");
+        }
+    }
+
+    std::set<std::string> present;
+    collect_site_files(staging, present);
+    present.erase("/site-manifest.json");
+    std::set<std::string> declared;
+    for (const auto& [manifest_route, digest] : writer.manifest) {
+        declared.insert(manifest_route);
+    }
+    if (present != declared) {
+        throw std::runtime_error(
+            "site manifest set mismatch: manifest declares " + std::to_string(declared.size())
+            + " outputs but the staged tree has " + std::to_string(present.size()));
+    }
+
+    atomic_publish(staging, output);
+    const std::string manifest_hash =
+        bioseq::codegen::sha256_hex(read_file(output / "site-manifest.json"));
+    write_if_different(output.string() + ".success", manifest_hash + "\n");
+    std::println("published {} outputs to {} (bundle {})",
+                 writer.manifest.size(), output.string(), bundle_sha256);
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website publish: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website publish: {}", error.what());
+    return 3;
+}
+
 /// @brief Dispatches a website subcommand and returns its process exit code.
 /// @param args Arguments after the leading `website` token (subcommand first).
 /// @return Exit code per §7: 2 usage, 3 parse/validation, 0 success.
@@ -792,8 +1293,11 @@ namespace {
     if (command == "catalog") {
         return run_catalog(rest);
     }
+    if (command == "publish") {
+        return run_publish(rest);
+    }
     static constexpr std::string_view known[] = {
-        "source_graph", "publish", "assemble"};
+        "source_graph", "assemble"};
     for (const std::string_view candidate : known) {
         if (command == candidate) {
             std::println(stderr,
