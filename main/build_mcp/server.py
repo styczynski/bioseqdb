@@ -616,7 +616,14 @@ MODES: Dict[str, ModeDefinition] = {
         commands=[],
         preset_family="website",
         binary_subdir="website",
-        required_cache_variables={"BIOSEQ_BUILD_WEBSITE": "ON"},
+        # §726/§17.5: the website MCP mode forces the pinned-browser acceptance layer
+        # ON. It runs only when the full bioseq_website target is built (the browser
+        # step degrades to a clean SKIP when Chromium is unprovisioned), so enabling it
+        # here never affects the generator-only build_only iteration path.
+        required_cache_variables={
+            "BIOSEQ_BUILD_WEBSITE": "ON",
+            "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
+        },
     ),
     "unit+integration": ModeDefinition(
         lock_group="tests",

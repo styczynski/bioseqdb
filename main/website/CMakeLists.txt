@@ -394,14 +394,17 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
     COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
             --site "${_fixture_root_bioseqdb}"
             --stamp "${_output_root}/fixture-bioseqdb-validation.stamp"
-    COMMAND "${CMAKE_COMMAND}" -E env
-            "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
-            "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/browser_test.py"
-            --site "${_staging_dir}" --base-path "${_base_path}"
-            --version "${_version}" --stamp "${_browser_stamp}"
+    COMMAND "${CMAKE_COMMAND}"
+            -DPYTHON=${_venv_python}
+            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
+            -DSITE=${_staging_dir} -DBASE_PATH=${_base_path} -DVERSION=${_version}
+            -DSTAMP=${_browser_stamp}
+            -DBROWSERS_PATH=${_output_root}/playwright-browsers
+            -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
     DEPENDS "${_html_validation_stamp}" "${_site_model}" "${_venv_stamp}"
             "${CMAKE_SOURCE_DIR}/website/tests/browser_test.py"
             "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+            "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
     COMMENT "website: two-base-path render + pinned browser acceptance"
     USES_TERMINAL VERBATIM)
   set(_browser_dep "${_browser_stamp}")
