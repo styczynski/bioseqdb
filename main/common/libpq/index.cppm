@@ -160,6 +160,20 @@ public:
         return std::exchange(notices_, {});
     }
 
+    /// @brief Quotes an SQL identifier via libpq — never string interpolation.
+    /// @param name Raw identifier (role/database name) to quote for a DDL command.
+    /// @return The escaped, double-quoted identifier safe to concatenate.
+    [[nodiscard]] std::string escape_identifier(std::string_view name) const {
+        char* escaped = PQescapeIdentifier(handle_, name.data(), name.size());
+        if (escaped == nullptr) {
+            throw query_error("PQescapeIdentifier failed: " + current_error_message(),
+                              std::string{});
+        }
+        std::string result(escaped);
+        PQfreemem(escaped);
+        return result;
+    }
+
     [[nodiscard]] std::string server_version() const {
         const int version = PQserverVersion(handle_);
         if (version == 0) {

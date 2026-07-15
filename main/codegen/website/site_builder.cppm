@@ -677,12 +677,14 @@ namespace {
 /// @return Zero on success; two on usage errors; three on execution failure.
 [[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
-        "conninfo", "setup", "visible", "teardown", "expect-sqlstate"};
-    const auto options = parse_options(args, value_keys, {});
-    const std::string conninfo = require_option(options, "conninfo");
+        "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
+        "admin-conninfo", "socket-dir", "port", "template-db"};
+    static constexpr std::string_view flag_keys[] = {"isolated"};
+    const auto options = parse_options(args, value_keys, flag_keys);
 
     sql_example example;
     example.canonical_id = "adhoc";
+    example.local_id = "adhoc";
     if (const auto found = options.find("setup"); found != options.end()) {
         example.setup_sql = found->second;
     }
@@ -695,9 +697,23 @@ namespace {
         example.expected_sqlstate = found->second;
     }
 
-    private_cluster_executor executor(conninfo);
-    const std::expected<sql_example_result, diagnostic> outcome =
-        executor.execute(example);
+    // In --isolated mode the example runs as a fresh restricted role inside a
+    // per-example database cloned from the extension-bearing template (§13.3);
+    // otherwise it runs directly against the supplied conninfo.
+    std::expected<sql_example_result, diagnostic> outcome =
+        std::unexpected(diagnostic{});
+    if (options.contains("isolated")) {
+        isolation_settings settings;
+        settings.admin_conninfo = require_option(options, "admin-conninfo");
+        settings.socket_directory = require_option(options, "socket-dir");
+        settings.port = std::stoi(require_option(options, "port"));
+        settings.template_database = require_option(options, "template-db");
+        private_cluster_executor executor("");
+        outcome = executor.execute_isolated(example, settings);
+    } else {
+        private_cluster_executor executor(require_option(options, "conninfo"));
+        outcome = executor.execute(example);
+    }
     if (!outcome) {
         std::println(stderr, "website execute: [{}] {}",
                      outcome.error().code, outcome.error().message);
