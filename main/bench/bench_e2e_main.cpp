@@ -6789,6 +6789,18 @@ void load_e2e_query_table(const it::connection_test_context& c,
         abort_raw_evidence_serialization(
             "PostgreSQL sample is missing versioned GPU operation evidence");
     }
+    const bool format5_memory_v2_valid = json_has_exact_keys(
+            out.format5_reader_memory_evidence,
+            kFormat5ReaderMemoryEvidenceKeys)
+        && out.format5_reader_memory_evidence["schema"].is_string()
+        && out.format5_reader_memory_evidence["schema"]
+            == "bioseq.format5_reader_memory_evidence"
+        && out.format5_reader_memory_evidence["version"].is_number_integer()
+        && out.format5_reader_memory_evidence["version"] == 2;
+    if (postgres_sample && !format5_memory_v2_valid) {
+        abort_raw_evidence_serialization(
+            "PostgreSQL sample is missing exact Format-5 memory evidence v2");
+    }
     if (persisted_gpu_sample
         && out.persisted_gpu_operation_evidence_accepted != 1) {
         abort_raw_evidence_serialization(
@@ -6807,7 +6819,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
     nlohmann::json payload = nlohmann::json::object();
     payload["payload_schema"] = "bioseq.e2e.raw-sample";
-    payload["payload_schema_version"] = 3;
+    payload["payload_schema_version"] = 4;
     payload["index_and_map_ns"] = out.measured_region_ns;
     payload["cache_policy"] = "process-cold-os-cache-unspecified";
     payload["benchmark_shape"] = nlohmann::json{
