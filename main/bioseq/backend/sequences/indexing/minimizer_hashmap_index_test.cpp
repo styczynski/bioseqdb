@@ -8853,8 +8853,9 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         >= sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
     REQUIRE(sparse_evidence.released_query_hash_capacity_bytes == 0u);
     REQUIRE(sparse_evidence.decoded_control_records > 1u);
+    REQUIRE(sparse_evidence.query_route_control_lookups > 0u);
     REQUIRE(sparse_evidence.query_route_control_lookups
-        == sparse_evidence.decoded_control_records);
+        <= sparse_evidence.decoded_control_records);
     REQUIRE(sparse_evidence.query_route_matches == 1u);
     REQUIRE(sparse_evidence.query_route_hash_probes
         <= sparse_evidence.query_route_control_lookups * 2u);

@@ -5425,14 +5425,11 @@ protected:
 
     [[nodiscard]] std::size_t query_index_for_hash_impl_(
             std::uint64_t hash,
-            bool record_control_probe) const noexcept {
+            std::uint32_t* hash_probes) const noexcept {
+        if (hash_probes != nullptr) *hash_probes = 0u;
         if (hash > (std::numeric_limits<hash_type>::max)()) return no_route;
         const hash_type narrowed = static_cast<hash_type>(hash);
         if constexpr (Traits::global_controls_then_positions) {
-            if (record_control_probe) {
-                increment_memory_evidence_(protocol_memory_evidence_.
-                    query_route_control_lookups);
-            }
             if (!protocol_query_radix_offsets_
                 || protocol_query_radix_offset_count_ < 2u
                 || protocol_query_hashes_.size()
@@ -5454,10 +5451,7 @@ protected:
             std::size_t last = end;
             while (first < last) {
                 const std::size_t middle = first + (last - first) / 2u;
-                if (record_control_probe) {
-                    increment_memory_evidence_(protocol_memory_evidence_.
-                        query_route_hash_probes);
-                }
+                if (hash_probes != nullptr) ++*hash_probes;
                 if (protocol_query_hashes_[middle] < narrowed) {
                     first = middle + 1u;
                 } else {
@@ -5465,15 +5459,8 @@ protected:
                 }
             }
             if (first < end) {
-                if (record_control_probe) {
-                    increment_memory_evidence_(protocol_memory_evidence_.
-                        query_route_hash_probes);
-                }
+                if (hash_probes != nullptr) ++*hash_probes;
                 if (protocol_query_hashes_[first] == narrowed) {
-                    if (record_control_probe) {
-                        increment_memory_evidence_(protocol_memory_evidence_.
-                            query_route_matches);
-                    }
                     return first;
                 }
             }
@@ -5491,12 +5478,13 @@ protected:
 
     [[nodiscard]] std::size_t query_index_for_hash(
             std::uint64_t hash) const noexcept {
-        return query_index_for_hash_impl_(hash, false);
+        return query_index_for_hash_impl_(hash, nullptr);
     }
 
     [[nodiscard]] std::size_t query_index_for_control_hash(
-            std::uint64_t hash) const noexcept {
-        return query_index_for_hash_impl_(hash, true);
+            std::uint64_t hash,
+            std::uint32_t& hash_probes) const noexcept {
+        return query_index_for_hash_impl_(hash, &hash_probes);
     }
 
     [[nodiscard]] bool query_intersects_entry(
@@ -6035,10 +6023,23 @@ protected:
                 std::uint64_t expected_position_begin = 0u;
                 std::size_t control_ordinal = 0u;
                 std::size_t routed_control_count = 0u;
+                std::uint64_t route_hash_probes = 0u;
+                if constexpr (Traits::global_controls_then_positions) {
+                    constexpr std::uint64_t max_probes_per_lookup =
+                        std::numeric_limits<std::uint32_t>::digits + 1u;
+                    if (decoded->size()
+                            > (std::numeric_limits<std::uint64_t>::max)()
+                                / max_probes_per_lookup) {
+                        return std::unexpected(
+                            MinimizerGenerationWireError::arithmetic_overflow);
+                    }
+                }
                 for (const auto& control : *decoded) {
+                    std::uint32_t control_hash_probes = 0u;
                     const std::size_t query_index =
                         query_index_for_control_hash(
-                            WireOps::hash(control));
+                            WireOps::hash(control), control_hash_probes);
+                    route_hash_probes += control_hash_probes;
                     const std::uint64_t begin =
                         WireOps::position_begin(control);
                     const std::uint64_t end = WireOps::position_end(control);
@@ -6134,6 +6135,19 @@ protected:
                         selected.route_state.dense_routes.reset();
                         selected.route_state.uses_sparse = true;
                     }
+                    // Update proof once per decoded extent.  A counter write
+                    // on every binary-search comparison would itself become
+                    // material at hundreds of millions of controls.
+                    add_memory_evidence_(
+                        protocol_memory_evidence_.
+                            query_route_control_lookups,
+                        static_cast<std::uint64_t>(decoded->size()));
+                    add_memory_evidence_(
+                        protocol_memory_evidence_.query_route_hash_probes,
+                        route_hash_probes);
+                    add_memory_evidence_(
+                        protocol_memory_evidence_.query_route_matches,
+                        static_cast<std::uint64_t>(routed_control_count));
                 }
                 add_memory_evidence_(
                     protocol_memory_evidence_.
