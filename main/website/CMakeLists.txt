@@ -132,6 +132,35 @@ set(_compile_db "${CMAKE_BINARY_DIR}/compile_commands.json")
 
 # --- Private-runner tests (§17.3) ---------------------------------------------
 find_package(Python3 3.12 COMPONENTS Interpreter REQUIRED)
+
+# --- Pinned Python validation environment (§4.4) ------------------------------
+# The independent html5lib validator and the Playwright browser tests run in a
+# hash-locked virtualenv provisioned from tests/requirements.lock, so html5lib and
+# (when browser tests are on) Playwright's pinned Chromium are deterministic and
+# offline-verifiable. html5lib is a hard prerequisite of publication, so a failed
+# provisioning fails the build rather than skipping the check.
+set(_venv_dir "${_output_root}/venv")
+set(_venv_python "${_venv_dir}/bin/python")
+set(_venv_stamp "${_output_root}/venv.stamp")
+set(_requirements_lock "${CMAKE_SOURCE_DIR}/website/tests/requirements.lock")
+set(_browser_provision "")
+if(BIOSEQ_WEBSITE_BROWSER_TESTS)
+  set(_browser_provision
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
+            "${_venv_python}" -m playwright install chromium)
+endif()
+add_custom_command(
+  OUTPUT "${_venv_stamp}"
+  COMMAND "${Python3_EXECUTABLE}" -m venv "${_venv_dir}"
+  COMMAND "${_venv_python}" -m pip install --quiet --disable-pip-version-check
+          --require-hashes -r "${_requirements_lock}"
+  ${_browser_provision}
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_venv_stamp}"
+  DEPENDS "${_requirements_lock}"
+  COMMENT "website: provision pinned Python validation venv (§4.4)"
+  VERBATIM)
+
 set(_pg_bindir "${PostgreSQL_BIN_DIR}")
 if(NOT _pg_bindir)
   get_filename_component(_pg_bindir "${PostgreSQL_CONFIG}" DIRECTORY)
@@ -239,23 +268,21 @@ add_custom_command(
   COMMENT "website: stage relocatable PostgreSQL + current extension artifacts"
   VERBATIM)
 
-# --- execute + publish on the staged cluster (§17.3 step 7) -------------------
+# --- catalog + execute on the staged cluster (§17.3 step 7) -------------------
 # One owner process starts the copied server under RLIMIT_AS containment, applies
-# CREATE EXTENSION bioseq, then launches a single generator child (§17.3): a
-# wrapper that builds the private Unix-socket conninfo from the runner-provided
-# PG* environment, captures the live SQL catalog into sql-entities.json, and then
-# runs publish with that same conninfo so the runnable landing slots (§15.2) and
-# reference pages both resolve against the live extension before the durable swap.
+# CREATE EXTENSION bioseq, then launches a single generator child: it captures the
+# live SQL catalog into sql-entities.json and then runs `execute`, which resolves
+# and runs every landing/tutorial runnable example against the live extension and
+# writes the database-independent resolved site model (schema site_model/v1, §180).
+# Nothing after this step needs a cluster.
 string(REGEX REPLACE "^/+" "" _pg_bindir_rel "${_pg_bindir}")
 set(_staged_bindir "${_stage_root}/${_pg_bindir_rel}")
 set(_sql_entities "${_output_root}/sql-entities.json")
-set(_publish_stamp "${_output_root}/site/site-manifest.json")
+set(_site_model "${_output_root}/site-model.json")
 
 # The private CREATE EXTENSION bootstrap the runner applies (§13.2).
 file(WRITE "${_output_root}/create-extension.sql" "CREATE EXTENSION bioseq;\n")
 
-# The single cluster child. Generated so the dynamic socket/port the runner
-# chooses never need to be known at configure; VERBATIM keeps the literal $PG*.
 set(_drafts_flag "")
 if(BIOSEQ_WEBSITE_INCLUDE_DRAFTS)
   set(_drafts_flag "--include-drafts")
@@ -267,17 +294,16 @@ file(WRITE "${_cluster_child}"
 "CONN=\"host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER\"\n"
 "\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
 "  --schemas 'public,bioseq' --output '${_sql_entities}'\n"
-"exec \"${_gen}\" website publish \\\n"
+"exec \"${_gen}\" website execute \\\n"
 "  --source '${_source_dir}' --version '${_version}' \\\n"
 "  --site-config '${_site_config}' \\\n"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
-"  --templates '${_templates_dir}' --static '${_static_dir}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
 "  --conninfo \"$CONN\" ${_drafts_flag} \\\n"
-"  --output '${_output_root}/site'\n")
+"  --output-model '${_site_model}'\n")
 
 add_custom_command(
-  OUTPUT "${_publish_stamp}" "${_sql_entities}"
+  OUTPUT "${_site_model}" "${_sql_entities}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
           --pg-bin-dir "${_staged_bindir}"
           --data-dir-parent "${_output_root}/cluster"
@@ -289,21 +315,95 @@ add_custom_command(
           -- bash "${_cluster_child}"
   DEPENDS ${_gen_dep} "${_stage_manifest}" "${_cluster_child}"
           "${_cpp_entities}" "${_plan_json}"
-          ${_template_files} ${_static_files}
+          ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests
-  COMMENT "website: execute runnable SQL + catalog + durable publish on the cluster"
+  COMMENT "website: catalog + execute runnable SQL into the resolved site model"
   USES_TERMINAL VERBATIM)
 
-# --- independent HTML validation (§17.3 step 9) -------------------------------
+# --- render the resolved model into staging without a database (step 8) -------
+set(_staging_dir "${_output_root}/staging")
+set(_staging_manifest "${_staging_dir}/site-manifest.json")
+set(_model_validation_stamp "${_output_root}/model-validation.stamp")
+add_custom_command(
+  OUTPUT "${_staging_manifest}" "${_model_validation_stamp}"
+  COMMAND "${_gen}" website render
+          --model "${_site_model}"
+          --site-config "${_site_config}"
+          --templates "${_templates_dir}"
+          --static "${_static_dir}"
+          --base-path "${_base_path}"
+          --source-revision "${_revision}"
+          --output "${_staging_dir}"
+          --model-validation-stamp "${_model_validation_stamp}"
+  DEPENDS ${_gen_dep} "${_site_model}" ${_template_files} ${_static_files}
+  COMMENT "website: render resolved model into owner-marked staging (no database)"
+  VERBATIM)
+
+# --- independent html5lib validation of staging BEFORE the swap (step 9) ------
+# The pinned Python validators (§4.4) inspect staging, not the published tree, so a
+# rejected page blocks publication rather than being served first (fail-closed §14).
 set(_html_validation_stamp "${_output_root}/html-validation.stamp")
 add_custom_command(
   OUTPUT "${_html_validation_stamp}"
-  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/website/validate_site.py"
-          --staging "${_output_root}/site"
-          --manifest "${_publish_stamp}"
+  COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+          --site "${_staging_dir}"
           --stamp "${_html_validation_stamp}"
-  DEPENDS "${_publish_stamp}" "${CMAKE_SOURCE_DIR}/website/validate_site.py"
-  COMMENT "website: independent HTML validation bound to the manifest"
+  DEPENDS "${_staging_manifest}" "${_venv_stamp}"
+          "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+  COMMENT "website: independent html5lib validation of staging"
+  VERBATIM)
+
+# --- optional pinned-browser acceptance at two base paths (step 10) -----------
+# When enabled, the SAME executed model is re-rendered at base paths / and
+# /bioseqdb/ into private fixture roots, each independently validated, and Playwright
+# runs against staging plus both fixtures. The browser stamp then gates publish.
+# Browser tests degrade cleanly (SKIP) when Chromium is unprovisioned.
+set(_browser_dep "")
+if(BIOSEQ_WEBSITE_BROWSER_TESTS)
+  set(_browser_stamp "${_output_root}/browser-validation.stamp")
+  set(_fixture_root_slash "${_output_root}/fixture-root")
+  set(_fixture_root_bioseqdb "${_output_root}/fixture-bioseqdb")
+  add_custom_command(
+    OUTPUT "${_browser_stamp}"
+    COMMAND "${_gen}" website render --model "${_site_model}"
+            --site-config "${_site_config}" --templates "${_templates_dir}"
+            --static "${_static_dir}" --base-path "/"
+            --source-revision "${_revision}" --output "${_fixture_root_slash}"
+    COMMAND "${_gen}" website render --model "${_site_model}"
+            --site-config "${_site_config}" --templates "${_templates_dir}"
+            --static "${_static_dir}" --base-path "/bioseqdb/"
+            --source-revision "${_revision}" --output "${_fixture_root_bioseqdb}"
+    COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+            --site "${_fixture_root_slash}"
+            --stamp "${_output_root}/fixture-root-validation.stamp"
+    COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+            --site "${_fixture_root_bioseqdb}"
+            --stamp "${_output_root}/fixture-bioseqdb-validation.stamp"
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "PLAYWRIGHT_BROWSERS_PATH=${_output_root}/playwright-browsers"
+            "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/browser_test.py"
+            --site "${_staging_dir}" --base-path "${_base_path}"
+            --version "${_version}" --stamp "${_browser_stamp}"
+    DEPENDS "${_html_validation_stamp}" "${_site_model}" "${_venv_stamp}"
+            "${CMAKE_SOURCE_DIR}/website/tests/browser_test.py"
+            "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+    COMMENT "website: two-base-path render + pinned browser acceptance"
+    USES_TERMINAL VERBATIM)
+  set(_browser_dep "${_browser_stamp}")
+endif()
+
+# --- publish: verify validator stamps + atomic swap (step 11) -----------------
+set(_publish_stamp "${_output_root}/site/site-manifest.json")
+add_custom_command(
+  OUTPUT "${_publish_stamp}"
+  COMMAND "${_gen}" website publish
+          --staging "${_staging_dir}"
+          --output "${_output_root}/site"
+          --model-validation-stamp "${_model_validation_stamp}"
+          --html-validation-stamp "${_html_validation_stamp}"
+  DEPENDS ${_gen_dep} "${_staging_manifest}" "${_model_validation_stamp}"
+          "${_html_validation_stamp}" ${_browser_dep}
+  COMMENT "website: verify validator stamps and atomically publish staging"
   VERBATIM)
 
 # --- bioseq_website final target (§17.3 step 11) ------------------------------

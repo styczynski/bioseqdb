@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting started &#183; Bioseq tutorials</title>
+<meta name="description" content="Store and query DNA sequences with Bioseq.">
+<link rel="canonical" href="https://styczynski.github.io/v0.1/tutorials/intro/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<link rel="icon" href="/bioseqdb/assets/deadbeef/favicon.svg">
+<link rel="stylesheet" href="/bioseqdb/assets/deadbeef/css/site.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Getting started"}</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header">
+  <nav class="site-nav" aria-label="Primary">
+    <a class="brand" href="/bioseqdb/">Bioseq</a>
+  </nav>
+</header>
+<main id="main">
+<article class="tutorial">
+  <h1>Getting started</h1>
+  <p>This tutorial creates a table with a <code>bioseq.seq</code> column and runs a query.</p>
+  <section aria-labelledby="setup-heading">
+    <h2 id="setup-heading">Create a table</h2>
+    <pre><code>CREATE TABLE reads (id integer PRIMARY KEY, sequence bioseq.seq('dna4', 16));</code></pre>
+  </section>
+  <nav class="pager" aria-label="Tutorial">
+    <a href="/bioseqdb/v0.1/tutorials/">All tutorials</a>
+  </nav>
+</article>
+</main>
+<footer class="site-footer">
+  <p>&#169; 2026 Bioseq contributors &#183; v0.1</p>
+</footer>
+<script type="module" src="/bioseqdb/assets/deadbeef/js/main.js"></script>
+</body>
+</html>

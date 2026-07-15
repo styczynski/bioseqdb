@@ -2,10 +2,12 @@ module;
 
 #include <boost/json.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -435,18 +437,6 @@ namespace {
         boost::json::serialize(boost::json::value(std::move(items))));
 }
 
-/// @brief One executed landing-page runnable slot (§15.2) for the render context.
-///
-/// `visible_sql` is the visible phase only (hidden setup/teardown never reaches
-/// the page, §5.1). `result` is meaningful only when has_result is set and the
-/// visible phase returned rows; otherwise the slot renders just its SQL.
-struct landing_example_view {
-    std::string slot;
-    std::string visible_sql;
-    bool has_result{};
-    sql_result_set result;
-};
-
 /// @brief Serializes executed landing slots to the `examples.<slot>` context.
 ///
 /// Shape consumed by the landing partials: each slot has `visible_sql` and a
@@ -515,6 +505,239 @@ namespace {
     return std::nullopt;
 }
 
+// Inverse of node_kind_name; unknown spellings are rejected so a stale/tampered
+// artifact cannot silently degrade to an unexpected node kind (§5.1).
+[[nodiscard]] document_node_kind node_kind_from_name(std::string_view name) {
+    using kind = document_node_kind;
+    if (name == "document") return kind::document;
+    if (name == "paragraph") return kind::paragraph;
+    if (name == "text") return kind::text;
+    if (name == "heading") return kind::heading;
+    if (name == "emphasis") return kind::emphasis;
+    if (name == "strong") return kind::strong_text;
+    if (name == "strikethrough") return kind::strikethrough;
+    if (name == "highlight") return kind::highlight;
+    if (name == "link") return kind::link;
+    if (name == "image") return kind::image;
+    if (name == "entity_link") return kind::entity_link;
+    if (name == "code_span") return kind::code_span;
+    if (name == "code_block") return kind::code_block;
+    if (name == "admonition") return kind::admonition;
+    if (name == "block_quote") return kind::block_quote;
+    if (name == "ordered_list") return kind::ordered_list;
+    if (name == "unordered_list") return kind::unordered_list;
+    if (name == "list_item") return kind::list_item;
+    if (name == "table") return kind::table;
+    if (name == "table_row") return kind::table_row;
+    if (name == "table_cell") return kind::table_cell;
+    if (name == "footnote") return kind::footnote;
+    if (name == "line_break") return kind::line_break;
+    if (name == "code_annotation") return kind::code_annotation;
+    throw std::runtime_error("site_model: unknown document node kind '"
+                             + std::string(name) + "'");
+}
+
+[[nodiscard]] entity_query_domain domain_from_name(std::string_view name) {
+    if (name == "cpp") return entity_query_domain::cpp;
+    if (name == "sql") return entity_query_domain::sql;
+    if (name == "canonical_id") return entity_query_domain::canonical_id;
+    return entity_query_domain::any;
+}
+
+// Inverse of serialize_node; optional keys default to empty just as the serializer
+// omits them when empty, so the round-trip is exact.
+[[nodiscard]] document_node deserialize_node(const boost::json::value& value) {
+    const boost::json::object& object = value.as_object();
+    document_node node;
+    node.kind = node_kind_from_name(std::string(object.at("kind").as_string()));
+    if (const boost::json::value* text = object.if_contains("text")) {
+        node.text = std::string(text->as_string());
+    }
+    if (const boost::json::value* target = object.if_contains("target")) {
+        node.target = std::string(target->as_string());
+    }
+    if (const boost::json::value* attributes = object.if_contains("attributes")) {
+        for (const auto& field : attributes->as_object()) {
+            node.attributes.emplace(std::string(field.key()),
+                                    std::string(field.value().as_string()));
+        }
+    }
+    if (const boost::json::value* children = object.if_contains("children")) {
+        for (const boost::json::value& child : children->as_array()) {
+            node.children.push_back(deserialize_node(child));
+        }
+    }
+    return node;
+}
+
+// Inverse of serialize_example. setup/teardown are read when present so the plan
+// round-trips; the site_model projection stores examples with those fields cleared.
+[[nodiscard]] sql_example deserialize_example(const boost::json::value& value) {
+    const boost::json::object& object = value.as_object();
+    sql_example example;
+    example.local_id = std::string(object.at("local_id").as_string());
+    example.canonical_id = std::string(object.at("canonical_id").as_string());
+    example.expectation = std::string(object.at("expectation").as_string()) == "error"
+        ? sql_expectation::error : sql_expectation::success;
+    example.timeout = std::chrono::milliseconds(
+        object.at("timeout_ms").to_number<std::int64_t>());
+    example.expected_sqlstate = object.if_contains("expected_sqlstate")
+        ? as_optional_string(object.at("expected_sqlstate")) : std::nullopt;
+    if (const boost::json::value* setup = object.if_contains("setup_sql")) {
+        example.setup_sql = std::string(setup->as_string());
+    }
+    if (const boost::json::value* visible = object.if_contains("visible_sql")) {
+        example.visible_sql = std::string(visible->as_string());
+    }
+    if (const boost::json::value* teardown = object.if_contains("teardown_sql")) {
+        example.teardown_sql = std::string(teardown->as_string());
+    }
+    return example;
+}
+
+[[nodiscard]] unresolved_entity_query deserialize_query(const boost::json::value& value) {
+    const boost::json::object& object = value.as_object();
+    unresolved_entity_query query;
+    query.domain = domain_from_name(std::string(object.at("domain").as_string()));
+    query.spelling = std::string(object.at("spelling").as_string());
+    query.label = object.if_contains("label")
+        ? as_optional_string(object.at("label")) : std::nullopt;
+    return query;
+}
+
+// Inverse of serialize_tutorial. Rebuilds the resolved content forest, examples,
+// entity queries, and previous/next links the render stage binds without a DB.
+[[nodiscard]] tutorial deserialize_tutorial(const boost::json::value& value) {
+    const boost::json::object& object = value.as_object();
+    tutorial item;
+    item.metadata.slug = std::string(object.at("slug").as_string());
+    item.metadata.order =
+        static_cast<std::uint32_t>(object.at("order").to_number<std::int64_t>());
+    item.metadata.title = std::string(object.at("title").as_string());
+    item.metadata.description = std::string(object.at("description").as_string());
+    for (const boost::json::value& keyword : object.at("keywords").as_array()) {
+        item.metadata.keywords.push_back(std::string(keyword.as_string()));
+    }
+    item.metadata.draft = object.at("draft").as_bool();
+    item.source_path = std::string(object.at("source_path").as_string());
+    item.previous_slug = as_optional_string(object.at("previous_slug"));
+    item.next_slug = as_optional_string(object.at("next_slug"));
+    for (const boost::json::value& example : object.at("sql_examples").as_array()) {
+        item.sql_examples.push_back(deserialize_example(example));
+    }
+    for (const boost::json::value& query : object.at("entity_queries").as_array()) {
+        item.entity_queries.push_back(deserialize_query(query));
+    }
+    for (const boost::json::value& node : object.at("content").as_array()) {
+        item.content.push_back(deserialize_node(node));
+    }
+    return item;
+}
+
+// Inverse of serialize_entity (the full documented_entity projection, §11.3).
+[[nodiscard]] documented_entity deserialize_one_entity(const boost::json::object& object) {
+    documented_entity entity;
+    entity.canonical_id = std::string(object.at("canonical_id").as_string());
+    entity.domain = std::string(object.at("domain").as_string()) == "sql"
+        ? entity_domain::sql : entity_domain::cpp;
+    entity.kind = entity_kind_from_name(std::string(object.at("kind").as_string()));
+    entity.qualified_name = std::string(object.at("qualified_name").as_string());
+    entity.display_name = std::string(object.at("display_name").as_string());
+    entity.normalized_signature =
+        std::string(object.at("normalized_signature").as_string());
+    entity.summary_text = std::string(object.at("summary").as_string());
+    entity.route_path = std::string(object.at("route_path").as_string());
+    entity.module_name = as_optional_string(object.at("module"));
+    entity.return_type = as_optional_string(object.at("return_type"));
+    if (const boost::json::value& declaration = object.at("declaration");
+        declaration.is_object()) {
+        source_span span;
+        span.path = std::string(declaration.at("path").as_string());
+        span.first_line =
+            static_cast<std::size_t>(declaration.at("line").to_number<std::int64_t>());
+        entity.declaration = span;
+    }
+    for (const boost::json::value& parameter : object.at("parameters").as_array()) {
+        const boost::json::object& fields = parameter.as_object();
+        parameter_documentation documented;
+        documented.name = std::string(fields.at("name").as_string());
+        documented.type = std::string(fields.at("type").as_string());
+        documented.default_value = as_optional_string(fields.at("default"));
+        entity.parameters.push_back(std::move(documented));
+    }
+    if (const boost::json::value& attributes = object.at("attributes");
+        attributes.is_object()) {
+        for (const auto& field : attributes.as_object()) {
+            entity.attributes.emplace(std::string(field.key()),
+                                      std::string(field.value().as_string()));
+        }
+    }
+    return entity;
+}
+
+// Semantic (non-HTML-escaped) projection of an executed landing slot for the
+// private site_model. The render stage re-escapes via serialize_landing_examples,
+// so these stored values are the raw result text (§180 semantic projection).
+[[nodiscard]] boost::json::value serialize_landing_view(const landing_example_view& slot) {
+    boost::json::object object;
+    object["slot"] = slot.slot;
+    object["visible_sql"] = slot.visible_sql;
+    object["has_result"] = slot.has_result;
+    if (slot.has_result && slot.result.kind == sql_result_kind::rows) {
+        boost::json::object result;
+        boost::json::array columns;
+        for (const sql_column& column : slot.result.columns) {
+            boost::json::object header;
+            header["name"] = column.name;
+            columns.push_back(std::move(header));
+        }
+        result["columns"] = std::move(columns);
+        boost::json::array rows;
+        for (const std::vector<sql_cell>& source_row : slot.result.rows) {
+            boost::json::array cells;
+            for (const sql_cell& cell : source_row) {
+                boost::json::object rendered;
+                rendered["is_null"] = cell.is_null;
+                rendered["text"] = cell.text;
+                cells.push_back(std::move(rendered));
+            }
+            rows.push_back(std::move(cells));
+        }
+        result["rows"] = std::move(rows);
+        object["result"] = std::move(result);
+    } else {
+        object["result"] = boost::json::value(nullptr);
+    }
+    return object;
+}
+
+[[nodiscard]] landing_example_view deserialize_landing_view(const boost::json::value& value) {
+    const boost::json::object& object = value.as_object();
+    landing_example_view slot;
+    slot.slot = std::string(object.at("slot").as_string());
+    slot.visible_sql = std::string(object.at("visible_sql").as_string());
+    slot.has_result = object.at("has_result").as_bool();
+    if (const boost::json::value& result = object.at("result"); result.is_object()) {
+        slot.result.kind = sql_result_kind::rows;
+        for (const boost::json::value& column : result.at("columns").as_array()) {
+            sql_column header;
+            header.name = std::string(column.as_object().at("name").as_string());
+            slot.result.columns.push_back(std::move(header));
+        }
+        for (const boost::json::value& source_row : result.at("rows").as_array()) {
+            std::vector<sql_cell> cells;
+            for (const boost::json::value& cell : source_row.as_array()) {
+                sql_cell rendered;
+                rendered.is_null = cell.as_object().at("is_null").as_bool();
+                rendered.text = std::string(cell.as_object().at("text").as_string());
+                cells.push_back(std::move(rendered));
+            }
+            slot.result.rows.push_back(std::move(cells));
+        }
+    }
+    return slot;
+}
+
 }  // namespace
 
 /// @brief Parses a cpp_entities/sql_entities artifact back into the model (§11.3).
@@ -530,47 +753,155 @@ namespace {
     const boost::json::array& items = root.at("entities").as_array();
     entities.reserve(items.size());
     for (const boost::json::value& item : items) {
-        const boost::json::object& object = item.as_object();
-        documented_entity entity;
-        entity.canonical_id = std::string(object.at("canonical_id").as_string());
-        entity.domain = std::string(object.at("domain").as_string()) == "sql"
-            ? entity_domain::sql : entity_domain::cpp;
-        entity.kind =
-            entity_kind_from_name(std::string(object.at("kind").as_string()));
-        entity.qualified_name = std::string(object.at("qualified_name").as_string());
-        entity.display_name = std::string(object.at("display_name").as_string());
-        entity.normalized_signature =
-            std::string(object.at("normalized_signature").as_string());
-        entity.summary_text = std::string(object.at("summary").as_string());
-        entity.route_path = std::string(object.at("route_path").as_string());
-        entity.module_name = as_optional_string(object.at("module"));
-        entity.return_type = as_optional_string(object.at("return_type"));
-        if (const boost::json::value& declaration = object.at("declaration");
-            declaration.is_object()) {
-            source_span span;
-            span.path = std::string(declaration.at("path").as_string());
-            span.first_line =
-                static_cast<std::size_t>(declaration.at("line").to_number<std::int64_t>());
-            entity.declaration = span;
-        }
-        for (const boost::json::value& parameter : object.at("parameters").as_array()) {
-            const boost::json::object& fields = parameter.as_object();
-            parameter_documentation documented;
-            documented.name = std::string(fields.at("name").as_string());
-            documented.type = std::string(fields.at("type").as_string());
-            documented.default_value = as_optional_string(fields.at("default"));
-            entity.parameters.push_back(std::move(documented));
-        }
-        if (const boost::json::value& attributes = object.at("attributes");
-            attributes.is_object()) {
-            for (const auto& field : attributes.as_object()) {
-                entity.attributes.emplace(std::string(field.key()),
-                                          std::string(field.value().as_string()));
-            }
-        }
-        entities.push_back(std::move(entity));
+        entities.push_back(deserialize_one_entity(item.as_object()));
     }
     return entities;
+}
+
+/// @brief Serializes the resolved, database-independent site model (§180).
+///
+/// Schema bioseq.website.site_model/v1: the private artifact `website execute`
+/// writes (mode 0600) and `website render` consumes without a cluster. It carries
+/// only normalized semantic projections — resolved tutorial/landing trees, executed
+/// visible-result models, the entity graph with base-independent routes, coverage,
+/// and server/extension provenance — never setup/teardown SQL, credentials, OIDs,
+/// timings, or machine paths, so the same model renders at two base paths.
+/// @param model Fully resolved site model.
+/// @return Canonical JSON ending in one newline.
+[[nodiscard]] std::string serialize_site_model(const site_model& model) {
+    boost::json::object root;
+    root["schema"] = model.schema_version;
+    root["parser_version"] = model.parser_version;
+    root["binding_schema"] = model.binding_schema_version;
+    boost::json::object version;
+    version["label"] = model.version.path_component;
+    boost::json::array parts;
+    for (const std::uint32_t part : model.version.parts) {
+        parts.push_back(static_cast<std::int64_t>(part));
+    }
+    version["parts"] = std::move(parts);
+    root["version"] = std::move(version);
+    root["site_title"] = model.site_title;
+    root["source_revision"] = model.source_revision;
+    boost::json::array tutorials;
+    for (const tutorial& item : model.tutorials) {
+        tutorials.push_back(serialize_tutorial(item));
+    }
+    root["tutorials"] = std::move(tutorials);
+    boost::json::array landing;
+    for (const landing_example_view& slot : model.landing_examples) {
+        landing.push_back(serialize_landing_view(slot));
+    }
+    root["landing_examples"] = std::move(landing);
+    boost::json::array cpp_entities;
+    for (const documented_entity& entity : model.cpp_entities) {
+        cpp_entities.push_back(serialize_entity(entity));
+    }
+    root["cpp_entities"] = std::move(cpp_entities);
+    boost::json::array sql_entities;
+    for (const documented_entity& entity : model.sql_entities) {
+        sql_entities.push_back(serialize_entity(entity));
+    }
+    root["sql_entities"] = std::move(sql_entities);
+    boost::json::object coverage;
+    coverage["public_total"] = static_cast<std::int64_t>(model.coverage_public_total);
+    coverage["documented_total"] =
+        static_cast<std::int64_t>(model.coverage_documented_total);
+    boost::json::array missing;
+    for (const std::string& entry : model.coverage_missing) {
+        missing.push_back(boost::json::value(entry));
+    }
+    coverage["missing"] = std::move(missing);
+    boost::json::array fatal_missing;
+    for (const std::string& entry : model.coverage_fatal_missing) {
+        fatal_missing.push_back(boost::json::value(entry));
+    }
+    coverage["fatal_missing"] = std::move(fatal_missing);
+    root["coverage"] = std::move(coverage);
+    boost::json::object provenance;
+    provenance["postgres_server_version"] = model.postgres_server_version;
+    provenance["extension_version"] = model.extension_version;
+    provenance["staged_extension_sha256"] = model.staged_extension_sha256;
+    root["provenance"] = std::move(provenance);
+    boost::json::array inputs;
+    for (const plan_input& input : model.inputs) {
+        boost::json::object object;
+        object["path"] = input.path;
+        object["content_hash"] = input.content_hash;
+        inputs.push_back(std::move(object));
+    }
+    root["inputs"] = std::move(inputs);
+    boost::json::object signatures;
+    signatures["plan"] = model.plan_signature;
+    signatures["cpp"] = model.cpp_signature;
+    root["signatures"] = std::move(signatures);
+    return serialize_canonical(root);
+}
+
+/// @brief Parses a site_model/v1 artifact back into the model, rejecting a wrong
+/// schema so a stale/tampered artifact cannot silently render (§5.1, §184).
+/// @param text Canonical site_model JSON text.
+/// @return The resolved site model.
+[[nodiscard]] site_model deserialize_site_model(std::string_view text) {
+    const boost::json::value document = parse_json(text);
+    const boost::json::object& object = document.as_object();
+    site_model model;
+    model.schema_version = std::string(object.at("schema").as_string());
+    if (model.schema_version != "bioseq.website.site_model/v1") {
+        throw std::runtime_error("site_model: unexpected schema '"
+                                 + model.schema_version + "'");
+    }
+    model.parser_version = std::string(object.at("parser_version").as_string());
+    model.binding_schema_version = std::string(object.at("binding_schema").as_string());
+    const boost::json::object& version = object.at("version").as_object();
+    model.version.path_component = std::string(version.at("label").as_string());
+    for (const boost::json::value& part : version.at("parts").as_array()) {
+        model.version.parts.push_back(
+            static_cast<std::uint32_t>(part.to_number<std::int64_t>()));
+    }
+    model.site_title = std::string(object.at("site_title").as_string());
+    model.source_revision = std::string(object.at("source_revision").as_string());
+    for (const boost::json::value& item : object.at("tutorials").as_array()) {
+        model.tutorials.push_back(deserialize_tutorial(item));
+    }
+    for (const boost::json::value& slot : object.at("landing_examples").as_array()) {
+        model.landing_examples.push_back(deserialize_landing_view(slot));
+    }
+    for (const boost::json::value& entity : object.at("cpp_entities").as_array()) {
+        model.cpp_entities.push_back(deserialize_one_entity(entity.as_object()));
+    }
+    for (const boost::json::value& entity : object.at("sql_entities").as_array()) {
+        model.sql_entities.push_back(deserialize_one_entity(entity.as_object()));
+    }
+    const boost::json::object& coverage = object.at("coverage").as_object();
+    model.coverage_public_total = static_cast<std::uint32_t>(
+        coverage.at("public_total").to_number<std::int64_t>());
+    model.coverage_documented_total = static_cast<std::uint32_t>(
+        coverage.at("documented_total").to_number<std::int64_t>());
+    for (const boost::json::value& entry : coverage.at("missing").as_array()) {
+        model.coverage_missing.push_back(std::string(entry.as_string()));
+    }
+    for (const boost::json::value& entry : coverage.at("fatal_missing").as_array()) {
+        model.coverage_fatal_missing.push_back(std::string(entry.as_string()));
+    }
+    const boost::json::object& provenance = object.at("provenance").as_object();
+    model.postgres_server_version =
+        std::string(provenance.at("postgres_server_version").as_string());
+    model.extension_version =
+        std::string(provenance.at("extension_version").as_string());
+    model.staged_extension_sha256 =
+        std::string(provenance.at("staged_extension_sha256").as_string());
+    for (const boost::json::value& input : object.at("inputs").as_array()) {
+        plan_input parsed;
+        parsed.path = std::string(input.as_object().at("path").as_string());
+        parsed.content_hash =
+            std::string(input.as_object().at("content_hash").as_string());
+        model.inputs.push_back(std::move(parsed));
+    }
+    const boost::json::object& signatures = object.at("signatures").as_object();
+    model.plan_signature = std::string(signatures.at("plan").as_string());
+    model.cpp_signature = std::string(signatures.at("cpp").as_string());
+    return model;
 }
 
 /// @brief Serializes the Clang source-graph closure (§11.3, schema source_graph/v1).

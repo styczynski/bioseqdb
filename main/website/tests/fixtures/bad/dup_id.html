@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Duplicate id</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+</head>
+<body>
+<h1>Duplicate id</h1>
+<section id="dup"><p>First.</p></section>
+<section id="dup"><p>Second section reuses the same id, which HTML5 forbids but the parser tolerates.</p></section>
+</body>
+</html>

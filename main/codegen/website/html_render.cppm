@@ -200,13 +200,35 @@ struct html_writer {
         case document_node_kind::ordered_list: wrap("ol", node); break;
         case document_node_kind::unordered_list: wrap("ul", node); break;
         case document_node_kind::list_item: wrap("li", node); break;
-        case document_node_kind::table:
-            out += "<table>";
+        case document_node_kind::table: {
+            const std::string_view table_class = attribute_or(node, "class", "");
+            out += "<table";
+            if (!table_class.empty()) {
+                out += " class=\"";
+                append_escaped_attribute(out, table_class);
+                out.push_back('"');
+            }
+            out.push_back('>');
             render_children(node.children);
             out += "</table>";
             break;
+        }
         case document_node_kind::table_row: wrap("tr", node); break;
-        case document_node_kind::table_cell: wrap("td", node); break;
+        case document_node_kind::table_cell: {
+            // A cell with a scope attribute is a header cell (§15.4 accessible data
+            // tables); otherwise it is a plain data cell.
+            const std::string_view scope = attribute_or(node, "scope", "");
+            if (scope.empty()) {
+                wrap("td", node);
+            } else {
+                out += "<th scope=\"";
+                append_escaped_attribute(out, scope);
+                out += "\">";
+                render_children(node.children);
+                out += "</th>";
+            }
+            break;
+        }
         case document_node_kind::footnote: wrap("span", node); break;
         case document_node_kind::line_break: out += "<br>"; break;
         case document_node_kind::code_annotation:

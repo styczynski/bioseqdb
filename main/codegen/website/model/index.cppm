@@ -225,6 +225,46 @@ struct sql_catalog_snapshot {
     std::string staged_artifact_sha256;
 };
 
+// One executed landing-page runnable slot (§15.2). `visible_sql` is the visible
+// phase only; hidden setup/teardown never enters this projection (§5.1). `result`
+// is meaningful only when has_result is set and the visible phase returned rows.
+struct landing_example_view {
+    std::string slot;
+    std::string visible_sql;
+    bool has_result{};
+    sql_result_set result;
+};
+
+// The fully resolved, database-independent site model written by `website execute`
+// (schema bioseq.website.site_model/v1, §5.1/§180) and consumed by `website render`
+// without a cluster. It carries only normalized semantic projections: resolved
+// tutorial/landing trees, executed visible-result models, the entity graph with
+// base-independent routes, coverage, and server/extension provenance. It never
+// carries setup/teardown SQL, credentials, OIDs, timings, or machine paths, so the
+// same model can be rendered at two base paths without re-executing SQL.
+struct site_model {
+    std::string schema_version;   // bioseq.website.site_model/v1
+    std::string parser_version;
+    std::string binding_schema_version;
+    site_version version;
+    std::string site_title;
+    std::string source_revision;
+    std::vector<tutorial> tutorials;               // content stripped of hidden SQL
+    std::vector<landing_example_view> landing_examples;
+    std::vector<documented_entity> cpp_entities;   // base-independent route_path
+    std::vector<documented_entity> sql_entities;
+    std::uint32_t coverage_public_total{};
+    std::uint32_t coverage_documented_total{};
+    std::vector<std::string> coverage_missing;        // public, undocumented, non-fatal
+    std::vector<std::string> coverage_fatal_missing;  // required, undocumented
+    std::string postgres_server_version;
+    std::string extension_version;
+    std::string staged_extension_sha256;
+    std::vector<plan_input> inputs;   // path + content hash, for the site manifest
+    std::string plan_signature;       // semantic hash of the plan input
+    std::string cpp_signature;        // semantic hash of the C++ entity input
+};
+
 template <typename executor_t>
 concept tutorial_sql_executor =
     requires(executor_t& executor, sql_example const& example) {

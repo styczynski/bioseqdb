@@ -427,24 +427,106 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
     }
 }
 
-// Executes the landing page's runnable slots (§15.2) and serializes them to the
-// examples.<slot> render context. The slot name is the fence id with the
-// "landing_" prefix removed. When no connection is configured, each slot still
-// renders its visible SQL with no result table; when a connection is given, a
-// failing example fails the build. Hidden setup/teardown never leaves the model.
-[[nodiscard]] std::string build_landing_examples(
+// Parses the landing frontmatter `slots:` mapping (§15.2): each entry maps a
+// template slot name to the landing-page-local id of a runnable block. Returns the
+// mapping in declared order. The YAML here is a flat two-space-indented block of
+// `slot_name: block_id` lines directly under a `slots:` key.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> parse_landing_slots(
+    std::string_view yaml) {
+    std::vector<std::pair<std::string, std::string>> slots;
+    bool in_slots = false;
+    std::size_t begin = 0;
+    while (begin <= yaml.size()) {
+        const std::size_t end = yaml.find('\n', begin);
+        const std::size_t stop = end == std::string_view::npos ? yaml.size() : end;
+        std::string_view line = yaml.substr(begin, stop - begin);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        const bool indented = !line.empty() && (line.front() == ' ' || line.front() == '\t');
+        const std::string trimmed = trim(std::string(line));
+        if (!in_slots) {
+            if (trimmed == "slots:") {
+                in_slots = true;
+            }
+        } else if (trimmed.empty()) {
+            // blank line inside the block is ignored
+        } else if (!indented) {
+            break;  // a new top-level key ends the slots block
+        } else {
+            const std::size_t colon = trimmed.find(':');
+            if (colon == std::string::npos) {
+                throw std::runtime_error("landing slots: malformed mapping line '"
+                                         + trimmed + "'");
+            }
+            std::string slot = trim(trimmed.substr(0, colon));
+            std::string block = trim(trimmed.substr(colon + 1));
+            if (slot.empty() || block.empty()) {
+                throw std::runtime_error("landing slots: empty slot or block id in '"
+                                         + trimmed + "'");
+            }
+            slots.emplace_back(std::move(slot), std::move(block));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return slots;
+}
+
+// Executes the landing page's runnable slots (§15.2) into database-independent
+// views. The template slot name comes from the authoritative frontmatter `slots:`
+// mapping, and every §15.2 binding error is fatal: a slot referencing an unknown
+// block id, a block referenced by no slot, or a duplicate slot/block. When no
+// connection is configured, each slot renders its visible SQL with no result table;
+// when a connection is given, a failing example fails the build. Hidden
+// setup/teardown never leaves the returned model.
+[[nodiscard]] std::vector<landing_example_view> collect_landing_views(
     const fs::path& source, const std::string& version_string,
     const std::map<std::string, std::string, std::less<>>& options) {
     const fs::path landing_md = source / version_string / "landing_examples.md";
     std::error_code probe;
     if (!fs::exists(landing_md, probe) || probe) {
-        return "{}";
+        return {};
     }
     const front_matter_split split = split_front_matter(read_file(landing_md));
     const document_node document = parse_markdown(split.body);
     std::vector<sql_example> examples;
     std::vector<unresolved_entity_query> queries;
     collect_examples_and_queries(document, "landing", version_string, examples, queries);
+
+    // Map block id -> example, rejecting duplicate block ids (§15.2).
+    std::map<std::string, const sql_example*, std::less<>> by_block;
+    for (const sql_example& example : examples) {
+        if (!by_block.emplace(example.local_id, &example).second) {
+            throw std::runtime_error("landing slots: duplicate runnable block id '"
+                                     + example.local_id + "'");
+        }
+    }
+    const std::vector<std::pair<std::string, std::string>> slots =
+        parse_landing_slots(split.yaml);
+    std::map<std::string, int, std::less<>> slot_names;
+    std::set<std::string> referenced_blocks;
+    for (const auto& [slot, block] : slots) {
+        if (++slot_names[slot] > 1) {
+            throw std::runtime_error("landing slots: duplicate slot '" + slot + "'");
+        }
+        if (!by_block.contains(block)) {
+            throw std::runtime_error("landing slots: slot '" + slot
+                + "' references unknown block id '" + block + "'");
+        }
+        if (!referenced_blocks.insert(block).second) {
+            throw std::runtime_error("landing slots: block id '" + block
+                + "' is bound to more than one slot");
+        }
+    }
+    for (const sql_example& example : examples) {
+        if (!referenced_blocks.contains(example.local_id)) {
+            throw std::runtime_error("landing slots: runnable block '"
+                + example.local_id + "' is not bound to any slot");
+        }
+    }
 
     const bool have_connection =
         options.contains("conninfo") || options.contains("isolated");
@@ -462,11 +544,10 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
     }
 
     std::vector<landing_example_view> views;
-    for (const sql_example& example : examples) {
+    for (const auto& [slot, block] : slots) {
+        const sql_example& example = *by_block.at(block);
         landing_example_view view;
-        view.slot = example.local_id.starts_with("landing_")
-            ? example.local_id.substr(std::string_view("landing_").size())
-            : example.local_id;
+        view.slot = slot;
         view.visible_sql = example.visible_sql;
         if (have_connection) {
             std::expected<sql_example_result, diagnostic> outcome =
@@ -489,7 +570,7 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
         }
         views.push_back(std::move(view));
     }
-    return serialize_landing_examples(views);
+    return views;
 }
 
 /// @brief Builds the deterministic website plan from validated source (§10).
@@ -599,6 +680,285 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
     plan.inputs = std::move(inputs);
     plan.signature = hex64(signature);
     return plan;
+}
+
+// Small owned-node constructors for the executed-result document subtree (§13.6).
+[[nodiscard]] document_node make_text_node(std::string value) {
+    document_node node;
+    node.kind = document_node_kind::text;
+    node.text = std::move(value);
+    return node;
+}
+
+[[nodiscard]] document_node make_emphasis_node(std::string value) {
+    document_node node;
+    node.kind = document_node_kind::emphasis;
+    node.children.push_back(make_text_node(std::move(value)));
+    return node;
+}
+
+[[nodiscard]] document_node make_paragraph_node(std::vector<document_node> children) {
+    document_node node;
+    node.kind = document_node_kind::paragraph;
+    node.children = std::move(children);
+    return node;
+}
+
+[[nodiscard]] document_node make_cell_node(bool header, document_node child) {
+    document_node node;
+    node.kind = document_node_kind::table_cell;
+    if (header) {
+        node.attributes.emplace("scope", "col");
+    }
+    node.children.push_back(std::move(child));
+    return node;
+}
+
+[[nodiscard]] document_node make_row_node(std::vector<document_node> cells) {
+    document_node node;
+    node.kind = document_node_kind::table_row;
+    node.children = std::move(cells);
+    return node;
+}
+
+// Renders one executed example's visible result model (§13.4) to owned document
+// nodes so the render stage emits result tables/notices/error admonitions without a
+// database (§13.6). Multiple row result sets are labelled Result 1..N in order, a
+// §13.6 provenance caption names the extension/server versions when known, and hidden
+// SQL never enters this subtree — only the visible-phase result model does.
+[[nodiscard]] std::vector<document_node> make_result_nodes(
+    const sql_example_result& result, const std::string& extension_version,
+    const std::string& server_version) {
+    std::vector<document_node> nodes;
+    std::size_t rows_total = 0;
+    for (const sql_result_set& set : result.visible_results) {
+        if (set.kind == sql_result_kind::rows) {
+            ++rows_total;
+        }
+    }
+    std::size_t rows_index = 0;
+    for (const sql_result_set& set : result.visible_results) {
+        if (set.kind == sql_result_kind::rows) {
+            ++rows_index;
+            if (rows_total > 1) {
+                nodes.push_back(make_paragraph_node(
+                    {make_emphasis_node("Result " + std::to_string(rows_index))}));
+            }
+            document_node table;
+            table.kind = document_node_kind::table;
+            table.attributes.emplace("class", "result-table");
+            std::vector<document_node> header_cells;
+            for (const sql_column& column : set.columns) {
+                header_cells.push_back(make_cell_node(true, make_text_node(column.name)));
+            }
+            table.children.push_back(make_row_node(std::move(header_cells)));
+            for (const std::vector<sql_cell>& row : set.rows) {
+                std::vector<document_node> cells;
+                for (const sql_cell& cell : row) {
+                    cells.push_back(cell.is_null
+                        ? make_cell_node(false, make_emphasis_node("NULL"))
+                        : make_cell_node(false, make_text_node(cell.text)));
+                }
+                table.children.push_back(make_row_node(std::move(cells)));
+            }
+            nodes.push_back(std::move(table));
+        } else if (set.kind == sql_result_kind::command) {
+            nodes.push_back(make_paragraph_node({make_emphasis_node(set.command_tag)}));
+        } else {
+            document_node admonition;
+            admonition.kind = document_node_kind::admonition;
+            admonition.attributes.emplace("class", "warning");
+            admonition.children.push_back(make_paragraph_node({make_text_node(
+                "SQLSTATE " + set.sqlstate.value_or("") + ": " + set.primary_message)}));
+            nodes.push_back(std::move(admonition));
+        }
+    }
+    if (!result.notices.empty()) {
+        document_node admonition;
+        admonition.kind = document_node_kind::admonition;
+        admonition.attributes.emplace("class", "note");
+        for (const sql_notice& notice : result.notices) {
+            admonition.children.push_back(make_paragraph_node(
+                {make_text_node(notice.severity + ": " + notice.message)}));
+        }
+        nodes.push_back(std::move(admonition));
+    }
+    if (!extension_version.empty() || !server_version.empty()) {
+        nodes.push_back(make_paragraph_node({make_emphasis_node(
+            "Executed against Bioseq extension "
+            + (extension_version.empty() ? std::string("(unknown)") : extension_version)
+            + " on PostgreSQL "
+            + (server_version.empty() ? std::string("(unknown)") : server_version))}));
+    }
+    return nodes;
+}
+
+// Walks the resolved tutorial content and inserts each runnable block's executed
+// result nodes immediately after it (§13.6). Recurses so runnable blocks nested in
+// admonitions/lists are covered; a block with no captured result (no cluster) is
+// left as its visible SQL only.
+void inject_tutorial_results(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, sql_example_result, std::less<>>& results,
+    const std::string& extension_version, const std::string& server_version) {
+    std::vector<document_node> rebuilt;
+    rebuilt.reserve(nodes.size());
+    for (document_node& node : nodes) {
+        inject_tutorial_results(node.children, results, extension_version, server_version);
+        std::optional<std::string> runnable_id;
+        if (node.kind == document_node_kind::code_block) {
+            const auto language = node.attributes.find("language");
+            const auto info = node.attributes.find("info");
+            if (language != node.attributes.end() && language->second == "sql"
+                && info != node.attributes.end()) {
+                if (const auto fence = parse_runnable_fence(info->second)) {
+                    runnable_id = fence->local_id;
+                }
+            }
+        }
+        rebuilt.push_back(std::move(node));
+        if (runnable_id) {
+            if (const auto found = results.find(*runnable_id); found != results.end()) {
+                for (document_node& result_node :
+                     make_result_nodes(found->second, extension_version, server_version)) {
+                    rebuilt.push_back(std::move(result_node));
+                }
+            }
+        }
+    }
+    nodes = std::move(rebuilt);
+}
+
+// Resolves the private-cluster execution target from the shared CLI options: either
+// a per-example isolated clone (§13.3) or a direct conninfo, or neither (no cluster,
+// examples render visible SQL only).
+struct execution_target {
+    bool have_connection{};
+    std::optional<isolation_settings> isolation;
+    std::string conninfo;
+    std::string probe_conninfo;  // a plain connection usable for catalog provenance
+};
+
+[[nodiscard]] execution_target resolve_execution_target(
+    const std::map<std::string, std::string, std::less<>>& options) {
+    execution_target target;
+    target.have_connection = options.contains("conninfo") || options.contains("isolated");
+    if (options.contains("isolated")) {
+        isolation_settings settings;
+        settings.admin_conninfo = require_option(options, "admin-conninfo");
+        settings.socket_directory = require_option(options, "socket-dir");
+        settings.port = std::stoi(require_option(options, "port"));
+        settings.template_database = require_option(options, "template-db");
+        target.probe_conninfo = settings.admin_conninfo;
+        target.isolation = std::move(settings);
+    } else if (const auto found = options.find("conninfo"); found != options.end()) {
+        target.conninfo = found->second;
+        target.probe_conninfo = found->second;
+    }
+    return target;
+}
+
+[[nodiscard]] std::expected<sql_example_result, diagnostic> run_one_example(
+    const execution_target& target, const sql_example& example) {
+    if (target.isolation) {
+        private_cluster_executor executor("");
+        return executor.execute_isolated(example, *target.isolation);
+    }
+    private_cluster_executor executor(target.conninfo);
+    return executor.execute(example);
+}
+
+/// @brief Builds the resolved, database-independent site model (§5, §180).
+///
+/// Rebuilds the deterministic plan from source, reads the merged C++/SQL entity
+/// graphs, executes the landing and tutorial runnable examples on the private
+/// cluster (when one is configured), injects each tutorial result inline (§13.6),
+/// captures server/extension provenance, and computes documentation coverage. The
+/// returned model carries only normalized projections — never hidden setup/teardown
+/// SQL, credentials, OIDs, timings, or machine paths — so `render` can emit staging
+/// without a cluster and at more than one base path.
+[[nodiscard]] site_model build_site_model(
+    const fs::path& source, const std::string& version_string,
+    const site_configuration& config, const std::string& site_yaml,
+    const std::string& site_config_relpath, std::string base_path,
+    std::string revision, bool include_drafts,
+    const std::map<std::string, std::string, std::less<>>& options) {
+    website_plan plan = build_plan_from_source(
+        source, version_string, config, site_yaml, site_config_relpath,
+        std::move(base_path), std::move(revision), include_drafts);
+
+    site_model model;
+    model.schema_version = "bioseq.website.site_model/v1";
+    model.parser_version = plan.parser_version;
+    model.binding_schema_version = plan.binding_schema_version;
+    model.version = plan.version;
+    model.site_title = plan.site_title;
+    model.source_revision = plan.source_revision;
+    model.inputs = plan.inputs;
+    model.plan_signature = plan.signature;
+
+    if (const auto found = options.find("cpp-entities"); found != options.end()) {
+        model.cpp_entities = deserialize_entities(read_file(found->second));
+    }
+    if (const auto found = options.find("sql-entities"); found != options.end()) {
+        model.sql_entities = deserialize_entities(read_file(found->second));
+    }
+    if (const auto found = options.find("cpp-signature"); found != options.end()) {
+        model.cpp_signature = found->second;
+    }
+    if (const auto found = options.find("staged-extension-sha256"); found != options.end()) {
+        model.staged_extension_sha256 = found->second;
+    }
+
+    const execution_target target = resolve_execution_target(options);
+    if (target.have_connection && !target.probe_conninfo.empty()) {
+        private_cluster_executor probe(target.probe_conninfo);
+        if (const std::expected<sql_catalog_snapshot, diagnostic> snapshot =
+                probe.read_catalog()) {
+            model.postgres_server_version = snapshot->server_version;
+            model.extension_version = snapshot->extension_version;
+            if (model.staged_extension_sha256.empty()) {
+                model.staged_extension_sha256 = snapshot->staged_artifact_sha256;
+            }
+        }
+    }
+
+    model.landing_examples = collect_landing_views(source, version_string, options);
+
+    for (tutorial& item : plan.tutorials) {
+        std::map<std::string, sql_example_result, std::less<>> results;
+        if (target.have_connection) {
+            for (const sql_example& example : item.sql_examples) {
+                std::expected<sql_example_result, diagnostic> outcome =
+                    run_one_example(target, example);
+                if (!outcome) {
+                    throw std::runtime_error("tutorial '" + item.metadata.slug
+                        + "' example '" + example.local_id + "': ["
+                        + outcome.error().code + "] " + outcome.error().message);
+                }
+                results.emplace(example.local_id, std::move(*outcome));
+            }
+        }
+        inject_tutorial_results(item.content, results, model.extension_version,
+                                model.postgres_server_version);
+        // The site_model is a published-adjacent artifact: it must never carry hidden
+        // setup/teardown SQL (§180). Those phases were consumed by execution above;
+        // strip them so only the visible projection survives into the model.
+        for (sql_example& example : item.sql_examples) {
+            example.setup_sql.clear();
+            example.teardown_sql.clear();
+        }
+    }
+    model.tutorials = std::move(plan.tutorials);
+
+    const coverage_report coverage = compute_coverage(
+        model.cpp_entities, config.required_documentation_entities, {});
+    model.coverage_public_total = static_cast<std::uint32_t>(coverage.public_total);
+    model.coverage_documented_total =
+        static_cast<std::uint32_t>(coverage.documented_total);
+    model.coverage_missing = coverage.missing_summary;
+    model.coverage_fatal_missing = coverage.fatal_missing;
+    return model;
 }
 
 }  // namespace
@@ -754,15 +1114,15 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website execute`: runs one SQL example against a live cluster.
+/// @brief Runs `website execute-sql`: runs one ad-hoc SQL example on a live cluster.
 ///
 /// Connects to the private Unix-socket cluster, runs the setup/visible/teardown
 /// SQL through private_cluster_executor, and renders the visible result model to
-/// stdout (§13.5-13.6). A focused live-execution entrypoint; database-per-example
-/// isolation and the plan-driven batch runner are layered on top of this.
-/// @param args Options after the `execute` token.
+/// stdout (§13.5-13.6). A focused live-execution entrypoint used by the acceptance
+/// harness; the model-producing `execute` and the batch runner sit on top of this.
+/// @param args Options after the `execute-sql` token.
 /// @return Zero on success; two on usage errors; three on execution failure.
-[[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
+[[nodiscard]] int run_execute_sql(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
         "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms"};
@@ -805,7 +1165,7 @@ namespace {
         outcome = executor.execute(example);
     }
     if (!outcome) {
-        std::println(stderr, "website execute: [{}] {}",
+        std::println(stderr, "website execute-sql: [{}] {}",
                      outcome.error().code, outcome.error().message);
         return 3;
     }
@@ -837,10 +1197,10 @@ namespace {
     }
     return 0;
 } catch (const cli_usage_error& error) {
-    std::println(stderr, "website execute: {}", error.what());
+    std::println(stderr, "website execute-sql: {}", error.what());
     return 2;
 } catch (const std::exception& error) {
-    std::println(stderr, "website execute: {}", error.what());
+    std::println(stderr, "website execute-sql: {}", error.what());
     return 3;
 }
 
@@ -894,14 +1254,14 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website render`: renders a template against a JSON context.
+/// @brief Runs `website render-fragment`: renders a template against a JSON context.
 ///
-/// Reads a Jinja template and a JSON page-data context (for example the
-/// cpp_entities/plan artifact) and writes the rendered document (§14). The
-/// structured render primitive entity/tutorial/landing pages are produced with.
-/// @param args Options after the `render` token.
+/// Reads a Jinja template and a JSON page-data context and writes the rendered
+/// document (§14). The low-level render primitive; the full model-driven `render`
+/// stage is separate.
+/// @param args Options after the `render-fragment` token.
 /// @return Zero on success; two on usage errors; three on render failure.
-[[nodiscard]] int run_render(std::span<std::string_view const> args) try {
+[[nodiscard]] int run_render_fragment(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {"template", "context", "output"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path template_path = require_option(options, "template");
@@ -912,10 +1272,10 @@ namespace {
     write_if_different(output, document);
     return 0;
 } catch (const cli_usage_error& error) {
-    std::println(stderr, "website render: {}", error.what());
+    std::println(stderr, "website render-fragment: {}", error.what());
     return 2;
 } catch (const std::exception& error) {
-    std::println(stderr, "website render: {}", error.what());
+    std::println(stderr, "website render-fragment: {}", error.what());
     return 3;
 }
 
@@ -1122,106 +1482,25 @@ struct staging_writer {
     }
 };
 
-}  // namespace
+// Emits a JSON string value, or null when empty, for the site manifest provenance.
+[[nodiscard]] std::string manifest_optional(std::string_view value) {
+    return value.empty() ? std::string("null")
+                         : "\"" + std::string(value) + "\"";
+}
 
-/// @brief Runs `website publish`: renders the full content-addressed site tree.
+/// @brief Renders a resolved site model into an owner-marked staging tree (§14, §16).
 ///
-/// Rebuilds the plan from source, reads the C++/SQL entity artifacts, content-
-/// addresses main/website/static into one immutable /assets/<sha256>/ bundle,
-/// renders every §16 route through the shared template frame, writes the site
-/// manifest (SHA-256 of every output but itself), validates exact set equality
-/// between the manifest and the staged tree, and atomically swaps staging over
-/// the output root (§14, §16).
-/// @param args Options after the `publish` token.
-/// @return Zero on success; two on usage errors; three on parse/validation.
-[[nodiscard]] int run_publish(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
-        "source", "version", "site-config", "cpp-entities", "sql-entities",
-        "templates", "static", "output", "base-path", "source-revision",
-        "conninfo", "admin-conninfo", "socket-dir", "port", "template-db"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
-    const auto options = parse_options(args, value_keys, flag_keys);
-    const fs::path source = require_option(options, "source");
-    const std::string version_string = require_option(options, "version");
-    const fs::path site_config_path = require_option(options, "site-config");
-    const fs::path templates_dir = require_option(options, "templates");
-    const fs::path static_dir = require_option(options, "static");
-    const fs::path output = require_option(options, "output");
-    const bool include_drafts = options.contains("include-drafts");
-
-    // Crash recovery (§14): a prepublish descriptor beside output means a prior
-    // publish was interrupted after the write-ahead stamp. If output already matches
-    // the descriptor's manifest (hash + exact set), complete the publish by writing
-    // the success marker and dropping the descriptor; otherwise clear only the
-    // nonce-owned transient state and fail so the build DAG recreates staging.
-    {
-        const fs::path prepublish = output.string() + ".prepublish.json";
-        std::error_code probe;
-        if (fs::exists(prepublish, probe) && !probe) {
-            const std::string descriptor = read_file(prepublish);
-            const std::string expected =
-                manifest_string_field(descriptor, "new_manifest_sha256");
-            const fs::path site_manifest = output / "site-manifest.json";
-            bool output_valid = false;
-            if (!expected.empty() && fs::exists(site_manifest, probe) && !probe) {
-                const std::string manifest_text = read_file(site_manifest);
-                if (bioseq::codegen::sha256_hex(manifest_text) == expected) {
-                    std::set<std::string> present;
-                    collect_site_files(output, present);
-                    present.erase("/site-manifest.json");
-                    std::set<std::string> declared;
-                    for (const std::string& declared_route :
-                         manifest_output_routes(manifest_text)) {
-                        declared.insert(declared_route);
-                    }
-                    output_valid = (present == declared);
-                }
-            }
-            std::error_code cleanup;
-            const fs::path leftover_staging = output.string() + ".staging";
-            fs::remove_all(leftover_staging, cleanup);
-            fs::remove(leftover_staging.string() + ".owner.json", cleanup);
-            if (output_valid) {
-                write_if_different(output.string() + ".success", expected + "\n");
-                fsync_file(output.string() + ".success");
-                fs::remove(prepublish, cleanup);
-                fsync_directory(parent_or_dot(output));
-                std::println("recovered interrupted publish for {}", output.string());
-                return 0;
-            }
-            fs::remove(prepublish, cleanup);
-            fsync_directory(parent_or_dot(output));
-            throw std::runtime_error("crash recovery: output does not match the "
-                "prepublish descriptor; cleared transient state, rebuild required");
-        }
-    }
-
-    const std::string site_yaml = read_file(site_config_path);
-    const site_configuration config =
-        parse_site_config(site_yaml, site_config_path.generic_string());
-    std::string base_path = config.default_base_path;
-    if (const auto found = options.find("base-path"); found != options.end()) {
-        base_path = found->second;
-    }
-    std::string revision;
-    if (const auto found = options.find("source-revision"); found != options.end()) {
-        revision = found->second;
-    }
-
-    const website_plan plan = build_plan_from_source(
-        source, version_string, config, site_yaml,
-        plan_relative(site_config_path, source), base_path, revision, include_drafts);
-
-    std::vector<documented_entity> cpp_entities;
-    if (const auto found = options.find("cpp-entities"); found != options.end()) {
-        cpp_entities = deserialize_entities(read_file(found->second));
-    }
-    std::vector<documented_entity> sql_entities;
-    if (const auto found = options.find("sql-entities"); found != options.end()) {
-        sql_entities = deserialize_entities(read_file(found->second));
-    }
-
-    const std::string version = version_string;
+/// Consumes only the database-independent `site_model` plus the site config, the
+/// requested base path, and the template/static roots — never a cluster — so the
+/// same model can be rendered at more than one base path (§180). It content-
+/// addresses the static bundle, renders every §16 route through the shared frame,
+/// records server/extension provenance in the manifest (§16), and enforces exact
+/// manifest/tree set equality. Returns the site-manifest SHA-256; performs no swap.
+[[nodiscard]] std::string render_model_to_staging(
+    const site_model& model, const site_configuration& config,
+    const std::string& base_path, const std::string& revision,
+    const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging) {
+    const std::string version = model.version.path_component;
     const auto url = [&](std::string_view rel) { return base_path + std::string(rel); };
     const auto route = [&](std::string_view rel) { return "/" + std::string(rel); };
     const auto canonical = [&](std::string_view rel) {
@@ -1238,7 +1517,6 @@ struct staging_writer {
         collect_static_assets(static_dir, bundle_sha256);
     const std::string bundle_prefix = "assets/" + bundle_sha256 + "/";
 
-    const fs::path staging = output.string() + ".staging";
     std::error_code staging_error;
     fs::remove_all(staging, staging_error);
     fs::create_directories(staging);
@@ -1276,10 +1554,9 @@ struct staging_writer {
         writer.emit(route(rel), html);
     };
 
-    // Assign each entity a readable, collision-checked route (§12.1): a domain and
-    // kind path plus a slug and the 16-hex fnv1a_64 of the (Doxygen/OID-independent)
-    // canonical ID. Both the canonical ID and the output path are checked for
-    // collisions before any page is rendered, per §12.1.
+    // Assign each entity a readable, collision-checked route (§12.1). Routes are
+    // recomputed here (not carried in the model) so a base-independent model renders
+    // at any base path; the canonical ID and output path collision checks stay.
     const auto kind_token = [](entity_kind kind) -> std::string {
         switch (kind) {
         case entity_kind::namespace_: return "namespace";
@@ -1356,6 +1633,8 @@ struct staging_writer {
             + slugify(entity.qualified_name) + "-"
             + hex64(bioseq::common::fnv1a_64(entity.canonical_id)) + "/";
     };
+    std::vector<documented_entity> cpp_entities = model.cpp_entities;
+    std::vector<documented_entity> sql_entities = model.sql_entities;
     std::set<std::string> seen_routes;
     std::set<std::string> seen_ids;
     const auto assign_routes = [&](std::vector<documented_entity>& list) {
@@ -1373,12 +1652,10 @@ struct staging_writer {
     assign_routes(cpp_entities);
     assign_routes(sql_entities);
 
-    // Root marketing landing page for the primary version (§16). Its runnable
-    // slots (§15.2) are executed from landing_examples.md and bound as the
-    // examples.<slot> collection; without a connection they render visible SQL
-    // only. Hidden setup/teardown never reaches the page (§5.1).
+    // Root marketing landing page: the executed runnable slots (§15.2) are bound as
+    // the examples.<slot> collection; hidden setup/teardown never reaches the page.
     const std::string landing_examples_json =
-        build_landing_examples(source, version_string, options);
+        serialize_landing_examples(model.landing_examples);
     render("index.html", "landing.html.j2",
            "{\"title\":" + json_text(config.title)
                + ",\"description\":" + json_text(config.short_description)
@@ -1398,10 +1675,12 @@ struct staging_writer {
                + json_text(url(version + "/documentation-coverage/")) + "}",
            "", "");
 
-    // Tutorials index and one page per published tutorial (§10, §16).
+    // Tutorials index and one page per published tutorial (§10, §16). Each tutorial's
+    // content already carries its executed result subtrees (§13.6), injected by
+    // execute, so rendering here is database-free.
     std::string tutorial_cards = "[";
-    for (std::size_t index = 0; index < plan.tutorials.size(); ++index) {
-        const tutorial& item = plan.tutorials[index];
+    for (std::size_t index = 0; index < model.tutorials.size(); ++index) {
+        const tutorial& item = model.tutorials[index];
         if (index > 0) {
             tutorial_cards.push_back(',');
         }
@@ -1417,7 +1696,7 @@ struct staging_writer {
                + ",\"canonical\":"
                + json_text(canonical(version + "/tutorials/index.html")) + "}",
            "tutorials", tutorial_cards);
-    for (const tutorial& item : plan.tutorials) {
+    for (const tutorial& item : model.tutorials) {
         const std::string rel =
             version + "/tutorials/" + item.metadata.slug + "/index.html";
         const std::string body = render_document_html(item.content);
@@ -1470,15 +1749,14 @@ struct staging_writer {
     render_domain("cpp", "C++", cpp_entities);
     render_domain("sql", "SQL", sql_entities);
 
-    // Documentation-coverage page and machine-readable report (§11.4).
-    const coverage_report coverage = compute_coverage(
-        cpp_entities, config.required_documentation_entities, {});
+    // Documentation-coverage page and machine-readable report (§11.4), taken from
+    // the resolved model so execute and render agree exactly.
     std::string missing_json = "[";
-    for (std::size_t index = 0; index < coverage.missing_summary.size(); ++index) {
+    for (std::size_t index = 0; index < model.coverage_missing.size(); ++index) {
         if (index > 0) {
             missing_json.push_back(',');
         }
-        missing_json += json_text(coverage.missing_summary[index]);
+        missing_json += json_text(model.coverage_missing[index]);
     }
     missing_json.push_back(']');
     render(version + "/documentation-coverage/index.html", "coverage.html.j2",
@@ -1486,13 +1764,14 @@ struct staging_writer {
                + ",\"description\":" + json_text("Public API documentation coverage")
                + ",\"canonical\":"
                + json_text(canonical(version + "/documentation-coverage/index.html"))
-               + ",\"public_total\":" + std::to_string(coverage.public_total)
-               + ",\"documented_total\":" + std::to_string(coverage.documented_total)
+               + ",\"public_total\":" + std::to_string(model.coverage_public_total)
+               + ",\"documented_total\":" + std::to_string(model.coverage_documented_total)
                + ",\"missing\":" + missing_json + "}",
            "", "");
     writer.emit(route(version + "/documentation-coverage.json"),
-                serialize_coverage(coverage.public_total, coverage.documented_total,
-                                   coverage.missing_summary, coverage.fatal_missing));
+                serialize_coverage(model.coverage_public_total,
+                                   model.coverage_documented_total,
+                                   model.coverage_missing, model.coverage_fatal_missing));
 
     // Versions manifest, versions page, and per-version search index (§15.1, §12.5).
     const std::vector<std::string> version_labels{version};
@@ -1543,11 +1822,10 @@ struct staging_writer {
         sitemap += "  <url><loc>" + canonical(rel) + "</loc></url>\n";
     }
     sitemap += "</urlset>\n";
-    // The sitemap enumerates the pages produced above; it lists itself as a file
-    // but not as a <url>, matching the canonical page set.
     writer.emit(route("sitemap.xml"), sitemap);
 
-    // Serialize the manifest last, then require exact set equality (§16).
+    // Serialize the manifest last, then require exact set equality (§16). The live
+    // PostgreSQL server/extension provenance (§16) comes from the resolved model.
     {
         std::string manifest_json;
         manifest_json += "{\n  \"schema\": \"bioseq.website.site_manifest/v1\",\n";
@@ -1555,21 +1833,21 @@ struct staging_writer {
         manifest_json += "  \"version\": \"" + version + "\",\n";
         manifest_json += "  \"source_revision\": \"" + revision + "\",\n";
         manifest_json += "  \"base_path\": \"" + base_path + "\",\n";
-        manifest_json += "  \"generator_signature\": \"" + plan.signature + "\",\n";
-        manifest_json += "  \"parser_version\": \"" + plan.parser_version + "\",\n";
-        manifest_json += "  \"binding_schema\": \"" + plan.binding_schema_version + "\",\n";
+        manifest_json += "  \"generator_signature\": \"" + model.plan_signature + "\",\n";
+        manifest_json += "  \"parser_version\": \"" + model.parser_version + "\",\n";
+        manifest_json += "  \"binding_schema\": \"" + model.binding_schema_version + "\",\n";
         manifest_json += "  \"asset_bundle_sha256\": \"" + bundle_sha256 + "\",\n";
-        // The live PostgreSQL server/extension identity is captured by the catalog
-        // stage; publish does not open a cluster, so it records null placeholders
-        // that the assembled/full-pipeline manifest fills from that artifact.
-        manifest_json += "  \"postgres_server_version\": null,\n";
-        manifest_json += "  \"extension_version\": null,\n";
-        manifest_json += "  \"staged_extension_sha256\": null,\n";
+        manifest_json += "  \"postgres_server_version\": "
+            + manifest_optional(model.postgres_server_version) + ",\n";
+        manifest_json += "  \"extension_version\": "
+            + manifest_optional(model.extension_version) + ",\n";
+        manifest_json += "  \"staged_extension_sha256\": "
+            + manifest_optional(model.staged_extension_sha256) + ",\n";
         manifest_json += "  \"inputs\": [\n";
-        for (std::size_t index = 0; index < plan.inputs.size(); ++index) {
-            manifest_json += "    {\"path\": \"" + plan.inputs[index].path
-                + "\", \"content_hash\": \"" + plan.inputs[index].content_hash + "\"}";
-            manifest_json += (index + 1 == plan.inputs.size()) ? "\n" : ",\n";
+        for (std::size_t index = 0; index < model.inputs.size(); ++index) {
+            manifest_json += "    {\"path\": \"" + model.inputs[index].path
+                + "\", \"content_hash\": \"" + model.inputs[index].content_hash + "\"}";
+            manifest_json += (index + 1 == model.inputs.size()) ? "\n" : ",\n";
         }
         manifest_json += "  ],\n";
         manifest_json += "  \"outputs\": {\n";
@@ -1600,26 +1878,174 @@ struct staging_writer {
             "site manifest set mismatch: manifest declares " + std::to_string(declared.size())
             + " outputs but the staged tree has " + std::to_string(present.size()));
     }
+    return bioseq::codegen::sha256_hex(read_file(staging / "site-manifest.json"));
+}
 
-    // Durable write-ahead publish (§14): stamp an fsynced 0600 prepublish
-    // descriptor plus an owner marker adjacent to staging, then swap atomically,
-    // then record the success marker and drop the descriptor/owner. A crash between
-    // any two steps is resolved by the crash-recovery pass on the next run.
-    const std::string manifest_hash =
-        bioseq::codegen::sha256_hex(read_file(staging / "site-manifest.json"));
+}  // namespace
+
+/// @brief Runs `website publish`: renders the full content-addressed site tree.
+///
+/// Rebuilds the plan from source, reads the C++/SQL entity artifacts, content-
+/// addresses main/website/static into one immutable /assets/<sha256>/ bundle,
+/// renders every §16 route through the shared template frame, writes the site
+/// manifest (SHA-256 of every output but itself), validates exact set equality
+/// between the manifest and the staged tree, and atomically swaps staging over
+/// the output root (§14, §16).
+/// @param args Options after the `publish` token.
+/// @return Zero on success; two on usage errors; three on parse/validation.
+[[nodiscard]] int run_publish(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "cpp-entities", "sql-entities",
+        "templates", "static", "output", "base-path", "source-revision",
+        "conninfo", "admin-conninfo", "socket-dir", "port", "template-db",
+        "staged-extension-sha256", "cpp-signature",
+        "staging", "model-validation-stamp", "html-validation-stamp"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
+    const auto options = parse_options(args, value_keys, flag_keys);
+    const fs::path output = require_option(options, "output");
+    const bool swap_only = options.contains("staging");
+    const fs::path staging = swap_only
+        ? fs::path(require_option(options, "staging"))
+        : fs::path(output.string() + ".staging");
+
+    // Crash recovery (§14): a prepublish descriptor beside output means a prior
+    // publish was interrupted after the write-ahead stamp. If output already matches
+    // the descriptor's manifest (hash + exact set), complete the publish by writing
+    // the success marker and dropping the descriptor; otherwise clear only the
+    // nonce-owned transient state and fail so the build DAG recreates staging.
+    {
+        const fs::path prepublish = output.string() + ".prepublish.json";
+        std::error_code probe;
+        if (fs::exists(prepublish, probe) && !probe) {
+            const std::string descriptor = read_file(prepublish);
+            const std::string expected =
+                manifest_string_field(descriptor, "new_manifest_sha256");
+            const fs::path site_manifest = output / "site-manifest.json";
+            bool output_valid = false;
+            if (!expected.empty() && fs::exists(site_manifest, probe) && !probe) {
+                const std::string manifest_text = read_file(site_manifest);
+                if (bioseq::codegen::sha256_hex(manifest_text) == expected) {
+                    std::set<std::string> present;
+                    collect_site_files(output, present);
+                    present.erase("/site-manifest.json");
+                    std::set<std::string> declared;
+                    for (const std::string& declared_route :
+                         manifest_output_routes(manifest_text)) {
+                        declared.insert(declared_route);
+                    }
+                    output_valid = (present == declared);
+                }
+            }
+            std::error_code cleanup;
+            if (output_valid) {
+                write_if_different(output.string() + ".success", expected + "\n");
+                fsync_file(output.string() + ".success");
+                fs::remove(prepublish, cleanup);
+                fsync_directory(parent_or_dot(output));
+                std::println("recovered interrupted publish for {}", output.string());
+                return 0;
+            }
+            fs::remove(prepublish, cleanup);
+            fsync_directory(parent_or_dot(output));
+            throw std::runtime_error("crash recovery: output does not match the "
+                "prepublish descriptor; cleared transient state, rebuild required");
+        }
+    }
+
+    // Every validator stamp publish must confirm before the exchange (§14, §17.3):
+    // render binds them to staging; publish rechecks their presence (fail-closed).
+    std::vector<std::string> validation_stamps;
+    if (const auto found = options.find("model-validation-stamp"); found != options.end()) {
+        validation_stamps.push_back(found->second);
+    }
+    if (const auto found = options.find("html-validation-stamp"); found != options.end()) {
+        validation_stamps.push_back(found->second);
+    }
+
+    std::string manifest_hash;
+    if (swap_only) {
+        // Spec publish (§168): verify the owner-marked staging, the validator stamps,
+        // and the full staged manifest, then atomically exchange. No rendering, no
+        // cluster, so a validator that rejected staging blocks the swap entirely.
+        const fs::path staging_manifest = staging / "site-manifest.json";
+        if (!fs::exists(staging_manifest)) {
+            throw std::runtime_error("publish: staging has no site-manifest.json: "
+                                     + staging.string());
+        }
+        const std::string manifest_text = read_file(staging_manifest);
+        manifest_hash = bioseq::codegen::sha256_hex(manifest_text);
+        if (!fs::exists(staging.string() + ".owner.json")) {
+            throw std::runtime_error("publish: staging is not owner-marked: "
+                                     + staging.string() + ".owner.json");
+        }
+        for (const std::string& stamp : validation_stamps) {
+            if (!fs::exists(fs::path(stamp))) {
+                throw std::runtime_error(
+                    "publish: required validation stamp missing (validator failed "
+                    "or did not run before publish): " + stamp);
+            }
+        }
+        std::set<std::string> present;
+        collect_site_files(staging, present);
+        present.erase("/site-manifest.json");
+        std::set<std::string> declared;
+        for (const std::string& declared_route : manifest_output_routes(manifest_text)) {
+            declared.insert(declared_route);
+        }
+        if (present != declared) {
+            throw std::runtime_error("publish: staging manifest set mismatch (declares "
+                + std::to_string(declared.size()) + ", tree has "
+                + std::to_string(present.size()) + ")");
+        }
+    } else {
+        // Convenience all-in-one path (dev / MCP): build the resolved model and render
+        // staging in one process, then swap. The spec CMake pipeline instead uses
+        // execute -> render -> publish --staging so validators gate the exchange.
+        const std::string site_yaml = read_file(require_option(options, "site-config"));
+        const site_configuration config =
+            parse_site_config(site_yaml, require_option(options, "site-config"));
+        std::string base_path = config.default_base_path;
+        if (const auto found = options.find("base-path"); found != options.end()) {
+            base_path = found->second;
+        }
+        std::string revision;
+        if (const auto found = options.find("source-revision"); found != options.end()) {
+            revision = found->second;
+        }
+        const fs::path source = require_option(options, "source");
+        const std::string version_string = require_option(options, "version");
+        const fs::path site_config_path = require_option(options, "site-config");
+        const site_model model = build_site_model(
+            source, version_string, config, site_yaml,
+            plan_relative(site_config_path, source), base_path, revision,
+            options.contains("include-drafts"), options);
+        manifest_hash = render_model_to_staging(model, config, base_path, revision,
+            fs::path(require_option(options, "templates")),
+            fs::path(require_option(options, "static")), staging);
+    }
+
+    // Durable write-ahead publish (§14): stamp an fsynced 0600 prepublish descriptor
+    // plus an owner marker adjacent to staging, then swap atomically, then record the
+    // success marker and drop the descriptor/owner. A crash between any two steps is
+    // resolved by the crash-recovery pass on the next run.
     const std::string nonce =
         std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
     const fs::path owner_marker = staging.string() + ".owner.json";
     write_private_artifact(owner_marker,
         "{\"schema\":\"bioseq.website.owner/v1\",\"nonce\":\"" + nonce
         + "\",\"staging\":\"" + staging.filename().string() + "\"}\n");
+    std::string stamps_json = "[";
+    for (std::size_t index = 0; index < validation_stamps.size(); ++index) {
+        stamps_json += (index > 0 ? ", " : "") + json_quote(validation_stamps[index]);
+    }
+    stamps_json.push_back(']');
     const fs::path prepublish = output.string() + ".prepublish.json";
     write_private_artifact(prepublish,
         "{\n  \"schema\": \"bioseq.website.prepublish/v1\",\n"
         "  \"operation\": \"publish\",\n  \"nonce\": \"" + nonce + "\",\n"
         "  \"staging\": \"" + staging.filename().string() + "\",\n"
         "  \"new_manifest_sha256\": \"" + manifest_hash + "\",\n"
-        "  \"validation_stamps\": []\n}\n");
+        "  \"validation_stamps\": " + stamps_json + "\n}\n");
     fsync_file(prepublish);
     fsync_directory(parent_or_dot(output));
 
@@ -1632,14 +2058,118 @@ struct staging_writer {
     fs::remove(prepublish, cleanup);
     fs::remove(owner_marker, cleanup);
     fsync_directory(parent_or_dot(output));
-    std::println("published {} outputs to {} (bundle {})",
-                 writer.manifest.size(), output.string(), bundle_sha256);
+    std::println("published site to {}", output.string());
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website publish: {}", error.what());
     return 2;
 } catch (const std::exception& error) {
     std::println(stderr, "website publish: {}", error.what());
+    return 3;
+}
+
+/// @brief Runs `website execute`: resolves + executes the site into a site_model (§180).
+///
+/// Rebuilds the plan from source, reads the merged C++/SQL entity artifacts, opens
+/// the private cluster (when configured) to execute the landing and tutorial runnable
+/// examples and capture server/extension provenance, and writes the resolved
+/// database-independent site model (schema site_model/v1, mode 0600). Setup/teardown
+/// SQL, credentials, OIDs, timings, and machine paths never enter the artifact, so
+/// `render` can consume it without a database and at more than one base path.
+/// @param args Options after the `execute` token.
+/// @return Zero on success; two on usage errors; three on parse/execution failure.
+[[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "cpp-entities", "sql-entities",
+        "base-path", "source-revision", "output-model", "cpp-signature",
+        "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
+        "port", "template-db"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
+    const auto options = parse_options(args, value_keys, flag_keys);
+    const fs::path source = require_option(options, "source");
+    const std::string version_string = require_option(options, "version");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path output_model = require_option(options, "output-model");
+
+    const std::string site_yaml = read_file(site_config_path);
+    const site_configuration config =
+        parse_site_config(site_yaml, site_config_path.generic_string());
+    std::string base_path = config.default_base_path;
+    if (const auto found = options.find("base-path"); found != options.end()) {
+        base_path = found->second;
+    }
+    std::string revision;
+    if (const auto found = options.find("source-revision"); found != options.end()) {
+        revision = found->second;
+    }
+    const site_model model = build_site_model(
+        source, version_string, config, site_yaml,
+        plan_relative(site_config_path, source), std::move(base_path),
+        std::move(revision), options.contains("include-drafts"), options);
+    write_private_artifact(output_model, serialize_site_model(model));
+    std::println("executed site model for {} -> {}", version_string, output_model.string());
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website execute: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website execute: {}", error.what());
+    return 3;
+}
+
+/// @brief Runs `website render`: renders a resolved model into staging without a DB.
+///
+/// Reads the site_model/v1 artifact (verifying its schema), renders every §16 route
+/// into an owner-marked staging directory at the requested base path, and writes the
+/// built-in model-validation stamp bound to the staged manifest hash (§14, §17.3
+/// step 8). It never opens a cluster, so the same executed model can be rendered at
+/// more than one base path; only `publish` may exchange staging with the live site.
+/// @param args Options after the `render` token.
+/// @return Zero on success; two on usage errors; three on parse/render failure.
+[[nodiscard]] int run_render(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "model", "site-config", "templates", "static", "output", "base-path",
+        "source-revision", "model-validation-stamp"};
+    const auto options = parse_options(args, value_keys, {});
+    const fs::path model_path = require_option(options, "model");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path templates_dir = require_option(options, "templates");
+    const fs::path static_dir = require_option(options, "static");
+    const fs::path staging = require_option(options, "output");
+
+    const std::string site_yaml = read_file(site_config_path);
+    const site_configuration config =
+        parse_site_config(site_yaml, site_config_path.generic_string());
+    std::string base_path = config.default_base_path;
+    if (const auto found = options.find("base-path"); found != options.end()) {
+        base_path = found->second;
+    }
+    std::string revision;
+    if (const auto found = options.find("source-revision"); found != options.end()) {
+        revision = found->second;
+    }
+    const site_model model = deserialize_site_model(read_file(model_path));
+    const std::string manifest_hash = render_model_to_staging(
+        model, config, base_path, revision, templates_dir, static_dir, staging);
+
+    // Owner-mark staging (§168) so only publish may exchange it, and write the
+    // built-in model-validation stamp bound to the staged manifest hash.
+    const std::string nonce =
+        std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
+    write_private_artifact(staging.string() + ".owner.json",
+        "{\"schema\":\"bioseq.website.owner/v1\",\"nonce\":\"" + nonce
+        + "\",\"staging\":\"" + staging.filename().string() + "\"}\n");
+    if (const auto found = options.find("model-validation-stamp"); found != options.end()) {
+        write_if_different(fs::path(found->second), manifest_hash + "\n");
+    }
+    std::println("rendered {} -> {} (base {})",
+                 model_path.string(), staging.string(), base_path);
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website render: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website render: {}", error.what());
     return 3;
 }
 
@@ -1916,8 +2446,14 @@ struct staging_writer {
     if (command == "execute") {
         return run_execute(rest);
     }
+    if (command == "execute-sql") {
+        return run_execute_sql(rest);
+    }
     if (command == "render") {
         return run_render(rest);
+    }
+    if (command == "render-fragment") {
+        return run_render_fragment(rest);
     }
     if (command == "catalog") {
         return run_catalog(rest);
