@@ -2193,6 +2193,111 @@ struct PersistedGpuEnvironmentEvidence {
         const PersistedGpuEnvironmentEvidence&) const noexcept = default;
 };
 
+inline constexpr std::size_t
+    persisted_gpu_helper_build_identity_capacity = 128u;
+inline constexpr std::size_t persisted_gpu_helper_source_capacity = 32u;
+
+/// Process-wide immutable Metal archive qualification copied without paths,
+/// file descriptors, API handles or pointers. Text fields are bounded ASCII
+/// images so the admitted operation chunk remains a fixed allocation.
+struct PersistedGpuCacheQualificationEvidence {
+    std::uint32_t version = 0u;
+    std::uint64_t identity = 0u;
+    std::uint64_t archive_count = 0u;
+    std::uint64_t archive_bytes = 0u;
+    std::uint64_t archive_checksum = 0u;
+    std::uint64_t receipt_count = 0u;
+    std::uint64_t hash_passes = 0u;
+    std::uint64_t hashed_bytes = 0u;
+    std::uint64_t private_files_created = 0u;
+    std::uint64_t private_files_unlinked = 0u;
+    std::uint64_t live_private_paths = 0u;
+    std::uint64_t pipeline_filesystem_hash_passes = 0u;
+    std::uint64_t pipeline_filesystem_hashed_bytes = 0u;
+    std::uint32_t helper_protocol_version = 0u;
+    std::array<char, persisted_gpu_helper_build_identity_capacity>
+        helper_build_identity{};
+    std::uint32_t helper_build_identity_size = 0u;
+    std::array<char, persisted_gpu_helper_source_capacity> helper_source{};
+    std::uint32_t helper_source_size = 0u;
+    std::uint64_t helper_executable_size = 0u;
+    std::array<std::uint8_t, 32> helper_executable_sha256{};
+    std::uint64_t helper_metal_registry_id = 0u;
+    std::array<std::uint8_t, 16> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, 16> pipeline_cache_uuid{};
+    std::uint64_t seed_receipt_identity = 0u;
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    bool saturated = false;
+
+    [[nodiscard]] std::string_view helper_build_identity_text()
+        const noexcept {
+        return {helper_build_identity.data(), helper_build_identity_size};
+    }
+    [[nodiscard]] std::string_view helper_source_text() const noexcept {
+        return {helper_source.data(), helper_source_size};
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        const auto nonzero = [](const auto& bytes) noexcept {
+            return std::any_of(
+                bytes.begin(), bytes.end(),
+                [](const auto value) { return value != 0u; });
+        };
+        const auto safe_text = [](const auto& bytes,
+                                  const std::uint32_t size) noexcept {
+            if (size == 0u || size > bytes.size()) return false;
+            for (std::size_t i = 0u; i < size; ++i) {
+                const auto value = static_cast<unsigned char>(bytes[i]);
+                if (value < 0x20u || value > 0x7eu
+                    || value == static_cast<unsigned char>('"')
+                    || value == static_cast<unsigned char>('\\')) {
+                    return false;
+                }
+            }
+            return std::all_of(
+                bytes.begin() + size, bytes.end(),
+                [](const char value) { return value == '\0'; });
+        };
+        return version == 2u && identity != 0u
+            && archive_count != 0u
+            && archive_count <= sql_bigint_value_max
+            && archive_bytes != 0u
+            && archive_bytes <= sql_bigint_value_max
+            && archive_checksum != 0u
+            && receipt_count == archive_count
+            && hash_passes == 1u && hashed_bytes == archive_bytes
+            && private_files_created == archive_count
+            && private_files_unlinked == archive_count
+            && live_private_paths == 0u
+            && pipeline_filesystem_hash_passes == 0u
+            && pipeline_filesystem_hashed_bytes == 0u
+            && helper_protocol_version == 2u
+            && safe_text(
+                helper_build_identity, helper_build_identity_size)
+            && safe_text(helper_source, helper_source_size)
+            && helper_source_text() == "installed_sibling"
+            && helper_executable_size != 0u
+            && helper_executable_size <= sql_bigint_value_max
+            && nonzero(helper_executable_sha256)
+            && helper_metal_registry_id != 0u
+            && nonzero(device_uuid) && api_version != 0u
+            && driver_version != 0u && vendor_id != 0u && device_id != 0u
+            && nonzero(pipeline_cache_uuid)
+            && seed_receipt_identity != 0u && nonzero(seed_sha256)
+            && seed_size != 0u && seed_size <= sql_bigint_value_max
+            && manifest_checksum != 0u && !saturated;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuCacheQualificationEvidence&) const noexcept =
+        default;
+};
+
 /// Report-once cache counters attached to the accepted operation authority.
 struct PersistedGpuCacheMetricsEvidence {
     std::uint64_t token_identity = 0u;
@@ -2360,6 +2465,7 @@ struct PersistedGpuOperationEvidence {
     std::uint64_t source_identity = 0u;
     std::uint64_t cold_load_identity = 0u;
     PersistedGpuEnvironmentEvidence environment{};
+    PersistedGpuCacheQualificationEvidence cache_qualification{};
     PersistedGpuCacheMetricsEvidence cache_metrics{};
 
     [[nodiscard]] bool accepted(
@@ -2389,7 +2495,22 @@ struct PersistedGpuOperationEvidence {
             || generation_id == 0u
             || generation_id > sql_bigint_value_max
             || source_identity == 0u || cold_load_identity == 0u
-            || !environment.accepted() || !cache_metrics.accepted()
+            || !environment.accepted() || !cache_qualification.accepted()
+            || cache_qualification.device_uuid != environment.device_uuid
+            || cache_qualification.api_version != environment.api_version
+            || cache_qualification.driver_version
+                != environment.driver_version
+            || cache_qualification.vendor_id != environment.vendor_id
+            || cache_qualification.device_id != environment.device_id
+            || cache_qualification.pipeline_cache_uuid
+                != environment.pipeline_cache_uuid
+            || cache_qualification.seed_receipt_identity
+                != seed_receipt_identity
+            || cache_qualification.seed_sha256 != environment.seed_sha256
+            || cache_qualification.seed_size != environment.seed_size
+            || cache_qualification.manifest_checksum
+                != environment.manifest_checksum
+            || !cache_metrics.accepted()
             || cache_metrics.token_identity != operation_identity
             || jobs.size() != publication.expected_jobs) {
             return false;
@@ -2641,7 +2762,9 @@ public:
                 || old.cold_load_identity != operation.cold_load_identity
                 || old.seed_receipt_identity
                     != operation.seed_receipt_identity
-                || old.environment != operation.environment) {
+                || old.environment != operation.environment
+                || old.cache_qualification
+                    != operation.cache_qualification) {
                 invalidate(1u, false);
                 return {};
             }
@@ -2748,6 +2871,19 @@ public:
                 || operation.environment.manifest_checksum
                     != stats.environment
                         .gpu_pipeline_cache_manifest_checksum
+                || !operation.cache_qualification.accepted()
+                || operation.cache_qualification.device_uuid
+                    != operation.environment.device_uuid
+                || operation.cache_qualification.pipeline_cache_uuid
+                    != operation.environment.pipeline_cache_uuid
+                || operation.cache_qualification.seed_sha256
+                    != operation.environment.seed_sha256
+                || operation.cache_qualification.seed_size
+                    != operation.environment.seed_size
+                || operation.cache_qualification.manifest_checksum
+                    != operation.environment.manifest_checksum
+                || operation.cache_qualification.seed_receipt_identity
+                    != operation.seed_receipt_identity
                 || ::bioseq::gpu::vulkan::
                     canonical_vulkan_driver_identity(identity)
                     != stats.environment.gpu_driver_identity

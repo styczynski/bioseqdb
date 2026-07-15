@@ -660,6 +660,46 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
         environment.seed_sha256[0] = 0x63u;
         environment.seed_size = 4096u;
         environment.manifest_checksum = 0x7777u;
+        PersistedGpuCacheQualificationEvidence qualification{};
+        qualification.version = 2u;
+        qualification.identity = 0x7171u;
+        qualification.archive_count = 2u;
+        qualification.archive_bytes = 4096u;
+        qualification.archive_checksum = 0x7272u;
+        qualification.receipt_count = 2u;
+        qualification.hash_passes = 1u;
+        qualification.hashed_bytes = 4096u;
+        qualification.private_files_created = 2u;
+        qualification.private_files_unlinked = 2u;
+        qualification.helper_protocol_version = 2u;
+        constexpr std::string_view helper_build =
+            "bioseq-metal-archive-builder-v2";
+        std::copy(
+            helper_build.begin(), helper_build.end(),
+            qualification.helper_build_identity.begin());
+        qualification.helper_build_identity_size =
+            static_cast<std::uint32_t>(helper_build.size());
+        constexpr std::string_view helper_source = "installed_sibling";
+        std::copy(
+            helper_source.begin(), helper_source.end(),
+            qualification.helper_source.begin());
+        qualification.helper_source_size =
+            static_cast<std::uint32_t>(helper_source.size());
+        qualification.helper_executable_size = 8192u;
+        qualification.helper_executable_sha256[0] = 0x73u;
+        qualification.helper_metal_registry_id = 0x7474u;
+        qualification.device_uuid = environment.device_uuid;
+        qualification.api_version = environment.api_version;
+        qualification.driver_version = environment.driver_version;
+        qualification.vendor_id = environment.vendor_id;
+        qualification.device_id = environment.device_id;
+        qualification.pipeline_cache_uuid =
+            environment.pipeline_cache_uuid;
+        qualification.seed_receipt_identity = 0x8888u;
+        qualification.seed_sha256 = environment.seed_sha256;
+        qualification.seed_size = environment.seed_size;
+        qualification.manifest_checksum = environment.manifest_checksum;
+        REQUIRE(qualification.accepted());
         chunk->operation() = PersistedGpuOperationEvidence{
             .operation_identity = shape_operation_identity,
             .publication = {
@@ -684,6 +724,7 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
             .source_identity = 0x9999u,
             .cold_load_identity = 0xaaaau,
             .environment = environment,
+            .cache_qualification = qualification,
             .cache_metrics = {
                 .token_identity = shape_operation_identity,
                 .pipeline_cache_loads = 1u,
@@ -846,6 +887,9 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
     });
     require_cross_operation_rejection([](auto& operation) {
         operation.seed_receipt_identity += 1u;
+    });
+    require_cross_operation_rejection([](auto& operation) {
+        operation.cache_qualification.identity += 1u;
     });
     require_cross_operation_rejection([](auto& operation) {
         operation.cold_load_identity += 1u;

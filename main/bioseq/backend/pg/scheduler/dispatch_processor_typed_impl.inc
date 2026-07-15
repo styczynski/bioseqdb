@@ -991,6 +991,66 @@ persisted_gpu_cache_metrics_evidence(
     };
 }
 
+template <std::size_t Capacity>
+[[nodiscard]] inline std::uint32_t copy_persisted_gpu_evidence_text(
+        std::array<char, Capacity>& destination,
+        const std::string_view source) noexcept {
+    if (source.empty() || source.size() > destination.size()
+        || source.size()
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+        return 0u;
+    }
+    std::copy(source.begin(), source.end(), destination.begin());
+    return static_cast<std::uint32_t>(source.size());
+}
+
+/// Copy the pointer/path/handle-free process qualification into the admitted
+/// SQL ledger. An oversized helper identity becomes an invalid zero-length
+/// field instead of allocating or truncating provenance.
+[[nodiscard]] inline ::bioseq::pipeline_stats::
+PersistedGpuCacheQualificationEvidence
+persisted_gpu_cache_qualification_evidence(
+        const bioseq::gpu::vulkan::
+            RuntimeMetalArchiveProcessQualification& source) noexcept {
+    ::bioseq::pipeline_stats::PersistedGpuCacheQualificationEvidence result{
+        .version = source.version,
+        .identity = source.identity,
+        .archive_count = source.archive_set.archive_count,
+        .archive_bytes = source.archive_set.total_size,
+        .archive_checksum = source.archive_set.ordered_checksum,
+        .receipt_count = source.receipt_count,
+        .hash_passes = source.hash_passes,
+        .hashed_bytes = source.hashed_bytes,
+        .private_files_created = source.private_files_created,
+        .private_files_unlinked = source.private_files_unlinked,
+        .live_private_paths = source.live_private_paths,
+        .pipeline_filesystem_hash_passes =
+            source.pipeline_filesystem_hash_passes,
+        .pipeline_filesystem_hashed_bytes =
+            source.pipeline_filesystem_hashed_bytes,
+        .helper_protocol_version = source.helper_protocol_version,
+        .helper_executable_size = source.helper_executable_size,
+        .helper_executable_sha256 = source.helper_executable_sha256,
+        .helper_metal_registry_id = source.helper_metal_registry_id,
+        .device_uuid = source.vulkan_device_uuid,
+        .api_version = source.api_version,
+        .driver_version = source.driver_version,
+        .vendor_id = source.vendor_id,
+        .device_id = source.device_id,
+        .pipeline_cache_uuid = source.pipeline_cache_uuid,
+        .seed_receipt_identity = source.seed_receipt_identity,
+        .seed_sha256 = source.seed_sha256,
+        .seed_size = source.seed_size,
+        .manifest_checksum = source.manifest_checksum,
+        .saturated = source.saturated,
+    };
+    result.helper_build_identity_size = copy_persisted_gpu_evidence_text(
+        result.helper_build_identity, source.helper_build_identity);
+    result.helper_source_size = copy_persisted_gpu_evidence_text(
+        result.helper_source, source.helper_source);
+    return result;
+}
+
 /// Copy one full-stage runtime job preview into the admitted ledger slot.
 [[nodiscard]] inline ::bioseq::pipeline_stats::PersistedGpuJobEvidence
 persisted_gpu_job_evidence(
@@ -1100,6 +1160,9 @@ persisted_gpu_operation_evidence(
             .seed_size = source.seed_size,
             .manifest_checksum = source.manifest_checksum,
         },
+        .cache_qualification =
+            persisted_gpu_cache_qualification_evidence(
+                source.cache_qualification),
         .cache_metrics = persisted_gpu_cache_metrics_evidence(
             source.maximum_cache_metrics),
     };
