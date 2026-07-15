@@ -5,7 +5,7 @@ module;
 
 export module bioseq.codegen;
 
-import :cli;
+export import :cli;
 
 export namespace bioseq::codegen {
 
