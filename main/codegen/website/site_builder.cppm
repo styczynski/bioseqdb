@@ -5,6 +5,7 @@ module;
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
@@ -15,6 +16,8 @@ module;
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <sys/stat.h>
 
 module bioseq.codegen.website:site_builder;
 
@@ -148,22 +151,53 @@ namespace fs = std::filesystem;
     return out;
 }
 
-/// @brief Parses `--key value` options; repeated scalars and unknown forms fatal.
+// A CLI misuse (unknown/repeated/positional/missing-value option). Distinct from
+// std::runtime_error so the dispatcher can return exit 2 (usage) versus exit 3
+// (parse/validation) per the §7 exit-code contract.
+struct cli_usage_error : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+[[nodiscard]] bool contains_key(
+    std::span<std::string_view const> set, std::string_view key) {
+    for (const std::string_view candidate : set) {
+        if (candidate == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// @brief Parses options against a closed set of value-taking keys and flags.
+///
+/// Unknown, repeated, positional, and value-less usages are all fatal usage
+/// errors. Flags map to `"true"`; value keys consume the following token.
 [[nodiscard]] std::map<std::string, std::string, std::less<>> parse_options(
-    std::span<std::string_view const> args) {
+    std::span<std::string_view const> args,
+    std::span<std::string_view const> value_keys,
+    std::span<std::string_view const> flag_keys) {
     std::map<std::string, std::string, std::less<>> options;
     for (std::size_t index = 0; index < args.size(); ++index) {
         const std::string_view token = args[index];
         if (!token.starts_with("--")) {
-            throw std::runtime_error("unexpected positional argument: "
-                                     + std::string(token));
-        }
-        if (index + 1 >= args.size()) {
-            throw std::runtime_error("missing value for option " + std::string(token));
+            throw cli_usage_error("unexpected positional argument: "
+                                  + std::string(token));
         }
         const std::string key(token.substr(2));
+        if (contains_key(flag_keys, key)) {
+            if (!options.emplace(key, "true").second) {
+                throw cli_usage_error("repeated option --" + key);
+            }
+            continue;
+        }
+        if (!contains_key(value_keys, key)) {
+            throw cli_usage_error("unknown option --" + key);
+        }
+        if (index + 1 >= args.size()) {
+            throw cli_usage_error("missing value for option --" + key);
+        }
         if (!options.emplace(key, std::string(args[index + 1])).second) {
-            throw std::runtime_error("repeated option --" + key);
+            throw cli_usage_error("repeated option --" + key);
         }
         ++index;
     }
@@ -175,9 +209,51 @@ namespace fs = std::filesystem;
     std::string_view key) {
     const auto found = options.find(key);
     if (found == options.end()) {
-        throw std::runtime_error("missing required option --" + std::string(key));
+        throw cli_usage_error("missing required option --" + std::string(key));
     }
     return found->second;
+}
+
+/// @brief Writes a private artifact atomically with mode 0600 (§5.1).
+///
+/// The temp file is created under a 0077 umask so the private permissions hold
+/// from creation — there is never a window where the file is world-readable.
+/// The content is only rewritten when it differs, keeping mtimes stable for
+/// incremental builds while still asserting the permission bits every run.
+void write_private_artifact(const fs::path& path, std::string_view content) {
+    std::error_code exists_error;
+    if (fs::exists(path, exists_error) && !exists_error) {
+        if (read_file(path) == content) {
+            std::error_code permission_error;
+            fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write,
+                            fs::perm_options::replace, permission_error);
+            return;
+        }
+    }
+    if (path.has_parent_path()) {
+        fs::create_directories(path.parent_path());
+    }
+    const fs::path temp = fs::path(path).concat(".tmp");
+    const ::mode_t previous_mask = ::umask(0077);
+    try {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("cannot open for write: " + temp.string());
+        }
+        out.write(content.data(), static_cast<std::streamsize>(content.size()));
+        out.flush();
+        if (!out) {
+            throw std::runtime_error("write failed: " + temp.string());
+        }
+    } catch (...) {
+        ::umask(previous_mask);
+        throw;
+    }
+    ::umask(previous_mask);
+    fs::rename(temp, path);
+    std::error_code permission_error;
+    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, permission_error);
 }
 
 [[nodiscard]] std::string plan_relative(const fs::path& path, const fs::path& source) {
@@ -215,7 +291,10 @@ void collect_examples_and_queries(
         }
     }
     if (node.kind == document_node_kind::entity_link) {
-        if (auto query = parse_entity_reference(node.target, source_span{})) {
+        // Carry the node's own source span when the Markdown stage recorded one;
+        // span population is refined as MD4C offsets are threaded through.
+        const source_span span = node.source ? *node.source : source_span{};
+        if (auto query = parse_entity_reference(node.target, span)) {
             queries.push_back(std::move(*query));
         }
     }
@@ -233,9 +312,13 @@ void collect_examples_and_queries(
 /// previous/next links, and writes the deterministic private plan artifact
 /// (schema bioseq.website.plan/v1) with mode 0600 (§5.1, §10).
 /// @param args Options after the `plan` token.
-/// @return Zero on success; three on any parse/validation failure.
+/// @return Zero on success; two on CLI usage errors; three on parse/validation.
 [[nodiscard]] int run_plan(std::span<std::string_view const> args) try {
-    const auto options = parse_options(args);
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "templates", "static",
+        "base-path", "source-revision", "output"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts"};
+    const auto options = parse_options(args, value_keys, flag_keys);
     const fs::path source = require_option(options, "source");
     const std::string version_string = require_option(options, "version");
     const fs::path site_config_path = require_option(options, "site-config");
@@ -333,6 +416,8 @@ void collect_examples_and_queries(
 
     website_plan plan;
     plan.schema_version = "bioseq.website.plan/v1";
+    plan.parser_version = "bioseq.website.parser/v1";
+    plan.binding_schema_version = "bioseq.website.bindings/v1";
     plan.version = version;
     plan.base_path = base_path;
     plan.source_revision = revision;
@@ -342,11 +427,11 @@ void collect_examples_and_queries(
     plan.signature = hex64(signature);
 
     const std::string serialized = serialize_plan(plan);
-    write_if_different(output, serialized);
-    std::error_code permission_error;
-    fs::permissions(output, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, permission_error);
+    write_private_artifact(output, serialized);
     return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website plan: {}", error.what());
+    return 2;
 } catch (const std::exception& error) {
     std::println(stderr, "website plan: {}", error.what());
     return 3;

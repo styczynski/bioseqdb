@@ -206,6 +206,8 @@ namespace {
 [[nodiscard]] std::string serialize_plan(const website_plan& plan) {
     boost::json::object root;
     root["schema"] = plan.schema_version;
+    root["parser_version"] = plan.parser_version;
+    root["binding_schema"] = plan.binding_schema_version;
     boost::json::object version;
     version["label"] = plan.version.path_component;
     boost::json::array parts;

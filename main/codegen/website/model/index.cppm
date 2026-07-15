@@ -112,6 +112,8 @@ struct plan_input {
 
 struct website_plan {
     std::string schema_version;
+    std::string parser_version;         // Markdown/frontmatter parser schema
+    std::string binding_schema_version; // template binding-schema version (§5.1)
     site_version version;
     std::string base_path;
     std::string source_revision;
