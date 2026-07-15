@@ -821,6 +821,52 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
         REQUIRE_FALSE(wrong_shape_domain->seal());
     }
 
+    const auto require_qualification_rejection = [&make_chunk](
+            const auto& mutate) {
+        auto chunk = make_chunk(0x1050u, 0x2050u, 35u);
+        REQUIRE(chunk != nullptr);
+        mutate(chunk->operation().cache_qualification);
+        REQUIRE_FALSE(chunk->seal());
+    };
+    require_qualification_rejection([](auto& qualification) {
+        qualification.hash_passes = 2u;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        --qualification.hashed_bytes;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        --qualification.private_files_unlinked;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.live_private_paths = 1u;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.pipeline_filesystem_hash_passes = 1u;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.helper_source[0] = 'x';
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.helper_executable_sha256 = {};
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.device_uuid[0] ^= 1u;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        ++qualification.seed_receipt_identity;
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.saturated = true;
+    });
+
+    auto zero_numeric_device_ids = make_chunk(0x1060u, 0x2060u, 36u);
+    REQUIRE(zero_numeric_device_ids != nullptr);
+    zero_numeric_device_ids->operation().environment.vendor_id = 0u;
+    zero_numeric_device_ids->operation().environment.device_id = 0u;
+    zero_numeric_device_ids->operation().cache_qualification.vendor_id = 0u;
+    zero_numeric_device_ids->operation().cache_qualification.device_id = 0u;
+    REQUIRE(zero_numeric_device_ids->seal());
+
     {
         PersistedGpuOperationEvidenceLedger ledger{};
         auto first = make_chunk(0x1000u, 0x2000u, 30u);
