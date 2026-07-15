@@ -2305,12 +2305,12 @@ void capture_persisted_gpu_operation_evidence(
     __int128 pipeline_create_sum = 0;
     __int128 pipeline_creation_ns_sum = 0;
     std::set<std::string> operation_identities;
+    std::set<std::string> pipeline_operation_identities;
     std::set<std::tuple<std::string, std::int64_t, std::int64_t>>
         logical_jobs;
     std::optional<std::string> common_seed_receipt_identity;
     std::optional<std::string> common_cold_load_identity;
-    std::optional<std::int64_t> query_zero_target_start;
-    std::optional<bool> query_zero_is_reverse;
+    bool output_coordinate_witness = false;
 
     for (const nlohmann::json& operation : operations) {
         if (!json_has_exact_keys(operation, kPersistedGpuOperationKeys)) {
@@ -2604,11 +2604,10 @@ void capture_persisted_gpu_operation_evidence(
                         + static_cast<__int128>(target_end - target_start)
                 && chain_score > 0 && seed_count > 0;
 
-            const bool query_zero_unique = query_index != 0
-                || !query_zero_target_start.has_value();
-            if (query_index == 0 && query_zero_unique) {
-                query_zero_target_start = target_start;
-                query_zero_is_reverse = is_reverse;
+            if (query_index == 0
+                && target_start == out.target_start
+                && is_reverse == out.is_reverse) {
+                output_coordinate_witness = true;
             }
 
             jobs_valid = jobs_valid
@@ -2616,10 +2615,9 @@ void capture_persisted_gpu_operation_evidence(
                     operation_identity,
                     logical_target_row,
                     logical_query_ordinal).second
-                && query_index < job_count
+                && query_index < expected_jobs
                 && query_valid && direct_valid && submissions_valid
-                && status_valid && forbidden_valid && coordinate_valid
-                && query_zero_unique;
+                && status_valid && forbidden_valid && coordinate_valid;
         }
 
         const bool seed_receipt_matches =
@@ -2635,6 +2633,10 @@ void capture_persisted_gpu_operation_evidence(
         }
         const bool identity_valid =
             operation_identities.emplace(operation_identity).second
+            && pipeline_operation_identities.emplace(
+                query_operation_identity).second
+            && pipeline_operation_identities.emplace(
+                shape_operation_identity).second
             && operation_identity != query_operation_identity
             && operation_identity == shape_operation_identity
             && query_operation_identity != shape_operation_identity
@@ -2685,10 +2687,7 @@ void capture_persisted_gpu_operation_evidence(
         && job_count == out.attempted_alignment_jobs
         && accepted_job_count == out.fully_attested_alignment_jobs
         && out.unattested_alignment_jobs == 0
-        && query_zero_target_start.has_value()
-        && *query_zero_target_start == out.target_start
-        && query_zero_is_reverse.has_value()
-        && *query_zero_is_reverse == out.is_reverse
+        && output_coordinate_witness
         && operation_equations_valid && aggregate_cache_valid;
     const bool expects_persisted_gpu = out.actual_backend == "vulkan_gpu"
         && out.actual_target_index_source == "persisted";

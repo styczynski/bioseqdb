@@ -2374,6 +2374,7 @@ struct PersistedGpuOperationEvidence {
             || submission_count > sql_bigint_value_max
             || query_pipeline_operation_identity == 0u
             || shape_pipeline_operation_identity == 0u
+            || shape_pipeline_operation_identity != operation_identity
             || query_pipeline_operation_identity
                 == shape_pipeline_operation_identity
             || query_submission_ordinals[0] == 0u
@@ -2417,9 +2418,18 @@ struct PersistedGpuOperationEvidence {
                     for (std::size_t prior_submission = 0u;
                          prior_submission < prior_submission_limit;
                          ++prior_submission) {
-                        previously_seen =
-                            jobs[prior_job].submissions[prior_submission]
-                                .ordinal == submission.ordinal;
+                        const auto& prior =
+                            jobs[prior_job].submissions[prior_submission];
+                        const bool same_ordinal =
+                            prior.ordinal == submission.ordinal;
+                        const bool same_wait = prior.submit_wait_identity
+                            == submission.submit_wait_identity;
+                        if ((same_ordinal || same_wait)
+                            && !(same_ordinal && same_wait
+                                && prior_submission == submission_index)) {
+                            return false;
+                        }
+                        previously_seen = same_ordinal;
                         if (previously_seen) break;
                     }
                 }
@@ -2613,30 +2623,23 @@ public:
         const auto& operation = chunk->operation();
         for (const PersistedGpuOperationEvidenceChunk* existing = head_.get();
              existing != nullptr; existing = existing->next()) {
-            if (existing->operation().operation_identity
-                    == operation.operation_identity) {
+            const auto& old = existing->operation();
+            if (old.operation_identity == operation.operation_identity
+                || old.query_pipeline_operation_identity
+                    == operation.query_pipeline_operation_identity
+                || old.query_pipeline_operation_identity
+                    == operation.shape_pipeline_operation_identity
+                || old.shape_pipeline_operation_identity
+                    == operation.query_pipeline_operation_identity) {
                 invalidate(1u, false);
                 return {};
             }
-            for (const auto& job : chunk->jobs()) {
-                for (const auto& old_job : existing->jobs()) {
-                    if (existing->operation().operation_identity
-                            == operation.operation_identity
-                        && old_job.logical_target_row
-                            == job.logical_target_row
-                        && old_job.logical_query_ordinal
-                            == job.logical_query_ordinal) {
-                        invalidate(1u, false);
-                        return {};
-                    }
-                }
-            }
-            if (existing->operation().generation_id
-                    != operation.generation_id
-                || existing->operation().source_identity
-                    != operation.source_identity
-                || existing->operation().environment
-                    != operation.environment) {
+            if (old.generation_id != operation.generation_id
+                || old.source_identity != operation.source_identity
+                || old.cold_load_identity != operation.cold_load_identity
+                || old.seed_receipt_identity
+                    != operation.seed_receipt_identity
+                || old.environment != operation.environment) {
                 invalidate(1u, false);
                 return {};
             }
