@@ -4805,7 +4805,6 @@ protected:
 
     struct SelectedControl {
         std::size_t query_index = no_route;
-        std::uint64_t position_begin = 0;
         std::uint64_t position_end = 0;
     };
 
@@ -4818,6 +4817,7 @@ protected:
         // retained control record.  next_position > position_begin is the
         // exact validity bit and naturally resets at each control boundary.
         std::uint64_t previous_position = 0;
+        bool previous_position_valid = false;
         bool controls_complete = false;
         bool positions_complete = false;
     };
@@ -5688,16 +5688,21 @@ protected:
                     protocol_selected_extents_[selected_index];
                 const std::size_t retained_before = selected.controls.size();
                 selected.controls.reserve(decoded->size());
+                std::uint64_t expected_position_begin = 0u;
                 for (const auto& control : *decoded) {
                     const std::size_t query_index =
                         query_index_for_hash(WireOps::hash(control));
                     const std::uint64_t begin =
                         WireOps::position_begin(control);
                     const std::uint64_t end = WireOps::position_end(control);
-                    if (end <= begin) {
+                    // Both wire codecs already enforce this partition while
+                    // decoding.  Recheck it at the retained-image boundary so
+                    // position_begin does not need to survive per control.
+                    if (begin != expected_position_begin || end <= begin) {
                         return std::unexpected(
                             MinimizerGenerationWireError::control_range);
                     }
+                    expected_position_begin = end;
                     if (query_index != no_route) {
                         QueryRecord& record =
                             protocol_query_records_[query_index];
@@ -5722,9 +5727,13 @@ protected:
                     }
                     selected.controls.push_back(SelectedControl{
                         .query_index = query_index,
-                        .position_begin = begin,
                         .position_end = end,
                     });
+                }
+                if (expected_position_begin
+                        != entry.position_element_count) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::control_range);
                 }
                 add_memory_evidence_(
                     protocol_memory_evidence_.
@@ -5886,25 +5895,24 @@ protected:
                             >= selected->controls[selected->next_control]
                                 .position_end) {
                     ++selected->next_control;
+                    selected->previous_position_valid = false;
                 }
                 if (selected->next_control < selected->controls.size()) {
                     SelectedControl& control =
                         selected->controls[selected->next_control];
-                    if (selected->next_position >= control.position_begin
-                        && selected->next_position < control.position_end) {
-                        if (selected->next_position > control.position_begin
-                            && *decoded <= selected->previous_position) {
-                            return std::unexpected(
-                                MinimizerGenerationWireError::position_range);
-                        }
-                        selected->previous_position = *decoded;
-                        if (control.query_index != no_route) {
-                            QueryRecord& record =
-                                protocol_query_records_[control.query_index];
-                            if (auto appended = append_retained_position(
-                                    record, *decoded); !appended) {
-                                return appended;
-                            }
+                    if (selected->previous_position_valid
+                        && *decoded <= selected->previous_position) {
+                        return std::unexpected(
+                            MinimizerGenerationWireError::position_range);
+                    }
+                    selected->previous_position = *decoded;
+                    selected->previous_position_valid = true;
+                    if (control.query_index != no_route) {
+                        QueryRecord& record =
+                            protocol_query_records_[control.query_index];
+                        if (auto appended = append_retained_position(
+                                record, *decoded); !appended) {
+                            return appended;
                         }
                     }
                 }
@@ -6121,6 +6129,7 @@ protected:
                    && extent.next_position
                         >= extent.controls[extent.next_control].position_end) {
                 ++extent.next_control;
+                extent.previous_position_valid = false;
             }
             if (!extent.controls_complete
                 || extent.next_position != entry.position_element_count

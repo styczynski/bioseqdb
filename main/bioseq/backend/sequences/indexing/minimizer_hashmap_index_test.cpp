@@ -7692,9 +7692,16 @@ TEST_CASE("DOC0371 prepared callbacks reject control and position corruption",
             std::move(controls), original_positions,
             MinimizerGenerationWireError::control_range);
     }
-    SECTION("non-contiguous local offset") {
+    SECTION("overlapping local offset") {
         auto controls = original_controls;
         test_write_le<std::uint32_t>(controls, 16u + 8u, 1u);
+        expect_finish_error(
+            std::move(controls), original_positions,
+            MinimizerGenerationWireError::control_range);
+    }
+    SECTION("gapped local offset") {
+        auto controls = original_controls;
+        test_write_le<std::uint32_t>(controls, 16u + 8u, 3u);
         expect_finish_error(
             std::move(controls), original_positions,
             MinimizerGenerationWireError::control_range);
@@ -8518,6 +8525,14 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
                 corrupt, entry, generation->directory.profile()),
             MinimizerGenerationWireError::control_range);
     }
+    SECTION("interior prefix cannot overlap") {
+        auto corrupt = control_bytes;
+        test_write_le<std::uint16_t>(corrupt, 10u, 0u);
+        require_wire_error(
+            decode_minimizer_shape_v5_controls(
+                corrupt, entry, generation->directory.profile()),
+            MinimizerGenerationWireError::control_range);
+    }
     SECTION("saturated count") {
         auto corrupt = control_bytes;
         test_write_le<std::uint16_t>(corrupt, 16u, 1u);
@@ -8745,7 +8760,7 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         >= query_count * sizeof(std::uint64_t));
     REQUIRE(evidence.decoded_control_records == query_count);
     REQUIRE(evidence.retained_selected_control_records == query_count);
-    REQUIRE(evidence.selected_control_size_bytes == 24u);
+    REQUIRE(evidence.selected_control_size_bytes == 16u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
         >= query_count * evidence.selected_control_size_bytes);
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
