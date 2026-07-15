@@ -15602,21 +15602,68 @@ bool Runtime::self_test_persisted_shape_v5_finalizer_preclaim_contract(
     const auto rejected_receipt = [&](auto mutate) {
         RuntimeMetalArchivePipelineAudit saved = receipts[10].audit_;
         mutate(receipts[10].audit_);
-        const bool result = rejected(expected, live_features);
+        const bool remained_valid = receipts[10].accepted();
+        const bool result = remained_valid
+            && rejected(expected, live_features);
         receipts[10].audit_ = std::move(saved);
         return result && claims_unchanged();
     };
-    if (!rejected_receipt([](auto& audit) {
-            ++audit.receipt_identity;
+    const auto change_nonzero = [](auto& value) {
+        using Value = std::remove_reference_t<decltype(value)>;
+        value = value == (std::numeric_limits<Value>::max)()
+            ? value - 1u
+            : value + 1u;
+    };
+    const auto change_nonzero_byte = [](auto& bytes) {
+        bytes[0] = bytes[0] == 0xffu
+            ? static_cast<std::uint8_t>(0xfeu)
+            : static_cast<std::uint8_t>(bytes[0] + 1u);
+    };
+    if (!rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.receipt_identity);
         })
         || !rejected_receipt([&](auto& audit) {
             audit.shader_key = keys[0];
         })
-        || !rejected_receipt([](auto& audit) {
-            audit.runtime_vulkan_device_uuid[0] ^= 0x20u;
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero_byte(audit.configured_vulkan_device_uuid);
+            audit.runtime_vulkan_device_uuid =
+                audit.configured_vulkan_device_uuid;
         })
-        || !rejected_receipt([](auto& audit) {
-            ++audit.pipeline_create_ns;
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.api_version);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.driver_version);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.vendor_id);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.device_id);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero_byte(audit.pipeline_cache_uuid);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero_byte(audit.seed_sha256);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.seed_size);
+            audit.seed_artifact_bytes = audit.seed_size;
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.manifest_checksum);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.seed_receipt_identity);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.expected_archives.ordered_checksum);
+            audit.loaded_archives = audit.expected_archives;
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.pipeline_create_ns);
         })) {
         return false;
     }
