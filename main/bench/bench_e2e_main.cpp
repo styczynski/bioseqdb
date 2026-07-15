@@ -152,18 +152,28 @@ enum class JustIndexSetupKind {
     Gpu,
 };
 
-struct E2eCliSelection {
-    bool saw_cases_filter = false;
-    // Scalar remains available as an explicitly filtered diagnostic, but the
-    // default six-row SIMD/GPU/minimap2 comparison must not build an unused
-    // scalar persisted sidecar during shared setup.
+struct E2eSetupSelection {
     bool scalar_just_index = false;
-    bool simd_just_index = true;
-    bool gpu_just_index = true;
-    bool minimap2_just_index = true;
+    bool simd_just_index = false;
+    bool gpu_just_index = false;
+    bool minimap2_just_index = false;
 };
 
-E2eCliSelection g_e2e_cli_selection{};
+struct E2eJustIndexSetupRequirements {
+    bool scalar_per_fragment = false;
+    bool scalar_per_sequence = false;
+    bool simd_per_fragment = false;
+    bool simd_per_sequence = false;
+    bool gpu_per_fragment = false;
+    bool gpu_per_sequence = false;
+    bool minimap2 = false;
+
+    [[nodiscard]] bool any_bioseq() const noexcept {
+        return scalar_per_fragment || scalar_per_sequence
+            || simd_per_fragment || simd_per_sequence
+            || gpu_per_fragment || gpu_per_sequence;
+    }
+};
 
 struct E2eQueryTruth {
     std::int32_t id = 0;
@@ -479,49 +489,97 @@ static_assert(
     E2eOutput::kAlignmentSnapshotColumnCount
     == E2eOutput::kAlignmentSnapshotV1ColumnCount + 1);
 
-void note_e2e_filtered_case(std::string_view name, E2eCliSelection& selection) {
+[[nodiscard]] std::optional<JustIndexSetupKind>
+e2e_just_index_setup_kind(std::string_view name) {
     if (name == "bioseq_ksw2_scalar_dp_scalar_mm_just_index") {
-        selection.scalar_just_index = true;
-    } else if (name == "bioseq_just_index"
-        || name == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
-        selection.simd_just_index = true;
-    } else if (name == "bioseq_block_vulkan_phase_c_frontend_just_index"
-               || name == "bioseq_block_gpu_dp_gpu_seed_just_index") {
-        selection.gpu_just_index = true;
-    } else if (name == "minimap2_just_index") {
-        selection.minimap2_just_index = true;
+        return JustIndexSetupKind::Scalar;
     }
+    if (name == "bioseq_just_index"
+        || name == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
+        return JustIndexSetupKind::Simd;
+    }
+    if (name == "bioseq_block_vulkan_phase_c_frontend_just_index"
+               || name == "bioseq_block_gpu_dp_gpu_seed_just_index") {
+        return JustIndexSetupKind::Gpu;
+    }
+    return std::nullopt;
 }
 
-void parse_e2e_cli_selection(int argc, char** argv) {
-    E2eCliSelection selection{};
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::string_view{argv[i]} != "--filter") {
+[[nodiscard]] E2eJustIndexSetupRequirements
+e2e_just_index_setup_requirements(
+        const RunConstraints& constraints) {
+    E2eJustIndexSetupRequirements requirements{};
+    for (const auto& tuple : constraints.execution_tuples) {
+        if (tuple.algorithm_name == "minimap2_just_index") {
+            requirements.minimap2 = true;
             continue;
         }
-        const std::string_view spec{argv[i + 1]};
-        constexpr std::string_view prefix = "cases=";
-        if (!spec.starts_with(prefix)) {
-            continue;
-        }
-        selection.saw_cases_filter = true;
-        selection.scalar_just_index = false;
-        selection.simd_just_index = false;
-        selection.gpu_just_index = false;
-        selection.minimap2_just_index = false;
-        std::string_view rest = spec.substr(prefix.size());
-        while (!rest.empty()) {
-            const std::size_t comma = rest.find(',');
-            const std::string_view item =
-                rest.substr(0, comma == std::string_view::npos ? rest.size() : comma);
-            note_e2e_filtered_case(item, selection);
-            if (comma == std::string_view::npos) {
-                break;
+        const auto setup_kind =
+            e2e_just_index_setup_kind(tuple.algorithm_name);
+        if (!setup_kind.has_value()) {
+            if (std::string_view{tuple.algorithm_name}.ends_with("_just_index")) {
+                throw std::invalid_argument(fmt::format(
+                    "unsupported E2E just_index execution tuple '{}'",
+                    tuple.algorithm_name));
             }
-            rest.remove_prefix(comma + 1);
+            continue;
         }
+        const auto policy_it = tuple.params.find("minimizer_index");
+        if (policy_it == tuple.params.end() || !policy_it->second.is_string()) {
+            throw std::invalid_argument(fmt::format(
+                "E2E just_index tuple '{}' has no resolved string "
+                "minimizer_index parameter",
+                tuple.algorithm_name));
+        }
+        const std::string_view policy = policy_it->second.as_string();
+        bool* required = nullptr;
+        if (policy == kMinimizersPerFragmentIndex) {
+            switch (*setup_kind) {
+                case JustIndexSetupKind::Scalar:
+                    required = &requirements.scalar_per_fragment;
+                    break;
+                case JustIndexSetupKind::Simd:
+                    required = &requirements.simd_per_fragment;
+                    break;
+                case JustIndexSetupKind::Gpu:
+                    required = &requirements.gpu_per_fragment;
+                    break;
+            }
+        } else if (policy == kMinimizersPerSequenceIndex) {
+            switch (*setup_kind) {
+                case JustIndexSetupKind::Scalar:
+                    required = &requirements.scalar_per_sequence;
+                    break;
+                case JustIndexSetupKind::Simd:
+                    required = &requirements.simd_per_sequence;
+                    break;
+                case JustIndexSetupKind::Gpu:
+                    required = &requirements.gpu_per_sequence;
+                    break;
+            }
+        } else {
+            throw std::invalid_argument(fmt::format(
+                "E2E just_index tuple '{}' resolved unsupported "
+                "minimizer_index '{}'",
+                tuple.algorithm_name,
+                policy));
+        }
+        *required = true;
     }
-    g_e2e_cli_selection = selection;
+    return requirements;
+}
+
+[[nodiscard]] E2eSetupSelection e2e_setup_selection_for(
+        const E2eJustIndexSetupRequirements& requirements) noexcept {
+    return E2eSetupSelection{
+        .scalar_just_index = requirements.scalar_per_fragment
+            || requirements.scalar_per_sequence,
+        .simd_just_index = requirements.simd_per_fragment
+            || requirements.simd_per_sequence,
+        .gpu_just_index = requirements.gpu_per_fragment
+            || requirements.gpu_per_sequence,
+        .minimap2_just_index = requirements.minimap2,
+    };
 }
 
 void preflight_e2e_resources(it::connection_test_context& conn,
@@ -5246,7 +5304,7 @@ template <sequence_alphabet A>
 [[nodiscard]] E2eInput e2e_input_typed(std::string_view /*data_dir*/,
                                        std::string_view test_case_name,
                                        simdjson::dom::element data,
-                                       const RunConstraints&) {
+                                       const RunConstraints& constraints) {
     gen::generator_params gp{};
     gp.reference_length       = static_cast<std::size_t>(jint(data, "reference_length", kDefaultReferenceLengthBp));
     gp.fragment_count         = static_cast<std::size_t>(jint(data, "fragment_count", 1));
@@ -5424,11 +5482,37 @@ template <sequence_alphabet A>
              just_index_setup_only_name);
         std::abort();
     }
-    const auto should_setup_just_index =
-        [&just_index_setup_only_name](std::string_view index_name) {
-            return just_index_setup_only_name.empty()
-                || just_index_setup_only_name == index_name;
-        };
+    if (constraints.execution_tuples.empty()) {
+        std::fputs(
+            "[bench_e2e] framework supplied no expanded execution tuples "
+            "to input setup\n",
+            stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+    const E2eJustIndexSetupRequirements setup_requirements =
+        e2e_just_index_setup_requirements(constraints);
+    const E2eSetupSelection setup_selection =
+        e2e_setup_selection_for(setup_requirements);
+    const bool setup_only_mismatch =
+        just_index_setup_only_name == kMinimizersPerFragmentIndex
+            ? setup_requirements.scalar_per_sequence
+                || setup_requirements.simd_per_sequence
+                || setup_requirements.gpu_per_sequence
+            : just_index_setup_only_name == kMinimizersPerSequenceIndex
+                ? setup_requirements.scalar_per_fragment
+                    || setup_requirements.simd_per_fragment
+                    || setup_requirements.gpu_per_fragment
+                : false;
+    if (setup_only_mismatch) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] just_index_setup_only='%s' conflicts with the "
+            "expanded execution tuple policies\n",
+            just_index_setup_only_name.c_str());
+        std::fflush(stderr);
+        std::abort();
+    }
     const char* just_index_setup_pipeline_env =
         std::getenv("BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE");
     const std::string just_index_setup_pipeline_mode =
@@ -5645,57 +5729,50 @@ template <sequence_alphabet A>
     // (5) just_index tables: each indexed cell gets its own table and policy.
     // This avoids a per-sequence run accidentally succeeding through a residual
     // per-fragment index, and keeps the per-fragment cell valid too.
-    if (!skip_index_baseline_setup
-        && (g_e2e_cli_selection.scalar_just_index
-            || g_e2e_cli_selection.simd_just_index
-            || g_e2e_cli_selection.gpu_just_index)) {
-        if (should_setup_just_index(kMinimizersPerFragmentIndex)) {
-            if (g_e2e_cli_selection.scalar_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_scalar_per_fragment,
-                    kMinimizersPerFragmentIndex,
-                    JustIndexSetupKind::Scalar);
-            }
-            if (g_e2e_cli_selection.simd_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_simd_per_fragment,
-                    kMinimizersPerFragmentIndex,
-                    JustIndexSetupKind::Simd);
-            }
-            if (g_e2e_cli_selection.gpu_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_gpu_per_fragment,
-                    kMinimizersPerFragmentIndex,
-                    JustIndexSetupKind::Gpu);
-            }
+    if (!skip_index_baseline_setup && setup_requirements.any_bioseq()) {
+        if (setup_requirements.scalar_per_fragment) {
+            setup_just_index_table(
+                in.just_index_table_scalar_per_fragment,
+                kMinimizersPerFragmentIndex,
+                JustIndexSetupKind::Scalar);
         }
-        if (should_setup_just_index(kMinimizersPerSequenceIndex)) {
-            if (g_e2e_cli_selection.scalar_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_scalar_per_sequence,
-                    kMinimizersPerSequenceIndex,
-                    JustIndexSetupKind::Scalar);
-            }
-            if (g_e2e_cli_selection.simd_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_simd_per_sequence,
-                    kMinimizersPerSequenceIndex,
-                    JustIndexSetupKind::Simd);
-            }
-            if (g_e2e_cli_selection.gpu_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_gpu_per_sequence,
-                    kMinimizersPerSequenceIndex,
-                    JustIndexSetupKind::Gpu);
-            }
+        if (setup_requirements.simd_per_fragment) {
+            setup_just_index_table(
+                in.just_index_table_simd_per_fragment,
+                kMinimizersPerFragmentIndex,
+                JustIndexSetupKind::Simd);
+        }
+        if (setup_requirements.gpu_per_fragment) {
+            setup_just_index_table(
+                in.just_index_table_gpu_per_fragment,
+                kMinimizersPerFragmentIndex,
+                JustIndexSetupKind::Gpu);
+        }
+        if (setup_requirements.scalar_per_sequence) {
+            setup_just_index_table(
+                in.just_index_table_scalar_per_sequence,
+                kMinimizersPerSequenceIndex,
+                JustIndexSetupKind::Scalar);
+        }
+        if (setup_requirements.simd_per_sequence) {
+            setup_just_index_table(
+                in.just_index_table_simd_per_sequence,
+                kMinimizersPerSequenceIndex,
+                JustIndexSetupKind::Simd);
+        }
+        if (setup_requirements.gpu_per_sequence) {
+            setup_just_index_table(
+                in.just_index_table_gpu_per_sequence,
+                kMinimizersPerSequenceIndex,
+                JustIndexSetupKind::Gpu);
         }
     } else {
         bioseq_log<DBG>("[bench_e2e] skipping bioseq persisted-index setup "
                 "(skip_index_baseline_setup={}, scalar_just_index={}, simd_just_index={}, gpu_just_index={})",
                 skip_index_baseline_setup,
-                g_e2e_cli_selection.scalar_just_index,
-                g_e2e_cli_selection.simd_just_index,
-                g_e2e_cli_selection.gpu_just_index);
+                setup_selection.scalar_just_index,
+                setup_selection.simd_just_index,
+                setup_selection.gpu_just_index);
     }
 
     // (6) no_index table: create empty. Each rep loads base data untimed, proves
@@ -5705,13 +5782,13 @@ template <sequence_alphabet A>
 
     // (7) minimap2 prebuilt .mmi for the just_index baseline (untimed).
     if (!skip_index_baseline_setup && !skip_minimap2_baseline_setup
-        && g_e2e_cli_selection.minimap2_just_index) {
+        && setup_requirements.minimap2) {
         run_cmd(fmt::format("{} -k{} -w{} -d {} {}", BIOSEQ_E2E_MINIMAP2_BIN,
                             in.kmer_size, in.window_size, in.mmi_path, in.target_fasta_split));
     } else if (skip_minimap2_baseline_setup) {
         bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi baseline setup because "
                 "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP=1");
-    } else if (!g_e2e_cli_selection.minimap2_just_index) {
+    } else if (!setup_requirements.minimap2) {
         bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi setup because "
                 "minimap2_just_index is not selected");
     }
@@ -9532,7 +9609,6 @@ HWY_AFTER_NAMESPACE();    // close the Highway per-target namespace
 #ifndef BIOSEQ_E2E_CONTRACT_TEST
 int main(int argc, char** argv) {
     log_configure(true); fmtlog::setLogLevel(fmtlog::INF);
-    parse_e2e_cli_selection(argc, argv);
     const char* cfg_override = std::getenv("BIOSEQ_E2E_CONFIG_OVERRIDE");
     const std::string cfg{cfg_override != nullptr && *cfg_override != '\0'
         ? cfg_override
