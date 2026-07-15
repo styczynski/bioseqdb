@@ -239,11 +239,16 @@ struct MetalArchiveQualificationReceipt {
             && helper_metal_registry_id != 0u;
     }
     [[nodiscard]] bool production_accepted() const noexcept {
-        return accepted() && helper_source == "installed-sibling";
+        return accepted() && helper_source == "installed-sibling"
+            && helper_build_identity == "bioseq_gpu_archive_builder_v2";
     }
     [[nodiscard]] bool operator==(
         const MetalArchiveQualificationReceipt&) const noexcept = default;
 };
+
+[[nodiscard]] std::expected<void, std::string>
+validate_metal_archive_receipt_against_process_helper(
+    const MetalArchiveQualificationReceipt& receipt);
 
 /// One exact artifact byte image retained from the single sealed-seed load.
 /// The descriptor and bytes are immutable after the private seed constructor
@@ -547,6 +552,11 @@ struct RunCaptureLimits {
     std::chrono::milliseconds timeout = std::chrono::minutes(5);
 };
 
+struct RunCaptureInheritedFd {
+    int source_fd = -1;
+    int target_fd = -1;
+};
+
 class CaptureFileDescriptor {
 public:
     explicit CaptureFileDescriptor(int fd = -1) noexcept : fd_(fd) {}
@@ -703,7 +713,8 @@ private:
 
 [[nodiscard]] inline std::expected<std::string, std::string> run_capture(
     std::span<const std::string> args,
-    RunCaptureLimits limits = {})
+    RunCaptureLimits limits = {},
+    std::span<const RunCaptureInheritedFd> inherited_fds = {})
 {
     if (args.empty()) {
         return std::unexpected("empty command");
@@ -753,6 +764,27 @@ private:
         if (action_error != 0) {
             return std::unexpected(shader_cache_message(
                 args[0], " could not configure spawn actions: errno ",
+                action_error));
+        }
+    }
+    for (std::size_t index = 0u; index < inherited_fds.size(); ++index) {
+        const RunCaptureInheritedFd inherited = inherited_fds[index];
+        if (inherited.source_fd < 0 || inherited.target_fd < 3
+            || inherited.source_fd == inherited.target_fd) {
+            return std::unexpected(
+                "invalid inherited descriptor for command capture");
+        }
+        for (std::size_t prior = 0u; prior < index; ++prior) {
+            if (inherited_fds[prior].target_fd == inherited.target_fd) {
+                return std::unexpected(
+                    "duplicate inherited descriptor target for command capture");
+            }
+        }
+        if (const int action_error = actions.add_dup2(
+                inherited.source_fd, inherited.target_fd);
+            action_error != 0) {
+            return std::unexpected(shader_cache_message(
+                args[0], " could not inherit command descriptor: errno ",
                 action_error));
         }
     }
@@ -2865,6 +2897,16 @@ load_validated_artifact_bytes(
                 "Metal archive qualification is not production v2 for ",
                 archive.filename));
         }
+#if defined(__APPLE__)
+        if (auto current =
+                validate_metal_archive_receipt_against_process_helper(
+                    *qualification);
+            !current) {
+            return std::unexpected(shader_cache_message(
+                "Metal archive qualification helper mismatch for ",
+                archive.filename, ": ", current.error()));
+        }
+#endif
         if (qualification->archive_size != archive.size
             || qualification->archive_sha256 != archive.sha256) {
             return std::unexpected(shader_cache_message(
@@ -3055,6 +3097,16 @@ validate_all_artifact_images(
                 "Metal archive qualification is not production v2 for ",
                 archive.descriptor.filename));
         }
+#if defined(__APPLE__)
+        if (auto current =
+                validate_metal_archive_receipt_against_process_helper(
+                    *qualification);
+            !current) {
+            return std::unexpected(shader_cache_message(
+                "Metal archive qualification helper mismatch for ",
+                archive.descriptor.filename, ": ", current.error()));
+        }
+#endif
         if (qualification->archive_size != archive.descriptor.size
             || qualification->archive_sha256 != archive.descriptor.sha256) {
             return std::unexpected(shader_cache_message(
@@ -3912,20 +3964,36 @@ load_sealed_shader_cache_manifest_for_key(
 }
 
 struct QualifiedMetalArchiveHelper {
+    bioseq::parallelism::MemoryPermit permit;
     std::filesystem::path path;
     sealed_shader_cache_detail::RegularFileIdentity identity{};
     std::uint64_t executable_size = 0u;
     std::array<std::uint8_t, 32> executable_sha256{};
+    std::vector<std::byte> executable_bytes;
     std::string source;
     std::uint64_t hash_passes = 0u;
 
     [[nodiscard]] bool accepted() const noexcept {
-        return !path.empty() && executable_size != 0u && hash_passes == 1u
+        return permit && permit.bytes() == owned_capacity_bytes()
+            && !path.empty() && executable_size != 0u && hash_passes == 1u
+            && executable_bytes.size() == executable_size
             && (source == "installed-sibling"
                 || source == "test-env-override")
             && std::any_of(
                 executable_sha256.begin(), executable_sha256.end(),
                 [](std::uint8_t byte) { return byte != 0u; });
+    }
+
+    [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        std::uint64_t owned = sizeof(QualifiedMetalArchiveHelper);
+        owned = saturating_add(
+            owned, static_cast<std::uint64_t>(path.native().capacity()));
+        owned = saturating_add(
+            owned, static_cast<std::uint64_t>(executable_bytes.capacity()));
+        owned = saturating_add(
+            owned, static_cast<std::uint64_t>(source.capacity()));
+        return owned;
     }
 };
 
@@ -3933,7 +4001,8 @@ struct QualifiedMetalArchiveHelper {
 load_qualified_metal_archive_helper()
 {
 #if !defined(__APPLE__)
-    return QualifiedMetalArchiveHelper{};
+    return std::unexpected(
+        "Metal archive helper qualification is unavailable off Apple platforms");
 #else
     std::filesystem::path path;
     std::string source;
@@ -3965,33 +4034,65 @@ load_qualified_metal_archive_helper()
     struct stat path_status {};
     if (::lstat(path.c_str(), &path_status) != 0
         || !S_ISREG(path_status.st_mode) || S_ISLNK(path_status.st_mode)
-        || (path_status.st_mode & S_IWOTH) != 0
+        || (path_status.st_mode & (S_IWGRP | S_IWOTH)) != 0
+        || (path_status.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0
         || ::access(path.c_str(), X_OK) != 0) {
         return std::unexpected(shader_cache_message(
             "archive helper is not a non-symlink executable regular file: ",
             path.string()));
     }
-    auto digest = sealed_shader_cache_detail::stream_stable_regular_file_digest(
+    if (path_status.st_size <= 0
+        || static_cast<std::uint64_t>(path_status.st_size)
+            > sealed_shader_cache_detail::maximum_seed_artifact_bytes) {
+        return std::unexpected("archive helper executable size is invalid");
+    }
+    const std::uint64_t admission_peak =
+        bioseq::parallelism::saturating_add(
+            bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(path_status.st_size),
+                bioseq::parallelism::kVectorPreallocationHeadroomFactor),
+            sizeof(QualifiedMetalArchiveHelper) + 4096u);
+    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
+    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+        .try_reserve(admission_peak, &admission_failure);
+    if (!permit) {
+        return std::unexpected(
+            "archive helper executable memory admission denied");
+    }
+    auto image = sealed_shader_cache_detail::read_stable_regular_file(
         path, "qualified Metal archive helper",
+        static_cast<std::uint64_t>(path_status.st_size),
         sealed_shader_cache_detail::maximum_seed_artifact_bytes);
-    if (!digest) return std::unexpected(digest.error());
+    if (!image) return std::unexpected(image.error());
     struct stat after_status {};
     if (::lstat(path.c_str(), &after_status) != 0
         || !S_ISREG(after_status.st_mode) || S_ISLNK(after_status.st_mode)
-        || (after_status.st_mode & S_IWOTH) != 0
+        || (after_status.st_mode & (S_IWGRP | S_IWOTH)) != 0
+        || (after_status.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0
+        || ::access(path.c_str(), X_OK) != 0
         || sealed_shader_cache_detail::regular_file_identity(after_status)
-            != digest->identity) {
+            != image->identity) {
         return std::unexpected(
             "archive helper identity changed during process qualification");
     }
     QualifiedMetalArchiveHelper helper{
+        .permit = std::move(*permit),
         .path = std::move(path),
-        .identity = digest->identity,
-        .executable_size = digest->size,
-        .executable_sha256 = digest->sha256,
+        .identity = image->identity,
+        .executable_size = static_cast<std::uint64_t>(image->bytes.size()),
+        .executable_sha256 =
+            sealed_shader_cache_detail::sha256(image->bytes),
+        .executable_bytes = std::move(image->bytes),
         .source = std::move(source),
         .hash_passes = 1u,
     };
+    const std::uint64_t retained = helper.owned_capacity_bytes();
+    if (retained == (std::numeric_limits<std::uint64_t>::max)()
+        || retained > helper.permit.bytes()) {
+        return std::unexpected(
+            "archive helper executable ownership admission saturated");
+    }
+    helper.permit.shrink_to(retained);
     if (!helper.accepted()) {
         return std::unexpected("archive helper qualification is incomplete");
     }
@@ -4001,25 +4102,56 @@ load_qualified_metal_archive_helper()
 
 class QualifiedMetalArchiveHelperProcessStore {
 public:
-    [[nodiscard]] std::expected<QualifiedMetalArchiveHelper, std::string>
+    [[nodiscard]] std::expected<
+        std::shared_ptr<const QualifiedMetalArchiveHelper>, std::string>
     load_once()
     {
         std::lock_guard<std::mutex> guard(mutex_);
-        if (helper_) return *helper_;
+        if (result_) return *result_;
+        ++qualification_attempt_count_;
         auto loaded = load_qualified_metal_archive_helper();
-        if (!loaded) return std::unexpected(loaded.error());
-        helper_ = std::move(*loaded);
-        return *helper_;
+        if (!loaded) {
+            result_.emplace(std::unexpected(loaded.error()));
+            return *result_;
+        }
+        filesystem_hash_count_ += loaded->hash_passes;
+        auto retained =
+            std::make_shared<const QualifiedMetalArchiveHelper>(
+                std::move(*loaded));
+        result_.emplace(std::move(retained));
+        return *result_;
     }
 
     [[nodiscard]] std::uint64_t filesystem_hash_count() const noexcept {
         std::lock_guard<std::mutex> guard(mutex_);
-        return helper_ ? helper_->hash_passes : 0u;
+        return filesystem_hash_count_;
+    }
+
+    [[nodiscard]] std::uint64_t qualification_attempt_count() const noexcept {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return qualification_attempt_count_;
+    }
+
+    [[nodiscard]] bool reset_for_test() noexcept {
+        const char* enabled =
+            std::getenv("BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY");
+        if (enabled == nullptr || std::string_view{enabled} != "1") {
+            return false;
+        }
+        std::lock_guard<std::mutex> guard(mutex_);
+        result_.reset();
+        filesystem_hash_count_ = 0u;
+        qualification_attempt_count_ = 0u;
+        return true;
     }
 
 private:
     mutable std::mutex mutex_;
-    std::optional<QualifiedMetalArchiveHelper> helper_;
+    std::optional<std::expected<
+        std::shared_ptr<const QualifiedMetalArchiveHelper>, std::string>>
+        result_;
+    std::uint64_t filesystem_hash_count_ = 0u;
+    std::uint64_t qualification_attempt_count_ = 0u;
 };
 
 [[nodiscard]] inline QualifiedMetalArchiveHelperProcessStore&
@@ -4029,12 +4161,37 @@ qualified_metal_archive_helper_process_store() noexcept
     return store;
 }
 
+[[nodiscard]] inline std::expected<void, std::string>
+validate_metal_archive_receipt_against_process_helper(
+    const MetalArchiveQualificationReceipt& receipt)
+{
+    if (!receipt.production_accepted()) {
+        return std::unexpected(
+            "archive receipt is not production qualification v2");
+    }
+    auto helper = qualified_metal_archive_helper_process_store().load_once();
+    if (!helper) return std::unexpected(helper.error());
+    const QualifiedMetalArchiveHelper& current = **helper;
+    if (current.source != receipt.helper_source
+        || current.executable_size != receipt.helper_executable_size
+        || current.executable_sha256 != receipt.helper_executable_sha256
+        || current.hash_passes != 1u
+        || qualified_metal_archive_helper_process_store()
+                .filesystem_hash_count() != 1u
+        || qualified_metal_archive_helper_process_store()
+                .qualification_attempt_count() != 1u) {
+        return std::unexpected(
+            "archive receipt does not match current once-qualified helper executable");
+    }
+    return {};
+}
+
 [[nodiscard]] inline std::expected<std::filesystem::path, std::string>
 metal_archive_helper_path()
 {
     auto helper = qualified_metal_archive_helper_process_store().load_once();
     if (!helper) return std::unexpected(helper.error());
-    return helper->path;
+    return (*helper)->path;
 }
 
 [[nodiscard]] inline bool archive_helper_transcript_is_exact_success(
@@ -4189,6 +4346,266 @@ parse_archive_helper_qualification_v2(std::string_view transcript)
     };
 }
 
+inline constexpr int archive_helper_metallib_child_fd = 197;
+
+[[nodiscard]] inline std::expected<void, std::string>
+write_and_verify_exact_fd(int fd, std::span<const std::byte> bytes)
+{
+    std::size_t offset = 0u;
+    while (offset < bytes.size()) {
+        const ssize_t written = ::write(
+            fd, bytes.data() + offset, bytes.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            return std::unexpected(
+                "private helper staging write failed");
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    if (::fsync(fd) != 0 || ::lseek(fd, 0, SEEK_SET) < 0) {
+        return std::unexpected(
+            "private helper staging sync/rewind failed");
+    }
+    std::array<std::byte, 64u << 10u> scratch{};
+    std::size_t verified = 0u;
+    for (;;) {
+        const ssize_t count = ::read(fd, scratch.data(), scratch.size());
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            return std::unexpected(
+                "private helper staging verification read failed");
+        }
+        if (count == 0) break;
+        const std::size_t chunk = static_cast<std::size_t>(count);
+        if (verified > bytes.size() || chunk > bytes.size() - verified
+            || !std::equal(
+                scratch.begin(),
+                scratch.begin() + static_cast<std::ptrdiff_t>(chunk),
+                bytes.begin() + static_cast<std::ptrdiff_t>(verified))) {
+            return std::unexpected(
+                "private helper staging bytes differ from qualified image");
+        }
+        verified += chunk;
+    }
+    if (verified != bytes.size() || ::lseek(fd, 0, SEEK_SET) < 0) {
+        return std::unexpected(
+            "private helper staging verification is incomplete");
+    }
+    return {};
+}
+
+class StagedArchiveHelperInvocation {
+public:
+    StagedArchiveHelperInvocation() = default;
+    StagedArchiveHelperInvocation(const StagedArchiveHelperInvocation&) = delete;
+    StagedArchiveHelperInvocation& operator=(
+        const StagedArchiveHelperInvocation&) = delete;
+    StagedArchiveHelperInvocation(
+        StagedArchiveHelperInvocation&& other) noexcept
+        : directory_(std::exchange(other.directory_, {})),
+          helper_path_(std::exchange(other.helper_path_, {})),
+          helper_fd_(std::exchange(other.helper_fd_, -1)),
+          metallib_fd_(std::exchange(other.metallib_fd_, -1)),
+          helper_identity_(other.helper_identity_),
+          helper_linked_(std::exchange(other.helper_linked_, false)) {}
+    ~StagedArchiveHelperInvocation() noexcept { cleanup(); }
+
+    [[nodiscard]] const std::filesystem::path& helper_path() const noexcept {
+        return helper_path_;
+    }
+    [[nodiscard]] int metallib_fd() const noexcept { return metallib_fd_; }
+
+    [[nodiscard]] bool helper_identity_matches() const noexcept {
+        if (helper_fd_ < 0 || helper_path_.empty() || !helper_linked_) {
+            return false;
+        }
+        struct stat fd_status {};
+        struct stat path_status {};
+        return ::fstat(helper_fd_, &fd_status) == 0
+            && ::lstat(helper_path_.c_str(), &path_status) == 0
+            && S_ISREG(fd_status.st_mode) && S_ISREG(path_status.st_mode)
+            && !S_ISLNK(path_status.st_mode)
+            && sealed_shader_cache_detail::regular_file_identity(fd_status)
+                == helper_identity_
+            && sealed_shader_cache_detail::regular_file_identity(path_status)
+                == helper_identity_;
+    }
+
+    [[nodiscard]] std::expected<void, std::string> finish()
+    {
+        if (!helper_identity_matches()) {
+            return std::unexpected(
+                "private archive helper identity changed across execution");
+        }
+        if (::unlink(helper_path_.c_str()) != 0) {
+            return std::unexpected(
+                "private archive helper could not be unlinked");
+        }
+        helper_linked_ = false;
+        struct stat absent {};
+        errno = 0;
+        if (::lstat(helper_path_.c_str(), &absent) == 0 || errno != ENOENT) {
+            return std::unexpected(
+                "private archive helper name remained after unlink");
+        }
+        if (::close(std::exchange(helper_fd_, -1)) != 0
+            || ::close(std::exchange(metallib_fd_, -1)) != 0) {
+            return std::unexpected(
+                "private archive helper descriptors did not close");
+        }
+        helper_path_.clear();
+        if (::rmdir(directory_.c_str()) != 0) {
+            return std::unexpected(
+                "private archive helper directory did not disappear");
+        }
+        directory_.clear();
+        return {};
+    }
+
+private:
+    void cleanup() noexcept {
+        if (helper_linked_ && !helper_path_.empty()) {
+            (void)::unlink(helper_path_.c_str());
+        }
+        if (helper_fd_ >= 0) (void)::close(helper_fd_);
+        if (metallib_fd_ >= 0) (void)::close(metallib_fd_);
+        if (!directory_.empty()) (void)::rmdir(directory_.c_str());
+        helper_linked_ = false;
+        helper_fd_ = -1;
+        metallib_fd_ = -1;
+    }
+
+    std::filesystem::path directory_;
+    std::filesystem::path helper_path_;
+    int helper_fd_ = -1;
+    int metallib_fd_ = -1;
+    sealed_shader_cache_detail::RegularFileIdentity helper_identity_{};
+    bool helper_linked_ = false;
+
+    friend std::expected<StagedArchiveHelperInvocation, std::string>
+    stage_archive_helper_invocation(
+        const QualifiedMetalArchiveHelper&,
+        int);
+};
+
+[[nodiscard]] inline std::expected<StagedArchiveHelperInvocation, std::string>
+stage_archive_helper_invocation(
+    const QualifiedMetalArchiveHelper& helper,
+    int metallib_fd)
+{
+    if (!helper.accepted() || metallib_fd < 0) {
+        return std::unexpected(
+            "private archive helper staging inputs are incomplete");
+    }
+    std::error_code temp_error;
+    const std::filesystem::path temp_parent =
+        std::filesystem::temp_directory_path(temp_error);
+    std::error_code canonical_error;
+    const std::filesystem::path canonical_parent = temp_error
+        ? std::filesystem::path{}
+        : std::filesystem::canonical(temp_parent, canonical_error);
+    if (temp_error || canonical_error || !canonical_parent.is_absolute()) {
+        return std::unexpected(
+            "private archive helper staging parent is invalid");
+    }
+    std::string pattern =
+        (canonical_parent / ".bioseq-archive-helper-XXXXXX").string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+    char* directory = ::mkdtemp(writable.data());
+    if (directory == nullptr) {
+        return std::unexpected(
+            "private archive helper directory creation failed");
+    }
+    StagedArchiveHelperInvocation staged;
+    staged.directory_ = directory;
+    if (::chmod(staged.directory_.c_str(), S_IRWXU) != 0) {
+        return std::unexpected(
+            "private archive helper directory restriction failed");
+    }
+    struct stat directory_status {};
+    if (::lstat(staged.directory_.c_str(), &directory_status) != 0
+        || !S_ISDIR(directory_status.st_mode)
+        || directory_status.st_uid != ::geteuid()
+        || (directory_status.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+        return std::unexpected(
+            "private archive helper directory identity is invalid");
+    }
+    staged.helper_path_ = staged.directory_ / "helper";
+    staged.helper_fd_ = ::open(
+        staged.helper_path_.c_str(),
+        O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+        S_IRWXU);
+    if (staged.helper_fd_ < 0) {
+        return std::unexpected(
+            "private archive helper executable creation failed");
+    }
+    staged.helper_linked_ = true;
+    if (auto exact = write_and_verify_exact_fd(
+            staged.helper_fd_, helper.executable_bytes);
+        !exact) {
+        return std::unexpected(exact.error());
+    }
+    if (::fchmod(staged.helper_fd_, S_IRUSR | S_IXUSR) != 0) {
+        return std::unexpected(
+            "private archive helper executable mode failed");
+    }
+    struct stat helper_status {};
+    if (::fstat(staged.helper_fd_, &helper_status) != 0
+        || !S_ISREG(helper_status.st_mode)
+        || helper_status.st_uid != ::geteuid()
+        || (helper_status.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+        return std::unexpected(
+            "private archive helper executable identity is invalid");
+    }
+    staged.helper_identity_ =
+        sealed_shader_cache_detail::regular_file_identity(helper_status);
+    // Do not carry a writable executable descriptor across posix_spawn.
+    // Darwin may reject execution while the vnode is still open for writing,
+    // and the retained proof should hold only a non-mutating descriptor.
+    if (::close(std::exchange(staged.helper_fd_, -1)) != 0) {
+        return std::unexpected(
+            "private archive helper writable descriptor did not close");
+    }
+    staged.helper_fd_ = ::open(
+        staged.helper_path_.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat reopened_helper_status {};
+    if (staged.helper_fd_ < 0
+        || ::fstat(staged.helper_fd_, &reopened_helper_status) != 0
+        || !S_ISREG(reopened_helper_status.st_mode)
+        || sealed_shader_cache_detail::regular_file_identity(
+               reopened_helper_status)
+            != staged.helper_identity_) {
+        return std::unexpected(
+            "private archive helper read-only reopen changed identity");
+    }
+
+    if (::lseek(metallib_fd, 0, SEEK_SET) < 0) {
+        return std::unexpected(
+            "qualified metallib descriptor rewind failed");
+    }
+    staged.metallib_fd_ =
+        ::fcntl(
+            metallib_fd,
+            F_DUPFD_CLOEXEC,
+            archive_helper_metallib_child_fd + 1);
+    struct stat source_metallib {};
+    struct stat inherited_metallib {};
+    if (staged.metallib_fd_ < 0
+        || ::fstat(metallib_fd, &source_metallib) != 0
+        || ::fstat(staged.metallib_fd_, &inherited_metallib) != 0
+        || !S_ISREG(inherited_metallib.st_mode)
+        || sealed_shader_cache_detail::regular_file_identity(
+               source_metallib)
+            != sealed_shader_cache_detail::regular_file_identity(
+                inherited_metallib)
+        || !staged.helper_identity_matches()) {
+        return std::unexpected(
+            "private archive staging identity changed before execution");
+    }
+    return staged;
+}
+
 [[nodiscard]] inline std::expected<void, std::string> ensure_binary_archive(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key,
@@ -4246,15 +4663,53 @@ parse_archive_helper_qualification_v2(std::string_view transcript)
     if (!helper) {
         return std::unexpected(helper.error());
     }
+    const QualifiedMetalArchiveHelper& qualified_helper = **helper;
     const std::filesystem::path metallib_path =
         cache_metallib_path(cache_dir, key);
-    auto metallib_digest =
-        sealed_shader_cache_detail::stream_stable_regular_file_digest(
-            metallib_path, "qualified Metal shader library",
-            sealed_shader_cache_detail::maximum_seed_artifact_bytes);
-    if (!metallib_digest) {
-        return std::unexpected(metallib_digest.error());
+    const int metallib_fd = ::open(
+        metallib_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (metallib_fd < 0) {
+        return std::unexpected(
+            "qualified Metal shader library open failed");
     }
+    CaptureFileDescriptor metallib_fd_owner{metallib_fd};
+    struct stat metallib_before {};
+    if (::fstat(metallib_fd, &metallib_before) != 0
+        || !S_ISREG(metallib_before.st_mode)
+        || metallib_before.st_size <= 0
+        || static_cast<std::uint64_t>(metallib_before.st_size)
+            > sealed_shader_cache_detail::maximum_seed_artifact_bytes) {
+        return std::unexpected(
+            "qualified Metal shader library identity is invalid");
+    }
+    sealed_shader_cache_detail::Sha256 metallib_hasher;
+    std::array<std::byte, 64u << 10u> metallib_scratch{};
+    std::uint64_t metallib_size = 0u;
+    for (;;) {
+        const ssize_t count = ::read(
+            metallib_fd, metallib_scratch.data(), metallib_scratch.size());
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            return std::unexpected(
+                "qualified Metal shader library hash read failed");
+        }
+        if (count == 0) break;
+        const std::size_t chunk = static_cast<std::size_t>(count);
+        metallib_hasher.update(std::span<const std::byte>{
+            metallib_scratch.data(), chunk});
+        metallib_size += static_cast<std::uint64_t>(chunk);
+    }
+    struct stat metallib_after {};
+    if (::fstat(metallib_fd, &metallib_after) != 0
+        || sealed_shader_cache_detail::regular_file_identity(metallib_before)
+            != sealed_shader_cache_detail::regular_file_identity(
+                metallib_after)
+        || metallib_size != static_cast<std::uint64_t>(metallib_after.st_size)
+        || ::lseek(metallib_fd, 0, SEEK_SET) < 0) {
+        return std::unexpected(
+            "qualified Metal shader library changed during hash");
+    }
+    const auto metallib_sha256 = metallib_hasher.finalize();
 
     const std::uint64_t shader_threads =
         static_cast<std::uint64_t>(std::max<std::uint32_t>(meta.wg_x, 1u))
@@ -4297,40 +4752,58 @@ parse_archive_helper_qualification_v2(std::string_view transcript)
         std::filesystem::remove(qualification_tmp, ec);
         ec.clear();
 
+        auto staged_helper = stage_archive_helper_invocation(
+            qualified_helper, metallib_fd);
+        if (!staged_helper) {
+            std::filesystem::remove(tmp_path, ec);
+            std::filesystem::remove(qualification_tmp, ec);
+            return std::unexpected(staged_helper.error());
+        }
         const std::vector<std::string> args{
-            helper->path.string(),
-            metallib_path.string(),
+            staged_helper->helper_path().string(),
+            "/dev/fd/" + std::to_string(archive_helper_metallib_child_fd),
             tmp_path.string(),
             std::string(entry_name),
             std::to_string(max_threads),
             "0",
         };
-        if (!sealed_shader_cache_detail::same_regular_file_identity(
-                helper->path, helper->identity)
-            || !sealed_shader_cache_detail::same_regular_file_identity(
-                metallib_path, metallib_digest->identity)) {
+        if (!staged_helper->helper_identity_matches()) {
             std::filesystem::remove(tmp_path, ec);
             std::filesystem::remove(qualification_tmp, ec);
             return std::unexpected(
-                "archive helper or metallib identity changed before helper execution");
+                "private archive helper identity changed before execution");
         }
+        const std::array inherited_fds{
+            RunCaptureInheritedFd{
+                .source_fd = staged_helper->metallib_fd(),
+                .target_fd = archive_helper_metallib_child_fd,
+            },
+        };
         auto result = run_capture(
             args,
             RunCaptureLimits{
                 .maximum_output_bytes = 64u << 10u,
                 .timeout = std::chrono::minutes(2),
-            });
-        const bool helper_identity_unchanged =
-            sealed_shader_cache_detail::same_regular_file_identity(
-                helper->path, helper->identity);
+            },
+            inherited_fds);
+        struct stat metallib_after_execution {};
         const bool metallib_identity_unchanged =
-            sealed_shader_cache_detail::same_regular_file_identity(
-                metallib_path, metallib_digest->identity);
-        if (!helper_identity_unchanged || !metallib_identity_unchanged) {
+            ::fstat(metallib_fd, &metallib_after_execution) == 0
+            && sealed_shader_cache_detail::regular_file_identity(
+                   metallib_after_execution)
+                == sealed_shader_cache_detail::regular_file_identity(
+                    metallib_after);
+        auto staging_finished = staged_helper->finish();
+        if (!staging_finished) {
+            std::filesystem::remove(tmp_path, ec);
+            std::filesystem::remove(qualification_tmp, ec);
+            return std::unexpected(staging_finished.error());
+        }
+        if (!metallib_identity_unchanged) {
             std::filesystem::remove(tmp_path, ec);
             std::filesystem::remove(qualification_tmp, ec);
             return std::unexpected(
-                "archive helper or metallib identity changed during helper execution");
+                "qualified metallib descriptor identity changed during helper execution");
         }
         if (!result) {
             std::filesystem::remove(tmp_path, ec);
@@ -4385,8 +4858,8 @@ parse_archive_helper_qualification_v2(std::string_view transcript)
             .wire_version =
                 sealed_shader_cache_detail::archive_qualification_version,
             .shader_key = key,
-            .metallib_size = metallib_digest->size,
-            .metallib_sha256 = metallib_digest->sha256,
+            .metallib_size = metallib_size,
+            .metallib_sha256 = metallib_sha256,
             .entry_name = std::string(entry_name),
             .max_total_threads_per_threadgroup = max_threads,
             .threadgroup_size_is_multiple = false,
@@ -4397,9 +4870,10 @@ parse_archive_helper_qualification_v2(std::string_view transcript)
                 helper_qualification->protocol_version,
             .helper_build_identity =
                 std::move(helper_qualification->build_identity),
-            .helper_source = helper->source,
-            .helper_executable_size = helper->executable_size,
-            .helper_executable_sha256 = helper->executable_sha256,
+            .helper_source = qualified_helper.source,
+            .helper_executable_size = qualified_helper.executable_size,
+            .helper_executable_sha256 =
+                qualified_helper.executable_sha256,
             .helper_metal_registry_id =
                 helper_qualification->metal_registry_id,
         };
