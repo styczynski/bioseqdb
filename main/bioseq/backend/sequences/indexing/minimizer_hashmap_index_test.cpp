@@ -1354,6 +1354,95 @@ TEST_CASE("DOC0371 CRC-64/ECMA-182 is exact and incrementally composable",
         == 0x6C40DF5F0B497347ULL);
 }
 
+TEST_CASE("DOC0373 validated row CRC algebra reconstructs raw extent CRC",
+          "[indexing][minimizer-hashmap][wire][crc][cold-load][extent-crc]") {
+    using namespace bioseq::indexing;
+
+    REQUIRE(crc64_ecma182_advance_zero_bytes(0, 0) == 0);
+    REQUIRE(crc64_ecma182_concatenate(
+        crc64_ecma182("control"), crc64_ecma182("position"), 8u)
+        == crc64_ecma182("controlposition"));
+
+    const IndexChunkAddress signed_address{
+        .generation_id = 0xFEDCBA9876543210ULL,
+        .position_segment = (std::numeric_limits<std::int32_t>::min)() + 17,
+        .sub_key = (std::numeric_limits<index_sub_key_t>::min)() + 29,
+        .chunk_no = 0x89ABCDEFu,
+    };
+    constexpr std::uint32_t signed_length = 0x10203040u;
+    Crc64Ecma182 independently_encoded_prefix;
+    independently_encoded_prefix.update_little_endian(
+        signed_address.generation_id);
+    independently_encoded_prefix.update_little_endian(
+        std::bit_cast<std::uint32_t>(signed_address.position_segment));
+    independently_encoded_prefix.update_little_endian(
+        std::bit_cast<std::uint64_t>(signed_address.sub_key));
+    independently_encoded_prefix.update_little_endian(signed_address.chunk_no);
+    independently_encoded_prefix.update_little_endian(signed_length);
+    REQUIRE(crc64_index_chunk_row_prefix(
+        signed_address.generation_id,
+        signed_address.position_segment,
+        signed_address.sub_key,
+        signed_address.chunk_no,
+        signed_length) == independently_encoded_prefix.checksum());
+
+    std::uint64_t algebraic_extent = 0;
+    Crc64Ecma182 direct_extent;
+    std::uint64_t random_state = 0xD1B54A32D192ED03ULL;
+    const auto next_random = [&random_state]() noexcept {
+        random_state ^= random_state >> 12u;
+        random_state ^= random_state << 25u;
+        random_state ^= random_state >> 27u;
+        return random_state * 0x2545F4914F6CDD1DULL;
+    };
+    const auto append_case = [&](std::size_t length, std::uint32_t ordinal) {
+        INFO("payload length=" << length << " ordinal=" << ordinal);
+        std::vector<std::byte> payload(length);
+        for (std::byte& byte : payload) {
+            byte = static_cast<std::byte>(next_random() & 0xffu);
+        }
+        const IndexChunkAddress address{
+            .generation_id = 0x8000000000000000ULL + ordinal,
+            .position_segment = ordinal % 2u == 0
+                ? (std::numeric_limits<std::int32_t>::min)()
+                    + static_cast<std::int32_t>(ordinal)
+                : (std::numeric_limits<std::int32_t>::max)()
+                    - static_cast<std::int32_t>(ordinal),
+            .sub_key = ordinal % 2u == 0
+                ? (std::numeric_limits<index_sub_key_t>::min)()
+                    + static_cast<index_sub_key_t>(ordinal)
+                : (std::numeric_limits<index_sub_key_t>::max)()
+                    - static_cast<index_sub_key_t>(ordinal),
+            .chunk_no = 0xF0000000u + ordinal,
+        };
+        const auto bytes = std::span<const std::byte>{payload};
+        const auto chunk_bytes = static_cast<std::uint32_t>(bytes.size());
+        const std::uint64_t row_checksum = crc64_index_chunk_row(
+            address.generation_id,
+            address.position_segment,
+            address.sub_key,
+            address.chunk_no,
+            chunk_bytes,
+            bytes);
+        direct_extent.update(bytes);
+        algebraic_extent = crc64_append_validated_index_chunk_payload(
+            algebraic_extent, address, chunk_bytes, row_checksum);
+        REQUIRE(algebraic_extent == direct_extent.checksum());
+    };
+
+    const std::array<std::size_t, 6> boundary_lengths{
+        0u, 1u, 17u, 8063u, 8064u, 31u};
+    std::uint32_t ordinal = 0;
+    for (const std::size_t length : boundary_lengths) {
+        append_case(length, ordinal++);
+    }
+    for (std::size_t iteration = 0; iteration < 128u; ++iteration) {
+        append_case(static_cast<std::size_t>(next_random() % 8065u), ordinal++);
+    }
+
+    REQUIRE(algebraic_extent == direct_extent.checksum());
+}
+
 TEST_CASE("DOC0371 generation head has a fixed little-endian 64-byte wire image",
           "[indexing][minimizer-hashmap][wire]") {
     using namespace bioseq::indexing;

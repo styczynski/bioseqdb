@@ -192,7 +192,13 @@ struct ColdIndexPreparationStatsPg {
     std::uint64_t heap_tid_adjacent = 0;
     std::uint64_t heap_tid_forward_gap = 0;
     std::uint64_t heap_tid_backward_jump = 0;
+    // extent_crc_bytes is the frozen logical byte-coverage counter. The three
+    // additive counters distinguish raw payload traversal from authenticated
+    // algebraic combination without changing that public meaning.
     std::uint64_t extent_crc_bytes = 0;
+    std::uint64_t extent_crc_raw_bytes_hashed = 0;
+    std::uint64_t extent_crc_combined_bytes = 0;
+    std::uint64_t extent_crc_combine_rows = 0;
     std::uint64_t row_crc_bytes = 0;
     std::uint64_t tuple_form_bytes = 0;
     std::uint64_t toast_values = 0;
@@ -271,6 +277,10 @@ struct ColdIndexPreparationStatsPg {
         add(heap_tid_forward_gap, rhs.heap_tid_forward_gap);
         add(heap_tid_backward_jump, rhs.heap_tid_backward_jump);
         add(extent_crc_bytes, rhs.extent_crc_bytes);
+        add(extent_crc_raw_bytes_hashed,
+            rhs.extent_crc_raw_bytes_hashed);
+        add(extent_crc_combined_bytes, rhs.extent_crc_combined_bytes);
+        add(extent_crc_combine_rows, rhs.extent_crc_combine_rows);
         add(row_crc_bytes, rhs.row_crc_bytes);
         add(tuple_form_bytes, rhs.tuple_form_bytes);
         add(toast_values, rhs.toast_values);
@@ -4583,81 +4593,8 @@ struct MinimizerGenerationReadStats {
 
 namespace rev3_full_generation_crc_detail {
 
-using CrcLinearOperator = std::array<std::uint64_t, 64>;
-
-[[nodiscard]] constexpr std::uint64_t apply_operator(
-        const CrcLinearOperator& operation,
-        std::uint64_t value) noexcept {
-    std::uint64_t result = 0;
-    for (std::size_t bit = 0; bit < operation.size(); ++bit) {
-        if ((value & (std::uint64_t{1} << bit)) != 0) {
-            result ^= operation[bit];
-        }
-    }
-    return result;
-}
-
-[[nodiscard]] constexpr CrcLinearOperator square_operator(
-        const CrcLinearOperator& operation) noexcept {
-    CrcLinearOperator squared{};
-    for (std::size_t bit = 0; bit < squared.size(); ++bit) {
-        squared[bit] = apply_operator(operation, operation[bit]);
-    }
-    return squared;
-}
-
-[[nodiscard]] constexpr CrcLinearOperator zero_byte_operator() noexcept {
-    CrcLinearOperator operation{};
-    for (std::size_t bit = 0; bit < operation.size(); ++bit) {
-        const std::uint64_t basis = std::uint64_t{1} << bit;
-        operation[bit] = (basis & (std::uint64_t{1} << 63u)) != 0
-            ? (basis << 1u) ^ bioseq::indexing::kCrc64Ecma182Polynomial
-            : basis << 1u;
-    }
-    operation = square_operator(operation); // two zero bits
-    operation = square_operator(operation); // four zero bits
-    operation = square_operator(operation); // one zero byte
-    return operation;
-}
-
-inline const auto zero_byte_operator_powers = [] {
-    std::array<CrcLinearOperator, 64> powers{};
-    powers[0] = zero_byte_operator();
-    for (std::size_t power = 1; power < powers.size(); ++power) {
-        powers[power] = square_operator(powers[power - 1u]);
-    }
-    return powers;
-}();
-
-/// Advance one CRC state by `zero_byte_count` zero bytes in O(log n).
-[[nodiscard]] inline std::uint64_t advance_zero_bytes(
-        std::uint64_t checksum,
-        std::uint64_t zero_byte_count) noexcept {
-    std::size_t power = 0;
-    while (zero_byte_count != 0) {
-        if ((zero_byte_count & 1u) != 0) {
-            checksum = apply_operator(
-                zero_byte_operator_powers[power], checksum);
-        }
-        zero_byte_count >>= 1u;
-        ++power;
-    }
-    return checksum;
-}
-
-/// CRC(A || B) from CRC(A), CRC(B), and the byte length of B. Revision-3 uses
-/// the non-reflected ECMA polynomial with zero initial/final XOR, so the state
-/// transition is linear and concatenation is advance(A,len(B)) XOR B.
-[[nodiscard]] inline std::uint64_t concatenate(
-        std::uint64_t left_checksum,
-        std::uint64_t right_checksum,
-        std::uint64_t right_byte_count) noexcept {
-    return advance_zero_bytes(left_checksum, right_byte_count)
-        ^ right_checksum;
-}
-
 [[nodiscard]] inline bool concatenation_self_test() noexcept {
-    return concatenate(
+    return bioseq::indexing::crc64_ecma182_concatenate(
         bioseq::indexing::crc64_ecma182(std::string_view{"control"}),
         bioseq::indexing::crc64_ecma182(std::string_view{"position"}),
         std::string_view{"position"}.size())
@@ -6124,6 +6061,9 @@ private:
             || stats_.cold.payload_bytes_scanned != streamed_bytes
             || stats_.cold.row_crc_bytes != streamed_bytes
             || stats_.cold.extent_crc_bytes != streamed_bytes
+            || stats_.cold.extent_crc_raw_bytes_hashed != 0
+            || stats_.cold.extent_crc_combined_bytes != streamed_bytes
+            || stats_.cold.extent_crc_combine_rows != streamed_chunks
             || (streamed_chunks == 0
                 ? cold_tid_transitions != 0
                 : cold_tid_transitions != streamed_chunks - 1)
@@ -6737,7 +6677,16 @@ public:
                     fail_("full-generation row receipt lost validated authority");
                 }
 
-                extent_checksum.update(row.bytes);
+                extent_checksum.value = bioseq::indexing::
+                    crc64_append_validated_index_chunk_payload(
+                        extent_checksum.checksum(),
+                        row.address,
+                        row.chunk_bytes,
+                        validated_row_checksum);
+                stats_.cold.add(
+                    stats_.cold.extent_crc_combined_bytes,
+                    row.bytes.size());
+                stats_.cold.add(stats_.cold.extent_crc_combine_rows, 1);
                 extent_row_checksum.update_little_endian(
                     validated_row_checksum);
                 if (position_extent) {
@@ -6747,7 +6696,7 @@ public:
                                 entry.control_chunk_count)
                             * sizeof(std::uint64_t);
                         payload_row_checksum.value =
-                            rev3_full_generation_crc_detail::concatenate(
+                            bioseq::indexing::crc64_ecma182_concatenate(
                                 payload_row_checksum.checksum(),
                                 control_extent_row_checksums[entry_index],
                                 control_checksum_bytes);
@@ -7090,10 +7039,41 @@ public:
                     }
                     checked_add_(matched->total_bytes, row.bytes.size(),
                         "payload extent byte count overflow");
-                    matched->checksum.update(row.bytes);
+                    std::uint64_t validated_row_checksum = 0u;
+                    bool receipt_matches_row = false;
+                    const bool receipt_visited = row.validated_receipt.has_value()
+                        && bioseq::indexing::
+                            visit_validated_minimizer_generation_row(
+                                *row.validated_receipt,
+                                [&](const IndexChunkAddress& receipt_address,
+                                    std::span<const std::byte> receipt_bytes,
+                                    std::uint64_t receipt_checksum) noexcept {
+                                    receipt_matches_row =
+                                        receipt_address == row.address
+                                        && receipt_bytes.data()
+                                            == row.bytes.data()
+                                        && receipt_bytes.size()
+                                            == row.bytes.size();
+                                    validated_row_checksum = receipt_checksum;
+                                });
+                    if (!receipt_visited || !receipt_matches_row) {
+                        row.release();
+                        fail_("payload row receipt lost validated authority");
+                    }
+                    matched->checksum.value = bioseq::indexing::
+                        crc64_append_validated_index_chunk_payload(
+                            matched->checksum.checksum(),
+                            row.address,
+                            row.chunk_bytes,
+                            validated_row_checksum);
                     stats_.cold.add(
                         stats_.cold.extent_crc_bytes,
                         row.bytes.size());
+                    stats_.cold.add(
+                        stats_.cold.extent_crc_combined_bytes,
+                        row.bytes.size());
+                    stats_.cold.add(
+                        stats_.cold.extent_crc_combine_rows, 1);
                     sink(row.address,
                         reinterpret_cast<const char*>(row.bytes.data()),
                         row.bytes.size());
@@ -7363,6 +7343,11 @@ public:
                 || stats_.cold.row_crc_bytes != stats_.payload_bytes_read
                 || stats_.cold.extent_crc_bytes
                     != stats_.payload.delivered_bytes
+                || stats_.cold.extent_crc_raw_bytes_hashed != 0
+                || stats_.cold.extent_crc_combined_bytes
+                    != stats_.payload.delivered_bytes
+                || stats_.cold.extent_crc_combine_rows
+                    != stats_.payload.delivered_chunks
                 || (stats_.payload.heap_rows_read == 0
                     ? cold_tid_transitions != 0
                     : cold_tid_transitions

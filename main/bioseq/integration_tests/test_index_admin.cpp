@@ -2374,7 +2374,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
                 "10::smallint, {}::smallint)) SELECT "
                 "jsonb_typeof(cold)='object', "
                 "cold->>'schema'='bioseq.cold_index_selective_probe', "
-                "(cold->>'version')::bigint=1, "
+                "(cold->>'version')::bigint=2, "
                 "cold->>'timing_semantics'='payload_inclusive_wall_v1', "
                 "jsonb_typeof(cold->'decode_timing_available')='boolean' "
                 "AND NOT (cold->>'decode_timing_available')::boolean "
@@ -2393,9 +2393,11 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
                 "'payload_bytes_requested','payload_bytes_delivered',"
                 "'payload_bytes_scanned','heap_tid_adjacent',"
                 "'heap_tid_forward_gap','heap_tid_backward_jump',"
-                "'extent_crc_bytes','row_crc_bytes','payload_ns',"
+                "'extent_crc_bytes','extent_crc_raw_bytes_hashed',"
+                "'extent_crc_combined_bytes','extent_crc_combine_rows',"
+                "'row_crc_bytes','payload_ns',"
                 "'decode_ns','transfer_ns','stats_saturated']::text[], "
-                "(SELECT count(*) FROM jsonb_object_keys(cold))=24, "
+                "(SELECT count(*) FROM jsonb_object_keys(cold))=27, "
                 "NOT EXISTS (SELECT 1 FROM jsonb_each(cold) AS entry "
                 "WHERE entry.key NOT IN ('schema','timing_semantics',"
                 "'decode_timing_available','transfer_timing_available',"
@@ -2424,11 +2426,16 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
                 "(cold->>'payload_bytes_scanned')::bigint, "
                 "(cold->>'extent_crc_bytes')::bigint="
                 "(cold->>'payload_bytes_delivered')::bigint, "
+                "(cold->>'extent_crc_raw_bytes_hashed')::bigint=0, "
+                "(cold->>'extent_crc_combined_bytes')::bigint="
+                "(cold->>'payload_bytes_delivered')::bigint, "
+                "(cold->>'extent_crc_combine_rows')::bigint="
+                "(cold->>'payload_rows_delivered')::bigint, "
                 "(cold->>'payload_ns')::bigint>=0 FROM fixture;",
                 rowno, wire_format,
                 expected_full_probe ? 0 : 1,
                 expected_full_probe ? 1 : 0));
-            REQUIRE(selective_proof.size() == 18);
+            REQUIRE(selective_proof.size() == 21);
             for (const auto& assertion : selective_proof) {
                 REQUIRE(assertion.value_or("") == "t");
             }

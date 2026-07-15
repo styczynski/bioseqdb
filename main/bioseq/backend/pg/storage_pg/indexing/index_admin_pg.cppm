@@ -4457,6 +4457,9 @@ read_rev3_pg_integration_fixture_impl(
                 || probe_cold.payload_bytes_scanned != 0
                 || probe_cold.row_crc_bytes != 0
                 || probe_cold.extent_crc_bytes != 0
+                || probe_cold.extent_crc_raw_bytes_hashed != 0
+                || probe_cold.extent_crc_combined_bytes != 0
+                || probe_cold.extent_crc_combine_rows != 0
                 || probe_tid_transitions != 0
             : probe_cold.payload_rows_requested
                     != probe_cold.payload_rows_delivered
@@ -4472,6 +4475,11 @@ read_rev3_pg_integration_fixture_impl(
                     != probe_cold.payload_bytes_scanned
                 || probe_cold.extent_crc_bytes
                     != probe_cold.payload_bytes_delivered
+                || probe_cold.extent_crc_raw_bytes_hashed != 0
+                || probe_cold.extent_crc_combined_bytes
+                    != probe_cold.payload_bytes_delivered
+                || probe_cold.extent_crc_combine_rows
+                    != probe_cold.payload_rows_delivered
                 || probe_tid_transitions
                     != probe_cold.payload_rows_scanned - 1u;
         if (probe_cold.route_empty

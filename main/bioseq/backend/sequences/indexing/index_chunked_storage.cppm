@@ -32,6 +32,8 @@ inline constexpr std::uint64_t kCrc64Ecma182Polynomial = 0x42F0E1EBA9EA3693ULL;
 
 namespace bioseq::indexing::crc64_ecma182_detail {
 
+using LinearOperator = std::array<std::uint64_t, 64>;
+
 [[nodiscard]] consteval std::array<std::uint64_t, 256> make_table() noexcept {
     std::array<std::uint64_t, 256> table{};
     for (std::size_t index = 0; index < table.size(); ++index) {
@@ -47,6 +49,50 @@ namespace bioseq::indexing::crc64_ecma182_detail {
 }
 
 inline constexpr auto table = make_table();
+
+[[nodiscard]] constexpr std::uint64_t apply_operator(
+        const LinearOperator& operation,
+        std::uint64_t value) noexcept {
+    std::uint64_t result = 0;
+    for (std::size_t bit = 0; bit < operation.size(); ++bit) {
+        if ((value & (std::uint64_t{1} << bit)) != 0) {
+            result ^= operation[bit];
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] constexpr LinearOperator square_operator(
+        const LinearOperator& operation) noexcept {
+    LinearOperator squared{};
+    for (std::size_t bit = 0; bit < squared.size(); ++bit) {
+        squared[bit] = apply_operator(operation, operation[bit]);
+    }
+    return squared;
+}
+
+[[nodiscard]] constexpr LinearOperator zero_byte_operator() noexcept {
+    LinearOperator operation{};
+    for (std::size_t bit = 0; bit < operation.size(); ++bit) {
+        const std::uint64_t basis = std::uint64_t{1} << bit;
+        operation[bit] = (basis & (std::uint64_t{1} << 63u)) != 0
+            ? (basis << 1u) ^ kCrc64Ecma182Polynomial
+            : basis << 1u;
+    }
+    operation = square_operator(operation); // two zero bits
+    operation = square_operator(operation); // four zero bits
+    operation = square_operator(operation); // one zero byte
+    return operation;
+}
+
+inline const auto zero_byte_operator_powers = [] {
+    std::array<LinearOperator, 64> powers{};
+    powers[0] = zero_byte_operator();
+    for (std::size_t power = 1; power < powers.size(); ++power) {
+        powers[power] = square_operator(powers[power - 1u]);
+    }
+    return powers;
+}();
 
 } // namespace bioseq::indexing::crc64_ecma182_detail
 
@@ -109,6 +155,50 @@ struct Crc64Ecma182 {
     return crc.checksum();
 }
 
+/// Advance one zero-initialized, no-final-XOR CRC state by zero bytes. The
+/// persisted ECMA-182 convention is linear, so callers may combine already
+/// authenticated checksums without rereading their raw byte images.
+[[nodiscard]] inline std::uint64_t crc64_ecma182_advance_zero_bytes(
+        std::uint64_t checksum,
+        std::uint64_t zero_byte_count) noexcept {
+    std::size_t power = 0;
+    while (zero_byte_count != 0) {
+        if ((zero_byte_count & 1u) != 0) {
+            checksum = crc64_ecma182_detail::apply_operator(
+                crc64_ecma182_detail::zero_byte_operator_powers[power],
+                checksum);
+        }
+        zero_byte_count >>= 1u;
+        ++power;
+    }
+    return checksum;
+}
+
+/// CRC(A || B) from CRC(A), CRC(B), and the byte length of B.
+[[nodiscard]] inline std::uint64_t crc64_ecma182_concatenate(
+        std::uint64_t left_checksum,
+        std::uint64_t right_checksum,
+        std::uint64_t right_byte_count) noexcept {
+    return crc64_ecma182_advance_zero_bytes(
+        left_checksum, right_byte_count) ^ right_checksum;
+}
+
+/// Checksum the fixed 28-byte little-endian address/size prefix of one row.
+[[nodiscard]] constexpr std::uint64_t crc64_index_chunk_row_prefix(
+        std::uint64_t generation_id,
+        std::int32_t position_segment,
+        index_sub_key_t sub_key,
+        std::uint32_t chunk_no,
+        std::uint32_t chunk_bytes) noexcept {
+    Crc64Ecma182 crc;
+    crc.update_little_endian(generation_id);
+    crc.update_little_endian(std::bit_cast<std::uint32_t>(position_segment));
+    crc.update_little_endian(std::bit_cast<std::uint64_t>(sub_key));
+    crc.update_little_endian(chunk_no);
+    crc.update_little_endian(chunk_bytes);
+    return crc.checksum();
+}
+
 /// Checksum one payload row over its fixed LE address/size prefix and raw blob.
 [[nodiscard]] constexpr std::uint64_t crc64_index_chunk_row(
         std::uint64_t generation_id,
@@ -117,12 +207,8 @@ struct Crc64Ecma182 {
         std::uint32_t chunk_no,
         std::uint32_t chunk_bytes,
         std::span<const std::byte> blob) noexcept {
-    Crc64Ecma182 crc;
-    crc.update_little_endian(generation_id);
-    crc.update_little_endian(std::bit_cast<std::uint32_t>(position_segment));
-    crc.update_little_endian(std::bit_cast<std::uint64_t>(sub_key));
-    crc.update_little_endian(chunk_no);
-    crc.update_little_endian(chunk_bytes);
+    Crc64Ecma182 crc{crc64_index_chunk_row_prefix(
+        generation_id, position_segment, sub_key, chunk_no, chunk_bytes)};
     crc.update(blob);
     return crc.checksum();
 }
@@ -225,6 +311,27 @@ struct IndexChunkAddress {
 
     [[nodiscard]] bool operator==(const IndexChunkAddress&) const = default;
 };
+
+/// Append the raw payload covered by one already validated address-bound row
+/// checksum to an extent checksum without traversing the payload again. The
+/// validated checksum must come from the authority-sealed row receipt visitor;
+/// this function deliberately does not replace row authentication.
+[[nodiscard]] inline std::uint64_t
+crc64_append_validated_index_chunk_payload(
+        std::uint64_t current_extent_checksum,
+        const IndexChunkAddress& address,
+        std::uint32_t chunk_bytes,
+        std::uint64_t validated_row_checksum) noexcept {
+    const std::uint64_t prefix_checksum = crc64_index_chunk_row_prefix(
+        address.generation_id,
+        address.position_segment,
+        address.sub_key,
+        address.chunk_no,
+        chunk_bytes);
+    return validated_row_checksum
+        ^ crc64_ecma182_advance_zero_bytes(
+            current_extent_checksum ^ prefix_checksum, chunk_bytes);
+}
 
 /// Per-call proof counters returned by the generalized qualified bulk reader.
 struct IndexChunkReadStats {

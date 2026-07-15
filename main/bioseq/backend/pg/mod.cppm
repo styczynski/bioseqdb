@@ -1381,7 +1381,7 @@ template<std::size_t N>
 		const bioseq::storage::indexing::ColdIndexPreparationStatsPg& stats)
 {
 	std::string result =
-		R"({"schema":"bioseq.cold_index_selective_probe","version":1,"timing_semantics":"payload_inclusive_wall_v1","decode_timing_available":false,"transfer_timing_available":false)";
+		R"({"schema":"bioseq.cold_index_selective_probe","version":2,"timing_semantics":"payload_inclusive_wall_v1","decode_timing_available":false,"transfer_timing_available":false)";
 	result.reserve(1024);
 	const auto append = [&result](
 			const std::string_view key,
@@ -1405,6 +1405,9 @@ template<std::size_t N>
 	append("heap_tid_forward_gap", stats.heap_tid_forward_gap);
 	append("heap_tid_backward_jump", stats.heap_tid_backward_jump);
 	append("extent_crc_bytes", stats.extent_crc_bytes);
+	append("extent_crc_raw_bytes_hashed", stats.extent_crc_raw_bytes_hashed);
+	append("extent_crc_combined_bytes", stats.extent_crc_combined_bytes);
+	append("extent_crc_combine_rows", stats.extent_crc_combine_rows);
 	append("row_crc_bytes", stats.row_crc_bytes);
 	append("payload_ns", stats.payload_ns);
 	result += R"(,"decode_ns":null,"transfer_ns":null)";
