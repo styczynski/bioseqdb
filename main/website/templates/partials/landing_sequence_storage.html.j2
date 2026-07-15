@@ -1,0 +1,44 @@
+{# Runnable landing slot 'sequence_storage' (§15.2): stores biological
+   sequences beside their metadata in a bioseq.seq column and reads them back
+   with bioseq.len / bioseq.symbol_count. Renders only the visible SQL and the
+   executed result rows; the hidden setup/teardown SQL from landing_examples.md
+   never reaches the site. Context: examples.sequence_storage.visible_sql and
+   examples.sequence_storage.result, whose result.columns each carry a name and
+   whose result.rows are lists of cells with is_null and text. #}
+<figure class="sql-example" id="example-sequence-storage">
+  <figcaption class="sql-example-title">Store sequences beside their metadata</figcaption>
+  <p class="sql-example-lede">A <code>bioseq.seq</code> column records its alphabet and maximum length in the type modifier, so sequences live in ordinary rows next to their labels.</p>
+  <div class="code-card">
+    <div class="code-card-head">
+      <span class="code-dot code-dot-a" aria-hidden="true"></span>
+      <span class="code-dot code-dot-b" aria-hidden="true"></span>
+      <span class="code-dot code-dot-c" aria-hidden="true"></span>
+      <span class="code-card-name">query.sql</span>
+      <button type="button" class="copy-button" data-copy-target="sql-sequence-storage" aria-label="Copy the sequence storage query">Copy</button>
+    </div>
+    <pre class="code-block"><code class="language-sql" id="sql-sequence-storage">{{ examples.sequence_storage.visible_sql }}</code></pre>
+    {% if examples.sequence_storage.result %}
+    <div class="result-panel">
+      <table class="result-table">
+        <caption>Executed query result</caption>
+        <thead>
+          <tr>
+          {% for col in examples.sequence_storage.result.columns %}
+            <th scope="col">{{ col.name }}</th>
+          {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in examples.sequence_storage.result.rows %}
+          <tr>
+          {% for cell in row %}
+            <td>{% if cell.is_null %}<span class="cell-null">NULL</span>{% else %}{{ cell.text }}{% endif %}</td>
+          {% endfor %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+</figure>

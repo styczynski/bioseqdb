@@ -1,6 +1,10 @@
 // Progressive-enhancement entry module (§15.2). Self-hosted ES module, no
 // framework, no external host. Establishes copy-button behavior with a polite
-// live region; layout is CSS-only, so nothing here is required to render.
+// live region and initializes the landing tab toggler; layout is CSS-only, so
+// nothing here is required to render. Landing-only widgets are guarded by their
+// markers, so this single entry is inert on documentation/reference pages.
+
+import { initTabs } from "./tabs.mjs";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -35,5 +39,6 @@ function initCopyButtons() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initCopyButtons();
+  initTabs();
   document.documentElement.dataset.reducedMotion = reduceMotion ? "true" : "false";
 });
