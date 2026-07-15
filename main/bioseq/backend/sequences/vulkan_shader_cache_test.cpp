@@ -4909,9 +4909,15 @@ TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
     auto& admission =
         bioseq::parallelism::MemoryAdmissionController::instance();
     const std::uint64_t reserved_before = admission.reserved_bytes();
+    const auto base_audit = accepted_runtime_metal_archive_audit();
     CHECK(gv::RuntimePipelineOperationProof::
           self_test_causal_collector_contract(
-              accepted_runtime_metal_archive_audit()));
+              base_audit));
+    CHECK(gv::Runtime::
+          self_test_persisted_shape_v5_finalizer_preclaim_contract(
+              base_audit));
+    CHECK(gv::Runtime::self_test_gpu_cache_partial_delta_contract(
+        base_audit));
     CHECK(admission.reserved_bytes() == reserved_before);
 }
 
