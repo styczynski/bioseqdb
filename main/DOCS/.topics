@@ -25,6 +25,7 @@ columnar
 compile-errors
 design-prompt
 doc0294
+documentation
 engineering-overview
 gpu
 gzip-io
@@ -75,4 +76,5 @@ template-pipeline
 testing
 tests
 todo
+tooling
 viewer
