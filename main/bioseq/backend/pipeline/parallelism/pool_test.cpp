@@ -130,7 +130,7 @@ TEST_CASE("DOC0294 task-parallel nested scope gates inner regions", "[parallelis
 }
 
 TEST_CASE("DOC0294 memory admission reserves and releases", "[parallelism][memory]") {
-    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    bioseq::parallelism::MemoryAdmissionController admission;
     admission.set_index_memory_cap_bytes(1024);
     REQUIRE(admission.reserved_bytes() == 0u);
 
@@ -347,7 +347,7 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
 TEST_CASE("memory materialization releases only on exact reflected ownership proof",
           "[parallelism][memory][materialization]") {
     using bioseq::parallelism::MemoryMaterializationEvidence;
-    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    bioseq::parallelism::MemoryAdmissionController admission;
     admission.set_index_memory_cap_bytes(4096u);
     REQUIRE(admission.reserved_bytes() == 0u);
 
@@ -421,7 +421,7 @@ TEST_CASE("memory materialization releases only on exact reflected ownership pro
 TEST_CASE("memory materialization grow transfer, throw safety, and serialization",
           "[parallelism][memory][materialization]") {
     using bioseq::parallelism::MemoryMaterializationEvidence;
-    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    bioseq::parallelism::MemoryAdmissionController admission;
     admission.set_index_memory_cap_bytes(8192u);
     REQUIRE(admission.reserved_bytes() == 0u);
 

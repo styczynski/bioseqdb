@@ -99,6 +99,11 @@ void DispatchBufferRuntime::replace_executor_snapshot(
     as_buffer(impl)->replace_executor_snapshot(executor_snapshot);
 }
 
+void DispatchBufferRuntime::bind_persisted_gpu_operation_evidence_sink(
+    bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink) {
+    as_buffer(impl)->bind_persisted_gpu_operation_evidence_sink(sink);
+}
+
 void DispatchBufferRuntime::configure_mmsearch(
     const AttrNumber seq_attno,
     std::string column_name,

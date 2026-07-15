@@ -6123,6 +6123,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	const bool selected_vulkan =
 		bioseq::simd::active_target::pipe::vulkan_components_requested(
 			aligner_params);
+	const bool executable_scan =
+		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0;
 	/*
 	 * C1 is deliberately fail-closed: the only currently readable persisted
 	 * MPF/MPS layouts predate the revision-3 READY head+manifest identity.
@@ -6136,21 +6138,28 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		== bioseq::indexing::IndexReadRequirement::
 			require_compatible_persisted
 		&& selected_vulkan
-		&& (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
+		&& executable_scan) {
 		ereport(ERROR,
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			 errmsg("required compatible persisted minimizer index unavailable"),
 			 errdetail("ordinal 2 requires a revision-3 READY generation and has no live Vulkan grouped32 reader; CPU direct grouped32 execution does not authorize a GPU fallback"),
 			 errhint("Select the all-CPU/SIMD pipeline or choose index_read_requirement=allow/require_absent; GPU-to-CPU fallback is forbidden.")));
 	}
-	if (features.has_mmsearch && selected_vulkan && !aligner_params.vulkan_enabled) {
+	/* Plain EXPLAIN must describe the selected pipeline without touching the
+	 * process-owned Vulkan runtime or its immutable Metal policy.  PostgreSQL
+	 * clears EXEC_FLAG_EXPLAIN_ONLY for SELECT and EXPLAIN ANALYZE, so every
+	 * executable path retains the fail-closed enablement, cache and device
+	 * checks below. */
+	const bool executable_vulkan =
+		features.has_mmsearch && selected_vulkan && executable_scan;
+	if (executable_vulkan && !aligner_params.vulkan_enabled) {
 		raise_column_scan_vulkan_error_as_cpp(
 			"selected Vulkan execution requires "
 			"bioseq.aligner.vulkan_enabled=on",
 			"Set bioseq.aligner.vulkan_enabled=on, or select non-Vulkan "
 			"minimizer/chaining algorithms before dispatch.");
 	}
-	if (features.has_mmsearch && selected_vulkan && aligner_params.vulkan_enabled) {
+	if (executable_vulkan && aligner_params.vulkan_enabled) {
 		auto& vulkan_runtime =
 			bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 		if (!vulkan_runtime.usable()) {
@@ -6239,6 +6248,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		runtime.alignment_registration =
 			bioseq::pg::alignment_execution::bind_alignment_node(
 				estate, static_cast<std::uint32_t>(plan_node_id));
+		runtime.buffer.bind_persisted_gpu_operation_evidence_sink(
+			*bioseq::pg::alignment_execution::
+				borrow_persisted_gpu_operation_evidence_sink(
+					runtime.alignment_registration));
 	}
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() scan initialised successfully");
@@ -7663,6 +7676,10 @@ static void BioseqBatchJoin_BeginCustomScan(
 		runtime->alignment_registration =
 			bioseq::pg::alignment_execution::bind_alignment_node(
 				estate, static_cast<std::uint32_t>(plan_node_id));
+		runtime->buffer.bind_persisted_gpu_operation_evidence_sink(
+			*bioseq::pg::alignment_execution::
+				borrow_persisted_gpu_operation_evidence_sink(
+					runtime->alignment_registration));
 		  } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
 			converted_pg_error = error.release_error_data();
 		  } catch (...) {

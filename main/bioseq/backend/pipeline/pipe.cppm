@@ -584,6 +584,20 @@ struct PipelineOperationalStats {
     std::uint64_t format5_reader_position_append_growth_reservations = 0;
     std::uint64_t format5_reader_retained_position_count = 0;
     std::uint64_t format5_reader_retained_position_capacity = 0;
+    std::uint64_t format5_reader_directory_capacity_bytes = 0;
+    std::uint64_t format5_reader_query_hash_capacity_bytes = 0;
+    std::uint64_t format5_reader_query_record_capacity_bytes = 0;
+    std::uint64_t format5_reader_ordinal_route_capacity_bytes = 0;
+    std::uint64_t format5_reader_selected_extent_capacity_bytes = 0;
+    std::uint64_t format5_reader_current_selected_control_capacity_bytes = 0;
+    std::uint64_t format5_reader_global_position_capacity_bytes = 0;
+    std::uint64_t format5_reader_control_payload_capacity_bytes = 0;
+    std::uint64_t format5_reader_owned_capacity_bytes = 0;
+    std::uint64_t format5_reader_admitted_bytes = 0;
+    std::uint64_t format5_reader_exact_position_image_checks = 0;
+    std::uint64_t format5_reader_exact_position_image_failures = 0;
+    std::uint64_t format5_reader_retained_layout_checks = 0;
+    std::uint64_t format5_reader_retained_layout_failures = 0;
     bool format5_reader_memory_evidence_saturated = false;
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
@@ -835,6 +849,34 @@ struct PipelineOperationalStats {
             rhs.format5_reader_retained_position_count);
         add(format5_reader_retained_position_capacity,
             rhs.format5_reader_retained_position_capacity);
+        add(format5_reader_directory_capacity_bytes,
+            rhs.format5_reader_directory_capacity_bytes);
+        add(format5_reader_query_hash_capacity_bytes,
+            rhs.format5_reader_query_hash_capacity_bytes);
+        add(format5_reader_query_record_capacity_bytes,
+            rhs.format5_reader_query_record_capacity_bytes);
+        add(format5_reader_ordinal_route_capacity_bytes,
+            rhs.format5_reader_ordinal_route_capacity_bytes);
+        add(format5_reader_selected_extent_capacity_bytes,
+            rhs.format5_reader_selected_extent_capacity_bytes);
+        add(format5_reader_current_selected_control_capacity_bytes,
+            rhs.format5_reader_current_selected_control_capacity_bytes);
+        add(format5_reader_global_position_capacity_bytes,
+            rhs.format5_reader_global_position_capacity_bytes);
+        add(format5_reader_control_payload_capacity_bytes,
+            rhs.format5_reader_control_payload_capacity_bytes);
+        add(format5_reader_owned_capacity_bytes,
+            rhs.format5_reader_owned_capacity_bytes);
+        add(format5_reader_admitted_bytes,
+            rhs.format5_reader_admitted_bytes);
+        add(format5_reader_exact_position_image_checks,
+            rhs.format5_reader_exact_position_image_checks);
+        add(format5_reader_exact_position_image_failures,
+            rhs.format5_reader_exact_position_image_failures);
+        add(format5_reader_retained_layout_checks,
+            rhs.format5_reader_retained_layout_checks);
+        add(format5_reader_retained_layout_failures,
+            rhs.format5_reader_retained_layout_failures);
         format5_reader_memory_evidence_saturated =
             format5_reader_memory_evidence_saturated
             || rhs.format5_reader_memory_evidence_saturated;
@@ -1356,22 +1398,25 @@ merge_simd_alignment_algorithm_identity(
             && environment.gpu_pipeline_cache_hit == OptionalProofBool::not_applicable;
     }
     if (backend != ExecutedBackend::vulkan_gpu) return false;
-    const bool explicit_policy =
-        environment.gpu_pipeline_cache_policy == PipelineCachePolicy::immutable_preseed_all_hit
-        || environment.gpu_pipeline_cache_policy == PipelineCachePolicy::isolated_miss_diagnostic;
-    const bool seed_size_valid =
-        environment.gpu_pipeline_cache_policy == PipelineCachePolicy::isolated_miss_diagnostic
-        || environment.gpu_pipeline_cache_seed_size > 0;
-    const bool explicit_hit =
-        environment.gpu_pipeline_cache_hit == OptionalProofBool::false_value
-        || environment.gpu_pipeline_cache_hit == OptionalProofBool::true_value;
-    return environment.gpu_environment_present
+    const bool common_gpu_identity_valid =
+        environment.gpu_environment_present
         && !all_zero(environment.gpu_device_uuid)
         && canonical_nonempty_driver_identity(environment.gpu_driver_identity)
-        && explicit_policy
-        && seed_size_valid
         && !all_zero(environment.gpu_pipeline_cache_seed_sha256)
-        && explicit_hit;
+        && environment.gpu_pipeline_cache_manifest_checksum != 0;
+    if (!common_gpu_identity_valid) return false;
+    if (environment.gpu_pipeline_cache_policy
+            == PipelineCachePolicy::immutable_preseed_all_hit) {
+        return environment.gpu_pipeline_cache_seed_size > 0
+            && environment.gpu_pipeline_cache_hit
+                == OptionalProofBool::true_value;
+    }
+    if (environment.gpu_pipeline_cache_policy
+            == PipelineCachePolicy::isolated_miss_diagnostic) {
+        return environment.gpu_pipeline_cache_hit
+            == OptionalProofBool::false_value;
+    }
+    return false;
 }
 
 /// Return the sole permitted engine for a stage/mode. ExecutionEngine::count
@@ -2107,6 +2152,1019 @@ struct PipelineExecutionStats {
         }
     }
 };
+
+/// Fixed publication equation checked by the PostgreSQL owner before one
+/// persisted Shape-V5 GPU wave becomes visible.  `consumed_jobs` alone is not
+/// authority: a mismatched expectation deliberately burns its record, so a
+/// proof may be fully consumed while still being ineligible for publication.
+struct PersistedShapeV5CoordinatePublicationCounts {
+    std::uint64_t expected_jobs = 0;
+    std::uint64_t proof_jobs = 0;
+    std::uint64_t consumed_jobs = 0;
+    std::uint64_t accepted_jobs = 0;
+    std::uint64_t burned_jobs = 0;
+    std::uint64_t pending_jobs = 0;
+    std::uint64_t staged_jobs = 0;
+};
+
+[[nodiscard]] constexpr bool
+persisted_shape_v5_coordinate_publication_counts_valid(
+    const PersistedShapeV5CoordinatePublicationCounts& counts) noexcept {
+    return counts.expected_jobs != 0
+        && counts.expected_jobs <= sql_bigint_value_max
+        && counts.proof_jobs == counts.expected_jobs
+        && counts.consumed_jobs == counts.expected_jobs
+        && counts.accepted_jobs == counts.expected_jobs
+        && counts.burned_jobs == 0
+        && counts.pending_jobs == 0
+        && counts.staged_jobs == counts.expected_jobs;
+}
+
+static_assert(std::is_trivially_copyable_v<PipelineExecutionStats>);
+static_assert(std::is_standard_layout_v<PipelineExecutionStats>);
+
+/// Maximum statement-local persisted-GPU evidence retained for SQL proof.
+/// This is the production dispatch ceiling, not a silently growing cache.
+inline constexpr std::uint64_t
+    persisted_gpu_operation_evidence_capacity = 8192u;
+
+/// One causal queue submission, represented without Vulkan handles/pointers.
+struct PersistedGpuStructuredSubmissionEvidence {
+    std::uint64_t operation_identity = 0u;
+    std::uint64_t ordinal = 0u;
+    std::uint64_t submit_wait_identity = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return operation_identity != 0u && ordinal != 0u
+            && ordinal <= sql_bigint_value_max
+            && submit_wait_identity != 0u;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuStructuredSubmissionEvidence&) const noexcept =
+        default;
+};
+
+/// Immutable numeric Vulkan/cache identity copied from the runtime proof.
+struct PersistedGpuEnvironmentEvidence {
+    std::array<std::uint8_t, 16> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, 16> pipeline_cache_uuid{};
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return api_version != 0u && driver_version != 0u
+            && seed_size != 0u && seed_size <= sql_bigint_value_max
+            && manifest_checksum != 0u
+            && std::any_of(
+                device_uuid.begin(), device_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](const std::uint8_t value) { return value != 0u; });
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuEnvironmentEvidence&) const noexcept = default;
+};
+
+inline constexpr std::size_t
+    persisted_gpu_helper_build_identity_capacity = 128u;
+inline constexpr std::size_t persisted_gpu_helper_source_capacity = 32u;
+
+/// Process-wide immutable Metal archive qualification copied without paths,
+/// file descriptors, API handles or pointers. Text fields are bounded ASCII
+/// images so the admitted operation chunk remains a fixed allocation.
+struct PersistedGpuCacheQualificationEvidence {
+    std::uint32_t version = 0u;
+    std::uint64_t identity = 0u;
+    std::uint64_t archive_count = 0u;
+    std::uint64_t archive_bytes = 0u;
+    std::uint64_t archive_checksum = 0u;
+    std::uint64_t receipt_count = 0u;
+    std::uint64_t hash_passes = 0u;
+    std::uint64_t hashed_bytes = 0u;
+    std::uint64_t private_files_created = 0u;
+    std::uint64_t private_files_unlinked = 0u;
+    std::uint64_t live_private_paths = 0u;
+    std::uint64_t pipeline_filesystem_hash_passes = 0u;
+    std::uint64_t pipeline_filesystem_hashed_bytes = 0u;
+    std::uint32_t helper_protocol_version = 0u;
+    std::array<char, persisted_gpu_helper_build_identity_capacity>
+        helper_build_identity{};
+    std::uint32_t helper_build_identity_size = 0u;
+    std::array<char, persisted_gpu_helper_source_capacity> helper_source{};
+    std::uint32_t helper_source_size = 0u;
+    std::uint64_t helper_executable_size = 0u;
+    std::array<std::uint8_t, 32> helper_executable_sha256{};
+    std::uint64_t helper_metal_registry_id = 0u;
+    std::array<std::uint8_t, 16> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, 16> pipeline_cache_uuid{};
+    std::uint64_t seed_receipt_identity = 0u;
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    bool saturated = false;
+
+    [[nodiscard]] std::string_view helper_build_identity_text()
+        const noexcept {
+        return {helper_build_identity.data(), helper_build_identity_size};
+    }
+    [[nodiscard]] std::string_view helper_source_text() const noexcept {
+        return {helper_source.data(), helper_source_size};
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        const auto nonzero = [](const auto& bytes) noexcept {
+            return std::any_of(
+                bytes.begin(), bytes.end(),
+                [](const auto value) { return value != 0u; });
+        };
+        const auto safe_text = [](const auto& bytes,
+                                  const std::uint32_t size) noexcept {
+            if (size == 0u || size > bytes.size()) return false;
+            for (std::size_t i = 0u; i < size; ++i) {
+                const auto value = static_cast<unsigned char>(bytes[i]);
+                if (value < 0x20u || value > 0x7eu
+                    || value == static_cast<unsigned char>('"')
+                    || value == static_cast<unsigned char>('\\')) {
+                    return false;
+                }
+            }
+            return std::all_of(
+                bytes.begin() + size, bytes.end(),
+                [](const char value) { return value == '\0'; });
+        };
+        return version == 2u && identity != 0u
+            && archive_count != 0u
+            && archive_count <= sql_bigint_value_max
+            && archive_bytes != 0u
+            && archive_bytes <= sql_bigint_value_max
+            && archive_checksum != 0u
+            && receipt_count == archive_count
+            && hash_passes == 1u && hashed_bytes == archive_bytes
+            && private_files_created == archive_count
+            && private_files_unlinked == archive_count
+            && live_private_paths == 0u
+            && pipeline_filesystem_hash_passes == 0u
+            && pipeline_filesystem_hashed_bytes == 0u
+            && helper_protocol_version == 2u
+            && safe_text(
+                helper_build_identity, helper_build_identity_size)
+            && helper_build_identity_text()
+                == "bioseq_gpu_archive_builder_v2"
+            && safe_text(helper_source, helper_source_size)
+            && helper_source_text() == "installed-sibling"
+            && helper_executable_size != 0u
+            && helper_executable_size <= sql_bigint_value_max
+            && nonzero(helper_executable_sha256)
+            && helper_metal_registry_id != 0u
+            && nonzero(device_uuid) && api_version != 0u
+            && driver_version != 0u
+            && nonzero(pipeline_cache_uuid)
+            && seed_receipt_identity != 0u && nonzero(seed_sha256)
+            && seed_size != 0u && seed_size <= sql_bigint_value_max
+            && manifest_checksum != 0u && !saturated;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuCacheQualificationEvidence&) const noexcept =
+        default;
+};
+
+/// Report-once cache counters attached to the accepted operation authority.
+struct PersistedGpuCacheMetricsEvidence {
+    std::uint64_t token_identity = 0u;
+    std::uint64_t pipeline_cache_loads = 0u;
+    std::uint64_t pipeline_cache_seed_bytes = 0u;
+    std::uint64_t pipeline_cache_load_ns = 0u;
+    std::uint64_t pipeline_creates = 0u;
+    std::uint64_t pipeline_creation_ns = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool load_shape = pipeline_cache_loads == 0u
+            ? pipeline_cache_seed_bytes == 0u
+                && pipeline_cache_load_ns == 0u
+            : pipeline_cache_loads == 1u
+                && pipeline_cache_seed_bytes != 0u
+                && pipeline_cache_load_ns != 0u;
+        const bool create_shape = pipeline_creates == 0u
+            ? pipeline_creation_ns == 0u
+            : pipeline_creation_ns != 0u;
+        return token_identity != 0u && load_shape && create_shape
+            && pipeline_cache_loads <= sql_bigint_value_max
+            && pipeline_cache_seed_bytes <= sql_bigint_value_max
+            && pipeline_cache_load_ns <= sql_bigint_value_max
+            && pipeline_creates <= sql_bigint_value_max
+            && pipeline_creation_ns <= sql_bigint_value_max;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuCacheMetricsEvidence&) const noexcept = default;
+};
+
+/// Coordinate result copied after the runtime's status/readback checks.
+struct PersistedGpuCoordinateResultEvidence {
+    std::uint64_t query_start = 0u;
+    std::uint64_t query_end = 0u;
+    std::uint64_t target_start = 0u;
+    std::uint64_t target_end = 0u;
+    std::uint64_t match_length = 0u;
+    std::uint64_t block_length = 0u;
+    std::int32_t chain_score = 0;
+    std::int32_t seed_count = 0;
+    bool is_reverse = false;
+    bool valid = false;
+
+    [[nodiscard]] constexpr bool accepted(
+        const std::uint64_t query_length,
+        const std::uint64_t target_length) const noexcept {
+        return valid && chain_score > 0 && seed_count > 0
+            && query_start < query_end && query_end <= query_length
+            && target_start < target_end && target_end <= target_length
+            && match_length != 0u
+            && match_length <= block_length
+            && match_length <= query_end - query_start
+            && match_length <= target_end - target_start
+            && block_length <= query_end - query_start
+                + target_end - target_start
+            && query_start <= sql_bigint_value_max
+            && query_end <= sql_bigint_value_max
+            && target_start <= sql_bigint_value_max
+            && target_end <= sql_bigint_value_max
+            && match_length <= sql_bigint_value_max
+            && block_length <= sql_bigint_value_max;
+    }
+};
+
+/// Full-stage causal evidence for one logical target/query coordinate result.
+struct PersistedGpuJobEvidence {
+    std::uint64_t logical_target_row = 0u;
+    std::uint64_t logical_query_ordinal = 0u;
+    std::uint32_t query_index = 0u;
+    std::uint64_t query_length = 0u;
+    std::uint64_t target_length = 0u;
+    std::uint64_t query_minimizer_count = 0u;
+    std::uint64_t query_tile_count = 0u;
+    std::uint64_t query_count_dispatches = 0u;
+    std::uint64_t query_scan_dispatches = 0u;
+    std::uint64_t query_emit_dispatches = 0u;
+    std::uint64_t query_completed_roundtrips = 0u;
+    std::uint64_t direct_count_dispatches = 0u;
+    std::uint64_t direct_scan_dispatches = 0u;
+    std::uint64_t anchor_count = 0u;
+    std::uint64_t direct_emit_dispatches = 0u;
+    std::uint64_t sort_operations = 0u;
+    std::uint64_t range_build_dispatches = 0u;
+    std::uint64_t range_count = 0u;
+    std::uint64_t chain_dispatches = 0u;
+    std::uint64_t chain_backtrack_dispatches = 0u;
+    std::uint64_t coordinate_dispatches = 0u;
+    std::array<PersistedGpuStructuredSubmissionEvidence, 4> submissions{};
+    std::uint64_t count_status_checks = 0u;
+    std::uint64_t emit_status_checks = 0u;
+    std::uint32_t status_or = 0u;
+    std::uint64_t result_readbacks = 0u;
+    std::uint64_t coordinate_vote_dispatches = 0u;
+    std::uint64_t cpu_or_simd_biological_calls = 0u;
+    std::uint64_t recompute_calls = 0u;
+    std::uint64_t fallback_calls = 0u;
+    PersistedGpuCoordinateResultEvidence coordinate{};
+
+    [[nodiscard]] constexpr bool accepted(
+        const std::uint64_t shape_operation_identity) const noexcept {
+        if (logical_target_row > sql_bigint_value_max
+            || logical_query_ordinal > sql_bigint_value_max
+            || query_length == 0u || query_length > sql_bigint_value_max
+            || target_length == 0u || target_length > sql_bigint_value_max
+            || query_minimizer_count == 0u
+            || query_minimizer_count > sql_bigint_value_max
+            || query_tile_count == 0u
+            || query_tile_count > sql_bigint_value_max
+            || query_count_dispatches != 1u
+            || query_scan_dispatches != 3u
+            || query_emit_dispatches != 1u
+            || query_completed_roundtrips != 2u
+            || direct_count_dispatches != 1u
+            || direct_scan_dispatches != 3u
+            || anchor_count == 0u || anchor_count > sql_bigint_value_max
+            || direct_emit_dispatches != 1u
+            || sort_operations != 1u
+            || range_build_dispatches != 1u
+            || range_count == 0u || range_count > sql_bigint_value_max
+            || chain_dispatches != 1u
+            || chain_backtrack_dispatches != 1u
+            || coordinate_dispatches != 1u
+            || count_status_checks != 1u
+            || emit_status_checks != 1u
+            || status_or != 0u || result_readbacks != 1u
+            || coordinate_vote_dispatches != 0u
+            || cpu_or_simd_biological_calls != 0u
+            || recompute_calls != 0u || fallback_calls != 0u
+            || !coordinate.accepted(query_length, target_length)) {
+            return false;
+        }
+        for (std::size_t i = 0u; i < submissions.size(); ++i) {
+            if (!submissions[i].accepted()
+                || submissions[i].operation_identity
+                    != shape_operation_identity) {
+                return false;
+            }
+            for (std::size_t prior = 0u; prior < i; ++prior) {
+                if (submissions[prior].ordinal == submissions[i].ordinal
+                    || submissions[prior].submit_wait_identity
+                        == submissions[i].submit_wait_identity) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
+/// One publication-wave envelope. The final cache delta may be replaced only
+/// by the runtime authority immediately before allocation-free ledger linking.
+struct PersistedGpuOperationEvidence {
+    std::uint64_t operation_identity = 0u;
+    PersistedShapeV5CoordinatePublicationCounts publication{};
+    std::uint64_t published_jobs = 0u;
+    std::uint64_t publication_commits = 0u;
+    std::uint64_t query_pipeline_receipt_count = 0u;
+    std::uint64_t shape_pipeline_receipt_count = 0u;
+    std::uint64_t submission_count = 0u;
+    std::uint64_t query_pipeline_operation_identity = 0u;
+    std::uint64_t shape_pipeline_operation_identity = 0u;
+    std::array<std::uint64_t, 2> query_submission_ordinals{};
+    std::uint64_t seed_receipt_identity = 0u;
+    std::uint64_t generation_id = 0u;
+    std::uint64_t source_identity = 0u;
+    std::uint64_t cold_load_identity = 0u;
+    PersistedGpuEnvironmentEvidence environment{};
+    PersistedGpuCacheQualificationEvidence cache_qualification{};
+    PersistedGpuCacheMetricsEvidence cache_metrics{};
+
+    [[nodiscard]] bool accepted(
+        const std::span<const PersistedGpuJobEvidence> jobs) const noexcept {
+        if (operation_identity == 0u
+            || !persisted_shape_v5_coordinate_publication_counts_valid(
+                publication)
+            || published_jobs != publication.expected_jobs
+            || publication_commits != 1u
+            || query_pipeline_receipt_count != 3u
+            || shape_pipeline_receipt_count < 7u
+            || shape_pipeline_receipt_count > 10u
+            || submission_count < 6u
+            || submission_count > sql_bigint_value_max
+            || query_pipeline_operation_identity == 0u
+            || shape_pipeline_operation_identity == 0u
+            || shape_pipeline_operation_identity != operation_identity
+            || query_pipeline_operation_identity
+                == shape_pipeline_operation_identity
+            || query_submission_ordinals[0] == 0u
+            || query_submission_ordinals[1] == 0u
+            || query_submission_ordinals[0]
+                == query_submission_ordinals[1]
+            || query_submission_ordinals[0] > sql_bigint_value_max
+            || query_submission_ordinals[1] > sql_bigint_value_max
+            || seed_receipt_identity == 0u
+            || generation_id == 0u
+            || generation_id > sql_bigint_value_max
+            || source_identity == 0u || cold_load_identity == 0u
+            || !environment.accepted() || !cache_qualification.accepted()
+            || cache_qualification.device_uuid != environment.device_uuid
+            || cache_qualification.api_version != environment.api_version
+            || cache_qualification.driver_version
+                != environment.driver_version
+            || cache_qualification.vendor_id != environment.vendor_id
+            || cache_qualification.device_id != environment.device_id
+            || cache_qualification.pipeline_cache_uuid
+                != environment.pipeline_cache_uuid
+            || cache_qualification.seed_receipt_identity
+                != seed_receipt_identity
+            || cache_qualification.seed_sha256 != environment.seed_sha256
+            || cache_qualification.seed_size != environment.seed_size
+            || cache_qualification.manifest_checksum
+                != environment.manifest_checksum
+            || !cache_metrics.accepted()
+            || cache_metrics.token_identity != operation_identity
+            || jobs.size() != publication.expected_jobs) {
+            return false;
+        }
+        std::uint64_t shape_ordinal_count = 0u;
+        for (std::size_t job_index = 0u; job_index < jobs.size(); ++job_index) {
+            const PersistedGpuJobEvidence& job = jobs[job_index];
+            if (!job.accepted(shape_pipeline_operation_identity)) return false;
+            for (std::size_t prior = 0u; prior < job_index; ++prior) {
+                if (jobs[prior].logical_target_row == job.logical_target_row
+                    && jobs[prior].logical_query_ordinal
+                        == job.logical_query_ordinal) {
+                    return false;
+                }
+            }
+            for (std::size_t submission_index = 0u;
+                 submission_index < job.submissions.size();
+                 ++submission_index) {
+                const auto& submission = job.submissions[submission_index];
+                bool previously_seen = false;
+                for (std::size_t prior_job = 0u;
+                     prior_job <= job_index && !previously_seen;
+                     ++prior_job) {
+                    const std::size_t prior_submission_limit =
+                        prior_job == job_index
+                        ? submission_index
+                        : jobs[prior_job].submissions.size();
+                    for (std::size_t prior_submission = 0u;
+                         prior_submission < prior_submission_limit;
+                         ++prior_submission) {
+                        const auto& prior =
+                            jobs[prior_job].submissions[prior_submission];
+                        const bool same_ordinal =
+                            prior.ordinal == submission.ordinal;
+                        const bool same_wait = prior.submit_wait_identity
+                            == submission.submit_wait_identity;
+                        if ((same_ordinal || same_wait)
+                            && !(same_ordinal && same_wait
+                                && prior_submission == submission_index)) {
+                            return false;
+                        }
+                        previously_seen = same_ordinal;
+                        if (previously_seen) break;
+                    }
+                }
+                if (!previously_seen) {
+                    if (shape_ordinal_count == sql_bigint_value_max) {
+                        return false;
+                    }
+                    ++shape_ordinal_count;
+                }
+            }
+        }
+        return submission_count == 2u + shape_ordinal_count;
+    }
+};
+
+class PersistedGpuOperationEvidenceLedger;
+
+/// Pre-finalizer authority proving one sealed chunk can be linked without any
+/// later allocation, duplicate search, range check, or capacity decision.
+class PersistedGpuOperationEvidenceAppendAuthority {
+public:
+    PersistedGpuOperationEvidenceAppendAuthority() = default;
+    PersistedGpuOperationEvidenceAppendAuthority(
+        const PersistedGpuOperationEvidenceAppendAuthority&) = delete;
+    PersistedGpuOperationEvidenceAppendAuthority& operator=(
+        const PersistedGpuOperationEvidenceAppendAuthority&) = delete;
+    PersistedGpuOperationEvidenceAppendAuthority(
+        PersistedGpuOperationEvidenceAppendAuthority&& other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)) {}
+    PersistedGpuOperationEvidenceAppendAuthority& operator=(
+        PersistedGpuOperationEvidenceAppendAuthority&& other) noexcept {
+        if (this != &other) {
+            owner_ = std::exchange(other.owner_, nullptr);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept { return owner_ != nullptr; }
+
+private:
+    explicit PersistedGpuOperationEvidenceAppendAuthority(
+        PersistedGpuOperationEvidenceLedger& owner) noexcept
+        : owner_(&owner) {}
+
+    PersistedGpuOperationEvidenceLedger* owner_ = nullptr;
+    friend class PersistedGpuOperationEvidenceLedger;
+};
+
+/// One admitted operation chunk. The job vector dies before its permit, and
+/// the ledger removes next links iteratively before destroying each chunk.
+class PersistedGpuOperationEvidenceChunk {
+public:
+    PersistedGpuOperationEvidenceChunk() = default;
+    PersistedGpuOperationEvidenceChunk(
+        const PersistedGpuOperationEvidenceChunk&) = delete;
+    PersistedGpuOperationEvidenceChunk& operator=(
+        const PersistedGpuOperationEvidenceChunk&) = delete;
+    PersistedGpuOperationEvidenceChunk(
+        PersistedGpuOperationEvidenceChunk&&) = delete;
+    PersistedGpuOperationEvidenceChunk& operator=(
+        PersistedGpuOperationEvidenceChunk&&) = delete;
+
+    /// Admit and allocate one exact operation/job image before finalization.
+    [[nodiscard]] static std::unique_ptr<
+        PersistedGpuOperationEvidenceChunk> prepare(
+            const std::size_t job_count) noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        if (job_count == 0u
+            || job_count > persisted_gpu_operation_evidence_capacity
+            || job_count > std::vector<PersistedGpuJobEvidence>{}.max_size()) {
+            return nullptr;
+        }
+        const std::uint64_t retained = saturating_add(
+            sizeof(PersistedGpuOperationEvidenceChunk),
+            saturating_mul(
+                static_cast<std::uint64_t>(job_count),
+                sizeof(PersistedGpuJobEvidence)));
+        const std::uint64_t peak = saturating_mul(
+            retained,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            return nullptr;
+        }
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) return nullptr;
+        try {
+            auto chunk = std::make_unique<
+                PersistedGpuOperationEvidenceChunk>();
+            chunk->capacity_permit_ = std::move(*permit);
+            chunk->jobs_.resize(job_count);
+            const std::uint64_t actual = saturating_add(
+                sizeof(PersistedGpuOperationEvidenceChunk),
+                saturating_mul(
+                    static_cast<std::uint64_t>(chunk->jobs_.capacity()),
+                    sizeof(PersistedGpuJobEvidence)));
+            if (actual == (std::numeric_limits<std::uint64_t>::max)()
+                || actual > chunk->capacity_permit_.bytes()) {
+                return nullptr;
+            }
+            chunk->capacity_permit_.shrink_to(actual);
+            return chunk;
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    [[nodiscard]] PersistedGpuOperationEvidence& operation() noexcept {
+        return operation_;
+    }
+    [[nodiscard]] std::span<PersistedGpuJobEvidence> jobs() noexcept {
+        return jobs_;
+    }
+    [[nodiscard]] const PersistedGpuOperationEvidence& operation()
+        const noexcept { return operation_; }
+    [[nodiscard]] std::span<const PersistedGpuJobEvidence> jobs()
+        const noexcept { return jobs_; }
+    [[nodiscard]] const PersistedGpuOperationEvidenceChunk* next()
+        const noexcept { return next_.get(); }
+
+    /// Freeze populated fields after every full-stage/range/equation check.
+    [[nodiscard]] bool seal() noexcept {
+        sealed_ = operation_.accepted(jobs_);
+        return sealed_;
+    }
+    [[nodiscard]] bool sealed() const noexcept {
+        return sealed_;
+    }
+
+    /// Publish the Runtime-prevalidated final report-once delta. Runtime's
+    /// claim plan proves componentwise boundedness before its irreversible
+    /// report-once commit, so this post-finalizer step is only a fixed write.
+    void publish_cache_metrics(
+        const PersistedGpuCacheMetricsEvidence& metrics) noexcept {
+        operation_.cache_metrics = metrics;
+        cache_metrics_published_ = true;
+    }
+    [[nodiscard]] bool cache_metrics_published() const noexcept {
+        return cache_metrics_published_;
+    }
+
+private:
+    // Declared first: jobs/next are destroyed before their admission permit.
+    bioseq::parallelism::MemoryPermit capacity_permit_{};
+    std::unique_ptr<PersistedGpuOperationEvidenceChunk> next_{};
+    std::vector<PersistedGpuJobEvidence> jobs_{};
+    PersistedGpuOperationEvidence operation_{};
+    bool cache_metrics_published_ = false;
+    bool sealed_ = false;
+    friend class PersistedGpuOperationEvidenceLedger;
+};
+
+/// Statement-root-owned causal evidence ledger. It never owns through stats;
+/// schedulers retain only a borrowed pointer to this root object.
+class PersistedGpuOperationEvidenceLedger {
+public:
+    PersistedGpuOperationEvidenceLedger() = default;
+    PersistedGpuOperationEvidenceLedger(
+        const PersistedGpuOperationEvidenceLedger&) = delete;
+    PersistedGpuOperationEvidenceLedger& operator=(
+        const PersistedGpuOperationEvidenceLedger&) = delete;
+    PersistedGpuOperationEvidenceLedger(
+        PersistedGpuOperationEvidenceLedger&& other) noexcept {
+        move_from(other);
+    }
+    PersistedGpuOperationEvidenceLedger& operator=(
+        PersistedGpuOperationEvidenceLedger&& other) noexcept {
+        if (this != &other) {
+            clear_iterative();
+            move_from(other);
+        }
+        return *this;
+    }
+    ~PersistedGpuOperationEvidenceLedger() { clear_iterative(); }
+
+    /// Complete all duplicate/capacity/range checks before runtime finalizer.
+    [[nodiscard]] PersistedGpuOperationEvidenceAppendAuthority prepare_append(
+        const std::unique_ptr<PersistedGpuOperationEvidenceChunk>& chunk)
+        noexcept {
+        if (frozen_ || invalid_ || chunk == nullptr || !chunk->sealed()
+            || chunk->cache_metrics_published()
+            || operation_count_ >= persisted_gpu_operation_evidence_capacity
+            || job_count_ > persisted_gpu_operation_evidence_capacity
+                - chunk->jobs().size()) {
+            invalidate(chunk == nullptr ? 0u : 1u, true);
+            return {};
+        }
+        const auto& operation = chunk->operation();
+        for (const PersistedGpuOperationEvidenceChunk* existing = head_.get();
+             existing != nullptr; existing = existing->next()) {
+            const auto& old = existing->operation();
+            if (old.operation_identity == operation.operation_identity
+                || old.query_pipeline_operation_identity
+                    == operation.query_pipeline_operation_identity
+                || old.query_pipeline_operation_identity
+                    == operation.shape_pipeline_operation_identity
+                || old.shape_pipeline_operation_identity
+                    == operation.query_pipeline_operation_identity) {
+                invalidate(1u, false);
+                return {};
+            }
+            if (old.generation_id != operation.generation_id
+                || old.source_identity != operation.source_identity
+                || old.cold_load_identity != operation.cold_load_identity
+                || old.seed_receipt_identity
+                    != operation.seed_receipt_identity
+                || old.environment != operation.environment
+                || old.cache_qualification
+                    != operation.cache_qualification) {
+                invalidate(1u, false);
+                return {};
+            }
+        }
+        return PersistedGpuOperationEvidenceAppendAuthority{*this};
+    }
+
+    /// Allocation-free/noexcept link after accepted Runtime authority exists.
+    void commit_append(
+        PersistedGpuOperationEvidenceAppendAuthority&& authority,
+        std::unique_ptr<PersistedGpuOperationEvidenceChunk>&& chunk) noexcept {
+        DEBUG_ASSERT(authority.owner_ == this,
+            "persisted GPU evidence append authority owner changed");
+        DEBUG_ASSERT(chunk != nullptr && chunk->sealed()
+            && chunk->cache_metrics_published(),
+            "persisted GPU evidence chunk was not publication-ready");
+        PersistedGpuOperationEvidenceChunk* appended = chunk.get();
+        if (tail_ == nullptr) {
+            head_ = std::move(chunk);
+        } else {
+            tail_->next_ = std::move(chunk);
+        }
+        tail_ = appended;
+        ++operation_count_;
+        job_count_ += tail_->jobs_.size();
+        authority.owner_ = nullptr;
+    }
+
+    /// Freeze at ExecutorFinish before move into the immutable snapshot.
+    void freeze() noexcept { frozen_ = true; }
+
+    [[nodiscard]] bool complete() const noexcept {
+        if (!frozen_ || invalid_ || saturated_ || dropped_operation_count_ != 0u
+            || operation_count_ > persisted_gpu_operation_evidence_capacity
+            || job_count_ > persisted_gpu_operation_evidence_capacity) {
+            return false;
+        }
+        std::uint64_t operations = 0u;
+        std::uint64_t jobs = 0u;
+        for (const PersistedGpuOperationEvidenceChunk* chunk = head_.get();
+             chunk != nullptr; chunk = chunk->next()) {
+            if (!chunk->sealed() || !chunk->cache_metrics_published()) {
+                return false;
+            }
+            ++operations;
+            jobs += chunk->jobs().size();
+        }
+        return operations == operation_count_ && jobs == job_count_;
+    }
+    [[nodiscard]] bool accepted() const noexcept {
+        return operation_count_ != 0u && job_count_ != 0u && complete();
+    }
+    /// Bind the immutable ledger back to the canonical statement aggregate.
+    [[nodiscard]] bool matches_pipeline(
+        const PipelineExecutionStats& stats) const noexcept {
+        if (!accepted()
+            || !PipelineExecutionStats::can_retain_full_attestation(stats)
+            || stats.actual_backend != ExecutedBackend::vulkan_gpu
+            || stats.actual_target_index_source != TargetIndexSource::persisted
+            || stats.attempted_alignment_jobs != job_count_
+            || stats.fully_attested_alignment_jobs != job_count_
+            || stats.persisted_generation_id == 0u
+            || stats.persisted_source_identity == 0u
+            || !environment_is_valid_for_backend(
+                stats.environment, ExecutedBackend::vulkan_gpu)) {
+            return false;
+        }
+        std::uint64_t cache_loads = 0u;
+        std::uint64_t cache_seed_bytes = 0u;
+        std::uint64_t cache_load_ns = 0u;
+        std::uint64_t pipeline_creates = 0u;
+        std::uint64_t pipeline_creation_ns = 0u;
+        std::uint64_t seed_dispatches = 0u;
+        std::uint64_t chain_dispatches = 0u;
+        std::uint64_t backtrack_dispatches = 0u;
+        const auto add = [](std::uint64_t& destination,
+                            const std::uint64_t value) noexcept {
+            if (value > (std::numeric_limits<std::uint64_t>::max)()
+                    - destination) {
+                return false;
+            }
+            destination += value;
+            return true;
+        };
+        for (const PersistedGpuOperationEvidenceChunk* chunk = head_.get();
+             chunk != nullptr; chunk = chunk->next()) {
+            const auto& operation = chunk->operation();
+            ::bioseq::gpu::vulkan::VulkanFeatureSet identity{};
+            identity.api_version = operation.environment.api_version;
+            identity.driver_version = operation.environment.driver_version;
+            identity.vendor_id = operation.environment.vendor_id;
+            identity.device_id = operation.environment.device_id;
+            identity.pipeline_cache_uuid =
+                operation.environment.pipeline_cache_uuid;
+            if (operation.generation_id != stats.persisted_generation_id
+                || operation.source_identity
+                    != stats.persisted_source_identity
+                || operation.environment.device_uuid
+                    != stats.environment.gpu_device_uuid
+                || operation.environment.seed_sha256
+                    != stats.environment.gpu_pipeline_cache_seed_sha256
+                || operation.environment.seed_size
+                    != stats.environment.gpu_pipeline_cache_seed_size
+                || operation.environment.manifest_checksum
+                    != stats.environment
+                        .gpu_pipeline_cache_manifest_checksum
+                || !operation.cache_qualification.accepted()
+                || operation.cache_qualification.device_uuid
+                    != operation.environment.device_uuid
+                || operation.cache_qualification.pipeline_cache_uuid
+                    != operation.environment.pipeline_cache_uuid
+                || operation.cache_qualification.seed_sha256
+                    != operation.environment.seed_sha256
+                || operation.cache_qualification.seed_size
+                    != operation.environment.seed_size
+                || operation.cache_qualification.manifest_checksum
+                    != operation.environment.manifest_checksum
+                || operation.cache_qualification.seed_receipt_identity
+                    != operation.seed_receipt_identity
+                || ::bioseq::gpu::vulkan::
+                    canonical_vulkan_driver_identity(identity)
+                    != stats.environment.gpu_driver_identity
+                || !add(cache_loads,
+                    operation.cache_metrics.pipeline_cache_loads)
+                || !add(cache_seed_bytes,
+                    operation.cache_metrics.pipeline_cache_seed_bytes)
+                || !add(cache_load_ns,
+                    operation.cache_metrics.pipeline_cache_load_ns)
+                || !add(pipeline_creates,
+                    operation.cache_metrics.pipeline_creates)
+                || !add(pipeline_creation_ns,
+                    operation.cache_metrics.pipeline_creation_ns)) {
+                return false;
+            }
+            for (const auto& job : chunk->jobs()) {
+                if (!add(seed_dispatches,
+                        job.direct_count_dispatches
+                            + job.direct_emit_dispatches)
+                    || !add(chain_dispatches, job.chain_dispatches)
+                    || !add(backtrack_dispatches,
+                        job.chain_backtrack_dispatches)) {
+                    return false;
+                }
+            }
+        }
+        return cache_loads
+                == stats.operational.gpu_pipeline_cache_loads
+            && cache_seed_bytes
+                == stats.operational.gpu_pipeline_cache_seed_bytes
+            && cache_load_ns
+                == stats.operational.gpu_pipeline_cache_load_ns
+            && pipeline_creates
+                == stats.operational.gpu_pipeline_creates
+            && pipeline_creation_ns
+                == stats.operational.gpu_pipeline_creation_ns
+            && seed_dispatches == stats.operational.gpu_seed_dispatches
+            && chain_dispatches == stats.operational.gpu_chain_dispatches
+            && backtrack_dispatches
+                == stats.operational.gpu_chain_backtrack_dispatches;
+    }
+    [[nodiscard]] bool saturated() const noexcept { return saturated_; }
+    [[nodiscard]] std::uint64_t dropped_operation_count() const noexcept {
+        return dropped_operation_count_;
+    }
+    [[nodiscard]] std::uint64_t operation_count() const noexcept {
+        return operation_count_;
+    }
+    [[nodiscard]] std::uint64_t job_count() const noexcept {
+        return job_count_;
+    }
+    [[nodiscard]] const PersistedGpuOperationEvidenceChunk* head()
+        const noexcept { return head_.get(); }
+
+private:
+    void invalidate(
+        const std::uint64_t dropped,
+        const bool saturated) noexcept {
+        invalid_ = true;
+        saturated_ = saturated_ || saturated;
+        if (dropped > (std::numeric_limits<std::uint64_t>::max)()
+                - dropped_operation_count_) {
+            dropped_operation_count_ =
+                (std::numeric_limits<std::uint64_t>::max)();
+            saturated_ = true;
+        } else {
+            dropped_operation_count_ += dropped;
+        }
+    }
+
+    void clear_iterative() noexcept {
+        tail_ = nullptr;
+        while (head_ != nullptr) {
+            auto next = std::move(head_->next_);
+            head_ = std::move(next);
+        }
+    }
+
+    void move_from(PersistedGpuOperationEvidenceLedger& other) noexcept {
+        head_ = std::move(other.head_);
+        tail_ = std::exchange(other.tail_, nullptr);
+        operation_count_ = std::exchange(other.operation_count_, 0u);
+        job_count_ = std::exchange(other.job_count_, 0u);
+        dropped_operation_count_ = std::exchange(
+            other.dropped_operation_count_, 0u);
+        invalid_ = std::exchange(other.invalid_, false);
+        saturated_ = std::exchange(other.saturated_, false);
+        frozen_ = std::exchange(other.frozen_, false);
+    }
+
+    std::unique_ptr<PersistedGpuOperationEvidenceChunk> head_{};
+    PersistedGpuOperationEvidenceChunk* tail_ = nullptr;
+    std::uint64_t operation_count_ = 0u;
+    std::uint64_t job_count_ = 0u;
+    std::uint64_t dropped_operation_count_ = 0u;
+    bool invalid_ = false;
+    bool saturated_ = false;
+    bool frozen_ = false;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedGpuOperationEvidenceLedger>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedGpuOperationEvidenceLedger>);
+
+/// Convert the runtime-minted fixed GPU identity into the statement proof
+/// without allocating or inferring cache state from descriptive counters.
+/// Only the immutable all-hit policy accepted by the persisted operation can
+/// become an all-GPU execution environment.
+[[nodiscard]] inline std::optional<ExecutionEnvironmentProof>
+make_persisted_shape_v5_gpu_environment_proof(
+    const ::bioseq::gpu::vulkan::RuntimeGpuExecutionEnvironmentBinding&
+        binding,
+    const std::size_t effective_cpu_workers) noexcept {
+    using RuntimePolicy = ::bioseq::gpu::vulkan::
+        RuntimePipelineCachePolicyEvidence;
+    if (!binding.accepted()
+        || binding.cache_policy
+            != RuntimePolicy::immutable_preseed_all_hit
+        || effective_cpu_workers == 0
+        || effective_cpu_workers > sql_integer_value_max
+        || binding.seed_size > sql_bigint_value_max) {
+        return std::nullopt;
+    }
+    ExecutionEnvironmentProof environment{};
+    environment.effective_cpu_workers =
+        static_cast<std::uint32_t>(effective_cpu_workers);
+    environment.gpu_environment_present = binding.gpu_environment_present;
+    environment.gpu_device_uuid = binding.gpu_device_uuid;
+    environment.gpu_driver_identity = binding.gpu_driver_identity;
+    environment.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::immutable_preseed_all_hit;
+    environment.gpu_pipeline_cache_seed_sha256 = binding.seed_sha256;
+    environment.gpu_pipeline_cache_seed_size = binding.seed_size;
+    environment.gpu_pipeline_cache_manifest_checksum =
+        binding.manifest_checksum;
+    environment.gpu_pipeline_cache_hit = binding.pipeline_cache_all_hit
+        ? OptionalProofBool::true_value
+        : OptionalProofBool::false_value;
+    return environment_is_valid_for_backend(
+            environment, ExecutedBackend::vulkan_gpu)
+        ? std::optional<ExecutionEnvironmentProof>{environment}
+        : std::nullopt;
+}
+
+/// Convert the separately-owned report-once cache token into an operational
+/// delta.  The descriptive environment proof is intentionally insufficient to
+/// manufacture these counters, and the token identity itself is not replayed
+/// into the SQL aggregate.
+[[nodiscard]] inline std::optional<PipelineOperationalStats>
+make_persisted_shape_v5_gpu_cache_metrics_delta(
+    const ::bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& audit) noexcept {
+    if (!audit.accepted()
+        || audit.gpu_pipeline_cache_loads > sql_bigint_value_max
+        || audit.gpu_pipeline_cache_seed_bytes > sql_bigint_value_max
+        || audit.gpu_pipeline_cache_load_ns > sql_bigint_value_max
+        || audit.gpu_pipeline_creates > sql_bigint_value_max
+        || audit.gpu_pipeline_creation_ns > sql_bigint_value_max) {
+        return std::nullopt;
+    }
+    PipelineOperationalStats delta{};
+    delta.gpu_pipeline_cache_loads = audit.gpu_pipeline_cache_loads;
+    delta.gpu_pipeline_cache_seed_bytes =
+        audit.gpu_pipeline_cache_seed_bytes;
+    delta.gpu_pipeline_cache_load_ns = audit.gpu_pipeline_cache_load_ns;
+    delta.gpu_pipeline_creates = audit.gpu_pipeline_creates;
+    delta.gpu_pipeline_creation_ns = audit.gpu_pipeline_creation_ns;
+    return delta;
+}
+
+/// The runtime's sealed proof exposes an immutable environment preview before
+/// it commits report-once cache bits.  Final authority must reproduce every
+/// fixed field exactly; descriptive equivalence is not enough.
+[[nodiscard]] inline bool
+persisted_shape_v5_gpu_environment_binding_matches(
+    const ::bioseq::gpu::vulkan::RuntimeGpuExecutionEnvironmentBinding& actual,
+    const ::bioseq::gpu::vulkan::RuntimeGpuExecutionEnvironmentBinding&
+        preview) noexcept {
+    return actual.accepted() && preview.accepted()
+        && actual == preview;
+}
+
+/// The pre-finalizer cache audit is a componentwise maximum claim, not the
+/// counter delta to publish.  An accepted final report-once token may publish
+/// only the same operation identity and values bounded by that validated
+/// maximum.
+[[nodiscard]] inline bool
+persisted_shape_v5_gpu_cache_metrics_bounded_by(
+    const ::bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& actual,
+    const ::bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& preview) noexcept {
+    return actual.componentwise_bounded_by(preview);
+}
+
+/// Validate a staged persisted-GPU stats delta and the prospective aggregate
+/// without mutating the caller.  The scheduler performs this check before the
+/// allocation-free commit so environment or persisted-generation drift cannot
+/// revoke earlier jobs after any result/source/lifecycle state is published.
+[[nodiscard]] constexpr bool
+persisted_shape_v5_coordinate_prospective_stats_valid(
+    const PipelineExecutionStats& before,
+    const PipelineExecutionStats& staged,
+    const PipelineExecutionStats& prospective,
+    const std::uint64_t expected_jobs) noexcept {
+    if (expected_jobs == 0 || expected_jobs > sql_bigint_value_max
+        || before.attempted_alignment_jobs
+            > sql_bigint_value_max - expected_jobs) {
+        return false;
+    }
+    const std::uint64_t expected_total =
+        before.attempted_alignment_jobs + expected_jobs;
+    return PipelineExecutionStats::can_retain_full_attestation(before)
+        && PipelineExecutionStats::can_retain_full_attestation(staged)
+        && PipelineExecutionStats::can_retain_full_attestation(prospective)
+        && staged.requested_backend == ExecutedBackend::vulkan_gpu
+        && staged.actual_backend == ExecutedBackend::vulkan_gpu
+        && staged.requested_target_index_source
+            == TargetIndexSource::persisted
+        && staged.actual_target_index_source == TargetIndexSource::persisted
+        && staged.attempted_alignment_jobs == expected_jobs
+        && staged.fully_attested_alignment_jobs == expected_jobs
+        && staged.unattested_alignment_jobs == 0
+        && prospective.attempted_alignment_jobs == expected_total
+        && prospective.fully_attested_alignment_jobs == expected_total
+        && prospective.unattested_alignment_jobs == 0
+        && prospective.requested_backend == ExecutedBackend::vulkan_gpu
+        && prospective.actual_backend == ExecutedBackend::vulkan_gpu
+        && prospective.requested_target_index_source
+            == TargetIndexSource::persisted
+        && prospective.actual_target_index_source
+            == TargetIndexSource::persisted
+        && prospective.persisted_generation_id
+            == staged.persisted_generation_id
+        && prospective.persisted_source_identity
+            == staged.persisted_source_identity
+        && ExecutionEnvironmentProof::payload_equal(
+            prospective.environment, staged.environment)
+        && !prospective.environment.mixed_invalid;
+}
 
 } // namespace bioseq::pipeline_stats
 

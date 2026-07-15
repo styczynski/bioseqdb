@@ -1355,13 +1355,13 @@ void register_scheduler_supervisor() {
 
 [[nodiscard]] std::expected<void, std::string>
 publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
-    const std::filesystem::path command_lib =
-        bioseq::gpu::vulkan::moltenvk_command_metallib_path(cache_dir);
-    if (::setenv(
-            "BIOSEQ_MOLTENVK_COMMAND_METALLIB", command_lib.c_str(), 1) != 0) {
+    // No exact MoltenVK command-source AOT capture exists yet. Never publish
+    // the old no-op placeholder as immutable command evidence; Runtime's
+    // recognized command-source interpose must fail closed instead.
+    if (::unsetenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB") != 0) {
         const int saved_errno = errno;
         return std::unexpected(fmt::format(
-            "setenv BIOSEQ_MOLTENVK_COMMAND_METALLIB failed: errno {} ({})",
+            "unsetenv BIOSEQ_MOLTENVK_COMMAND_METALLIB failed: errno {} ({})",
             saved_errno, std::strerror(saved_errno)));
     }
     if (::setenv(
@@ -1369,6 +1369,15 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
         const int saved_errno = errno;
         return std::unexpected(fmt::format(
             "setenv BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR failed: errno {} ({})",
+            saved_errno, std::strerror(saved_errno)));
+    }
+    const std::filesystem::path sealed_manifest =
+        bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir);
+    if (::setenv(
+            "BIOSEQ_GPU_SEALED_CACHE_MANIFEST", sealed_manifest.c_str(), 1) != 0) {
+        const int saved_errno = errno;
+        return std::unexpected(fmt::format(
+            "setenv BIOSEQ_GPU_SEALED_CACHE_MANIFEST failed: errno {} ({})",
             saved_errno, std::strerror(saved_errno)));
     }
     return {};
@@ -1396,6 +1405,68 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
     return inputs;
 }
 
+[[nodiscard]] std::expected<
+    std::vector<bioseq::gpu::vulkan::ShaderVariantKey>, std::string>
+exact_aot_shader_keys(
+        const bioseq::gpu::vulkan::ShaderCacheBuildInputs& inputs) {
+    std::vector<bioseq::gpu::vulkan::ShaderVariantKey> keys;
+    bioseq::gpu::vulkan::for_each_static_shader_variant(
+        inputs.variants,
+        [&keys](const bioseq::gpu::vulkan::ShaderVariantKey& key) {
+            keys.push_back(key);
+        });
+    return bioseq::gpu::vulkan::canonical_sealed_shader_cache_keys(keys);
+}
+
+[[nodiscard]] bioseq::gpu::vulkan::SealedShaderCacheProcessStore&
+process_shader_seed_store() noexcept {
+    static bioseq::gpu::vulkan::SealedShaderCacheProcessStore store;
+    return store;
+}
+
+[[nodiscard]] std::expected<std::shared_ptr<
+    const bioseq::gpu::vulkan::SealedShaderCacheSeedImage>, std::string>
+load_process_shader_seed_once(
+    const std::filesystem::path& cache_dir,
+    std::string_view digest,
+    std::span<const bioseq::gpu::vulkan::ShaderVariantKey> keys)
+{
+    return process_shader_seed_store().load_once(cache_dir, digest, keys);
+}
+
+[[nodiscard]] std::shared_ptr<
+    const bioseq::gpu::vulkan::SealedShaderCacheSeedImage>
+process_shader_seed_snapshot() {
+    return process_shader_seed_store().snapshot();
+}
+
+[[nodiscard]] std::expected<void, std::string>
+install_verified_runtime_archive_configuration(
+    std::shared_ptr<
+        const bioseq::gpu::vulkan::SealedShaderCacheSeedImage> seed)
+{
+    if (!seed || !seed->accepted()) {
+        return std::unexpected(
+            "runtime archive configuration has no accepted process seed image");
+    }
+    auto configuration = bioseq::gpu::vulkan::
+        make_runtime_metal_archive_configuration_image(std::move(seed));
+    if (!configuration) {
+        return std::unexpected(fmt::format(
+            "prepare admitted Metal archive configuration: {}",
+            configuration.error()));
+    }
+    auto installed =
+        bioseq::gpu::vulkan::install_runtime_metal_archive_configuration(
+            std::move(*configuration));
+    if (!installed) {
+        return std::unexpected(fmt::format(
+            "install sealed Metal archive configuration: {}",
+            installed.error()));
+    }
+    return {};
+}
+
 [[nodiscard]] std::expected<void, std::string> run_shader_cache_aot_phase() {
 #if !defined(__APPLE__)
     return {};
@@ -1410,25 +1481,35 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
             "create shader cache dir {} failed: {}",
             cache_dir.string(), ec.message()));
     }
-    if (auto command_lib = bioseq::gpu::vulkan::ensure_moltenvk_command_library(
-            cache_dir, inputs.msl);
-        !command_lib) {
+    auto keys = exact_aot_shader_keys(inputs);
+    if (!keys) {
         return std::unexpected(fmt::format(
-            "moltenvk command library: {}", command_lib.error()));
+            "canonicalize exact AOT shader keys: {}", keys.error()));
     }
-
-    if (g_shared != nullptr) {
-        std::snprintf(
-            g_shared->cache_digest_hex, sizeof(g_shared->cache_digest_hex),
-            "%s", digest.c_str());
+    const std::filesystem::path manifest_path =
+        bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir);
+    const bool manifest_exists = std::filesystem::exists(manifest_path, ec);
+    if (ec) {
+        return std::unexpected(fmt::format(
+            "stat sealed shader cache manifest {} failed: {}",
+            manifest_path.string(), ec.message()));
     }
-
-    std::vector<bioseq::gpu::vulkan::ShaderVariantKey> keys;
-    bioseq::gpu::vulkan::for_each_static_shader_variant(
-        inputs.variants,
-        [&keys](const bioseq::gpu::vulkan::ShaderVariantKey& key) {
-            keys.push_back(key);
-        });
+    if (manifest_exists) {
+        auto sealed =
+            bioseq::gpu::vulkan::load_validated_sealed_shader_cache_manifest(
+                cache_dir, digest, *keys);
+        if (!sealed) {
+            return std::unexpected(fmt::format(
+                "existing sealed shader cache is invalid and will not be repaired: {}",
+                sealed.error()));
+        }
+        if (g_shared != nullptr) {
+            std::snprintf(
+                g_shared->cache_digest_hex, sizeof(g_shared->cache_digest_hex),
+                "%s", digest.c_str());
+        }
+        return {};
+    }
 
     bioseq::parallelism::GlobalPool::instance().configure(
         bioseq::parallelism::PoolConfig{
@@ -1440,30 +1521,32 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
 
     constexpr std::uint64_t kPeakCompileBytes = 256ull << 20;
     std::size_t cursor = 0;
-    while (cursor < keys.size()) {
+    while (cursor < keys->size()) {
         const unsigned requested = static_cast<unsigned>(
-            std::min<std::size_t>(4, keys.size() - cursor));
+            std::min<std::size_t>(4, keys->size() - cursor));
         auto wave = bioseq::parallelism::try_reserve_budgeted_wave(
             requested, kPeakCompileBytes);
         if (!wave.admitted) {
             return std::unexpected("shader cache AOT memory admission failed");
         }
         const std::size_t begin = cursor;
-        const std::size_t end = std::min<std::size_t>(keys.size(), cursor + wave.fanout);
+        const std::size_t end = std::min<std::size_t>(
+            keys->size(), cursor + wave.fanout);
         std::mutex error_mu;
         std::string first_error;
         bioseq::parallelism::GlobalPool::instance().parallel_for(
             begin, end, 1,
             [&](std::size_t b, std::size_t e) {
                 for (std::size_t i = b; i < e; ++i) {
-                    auto compiled = bioseq::gpu::vulkan::ensure_compiled(
-                        cache_dir, keys[i], inputs.msl);
+                    auto compiled =
+                        bioseq::gpu::vulkan::ensure_compiled_for_sealed_seed(
+                        cache_dir, (*keys)[i], inputs.msl);
                     if (!compiled) {
                         std::lock_guard<std::mutex> guard(error_mu);
                         if (first_error.empty()) {
                             first_error = fmt::format(
                                 "{}: {}",
-                                bioseq::gpu::vulkan::cache_file_stem(keys[i]),
+                                bioseq::gpu::vulkan::cache_file_stem((*keys)[i]),
                                 compiled.error());
                         }
                     }
@@ -1473,6 +1556,17 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
             return std::unexpected(first_error);
         }
         cursor = end;
+    }
+    auto sealed = bioseq::gpu::vulkan::seal_shader_cache_manifest(
+        cache_dir, digest, *keys);
+    if (!sealed) {
+        return std::unexpected(fmt::format(
+            "seal exact shader AOT seed: {}", sealed.error()));
+    }
+    if (g_shared != nullptr) {
+        std::snprintf(
+            g_shared->cache_digest_hex, sizeof(g_shared->cache_digest_hex),
+            "%s", digest.c_str());
     }
     return {};
 #endif
@@ -1617,6 +1711,32 @@ void wait_for_runtime_ready() {
 				if (!digest.empty()) {
 					const std::filesystem::path cache_dir =
 						runtime_cache_dir_from_digest(digest);
+					const auto inputs = conservative_shader_inputs();
+					auto keys = exact_aot_shader_keys(inputs);
+					if (!keys) {
+						const std::string diagnostic = fmt::format(
+							"canonicalize exact AOT shader keys: {}",
+							keys.error());
+						cancel_sleep();
+						report_runtime_init_unavailable(diagnostic);
+					}
+					auto seed = load_process_shader_seed_once(
+						cache_dir, digest, *keys);
+					if (!seed) {
+						const std::string diagnostic = fmt::format(
+							"supervisor shader cache seal validation failed: {}",
+							seed.error());
+						cancel_sleep();
+						report_runtime_init_unavailable(diagnostic);
+					}
+					if (auto installed =
+							install_verified_runtime_archive_configuration(
+								*seed);
+						!installed) {
+						const std::string diagnostic = installed.error();
+						cancel_sleep();
+						report_runtime_init_unavailable(diagnostic);
+					}
 					if (auto published = publish_runtime_cache_env(cache_dir);
 						!published) {
 						const std::string diagnostic = published.error();
@@ -1914,11 +2034,63 @@ prepare_backend_local_shader_cache_env() {
     const auto inputs = conservative_shader_inputs();
     const std::string digest = bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
     const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
-    if (auto command_lib = bioseq::gpu::vulkan::ensure_moltenvk_command_library(
-            cache_dir, inputs.msl);
-        !command_lib) {
+    auto keys = exact_aot_shader_keys(inputs);
+    if (!keys) {
         return std::unexpected(fmt::format(
-            "moltenvk command library: {}", command_lib.error()));
+            "canonicalize exact AOT shader keys: {}", keys.error()));
+    }
+    const std::filesystem::path manifest_path =
+        bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir);
+    std::error_code ec;
+    const bool manifest_exists = std::filesystem::exists(manifest_path, ec);
+    if (ec) {
+        return std::unexpected(fmt::format(
+            "stat sealed shader cache manifest {} failed: {}",
+            manifest_path.string(), ec.message()));
+    }
+    if (manifest_exists) {
+        auto seed = load_process_shader_seed_once(cache_dir, digest, *keys);
+        if (!seed) {
+            return std::unexpected(fmt::format(
+                "existing sealed shader cache is invalid and will not be repaired: {}",
+                seed.error()));
+        }
+        if (auto installed = install_verified_runtime_archive_configuration(
+                *seed);
+            !installed) {
+            return std::unexpected(installed.error());
+        }
+        if (auto published = publish_runtime_cache_env(cache_dir); !published) {
+            return std::unexpected(published.error());
+        }
+        return cache_dir;
+    }
+
+    for (const auto& key : *keys) {
+        auto compiled = bioseq::gpu::vulkan::ensure_compiled_for_sealed_seed(
+            cache_dir, key, inputs.msl);
+        if (!compiled) {
+            return std::unexpected(fmt::format(
+                "backend-local exact AOT compile {}: {}",
+                bioseq::gpu::vulkan::cache_file_stem(key),
+                compiled.error()));
+        }
+    }
+    auto sealed = bioseq::gpu::vulkan::seal_shader_cache_manifest(
+        cache_dir, digest, *keys);
+    if (!sealed) {
+        return std::unexpected(fmt::format(
+            "seal backend-local exact shader AOT seed: {}", sealed.error()));
+    }
+    auto seed = load_process_shader_seed_once(cache_dir, digest, *keys);
+    if (!seed) {
+        return std::unexpected(fmt::format(
+            "load newly sealed backend-local shader seed: {}", seed.error()));
+    }
+    if (auto installed = install_verified_runtime_archive_configuration(
+            *seed);
+        !installed) {
+        return std::unexpected(installed.error());
     }
     if (auto published = publish_runtime_cache_env(cache_dir); !published) {
         return std::unexpected(published.error());
@@ -1966,43 +2138,75 @@ struct PgBackendLocalCompileService {
         out << "env BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR=" << env << '\n';
     }
 
-    std::vector<bioseq::gpu::vulkan::ShaderVariantKey> keys;
-    bioseq::gpu::vulkan::for_each_static_shader_variant(
-        inputs.variants,
-        [&keys](const bioseq::gpu::vulkan::ShaderVariantKey& key) {
-            keys.push_back(key);
-        });
-
-    auto file_size_or_zero = [](const std::filesystem::path& path) -> std::uintmax_t {
-        std::error_code ec;
-        const std::uintmax_t size = std::filesystem::file_size(path, ec);
-        return ec ? 0u : size;
-    };
+    auto keys = exact_aot_shader_keys(inputs);
+    if (!keys) {
+        out << "RESULT: failed\n"
+            << "error=canonicalize exact AOT shader keys: "
+            << keys.error() << '\n';
+        return out.str();
+    }
+    const std::string digest = cache_dir.filename().string();
+    const auto seed = process_shader_seed_snapshot();
+    if (!seed || !seed->accepted()
+        || seed->manifest().cache_digest != digest
+        || seed->manifest().keys != *keys) {
+        out << "RESULT: failed\n"
+            << "error=process-owned shader seed unavailable after preparation\n";
+        return out.str();
+    }
+    const auto& sealed = seed->manifest();
+    out << "sealed_manifest="
+        << bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir).string()
+        << " seed_bytes=" << sealed.seed_size
+        << " manifest_checksum=" << sealed.manifest_checksum
+        << " seed_load_count=" << seed->receipt().load_count()
+        << " seed_load_ns=" << seed->receipt().load_ns() << '\n';
 
     std::size_t failed = 0;
-    for (const auto& key : keys) {
+    for (const auto& key : *keys) {
         const std::string stem = bioseq::gpu::vulkan::cache_file_stem(key);
-        auto compiled = bioseq::gpu::vulkan::ensure_compiled(cache_dir, key, inputs.msl);
-        if (!compiled) {
+        auto compatible =
+            bioseq::gpu::vulkan::sealed_shader_cache_key_view(*seed, key);
+        if (!compatible) {
             ++failed;
             out << "variant " << stem
                 << " kind=" << key.kind
                 << " tile=" << key.tile_size
                 << " local=" << key.local_size
                 << " max_span=" << key.max_span
-                << " status=failed error=" << compiled.error() << '\n';
+                << " status=failed error=" << compatible.error() << '\n';
             continue;
         }
-        const auto metallib = bioseq::gpu::vulkan::cache_metallib_path(cache_dir, key);
-        const auto meta = bioseq::gpu::vulkan::cache_meta_path(cache_dir, key);
+        const auto key_iterator = std::find(
+            sealed.keys.begin(), sealed.keys.end(), key);
+        const std::uint32_t key_index = static_cast<std::uint32_t>(
+            std::distance(sealed.keys.begin(), key_iterator));
+        const auto* metallib = bioseq::gpu::vulkan::
+            sealed_shader_cache_detail::find_artifact_image(
+                seed->artifacts(),
+                bioseq::gpu::vulkan::SealedShaderCacheArtifactKind::
+                    shader_metallib,
+                key_index, stem + ".metallib");
+        const auto* meta = bioseq::gpu::vulkan::
+            sealed_shader_cache_detail::find_artifact_image(
+                seed->artifacts(),
+                bioseq::gpu::vulkan::SealedShaderCacheArtifactKind::shader_meta,
+                key_index, stem + ".meta");
         std::ostringstream archive_bytes;
         bool first_archive = true;
-        for (const auto& archive : bioseq::gpu::vulkan::cache_binary_archive_paths(cache_dir, key)) {
+        for (const auto& archive : seed->artifacts()) {
+            if (archive.descriptor.key_index != key_index
+                || archive.descriptor.kind
+                    != bioseq::gpu::vulkan::SealedShaderCacheArtifactKind::
+                        metal_binary_archive) {
+                continue;
+            }
             if (!first_archive) {
                 archive_bytes << ',';
             }
             first_archive = false;
-            archive_bytes << archive.filename().string() << ':' << file_size_or_zero(archive);
+            archive_bytes << archive.descriptor.filename << ':'
+                << archive.bytes.size();
         }
         out << "variant " << stem
             << " kind=" << key.kind
@@ -2010,13 +2214,13 @@ struct PgBackendLocalCompileService {
             << " local=" << key.local_size
             << " max_span=" << key.max_span
             << " status=ok"
-            << " metallib_bytes=" << file_size_or_zero(metallib)
-            << " meta_bytes=" << file_size_or_zero(meta)
+            << " metallib_bytes=" << (metallib ? metallib->bytes.size() : 0u)
+            << " meta_bytes=" << (meta ? meta->bytes.size() : 0u)
             << " archive_bytes=" << archive_bytes.str()
             << '\n';
     }
     out << "RESULT: " << (failed == 0 ? "ok" : "failed")
-        << " variants=" << keys.size()
+        << " variants=" << keys->size()
         << " failed=" << failed << '\n';
     return out.str();
 #endif
@@ -2039,29 +2243,27 @@ pg_shader_provider_prepare_runtime() {
 pg_shader_provider_load_module(
         VkDevice device,
         const bioseq::gpu::vulkan::ShaderVariantKey& key,
-        PFN_vkCreateShaderModule create_shader_module) {
+    PFN_vkCreateShaderModule create_shader_module) {
+    const auto inputs = conservative_shader_inputs();
+    auto keys = exact_aot_shader_keys(inputs);
+    if (!keys) {
+        return std::unexpected(fmt::format(
+            "canonicalize exact AOT shader keys: {}", keys.error()));
+    }
     if (g_shared != nullptr) {
         wait_for_runtime_ready();
-        const std::string digest = current_runtime_cache_digest();
-        if (digest.empty()) {
-            return std::unexpected("shader cache digest unavailable");
-        }
-        PgSupervisorCompileService service;
-        return bioseq::gpu::vulkan::load_module(
-            device, runtime_cache_dir_from_digest(digest), key, create_shader_module, service);
+    } else if (!process_shader_seed_snapshot()) {
+        auto prepared = prepare_backend_local_shader_cache_env();
+        if (!prepared) return std::unexpected(prepared.error());
     }
-
-    auto prepared = prepare_backend_local_shader_cache_env();
-    if (!prepared) {
-        return std::unexpected(prepared.error());
+    const auto seed = process_shader_seed_snapshot();
+    if (!seed || !seed->accepted()
+        || seed->manifest().keys != *keys) {
+        return std::unexpected(
+            "process-owned sealed shader seed is unavailable or incompatible");
     }
-    const auto inputs = conservative_shader_inputs();
-    PgBackendLocalCompileService service{
-        .cache_dir = *prepared,
-        .msl = inputs.msl,
-    };
-    return bioseq::gpu::vulkan::load_module(
-        device, *prepared, key, create_shader_module, service);
+    return bioseq::gpu::vulkan::load_sealed_cached_module(
+        device, *seed, key, create_shader_module);
 }
 
 void install_pg_shader_provider_if_available() noexcept {

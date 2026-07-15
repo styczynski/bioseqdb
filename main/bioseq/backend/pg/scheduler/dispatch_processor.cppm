@@ -319,6 +319,18 @@ public:
 				&& resident_view.descriptors == &resident->descriptors()
 				&& resident_view.controls == &resident->controls()
 				&& resident_view.positions == &resident->positions()
+				&& resident_view.descriptor_bytes
+					== resident->descriptor_bytes()
+				&& resident_view.control_bytes == resident->control_bytes()
+				&& resident_view.position_bytes == resident->position_bytes()
+				&& resident_view.position_count == resident->position_count()
+				&& resident_view.max_occ_cap
+					== bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap
+				&& resident_view.partition_count == resident->descriptor_count()
+				&& resident_view.abi_version
+					== resident->identity().gpu_abi_version
+				&& resident_view.device_uuid
+					== resident->identity().device_uuid
 				&& resident_view.generation_id
 					== resident->identity().generation_id
 				&& resident_view.source_identity
@@ -478,6 +490,10 @@ public:
         // scanner_pg validates that it is registered MVCC state and never
         // changes its registration count.
         Snapshot                                         snapshot             = nullptr;
+        // Borrowed statement-root sink. It is required only by the accepted
+        // persisted Shape-V5 Vulkan route and never owns through hot stats.
+        ::bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
+            persisted_gpu_operation_evidence_sink = nullptr;
         // Per-row optional locator. nullopt means "use the inline pgseq_t at
         // target_hdrs[i]" — scanner_pg is then constructed in in-memory mode.
         std::array<std::optional<bioseq::storage::seq_locator>,

@@ -3,12 +3,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -22,7 +26,9 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <vulkan/vulkan.h>
 
 import bioseq.gpu.vulkan.shader_cache;
@@ -31,12 +37,31 @@ import bioseq.gpu.vulkan.shader_layout;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
 
 namespace {
 
 namespace gv = bioseq::gpu::vulkan;
 
 bool shader_module_create_called = false;
+bool shader_module_payload_matches = false;
+std::vector<std::byte> expected_shader_module_metallib;
+std::filesystem::path seal_identity_mutation_path;
+bool seal_identity_mutation_succeeded = false;
+
+void mutate_seal_artifact_same_size() noexcept {
+    seal_identity_mutation_succeeded = false;
+    const int fd = ::open(
+        seal_identity_mutation_path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return;
+    std::byte value{};
+    if (::pread(fd, &value, 1u, 0) == 1) {
+        value ^= std::byte{0x01u};
+        seal_identity_mutation_succeeded =
+            ::pwrite(fd, &value, 1u, 0) == 1 && ::fsync(fd) == 0;
+    }
+    (void)::close(fd);
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL record_shader_module_create(
     VkDevice,
@@ -45,6 +70,26 @@ VKAPI_ATTR VkResult VKAPI_CALL record_shader_module_create(
     VkShaderModule*)
 {
     shader_module_create_called = true;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL record_exact_shader_module_create(
+    VkDevice,
+    const VkShaderModuleCreateInfo* create_info,
+    const VkAllocationCallbacks*,
+    VkShaderModule*)
+{
+    shader_module_create_called = true;
+    const std::size_t header_bytes = gv::moltenvk_msl_spirv_header_size();
+    shader_module_payload_matches = create_info != nullptr
+        && create_info->pCode != nullptr
+        && create_info->codeSize
+            == header_bytes + expected_shader_module_metallib.size()
+        && std::memcmp(
+            reinterpret_cast<const std::byte*>(create_info->pCode)
+                + header_bytes,
+            expected_shader_module_metallib.data(),
+            expected_shader_module_metallib.size()) == 0;
     return VK_SUCCESS;
 }
 
@@ -78,6 +123,40 @@ struct TempDir {
     }
 };
 
+struct ScopedEnvironmentVariable {
+    std::string name;
+    std::optional<std::string> previous;
+
+    ScopedEnvironmentVariable(std::string variable, std::string_view value)
+        : name(std::move(variable))
+    {
+        if (const char* existing = std::getenv(name.c_str()); existing != nullptr) {
+            previous = existing;
+        }
+        REQUIRE(::setenv(name.c_str(), std::string(value).c_str(), 1) == 0);
+    }
+
+    ~ScopedEnvironmentVariable()
+    {
+        if (previous) {
+            (void)::setenv(name.c_str(), previous->c_str(), 1);
+        } else {
+            (void)::unsetenv(name.c_str());
+        }
+    }
+};
+
+struct ScopedArchiveHelperStoreReset {
+    ScopedArchiveHelperStoreReset() {
+        REQUIRE(gv::qualified_metal_archive_helper_process_store()
+                    .reset_for_test());
+    }
+    ~ScopedArchiveHelperStoreReset() {
+        (void)gv::qualified_metal_archive_helper_process_store()
+            .reset_for_test();
+    }
+};
+
 [[nodiscard]] bool contains_key(
     const std::vector<gv::ShaderVariantKey>& keys,
     gv::ShaderVariantKey needle)
@@ -98,6 +177,116 @@ struct TempDir {
     std::vector<std::byte> out(text.size());
     std::memcpy(out.data(), text.data(), text.size());
     return out;
+}
+
+[[nodiscard]] std::vector<std::byte> read_file_bytes(
+    const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input);
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    REQUIRE(size >= 0);
+    input.seekg(0, std::ios::beg);
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    input.read(reinterpret_cast<char*>(bytes.data()), size);
+    REQUIRE(input);
+    return bytes;
+}
+
+void write_fake_archive_qualification(
+    const std::filesystem::path& archive,
+    std::span<const std::byte> archive_bytes,
+    const gv::ShaderVariantKey& key,
+    std::span<const std::byte> metallib_bytes,
+    std::string_view entry_name,
+    std::uint64_t max_threads = 256u)
+{
+#if defined(__APPLE__)
+    const auto helper =
+        gv::qualified_metal_archive_helper_process_store().load_once();
+    REQUIRE(helper);
+    const std::string helper_source = (**helper).source;
+    const std::uint64_t helper_size = (**helper).executable_size;
+    const std::array<std::uint8_t, 32> helper_sha256 =
+        (**helper).executable_sha256;
+#else
+    const auto portable_helper = bytes_of("portable-helper-fixture");
+    const std::string helper_source = "installed-sibling";
+    const std::uint64_t helper_size =
+        static_cast<std::uint64_t>(portable_helper.size());
+    const std::array<std::uint8_t, 32> helper_sha256 =
+        gv::sealed_shader_cache_detail::sha256(portable_helper);
+#endif
+    const gv::MetalArchiveQualificationReceipt qualification{
+        .wire_version =
+            gv::sealed_shader_cache_detail::archive_qualification_version,
+        .shader_key = key,
+        .metallib_size = static_cast<std::uint64_t>(metallib_bytes.size()),
+        .metallib_sha256 =
+            gv::sealed_shader_cache_detail::sha256(metallib_bytes),
+        .entry_name = std::string(entry_name),
+        .max_total_threads_per_threadgroup = max_threads,
+        .threadgroup_size_is_multiple = false,
+        .negative_error = gv::MetalArchiveNegativeErrorFingerprint{
+            .domain = "MTLLibraryErrorDomain",
+            .code = 6,
+        },
+        .archive_size = static_cast<std::uint64_t>(archive_bytes.size()),
+        .archive_sha256 =
+            gv::sealed_shader_cache_detail::sha256(archive_bytes),
+        .helper_protocol_version = 2u,
+        .helper_build_identity = "bioseq_gpu_archive_builder_v2",
+        .helper_source = helper_source,
+        .helper_executable_size = helper_size,
+        .helper_executable_sha256 = helper_sha256,
+        .helper_metal_registry_id = 0x1234u,
+    };
+    const auto qualification_bytes = gv::sealed_shader_cache_detail::
+        serialize_metal_archive_qualification_receipt(qualification);
+    REQUIRE(qualification_bytes);
+    REQUIRE(gv::durable_write_file(
+        gv::cache_binary_archive_qualification_path(archive),
+        *qualification_bytes));
+}
+
+void write_fake_sealed_shader_artifacts(
+    const std::filesystem::path& cache_dir,
+    std::span<const gv::ShaderVariantKey> keys)
+{
+    constexpr std::string_view entry = "main0";
+    for (const gv::ShaderVariantKey& key : keys) {
+        const gv::ShaderWorkgroupSize workgroup =
+            gv::expected_shader_workgroup_size(key);
+        gv::ShaderCacheMeta meta{};
+        meta.key = key;
+        meta.wg_x = workgroup.x;
+        meta.wg_y = workgroup.y;
+        meta.wg_z = workgroup.z;
+        meta.entry_len = static_cast<std::uint32_t>(entry.size());
+        const auto meta_bytes = gv::meta_to_bytes(meta, entry);
+        REQUIRE(gv::durable_write_file(
+            gv::cache_meta_path(cache_dir, key), meta_bytes));
+        const auto metallib = bytes_of(
+            "test-metallib-" + gv::cache_file_stem(key));
+        REQUIRE(gv::durable_write_file(
+            gv::cache_metallib_path(cache_dir, key), metallib));
+        const auto archives = gv::cache_binary_archive_paths(cache_dir, key);
+        const std::uint64_t exact_threads =
+            static_cast<std::uint64_t>(workgroup.x)
+            * static_cast<std::uint64_t>(workgroup.y)
+            * static_cast<std::uint64_t>(workgroup.z);
+        for (std::size_t archive_ordinal = 0u;
+             archive_ordinal < archives.size(); ++archive_ordinal) {
+            const std::filesystem::path& archive = archives[archive_ordinal];
+            const auto archive_bytes = bytes_of(
+                "qualified-test-archive-" + archive.filename().string());
+            REQUIRE(gv::durable_write_file(archive, archive_bytes));
+            write_fake_archive_qualification(
+                archive, archive_bytes, key, metallib, entry,
+                archive_ordinal == 0u ? exact_threads : 256u);
+        }
+    }
 }
 
 [[nodiscard]] std::size_t spirv_opcode_count(
@@ -1480,6 +1669,146 @@ TEST_CASE("format-5 ABI3 direct seed shaders pin raw SoA and local-position ABI"
     }
 }
 
+[[nodiscard]] gv::PersistedShapeV5CoordinateJobAudit
+make_shape_v5_coordinate_hit_audit(
+    const std::size_t problem_index,
+    const std::uint64_t operation_identity)
+{
+    static gv::Buffer resident_descriptors;
+    static gv::Buffer resident_controls;
+    static gv::Buffer resident_positions;
+    static gv::Buffer query_minimizers;
+    const auto identity = [](const gv::Buffer* object,
+                             const std::uint64_t token,
+                             const std::uint64_t bytes) {
+        return gv::RuntimeBufferIdentity{
+            .object = object,
+            .owner = reinterpret_cast<const gv::Runtime*>(1u),
+            .buffer_handle = token,
+            .memory_handle = token + 100u,
+            .bytes = bytes,
+            .allocation_bytes = bytes,
+        };
+    };
+    gv::PersistedShapeV5CoordinateJobAudit audit{};
+    audit.operation_identity = operation_identity;
+    audit.query_authority_identity = 200u;
+    audit.resident_descriptors = identity(
+        &resident_descriptors, 1u, 104u);
+    audit.resident_controls = identity(&resident_controls, 2u, 64u);
+    audit.resident_positions = identity(&resident_positions, 3u, 64u);
+    audit.query_minimizer_buffer = identity(&query_minimizers, 4u, 64u);
+    audit.device_uuid[0] = 1u;
+    audit.descriptor_bytes = 104u;
+    audit.control_bytes = 64u;
+    audit.position_bytes = 64u;
+    audit.position_count = 8u;
+    audit.max_occ_cap = 500u;
+    audit.partition_count = 1u;
+    audit.abi_version = gv::k_gpu_shape_v5_abi_version;
+    audit.generation_id = 300u;
+    audit.source_identity = 400u;
+    audit.cold_load_identity = 500u;
+    audit.target_len = 10'000u;
+    audit.problem_index = problem_index;
+    audit.query_index = static_cast<std::uint32_t>(problem_index);
+    audit.logical_target_row = 600u + problem_index;
+    audit.logical_query_ordinal = 700u + problem_index;
+    audit.query_record = gv::PhaseCSeedQueryRecordWire{
+        .minimizer_offset = static_cast<std::uint32_t>(problem_index * 4u),
+        .minimizer_count = 4u,
+        .query_len = 120u,
+        .flags = 0u,
+    };
+    audit.result = gv::GpuCoordinateOnlyResultWire{
+        .query_start = 1u,
+        .query_end = 119u,
+        .target_start = 100u + problem_index,
+        .target_end = 218u + problem_index,
+        .match_length = 118u,
+        .block_length = 118u,
+        .chain_score = 42,
+        .seed_count = 7u,
+        .is_reverse = 0u,
+        .valid = 1u,
+    };
+    audit.configuration =
+        gv::persisted_shape_v5_coordinate_config_identity(
+            15u,
+            500,
+            gv::PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp,
+            gv::ChainingPipelineKey{
+                .tile_size = 384u,
+                .local_size = 128u,
+            },
+            5'000,
+            5'000,
+            500,
+            3'000,
+            0.01F,
+            0.005F,
+            25,
+            40,
+            3,
+            16u);
+    audit.query_tile_count = 2u;
+    audit.query_count_dispatches = 1u;
+    audit.query_scan_dispatches = 3u;
+    audit.query_emit_dispatches = 1u;
+    audit.query_completed_roundtrips = 2u;
+    audit.direct_count_dispatches = 1u;
+    audit.direct_scan_dispatches = 3u;
+    audit.direct_emit_dispatches = 1u;
+    audit.anchor_count = 7u;
+    audit.sort_operations = 1u;
+    audit.range_build_dispatches = 1u;
+    audit.range_count = 1u;
+    audit.chain_dispatches = 1u;
+    audit.chain_backtrack_dispatches = 1u;
+    audit.coordinate_dispatches = 1u;
+    const std::uint64_t receipt_base = 1'000u + problem_index * 10u;
+    audit.count_submit_wait_identity = receipt_base + 1u;
+    audit.emit_submit_wait_identity = receipt_base + 2u;
+    audit.sort_range_submit_wait_identity = receipt_base + 3u;
+    audit.chain_coordinate_submit_wait_identity = receipt_base + 4u;
+    audit.count_status_checks = 1u;
+    audit.emit_status_checks = 1u;
+    audit.result_readbacks = 1u;
+    return audit;
+}
+
+[[nodiscard]] gv::PersistedShapeV5CoordinateJobExpectation
+expectation_for_shape_v5_coordinate_audit(
+    const gv::PersistedShapeV5CoordinateJobAudit& audit)
+{
+    return gv::PersistedShapeV5CoordinateJobExpectation{
+        .problem_index = audit.problem_index,
+        .query_authority_identity = audit.query_authority_identity,
+        .resident_descriptors = audit.resident_descriptors,
+        .resident_controls = audit.resident_controls,
+        .resident_positions = audit.resident_positions,
+        .query_minimizer_buffer = audit.query_minimizer_buffer,
+        .device_uuid = audit.device_uuid,
+        .descriptor_bytes = audit.descriptor_bytes,
+        .control_bytes = audit.control_bytes,
+        .position_bytes = audit.position_bytes,
+        .position_count = audit.position_count,
+        .max_occ_cap = audit.max_occ_cap,
+        .partition_count = audit.partition_count,
+        .abi_version = audit.abi_version,
+        .generation_id = audit.generation_id,
+        .source_identity = audit.source_identity,
+        .cold_load_identity = audit.cold_load_identity,
+        .target_len = audit.target_len,
+        .query_index = audit.query_index,
+        .logical_target_row = audit.logical_target_row,
+        .logical_query_ordinal = audit.logical_query_ordinal,
+        .query_record = audit.query_record,
+        .result = audit.result,
+        .configuration = audit.configuration,
+    };
+}
+
 TEST_CASE("format-5 seed jobs require strict XOR resident representation",
           "[vulkan][phase_c][shape_v5][route]") {
     gv::Buffer legacy_slots;
@@ -1524,6 +1853,296 @@ TEST_CASE("format-5 seed jobs require strict XOR resident representation",
     };
     CHECK(gv::phase_c_seed_index_representation(incomplete_legacy)
           == gv::PhaseCSeedIndexRepresentation::invalid);
+}
+
+TEST_CASE("persisted shape-v5 coordinate proof is strict and one-shot",
+          "[vulkan][phase_c][shape_v5][operation-proof]") {
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::DeviceQuerySketchAuthority>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::DeviceQuerySketchAuthority>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::PersistedShapeV5CoordinateOperationProof>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::PersistedShapeV5CoordinateOperationProof>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::PersistedShapeV5CoordinateJobEvidence>);
+
+    auto hit = make_shape_v5_coordinate_hit_audit(0u, 100u);
+    REQUIRE(hit.accepted());
+    const auto as_zero_minimizer_query = [](auto audit) {
+        audit.query_record.minimizer_count = 0u;
+        audit.result = {};
+        audit.direct_count_dispatches = 0u;
+        audit.direct_scan_dispatches = 0u;
+        audit.direct_emit_dispatches = 0u;
+        audit.anchor_count = 0u;
+        audit.sort_operations = 0u;
+        audit.range_build_dispatches = 0u;
+        audit.range_count = 0u;
+        audit.chain_dispatches = 0u;
+        audit.chain_backtrack_dispatches = 0u;
+        audit.coordinate_dispatches = 0u;
+        audit.count_submit_wait_identity = 0u;
+        audit.emit_submit_wait_identity = 0u;
+        audit.sort_range_submit_wait_identity = 0u;
+        audit.chain_coordinate_submit_wait_identity = 0u;
+        audit.count_status_checks = 0u;
+        audit.emit_status_checks = 0u;
+        audit.result_readbacks = 0u;
+        return audit;
+    };
+
+    SECTION("every mandatory dispatch and completion is required") {
+        auto missing = hit;
+        missing.query_count_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.query_scan_dispatches = 2u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.query_emit_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.query_completed_roundtrips = 1u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.direct_count_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.direct_scan_dispatches = 2u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.direct_emit_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.sort_operations = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.range_build_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.chain_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.chain_backtrack_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.coordinate_dispatches = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.result_readbacks = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.count_status_checks = 0u;
+        CHECK_FALSE(missing.accepted());
+        missing = hit;
+        missing.emit_status_checks = 0u;
+        CHECK_FALSE(missing.accepted());
+    }
+
+    SECTION("tamper and forbidden-route counters fail closed") {
+        auto tampered = hit;
+        tampered.status_or = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.coordinate_vote_dispatches = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.cpu_or_simd_biological_calls = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.recompute_calls = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.fallback_calls = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.query_record.flags = 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.query_authority_identity = 0u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.resident_controls = {};
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.resident_controls.buffer_handle =
+            hit.resident_descriptors.buffer_handle;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.resident_controls.memory_handle =
+            hit.resident_descriptors.memory_handle;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.descriptor_bytes =
+            hit.resident_descriptors.bytes + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.partition_count += 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.control_bytes = hit.resident_controls.bytes + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.position_bytes = hit.resident_positions.bytes + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.device_uuid = {};
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.configuration.coordinate_algorithm =
+            gv::PhaseCSeedCoordinateAlgorithm::coordinate_vote;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.configuration.probe_limit = 0u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.configuration.max_occ =
+            static_cast<std::int32_t>(hit.max_occ_cap + 1u);
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.chain_coordinate_submit_wait_identity =
+            hit.count_submit_wait_identity;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.valid = 2u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.is_reverse = 9u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.query_end = tampered.query_record.query_len + 1u;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.target_start = tampered.result.target_end;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.seed_count = -1;
+        CHECK_FALSE(tampered.accepted());
+        tampered = hit;
+        tampered.result.match_length = tampered.result.block_length + 1u;
+        CHECK_FALSE(tampered.accepted());
+    }
+
+    SECTION("data-dependent no-hit stages remain ineligible") {
+        const auto zero_query = as_zero_minimizer_query(hit);
+        CHECK_FALSE(zero_query.accepted());
+        auto zero_tile_query = zero_query;
+        zero_tile_query.query_tile_count = 0u;
+        CHECK_FALSE(zero_tile_query.accepted());
+
+        auto no_anchor = hit;
+        no_anchor.result = {};
+        no_anchor.direct_emit_dispatches = 0u;
+        no_anchor.anchor_count = 0u;
+        no_anchor.sort_operations = 0u;
+        no_anchor.range_build_dispatches = 0u;
+        no_anchor.range_count = 0u;
+        no_anchor.chain_dispatches = 0u;
+        no_anchor.chain_backtrack_dispatches = 0u;
+        no_anchor.coordinate_dispatches = 0u;
+        no_anchor.emit_submit_wait_identity = 0u;
+        no_anchor.sort_range_submit_wait_identity = 0u;
+        no_anchor.chain_coordinate_submit_wait_identity = 0u;
+        no_anchor.emit_status_checks = 0u;
+        no_anchor.result_readbacks = 0u;
+        CHECK(no_anchor.accepted());
+
+        auto no_range = hit;
+        no_range.result = {};
+        no_range.range_count = 0u;
+        no_range.chain_dispatches = 0u;
+        no_range.chain_backtrack_dispatches = 0u;
+        no_range.coordinate_dispatches = 0u;
+        no_range.chain_coordinate_submit_wait_identity = 0u;
+        no_range.result_readbacks = 0u;
+        CHECK(no_range.accepted());
+    }
+
+    SECTION("two logical jobs move and consume exactly once") {
+        std::array audits{
+            make_shape_v5_coordinate_hit_audit(0u, 900u),
+            make_shape_v5_coordinate_hit_audit(1u, 900u),
+        };
+        std::array expectations{
+            expectation_for_shape_v5_coordinate_audit(audits[0]),
+            expectation_for_shape_v5_coordinate_audit(audits[1]),
+        };
+        CHECK(gv::PersistedShapeV5CoordinateOperationProof::
+              self_test_one_shot_contract(audits, expectations));
+
+        auto unsupported_zero_audits = audits;
+        unsupported_zero_audits[1] =
+            as_zero_minimizer_query(unsupported_zero_audits[1]);
+        std::array unsupported_zero_expectations{
+            expectation_for_shape_v5_coordinate_audit(
+                unsupported_zero_audits[0]),
+            expectation_for_shape_v5_coordinate_audit(
+                unsupported_zero_audits[1]),
+        };
+        CHECK_FALSE(gv::PersistedShapeV5CoordinateOperationProof::
+                    self_test_one_shot_contract(
+                        unsupported_zero_audits,
+                        unsupported_zero_expectations));
+
+        const auto config_tamper_fails = [&](auto mutate) {
+            auto tampered = expectations;
+            mutate(tampered[0].configuration);
+            return !gv::PersistedShapeV5CoordinateOperationProof::
+                self_test_one_shot_contract(audits, tampered);
+        };
+        CHECK(config_tamper_fails([](auto& config) {
+            config.kmer_size += 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_occ += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.coordinate_algorithm =
+                gv::PhaseCSeedCoordinateAlgorithm::coordinate_vote;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.chain_key.tile_size += 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.chain_key.local_size += 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_dist_x += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_dist_y += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.bandwidth += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_iter += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.gap_penalty_bits ^= 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.skip_penalty_bits ^= 1u;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.max_chain_skip += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.min_chain_score += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.min_seed_count += 1;
+        }));
+        CHECK(config_tamper_fails([](auto& config) {
+            config.probe_limit += 1u;
+        }));
+
+        expectations[0].result.target_end += 1u;
+        CHECK_FALSE(gv::PersistedShapeV5CoordinateOperationProof::
+                    self_test_one_shot_contract(audits, expectations));
+    }
 }
 
 TEST_CASE("format-4 bounded stream kernels compile and reflect exact raw ABI",
@@ -3158,6 +3777,734 @@ TEST_CASE("DOC0341 shader cache digest changes with variant ABI inputs",
     CHECK(digest_c != digest_a);
 }
 
+TEST_CASE("sealed shader cache manifest fixes exact AOT membership and bytes",
+          "[shader_cache][sealed-manifest][immutable-cache]") {
+    const auto abc = bytes_of("abc");
+    constexpr std::array<std::uint8_t, 32> abc_sha256{
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+    };
+    CHECK(gv::sealed_shader_cache_detail::sha256(abc) == abc_sha256);
+
+    TempDir temp;
+    constexpr std::string_view digest = "0123456789abcdef";
+    const gv::ShaderVariantKey key_64 = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const gv::ShaderVariantKey key_32 = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 32u);
+    const std::array requested{key_64, key_32};
+    write_fake_sealed_shader_artifacts(temp.path, requested);
+
+    const auto sealed = gv::seal_shader_cache_manifest(
+        temp.path, digest, requested);
+    REQUIRE(sealed);
+    REQUIRE(sealed->keys.size() == requested.size());
+    CHECK(std::none_of(
+        sealed->artifacts.begin(),
+        sealed->artifacts.end(),
+        [](const gv::SealedShaderCacheArtifact& artifact) {
+            return artifact.kind
+                == gv::SealedShaderCacheArtifactKind::reserved_command_metallib;
+        }));
+    CHECK(sealed->keys[0] == key_32);
+    CHECK(sealed->keys[1] == key_64);
+    CHECK(sealed->seed_size > 0u);
+    CHECK(sealed->manifest_checksum != 0u);
+    CHECK(std::filesystem::file_size(
+              gv::sealed_shader_cache_manifest_path(temp.path)) > 0u);
+
+    // Expected membership is a set at the API, but the stored wire image is
+    // canonical and exact. Reordering the request cannot change acceptance.
+    const std::array reverse_expected{key_64, key_32};
+    const auto loaded = gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, reverse_expected);
+    REQUIRE(loaded);
+    CHECK(loaded->seed_sha256 == sealed->seed_sha256);
+    CHECK(loaded->artifacts == sealed->artifacts);
+
+    shader_module_create_called = false;
+    const auto module = gv::load_sealed_cached_module(
+        VK_NULL_HANDLE,
+        temp.path,
+        digest,
+        reverse_expected,
+        key_64,
+        &record_shader_module_create);
+    REQUIRE(module);
+    CHECK(shader_module_create_called);
+
+    shader_module_create_called = false;
+    const gv::ShaderVariantKey nonmember = gv::make_shader_key(
+        gv::ShaderKind::align_extend_banded_affine, 384u, 1u, 512u);
+    const auto rejected = gv::load_sealed_cached_module(
+        VK_NULL_HANDLE,
+        temp.path,
+        digest,
+        reverse_expected,
+        nonmember,
+        &record_shader_module_create);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().find("not a member of the sealed AOT seed")
+          != std::string::npos);
+    CHECK_FALSE(shader_module_create_called);
+
+    const std::array wrong_expected{key_64};
+    const auto wrong_membership =
+        gv::load_validated_sealed_shader_cache_manifest(
+            temp.path, digest, wrong_expected);
+    REQUIRE_FALSE(wrong_membership);
+    CHECK(wrong_membership.error().find("key membership mismatch")
+          != std::string::npos);
+}
+
+TEST_CASE("sealed shader module uses the exact already-hashed metallib image",
+          "[shader_cache][sealed-manifest][immutable-cache][toctou]") {
+    TempDir temp;
+    constexpr std::string_view digest = "1122334455667788";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    REQUIRE(gv::seal_shader_cache_manifest(temp.path, digest, keys));
+
+    auto image = gv::load_sealed_shader_cache_key_image(
+        temp.path, digest, keys, key);
+    REQUIRE(image);
+    expected_shader_module_metallib = image->metallib_bytes;
+    const auto replacement = bytes_of("mutated-after-verified-image-load");
+    REQUIRE(gv::durable_write_file(
+        gv::cache_metallib_path(temp.path, key), replacement));
+
+    shader_module_create_called = false;
+    shader_module_payload_matches = false;
+    const auto module = gv::create_shader_module_from_sealed_key_image(
+        VK_NULL_HANDLE, *image, &record_exact_shader_module_create);
+    REQUIRE(module);
+    CHECK(shader_module_create_called);
+    CHECK(shader_module_payload_matches);
+
+    // A fresh provider call sees the mutation and fails before Vulkan. The
+    // previously verified image remains immutable and needs no pathname reopen.
+    shader_module_create_called = false;
+    const auto rejected = gv::load_sealed_cached_module(
+        VK_NULL_HANDLE,
+        temp.path,
+        digest,
+        keys,
+        key,
+        &record_shader_module_create);
+    REQUIRE_FALSE(rejected);
+    CHECK_FALSE(shader_module_create_called);
+    CHECK((rejected.error().find("artifact size mismatch") != std::string::npos
+           || rejected.error().find("artifact SHA-256 mismatch")
+               != std::string::npos));
+    expected_shader_module_metallib.clear();
+}
+
+TEST_CASE("process seed reads once and survives source mutation and deletion",
+          "[shader_cache][sealed-manifest][seed-image][immutable-cache][toctou]") {
+    STATIC_REQUIRE_FALSE(std::is_default_constructible_v<
+                         gv::SealedShaderCacheSeedReceipt>);
+    STATIC_REQUIRE_FALSE(std::is_default_constructible_v<
+                         gv::SealedShaderCacheSeedImage>);
+    STATIC_REQUIRE_FALSE(std::is_copy_constructible_v<
+                         gv::SealedShaderCacheSeedImage>);
+
+    TempDir temp;
+    constexpr std::string_view digest = "22446688aaccee00";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const gv::ShaderVariantKey earlier_key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 32u);
+    // This intentionally matches producer traversal rather than manifest
+    // ordering; every production consumer uses the shared canonical contract.
+    const std::array keys{key, earlier_key};
+    const auto canonical = gv::canonical_sealed_shader_cache_keys(keys);
+    REQUIRE(canonical);
+    REQUIRE(canonical->front() == earlier_key);
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    REQUIRE(gv::seal_shader_cache_manifest(temp.path, digest, keys));
+
+    gv::SealedShaderCacheProcessStore process_store;
+    auto first = process_store.load_once(temp.path, digest, keys);
+    REQUIRE(first);
+    const std::array reverse_keys{earlier_key, key};
+    auto second = process_store.load_once(temp.path, digest, reverse_keys);
+    REQUIRE(second);
+    CHECK(first->get() == second->get());
+    CHECK((*first)->receipt().identity() == (*second)->receipt().identity());
+    CHECK(process_store.filesystem_load_count() == 1u);
+    const auto seed = *first;
+    REQUIRE(seed->accepted());
+    const auto& receipt = seed->receipt();
+    CHECK(receipt.load_count() == 1u);
+    CHECK(receipt.manifest_read_count() == 1u);
+    CHECK(receipt.artifact_read_count() == seed->artifacts().size());
+    CHECK(receipt.artifact_bytes() == seed->manifest().seed_size);
+    CHECK(receipt.manifest_bytes() == seed->manifest_bytes().size());
+    CHECK(receipt.load_ns() > 0u);
+    CHECK(receipt.admission_count() == 1u);
+    CHECK(receipt.peak_admitted_bytes() >=
+          receipt.retained_capacity_bytes());
+    CHECK(receipt.retained_capacity_bytes()
+          == seed->owned_capacity_bytes());
+    CHECK_FALSE(receipt.admission_saturated());
+
+    auto key_view = gv::sealed_shader_cache_key_view(*seed, key);
+    REQUIRE(key_view);
+    expected_shader_module_metallib.assign(
+        key_view->metallib_bytes.begin(), key_view->metallib_bytes.end());
+
+    const auto archive = std::find_if(
+        seed->artifacts().begin(), seed->artifacts().end(),
+        [](const gv::SealedShaderCacheArtifactImage& image) {
+            return image.descriptor.kind
+                == gv::SealedShaderCacheArtifactKind::metal_binary_archive;
+        });
+    REQUIRE(archive != seed->artifacts().end());
+    const auto qualification = std::find_if(
+        seed->artifacts().begin(), seed->artifacts().end(),
+        [&archive](const gv::SealedShaderCacheArtifactImage& image) {
+            return image.descriptor.kind
+                    == gv::SealedShaderCacheArtifactKind::
+                        metal_binary_archive_qualification
+                && image.descriptor.filename
+                    == archive->descriptor.filename + ".qualification";
+        });
+    REQUIRE(qualification != seed->artifacts().end());
+    REQUIRE(gv::sealed_shader_cache_detail::
+        parse_metal_archive_qualification_receipt(qualification->bytes));
+
+    REQUIRE(gv::durable_write_file(
+        gv::cache_metallib_path(temp.path, key), bytes_of("mutated")));
+    std::error_code remove_error;
+    std::filesystem::remove_all(temp.path, remove_error);
+    REQUIRE_FALSE(remove_error);
+
+    shader_module_create_called = false;
+    shader_module_payload_matches = false;
+    const auto module = gv::load_sealed_cached_module(
+        VK_NULL_HANDLE, *seed, key, &record_exact_shader_module_create);
+    REQUIRE(module);
+    CHECK(shader_module_create_called);
+    CHECK(shader_module_payload_matches);
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    admission.set_index_memory_cap_bytes(admission.reserved_bytes());
+    shader_module_create_called = false;
+    shader_module_payload_matches = false;
+    const auto denied_module = gv::load_sealed_cached_module(
+        VK_NULL_HANDLE, *seed, key, &record_exact_shader_module_create);
+    admission.set_index_memory_cap_bytes(previous_cap);
+    REQUIRE_FALSE(denied_module);
+    CHECK(denied_module.error().find("module admission denied")
+          != std::string::npos);
+    CHECK_FALSE(shader_module_create_called);
+
+    shader_module_create_called = false;
+    shader_module_payload_matches = false;
+    const auto second_module = gv::load_sealed_cached_module(
+        VK_NULL_HANDLE, *seed, key, &record_exact_shader_module_create);
+    REQUIRE(second_module);
+    CHECK(shader_module_create_called);
+    CHECK(shader_module_payload_matches);
+    CHECK(gv::sealed_shader_cache_detail::sha256(archive->bytes)
+          == archive->descriptor.sha256);
+    expected_shader_module_metallib.clear();
+}
+
+TEST_CASE("process seed rejects oversized manifest before artifact allocation",
+          "[shader_cache][sealed-manifest][seed-image][admission][corruption]") {
+    TempDir temp;
+    constexpr std::string_view digest = "33557799bbddff11";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    const auto sealed = gv::seal_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE(sealed);
+
+    gv::SealedShaderCacheManifest oversized = *sealed;
+    oversized.seed_size =
+        gv::sealed_shader_cache_detail::maximum_seed_image_bytes + 1u;
+    const auto wire =
+        gv::sealed_shader_cache_detail::serialize_manifest(oversized);
+    REQUIRE(wire);
+    REQUIRE(gv::durable_write_file(
+        gv::sealed_shader_cache_manifest_path(temp.path), wire->first));
+    const auto rejected = gv::load_validated_sealed_shader_cache_seed(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().find("exceeds bounded ownership")
+          != std::string::npos);
+}
+
+TEST_CASE("seal rejects oversized seed before publishing or reading it",
+          "[shader_cache][sealed-manifest][seed-image][admission][publication]") {
+    TempDir temp;
+    constexpr std::string_view digest = "22446688aaccee00";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    std::error_code error;
+    std::filesystem::resize_file(
+        gv::cache_metallib_path(temp.path, key),
+        gv::sealed_shader_cache_detail::maximum_seed_image_bytes + 1u,
+        error);
+    REQUIRE_FALSE(error);
+    const auto sealed = gv::seal_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(sealed);
+    CHECK(sealed.error().find("beyond byte cap") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(
+        gv::sealed_shader_cache_manifest_path(temp.path)));
+    CHECK_FALSE(std::filesystem::exists(
+        gv::sealed_shader_cache_manifest_path(temp.path).string() + ".tmp"));
+}
+
+TEST_CASE("seal validates the admitted candidate before atomic publication",
+          "[shader_cache][sealed-manifest][seed-image][publication][corruption]") {
+    TempDir temp;
+    constexpr std::string_view digest = "1133557799bbddff";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    REQUIRE(gv::durable_write_file(
+        gv::cache_meta_path(temp.path, key), bytes_of("bad-meta")));
+    const auto sealed = gv::seal_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(sealed);
+    CHECK(sealed.error().find("metadata incompatible") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(
+        gv::sealed_shader_cache_manifest_path(temp.path)));
+    CHECK_FALSE(std::filesystem::exists(
+        gv::sealed_shader_cache_manifest_path(temp.path).string() + ".tmp"));
+}
+
+TEST_CASE("seal rejects same-size mutation between read and publication",
+          "[shader_cache][sealed-manifest][publication][toctou][corruption]") {
+    TempDir temp;
+    constexpr std::string_view digest = "0011223344556677";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    seal_identity_mutation_path = gv::cache_metallib_path(temp.path, key);
+    seal_identity_mutation_succeeded = false;
+    const auto sealed = gv::seal_shader_cache_manifest_for_test(
+        temp.path, digest, keys, &mutate_seal_artifact_same_size);
+    seal_identity_mutation_path.clear();
+    REQUIRE(seal_identity_mutation_succeeded);
+    REQUIRE_FALSE(sealed);
+    CHECK(sealed.error().find("identity changed before publication")
+          != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(
+        gv::sealed_shader_cache_manifest_path(temp.path)));
+    CHECK_FALSE(std::filesystem::exists(
+        gv::sealed_shader_cache_manifest_path(temp.path).string() + ".tmp"));
+}
+
+TEST_CASE("private archive staging canonicalizes a symlinked temp parent",
+          "[shader_cache][seed-image][metal-archive][private-snapshot]") {
+#if !defined(__APPLE__)
+    SKIP("private Metal archive snapshots are Apple-only");
+#else
+    TempDir temp;
+    const std::filesystem::path real_parent = temp.path / "real";
+    const std::filesystem::path linked_parent = temp.path / "linked";
+    std::error_code error;
+    std::filesystem::create_directory(real_parent, error);
+    REQUIRE_FALSE(error);
+    std::filesystem::create_directory_symlink(
+        real_parent, linked_parent, error);
+    REQUIRE_FALSE(error);
+
+    const auto retained = bytes_of("archive-source-is-already-deleted");
+    const std::filesystem::path source = temp.path / "source.metalar";
+    REQUIRE(gv::durable_write_file(source, retained));
+    std::filesystem::remove(source, error);
+    REQUIRE_FALSE(error);
+    REQUIRE_FALSE(std::filesystem::exists(source));
+
+    const auto snapshot = gv::verify_runtime_private_archive_snapshot_for_test(
+        "safe-test.metalar", retained, linked_parent);
+    REQUIRE(snapshot);
+    CHECK(snapshot->snapshot_path.is_absolute());
+    CHECK(snapshot->snapshot_path.parent_path()
+          == std::filesystem::canonical(real_parent));
+    CHECK(snapshot->streamed_bytes == retained.size());
+    CHECK(snapshot->scratch_capacity_bytes == 64u * 1024u);
+    CHECK(snapshot->exact_seed_compared);
+    CHECK(snapshot->tamper_rejected);
+    CHECK_FALSE(std::filesystem::exists(snapshot->snapshot_path));
+#endif
+}
+
+TEST_CASE("sealed shader cache rejects artifact, wire, and symlink mutation",
+          "[shader_cache][sealed-manifest][immutable-cache][corruption]") {
+    TempDir temp;
+    constexpr std::string_view digest = "fedcba9876543210";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    REQUIRE(gv::seal_shader_cache_manifest(temp.path, digest, keys));
+
+    const std::filesystem::path metallib =
+        gv::cache_metallib_path(temp.path, key);
+    const std::vector<std::byte> original_metallib = read_file_bytes(metallib);
+    const auto corrupted = bytes_of("same-cache-name-different-metallib");
+    REQUIRE(gv::durable_write_file(metallib, corrupted));
+    auto rejected = gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(rejected);
+    CHECK((rejected.error().find("artifact size mismatch") != std::string::npos
+           || rejected.error().find("artifact SHA-256 mismatch")
+               != std::string::npos));
+    REQUIRE(gv::durable_write_file(metallib, original_metallib));
+    REQUIRE(gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, keys));
+
+    const std::filesystem::path qualification =
+        gv::cache_binary_archive_qualification_path(
+            gv::cache_binary_archive_path(temp.path, key));
+    const std::vector<std::byte> original_qualification =
+        read_file_bytes(qualification);
+    std::vector<std::byte> corrupt_qualification = original_qualification;
+    REQUIRE(corrupt_qualification.size() > 50u);
+    corrupt_qualification[50u] ^= std::byte{0x01};
+    REQUIRE(gv::durable_write_file(qualification, corrupt_qualification));
+    rejected = gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().find("artifact SHA-256 mismatch")
+          != std::string::npos);
+    REQUIRE(gv::durable_write_file(
+        qualification, original_qualification));
+    REQUIRE(gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, keys));
+
+    const std::filesystem::path manifest_path =
+        gv::sealed_shader_cache_manifest_path(temp.path);
+    const std::vector<std::byte> original_manifest =
+        read_file_bytes(manifest_path);
+    std::vector<std::byte> corrupt_manifest = original_manifest;
+    REQUIRE(corrupt_manifest.size() > 8u);
+    corrupt_manifest.back() ^= std::byte{0x01};
+    REQUIRE(gv::durable_write_file(manifest_path, corrupt_manifest));
+    rejected = gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().find("checksum mismatch") != std::string::npos);
+    REQUIRE(gv::durable_write_file(manifest_path, original_manifest));
+
+    const std::filesystem::path owned_metallib = metallib.string() + ".owned";
+    std::error_code ec;
+    std::filesystem::rename(metallib, owned_metallib, ec);
+    REQUIRE_FALSE(ec);
+    std::filesystem::create_symlink(
+        owned_metallib.filename(), metallib, ec);
+    REQUIRE_FALSE(ec);
+    rejected = gv::load_validated_sealed_shader_cache_manifest(
+        temp.path, digest, keys);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().find("must not be a symlink") != std::string::npos);
+}
+
+TEST_CASE("archive helper success sentinel is unique and final",
+          "[shader_cache][metal-archive][immutable-cache]") {
+    CHECK(gv::archive_helper_transcript_is_exact_success(
+        "qualification evidence\nRESULT: ok\n"));
+    CHECK_FALSE(gv::archive_helper_transcript_is_exact_success(
+        "qualification evidence\nRESULT: failed\n"));
+    CHECK_FALSE(gv::archive_helper_transcript_is_exact_success(
+        "RESULT: ok\ntrailing output\n"));
+    CHECK_FALSE(gv::archive_helper_transcript_is_exact_success(
+        "RESULT: failed\nRESULT: ok\n"));
+    CHECK_FALSE(gv::archive_helper_transcript_is_exact_success("RESULT: ok"));
+}
+
+TEST_CASE("archive miss NSError fingerprint and receipt are canonical",
+          "[shader_cache][metal-archive][immutable-cache][qualification]") {
+    constexpr std::string_view transcript =
+        "same-descriptor empty-archive negative control: ok\n"
+        "NEGATIVE_CONTROL_NSError domain_hex="
+        "4d544c4c6962726172794572726f72446f6d61696e code=-7\n"
+        "RESULT: ok\n";
+    const auto fingerprint =
+        gv::parse_archive_helper_negative_error_fingerprint(transcript);
+    REQUIRE(fingerprint);
+    CHECK(fingerprint->domain == "MTLLibraryErrorDomain");
+    CHECK(fingerprint->code == -7);
+
+    CHECK_FALSE(gv::parse_archive_helper_negative_error_fingerprint(
+        "NEGATIVE_CONTROL_NSError domain_hex=4D54 code=1\nRESULT: ok\n"));
+    CHECK_FALSE(gv::parse_archive_helper_negative_error_fingerprint(
+        "NEGATIVE_CONTROL_NSError domain_hex=4d54 code=nope\nRESULT: ok\n"));
+    CHECK_FALSE(gv::parse_archive_helper_negative_error_fingerprint(
+        "prefix NEGATIVE_CONTROL_NSError domain_hex=4d54 code=1\n"
+        "RESULT: ok\n"));
+    CHECK_FALSE(gv::parse_archive_helper_negative_error_fingerprint(
+        std::string{transcript} + std::string{transcript}));
+
+    const auto helper_qualification =
+        gv::parse_archive_helper_qualification_v2(
+            "HELPER_QUALIFICATION_V2 protocol=2 "
+            "build=bioseq_gpu_archive_builder_v2 registry_id=4660\n"
+            "RESULT: ok\n");
+    REQUIRE(helper_qualification);
+    CHECK(helper_qualification->protocol_version == 2u);
+    CHECK(helper_qualification->build_identity
+          == "bioseq_gpu_archive_builder_v2");
+    CHECK(helper_qualification->metal_registry_id == 4660u);
+    CHECK_FALSE(gv::parse_archive_helper_qualification_v2(
+        "HELPER_QUALIFICATION_V2 protocol=1 "
+        "build=bioseq_gpu_archive_builder_v2 registry_id=4660\n"));
+    CHECK_FALSE(gv::parse_archive_helper_qualification_v2(
+        "HELPER_QUALIFICATION_V2 protocol=2 build=other registry_id=4660\n"));
+    CHECK_FALSE(gv::parse_archive_helper_qualification_v2(
+        "HELPER_QUALIFICATION_V2 protocol=2 "
+        "build=bioseq_gpu_archive_builder_v2 registry_id=0\n"));
+
+    const auto archive = bytes_of("qualified-archive-byte-image");
+    const auto metallib = bytes_of("qualified-metallib-byte-image");
+    const auto helper = bytes_of("qualified-helper-byte-image");
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const gv::MetalArchiveQualificationReceipt receipt{
+        .wire_version =
+            gv::sealed_shader_cache_detail::archive_qualification_version,
+        .shader_key = key,
+        .metallib_size = static_cast<std::uint64_t>(metallib.size()),
+        .metallib_sha256 =
+            gv::sealed_shader_cache_detail::sha256(metallib),
+        .entry_name = "main0",
+        .max_total_threads_per_threadgroup = 256u,
+        .threadgroup_size_is_multiple = false,
+        .negative_error = *fingerprint,
+        .archive_size = static_cast<std::uint64_t>(archive.size()),
+        .archive_sha256 = gv::sealed_shader_cache_detail::sha256(archive),
+        .helper_protocol_version = 2u,
+        .helper_build_identity = "bioseq_gpu_archive_builder_v2",
+        .helper_source = "installed-sibling",
+        .helper_executable_size = static_cast<std::uint64_t>(helper.size()),
+        .helper_executable_sha256 =
+            gv::sealed_shader_cache_detail::sha256(helper),
+        .helper_metal_registry_id = 0x1234u,
+    };
+    auto wire = gv::sealed_shader_cache_detail::
+        serialize_metal_archive_qualification_receipt(receipt);
+    REQUIRE(wire);
+    const auto parsed = gv::sealed_shader_cache_detail::
+        parse_metal_archive_qualification_receipt(*wire);
+    REQUIRE(parsed);
+    CHECK(*parsed == receipt);
+
+    REQUIRE(wire->size() > 50u);
+    wire->at(50u) ^= std::byte{0x01};
+    const auto corrupted = gv::sealed_shader_cache_detail::
+        parse_metal_archive_qualification_receipt(*wire);
+    REQUIRE_FALSE(corrupted);
+    CHECK(corrupted.error().find("checksum mismatch") != std::string::npos);
+}
+
+TEST_CASE("failed archive helper output is never promoted",
+          "[shader_cache][metal-archive][immutable-cache]") {
+#if !defined(__APPLE__)
+    SKIP("Metal archive helper is an Apple-only publication path");
+#else
+    TempDir temp;
+    const std::filesystem::path helper = temp.path / "false_archive_helper.sh";
+    const auto script = bytes_of(
+        "#!/bin/sh\n"
+        "printf 'partial archive bytes' > \"$2\"\n"
+        "printf 'qualification failed without success sentinel\\n'\n"
+        "exit 0\n");
+    REQUIRE(gv::durable_write_file(helper, script));
+    REQUIRE(::chmod(helper.c_str(), 0700) == 0);
+    ScopedEnvironmentVariable test_only_env{
+        "BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY", "1"};
+    ScopedEnvironmentVariable helper_env{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+    ScopedArchiveHelperStoreReset helper_store_reset;
+
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
+    const std::array keys{key};
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    constexpr std::string_view forged_entry = "wrong_semantic_entry";
+    const gv::ShaderWorkgroupSize workgroup =
+        gv::expected_shader_workgroup_size(key);
+    gv::ShaderCacheMeta forged_meta{};
+    forged_meta.key = key;
+    forged_meta.wg_x = workgroup.x;
+    forged_meta.wg_y = workgroup.y;
+    forged_meta.wg_z = workgroup.z;
+    forged_meta.entry_len = static_cast<std::uint32_t>(forged_entry.size());
+    REQUIRE(gv::durable_write_file(
+        gv::cache_meta_path(temp.path, key),
+        gv::meta_to_bytes(forged_meta, forged_entry)));
+    REQUIRE(gv::cache_entry_complete(temp.path, key));
+    const std::vector<std::byte> stale_meta = read_file_bytes(
+        gv::cache_meta_path(temp.path, key));
+    const std::vector<std::byte> stale_metallib = read_file_bytes(
+        gv::cache_metallib_path(temp.path, key));
+    const std::filesystem::path final =
+        gv::cache_binary_archive_path(temp.path, key);
+    REQUIRE(std::filesystem::exists(final));
+
+    // A merely nonempty preexisting archive is not reusable while building a
+    // new seed. Qualification removes it first; failure leaves nothing that a
+    // later manifest publication could accidentally bless.
+    const auto result = gv::ensure_compiled_for_sealed_seed(
+        temp.path, key, gv::MslVersion{});
+    REQUIRE_FALSE(result);
+    CHECK(result.error().find("without exact success sentinel")
+          != std::string::npos);
+    CHECK(read_file_bytes(gv::cache_meta_path(temp.path, key)) != stale_meta);
+    CHECK(read_file_bytes(gv::cache_metallib_path(temp.path, key))
+          != stale_metallib);
+    CHECK_FALSE(std::filesystem::exists(final));
+    CHECK_FALSE(std::filesystem::exists(final.string() + ".tmp"));
+    const auto cannot_seal = gv::seal_shader_cache_manifest(
+        temp.path, "0123456789abcdef", keys);
+    REQUIRE_FALSE(cannot_seal);
+    CHECK(cannot_seal.error().find(
+              "cannot seal non-regular shader artifact")
+          != std::string::npos);
+    CHECK(cannot_seal.error().find(final.string()) != std::string::npos);
+#endif
+}
+
+TEST_CASE("legacy archive qualification is diagnostic only",
+          "[shader_cache][metal-archive][qualification][wire-v1]") {
+    const auto archive = bytes_of("legacy-qualified-archive");
+    std::vector<std::byte> wire;
+    gv::sealed_shader_cache_detail::append_text(
+        wire, gv::sealed_shader_cache_detail::archive_qualification_magic);
+    gv::sealed_shader_cache_detail::append_u32(
+        wire,
+        gv::sealed_shader_cache_detail::archive_qualification_legacy_version);
+    gv::sealed_shader_cache_detail::append_u32(wire, 0u);
+    gv::sealed_shader_cache_detail::append_u64(wire, 256u);
+    gv::sealed_shader_cache_detail::append_u32(wire, 0u);
+    constexpr std::string_view domain = "MTLLibraryErrorDomain";
+    gv::sealed_shader_cache_detail::append_u32(
+        wire, static_cast<std::uint32_t>(domain.size()));
+    gv::sealed_shader_cache_detail::append_u64(
+        wire, std::bit_cast<std::uint64_t>(std::int64_t{-7}));
+    gv::sealed_shader_cache_detail::append_u64(
+        wire, static_cast<std::uint64_t>(archive.size()));
+    gv::sealed_shader_cache_detail::append_digest(
+        wire, gv::sealed_shader_cache_detail::sha256(archive));
+    gv::sealed_shader_cache_detail::append_text(wire, domain);
+    gv::sealed_shader_cache_detail::append_u64(
+        wire, gv::sealed_shader_cache_detail::manifest_checksum(wire));
+
+    const auto parsed = gv::sealed_shader_cache_detail::
+        parse_metal_archive_qualification_receipt(wire);
+    REQUIRE(parsed);
+    CHECK(parsed->wire_version
+          == gv::sealed_shader_cache_detail::
+              archive_qualification_legacy_version);
+    CHECK(parsed->diagnostic_valid());
+    CHECK_FALSE(parsed->accepted());
+    CHECK_FALSE(parsed->production_accepted());
+}
+
+TEST_CASE("archive helper qualification is terminal and hashes once",
+          "[shader_cache][metal-archive][qualification][helper]") {
+#if !defined(__APPLE__)
+    SKIP("archive helper qualification is Apple-only");
+#else
+    TempDir temp;
+    const std::filesystem::path helper = temp.path / "helper.sh";
+    const auto helper_bytes = bytes_of("#!/bin/sh\nexit 1\n");
+    REQUIRE(gv::durable_write_file(helper, helper_bytes));
+    REQUIRE(::chmod(helper.c_str(), 0700) == 0);
+    ScopedEnvironmentVariable test_only{
+        "BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY", "1"};
+    ScopedEnvironmentVariable override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+
+    gv::QualifiedMetalArchiveHelperProcessStore store;
+    const auto first = store.load_once();
+    REQUIRE(first);
+    CHECK((**first).source == "test-env-override");
+    CHECK(store.qualification_attempt_count() == 1u);
+    CHECK(store.filesystem_hash_count() == 1u);
+    REQUIRE(gv::durable_write_file(helper, bytes_of("mutated")));
+    const auto second = store.load_once();
+    REQUIRE(second);
+    CHECK(first->get() == second->get());
+    CHECK((**second).executable_bytes == helper_bytes);
+    CHECK(store.qualification_attempt_count() == 1u);
+    CHECK(store.filesystem_hash_count() == 1u);
+
+    const std::filesystem::path metallib = temp.path / "input.metallib";
+    REQUIRE(gv::durable_write_file(metallib, bytes_of("metallib")));
+    const int metallib_fd = ::open(
+        metallib.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    REQUIRE(metallib_fd >= 0);
+    auto staged = gv::stage_archive_helper_invocation(**first, metallib_fd);
+    REQUIRE(staged);
+    const std::filesystem::path staged_path = staged->helper_path();
+    const std::filesystem::path staged_directory = staged_path.parent_path();
+    CHECK(staged->helper_identity_matches());
+    CHECK(std::filesystem::exists(staged_path));
+    REQUIRE(staged->finish());
+    CHECK_FALSE(std::filesystem::exists(staged_path));
+    CHECK_FALSE(std::filesystem::exists(staged_directory));
+    REQUIRE(::close(metallib_fd) == 0);
+
+    const std::filesystem::path symlink = temp.path / "helper-link";
+    REQUIRE(::symlink(helper.c_str(), symlink.c_str()) == 0);
+    ScopedEnvironmentVariable symlink_override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", symlink.string()};
+    gv::QualifiedMetalArchiveHelperProcessStore failed_store;
+    CHECK_FALSE(failed_store.load_once());
+    CHECK_FALSE(failed_store.load_once());
+    CHECK(failed_store.qualification_attempt_count() == 1u);
+    CHECK(failed_store.filesystem_hash_count() == 0u);
+
+    REQUIRE(::chmod(helper.c_str(), 0702) == 0);
+    ScopedEnvironmentVariable writable_override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+    gv::QualifiedMetalArchiveHelperProcessStore writable_store;
+    CHECK_FALSE(writable_store.load_once());
+    CHECK(writable_store.qualification_attempt_count() == 1u);
+    CHECK(writable_store.filesystem_hash_count() == 0u);
+#endif
+}
+
+TEST_CASE("archive helper override is explicitly test-only",
+          "[shader_cache][metal-archive][qualification][helper]") {
+#if !defined(__APPLE__)
+    SKIP("archive helper qualification is Apple-only");
+#else
+    TempDir temp;
+    const std::filesystem::path helper = temp.path / "helper.sh";
+    REQUIRE(gv::durable_write_file(helper, bytes_of("#!/bin/sh\nexit 1\n")));
+    REQUIRE(::chmod(helper.c_str(), 0700) == 0);
+    ScopedEnvironmentVariable test_only{
+        "BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY", "0"};
+    ScopedEnvironmentVariable override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+    gv::QualifiedMetalArchiveHelperProcessStore store;
+    CHECK_FALSE(store.load_once());
+    CHECK_FALSE(store.load_once());
+    CHECK(store.qualification_attempt_count() == 1u);
+    CHECK(store.filesystem_hash_count() == 0u);
+#endif
+}
+
 TEST_CASE("DOC0341 shader cache meta and MoltenVK header payload are exact",
           "[shader_cache][doc0341]") {
     TempDir temp;
@@ -3190,6 +4537,9 @@ TEST_CASE("DOC0341 shader cache meta and MoltenVK header payload are exact",
         gv::cache_binary_archive_path(temp.path, key),
         std::span<const std::byte>(fake_archive.data(), fake_archive.size()));
     REQUIRE(archive_write);
+    write_fake_archive_qualification(
+        gv::cache_binary_archive_path(temp.path, key), fake_archive,
+        key, metallib, entry);
     REQUIRE(gv::cache_entry_complete(temp.path, key));
 
     std::string decoded_entry;
@@ -3239,25 +4589,39 @@ TEST_CASE("DOC0341 shader cache meta and MoltenVK header payload are exact",
     CHECK(no_publish_service.calls == 1);
     CHECK_FALSE(shader_module_create_called);
 
-    const auto module_code = gv::make_moltenvk_metallib_module_code(
-        gv::cache_metallib_path(temp.path, key));
-    REQUIRE(module_code);
-    CHECK(module_code->header_size_bytes == gv::moltenvk_msl_spirv_header_size());
-    CHECK(module_code->code_size_bytes
-          == gv::moltenvk_msl_spirv_header_size() + metallib.size());
-    CHECK(reinterpret_cast<std::uintptr_t>(module_code->words.data())
-          % alignof(std::uint32_t) == 0u);
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    {
+        const auto module_code = gv::make_moltenvk_metallib_module_code(
+            gv::cache_metallib_path(temp.path, key));
+        REQUIRE(module_code);
+        CHECK(module_code->admission_count == 1u);
+        CHECK(module_code->peak_admitted_bytes
+              >= module_code->retained_capacity_bytes);
+        CHECK(module_code->retained_capacity_bytes > 0u);
+        CHECK_FALSE(module_code->admission_saturated);
+        CHECK(module_code->permit.bytes()
+              == module_code->retained_capacity_bytes);
+        CHECK(module_code->header_size_bytes
+              == gv::moltenvk_msl_spirv_header_size());
+        CHECK(module_code->code_size_bytes
+              == gv::moltenvk_msl_spirv_header_size() + metallib.size());
+        CHECK(reinterpret_cast<std::uintptr_t>(module_code->words.data())
+              % alignof(std::uint32_t) == 0u);
 
-    const auto* submitted =
-        reinterpret_cast<const std::byte*>(module_code->words.data());
-    REQUIRE(module_code->header_size_bytes >= sizeof(std::uint32_t));
-    std::uint32_t magic = 0;
-    std::memcpy(&magic, submitted, sizeof(magic));
-    CHECK(magic == gv::moltenvk_msl_compiled_code_magic());
-    CHECK(std::memcmp(
-              submitted + module_code->header_size_bytes,
-              metallib.data(),
-              metallib.size()) == 0);
+        const auto* submitted =
+            reinterpret_cast<const std::byte*>(module_code->words.data());
+        REQUIRE(module_code->header_size_bytes >= sizeof(std::uint32_t));
+        std::uint32_t magic = 0;
+        std::memcpy(&magic, submitted, sizeof(magic));
+        CHECK(magic == gv::moltenvk_msl_compiled_code_magic());
+        CHECK(std::memcmp(
+                  submitted + module_code->header_size_bytes,
+                  metallib.data(),
+                  metallib.size()) == 0);
+    }
+    CHECK(admission.reserved_bytes() == reserved_before);
 }
 
 TEST_CASE("fixed radix cache accepts reflected workgroup and exact archive",
@@ -3286,6 +4650,9 @@ TEST_CASE("fixed radix cache accepts reflected workgroup and exact archive",
     REQUIRE(gv::durable_write_file(
         gv::cache_binary_archive_path(temp.path, key),
         std::span<const std::byte>(archive.data(), archive.size())));
+    write_fake_archive_qualification(
+        gv::cache_binary_archive_path(temp.path, key), archive,
+        key, metallib, entry);
 
     // Publication uses reflected threads, so a 256-thread shader needs only
     // the exact base archive; completeness must not invent a duplicate
@@ -3306,4 +4673,676 @@ TEST_CASE("fixed radix cache accepts reflected workgroup and exact archive",
     CHECK(loaded->wg_x == 256u);
     CHECK(should_not_compile.calls == 0);
     CHECK(shader_module_create_called);
+}
+
+namespace {
+
+[[nodiscard]] gv::RuntimeMetalArchiveConfiguration
+accepted_runtime_metal_archive_configuration() {
+    TempDir temp;
+    constexpr std::string_view digest = "0123456789abcdef";
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u);
+    const std::array keys{key};
+    REQUIRE(gv::cache_binary_archive_paths(temp.path, key).size() == 2u);
+    write_fake_sealed_shader_artifacts(temp.path, keys);
+    REQUIRE(gv::seal_shader_cache_manifest(temp.path, digest, keys));
+    auto loaded = gv::load_validated_sealed_shader_cache_seed(
+        temp.path, digest, keys);
+    REQUIRE(loaded);
+    const auto seed = std::make_shared<const gv::SealedShaderCacheSeedImage>(
+        std::move(*loaded));
+    gv::RuntimeMetalArchiveConfiguration configuration{};
+    configuration.seed_image = seed;
+    configuration.vulkan_device_uuid[0] = 0x42u;
+    configuration.metal_device_registry_id = 0x1234u;
+    for (std::size_t ordinal = 0u;
+         ordinal < seed->artifacts().size(); ++ordinal) {
+        const auto& artifact = seed->artifacts()[ordinal];
+        if (artifact.descriptor.kind
+            != gv::SealedShaderCacheArtifactKind::metal_binary_archive) {
+            continue;
+        }
+        const auto* qualification =
+            gv::sealed_shader_cache_detail::find_artifact_image(
+                seed->artifacts(),
+                gv::SealedShaderCacheArtifactKind::
+                    metal_binary_archive_qualification,
+                artifact.descriptor.key_index,
+                artifact.descriptor.filename + ".qualification");
+        REQUIRE(qualification != nullptr);
+        const auto parsed = gv::sealed_shader_cache_detail::
+            parse_metal_archive_qualification_receipt(qualification->bytes);
+        REQUIRE(parsed);
+        if (configuration.qualification_receipt_count == 0u) {
+            configuration.qualification_version = parsed->wire_version;
+            configuration.helper_protocol_version =
+                parsed->helper_protocol_version;
+            configuration.helper_build_identity =
+                parsed->helper_build_identity;
+            configuration.helper_source = parsed->helper_source;
+            configuration.helper_executable_size =
+                parsed->helper_executable_size;
+            configuration.helper_executable_sha256 =
+                parsed->helper_executable_sha256;
+            configuration.helper_metal_registry_id =
+                parsed->helper_metal_registry_id;
+        }
+        ++configuration.qualification_receipt_count;
+        configuration.archives.push_back(gv::RuntimeMetalArchiveSpec{
+            .artifact_ordinal = static_cast<std::uint32_t>(ordinal),
+            .artifact_filename = artifact.descriptor.filename,
+            .size = artifact.descriptor.size,
+            .sha256 = artifact.descriptor.sha256,
+            .negative_error_domain = parsed->negative_error.domain,
+            .negative_error_code = parsed->negative_error.code,
+        });
+    }
+    return configuration;
+}
+
+[[nodiscard]] gv::RuntimeMetalArchivePipelineAudit
+accepted_runtime_metal_archive_audit() {
+    const auto configuration = accepted_runtime_metal_archive_configuration();
+    const auto archive_identity = gv::runtime_metal_archive_set_identity(
+        configuration.archives);
+    gv::RuntimeMetalArchivePipelineAudit audit{};
+    audit.receipt_identity = 7u;
+    audit.scope_identity = 8u;
+    const auto& manifest = configuration.seed_image->manifest();
+    const auto& seed_receipt = configuration.seed_image->receipt();
+    audit.cache_digest = manifest.cache_digest;
+    audit.seed_sha256 = manifest.seed_sha256;
+    audit.seed_size = manifest.seed_size;
+    audit.manifest_checksum = manifest.manifest_checksum;
+    audit.seed_receipt_identity = seed_receipt.identity();
+    audit.seed_load_count = seed_receipt.load_count();
+    audit.seed_manifest_read_count = seed_receipt.manifest_read_count();
+    audit.seed_artifact_read_count = seed_receipt.artifact_read_count();
+    audit.seed_manifest_bytes = seed_receipt.manifest_bytes();
+    audit.seed_artifact_bytes = seed_receipt.artifact_bytes();
+    audit.seed_load_ns = seed_receipt.load_ns();
+    audit.seed_admission_count = seed_receipt.admission_count();
+    audit.seed_peak_admitted_bytes = seed_receipt.peak_admitted_bytes();
+    audit.seed_retained_capacity_bytes =
+        seed_receipt.retained_capacity_bytes();
+    audit.seed_admission_saturated = seed_receipt.admission_saturated();
+    audit.shader_key = gv::make_shader_key(
+        gv::ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u);
+    audit.expected_entry_name = "main0";
+    audit.observed_entry_name = audit.expected_entry_name;
+    audit.matched_descriptor_functions = 1u;
+    audit.expected_archives = archive_identity;
+    audit.loaded_archives = archive_identity;
+    audit.archive_pre_post_identity_checks = archive_identity.archive_count;
+    audit.pipeline_pre_identity_checks = 0u;
+    audit.pipeline_post_identity_checks = 0u;
+    audit.command_interpose_installed = true;
+    audit.command_interpose_immutable_fail_closed = true;
+    audit.configured_vulkan_device_uuid = configuration.vulkan_device_uuid;
+    audit.runtime_vulkan_device_uuid = configuration.vulkan_device_uuid;
+    audit.api_version = 0x00403000u;
+    audit.driver_version = 0x01020304u;
+    audit.vendor_id = 0x0000106bu;
+    audit.device_id = 0x00000001u;
+    audit.pipeline_cache_uuid[0] = 0x42u;
+    audit.pipeline_cache_uuid[15] = 0x24u;
+    audit.cache_qualification = gv::RuntimeMetalArchiveProcessQualification{
+        .version = 2u,
+        .archive_set = archive_identity,
+        .receipt_count = configuration.qualification_receipt_count,
+        .hash_passes = 1u,
+        .hashed_bytes = archive_identity.total_size,
+        .private_files_created = archive_identity.archive_count,
+        .private_files_unlinked = archive_identity.archive_count,
+        .live_private_paths = 0u,
+        .pipeline_filesystem_hash_passes = 0u,
+        .pipeline_filesystem_hashed_bytes = 0u,
+        .helper_protocol_version = configuration.helper_protocol_version,
+        .helper_build_identity = "bioseq_gpu_archive_builder_v2",
+        .helper_source = "installed-sibling",
+        .helper_executable_size = configuration.helper_executable_size,
+        .helper_executable_sha256 =
+            configuration.helper_executable_sha256,
+        .helper_metal_registry_id =
+            configuration.helper_metal_registry_id,
+        .vulkan_device_uuid = audit.runtime_vulkan_device_uuid,
+        .api_version = audit.api_version,
+        .driver_version = audit.driver_version,
+        .vendor_id = audit.vendor_id,
+        .device_id = audit.device_id,
+        .pipeline_cache_uuid = audit.pipeline_cache_uuid,
+        .seed_receipt_identity = audit.seed_receipt_identity,
+        .seed_sha256 = audit.seed_sha256,
+        .seed_size = audit.seed_size,
+        .manifest_checksum = audit.manifest_checksum,
+        .saturated = false,
+    };
+    audit.cache_qualification.identity =
+        gv::runtime_metal_archive_process_qualification_identity(
+            audit.cache_qualification);
+    audit.pipeline_create_ns = 17u;
+    audit.expected_metal_registry_id =
+        configuration.metal_device_registry_id;
+    audit.command_loader_metal_registry_id =
+        configuration.metal_device_registry_id;
+    audit.command_source_methods_present = 2u;
+    audit.command_source_wrapper_methods = 2u;
+    audit.loader_metal_registry_id = configuration.metal_device_registry_id;
+    audit.intercepted_metal_registry_id =
+        configuration.metal_device_registry_id;
+    audit.scoped_interceptions = 1u;
+    audit.descriptor_replacements = 1u;
+    audit.fail_on_miss_enforcements = 1u;
+    audit.same_descriptor_negative_controls = 1u;
+    audit.negative_control_misses = 1u;
+    audit.expected_negative_error_domain =
+        configuration.archives.front().negative_error_domain;
+    audit.expected_negative_error_code =
+        configuration.archives.front().negative_error_code;
+    audit.observed_negative_error_domain =
+        audit.expected_negative_error_domain;
+    audit.observed_negative_error_code = audit.expected_negative_error_code;
+    audit.original_sync_negative_calls = 1u;
+    audit.actual_sync_calls = 1u;
+    audit.actual_async_calls = 0u;
+    audit.outer_vulkan_pipeline_succeeded = true;
+    return audit;
+}
+
+}  // namespace
+
+TEST_CASE("immutable live gate uses cached scalar configuration evidence",
+          "[vulkan][metal-archive-receipt][environment][live-gate]") {
+    const auto before = gv::runtime_metal_archive_live_gate_evidence();
+    REQUIRE_FALSE(before.installed_accepted);
+    for (std::size_t iteration = 0u; iteration < 8u; ++iteration) {
+        gv::probe_immutable_metal_policy_live_for_test();
+    }
+    const auto after = gv::runtime_metal_archive_live_gate_evidence();
+    CHECK(after.install_validation_count == before.install_validation_count);
+    CHECK(after.live_gate_calls == before.live_gate_calls + 8u);
+    CHECK(after.live_configuration_scan_count == 0u);
+}
+
+TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
+          "[vulkan][metal-archive-receipt]") {
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    auto accepted = accepted_runtime_metal_archive_configuration();
+    REQUIRE(accepted.accepted());
+    const std::uint64_t retained_seed_bytes =
+        accepted.seed_image->receipt().retained_capacity_bytes();
+    const std::uint64_t reserved_with_seed = admission.reserved_bytes();
+    REQUIRE(reserved_with_seed >= retained_seed_bytes);
+    // The first qualification also process-retains the installed helper. Keep
+    // that intentional singleton reservation in the baseline while proving
+    // that this configuration's seed and derived image release independently.
+    const std::uint64_t process_qualification_baseline =
+        reserved_with_seed - retained_seed_bytes;
+    const auto identity = gv::runtime_metal_archive_set_identity(
+        accepted.archives);
+    CHECK(identity.accepted());
+    CHECK(identity.archive_count == 2u);
+    CHECK(identity.total_size > 0u);
+    {
+        const auto admitted =
+            gv::make_runtime_metal_archive_configuration_image(
+                accepted.seed_image,
+                accepted.vulkan_device_uuid,
+                accepted.metal_device_registry_id);
+        REQUIRE(admitted);
+        REQUIRE((*admitted)->accepted());
+        CHECK((*admitted)->configuration() == accepted);
+        CHECK((*admitted)->retained_capacity_bytes() > 0u);
+        CHECK((*admitted)->retained_capacity_bytes()
+              <= (*admitted)->peak_admitted_bytes());
+    }
+    CHECK(admission.reserved_bytes() == reserved_with_seed);
+
+    SECTION("configuration rejects missing immutable identities") {
+        auto invalid = accepted;
+        invalid.seed_image.reset();
+        CHECK_FALSE(invalid.accepted());
+
+        // Device identities may be unknown to the supervisor before Runtime
+        // selects VkPhysicalDevice/MTLDevice. Zero is an explicit request for
+        // Runtime to seal the actual identities; the receipt never accepts
+        // zero after that sealing step.
+        auto runtime_sealed = accepted;
+        runtime_sealed.vulkan_device_uuid = {};
+        runtime_sealed.metal_device_registry_id = 0u;
+        CHECK(runtime_sealed.accepted());
+    }
+
+    SECTION("archive entries are retained-image-bound and strictly ordered") {
+        auto invalid = accepted;
+        invalid.archives.clear();
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.archives[0].artifact_filename += ".other";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.archives[0].artifact_ordinal;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.archives[0].size = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.archives[0].sha256 = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.archives[0].negative_error_domain.clear();
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.archives[1].negative_error_code;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.archives[1].negative_error_domain += ".other";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        std::swap(invalid.archives[0], invalid.archives[1]);
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.archives[1] = invalid.archives[0];
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("helper qualification metadata is exact") {
+        auto invalid = accepted;
+        invalid.qualification_version = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.qualification_receipt_count;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_protocol_version = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_build_identity += ".other";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_source = "test-env-override";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.helper_executable_size;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_executable_sha256 = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_metal_registry_id = 0u;
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("every byte identity component changes the ordered set") {
+        auto changed = accepted;
+        changed.archives[0].artifact_filename += ".other";
+        CHECK(gv::runtime_metal_archive_set_identity(changed.archives)
+              != identity);
+        changed = accepted;
+        ++changed.archives[0].artifact_ordinal;
+        CHECK(gv::runtime_metal_archive_set_identity(changed.archives)
+              != identity);
+        changed = accepted;
+        ++changed.archives[0].size;
+        CHECK(gv::runtime_metal_archive_set_identity(changed.archives)
+              != identity);
+        changed = accepted;
+        changed.archives[0].sha256[1] = 0x77u;
+        CHECK(gv::runtime_metal_archive_set_identity(changed.archives)
+              != identity);
+        changed = accepted;
+        changed.archives[0].negative_error_domain += ".other";
+        CHECK(gv::runtime_metal_archive_set_identity(changed.archives)
+              != identity);
+        changed = accepted;
+        ++changed.archives[0].negative_error_code;
+        CHECK(gv::runtime_metal_archive_set_identity(changed.archives)
+              != identity);
+    }
+    accepted = {};
+    CHECK(admission.reserved_bytes() == process_qualification_baseline);
+}
+
+TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
+          "[vulkan][metal-archive-receipt]") {
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::RuntimeMetalArchivePipelineReceipt>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::RuntimeMetalArchivePipelineReceipt>);
+
+    const auto accepted = accepted_runtime_metal_archive_audit();
+    REQUIRE(accepted.accepted());
+    CHECK(gv::RuntimeMetalArchivePipelineReceipt::
+          self_test_move_and_reuse_contract(accepted));
+
+    SECTION("exact expected and loaded archive sets must agree") {
+        auto invalid = accepted;
+        ++invalid.loaded_archives.archive_count;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.loaded_archives.total_size;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.loaded_archives.ordered_checksum;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.archive_pre_post_identity_checks;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.pipeline_pre_identity_checks;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.pipeline_post_identity_checks;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.unsealed_metal_source_requests = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.metal_source_fallback_calls = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.manifest_checksum = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.cache_digest.clear();
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.cache_digest = "0000000000000000";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.cache_digest[0] = 'A';
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_sha256 = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_size = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_receipt_identity = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_load_count = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_manifest_read_count = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_artifact_read_count = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.seed_artifact_bytes;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_load_ns = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_admission_count = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_retained_capacity_bytes =
+            invalid.seed_peak_admitted_bytes + 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.seed_admission_saturated = true;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.shader_key = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.observed_entry_name += ".other";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.matched_descriptor_functions = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.command_interpose_installed = false;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.command_interpose_immutable_fail_closed = false;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.command_loader_metal_registry_id;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.command_source_methods_present;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.command_source_wrapper_methods;
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("Vulkan loader and intercepted Metal device identities are exact") {
+        auto invalid = accepted;
+        invalid.runtime_vulkan_device_uuid[1] = 0x44u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.api_version = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.driver_version = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.pipeline_cache_uuid = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.pipeline_create_ns = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.loader_metal_registry_id;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.intercepted_metal_registry_id;
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("every scoped call replaces archives enforces miss and runs control") {
+        auto invalid = accepted;
+        --invalid.descriptor_replacements;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.fail_on_miss_enforcements;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.same_descriptor_negative_controls;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.negative_control_misses;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.original_sync_negative_calls;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.actual_async_calls;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.scoped_interceptions;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.observed_negative_error_domain += ".other";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.observed_negative_error_code;
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("outside nested sticky and failed outer execution fail closed") {
+        auto invalid = accepted;
+        invalid.outside_scope_interceptions = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.nested_scope = true;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.sticky_failure = true;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.outer_vulkan_pipeline_succeeded = false;
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("process qualification equations reject every filesystem shortcut") {
+        const auto reject = [&accepted](auto mutate) {
+            auto invalid = accepted;
+            mutate(invalid.cache_qualification);
+            invalid.cache_qualification.identity =
+                gv::runtime_metal_archive_process_qualification_identity(
+                    invalid.cache_qualification);
+            CHECK_FALSE(invalid.accepted());
+        };
+        reject([](auto& value) { value.hash_passes = 2u; });
+        reject([](auto& value) { ++value.hashed_bytes; });
+        reject([](auto& value) { --value.private_files_created; });
+        reject([](auto& value) { --value.private_files_unlinked; });
+        reject([](auto& value) { value.live_private_paths = 1u; });
+        reject([](auto& value) {
+            value.pipeline_filesystem_hash_passes = 1u;
+        });
+        reject([](auto& value) {
+            value.pipeline_filesystem_hashed_bytes = 1u;
+        });
+        reject([](auto& value) { value.helper_source = "test-env-override"; });
+        reject([](auto& value) { value.helper_metal_registry_id = 0u; });
+        reject([](auto& value) { value.vulkan_device_uuid[0] ^= 0x80u; });
+        reject([](auto& value) { ++value.api_version; });
+        reject([](auto& value) { ++value.driver_version; });
+        reject([](auto& value) { ++value.vendor_id; });
+        reject([](auto& value) { ++value.device_id; });
+        reject([](auto& value) { value.pipeline_cache_uuid[0] ^= 0x80u; });
+        reject([](auto& value) { value.seed_sha256[0] ^= 0x80u; });
+        reject([](auto& value) { ++value.seed_size; });
+        reject([](auto& value) { ++value.manifest_checksum; });
+
+        auto invalid_identity = accepted;
+        invalid_identity.cache_qualification.identity = 0u;
+        CHECK_FALSE(invalid_identity.accepted());
+    }
+}
+
+TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
+          "[vulkan][metal-archive-receipt][pipeline-use-proof][admission]") {
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::RuntimePipelineOperationProof>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::RuntimePipelineOperationProof>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::PersistedShapeV5CoordinateAcceptedOperation>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::PersistedShapeV5CoordinateAcceptedOperation>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::RuntimeGpuCacheMetricsDelta>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::RuntimeGpuCacheMetricsDelta>);
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const auto base_audit = accepted_runtime_metal_archive_audit();
+    REQUIRE(base_audit.accepted());
+    // Constructing the first audit also once-qualifies and process-retains the
+    // installed helper executable. That reservation intentionally lives until
+    // process shutdown, so leak checks begin after this process-wide baseline.
+    const std::uint64_t reserved_after_process_qualification =
+        admission.reserved_bytes();
+    CHECK(gv::RuntimePipelineOperationProof::
+          self_test_causal_collector_contract(
+              base_audit));
+    CHECK(admission.reserved_bytes()
+          == reserved_after_process_qualification);
+    CHECK(gv::Runtime::
+          self_test_persisted_shape_v5_finalizer_preclaim_contract(
+              base_audit));
+    CHECK(admission.reserved_bytes()
+          == reserved_after_process_qualification);
+    CHECK(gv::Runtime::self_test_gpu_cache_partial_delta_contract(
+        base_audit));
+    CHECK(admission.reserved_bytes()
+          == reserved_after_process_qualification);
+}
+
+TEST_CASE("runtime GPU environment identity is canonical and byte exact",
+          "[vulkan][metal-archive-receipt][environment]") {
+    gv::VulkanFeatureSet features{};
+    features.api_version = 0x01020304u;
+    features.driver_version = 0xa0b0c0d0u;
+    features.vendor_id = 0x0000106bu;
+    features.device_id = 0x0000002au;
+    for (std::size_t i = 0u; i < features.pipeline_cache_uuid.size(); ++i) {
+        features.pipeline_cache_uuid[i] = static_cast<std::uint8_t>(i);
+    }
+    const auto identity = gv::canonical_vulkan_driver_identity(features);
+    CHECK(std::string(identity.data())
+          == "api=01020304;driver=a0b0c0d0;vendor=0000106b;"
+             "device=0000002a;pcuuid=000102030405060708090a0b0c0d0e0f");
+    const auto terminator = std::find(
+        identity.begin(), identity.end(), '\0');
+    REQUIRE(terminator != identity.end());
+    CHECK(std::all_of(
+        std::next(terminator), identity.end(),
+        [](char byte) { return byte == '\0'; }));
+
+    auto changed = features;
+    ++changed.api_version;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    ++changed.driver_version;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    ++changed.vendor_id;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    ++changed.device_id;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    std::swap(changed.pipeline_cache_uuid[0],
+              changed.pipeline_cache_uuid[1]);
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+}
+
+TEST_CASE("runtime GPU cache delta is bounded by its pre-finalizer maximum",
+          "[vulkan][metal-archive-receipt][cache-metrics]") {
+    const gv::RuntimeGpuCacheMetricsAudit maximum{
+        .token_identity = 77u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = 4096u,
+        .gpu_pipeline_cache_load_ns = 11u,
+        .gpu_pipeline_creates = 8u,
+        .gpu_pipeline_creation_ns = 88u,
+    };
+    const gv::RuntimeGpuCacheMetricsAudit first = maximum;
+    const gv::RuntimeGpuCacheMetricsAudit later{
+        .token_identity = 77u,
+    };
+    REQUIRE(maximum.accepted());
+    CHECK(first.componentwise_bounded_by(maximum));
+    CHECK(later.componentwise_bounded_by(maximum));
+    auto invalid = later;
+    invalid.token_identity = 78u;
+    CHECK_FALSE(invalid.componentwise_bounded_by(maximum));
+    invalid = first;
+    ++invalid.gpu_pipeline_creation_ns;
+    CHECK_FALSE(invalid.componentwise_bounded_by(maximum));
+    invalid = first;
+    invalid.saturated = true;
+    CHECK_FALSE(invalid.componentwise_bounded_by(maximum));
+}
+
+TEST_CASE("Shape-V5 radix pass count is exact at byte boundaries",
+          "[vulkan][pipeline-use-proof][shape-v5][radix]") {
+    const auto passes = [](std::uint64_t target_end) {
+        return gv::runtime_shape_v5_radix_pass_count(
+            0u, target_end + 1u);
+    };
+    CHECK(passes(0u) == 1u);                    // 1 bit
+    CHECK(passes(0xffu) == 1u);                 // 8 bits
+    CHECK(passes(0x100u) == 2u);                // 9 bits
+    CHECK(passes(0xffffu) == 2u);               // 16 bits
+    CHECK(passes(0x10000u) == 3u);              // 17 bits
+    CHECK(passes(std::uint64_t{1} << 62u) == 8u); // 63 bits
+    CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(0u, 0u));
+    CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(
+        0u, (std::uint64_t{1} << 63u) + 1u));
+    CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(
+        (std::numeric_limits<std::uint64_t>::max)(), 2u));
 }

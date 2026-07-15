@@ -1354,6 +1354,95 @@ TEST_CASE("DOC0371 CRC-64/ECMA-182 is exact and incrementally composable",
         == 0x6C40DF5F0B497347ULL);
 }
 
+TEST_CASE("DOC0373 validated row CRC algebra reconstructs raw extent CRC",
+          "[indexing][minimizer-hashmap][wire][crc][cold-load][extent-crc]") {
+    using namespace bioseq::indexing;
+
+    REQUIRE(crc64_ecma182_advance_zero_bytes(0, 0) == 0);
+    REQUIRE(crc64_ecma182_concatenate(
+        crc64_ecma182("control"), crc64_ecma182("position"), 8u)
+        == crc64_ecma182("controlposition"));
+
+    const IndexChunkAddress signed_address{
+        .generation_id = 0xFEDCBA9876543210ULL,
+        .position_segment = (std::numeric_limits<std::int32_t>::min)() + 17,
+        .sub_key = (std::numeric_limits<index_sub_key_t>::min)() + 29,
+        .chunk_no = 0x89ABCDEFu,
+    };
+    constexpr std::uint32_t signed_length = 0x10203040u;
+    Crc64Ecma182 independently_encoded_prefix;
+    independently_encoded_prefix.update_little_endian(
+        signed_address.generation_id);
+    independently_encoded_prefix.update_little_endian(
+        std::bit_cast<std::uint32_t>(signed_address.position_segment));
+    independently_encoded_prefix.update_little_endian(
+        std::bit_cast<std::uint64_t>(signed_address.sub_key));
+    independently_encoded_prefix.update_little_endian(signed_address.chunk_no);
+    independently_encoded_prefix.update_little_endian(signed_length);
+    REQUIRE(crc64_index_chunk_row_prefix(
+        signed_address.generation_id,
+        signed_address.position_segment,
+        signed_address.sub_key,
+        signed_address.chunk_no,
+        signed_length) == independently_encoded_prefix.checksum());
+
+    std::uint64_t algebraic_extent = 0;
+    Crc64Ecma182 direct_extent;
+    std::uint64_t random_state = 0xD1B54A32D192ED03ULL;
+    const auto next_random = [&random_state]() noexcept {
+        random_state ^= random_state >> 12u;
+        random_state ^= random_state << 25u;
+        random_state ^= random_state >> 27u;
+        return random_state * 0x2545F4914F6CDD1DULL;
+    };
+    const auto append_case = [&](std::size_t length, std::uint32_t ordinal) {
+        INFO("payload length=" << length << " ordinal=" << ordinal);
+        std::vector<std::byte> payload(length);
+        for (std::byte& byte : payload) {
+            byte = static_cast<std::byte>(next_random() & 0xffu);
+        }
+        const IndexChunkAddress address{
+            .generation_id = 0x8000000000000000ULL + ordinal,
+            .position_segment = ordinal % 2u == 0
+                ? (std::numeric_limits<std::int32_t>::min)()
+                    + static_cast<std::int32_t>(ordinal)
+                : (std::numeric_limits<std::int32_t>::max)()
+                    - static_cast<std::int32_t>(ordinal),
+            .sub_key = ordinal % 2u == 0
+                ? (std::numeric_limits<index_sub_key_t>::min)()
+                    + static_cast<index_sub_key_t>(ordinal)
+                : (std::numeric_limits<index_sub_key_t>::max)()
+                    - static_cast<index_sub_key_t>(ordinal),
+            .chunk_no = 0xF0000000u + ordinal,
+        };
+        const auto bytes = std::span<const std::byte>{payload};
+        const auto chunk_bytes = static_cast<std::uint32_t>(bytes.size());
+        const std::uint64_t row_checksum = crc64_index_chunk_row(
+            address.generation_id,
+            address.position_segment,
+            address.sub_key,
+            address.chunk_no,
+            chunk_bytes,
+            bytes);
+        direct_extent.update(bytes);
+        algebraic_extent = crc64_append_validated_index_chunk_payload(
+            algebraic_extent, address, chunk_bytes, row_checksum);
+        REQUIRE(algebraic_extent == direct_extent.checksum());
+    };
+
+    const std::array<std::size_t, 6> boundary_lengths{
+        0u, 1u, 17u, 8063u, 8064u, 31u};
+    std::uint32_t ordinal = 0;
+    for (const std::size_t length : boundary_lengths) {
+        append_case(length, ordinal++);
+    }
+    for (std::size_t iteration = 0; iteration < 128u; ++iteration) {
+        append_case(static_cast<std::size_t>(next_random() % 8065u), ordinal++);
+    }
+
+    REQUIRE(algebraic_extent == direct_extent.checksum());
+}
+
 TEST_CASE("DOC0371 generation head has a fixed little-endian 64-byte wire image",
           "[indexing][minimizer-hashmap][wire]") {
     using namespace bioseq::indexing;
@@ -7692,9 +7781,16 @@ TEST_CASE("DOC0371 prepared callbacks reject control and position corruption",
             std::move(controls), original_positions,
             MinimizerGenerationWireError::control_range);
     }
-    SECTION("non-contiguous local offset") {
+    SECTION("overlapping local offset") {
         auto controls = original_controls;
         test_write_le<std::uint32_t>(controls, 16u + 8u, 1u);
+        expect_finish_error(
+            std::move(controls), original_positions,
+            MinimizerGenerationWireError::control_range);
+    }
+    SECTION("gapped local offset") {
+        auto controls = original_controls;
+        test_write_le<std::uint32_t>(controls, 16u + 8u, 3u);
         expect_finish_error(
             std::move(controls), original_positions,
             MinimizerGenerationWireError::control_range);
@@ -8438,7 +8534,9 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
         {1u, (3u << 1u) | 1u},
         {1u, (9u << 1u)},
-        {2u, (11u << 1u) | 1u},
+        // A new hash may restart below the previous hash's last coordinate.
+        // This proves the reader's strict-order state resets per control.
+        {2u, (1u << 1u) | 1u},
     };
     VectorReplayMinimizerProducer producer{minimizers};
     CollectingMinimizerRowSink sink;
@@ -8496,6 +8594,7 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     REQUIRE((std::vector<std::uint64_t>{
         hash1.positions.begin(), hash1.positions.end()}
         == std::vector<std::uint64_t>{7u, 18u}));
+    REQUIRE(reader->lookup(2u).positions.front() == 3u);
     REQUIRE(reader->lookup(999u).positions.empty());
 
     SECTION("padding byte") {
@@ -8510,6 +8609,14 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     SECTION("terminal prefix") {
         auto corrupt = control_bytes;
         test_write_le<std::uint16_t>(corrupt, 12u, 2u);
+        require_wire_error(
+            decode_minimizer_shape_v5_controls(
+                corrupt, entry, generation->directory.profile()),
+            MinimizerGenerationWireError::control_range);
+    }
+    SECTION("interior prefix cannot overlap") {
+        auto corrupt = control_bytes;
+        test_write_le<std::uint16_t>(corrupt, 10u, 0u);
         require_wire_error(
             decode_minimizer_shape_v5_controls(
                 corrupt, entry, generation->directory.profile()),
@@ -8547,6 +8654,33 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
                 *minimizer_position_segment_core(
                     generation->manifest, 0u),
                 generation->directory.profile()),
+            MinimizerGenerationWireError::position_range);
+    }
+    SECTION("prepared reader retains strict order state") {
+        auto corrupt = sink.rows[entry.control_chunk_count];
+        test_write_le<std::uint16_t>(
+            corrupt.bytes, 2u,
+            test_read_le<std::uint16_t>(corrupt.bytes, 0u));
+        recompute_row_checksum(corrupt);
+        // Hash 1 is deliberately absent from the query union: every control
+        // boundary must still enforce strict order without retaining the old
+        // 16-byte route-and-boundary record beside it.
+        const std::array<std::uint64_t, 1> unqueried_hash{2u};
+        auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            unqueried_hash,
+            10u);
+        REQUIRE(made.has_value());
+        for (std::size_t index = 0;
+             index < entry.control_chunk_count; ++index) {
+            REQUIRE(made->accept(row_view(sink.rows[index])).has_value());
+        }
+        require_wire_error(
+            made->accept(row_view(corrupt)),
             MinimizerGenerationWireError::position_range);
     }
     SECTION("positions cannot escape their persisted segment") {
@@ -8672,7 +8806,12 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     minimizers.reserve(query_count);
     queries.reserve(query_count);
     for (std::uint64_t index = 0; index < query_count; ++index) {
-        const std::uint64_t hash = index + 1u;
+        // Odd multiplication is a permutation modulo 2^30 and spreads this
+        // mostly-unique fixture across the same 30-bit domain as production
+        // ntHash keys. This exercises actual high-bit radix occupancy rather
+        // than putting every synthetic key in bucket zero.
+        const std::uint64_t hash =
+            ((index + 1u) * 2'654'435'761ULL) & ((1ULL << 30u) - 1u);
         minimizers.emplace_back(hash, retained_bp(index) << 1u);
         queries.push_back(hash);
     }
@@ -8708,7 +8847,42 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.global_position_storage_allocations == 1u);
     REQUIRE(evidence.position_append_growth_reservations == 0u);
     REQUIRE(evidence.retained_position_count == query_count);
-    REQUIRE(evidence.retained_position_capacity >= query_count);
+    REQUIRE(evidence.retained_position_capacity == query_count);
+    REQUIRE(evidence.query_record_size_bytes == 32u);
+    REQUIRE(evidence.query_record_count == query_count);
+    REQUIRE(evidence.query_record_capacity >= query_count);
+    REQUIRE(evidence.query_record_capacity_bytes
+        == evidence.query_record_capacity * evidence.query_record_size_bytes);
+    REQUIRE(evidence.query_route_radix_bits == 8u);
+    REQUIRE(evidence.query_route_radix_bucket_count == 256u);
+    REQUIRE(evidence.query_route_radix_nonempty_bucket_count == 256u);
+    REQUIRE(evidence.query_route_radix_max_bucket_size == 11u);
+    REQUIRE(evidence.query_hash_capacity_bytes
+        >= query_count * sizeof(std::uint64_t)
+            + (evidence.query_route_radix_bucket_count + 1u)
+                * sizeof(std::uint32_t));
+    REQUIRE(evidence.released_query_hash_capacity_bytes == 0u);
+    REQUIRE(evidence.decoded_control_records == query_count);
+    REQUIRE(evidence.query_route_control_lookups
+        == evidence.decoded_control_records);
+    REQUIRE(evidence.query_route_matches == query_count);
+    const std::uint64_t global_lower_bound_probe_ceiling =
+        evidence.query_route_control_lookups
+        * (std::bit_width(query_count - 1u) + 1u);
+    REQUIRE(evidence.query_route_hash_probes * 2u
+        < global_lower_bound_probe_ceiling);
+    REQUIRE(evidence.query_route_hash_probes
+        <= evidence.query_route_control_lookups * 5u);
+    REQUIRE(evidence.retained_selected_control_records == query_count);
+    REQUIRE(evidence.selected_control_size_bytes == 8u);
+    REQUIRE(evidence.retained_selected_control_capacity_bytes
+        == query_count * (sizeof(std::uint64_t) + sizeof(std::uint32_t)));
+    REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
+    REQUIRE(evidence.global_position_capacity_bytes
+        == evidence.retained_position_capacity * sizeof(std::uint64_t));
+    REQUIRE(evidence.control_payload_capacity_bytes == 0u);
+    REQUIRE(evidence.retained_layout_equation_holds());
+    REQUIRE(evidence.owned_capacity_bytes == reader->admitted_bytes());
     const std::uint64_t extent_count =
         generation->directory.entries().size() * 2u;
     const std::uint64_t fixed_passes = 7u + extent_count;
@@ -8719,15 +8893,24 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         <= extent_count / 2u);
     REQUIRE(evidence.capacity_accounting_passes == 7u + 3u * extent_count);
     REQUIRE_FALSE(evidence.saturated);
-    REQUIRE(reader->lookup(1u).positions.front() == retained_bp(0u) << 1u);
-    REQUIRE(reader->lookup(query_count).positions.front()
+    REQUIRE(reader->lookup(queries.front()).positions.front()
+        == retained_bp(0u) << 1u);
+    REQUIRE(reader->lookup(queries.back()).positions.front()
         == retained_bp(query_count - 1u) << 1u);
 
     // Exercise the statement-level aggregate equation with a second reader
     // that selects only the first of the three control extents. Production
     // merges these per-reader counters, so the aggregate must retain the same
     // 7R + E + 4S shape even when readers select different extent counts.
-    const std::array<std::uint64_t, 1> sparse_queries{1u};
+    const std::array<std::uint64_t, 1> sparse_queries{queries.front()};
+    const std::uint64_t sparse_selected_extent_count =
+        static_cast<std::uint64_t>(std::ranges::count_if(
+            generation->directory.entries(),
+            [&](const MinimizerBucketDirEntry& entry) {
+                return entry.lo_hash <= sparse_queries.front()
+                    && sparse_queries.front() <= entry.hi_hash;
+            }));
+    REQUIRE(sparse_selected_extent_count > 0u);
     auto sparse_reader = PreparedShapeV5QueryReader::begin(
         admission,
         generation->head,
@@ -8748,10 +8931,67 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.global_position_storage_allocations == 1u);
     REQUIRE(sparse_evidence.position_append_growth_reservations == 0u);
     REQUIRE(sparse_evidence.retained_position_count == 1u);
-    REQUIRE(sparse_evidence.retained_position_capacity >= 1u);
+    REQUIRE(sparse_evidence.retained_position_capacity == 1u);
+    REQUIRE(sparse_evidence.query_record_size_bytes == 32u);
+    REQUIRE(sparse_evidence.query_record_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_bits == 0u);
+    REQUIRE(sparse_evidence.query_route_radix_bucket_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_nonempty_bucket_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_max_bucket_size == 1u);
+    REQUIRE(sparse_evidence.query_hash_capacity_bytes
+        >= sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
+    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes == 0u);
+    REQUIRE(sparse_evidence.decoded_control_records > 1u);
+    REQUIRE(sparse_evidence.query_route_control_lookups > 0u);
+    REQUIRE(sparse_evidence.query_route_control_lookups
+        <= sparse_evidence.decoded_control_records);
+    REQUIRE(sparse_evidence.query_route_matches == 1u);
+    REQUIRE(sparse_evidence.query_route_hash_probes
+        <= sparse_evidence.query_route_control_lookups * 2u);
+    REQUIRE(sparse_evidence.retained_selected_control_records
+        == sparse_evidence.decoded_control_records);
+    REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
+        == sparse_evidence.decoded_control_records * sizeof(std::uint64_t)
+            + sizeof(std::uint32_t) * 2u);
+    REQUIRE(sparse_evidence.current_selected_control_capacity_bytes == 0u);
+    REQUIRE(sparse_evidence.retained_layout_equation_holds());
+    REQUIRE(sparse_evidence.owned_capacity_bytes
+        == sparse_reader->admitted_bytes());
     REQUIRE(sparse_evidence.capacity_accounting_passes
-        == 7u + extent_count + 4u);
+        == 7u + extent_count + 4u * sparse_selected_extent_count);
     REQUIRE_FALSE(sparse_evidence.saturated);
+
+    // A selected query absent from the target still crosses the same global
+    // controls/positions boundary, but exact P=0 must remain allocation-free.
+    const std::array<std::uint64_t, 1> absent_queries{
+        queries.front() ^ 1u};
+    REQUIRE(std::ranges::find(queries, absent_queries.front())
+        == queries.end());
+    auto empty_reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        absent_queries,
+        10u);
+    REQUIRE(empty_reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(empty_reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(empty_reader->finish().has_value());
+    const auto empty_evidence = empty_reader->memory_evidence();
+    REQUIRE(empty_evidence.global_position_storage_preparations == 1u);
+    REQUIRE(empty_evidence.global_position_storage_allocations == 0u);
+    REQUIRE(empty_evidence.retained_position_count == 0u);
+    REQUIRE(empty_evidence.retained_position_capacity == 0u);
+    REQUIRE(empty_evidence.global_position_capacity_bytes == 0u);
+    REQUIRE(empty_evidence.retained_layout_equation_holds());
+    REQUIRE(empty_evidence.owned_capacity_bytes
+        == empty_reader->admitted_bytes());
+    REQUIRE(empty_reader->lookup(absent_queries.front()).positions.empty());
 
     constexpr std::uint64_t aggregate_sessions = 2u;
     const std::uint64_t aggregate_extents = aggregate_sessions * extent_count;
@@ -8765,9 +9005,217 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(aggregate_passes >= aggregate_fixed_passes);
     REQUIRE((aggregate_passes - aggregate_fixed_passes) % 4u == 0u);
     REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
-        == segment_count + 1u);
+        == segment_count + sparse_selected_extent_count);
     REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
         <= aggregate_extents / 2u);
+}
+
+TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
+          "[indexing][minimizer-hashmap][wire][v5][reader][admission]"
+          "[diagnostics][failpoint]") {
+    using namespace bioseq::indexing;
+    STATIC_REQUIRE(static_cast<std::uint8_t>(
+        MinimizerGenerationWireError::admission) == 28u);
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
+        {1u, 2u},
+        {2u, 4u},
+    };
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink, test_shape_v5_generation_options(100u, 10u));
+    REQUIRE(generation.has_value());
+    const std::array<std::uint64_t, 2> queries{1u, 2u};
+    std::vector<const CollectedMinimizerRow*> payload;
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) payload.push_back(&row);
+    }
+    REQUIRE(payload.size() == 2u);
+
+    using Substage = PreparedShapeV5QueryAdmissionSubstage;
+    constexpr std::array begin_substages{
+        Substage::identity_and_directory_reservation,
+        Substage::query_hash_reservation,
+        Substage::query_hash_allocation,
+        Substage::query_hash_reconcile,
+        Substage::query_route_reservation,
+        Substage::query_route_allocation,
+        Substage::query_route_reconcile,
+    };
+    constexpr std::array payload_substages{
+        Substage::control_payload_reservation,
+        Substage::control_payload_allocation,
+        Substage::control_payload_reconcile,
+        Substage::control_decode_reservation,
+        Substage::control_decode_allocation,
+        Substage::control_decode_reconcile,
+        Substage::position_image_reservation,
+        Substage::position_image_allocation,
+        Substage::position_image_reconcile,
+    };
+
+    for (const Substage wanted : begin_substages) {
+        INFO("begin admission substage "
+            << prepared_shape_v5_query_admission_substage_name(wanted));
+        bioseq::parallelism::MemoryAdmissionController admission;
+        PreparedShapeV5QueryAdmissionEvidence evidence;
+        const auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &evidence,
+            PreparedShapeV5QueryReaderTestOptions{
+                .fail_admission_substage = wanted,
+            });
+        require_wire_error(
+            made, MinimizerGenerationWireError::admission);
+        REQUIRE(evidence.substage == wanted);
+        REQUIRE(evidence.injected_failure);
+        REQUIRE(prepared_shape_v5_query_admission_substage_name(wanted)
+            != std::string_view{"unknown"});
+        if (wanted != Substage::identity_and_directory_reservation) {
+            REQUIRE(evidence.projected_bytes > 0u);
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    for (const Substage wanted : payload_substages) {
+        INFO("payload admission substage "
+            << prepared_shape_v5_query_admission_substage_name(wanted));
+        bioseq::parallelism::MemoryAdmissionController admission;
+        PreparedShapeV5QueryAdmissionEvidence begin_evidence;
+        auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &begin_evidence,
+            PreparedShapeV5QueryReaderTestOptions{
+                .fail_admission_substage = wanted,
+            });
+        REQUIRE(made.has_value());
+        REQUIRE(begin_evidence.substage == Substage::none);
+        bool rejected = false;
+        for (const CollectedMinimizerRow* row : payload) {
+            const auto accepted = made->accept(row_view(*row));
+            if (!accepted) {
+                REQUIRE(accepted.error()
+                    == MinimizerGenerationWireError::admission);
+                rejected = true;
+                break;
+            }
+        }
+        REQUIRE(rejected);
+        const auto evidence = made->admission_failure_evidence();
+        REQUIRE(evidence.substage == wanted);
+        REQUIRE(evidence.injected_failure);
+        REQUIRE(evidence.projected_bytes > 0u);
+        REQUIRE(evidence.query_record_count == queries.size());
+        REQUIRE(evidence.query_record_capacity >= queries.size());
+        REQUIRE(evidence.releasable_protocol_query_hash_bytes == 0u);
+        if (wanted == Substage::position_image_reservation
+            || wanted == Substage::position_image_allocation
+            || wanted == Substage::position_image_reconcile) {
+            REQUIRE(evidence.retained_position_count == queries.size());
+            REQUIRE(evidence.retained_position_bytes
+                == queries.size() * sizeof(std::uint64_t));
+            REQUIRE(evidence.allocation_headroom_bytes == 0u);
+            if (wanted == Substage::position_image_reconcile) {
+                REQUIRE(evidence.projected_bytes
+                    == evidence.owned_capacity_bytes);
+            } else {
+                REQUIRE(evidence.projected_bytes
+                    == evidence.owned_capacity_bytes
+                        + evidence.retained_position_bytes);
+            }
+        }
+        REQUIRE(made->failed());
+        REQUIRE(made->admitted_bytes() == 0u);
+        const auto released = made->memory_evidence();
+        REQUIRE(released.retained_position_count == 0u);
+        REQUIRE(released.retained_position_capacity == 0u);
+        REQUIRE(released.global_position_capacity_bytes == 0u);
+        REQUIRE(released.retained_layout_equation_holds());
+        REQUIRE(released.global_position_storage_allocations
+            == (wanted == Substage::position_image_reconcile ? 1u : 0u));
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("real low budget retains the controller predicate snapshot") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        admission.set_index_memory_cap_bytes(1u);
+        PreparedShapeV5QueryAdmissionEvidence evidence;
+        const auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &evidence);
+        require_wire_error(
+            made, MinimizerGenerationWireError::admission);
+        REQUIRE(evidence.substage
+            == Substage::identity_and_directory_reservation);
+        REQUIRE_FALSE(evidence.injected_failure);
+        REQUIRE(evidence.controller_failure_snapshot_present);
+        REQUIRE(evidence.controller_reason
+            != bioseq::parallelism::MemoryAdmissionFailureReason::none);
+        REQUIRE(evidence.requested_growth_bytes > 1u);
+        REQUIRE(evidence.controller_budget_ceiling_bytes <= 1u);
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("arithmetic overflow is not relabelled as admission") {
+        const auto ordinary = plan_prepared_shape_v5_position_image(3u, 5u);
+        REQUIRE(ordinary.has_value());
+        REQUIRE(ordinary->retained_position_bytes == 24u);
+        REQUIRE(ordinary->allocation_headroom_bytes == 0u);
+        REQUIRE(ordinary->projected_bytes == 29u);
+        constexpr std::uint64_t adversarial_count = 100'000'000u;
+        const auto adversarial = plan_prepared_shape_v5_position_image(
+            adversarial_count, 17u);
+        REQUIRE(adversarial.has_value());
+        REQUIRE(adversarial->retained_position_bytes == 800'000'000u);
+        REQUIRE(adversarial->allocation_headroom_bytes == 0u);
+        REQUIRE(adversarial->projected_bytes == 800'000'017u);
+        REQUIRE(adversarial->projected_bytes - 17u
+            < adversarial->retained_position_bytes
+                * bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        constexpr std::uint64_t adversarial_query_count = 100'000'000u;
+        constexpr std::uint64_t prior_query_owned_bytes =
+            adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));
+        constexpr std::uint64_t exact_query_state_and_hash_bytes =
+            adversarial_query_count * 40u;
+        // ceil(Q / 8) needs 24 high radix bits for this adversarial Q.
+        constexpr std::uint64_t exact_query_radix_bytes =
+            ((1ULL << 24u) + 1u) * sizeof(std::uint32_t);
+        constexpr std::uint64_t exact_query_owned_bytes =
+            exact_query_state_and_hash_bytes + exact_query_radix_bytes;
+        STATIC_REQUIRE(prior_query_owned_bytes == 8'000'000'000u);
+        STATIC_REQUIRE(exact_query_state_and_hash_bytes == 4'000'000'000u);
+        STATIC_REQUIRE(exact_query_radix_bytes == 67'108'868u);
+        STATIC_REQUIRE(exact_query_owned_bytes == 4'067'108'868u);
+        STATIC_REQUIRE(prior_query_owned_bytes - exact_query_owned_bytes
+            == 3'932'891'132u);
+        require_wire_error(
+            plan_prepared_shape_v5_position_image(
+                (std::numeric_limits<std::uint64_t>::max)(), 0u),
+            MinimizerGenerationWireError::arithmetic_overflow);
+        require_wire_error(
+            plan_prepared_shape_v5_position_image(
+                1u,
+                (std::numeric_limits<std::uint64_t>::max)() - 1u),
+            MinimizerGenerationWireError::arithmetic_overflow);
+    }
 }
 
 TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
@@ -8783,10 +9231,16 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
         == 8064u);
 
     constexpr std::uint64_t position_count = 5000u;
+    constexpr std::uint64_t first_control_count = 8064u / 4u;
+    constexpr std::uint64_t queried_control_count =
+        position_count - first_control_count - 1u;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
     minimizers.reserve(position_count);
     for (std::uint64_t position = 0; position < position_count; ++position) {
-        minimizers.emplace_back(7u, position << 1u);
+        const std::uint64_t hash = position < first_control_count ? 6u
+            : position < first_control_count + queried_control_count ? 7u
+            : 8u;
+        minimizers.emplace_back(hash, position << 1u);
     }
     VectorReplayMinimizerProducer producer{minimizers};
     CollectingMinimizerRowSink sink;
@@ -8822,6 +9276,36 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     REQUIRE(first_position->bytes.size() == 8064u);
     REQUIRE(sink.max_callback_bytes == 8064u);
     require_complete_generation_rows(*generation, sink.rows);
+
+    // The first unqueried control ends exactly at the first position-row
+    // boundary. Querying only the middle of three controls forces the sparse
+    // route image and exercises its late ordinal on the following row.
+    bioseq::parallelism::MemoryAdmissionController admission;
+    const std::array<std::uint64_t, 1> query{7u};
+    auto reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(65'534u),
+        generation->directory.encoded_bytes(),
+        query,
+        65'534u);
+    REQUIRE(reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(reader->finish().has_value());
+    const auto lookup = reader->lookup(7u);
+    REQUIRE(lookup.positions.size() == queried_control_count);
+    REQUIRE(lookup.positions.front() == first_control_count << 1u);
+    REQUIRE(lookup.positions.back()
+        == (first_control_count + queried_control_count - 1u) << 1u);
+    const auto evidence = reader->memory_evidence();
+    REQUIRE(evidence.decoded_control_records == 3u);
+    REQUIRE(evidence.retained_selected_control_capacity_bytes
+        == 3u * sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
 }
 
 TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",
@@ -9124,6 +9608,41 @@ TEST_CASE("DOC0373 Format-5 reader releases admission on every terminal path",
                 REQUIRE(destination.accept(row_view(*row)).has_value());
             }
             REQUIRE(destination.finish().has_value());
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("move after exact position allocation transfers array ownership") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        {
+            auto made = begin(admission);
+            REQUIRE(made.has_value());
+            REQUIRE(made->accept(row_view(*payload.front())).has_value());
+            const auto before_move = made->memory_evidence();
+            REQUIRE(before_move.global_position_storage_preparations == 1u);
+            REQUIRE(before_move.global_position_storage_allocations == 1u);
+            REQUIRE(before_move.retained_position_count == 2u);
+            REQUIRE(before_move.retained_position_capacity == 2u);
+            REQUIRE(before_move.global_position_capacity_bytes
+                == 2u * sizeof(std::uint64_t));
+            REQUIRE(before_move.owned_capacity_bytes
+                == made->admitted_bytes());
+            const std::uint64_t reserved = admission.reserved_bytes();
+
+            PreparedShapeV5QueryReader destination{std::move(*made)};
+            REQUIRE(made->failed());
+            REQUIRE(made->admitted_bytes() == 0u);
+            REQUIRE(made->memory_evidence().retained_position_count == 0u);
+            REQUIRE(made->memory_evidence().retained_position_capacity == 0u);
+            REQUIRE(admission.reserved_bytes() == reserved);
+            REQUIRE(destination.memory_evidence().retained_position_count
+                == 2u);
+            REQUIRE(destination.accept(row_view(*payload.back())).has_value());
+            REQUIRE(destination.finish().has_value());
+            const auto found = destination.lookup(1u);
+            REQUIRE(found.positions.size() == 2u);
+            REQUIRE(found.positions[0] == 2u);
+            REQUIRE(found.positions[1] == 4u);
         }
         REQUIRE(admission.reserved_bytes() == 0u);
     }

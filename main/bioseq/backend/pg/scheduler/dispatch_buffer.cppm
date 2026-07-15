@@ -859,6 +859,9 @@ private:
     // owner keeps it registered until every batch/scanner is drained; buffer
     // destruction never dereferences it and never changes its registration.
     Snapshot scan_snapshot       = nullptr;
+    // Borrowed from the statement-root AlignmentExecutionCollector.
+    bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
+        persisted_gpu_operation_evidence_sink = nullptr;
     MemoryContext batch_payload_ctx = nullptr;
     std::array<std::vector<SM::fetch_request>, SM::bucket_count>
         per_bucket_target_requests{};
@@ -888,6 +891,18 @@ public:
     explicit TupleDispatchBuffer(const size_t estimated_tuple_count) {
         buffered_entries.reserve(estimated_tuple_count * 2);
         output_cursors.reserve(estimated_tuple_count * 2);
+    }
+
+    /// Bind the sole statement-root owner used by every batch/node/rescan.
+    void bind_persisted_gpu_operation_evidence_sink(
+        bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink) {
+        if (persisted_gpu_operation_evidence_sink != nullptr
+            && persisted_gpu_operation_evidence_sink != &sink) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq persisted GPU evidence sink changed during execution")));
+        }
+        persisted_gpu_operation_evidence_sink = &sink;
     }
 
     /*
@@ -2025,6 +2040,8 @@ public:
             scanner_pg_ctx.caches = join_scanner_pg_cache;
             scanner_pg_ctx.parent_mctx = batch_payload_ctx;
             scanner_pg_ctx.snapshot = scan_snapshot;
+            scanner_pg_ctx.persisted_gpu_operation_evidence_sink =
+                persisted_gpu_operation_evidence_sink;
             scanner_pg_ctx.user_relid = user_relid;
             scanner_pg_ctx.index_read_requirement = index_read_requirement;
             scanner_pg_ctx.read_index_active = read_sequence_index_active;
@@ -2183,6 +2200,21 @@ public:
 					if (group.persisted_shape_v5_reader) {
 						const auto memory_evidence =
 							group.persisted_shape_v5_reader->memory_evidence();
+						const std::uint64_t exact_position_bytes =
+							bioseq::parallelism::saturating_mul(
+								memory_evidence.retained_position_count,
+								sizeof(std::uint64_t));
+						const bool exact_position_image =
+							exact_position_bytes
+								!= (std::numeric_limits<std::uint64_t>::max)()
+							&& memory_evidence.retained_position_capacity
+								== memory_evidence.retained_position_count
+							&& memory_evidence.global_position_capacity_bytes
+								== exact_position_bytes;
+						const bool retained_layout =
+							memory_evidence.retained_layout_equation_holds()
+							&& memory_evidence.owned_capacity_bytes
+								== group.persisted_shape_v5_reader->admitted_bytes();
 						read_delta.format5_reader_capacity_accounting_passes =
 							memory_evidence.capacity_accounting_passes;
 						read_delta.
@@ -2198,8 +2230,37 @@ public:
 							memory_evidence.retained_position_count;
 						read_delta.format5_reader_retained_position_capacity =
 							memory_evidence.retained_position_capacity;
+						read_delta.format5_reader_directory_capacity_bytes =
+							memory_evidence.directory_capacity_bytes;
+						read_delta.format5_reader_query_hash_capacity_bytes =
+							memory_evidence.query_hash_capacity_bytes;
+						read_delta.format5_reader_query_record_capacity_bytes =
+							memory_evidence.query_record_capacity_bytes;
+						read_delta.format5_reader_ordinal_route_capacity_bytes =
+							memory_evidence.ordinal_route_capacity_bytes;
+						read_delta.format5_reader_selected_extent_capacity_bytes =
+							memory_evidence.selected_extent_capacity_bytes;
+						read_delta.
+							format5_reader_current_selected_control_capacity_bytes =
+							memory_evidence.current_selected_control_capacity_bytes;
+						read_delta.format5_reader_global_position_capacity_bytes =
+							memory_evidence.global_position_capacity_bytes;
+						read_delta.format5_reader_control_payload_capacity_bytes =
+							memory_evidence.control_payload_capacity_bytes;
+						read_delta.format5_reader_owned_capacity_bytes =
+							memory_evidence.owned_capacity_bytes;
+						read_delta.format5_reader_admitted_bytes =
+							group.persisted_shape_v5_reader->admitted_bytes();
+						read_delta.format5_reader_exact_position_image_checks = 1;
+						read_delta.format5_reader_exact_position_image_failures =
+							exact_position_image ? 0 : 1;
+						read_delta.format5_reader_retained_layout_checks = 1;
+						read_delta.format5_reader_retained_layout_failures =
+							retained_layout ? 0 : 1;
 						read_delta.format5_reader_memory_evidence_saturated =
-							memory_evidence.saturated;
+							memory_evidence.saturated
+							|| exact_position_bytes
+								== (std::numeric_limits<std::uint64_t>::max)();
 					}
 					operational.merge(read_delta);
 					merge_cold_index_preparation_stats(
@@ -2759,6 +2820,8 @@ public:
         scanner_pg_ctx.caches             = scanner_pg_cache;
         scanner_pg_ctx.parent_mctx        = batch_payload_ctx;
         scanner_pg_ctx.snapshot           = scan_snapshot;
+        scanner_pg_ctx.persisted_gpu_operation_evidence_sink =
+            persisted_gpu_operation_evidence_sink;
         // Populate per-row locators for the target column. The production
         // scanner_pg path uses these. Last-fragment padding is recomputed
         // inside process_sequences where the template parameter S (and thus

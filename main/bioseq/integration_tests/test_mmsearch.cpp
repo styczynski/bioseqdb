@@ -488,9 +488,25 @@ TEST_CASE("alignment execution SRF is empty before the first published root",
     connection_test_context ctx;
     REQUIRE(last_alignment_stats(ctx).empty());
     REQUIRE(last_alignment_stats_v2(ctx).empty());
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() IS NULL)::int;")
+        == 1);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(last_alignment_stats(ctx).empty());
     REQUIRE(last_alignment_stats_v2(ctx).empty());
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() IS NULL)::int;")
+        == 1);
 }
 
 TEST_CASE("alignment execution SRF publishes one exact stage row set",
@@ -554,6 +570,10 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
     REQUIRE(query_scalar_int(ctx,
         "SELECT (bioseq."
         "last_alignment_format5_reader_memory_evidence() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_format5_reader_memory_evidence_v2() IS NULL)::int;")
         == 1);
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 2);
@@ -736,6 +756,175 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
     for (const auto& assertion : memory) {
         REQUIRE(assertion.value_or("") == "t");
     }
+
+    const row_t memory_v2 = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence_v2()"
+        "        AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, stats_saturated"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(evidence.value)='object' "
+        "AND (SELECT count(*) FROM jsonb_object_keys(evidence.value))=27 "
+        "AND (evidence.value->>'version')::bigint=2, "
+        "(evidence.value->>'execution_id')::bigint=stats.execution_id "
+        "AND (evidence.value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (evidence.value->>'database_oid')::bigint=stats.database_oid, "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+        " WHERE entry.key LIKE 'format5_reader_%'"
+        " AND jsonb_typeof(entry.value)='number'"
+        " AND (entry.value #>> '{}')::numeric<>0"
+        "), "
+        "NOT (evidence.value->>"
+        "'format5_reader_memory_evidence_saturated')::boolean "
+        "AND (evidence.value->>'stats_saturated')::boolean "
+        "    = stats.stats_saturated "
+        "AND NOT (evidence.value->>'stats_saturated')::boolean "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(memory_v2.size() == 4u);
+    for (const auto& assertion : memory_v2) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+}
+
+TEST_CASE("persisted GPU SQL evidence is exact-empty and immutable for completed CPU work",
+          "[mmsearch][pipeline-stats][statement][gpu-evidence][sql][lifecycle]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+
+    const std::string first = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
+    const std::string second = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
+    REQUIRE(second == first);
+    const std::string first_v2 = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()::text;");
+    const std::string second_v2 = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()::text;");
+    REQUIRE(second_v2 == first_v2);
+    REQUIRE(first_v2 != first);
+
+    const row_t proof = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, completed, partial,"
+        "        fully_drained"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(value)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(value))=18 "
+        "AND value ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'completed','partial','fully_drained','accepted','complete',"
+        " 'saturated','dropped_operation_count','operation_count',"
+        " 'accepted_operation_count','complete_operation_count','job_count',"
+        " 'accepted_job_count','operations']::text[], "
+        "value->>'schema'='bioseq.persisted_gpu_operation_evidence' "
+        "AND (value->>'version')::bigint=1 "
+        "AND jsonb_typeof(value->'schema')='string' "
+        "AND jsonb_typeof(value->'version')='number', "
+        "(value->>'execution_id')::bigint=stats.execution_id "
+        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (value->>'database_oid')::bigint=stats.database_oid, "
+        "(value->>'completed')::boolean=stats.completed "
+        "AND (value->>'partial')::boolean=stats.partial "
+        "AND (value->>'fully_drained')::boolean=stats.fully_drained "
+        "AND stats.completed AND NOT stats.partial AND stats.fully_drained, "
+        "NOT (value->>'accepted')::boolean "
+        "AND (value->>'complete')::boolean "
+        "AND NOT (value->>'saturated')::boolean, "
+        "(value->>'dropped_operation_count')::bigint=0 "
+        "AND (value->>'operation_count')::bigint=0 "
+        "AND (value->>'accepted_operation_count')::bigint=0 "
+        "AND (value->>'complete_operation_count')::bigint=0 "
+        "AND (value->>'job_count')::bigint=0 "
+        "AND (value->>'accepted_job_count')::bigint=0, "
+        "jsonb_typeof(value->'operations')='array' "
+        "AND jsonb_array_length(value->'operations')=0, "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(value) AS entry"
+        " WHERE entry.key IN ("
+        "  'version','execution_id','backend_pid','database_oid',"
+        "  'dropped_operation_count','operation_count',"
+        "  'accepted_operation_count','complete_operation_count',"
+        "  'job_count','accepted_job_count'"
+        " ) AND jsonb_typeof(entry.value)<>'number'"
+        "), "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(value) AS entry"
+        " WHERE entry.key IN ("
+        "  'completed','partial','fully_drained','accepted','complete',"
+        "  'saturated'"
+        " ) AND jsonb_typeof(entry.value)<>'boolean'"
+        "), "
+        "(SELECT provolatile='v' AND proparallel='r' "
+        " FROM pg_proc WHERE oid='bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()'::regprocedure) "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(proof.size() == 11u);
+    for (const auto& assertion : proof) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t v2_proof = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, completed, partial,"
+        "        fully_drained"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(value)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(value))=19 "
+        "AND value ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'completed','partial','fully_drained','accepted','complete',"
+        " 'saturated','dropped_operation_count','operation_count',"
+        " 'accepted_operation_count','complete_operation_count','job_count',"
+        " 'accepted_job_count','cache_qualification','operations']::text[], "
+        "value->>'schema'='bioseq.persisted_gpu_operation_evidence' "
+        "AND (value->>'version')::bigint=2, "
+        "(value->>'execution_id')::bigint=stats.execution_id "
+        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (value->>'database_oid')::bigint=stats.database_oid, "
+        "(value->>'completed')::boolean=stats.completed "
+        "AND (value->>'partial')::boolean=stats.partial "
+        "AND (value->>'fully_drained')::boolean=stats.fully_drained, "
+        "NOT (value->>'accepted')::boolean "
+        "AND (value->>'complete')::boolean "
+        "AND NOT (value->>'saturated')::boolean, "
+        "(value->>'dropped_operation_count')::bigint=0 "
+        "AND (value->>'operation_count')::bigint=0 "
+        "AND (value->>'accepted_operation_count')::bigint=0 "
+        "AND (value->>'complete_operation_count')::bigint=0 "
+        "AND (value->>'job_count')::bigint=0 "
+        "AND (value->>'accepted_job_count')::bigint=0, "
+        "jsonb_typeof(value->'operations')='array' "
+        "AND jsonb_array_length(value->'operations')=0, "
+        "jsonb_typeof(value->'cache_qualification')='null', "
+        "(SELECT provolatile='v' AND proparallel='r' "
+        " FROM pg_proc WHERE oid='bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()'::regprocedure) "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(v2_proof.size() == 10u);
+    for (const auto& assertion : v2_proof) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
 }
 
 TEST_CASE("alignment execution id is fresh and errors do not publish",
@@ -747,15 +936,26 @@ TEST_CASE("alignment execution id is fresh and errors do not publish",
 
     (void)query_rows(ctx, index_requirement_sql(kHoe, 1));
     const long long first_id = stats_i64(last_alignment_stats(ctx).front(), 0);
+    const std::string first_evidence = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
 
     require_no_current_compatible_persisted_index(
         ctx, index_requirement_sql(kHoe, 2));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;")
+        == first_evidence);
 
     (void)query_rows(ctx, index_requirement_sql(kHoe, 1));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id + 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()->>"
+        "'execution_id')::bigint;") == first_id + 1);
 }
 
 TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
@@ -764,6 +964,12 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     seed_hoe_fixture(ctx, kHoe);
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+    const long long completed_id = stats_i64(
+        last_alignment_stats(ctx).front(), 0);
+    const std::string completed_evidence = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     const std::string limited_sql = fmt::format(
         "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
         "aligner_options(index_read_requirement => 1)) LIMIT 1;",
@@ -772,6 +978,7 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE_FALSE(query_rows(ctx, limited_sql).empty());
     const auto rows = last_alignment_stats(ctx);
     REQUIRE(rows.size() == 20);
+    REQUIRE(stats_i64(rows.front(), 0) == completed_id + 1);
     REQUIRE_FALSE(stats_bool(rows.front(), 13));
     REQUIRE(stats_bool(rows.front(), 14));
     REQUIRE_FALSE(stats_bool(rows.front(), 15));
@@ -780,6 +987,14 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE(stats_i64(rows.front(), 33) > 0);
     REQUIRE(stats_i64(rows.front(), 34) == 0);
     REQUIRE(stats_i64(rows.front(), 35) == stats_i64(rows.front(), 33));
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;")
+        == completed_evidence);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()->>"
+        "'execution_id')::bigint;") == completed_id);
 }
 
 TEST_CASE("one executor root aggregates two invoked alignment nodes",
@@ -1644,11 +1859,133 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS
 				"AND NOT (evidence.value->>'stats_saturated')::boolean "
 				"FROM stats CROSS JOIN evidence;");
 			REQUIRE(memory.size() == 9u);
-			for (const auto& assertion : memory) {
-				REQUIRE(assertion.value_or("") == "t");
-			}
+				for (const auto& assertion : memory) {
+					REQUIRE(assertion.value_or("") == "t");
+				}
 
-			/* Extra secondary indexes must not increase the cold reader's open
+				const row_t memory_v2 = query_one(ctx,
+					"WITH stats AS ("
+					" SELECT execution_id, backend_pid, database_oid,"
+					" persisted_generation_read_sessions, stats_saturated"
+					" FROM bioseq.last_alignment_execution_stats_v2()"
+					" WHERE stage='query_sketch'"
+					"), evidence AS MATERIALIZED ("
+					" SELECT bioseq."
+					"last_alignment_format5_reader_memory_evidence_v2() AS value"
+					") SELECT "
+					"jsonb_typeof(evidence.value) = 'object' "
+					"AND (SELECT count(*) FROM jsonb_object_keys(evidence.value)) = 27 "
+					"AND evidence.value ?& ARRAY["
+					" 'schema','version','execution_id','backend_pid','database_oid',"
+					" 'format5_reader_capacity_accounting_passes',"
+					" 'format5_reader_global_position_storage_preparations',"
+					" 'format5_reader_global_position_storage_allocations',"
+					" 'format5_reader_position_append_growth_reservations',"
+					" 'format5_reader_retained_position_count',"
+					" 'format5_reader_retained_position_capacity',"
+					" 'format5_reader_directory_capacity_bytes',"
+					" 'format5_reader_query_hash_capacity_bytes',"
+					" 'format5_reader_query_record_capacity_bytes',"
+					" 'format5_reader_ordinal_route_capacity_bytes',"
+					" 'format5_reader_selected_extent_capacity_bytes',"
+					" 'format5_reader_current_selected_control_capacity_bytes',"
+					" 'format5_reader_global_position_capacity_bytes',"
+					" 'format5_reader_control_payload_capacity_bytes',"
+					" 'format5_reader_owned_capacity_bytes',"
+					" 'format5_reader_admitted_bytes',"
+					" 'format5_reader_exact_position_image_checks',"
+					" 'format5_reader_exact_position_image_failures',"
+					" 'format5_reader_retained_layout_checks',"
+					" 'format5_reader_retained_layout_failures',"
+					" 'format5_reader_memory_evidence_saturated','stats_saturated'"
+					"]::text[], "
+					"evidence.value->>'schema' = "
+					" 'bioseq.format5_reader_memory_evidence' "
+					"AND (evidence.value->>'version')::bigint = 2, "
+					"NOT EXISTS ("
+					" SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+					" WHERE entry.key NOT IN ("
+					"  'schema','format5_reader_memory_evidence_saturated',"
+					"  'stats_saturated'"
+					" ) AND jsonb_typeof(entry.value) <> 'number'"
+					"), "
+					"(evidence.value->>'execution_id')::bigint = stats.execution_id "
+					"AND (evidence.value->>'backend_pid')::bigint = stats.backend_pid "
+					"AND (evidence.value->>'database_oid')::bigint = stats.database_oid, "
+					"(evidence.value->>"
+					"'format5_reader_global_position_storage_preparations')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND (evidence.value->>"
+					"'format5_reader_global_position_storage_allocations')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND stats.persisted_generation_read_sessions = 1, "
+					"(evidence.value->>"
+					"'format5_reader_position_append_growth_reservations')::bigint = 0 "
+					"AND (evidence.value->>'format5_reader_retained_position_count')"
+					"::bigint > 0 "
+					"AND (evidence.value->>'format5_reader_retained_position_capacity')"
+					"::bigint = (evidence.value->>"
+					"'format5_reader_retained_position_count')::bigint, "
+					"(evidence.value->>"
+					"'format5_reader_global_position_capacity_bytes')::numeric "
+					" = 8 * (evidence.value->>"
+					"'format5_reader_retained_position_count')::numeric, "
+					"(evidence.value->>"
+					"'format5_reader_exact_position_image_checks')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND (evidence.value->>"
+					"'format5_reader_exact_position_image_failures')::bigint = 0, "
+					"(evidence.value->>'format5_reader_retained_layout_checks')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND (evidence.value->>"
+					"'format5_reader_retained_layout_failures')::bigint = 0, "
+					"(evidence.value->>'format5_reader_owned_capacity_bytes')::numeric "
+					" = (evidence.value->>"
+					"'format5_reader_directory_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_query_hash_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_query_record_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_ordinal_route_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_selected_extent_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_current_selected_control_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_global_position_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_control_payload_capacity_bytes')::numeric, "
+					"(evidence.value->>'format5_reader_owned_capacity_bytes')::bigint "
+					" = (evidence.value->>'format5_reader_admitted_bytes')::bigint "
+					"AND (evidence.value->>"
+					"'format5_reader_query_hash_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_current_selected_control_capacity_bytes')::bigint = 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_control_payload_capacity_bytes')::bigint = 0, "
+					"(evidence.value->>'format5_reader_directory_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_query_record_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_ordinal_route_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_selected_extent_capacity_bytes')::bigint > 0, "
+					"jsonb_typeof(evidence.value->"
+					"'format5_reader_memory_evidence_saturated') = 'boolean' "
+					"AND NOT (evidence.value->>"
+					"'format5_reader_memory_evidence_saturated')::boolean "
+					"AND jsonb_typeof(evidence.value->'stats_saturated') = 'boolean' "
+					"AND (evidence.value->>'stats_saturated')::boolean "
+					" = stats.stats_saturated "
+					"AND NOT (evidence.value->>'stats_saturated')::boolean "
+					"FROM stats CROSS JOIN evidence;");
+				REQUIRE(memory_v2.size() == 13u);
+				for (const auto& assertion : memory_v2) {
+					REQUIRE(assertion.value_or("") == "t");
+				}
+
+				/* Extra secondary indexes must not increase the cold reader's open
 			 * count: it binds and validates only the exact named primary index. */
 			exec_sql(ctx,
 				"CREATE INDEX sequence_source_version_user_relid_probe_idx "
@@ -3067,6 +3404,7 @@ TEST_CASE("DOC0372 PostgreSQL finalizes SIMD chaining policy after the last over
 
     SECTION("RMQ and Vulkan overrides never carry the bounded SIMD policy") {
         exec_sql(ctx, "SET bioseq.aligner.chaining_algorithm = 'simd_mm2';");
+        exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
         for (const int ordinal : {2, 3}) {
             CAPTURE(ordinal);
             const std::string sql = fmt::format(
@@ -3079,6 +3417,9 @@ TEST_CASE("DOC0372 PostgreSQL finalizes SIMD chaining policy after the last over
             REQUIRE_FALSE(plan_contains(
                 plan,
                 "simd_chaining_policy: bounded_batch_approximate"));
+            if (ordinal == 3) {
+                REQUIRE(plan_contains(plan, "| ChainStage: Vulkan tiled DP"));
+            }
         }
     }
 }
