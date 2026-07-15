@@ -4,6 +4,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -605,6 +606,70 @@ namespace {
     return 3;
 }
 
+/// @brief Runs `website execute`: runs one SQL example against a live cluster.
+///
+/// Connects to the private Unix-socket cluster, runs the setup/visible/teardown
+/// SQL through private_cluster_executor, and renders the visible result model to
+/// stdout (§13.5-13.6). A focused live-execution entrypoint; database-per-example
+/// isolation and the plan-driven batch runner are layered on top of this.
+/// @param args Options after the `execute` token.
+/// @return Zero on success; two on usage errors; three on execution failure.
+[[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "conninfo", "setup", "visible", "teardown"};
+    const auto options = parse_options(args, value_keys, {});
+    const std::string conninfo = require_option(options, "conninfo");
+
+    sql_example example;
+    example.canonical_id = "adhoc";
+    if (const auto found = options.find("setup"); found != options.end()) {
+        example.setup_sql = found->second;
+    }
+    example.visible_sql = require_option(options, "visible");
+    if (const auto found = options.find("teardown"); found != options.end()) {
+        example.teardown_sql = found->second;
+    }
+
+    private_cluster_executor executor(conninfo);
+    const std::expected<sql_example_result, diagnostic> outcome =
+        executor.execute(example);
+    if (!outcome) {
+        std::println(stderr, "website execute: [{}] {}",
+                     outcome.error().code, outcome.error().message);
+        return 3;
+    }
+    for (const sql_result_set& result : outcome->visible_results) {
+        if (result.kind == sql_result_kind::rows) {
+            std::string header;
+            for (const sql_column& column : result.columns) {
+                header += (header.empty() ? "" : " | ") + column.name;
+            }
+            std::println("{}", header);
+            for (const std::vector<sql_cell>& row : result.rows) {
+                std::string line;
+                for (const sql_cell& cell : row) {
+                    line += (line.empty() ? "" : " | ")
+                        + (cell.is_null ? std::string("NULL") : cell.text);
+                }
+                std::println("{}", line);
+            }
+            std::println("({} rows)", result.rows.size());
+        } else {
+            std::println("{}", result.command_tag);
+        }
+    }
+    for (const sql_notice& notice : outcome->notices) {
+        std::println(stderr, "NOTICE {}: {}", notice.severity, notice.message);
+    }
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website execute: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website execute: {}", error.what());
+    return 3;
+}
+
 /// @brief Dispatches a website subcommand and returns its process exit code.
 /// @param args Arguments after the leading `website` token (subcommand first).
 /// @return Exit code per §7: 2 usage, 3 parse/validation, 0 success.
@@ -621,8 +686,11 @@ namespace {
     if (command == "cpp_index") {
         return run_cpp_index(rest);
     }
+    if (command == "execute") {
+        return run_execute(rest);
+    }
     static constexpr std::string_view known[] = {
-        "source_graph", "execute", "render", "publish", "assemble"};
+        "source_graph", "render", "publish", "assemble"};
     for (const std::string_view candidate : known) {
         if (command == candidate) {
             std::println(stderr,
