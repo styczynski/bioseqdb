@@ -124,7 +124,12 @@ set(BIOSEQ_WEBSITE_PROJECT_NAME "BioseqDB")
 set(BIOSEQ_WEBSITE_DOXYGEN_OUTPUT "${_doxygen_output}")
 set(BIOSEQ_WEBSITE_STRIP_FROM_PATH "${CMAKE_SOURCE_DIR}")
 set(BIOSEQ_WEBSITE_DOXYGEN_WARN_LOG "${_output_root}/doxygen-warnings.log")
-string(REPLACE ";" " \\\n" BIOSEQ_WEBSITE_DOXYGEN_INPUT "${_module_units}")
+# Doxygen INPUT is driven by the reachable interface-unit closure (§11.1), not the
+# recursive glob: source_graph writes the closure and a build-time fragment sets the
+# Doxyfile INPUT to exactly those files. The @INCLUDEd fragment path is baked here.
+set(_reachable_closure "${_output_root}/reachable-interface-units.txt")
+set(_doxygen_input_fragment "${_output_root}/doxygen-input.cfg")
+set(BIOSEQ_WEBSITE_DOXYGEN_INPUT_INCLUDE "${_doxygen_input_fragment}")
 configure_file("${_source_dir}/Doxyfile.in" "${_output_root}/Doxyfile" @ONLY)
 
 # --- Compile database ---------------------------------------------------------
@@ -212,28 +217,38 @@ add_custom_command(
 # Depends on the reachable universe + compile DB + provider BMIs (postgresql_bioseq).
 set(_source_graph_json "${_output_root}/source-graph.json")
 add_custom_command(
-  OUTPUT "${_source_graph_json}"
+  OUTPUT "${_source_graph_json}" "${_reachable_closure}"
   COMMAND "${_gen}" website source_graph
           --reachable-units "${_reachable_units_file}"
           --compile-db "${_compile_db}"
           --site-config "${_site_config}"
           --output "${_source_graph_json}"
+          --reachable-output "${_reachable_closure}"
   DEPENDS ${_gen_dep} postgresql_bioseq "${_source_universe}"
           "${_reachable_units_file}" "${_site_config}" "${_compile_db}"
   COMMENT "website: source_graph (export-import reachable closure)"
   VERBATIM)
 
 # --- Doxygen XML (§17.3 step 5) -----------------------------------------------
+# Doxygen INPUT is the reachable interface-unit closure, never the glob (§11.1): the
+# fragment step rewrites the Doxyfile INPUT from source_graph's closure before the run.
 set(_doxygen_stamp "${_output_root}/doxygen.stamp")
 add_custom_command(
   OUTPUT "${_doxygen_stamp}"
+  COMMAND "${CMAKE_COMMAND}"
+          -DCLOSURE=${_reachable_closure}
+          -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+          -DFRAGMENT_OUT=${_doxygen_input_fragment}
+          -P "${CMAKE_SOURCE_DIR}/cmake/doxygen_input_fragment.cmake"
   COMMAND "${DOXYGEN_EXECUTABLE}" "${_output_root}/Doxyfile"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_doxygen_stamp}"
-  DEPENDS "${_source_graph_json}" "${_output_root}/Doxyfile" ${_module_units}
-  COMMENT "website: Doxygen 1.9.8 XML"
+  DEPENDS "${_source_graph_json}" "${_reachable_closure}" "${_output_root}/Doxyfile"
+          "${CMAKE_SOURCE_DIR}/cmake/doxygen_input_fragment.cmake" ${_module_units}
+  COMMENT "website: Doxygen 1.9.8 XML over the reachable closure"
   VERBATIM)
 
 # --- cpp_index (§17.3 step 5) -------------------------------------------------
+# cpp_index parses exactly the reachable closure (§11.1), not the recursive glob.
 set(_cpp_entities "${_output_root}/cpp-entities.json")
 set(_cpp_coverage "${_output_root}/cpp-coverage.json")
 add_custom_command(
@@ -241,13 +256,13 @@ add_custom_command(
   COMMAND "${_gen}" website cpp_index
           --doxygen-xml "${_doxygen_xml}"
           --compile-db "${_compile_db}"
-          --reachable-units "${_reachable_units_file}"
+          --reachable-units "${_reachable_closure}"
           --site-config "${_site_config}"
           --output "${_cpp_entities}"
           --coverage-output "${_cpp_coverage}"
   DEPENDS ${_gen_dep} "${_doxygen_stamp}" "${_plan_json}" "${_source_graph_json}"
-          "${_compile_db}" "${_reachable_units_file}"
-  COMMENT "website: cpp_index (Doxygen/Clang merge + coverage)"
+          "${_compile_db}" "${_reachable_closure}"
+  COMMENT "website: cpp_index (Doxygen/Clang merge + coverage over the closure)"
   VERBATIM)
 
 # --- Relocatable PostgreSQL stage (§13.2 / §17.3 step 6) ----------------------

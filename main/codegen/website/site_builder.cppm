@@ -868,6 +868,98 @@ struct execution_target {
     return executor.execute(example);
 }
 
+// Domain-scoped index from an entity reference spelling to its canonical id (§12.1).
+// Each entity is indexed by qualified name, canonical id, and display name; a key
+// that maps to two different entities is marked ambiguous (empty) so resolution
+// rejects it (§10.4). The `id:` domain matches any entity by canonical id.
+struct entity_reference_index {
+    std::map<std::string, std::string, std::less<>> by_key;
+
+    static std::string domain_key(entity_query_domain domain) {
+        switch (domain) {
+        case entity_query_domain::sql: return "sql\x1f";
+        case entity_query_domain::cpp: return "cpp\x1f";
+        case entity_query_domain::canonical_id: return "id\x1f";
+        default: return "any\x1f";
+        }
+    }
+
+    void add(entity_query_domain domain, std::string_view spelling,
+             const std::string& canonical_id) {
+        if (spelling.empty()) {
+            return;
+        }
+        std::string key = domain_key(domain) + std::string(spelling);
+        const auto [iterator, inserted] = by_key.try_emplace(key, canonical_id);
+        if (!inserted && iterator->second != canonical_id) {
+            iterator->second.clear();  // two entities share this spelling: ambiguous
+        }
+    }
+};
+
+[[nodiscard]] entity_reference_index build_entity_reference_index(
+    const std::vector<documented_entity>& cpp_entities,
+    const std::vector<documented_entity>& sql_entities) {
+    entity_reference_index index;
+    const auto add_entity = [&](const documented_entity& entity) {
+        const entity_query_domain domain = entity.domain == entity_domain::sql
+            ? entity_query_domain::sql : entity_query_domain::cpp;
+        index.add(domain, entity.qualified_name, entity.canonical_id);
+        index.add(domain, entity.canonical_id, entity.canonical_id);
+        index.add(domain, entity.display_name, entity.canonical_id);
+        index.add(entity_query_domain::canonical_id, entity.canonical_id,
+                  entity.canonical_id);
+    };
+    for (const documented_entity& entity : cpp_entities) {
+        add_entity(entity);
+    }
+    for (const documented_entity& entity : sql_entities) {
+        add_entity(entity);
+    }
+    return index;
+}
+
+// Resolves every entity_link in a tutorial's content against the entity graph and
+// records the target entity's canonical id on the node (§10.4, §12.1). An
+// unresolved or ambiguous reference is fatal so a typo can never ship as inert
+// text. Routes stay base-independent: render binds the base-aware URL later.
+void resolve_entity_links(std::vector<document_node>& nodes,
+                          const entity_reference_index& index,
+                          const std::string& where) {
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::entity_link) {
+            const std::optional<unresolved_entity_query> query =
+                parse_entity_reference(node.target,
+                                       node.source ? *node.source : source_span{});
+            if (!query) {
+                throw std::runtime_error("malformed entity reference [[" + node.target
+                    + "]] in " + where);
+            }
+            const std::string key =
+                entity_reference_index::domain_key(query->domain) + query->spelling;
+            const auto found = index.by_key.find(key);
+            if (found == index.by_key.end()) {
+                throw std::runtime_error("unresolved entity reference [[" + node.target
+                    + "]] in " + where);
+            }
+            if (found->second.empty()) {
+                throw std::runtime_error("ambiguous entity reference [[" + node.target
+                    + "]] in " + where);
+            }
+            node.attributes["entity_id"] = found->second;
+            // A `spelling|label` reference names its own display text; otherwise the
+            // node's Markdown link text is the label. Only when neither exists does the
+            // spelling become the label (so a resolved route never shows as raw text).
+            if (query->label) {
+                node.attributes["entity_label"] = *query->label;
+            } else if (node.text.empty() && node.children.empty()) {
+                node.attributes["entity_label"] = query->spelling;
+            }
+        }
+        resolve_entity_links(node.children, index, where);
+    }
+}
+
 /// @brief Builds the resolved, database-independent site model (§5, §180).
 ///
 /// Rebuilds the deterministic plan from source, reads the merged C++/SQL entity
@@ -925,7 +1017,13 @@ struct execution_target {
 
     model.landing_examples = collect_landing_views(source, version_string, options);
 
+    // Resolve every tutorial's typed entity references against the merged graph
+    // (§10.4/§12.1); an unresolved reference fails the build here, before render.
+    const entity_reference_index reference_index =
+        build_entity_reference_index(model.cpp_entities, model.sql_entities);
+
     for (tutorial& item : plan.tutorials) {
+        resolve_entity_links(item.content, reference_index, item.source_path);
         std::map<std::string, sql_example_result, std::less<>> results;
         if (target.have_connection) {
             for (const sql_example& example : item.sql_examples) {
@@ -1488,6 +1586,29 @@ struct staging_writer {
                          : "\"" + std::string(value) + "\"";
 }
 
+// Binds each resolved entity_link to its base-aware route and tooltip data URL
+// (§12.1/§12.4). The resolver (execute) recorded the canonical id on the node; here
+// the render stage maps it to the route it assigned at this base path, so the same
+// model links correctly at more than one base path.
+void rewrite_entity_link_routes(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& route_by_id,
+    const std::string& tooltip_url) {
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::entity_link) {
+            const auto identity = node.attributes.find("entity_id");
+            if (identity != node.attributes.end()) {
+                const auto route = route_by_id.find(identity->second);
+                if (route != route_by_id.end()) {
+                    node.target = route->second;
+                    node.attributes["tooltip_url"] = tooltip_url;
+                }
+            }
+        }
+        rewrite_entity_link_routes(node.children, route_by_id, tooltip_url);
+    }
+}
+
 /// @brief Renders a resolved site model into an owner-marked staging tree (§14, §16).
 ///
 /// Consumes only the database-independent `site_model` plus the site config, the
@@ -1652,6 +1773,20 @@ struct staging_writer {
     assign_routes(cpp_entities);
     assign_routes(sql_entities);
 
+    // The merged entity graph, its canonical-id -> base-aware route map, and the
+    // content-addressed tooltip dataset URL (§12.4) are computed once here: tutorials
+    // bind their resolved entity links to these routes, and the search index and
+    // tooltip artifact below reuse the same values.
+    std::vector<documented_entity> all_entities = cpp_entities;
+    all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
+    std::map<std::string, std::string, std::less<>> route_by_id;
+    for (const documented_entity& entity : all_entities) {
+        route_by_id.emplace(entity.canonical_id, entity.route_path);
+    }
+    const std::string tooltip_json = serialize_entity_tooltips(all_entities);
+    const std::string tooltip_url =
+        url(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json) + ".json");
+
     // Root marketing landing page: the executed runnable slots (§15.2) are bound as
     // the examples.<slot> collection; hidden setup/teardown never reaches the page.
     const std::string landing_examples_json =
@@ -1699,7 +1834,9 @@ struct staging_writer {
     for (const tutorial& item : model.tutorials) {
         const std::string rel =
             version + "/tutorials/" + item.metadata.slug + "/index.html";
-        const std::string body = render_document_html(item.content);
+        std::vector<document_node> body_nodes = item.content;
+        rewrite_entity_link_routes(body_nodes, route_by_id, tooltip_url);
+        const std::string body = render_document_html(body_nodes);
         std::string page = "{\"title\":" + json_text(item.metadata.title)
             + ",\"description\":" + json_text(item.metadata.description)
             + ",\"canonical\":" + json_text(canonical(rel))
@@ -1784,13 +1921,10 @@ struct staging_writer {
            "versions",
            "[{\"route\":" + json_text(url(version + "/")) + ",\"label\":"
                + json_text(version) + "}]");
-    std::vector<documented_entity> all_entities = cpp_entities;
-    all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
     writer.emit(route(version + "/search-index.json"),
                 build_search_index(all_entities));
-    // Content-addressed per-version tooltip dataset (§12.4, §16): named by its own
-    // SHA-256 so its immutable bytes are long-cacheable.
-    const std::string tooltip_json = serialize_entity_tooltips(all_entities);
+    // Content-addressed per-version tooltip dataset (§12.4, §16): the same bytes the
+    // resolved entity links point at, named by their own SHA-256 for long caching.
     writer.emit(route(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json)
                           + ".json"),
                 tooltip_json);
@@ -2341,7 +2475,8 @@ struct staging_writer {
 /// @return Zero on success; two on usage errors; three on validation failure.
 [[nodiscard]] int run_source_graph(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
-        "reachable-units", "compile-db", "site-config", "output"};
+        "reachable-units", "compile-db", "site-config", "output",
+        "reachable-output"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path reachable_units = require_option(options, "reachable-units");
     const fs::path compile_db = require_option(options, "compile-db");
@@ -2418,6 +2553,18 @@ struct staging_writer {
 
     write_if_different(output,
                        serialize_source_graph(clang_api_version(), roots, closure));
+
+    // The reachable interface-unit closure is the sole Doxygen INPUT inventory and
+    // the exact unit list cpp_index parses (§11.1): emit it as a newline-delimited
+    // file so those stages consume the closure instead of a recursive directory glob.
+    if (const auto found = options.find("reachable-output"); found != options.end()) {
+        std::string reachable_text;
+        for (const module_graph_unit& unit : closure) {
+            reachable_text += unit.source_path;
+            reachable_text.push_back('\n');
+        }
+        write_if_different(fs::path(found->second), reachable_text);
+    }
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website source_graph: {}", error.what());

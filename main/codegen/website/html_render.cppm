@@ -172,19 +172,47 @@ struct html_writer {
             out += "\">";
             break;
         }
-        case document_node_kind::entity_link:
-            // Resolution to a real entity route arrives with the link resolver;
-            // until then the reference renders as inert code showing its label
-            // (the child text / target), never a live link and never doubled.
-            out += "<code class=\"entity-ref\">";
-            if (node.children.empty() && node.text.empty()) {
-                append_escaped_text(out, node.target);
+        case document_node_kind::entity_link: {
+            // A resolved reference (the link resolver set entity_id + a base-aware
+            // route in target, §12.1/§12.4) renders as a live cross-link carrying the
+            // tooltip data attributes; an unresolved one renders as inert code (the
+            // build fails before this in normal operation, §10.4).
+            const std::string_view entity_id = attribute_or(node, "entity_id", "");
+            const std::string_view label = attribute_or(node, "entity_label", "");
+            if (!entity_id.empty() && !node.target.empty() && is_safe_href(node.target)) {
+                out += "<a class=\"entity-ref\" href=\"";
+                append_escaped_attribute(out, node.target);
+                out += "\" data-entity-id=\"";
+                append_escaped_attribute(out, entity_id);
+                const std::string_view tooltip = attribute_or(node, "tooltip_url", "");
+                if (!tooltip.empty()) {
+                    out += "\" data-entity-data-url=\"";
+                    append_escaped_attribute(out, tooltip);
+                }
+                out += "\">";
+                if (!label.empty()) {
+                    append_escaped_text(out, label);
+                } else if (node.children.empty() && node.text.empty()) {
+                    append_escaped_text(out, node.target);
+                } else {
+                    append_escaped_text(out, node.text);
+                    render_children(node.children);
+                }
+                out += "</a>";
             } else {
-                append_escaped_text(out, node.text);
-                render_children(node.children);
+                out += "<code class=\"entity-ref\">";
+                if (!label.empty()) {
+                    append_escaped_text(out, label);
+                } else if (node.children.empty() && node.text.empty()) {
+                    append_escaped_text(out, node.target);
+                } else {
+                    append_escaped_text(out, node.text);
+                    render_children(node.children);
+                }
+                out += "</code>";
             }
-            out += "</code>";
             break;
+        }
         case document_node_kind::block_quote: wrap("blockquote", node); break;
         case document_node_kind::admonition: {
             const std::string_view kind = attribute_or(node, "class", "note");
