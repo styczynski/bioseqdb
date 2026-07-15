@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -678,13 +679,16 @@ namespace {
 [[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
-        "admin-conninfo", "socket-dir", "port", "template-db"};
+        "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms"};
     static constexpr std::string_view flag_keys[] = {"isolated"};
     const auto options = parse_options(args, value_keys, flag_keys);
 
     sql_example example;
     example.canonical_id = "adhoc";
     example.local_id = "adhoc";
+    if (const auto found = options.find("timeout-ms"); found != options.end()) {
+        example.timeout = std::chrono::milliseconds(std::stoll(found->second));
+    }
     if (const auto found = options.find("setup"); found != options.end()) {
         example.setup_sql = found->second;
     }

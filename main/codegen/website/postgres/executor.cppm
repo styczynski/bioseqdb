@@ -1,5 +1,6 @@
 module;
 
+#include <chrono>
 #include <cstddef>
 #include <expected>
 #include <optional>
@@ -142,12 +143,16 @@ private:
         bioseq::libpq::connection& connection, sql_example const& example) {
         sql_example_result outcome;
         outcome.example_id = example.canonical_id;
+        // Every phase shares one client deadline — the validated fence timeout
+        // capped at 60s (§13.5) — independent of the server statement_timeout the
+        // deterministic session settings also install.
+        const std::chrono::milliseconds fence = fence_deadline(example);
         // Deterministic session settings (§13.4) precede setup so formatting,
         // search_path, and the defense-in-depth server timeouts are fixed for
         // every phase; the fence timeout (capped at 60s) drives statement_timeout.
         apply_session_settings(connection, example);
         if (!example.setup_sql.empty()) {
-            (void)connection.exec(example.setup_sql);
+            (void)connection.exec(example.setup_sql, fence);
         }
         // Only sql_phase::visible notices may render (§13.6); discard the
         // session-setup and setup-phase notices before the visible phase.
@@ -156,13 +161,18 @@ private:
         // (§13.5): a success example must not raise; an error example must
         // raise the expected SQLSTATE (or any, when unspecified).
         if (example.expectation == sql_expectation::error) {
-            if (auto captured = run_expected_error(connection, example); !captured) {
+            if (auto captured = run_expected_error(connection, example, fence);
+                !captured) {
                 return std::unexpected(std::move(captured.error()));
             } else {
                 outcome.visible_results.push_back(std::move(*captured));
             }
         } else {
-            const bioseq::libpq::result visible = connection.exec(example.visible_sql);
+            // The retention limits bound chunked accumulation as it streams; a
+            // breach is still reported by check_result_limits below with its
+            // author-facing message rather than a silent truncation.
+            const bioseq::libpq::result visible =
+                connection.exec_bounded(example.visible_sql, fence, website_limits());
             outcome.visible_results.push_back(project_result(visible));
             // Exceeding a retention limit is a build error, never a silent
             // truncation — displayed output must be the actual result (§13.4).
@@ -186,7 +196,7 @@ private:
         }
         if (!example.teardown_sql.empty()) {
             try {
-                (void)connection.exec(example.teardown_sql);
+                (void)connection.exec(example.teardown_sql, fence);
             } catch (const bioseq::libpq::query_error&) {
                 // Teardown is best-effort after a captured expected error.
             }
@@ -194,11 +204,34 @@ private:
         return outcome;
     }
 
-    // Runs a best-effort administrative command, swallowing failures so cleanup
-    // always attempts every drop (§13.3).
+    // The per-phase client deadline: the validated fence timeout capped at 60s,
+    // independent of the server statement_timeout (§13.5).
+    [[nodiscard]] static std::chrono::milliseconds fence_deadline(
+        const sql_example& example) {
+        long long timeout_ms = example.timeout.count();
+        if (timeout_ms <= 0 || timeout_ms > 60'000) {
+            timeout_ms = 60'000;
+        }
+        return std::chrono::milliseconds(timeout_ms);
+    }
+
+    // The §13.4 visible-result retention limits, handed to the nonblocking state
+    // machine so chunked accumulation stays bounded; check_result_limits owns the
+    // matching author-facing messages.
+    [[nodiscard]] static bioseq::libpq::execution_limits website_limits() {
+        return bioseq::libpq::execution_limits{
+            .max_rows = 200,
+            .max_columns = 100,
+            .max_cell_bytes = 64 * 1024,
+            .max_total_bytes = 2 * 1024 * 1024};
+    }
+
+    // Runs a best-effort administrative command under the fixed five-second
+    // cleanup deadline (§13.5), swallowing failures so cleanup always attempts
+    // every drop (§13.3).
     static void drop_quietly(bioseq::libpq::connection& admin, const std::string& sql) {
         try {
-            (void)admin.exec(sql);
+            (void)admin.exec(sql, std::chrono::seconds(5));
         } catch (const bioseq::libpq::query_error&) {
         }
     }
@@ -247,9 +280,10 @@ private:
     // Runs the visible SQL of an error example, capturing the raised SQLSTATE.
     // A success (no error) or a wrong SQLSTATE is a failed expectation.
     [[nodiscard]] static std::expected<sql_result_set, diagnostic> run_expected_error(
-        bioseq::libpq::connection& connection, sql_example const& example) {
+        bioseq::libpq::connection& connection, sql_example const& example,
+        std::chrono::milliseconds fence) {
         try {
-            (void)connection.exec(example.visible_sql);
+            (void)connection.exec(example.visible_sql, fence);
         } catch (const bioseq::libpq::query_error& error) {
             const std::string sqlstate(error.sqlstate());
             if (example.expected_sqlstate
