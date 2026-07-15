@@ -165,7 +165,7 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
   set_target_properties(bioseq_codegen_jinja_shim PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
     CXX_SCAN_FOR_MODULES OFF CXX_MODULE_STD OFF POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(bioseq_codegen_jinja_shim PRIVATE jinja2cpp)
+  target_link_libraries(bioseq_codegen_jinja_shim PRIVATE jinja2cpp Boost::json)
 
   set(CMAKE_CXX_SCAN_FOR_MODULES "${_saved_scan}")
   set(CMAKE_CXX_MODULE_STD "${_saved_module_std}")

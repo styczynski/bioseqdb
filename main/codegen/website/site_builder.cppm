@@ -196,6 +196,13 @@ void run_website_smoke() {
         std::map<std::string, std::string, std::less<>>{{"project", "bioseq"}});
     expect(rendered == "Hello bioseq", "template render");
 
+    // Structured JSON-context rendering (§14): loop over a list of objects,
+    // reflected from Boost.JSON — the surface entity/tutorial pages render with.
+    const std::string page = render_template_json(
+        "{% for e in items %}{{ e.name }}={{ e.n }};{% endfor %}",
+        R"({"items":[{"name":"a","n":1},{"name":"b","n":2}]})");
+    expect(page == "a=1;b=2;", "template json loop render");
+
     // PostgreSQL policy layer constructs (libpq is link-proven by the executor;
     // live catalog/execution arrives in Phase 7). No connection is attempted.
     private_cluster_executor executor("host='/nonexistent-bioseq-socket'");

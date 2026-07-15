@@ -42,4 +42,20 @@ namespace bioseq::codegen::website {
     return result;
 }
 
+/// @brief Renders a template against a structured JSON object context.
+/// @param template_text Jinja template source.
+/// @param json_context A JSON object serialized as text (page data).
+/// @return The rendered document, throwing on any template/context/render error.
+[[nodiscard]] std::string render_template_json(
+    std::string_view template_text, std::string_view json_context) {
+    std::string result;
+    std::string error;
+    const int status = detail::render_jinja_json(
+        std::string(template_text), std::string(json_context), result, error);
+    if (status != 0) {
+        throw std::runtime_error("template render failed: " + error);
+    }
+    return result;
+}
+
 }  // namespace bioseq::codegen::website

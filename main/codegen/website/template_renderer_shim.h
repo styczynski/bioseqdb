@@ -23,4 +23,20 @@ int render_jinja(const std::string& template_text,
                  std::string& out_result,
                  std::string& out_error);
 
+/// @brief Renders a Jinja template against a JSON object context.
+///
+/// The JSON context (an object) is reflected directly into Jinja values through
+/// Jinja2Cpp's Boost.JSON binding, so structured page data — lists of entities,
+/// nested tutorials — drives `{% for %}`/`{{ obj.field }}` templates without
+/// leaking any Jinja2Cpp type across the module boundary.
+/// @param template_text Jinja template source.
+/// @param json_context A JSON object serialized as text.
+/// @param out_result Receives the rendered document on success.
+/// @param out_error Receives the diagnostic message on failure.
+/// @return Zero on success; one on load, two on render, three on context failure.
+int render_jinja_json(const std::string& template_text,
+                      const std::string& json_context,
+                      std::string& out_result,
+                      std::string& out_error);
+
 }  // namespace bioseq::codegen::website::detail
