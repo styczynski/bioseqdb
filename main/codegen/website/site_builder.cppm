@@ -127,15 +127,35 @@ void run_website_smoke() {
     expect(description.diagnostics.size() == 2,
            "doxygen unsafe-link and unknown-tag diagnostics");
 
-    // entity merge + canonical id.
+    // entity merge (§11.6): a Clang page-owner is enriched with its unique
+    // Doxygen documentation match (rule 1: exact normalized signature).
+    documented_entity clang_seq;
+    clang_seq.domain = entity_domain::cpp;
+    clang_seq.kind = entity_kind::struct_;
+    clang_seq.qualified_name = "bioseq::io::seq";
+    clang_seq.normalized_signature = "bioseq::io::seq";
+    clang_structural_index structural;
+    structural.entities.push_back(clang_seq);
     documented_entity documented;
     documented.domain = entity_domain::cpp;
     documented.qualified_name = "bioseq::io::seq";
+    documented.normalized_signature = "bioseq::io::seq";
     documented.summary_text = "sequence";
-    const clang_structural_index structural;
     const auto merged = merge_cpp_entities(structural, {documented});
-    expect(merged.size() == 1 && merged.front().canonical_id == "cpp:bioseq.io.seq",
-           "entity merge canonical id");
+    expect(merged.size() == 1 && merged.front().canonical_id == "cpp:bioseq.io.seq"
+               && merged.front().summary_text == "sequence",
+           "entity merge attaches docs by normalized signature");
+
+    // coverage (§11.4): a required-but-undocumented entity is fatal-listed.
+    documented_entity undocumented;
+    undocumented.domain = entity_domain::cpp;
+    undocumented.qualified_name = "bioseq::io::internal";
+    undocumented.canonical_id = "cpp:bioseq.io.internal";
+    const auto coverage = compute_coverage(
+        {merged.front(), undocumented}, {"cpp:bioseq.io.internal"}, {});
+    expect(coverage.public_total == 2 && coverage.documented_total == 1
+               && coverage.fatal_missing.size() == 1,
+           "coverage flags required undocumented entity");
 
     // Clang 22 structural/export pass (§11.3): exported module members are
     // recorded with kind/signature; a non-exported namespace is excluded.
