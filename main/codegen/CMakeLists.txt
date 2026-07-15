@@ -60,6 +60,7 @@ set(_codegen_module_files
   "${_codegen_src}/support/diagnostics.cppm"
   "${_codegen_src}/support/text.cppm"
   "${_codegen_src}/support/artifact_store.cppm"
+  "${_codegen_src}/support/sha256.cppm"
   "${_codegen_src}/support/index.cppm"
   "${_codegen_src}/cli.cppm"
   "${_codegen_src}/index.cppm"

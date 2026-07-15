@@ -190,6 +190,14 @@ void run_website_smoke() {
     expect((parse_version_parts("v0.1") == std::vector<std::uint32_t>{0, 1}),
            "version parts");
 
+    // SHA-256 (§16 content addressing) against NIST test vectors.
+    expect(bioseq::codegen::sha256_hex("abc")
+           == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+           "sha256 abc vector");
+    expect(bioseq::codegen::sha256_hex("")
+           == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+           "sha256 empty vector");
+
     // Jinja2Cpp (through the C++20 shim).
     const std::string rendered = render_template(
         "Hello {{ project }}",
