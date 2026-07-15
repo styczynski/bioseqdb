@@ -936,6 +936,7 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
     });
     require_cross_operation_rejection([](auto& operation) {
         operation.seed_receipt_identity += 1u;
+        operation.cache_qualification.seed_receipt_identity += 1u;
     });
     require_cross_operation_rejection([](auto& operation) {
         operation.cache_qualification.identity += 1u;

@@ -885,7 +885,7 @@ TEST_CASE("persisted GPU SQL evidence is exact-empty and immutable for completed
         " FROM pg_proc WHERE oid='bioseq."
         "last_alignment_persisted_gpu_operation_evidence_v2()'::regprocedure) "
         "FROM evidence CROSS JOIN stats;");
-    REQUIRE(v2_proof.size() == 9u);
+    REQUIRE(v2_proof.size() == 10u);
     for (const auto& assertion : v2_proof) {
         REQUIRE(assertion.value_or("") == "t");
     }
