@@ -608,12 +608,15 @@ MODES: Dict[str, ModeDefinition] = {
         # int-test client runs. Without this the int tests exercise whatever
         # stale extension happens to be installed in the server.
         targets=["postgresql_bioseq_cache", "postgresql_bioseq",
-                 "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"],
+                 "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec",
+                 "bioseq_bench_e2e_tests_exec"],
         install_extension=True,
         commands=[
             ["bioseq_aligner_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
             ["bioseq_aligner_int_tests_exec",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_bench_e2e_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
         preset_family="test",
@@ -782,6 +785,10 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
     "bioseq_aligner_int_tests_exec": InspectTargetDefinition(
         mode="unit+integration",
         artifact_names=("bioseq_aligner_int_tests_exec",),
+        shared_target_names=("bioseq_modules_nopg",)),
+    "bioseq_bench_e2e_tests_exec": InspectTargetDefinition(
+        mode="unit+integration",
+        artifact_names=("bioseq_bench_e2e_tests_exec",),
         shared_target_names=("bioseq_modules_nopg",)),
     "postgresql_bioseq_cache": InspectTargetDefinition(
         mode="cache-unit",
@@ -1324,6 +1331,22 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
     )
 
 
+def _run_command_argv(mode: str, active_bin_dir: Path,
+                      command: List[str], bench_flags=None,
+                      test_flags=None) -> List[str]:
+    """Resolve one configured command and apply its mode-scoped arguments."""
+    if not command:
+        raise ValueError("configured run command may not be empty")
+    full_command = [str(active_bin_dir / command[0]), *command[1:]]
+    if MODES[mode].is_bench_mode and bench_flags:
+        full_command += list(bench_flags)
+    elif mode == "unit+integration" and test_flags:
+        # Every qualification executable receives the same Catch2 test-spec
+        # and allow-no-tests policy. A focused tag may live in only one binary.
+        full_command += list(test_flags)
+    return full_command
+
+
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
                       test_flags=None, bench_e2e_config=None) -> int:
@@ -1341,8 +1364,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
     '--debug']) appended only to bench-mode commands (§5.4). `test_flags` is a
-    validated Catch2 argument list appended identically to both unit and
-    integration test executables for a focused test run.
+    validated Catch2 argument list appended identically to every executable in
+    the unit+integration qualification for a focused test run.
 
     `bench_e2e_config` is an absolute, server-validated path inside this
     workspace. It is exposed only to the bench-e2e executable's environment;
@@ -1734,13 +1757,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 # MODES.commands store binary BASENAMES; resolve against the
                 # active build's bin dir (DOC0270). Args after the first slot
                 # are passed through verbatim.
-                full_cmd = [str(active_bin_dir / cmd[0]), *cmd[1:]]
-                if mode_details.is_bench_mode and bench_flags:
-                    full_cmd += bench_flags          # e.g. --filter tags=gpu --debug
-                elif mode == "unit+integration" and test_flags:
-                    # The same test-spec + allow-no-tests policy must reach both
-                    # executables. One binary legitimately may have zero matches.
-                    full_cmd += test_flags
+                full_cmd = _run_command_argv(
+                    mode, active_bin_dir, cmd,
+                    bench_flags=bench_flags, test_flags=test_flags)
                 rc = _stream_subprocess(
                     full_cmd, log_handle, deadline,
                     cwd=active_build_dir, env=run_env,
@@ -1897,10 +1916,10 @@ def _unit_test_filter_to_cli_args(test_filter):
     """Translate ``filter.tags`` into one safe Catch2 OR test-spec.
 
     Catch2 treats commas inside one positional test-spec as OR.  We therefore
-    append the same deterministic argument to both unit and integration test
-    executables.  ``--allow-running-no-tests`` is also appended because a tag
-    commonly exists in only one of those binaries; absence from the other is
-    not a failure of the focused workflow.
+    append the same deterministic argument to every unit+integration
+    qualification executable. ``--allow-running-no-tests`` is also appended
+    because a tag commonly exists in only one binary; absence from the others
+    is not a failure of the focused workflow.
 
     Returns ``(extra_argv, error)``.  An omitted/empty filter deliberately
     returns no argv so the historical full-suite command lines are unchanged.
@@ -5136,7 +5155,7 @@ def main() -> int:
         metavar="JSON",
         help=(
             "(internal) JSON array of already-validated Catch2 argv tokens "
-            "appended to both unit and integration test executables (for "
+            "appended to every unit+integration qualification executable (for "
             "example [\"--allow-running-no-tests\",\"[index],[postgres]\"]). "
             "unit+integration mode only."
         ),

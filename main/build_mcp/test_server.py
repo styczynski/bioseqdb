@@ -48,5 +48,39 @@ class BenchE2eConfigOverrideTests(unittest.TestCase):
         self.assertIn("must name a .json file", non_json_error)
 
 
+class UnitIntegrationQualificationTests(unittest.TestCase):
+    def test_builder_builds_and_runs_e2e_serializer_contract(self):
+        mode = server.MODES["unit+integration"]
+
+        self.assertIn("bioseq_bench_e2e_tests_exec", mode.targets)
+        self.assertIn(
+            "bioseq_bench_e2e_tests_exec",
+            [command[0] for command in mode.commands],
+        )
+
+    def test_focused_filter_allows_zero_matches_in_every_binary(self):
+        test_flags, error = server._unit_test_filter_to_cli_args(
+            {"tags": ["[format5]"]})
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            test_flags,
+            ["--allow-running-no-tests", "[format5]"],
+        )
+        binary_dir = Path("/tmp/test-opt/bioseq")
+        resolved_commands = [
+            server._run_command_argv(
+                "unit+integration",
+                binary_dir,
+                command,
+                test_flags=test_flags,
+            )
+            for command in server.MODES["unit+integration"].commands
+        ]
+        self.assertEqual(len(resolved_commands), 3)
+        for command in resolved_commands:
+            self.assertEqual(command[-2:], test_flags)
+
+
 if __name__ == "__main__":
     unittest.main()
