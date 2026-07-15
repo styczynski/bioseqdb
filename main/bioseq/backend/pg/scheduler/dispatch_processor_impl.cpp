@@ -1282,7 +1282,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		return fmt::format(
 			"{} wire_error={} admission_substage={} controller_reason={} "
 			"retained_position_count={} retained_position_bytes={} "
-			"vector_headroom_bytes={} projected_bytes={} "
+			"allocation_headroom_bytes={} projected_bytes={} "
 			"requested_growth_bytes={} owned_capacity_bytes={} "
 			"permit_bytes={} controller_reserved_bytes={} "
 			"controller_budget_ceiling_bytes={} "
@@ -1306,7 +1306,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 				evidence.controller_reason),
 			evidence.retained_position_count,
 			evidence.retained_position_bytes,
-			evidence.vector_headroom_bytes,
+			evidence.allocation_headroom_bytes,
 			evidence.projected_bytes,
 			evidence.requested_growth_bytes,
 			evidence.owned_capacity_bytes,

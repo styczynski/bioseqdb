@@ -8949,12 +8949,25 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
             REQUIRE(evidence.retained_position_count == queries.size());
             REQUIRE(evidence.retained_position_bytes
                 == queries.size() * sizeof(std::uint64_t));
-            REQUIRE(evidence.vector_headroom_bytes == 0u);
-            REQUIRE(evidence.projected_bytes
-                == evidence.owned_capacity_bytes
-                    + evidence.retained_position_bytes);
+            REQUIRE(evidence.allocation_headroom_bytes == 0u);
+            if (wanted == Substage::position_image_reconcile) {
+                REQUIRE(evidence.projected_bytes
+                    == evidence.owned_capacity_bytes);
+            } else {
+                REQUIRE(evidence.projected_bytes
+                    == evidence.owned_capacity_bytes
+                        + evidence.retained_position_bytes);
+            }
         }
         REQUIRE(made->failed());
+        REQUIRE(made->admitted_bytes() == 0u);
+        const auto released = made->memory_evidence();
+        REQUIRE(released.retained_position_count == 0u);
+        REQUIRE(released.retained_position_capacity == 0u);
+        REQUIRE(released.global_position_capacity_bytes == 0u);
+        REQUIRE(released.retained_layout_equation_holds());
+        REQUIRE(released.global_position_storage_allocations
+            == (wanted == Substage::position_image_reconcile ? 1u : 0u));
         REQUIRE(admission.reserved_bytes() == 0u);
     }
 
@@ -8988,18 +9001,27 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         const auto ordinary = plan_prepared_shape_v5_position_image(3u, 5u);
         REQUIRE(ordinary.has_value());
         REQUIRE(ordinary->retained_position_bytes == 24u);
-        REQUIRE(ordinary->vector_headroom_bytes == 0u);
+        REQUIRE(ordinary->allocation_headroom_bytes == 0u);
         REQUIRE(ordinary->projected_bytes == 29u);
         constexpr std::uint64_t adversarial_count = 100'000'000u;
         const auto adversarial = plan_prepared_shape_v5_position_image(
             adversarial_count, 17u);
         REQUIRE(adversarial.has_value());
         REQUIRE(adversarial->retained_position_bytes == 800'000'000u);
-        REQUIRE(adversarial->vector_headroom_bytes == 0u);
+        REQUIRE(adversarial->allocation_headroom_bytes == 0u);
         REQUIRE(adversarial->projected_bytes == 800'000'017u);
         REQUIRE(adversarial->projected_bytes - 17u
             < adversarial->retained_position_bytes
                 * bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        constexpr std::uint64_t adversarial_query_count = 100'000'000u;
+        constexpr std::uint64_t prior_query_owned_bytes =
+            adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));
+        constexpr std::uint64_t exact_query_owned_bytes =
+            adversarial_query_count * 40u;
+        STATIC_REQUIRE(prior_query_owned_bytes == 8'000'000'000u);
+        STATIC_REQUIRE(exact_query_owned_bytes == 4'000'000'000u);
+        STATIC_REQUIRE(prior_query_owned_bytes - exact_query_owned_bytes
+            == 4'000'000'000u);
         require_wire_error(
             plan_prepared_shape_v5_position_image(
                 (std::numeric_limits<std::uint64_t>::max)(), 0u),

@@ -4024,7 +4024,7 @@ struct PreparedShapeV5QueryAdmissionEvidence {
         bioseq::parallelism::MemoryAdmissionFailureReason::none;
     std::uint64_t retained_position_count = 0;
     std::uint64_t retained_position_bytes = 0;
-    std::uint64_t vector_headroom_bytes = 0;
+    std::uint64_t allocation_headroom_bytes = 0;
     std::uint64_t projected_bytes = 0;
     std::uint64_t requested_growth_bytes = 0;
     std::uint64_t owned_capacity_bytes = 0;
@@ -4062,7 +4062,7 @@ struct PreparedShapeV5QueryReaderTestOptions {
 struct PreparedShapeV5PositionImagePlan {
     std::uint64_t retained_position_count = 0;
     std::uint64_t retained_position_bytes = 0;
-    std::uint64_t vector_headroom_bytes = 0;
+    std::uint64_t allocation_headroom_bytes = 0;
     std::uint64_t owned_capacity_bytes = 0;
     std::uint64_t projected_bytes = 0;
 };
@@ -4080,9 +4080,9 @@ plan_prepared_shape_v5_position_image(
             retained_position_count, sizeof(std::uint64_t));
     // The Format-5 image is one exact owned array: unlike a vector reserve,
     // its requested element count and admitted ownership are both exactly P.
-    // Keep the legacy diagnostic field explicit at zero so SQL evidence can
-    // distinguish this path from conservative vector preallocation.
-    constexpr std::uint64_t vector_headroom_bytes = 0u;
+    // Keep headroom explicit at zero so SQL evidence can distinguish this
+    // path from conservative vector preallocation.
+    constexpr std::uint64_t allocation_headroom_bytes = 0u;
     const std::uint64_t projected_bytes =
         bioseq::parallelism::saturating_add(
             owned_capacity_bytes, retained_position_bytes);
@@ -4096,7 +4096,7 @@ plan_prepared_shape_v5_position_image(
     return PreparedShapeV5PositionImagePlan{
         .retained_position_count = retained_position_count,
         .retained_position_bytes = retained_position_bytes,
-        .vector_headroom_bytes = vector_headroom_bytes,
+        .allocation_headroom_bytes = allocation_headroom_bytes,
         .owned_capacity_bytes = owned_capacity_bytes,
         .projected_bytes = projected_bytes,
     };
@@ -5024,7 +5024,7 @@ protected:
             std::uint64_t projected_bytes,
             std::uint64_t retained_position_count = 0u,
             std::uint64_t retained_position_bytes = 0u,
-            std::uint64_t vector_headroom_bytes = 0u,
+            std::uint64_t allocation_headroom_bytes = 0u,
             const bioseq::parallelism::MemoryAdmissionFailure*
                 controller_failure = nullptr,
             bool injected = false) noexcept {
@@ -5052,7 +5052,7 @@ protected:
             .substage = substage,
             .retained_position_count = retained_position_count,
             .retained_position_bytes = retained_position_bytes,
-            .vector_headroom_bytes = vector_headroom_bytes,
+            .allocation_headroom_bytes = allocation_headroom_bytes,
             .projected_bytes = projected_bytes,
             .requested_growth_bytes = projected_bytes > permit_bytes
                 ? projected_bytes - permit_bytes : 0u,
@@ -5163,7 +5163,8 @@ protected:
             retained_count += record.global_occurrence_count;
         }
         if (retained_count
-                > (std::numeric_limits<std::size_t>::max)()) {
+                > (std::numeric_limits<std::size_t>::max)()
+                    / sizeof(std::uint64_t)) {
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
@@ -5173,7 +5174,7 @@ protected:
         if (!planned) return std::unexpected(planned.error());
         const std::uint64_t retained_bytes =
             planned->retained_position_bytes;
-        const std::uint64_t headroom = planned->vector_headroom_bytes;
+        const std::uint64_t headroom = planned->allocation_headroom_bytes;
         const std::uint64_t projected = planned->projected_bytes;
         if (inject_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
@@ -5220,6 +5221,11 @@ protected:
                 projected, retained_count, retained_bytes, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
+        if (retained_count != 0u) {
+            increment_memory_evidence_(
+                protocol_memory_evidence_.
+                    global_position_storage_allocations);
+        }
         if (inject_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
                     position_image_reconcile)) {
@@ -5236,11 +5242,6 @@ protected:
                     position_image_reconcile,
                 projected, retained_count, retained_bytes, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
-        }
-        if (retained_count != 0u) {
-            increment_memory_evidence_(
-                protocol_memory_evidence_.
-                    global_position_storage_allocations);
         }
         protocol_global_position_storage_prepared_ = true;
         return {};
