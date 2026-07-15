@@ -141,11 +141,11 @@ subtest 'dead prepublication initializer is cleaned and taken over once' => sub 
 		'postgres',
 		q{WITH q AS (
 		    SELECT bioseq_cache_test.bootstrap_status() AS s)
-		  SELECT s->>'initializer_proc' || '|' ||
-		         s->>'initializer_pid' || '|' ||
-		         s->>'initializer_nonce' || '|' ||
-		         s->>'initializer_started_at' || '|' ||
-		         s->>'initializer_claim'
+		  SELECT (s->>'initializer_proc') || '|' ||
+		         (s->>'initializer_pid') || '|' ||
+		         (s->>'initializer_nonce') || '|' ||
+		         (s->>'initializer_started_at') || '|' ||
+		         (s->>'initializer_claim')
 		  FROM q});
 	my (undef, $initializer_pid) = split(/\|/, $dead_token);
 	ok($initializer_pid > 0, 'paused initializer PID is captured');
@@ -162,18 +162,30 @@ subtest 'dead prepublication initializer is cleaned and taken over once' => sub 
 			'postgres',
 			status_sql(
 				q{(s->>'state')::integer = 1
-				  AND (s->>'live_unpublished_areas')::integer = 0
-				  AND NOT (s->>'cleanup_handle_published')::boolean
-				  AND (s->>'last_cleanup_handle')::integer > 0
+				  AND (s->>'cleanup_handle_pinned')::integer = 0
+				  AND (s->>'last_cleanup_handle')::bigint > 0
 				  AND (s->>'last_cleanup_was_pinned')::boolean
-				  AND (s->>'last_cleanup_release_verified')::boolean}),
+				  AND (
+				    ((s->>'live_unpublished_areas')::integer = 0
+				     AND NOT (s->>'cleanup_handle_published')::boolean
+				     AND (s->>'last_cleanup_release_verified')::boolean)
+				    OR
+				    ((s->>'live_unpublished_areas')::integer = 1
+				     AND (s->>'cleanup_handle_published')::boolean
+				     AND NOT (s->>'last_cleanup_release_verified')::boolean)
+				  )}),
 			't'),
-		'exit cleanup removes the DSA pin and verifies handle release');
+		'exit cleanup removes the DSA pin and records release or takeover handoff');
+	my $cleanup_handle = $node->safe_psql(
+		'postgres',
+		q{WITH q AS (
+		    SELECT bioseq_cache_test.bootstrap_status() AS s)
+		  SELECT (s->>'last_cleanup_handle')::bigint FROM q});
 
 	is(
 		$node->safe_psql(
 			'postgres',
-			q{WITH a AS MATERIALIZED (
+			qq{WITH a AS MATERIALIZED (
 			    SELECT bioseq_cache_test.bootstrap_attach_twice() AS a),
 			  q AS (
 			    SELECT a.a, bioseq_cache_test.bootstrap_status() AS s FROM a)
@@ -191,6 +203,10 @@ subtest 'dead prepublication initializer is cleaned and taken over once' => sub 
 			     AND (s->>'takeover_used')::integer = 1
 			     AND (s->>'initialization_attempts')::bigint = 2
 			     AND (s->>'live_unpublished_areas')::integer = 0
+			     AND (s->>'cleanup_handle_pinned')::integer = 0
+			     AND NOT (s->>'cleanup_handle_published')::boolean
+			     AND (s->>'last_cleanup_handle')::bigint = $cleanup_handle
+			     AND (s->>'last_cleanup_release_verified')::boolean
 			     AND (s->>'ready_handle_published')::boolean
 			     AND (s->>'root_published')::boolean
 			  FROM q}),
@@ -201,11 +217,11 @@ subtest 'dead prepublication initializer is cleaned and taken over once' => sub 
 		'postgres',
 		q{WITH q AS (
 		    SELECT bioseq_cache_test.bootstrap_status() AS s)
-		  SELECT s->>'last_initializer_proc' || '|' ||
-		         s->>'last_initializer_pid' || '|' ||
-		         s->>'last_initializer_nonce' || '|' ||
-		         s->>'last_initializer_started_at' || '|' ||
-		         s->>'last_initializer_claim'
+		  SELECT (s->>'last_initializer_proc') || '|' ||
+		         (s->>'last_initializer_pid') || '|' ||
+		         (s->>'last_initializer_nonce') || '|' ||
+		         (s->>'last_initializer_started_at') || '|' ||
+		         (s->>'last_initializer_claim')
 		  FROM q});
 	isnt($new_token, $dead_token, 'takeover publishes a different full owner token');
 
@@ -260,7 +276,7 @@ subtest 'every DSA allocation phase fails cleanly and fails open' => sub {
 					  AND NOT (s->>'cleanup_handle_published')::boolean
 					  AND NOT (s->>'ready_handle_published')::boolean
 					  AND NOT (s->>'root_published')::boolean
-					  AND (s->>'last_cleanup_handle')::integer > 0
+					  AND (s->>'last_cleanup_handle')::bigint > 0
 					  AND (s->>'last_cleanup_was_pinned')::boolean
 					  AND (s->>'last_cleanup_release_verified')::boolean})),
 			't',
@@ -302,7 +318,7 @@ subtest 'prepublication root manifest faults release the DSA and fail open' => s
 					  AND NOT (s->>'cleanup_handle_published')::boolean
 					  AND NOT (s->>'ready_handle_published')::boolean
 					  AND NOT (s->>'root_published')::boolean
-					  AND (s->>'last_cleanup_handle')::integer > 0
+					  AND (s->>'last_cleanup_handle')::bigint > 0
 					  AND (s->>'last_cleanup_was_pinned')::boolean
 					  AND (s->>'last_cleanup_release_verified')::boolean})),
 			't',

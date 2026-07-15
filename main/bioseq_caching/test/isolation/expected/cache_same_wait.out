@@ -41,8 +41,9 @@ wait_until_paused
 (1 row)
 
 step same_state: 
-  SELECT state, waiter_count
-  FROM bioseq_cache_test.entry_states()
+  SELECT state, waiters AS waiter_count
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ExactFinalResult'
   ORDER BY generation;
 
 state   |waiter_count

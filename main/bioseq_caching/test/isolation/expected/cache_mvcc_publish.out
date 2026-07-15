@@ -45,13 +45,12 @@ rows|id_sum
 (1 row)
 
 step mvcc_state: 
-  SELECT state FROM bioseq_cache_test.entry_states() ORDER BY generation;
+  SELECT count(*) FILTER (WHERE state = 'FAILED') AS failed,
+         count(*) FILTER (WHERE state = 'COMPLETE') AS complete
+  FROM bioseq_cache_test.entry_states();
 
-state   
---------
-COMPLETE
-COMPLETE
-COMPLETE
-COMPLETE
-(4 rows)
+failed|complete
+------+--------
+     1|       1
+(1 row)
 

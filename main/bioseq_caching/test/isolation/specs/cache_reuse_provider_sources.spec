@@ -4,6 +4,15 @@
 # fetch predicate-only attributes, and finish without PostgreSQL deadlock.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE cache_provider_iso_sources(
     row_id bigint PRIMARY KEY,
     base_id bigint NOT NULL,

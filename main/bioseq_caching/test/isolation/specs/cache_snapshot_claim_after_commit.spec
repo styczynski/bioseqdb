@@ -5,6 +5,15 @@
 # publish a generation, and retained-child execution must return S-visible rows.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_snapshot_claim(
     id integer PRIMARY KEY,
     value text NOT NULL

@@ -18,6 +18,7 @@ WHERE nullable_value >= 6
 
 SELECT bioseq_cache_test.set_coverage_descriptor_fault('none');
 
+\o
 SELECT
     :'descriptor_fault' AS fault,
     :descriptor_result_result_count::bigint AS result_count,
@@ -31,3 +32,4 @@ CROSS JOIN LATERAL (
     SELECT bioseq_cache_test.provider_stats() AS stats
 ) AS provider
 CROSS JOIN bioseq_cache_test.planner_reference_counts() AS reference_counts;
+\o /dev/null

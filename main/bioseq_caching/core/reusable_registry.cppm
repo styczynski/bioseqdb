@@ -329,6 +329,20 @@ struct ReusableReferenceTokenV1 {
   operator==(const ReusableReferenceTokenV1 &) const noexcept = default;
 };
 
+/** Bounded lock-stable copy of every waiter attached to one generation. */
+struct ReusableWaiterOwnerBatchV1 {
+  std::array<ReusableReferenceTokenV1,
+             kReusableReferenceOwnersPerGenerationV1>
+      waiters{};
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  std::uint32_t count = 0;
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return error == ReusableRegistryErrorV1::None &&
+           count <= waiters.size();
+  }
+};
+
 /**
  * One lock-stable liveness subject copied before PostgreSQL probes ProcArray.
  * Producer observations carry a generation ABA reference and full owner
@@ -3597,6 +3611,75 @@ wait_reusable_generation(
   }
   const ReusableGenerationSnapshotV1 result =
       make_snapshot(generation, reference.generation_slot);
+  release_exact(callbacks, partition);
+  return result;
+}
+
+/**
+ * Copy all active waiter capabilities while the exact partition is stable.
+ * Callers that must exclude new waiters also hold exclusive membership across
+ * this snapshot and the terminal publication that consumes it.
+ */
+[[nodiscard]] inline ReusableWaiterOwnerBatchV1
+snapshot_reusable_waiter_owners(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableGenerationReferenceV1 &reference,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+  using namespace reusable_registry_detail;
+  ReusableWaiterOwnerBatchV1 result{};
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None ||
+      !callbacks.valid() || !reference ||
+      reference.generation_slot >=
+          header(attachment).config.max_generations) {
+    result.error = attachment_error != ReusableRegistryErrorV1::None
+                       ? attachment_error
+                       : ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+  const std::uint32_t partition =
+      reusable_exact_partition(attachment, reference.id.digest);
+  acquire_exact(callbacks, partition);
+  const ReusableSharedGenerationV1 &generation =
+      generations(attachment)[reference.generation_slot];
+  if (!reference_matches(generation, reference)) {
+    release_exact(callbacks, partition);
+    result.error = ReusableRegistryErrorV1::StaleReference;
+    return result;
+  }
+  for (std::uint32_t owner_slot = 0;
+       owner_slot < kReusableReferenceOwnersPerGenerationV1;
+       ++owner_slot) {
+    const ReusableSharedReferenceOwnerV1 &shared_owner =
+        generation.reference_owners[owner_slot];
+    if (!shared_owner.active ||
+        shared_owner.kind != ReusableReferenceKindV1::Waiter) {
+      continue;
+    }
+    const bool reserved_clear = std::all_of(
+        shared_owner.reserved.begin(), shared_owner.reserved.end(),
+        [](std::uint8_t value) noexcept { return value == 0; });
+    if (!shared_owner.owner.valid() || shared_owner.owner_sequence == 0 ||
+        !reserved_clear || result.count >= result.waiters.size()) {
+      release_exact(callbacks, partition);
+      result.error = ReusableRegistryErrorV1::CorruptGeneration;
+      result.count = 0;
+      return result;
+    }
+    result.waiters[result.count++] = ReusableReferenceTokenV1{
+        .reference = reference,
+        .owner = shared_owner.owner,
+        .owner_sequence = shared_owner.owner_sequence,
+        .owner_slot = owner_slot,
+        .kind = ReusableReferenceKindV1::Waiter,
+        .active = true,
+    };
+  }
+  if (result.count != generation.waiter_count) {
+    result.error = ReusableRegistryErrorV1::CorruptGeneration;
+    result.count = 0;
+  }
   release_exact(callbacks, partition);
   return result;
 }

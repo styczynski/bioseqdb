@@ -4,6 +4,15 @@
 # frozen query must complete without a database-wide/coarse fallback.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE cache_provider_iso_partitioned(
     row_id bigint NOT NULL,
     base_id bigint NOT NULL,
@@ -65,9 +74,10 @@ step "partition_after_b_write" {
       AS a_remains_complete,
     count(*) FILTER (
       WHERE kind = 'ReusableCoverage'
-        AND state = 'INVALIDATED'
+        AND state = 'COMPLETE'
+        AND readers = 0
         AND sql LIKE '%cache_provider_partition_source_b%') = 1
-      AS b_invalidated,
+      AS b_non_current,
     count(*) FILTER (
       WHERE kind = 'ReusableCoverage'
         AND state = 'INVALIDATED'
@@ -186,7 +196,7 @@ step "partition_write_b" {
   UPDATE ONLY cache_provider_iso_part_b
   SET payload = 'b-updated' WHERE row_id = 3;
   SELECT bioseq_cache_test.provider_record_write(
-    'cache_provider_iso_part_b');
+    'cache_provider_iso_part_b') IS NOT NULL AS x;
 }
 step "partition_commit" { COMMIT; }
 step "partition_transition_drained" {

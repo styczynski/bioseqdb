@@ -6,21 +6,20 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import contextlib
+import ctypes
+import ctypes.util
 import dataclasses
 import datetime as dt
 import hashlib
 import importlib.util
 import json
-import math
 import os
 from pathlib import Path
-import queue
 import re
 import select
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from typing import Any, Mapping, Sequence
@@ -99,6 +98,249 @@ PRIVATE = _load_private_runner()
 
 class BenchmarkError(RuntimeError):
     """The benchmark cannot produce a trustworthy report."""
+
+
+class _LibpqApi:
+    """Minimal libpq binding for protocol-level single-row measurements."""
+
+    CONNECTION_OK = 0
+    PGRES_COMMAND_OK = 1
+    PGRES_TUPLES_OK = 2
+    PGRES_SINGLE_TUPLE = 9
+
+    def __init__(self) -> None:
+        library_name = ctypes.util.find_library("pq")
+        if library_name is None:
+            raise BenchmarkError(
+                "libpq is required for trustworthy first-row measurements"
+            )
+        library = ctypes.CDLL(library_name)
+        library.PQconnectdbParams.argtypes = [
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.c_int,
+        ]
+        library.PQconnectdbParams.restype = ctypes.c_void_p
+        library.PQstatus.argtypes = [ctypes.c_void_p]
+        library.PQstatus.restype = ctypes.c_int
+        library.PQerrorMessage.argtypes = [ctypes.c_void_p]
+        library.PQerrorMessage.restype = ctypes.c_char_p
+        library.PQfinish.argtypes = [ctypes.c_void_p]
+        library.PQfinish.restype = None
+        library.PQexec.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        library.PQexec.restype = ctypes.c_void_p
+        library.PQsendQuery.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        library.PQsendQuery.restype = ctypes.c_int
+        library.PQsetSingleRowMode.argtypes = [ctypes.c_void_p]
+        library.PQsetSingleRowMode.restype = ctypes.c_int
+        library.PQgetResult.argtypes = [ctypes.c_void_p]
+        library.PQgetResult.restype = ctypes.c_void_p
+        library.PQresultStatus.argtypes = [ctypes.c_void_p]
+        library.PQresultStatus.restype = ctypes.c_int
+        library.PQresultErrorMessage.argtypes = [ctypes.c_void_p]
+        library.PQresultErrorMessage.restype = ctypes.c_char_p
+        library.PQntuples.argtypes = [ctypes.c_void_p]
+        library.PQntuples.restype = ctypes.c_int
+        library.PQnfields.argtypes = [ctypes.c_void_p]
+        library.PQnfields.restype = ctypes.c_int
+        library.PQgetisnull.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        library.PQgetisnull.restype = ctypes.c_int
+        library.PQgetvalue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        library.PQgetvalue.restype = ctypes.c_void_p
+        library.PQgetlength.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        library.PQgetlength.restype = ctypes.c_int
+        library.PQclear.argtypes = [ctypes.c_void_p]
+        library.PQclear.restype = None
+        library.PQlibVersion.argtypes = []
+        library.PQlibVersion.restype = ctypes.c_int
+        self.library = library
+        self.library_name = library_name
+
+
+_LIBPQ_API: _LibpqApi | None = None
+_LIBPQ_API_LOCK = threading.Lock()
+
+
+def _libpq_api() -> _LibpqApi:
+    global _LIBPQ_API
+    with _LIBPQ_API_LOCK:
+        if _LIBPQ_API is None:
+            _LIBPQ_API = _LibpqApi()
+        return _LIBPQ_API
+
+
+class _LibpqConnection:
+    """One private-node libpq connection with checked result ownership."""
+
+    def __init__(self, cluster: Any) -> None:
+        self._api = _libpq_api()
+        self._connection: int | None = None
+        parameters = (
+            ("host", str(cluster.socket_dir)),
+            ("port", str(cluster.port)),
+            ("user", str(cluster.database_user)),
+            ("dbname", str(cluster.database)),
+            ("client_encoding", "UTF8"),
+            ("application_name", "bioseq_cache_benchmark"),
+            ("connect_timeout", "10"),
+        )
+        keys = (ctypes.c_char_p * (len(parameters) + 1))()
+        values = (ctypes.c_char_p * (len(parameters) + 1))()
+        for index, (name, value) in enumerate(parameters):
+            keys[index] = name.encode("utf-8")
+            values[index] = value.encode("utf-8")
+        connection = self._api.library.PQconnectdbParams(keys, values, 0)
+        if not connection:
+            raise BenchmarkError("libpq could not allocate a connection")
+        self._connection = int(connection)
+        if self._api.library.PQstatus(connection) != self._api.CONNECTION_OK:
+            message = self.error_message()
+            self.close()
+            raise BenchmarkError(
+                f"libpq private-node connection failed: {message}"
+            )
+
+    @property
+    def connection(self) -> int:
+        if self._connection is None:
+            raise BenchmarkError("libpq connection is closed")
+        return self._connection
+
+    def error_message(self) -> str:
+        if self._connection is None:
+            return "connection is closed"
+        message = self._api.library.PQerrorMessage(self._connection)
+        return (
+            message.decode("utf-8", errors="replace").strip()
+            if message else "unknown libpq error"
+        )
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._api.library.PQfinish(self._connection)
+            self._connection = None
+
+    def __enter__(self) -> "_LibpqConnection":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+    def _result_error(self, result: int) -> str:
+        message = self._api.library.PQresultErrorMessage(result)
+        return (
+            message.decode("utf-8", errors="replace").strip()
+            if message else self.error_message()
+        )
+
+    def _append_result_rows(self, result: int, output: bytearray) -> int:
+        rows = self._api.library.PQntuples(result)
+        fields = self._api.library.PQnfields(result)
+        for row in range(rows):
+            for field in range(fields):
+                if field != 0:
+                    output.extend(b"\t")
+                if self._api.library.PQgetisnull(result, row, field):
+                    output.extend(b"\\N")
+                    continue
+                length = self._api.library.PQgetlength(result, row, field)
+                pointer = self._api.library.PQgetvalue(result, row, field)
+                if length < 0 or (length > 0 and not pointer):
+                    raise BenchmarkError(
+                        "libpq returned an invalid text field"
+                    )
+                if length > 0:
+                    output.extend(ctypes.string_at(pointer, length))
+            output.extend(b"\n")
+        return rows
+
+    def execute(self, sql: str) -> str:
+        """Execute setup/admin SQL and return its final text result."""
+        result = self._api.library.PQexec(
+            self.connection, sql.encode("utf-8")
+        )
+        if not result:
+            raise BenchmarkError(
+                f"libpq command failed without a result: {self.error_message()}"
+            )
+        try:
+            status = self._api.library.PQresultStatus(result)
+            if status not in (
+                self._api.PGRES_COMMAND_OK,
+                self._api.PGRES_TUPLES_OK,
+            ):
+                raise BenchmarkError(
+                    f"libpq command failed: {self._result_error(result)}\n"
+                    f"SQL:\n{sql}"
+                )
+            output = bytearray()
+            self._append_result_rows(result, output)
+            return output.decode("utf-8")
+        finally:
+            self._api.library.PQclear(result)
+
+    def execute_single_row(
+        self, sql: str
+    ) -> tuple[str, int | None, int]:
+        """Execute one SELECT via PQsetSingleRowMode without row buffering."""
+        if self._api.library.PQsendQuery(
+            self.connection, sql.encode("utf-8")
+        ) != 1:
+            raise BenchmarkError(
+                f"libpq send failed: {self.error_message()}\nSQL:\n{sql}"
+            )
+        if self._api.library.PQsetSingleRowMode(self.connection) != 1:
+            raise BenchmarkError(
+                "libpq single-row mode is unavailable for the benchmark query"
+            )
+        output = bytearray()
+        first_row_at_ns: int | None = None
+        terminal_result_seen = False
+        while True:
+            result = self._api.library.PQgetResult(self.connection)
+            if not result:
+                break
+            try:
+                status = self._api.library.PQresultStatus(result)
+                if status == self._api.PGRES_SINGLE_TUPLE:
+                    rows = self._append_result_rows(result, output)
+                    if rows != 1:
+                        raise BenchmarkError(
+                            "libpq single-row result did not contain one row"
+                        )
+                    if first_row_at_ns is None:
+                        first_row_at_ns = time.perf_counter_ns()
+                elif status == self._api.PGRES_TUPLES_OK:
+                    if self._append_result_rows(result, output) != 0:
+                        raise BenchmarkError(
+                            "libpq terminal result unexpectedly contained rows"
+                        )
+                    terminal_result_seen = True
+                else:
+                    raise BenchmarkError(
+                        f"libpq query failed: {self._result_error(result)}\n"
+                        f"SQL:\n{sql}"
+                    )
+            finally:
+                self._api.library.PQclear(result)
+        completed_at_ns = time.perf_counter_ns()
+        if not terminal_result_seen:
+            raise BenchmarkError(
+                "libpq single-row query exposed no terminal tuple result"
+            )
+        return output.decode("utf-8"), first_row_at_ns, completed_at_ns
 
 
 @dataclasses.dataclass(frozen=True)
@@ -679,6 +921,16 @@ def _nearest_rank_percentile(
     """Return the integer nearest-rank percentile used by the C++ CLI."""
     if (
         not samples
+        or any(
+            not isinstance(sample, int)
+            or isinstance(sample, bool)
+            or sample < 0
+            for sample in samples
+        )
+        or not isinstance(numerator, int)
+        or isinstance(numerator, bool)
+        or not isinstance(denominator, int)
+        or isinstance(denominator, bool)
         or numerator <= 0
         or denominator <= 0
         or numerator > denominator
@@ -687,6 +939,98 @@ def _nearest_rank_percentile(
     ordered = sorted(samples)
     rank = (numerator * len(ordered) + denominator - 1) // denominator
     return ordered[max(1, rank) - 1]
+
+
+def _validate_sample_summary_contract(
+    value: Any,
+    label: str,
+    *,
+    raw_name: str,
+    require_nonempty: bool,
+) -> None:
+    """Validate raw observations and their exact nearest-rank summaries."""
+    percentile_names = (
+        ("p50_ns", "p95_ns", "p99_ns")
+        if raw_name == "raw_samples_ns"
+        else ("p50", "p95", "p99")
+    )
+    if not isinstance(value, Mapping):
+        raise BenchmarkError(
+            f"Section 45 report lacks a sample summary for {label}"
+        )
+    raw_samples = value.get(raw_name)
+    if (
+        not isinstance(raw_samples, list)
+        or not all(
+            isinstance(sample, int)
+            and not isinstance(sample, bool)
+            and sample >= 0
+            for sample in raw_samples
+        )
+        or (require_nonempty and not raw_samples)
+    ):
+        raise BenchmarkError(
+            f"Section 45 report has invalid raw samples for {label}"
+        )
+    if not raw_samples:
+        if value.get("status") != "not_applicable" or any(
+            name in value for name in percentile_names
+        ):
+            raise BenchmarkError(
+                f"Section 45 empty sample summary is not applicable: {label}"
+            )
+        return
+    expected = {
+        percentile_names[0]: _nearest_rank_percentile(
+            raw_samples, 50, 100
+        ),
+        percentile_names[1]: _nearest_rank_percentile(
+            raw_samples, 95, 100
+        ),
+        percentile_names[2]: _nearest_rank_percentile(
+            raw_samples, 99, 100
+        ),
+    }
+    if any(
+        not isinstance(value.get(name), int)
+        or isinstance(value.get(name), bool)
+        or value[name] != expected[name]
+        for name in percentile_names
+    ):
+        raise BenchmarkError(
+            "Section 45 percentile does not match raw samples for "
+            f"{label}"
+        )
+
+
+def _validate_nested_sample_summary_contracts(
+    value: Any, label: str
+) -> None:
+    """Validate every latency and throughput sample series in a report tree."""
+    if isinstance(value, Mapping):
+        if "raw_samples_ns" in value:
+            _validate_sample_summary_contract(
+                value,
+                label,
+                raw_name="raw_samples_ns",
+                require_nonempty=False,
+            )
+        if "raw_samples" in value:
+            _validate_sample_summary_contract(
+                value,
+                label,
+                raw_name="raw_samples",
+                require_nonempty=False,
+            )
+        for name, child in value.items():
+            _validate_nested_sample_summary_contracts(
+                child, f"{label}.{name}"
+            )
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _validate_nested_sample_summary_contracts(
+                child, f"{label}[{index}]"
+            )
 
 
 def _psql_command(cluster: Any, sql: str) -> list[str]:
@@ -829,116 +1173,30 @@ class _ProviderSession:
 
     def __init__(self, cluster: Any) -> None:
         self._cluster = cluster
-        self._process: subprocess.Popen[str] | None = None
-        self._marker_sequence = 0
-        self._stdout_queue: queue.Queue[tuple[str, int] | None] = queue.Queue()
-        self._stdout_thread: threading.Thread | None = None
+        self._connection: _LibpqConnection | None = None
 
-    def _error(self, message: str) -> BenchmarkError:
-        error = ""
-        if (
-            self._process is not None
-            and self._process.poll() is not None
-            and self._process.stderr is not None
-        ):
-            with contextlib.suppress(Exception):
-                error = self._process.stderr.read()
-        suffix = f": {error}" if error else ""
-        return BenchmarkError(message + suffix)
-
-    def _next_marker(self) -> str:
-        self._marker_sequence += 1
-        return (
-            "BIOSEQ_CACHE_PROVIDER_"
-            f"{os.getpid()}_{self._marker_sequence}"
-        )
-
-    def _send(self, sql: str) -> None:
-        process = self._process
-        if process is None or process.stdin is None:
-            raise self._error("provider benchmark session has no psql stdin")
-        process.stdin.write(sql)
-        if not sql.endswith("\n"):
-            process.stdin.write("\n")
-        process.stdin.flush()
-
-    def _pump_stdout(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:
-            self._stdout_queue.put(None)
-            return
-        try:
-            for line in process.stdout:
-                self._stdout_queue.put((line, time.perf_counter_ns()))
-        finally:
-            self._stdout_queue.put(None)
-
-    def _read_until(
-        self,
-        marker: str,
-        *,
-        timeout_seconds: float = 120.0,
-    ) -> tuple[list[str], int | None]:
-        process = self._process
-        if process is None or process.stdout is None:
-            raise self._error("provider benchmark session has no psql stdout")
-        lines: list[str] = []
-        first_output_at_ns: int | None = None
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            try:
-                queued = self._stdout_queue.get(
-                    timeout=min(0.1, deadline - time.monotonic())
-                )
-            except queue.Empty:
-                if process.poll() is not None:
-                    raise self._error("provider benchmark psql exited early")
-                continue
-            if queued is None:
-                raise self._error("provider benchmark psql closed stdout")
-            line, arrived_at_ns = queued
-            if line.rstrip("\r\n") == marker:
-                return lines, first_output_at_ns
-            if first_output_at_ns is None:
-                first_output_at_ns = arrived_at_ns
-            lines.append(line)
-        raise self._error(
-            f"provider benchmark timed out waiting for {marker}"
-        )
+    @property
+    def connection(self) -> _LibpqConnection:
+        if self._connection is None:
+            raise BenchmarkError("provider benchmark session is closed")
+        return self._connection
 
     def _command(self, sql: str) -> list[str]:
-        marker = self._next_marker()
-        statement = sql.rstrip()
-        if not statement.endswith(";"):
-            statement += ";"
-        self._send(
-            "SET bioseq.query_cache_optimisation_mode = 'disabled';\n"
-            f"{statement}\n\\echo {marker}"
+        self.connection.execute(
+            "SET bioseq.query_cache_optimisation_mode = 'disabled'"
         )
-        lines, _ = self._read_until(marker)
-        return lines
+        return self.connection.execute(sql).splitlines(keepends=True)
 
     def __enter__(self) -> "_ProviderSession":
-        command = _psql_command(self._cluster, "")[:-2]
-        self._process = subprocess.Popen(
-            command,
-            env=self._cluster.environment(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-        self._stdout_thread = threading.Thread(
-            target=self._pump_stdout,
-            name="bioseq-cache-provider-bench-stdout",
-            daemon=True,
-        )
-        self._stdout_thread.start()
-        self._command(
-            "SELECT bioseq_cache_test.provider_init();\n"
-            "SET bioseq.query_cache_ttl = 3600000"
-        )
+        connection = _LibpqConnection(self._cluster)
+        self._connection = connection
+        try:
+            self._command("SELECT bioseq_cache_test.provider_init()")
+            connection.execute("SET bioseq.query_cache_ttl = 3600000")
+        except BaseException:
+            connection.close()
+            self._connection = None
+            raise
         return self
 
     def use_relation(self, relation: str) -> None:
@@ -976,84 +1234,67 @@ class _ProviderSession:
     def execute(self, *, mode: str, sql: str) -> QueryOutput:
         if mode not in {"disabled", "same", "reuse"}:
             raise BenchmarkError(f"unsupported provider benchmark mode: {mode}")
-        marker = self._next_marker()
         started = time.perf_counter_ns()
-        self._send(
+        self.connection.execute(
             "SET bioseq.query_cache_optimisation_mode = "
-            f"'{mode}';\n{sql.rstrip(';')};\n\\echo {marker}"
+            f"'{mode}'"
         )
-        lines, first_output_at_ns = self._read_until(marker)
-        completed_at_ns = time.perf_counter_ns()
+        stdout, first_row_at_ns, completed_at_ns = (
+            self.connection.execute_single_row(sql.strip().rstrip(";"))
+        )
         first_row_ns = (
-            first_output_at_ns - started
-            if first_output_at_ns is not None
+            first_row_at_ns - started
+            if first_row_at_ns is not None
             else None
         )
         return _digest_output(
-            "".join(lines),
+            stdout,
             completed_at_ns - started,
             first_row_ns,
             completed_at_ns,
         )
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        process = self._process
-        if process is None:
+        connection = self._connection
+        if connection is None:
             return
-        if process.poll() is None:
+        try:
             with contextlib.suppress(Exception):
-                self._command(
+                connection.execute(
+                    "SET bioseq.query_cache_optimisation_mode = 'disabled'"
+                )
+                connection.execute(
                     "SELECT bioseq_cache_test.provider_shutdown()"
                 )
-        if process.stdin is not None and process.poll() is None:
-            with contextlib.suppress(Exception):
-                process.stdin.write("\\q\n")
-                process.stdin.flush()
-        try:
-            process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        if self._stdout_thread is not None:
-            self._stdout_thread.join(timeout=1.0)
-        if process.returncode not in (0, None) and exc_type is None:
-            raise self._error(
-                f"provider benchmark psql exited {process.returncode}"
-            )
+        finally:
+            connection.close()
+            self._connection = None
 
 
-def _run_query_streaming(cluster: Any, sql: str) -> tuple[str, int, int | None, int]:
-    """Capture client-observed first output without buffering the full result first."""
+def _run_query_streaming(
+    cluster: Any,
+    sql: str,
+    *,
+    setup_sql: Sequence[str] = (),
+) -> tuple[str, int, int | None, int]:
+    """Capture the first tuple through libpq's single-row protocol mode."""
     started = time.perf_counter_ns()
-    with tempfile.TemporaryFile() as stderr:
-        process = subprocess.Popen(
-            _psql_command(cluster, sql),
-            env=cluster.environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=stderr,
+    with _LibpqConnection(cluster) as connection:
+        for command in setup_sql:
+            connection.execute(command)
+        stdout, first_row_at_ns, completed_at_ns = (
+            connection.execute_single_row(sql.strip().rstrip(";"))
         )
-        if process.stdout is None:
-            process.kill()
-            raise BenchmarkError("psql streaming stdout pipe was not created")
-        first_byte = process.stdout.read(1)
-        first_row_ns = (
-            time.perf_counter_ns() - started if first_byte != b"" else None
-        )
-        stdout_bytes = first_byte + process.stdout.read()
-        returncode = process.wait()
-        completed_at_ns = time.perf_counter_ns()
-        elapsed_ns = completed_at_ns - started
-        stderr.seek(0)
-        error_bytes = stderr.read()
-    stdout = stdout_bytes.decode("utf-8")
-    error = error_bytes.decode("utf-8", errors="replace")
-    if returncode != 0:
-        raise BenchmarkError(
-            f"SQL benchmark command failed ({returncode}):\n"
-            f"{error}\nSQL:\n{sql}"
-        )
-    return stdout, elapsed_ns, first_row_ns, completed_at_ns
+    return (
+        stdout,
+        completed_at_ns - started,
+        (
+            first_row_at_ns - started
+            if first_row_at_ns is not None
+            else None
+        ),
+        completed_at_ns,
+    )
 
 
 def _digest_output(
@@ -1085,6 +1326,95 @@ def _digest_output(
     )
 
 
+def _is_nonnegative_integer(value: Any, *, minimum: int = 0) -> bool:
+    """Reject bool aliases while validating observed integer quantities."""
+    return (
+        isinstance(minimum, int)
+        and not isinstance(minimum, bool)
+        and minimum >= 0
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= minimum
+    )
+
+
+def _streaming_protocol_probe_passed(
+    output: QueryOutput,
+    row_values: Sequence[str],
+    *,
+    minimum_post_first_row_ns: int,
+) -> bool:
+    """Require two correct rows with a material delay after the first."""
+    timing_values = (
+        output.elapsed_ns,
+        output.first_row_ns,
+        minimum_post_first_row_ns,
+    )
+    return (
+        list(row_values) == ["1", "2"]
+        and output.rows == 2
+        and all(
+            _is_nonnegative_integer(value)
+            for value in timing_values
+        )
+        and output.elapsed_ns > output.first_row_ns
+        and (
+            output.elapsed_ns - output.first_row_ns
+            >= minimum_post_first_row_ns
+        )
+    )
+
+
+def _verify_streaming_first_row_protocol(cluster: Any) -> dict[str, Any]:
+    """Prove cursor/unbuffered output precedes a deliberately delayed row."""
+    delayed_seconds = 0.25
+    minimum_post_first_row_ns = 150_000_000
+    sql = (
+        "SELECT value, pg_sleep(CASE WHEN value = 2 THEN "
+        f"{delayed_seconds} ELSE 0.0 END) "
+        "FROM generate_series(1, 2) AS streamed(value)"
+    )
+    stdout, elapsed_ns, first_row_ns, completed_at_ns = (
+        _run_query_streaming(cluster, sql)
+    )
+    output = _digest_output(
+        stdout, elapsed_ns, first_row_ns, completed_at_ns
+    )
+    normalized = stdout.replace("\r\n", "\n").rstrip("\n")
+    row_values = [
+        row.split("\t", 1)[0]
+        for row in ([] if normalized == "" else normalized.split("\n"))
+    ]
+    passed = _streaming_protocol_probe_passed(
+        output,
+        row_values,
+        minimum_post_first_row_ns=minimum_post_first_row_ns,
+    )
+    report = {
+        "status": "measured" if passed else "failed",
+        "passed": passed,
+        "protocol": "libpq PQsetSingleRowMode",
+        "libpq_library": _libpq_api().library_name,
+        "libpq_version": _libpq_api().library.PQlibVersion(),
+        "sql": sql,
+        "delayed_later_row_ns": int(delayed_seconds * 1_000_000_000),
+        "minimum_post_first_row_ns": minimum_post_first_row_ns,
+        "first_row_ns": first_row_ns,
+        "total_elapsed_ns": elapsed_ns,
+        "post_first_row_ns": (
+            elapsed_ns - first_row_ns
+            if first_row_ns is not None else None
+        ),
+        "row_values": row_values,
+    }
+    if not passed:
+        raise BenchmarkError(
+            "unbuffered one-row cursor did not expose the first row before "
+            f"the delayed second row: {report!r}"
+        )
+    return report
+
+
 def _execute_query(
     cluster: Any,
     *,
@@ -1092,43 +1422,29 @@ def _execute_query(
     sql: str,
     ttl_ms: int | None = None,
 ) -> QueryOutput:
-    settings = (
-        ""
-        if mode is None
-        else f"SET bioseq.query_cache_optimisation_mode = '{mode}';\n"
-    )
+    setup_sql: list[str] = []
+    if mode is not None:
+        setup_sql.append(
+            f"SET bioseq.query_cache_optimisation_mode = '{mode}'"
+        )
     if ttl_ms is not None:
         if mode is None:
             raise BenchmarkError("cache TTL requires a cache-enabled query mode")
-        settings += f"SET bioseq.query_cache_ttl = {ttl_ms};\n"
+        setup_sql.append(f"SET bioseq.query_cache_ttl = {ttl_ms}")
     stdout, elapsed, first_row_ns, completed_at_ns = _run_query_streaming(
         cluster,
-        settings + sql,
+        sql,
+        setup_sql=setup_sql,
     )
     return _digest_output(stdout, elapsed, first_row_ns, completed_at_ns)
-
-
-def _percentile(samples: Sequence[int], percentile: float) -> float:
-    if not samples:
-        raise BenchmarkError("cannot calculate percentile of empty samples")
-    ordered = sorted(samples)
-    if len(ordered) == 1:
-        return float(ordered[0])
-    position = (len(ordered) - 1) * percentile
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return float(ordered[lower])
-    fraction = position - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
 
 
 def _sample_summary(samples_ns: Sequence[int]) -> dict[str, Any]:
     return {
         "raw_samples_ns": list(samples_ns),
-        "p50_ns": int(_percentile(samples_ns, 0.50)),
-        "p95_ns": int(_percentile(samples_ns, 0.95)),
-        "p99_ns": int(_percentile(samples_ns, 0.99)),
+        "p50_ns": _nearest_rank_percentile(samples_ns, 50, 100),
+        "p95_ns": _nearest_rank_percentile(samples_ns, 95, 100),
+        "p99_ns": _nearest_rank_percentile(samples_ns, 99, 100),
     }
 
 
@@ -1139,9 +1455,9 @@ def _throughput_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
     def summary(samples: Sequence[int], unit: str) -> dict[str, Any]:
         return {
             "raw_samples": list(samples),
-            "p50": int(_percentile(samples, 0.50)),
-            "p95": int(_percentile(samples, 0.95)),
-            "p99": int(_percentile(samples, 0.99)),
+            "p50": _nearest_rank_percentile(samples, 50, 100),
+            "p95": _nearest_rank_percentile(samples, 95, 100),
+            "p99": _nearest_rank_percentile(samples, 99, 100),
             "unit": unit,
         }
 
@@ -1168,9 +1484,9 @@ def _fixed_quantity_throughput(
     ]
     return {
         "raw_samples": samples,
-        "p50": int(_percentile(samples, 0.50)),
-        "p95": int(_percentile(samples, 0.95)),
-        "p99": int(_percentile(samples, 0.99)),
+        "p50": _nearest_rank_percentile(samples, 50, 100),
+        "p95": _nearest_rank_percentile(samples, 95, 100),
+        "p99": _nearest_rank_percentile(samples, 99, 100),
         "unit": unit,
         "quantity_per_execution": quantity,
     }
@@ -1178,6 +1494,110 @@ def _fixed_quantity_throughput(
 
 def _unavailable_metric(detail: str) -> dict[str, Any]:
     return {"status": "unavailable", "value": None, "detail": detail}
+
+
+def _is_measured_integer_metric(
+    metric: Any,
+    *,
+    minimum: int = 0,
+    unit: str | None = None,
+    source_field: str | None = None,
+) -> bool:
+    """Return whether a metric contains an observed integer quantity."""
+    return (
+        _is_nonnegative_integer(minimum)
+        and isinstance(metric, Mapping)
+        and metric.get("status") == "measured"
+        and _is_nonnegative_integer(metric.get("value"), minimum=minimum)
+        and (unit is None or metric.get("unit") == unit)
+        and (
+            source_field is None
+            or metric.get("source_field") == source_field
+        )
+    )
+
+
+def _cold_physical_io_measured(resources: Any) -> bool:
+    """Require a cold file hit to cause an observed physical server read."""
+    io = (
+        resources.get("page_cache_and_physical_io")
+        if isinstance(resources, Mapping) else None
+    )
+    return (
+        isinstance(resources, Mapping)
+        and resources.get("status") == "measured"
+        and isinstance(io, Mapping)
+        and io.get("status") == "measured"
+        and isinstance(io.get("physical_read_bytes"), int)
+        and not isinstance(io.get("physical_read_bytes"), bool)
+        and int(io["physical_read_bytes"]) > 0
+    )
+
+
+def _latency_delta_within_tolerance(
+    baseline_ns: int, candidate_ns: int, tolerance_ns: int
+) -> bool:
+    """Apply a two-sided material-latency bound."""
+    if min(baseline_ns, candidate_ns, tolerance_ns) < 0:
+        return False
+    return abs(candidate_ns - baseline_ns) <= tolerance_ns
+
+
+def _ttl_cleanup_contract_passed(report: Any) -> bool:
+    """Require a usable COMPLETE entry before timed expiry and reclamation."""
+    if not isinstance(report, Mapping):
+        return False
+    pre_expiry = report.get("pre_expiry")
+    reclamation = report.get("reclamation")
+    correctness = report.get("correctness")
+    if (
+        not isinstance(pre_expiry, Mapping)
+        or not isinstance(reclamation, Mapping)
+        or not isinstance(correctness, Mapping)
+    ):
+        return False
+    stats = pre_expiry.get("stats")
+    tier = reclamation.get("tier")
+    store = reclamation.get("store")
+    ttl_ms = report.get("ttl_ms")
+    expiry_wait_ns = report.get("expiry_wait_ns")
+    return (
+        correctness.get("passed") is True
+        and pre_expiry.get("passed") is True
+        and _is_nonnegative_integer(
+            pre_expiry.get("complete_entries"), minimum=1
+        )
+        and isinstance(stats, Mapping)
+        and _is_nonnegative_integer(stats.get("produced"), minimum=1)
+        and stats.get("produced") == 1
+        and _is_nonnegative_integer(
+            stats.get("completed_hits"), minimum=1
+        )
+        and stats.get("completed_hits") == 1
+        and _is_nonnegative_integer(stats.get("fallbacks"))
+        and stats.get("fallbacks") == 0
+        and _is_nonnegative_integer(ttl_ms, minimum=1)
+        and _is_nonnegative_integer(expiry_wait_ns)
+        and expiry_wait_ns >= ttl_ms * 1_000_000
+        and _is_nonnegative_integer(reclamation.get("complete_entries"))
+        and reclamation.get("complete_entries") == 0
+        and isinstance(tier, Mapping)
+        and all(
+            _is_nonnegative_integer(tier.get(name))
+            and tier.get(name) == 0
+            for name in (
+                "dsa_blocks",
+                "file_blocks",
+                "reserved_hot_bytes",
+                "reserved_file_bytes",
+            )
+        )
+        and isinstance(store, Mapping)
+        and _is_nonnegative_integer(store.get("file_count"))
+        and store.get("file_count") == 0
+        and _is_nonnegative_integer(store.get("bytes"))
+        and store.get("bytes") == 0
+    )
 
 
 def _first_row_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
@@ -1196,7 +1616,7 @@ def _first_row_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
         "status": "measured",
         **_sample_summary(samples),
         "detail": (
-            "Client-observed time to the first psql result byte; it includes "
+            "Client-observed time to the first libpq single-row tuple; it includes "
             "planning, execution, cache prevalidation, decoding, and transport."
         ),
     }
@@ -1220,9 +1640,14 @@ def _entry_runtime_snapshot(cluster: Any) -> dict[str, Any]:
         if selected is None:
             return _unavailable_metric(detail)
         values = [entry.get(selected) for entry in entries]
-        if any(not isinstance(value, (int, float)) for value in values):
+        if any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            for value in values
+        ):
             return _unavailable_metric(
-                f"Admin field {selected!r} is present but is not wholly numeric."
+                f"Admin field {selected!r} is not wholly nonnegative integer data."
             )
         return {
             "status": "measured",
@@ -1325,6 +1750,7 @@ def _runtime_storage_snapshot(cluster: Any) -> dict[str, Any]:
     runtime["dsa_hot_bytes"] = {
         "status": "measured",
         "value": tier["reserved_hot_bytes"],
+        "unit": "bytes",
         "source_field": "bioseq_cache_test.storage_tier_stats.reserved_hot_bytes",
         "detail": (
             "The cache-only private benchmark exposes the physical storage "
@@ -1334,6 +1760,7 @@ def _runtime_storage_snapshot(cluster: Any) -> dict[str, Any]:
     runtime["file_bytes"] = {
         "status": "measured",
         "value": tier["reserved_file_bytes"],
+        "unit": "bytes",
         "source_field": "bioseq_cache_test.storage_tier_stats.reserved_file_bytes",
         "detail": (
             "Reserved file-tier bytes are read from the test-only physical "
@@ -2107,18 +2534,20 @@ def _measure_case(
         "producer_trials_passed": producer_behavior,
         "producer_trial_stats": producer_stats,
     }
-    reference_ns = int(_percentile(
-        [sample.elapsed_ns for sample in reference_samples], 0.50
-    ))
-    producer_ns = int(_percentile(
-        [sample.elapsed_ns for sample in producer_samples], 0.50
-    ))
+    reference_ns = _nearest_rank_percentile(
+        [sample.elapsed_ns for sample in reference_samples], 50, 100
+    )
+    producer_ns = _nearest_rank_percentile(
+        [sample.elapsed_ns for sample in producer_samples], 50, 100
+    )
     producer_delta = (
         ((producer_ns - reference_ns) / reference_ns) * 100.0
         if reference_ns > 0
         else 0.0
     )
-    hit_p50 = _percentile([sample.elapsed_ns for sample in hit_samples], 0.50)
+    hit_p50 = _nearest_rank_percentile(
+        [sample.elapsed_ns for sample in hit_samples], 50, 100
+    )
     speedup = reference_ns / hit_p50 if hit_p50 > 0 else None
     digest_name = "ordered_sha256" if ordered else "multiset_sha256"
     digest_value = (
@@ -2140,18 +2569,70 @@ def _measure_case(
             )
         first_hit = hit_samples[0]
         warm_hits = hit_samples[1:]
-        warm_p50 = int(_percentile(
-            [sample.elapsed_ns for sample in warm_hits], 0.50
-        ))
+        warm_p50 = _nearest_rank_percentile(
+            [sample.elapsed_ns for sample in warm_hits], 50, 100
+        )
+        first_checksum = (
+            first_hit.ordered_sha256
+            if ordered else first_hit.multiset_sha256
+        )
+        warm_checksums = [
+            sample.ordered_sha256 if ordered else sample.multiset_sha256
+            for sample in warm_hits
+        ]
+        checksum_evidence = {
+            "status": "measured",
+            "algorithm": "sha256",
+            "comparison_digest": digest_name,
+            "reference": digest_value,
+            "first_cold_file_hit": first_checksum,
+            "warm_file_hits": warm_checksums,
+            "passed": (
+                first_checksum == digest_value
+                and all(value == digest_value for value in warm_checksums)
+            ),
+        }
+        prevalidation_evidence = {
+            "status": (
+                "measured"
+                if _is_measured_integer_metric(
+                    runtime["prevalidation_bytes"], minimum=1
+                )
+                and _is_measured_integer_metric(
+                    runtime["prevalidation_duration_ns"], minimum=1
+                )
+                and _is_measured_integer_metric(
+                    runtime["row_group_count"], minimum=1
+                )
+                else "unavailable"
+            ),
+            "bytes": runtime["prevalidation_bytes"],
+            "duration_ns": runtime["prevalidation_duration_ns"],
+            "row_group_count": runtime["row_group_count"],
+            "validated_result_checksum": checksum_evidence,
+        }
+        prevalidation_evidence["passed"] = (
+            prevalidation_evidence["status"] == "measured"
+            and checksum_evidence["passed"]
+        )
+        cold_physical_io_passed = _cold_physical_io_measured(
+            cold_resources
+        )
         file_hit_temperature = {
             "status": "measured"
-            if page_cache_drop["status"] == "measured"
+            if (
+                page_cache_drop["status"] == "measured"
+                and prevalidation_evidence["status"] == "measured"
+                and cold_physical_io_passed
+            )
             else "unavailable",
             "page_cache_drop": page_cache_drop,
+            "full_block_prevalidation": prevalidation_evidence,
             "first_cold_file_hit": {
                 **_sample_summary([first_hit.elapsed_ns]),
                 "time_to_first_row": _first_row_summary([first_hit]),
                 "process_resources": cold_resources,
+                "physical_io_passed": cold_physical_io_passed,
                 "correctness_passed": _same_result(
                     reference, first_hit, ordered
                 ),
@@ -2170,11 +2651,12 @@ def _measure_case(
             "cold_to_warm_p50_ratio": (
                 first_hit.elapsed_ns / warm_p50 if warm_p50 > 0 else None
             ),
-            "mandatory_checksum_prepass_included": True,
             "passed": (
                 page_cache_drop["status"] == "measured"
                 and page_cache_drop["file_count"] > 0
                 and page_cache_drop["advised_bytes"] > 0
+                and prevalidation_evidence["passed"]
+                and cold_physical_io_passed
                 and _same_result(reference, first_hit, ordered)
                 and all(
                     _same_result(reference, sample, ordered)
@@ -2183,8 +2665,11 @@ def _measure_case(
             ),
             "detail": (
                 "The first completed file hit follows fsync plus "
-                "POSIX_FADV_DONTNEED. Both first and warm timings include "
-                "the mandatory full-block checksum validation prepass."
+                "POSIX_FADV_DONTNEED. Acceptance requires runtime-measured "
+                "full-block prevalidation bytes and duration, a positive "
+                "row-group count, a measured nonzero physical server read, "
+                "and matching result checksums for the cold and warm completed "
+                "hits."
             ),
         }
     else:
@@ -2334,9 +2819,9 @@ def _measure_long_source_exact_hit(
         sample_count=sample_count,
     )
     stats = _stats(cluster)
-    hit_p50_ns = int(_percentile(
-        [output.elapsed_ns for output in hits], 0.50
-    ))
+    hit_p50_ns = _nearest_rank_percentile(
+        [output.elapsed_ns for output in hits], 50, 100
+    )
     correct = (
         all(_same_result(reference, output, True) for output in references)
         and _same_result(reference, producer, True)
@@ -2378,18 +2863,18 @@ def _measure_long_source_exact_hit(
             "time_to_first_row": _first_row_summary(hits),
             "throughput": _throughput_summary(hits),
             "speedup_vs_disabled": (
-                int(_percentile(
-                    [output.elapsed_ns for output in references], 0.50
-                )) / hit_p50_ns
+                _nearest_rank_percentile(
+                    [output.elapsed_ns for output in references], 50, 100
+                ) / hit_p50_ns
                 if hit_p50_ns > 0
                 else None
             ),
             **explain,
         },
         "source_execution_exceeds_one_second": (
-            int(_percentile(
-                [output.elapsed_ns for output in references], 0.50
-            )) >= 1_000_000_000
+            _nearest_rank_percentile(
+                [output.elapsed_ns for output in references], 50, 100
+            ) >= 1_000_000_000
         ),
         "cache_behavior": {
             "passed": behavior,
@@ -2915,8 +3400,12 @@ def _measure_waiter_cancel_latency(
     ]
     baseline_latency = [sample[1] for sample in baseline]
     cancelled_latency = [sample[1] for sample in cancelled]
-    baseline_p95 = int(_percentile(baseline_latency, 0.95))
-    cancelled_p95 = int(_percentile(cancelled_latency, 0.95))
+    baseline_p95 = _nearest_rank_percentile(
+        baseline_latency, 95, 100
+    )
+    cancelled_p95 = _nearest_rank_percentile(
+        cancelled_latency, 95, 100
+    )
     tolerance_ns = max(int(baseline_p95 * 0.25), 5_000_000)
     correctness = all(
         _same_result(reference, sample[0], False)
@@ -2952,6 +3441,7 @@ def _measure_waiter_cancel_latency(
         "baseline_release_to_complete": _sample_summary(baseline_latency),
         "cancelled_release_to_complete": _sample_summary(cancelled_latency),
         "p95_delta_ns": cancelled_p95 - baseline_p95,
+        "absolute_p95_delta_ns": abs(cancelled_p95 - baseline_p95),
         "tolerance_ns": tolerance_ns,
         "correctness": {
             "passed": correctness,
@@ -2970,12 +3460,14 @@ def _measure_waiter_cancel_latency(
         "passed": (
             correctness
             and behavior_passed
-            and cancelled_p95 <= baseline_p95 + tolerance_ns
+            and _latency_delta_within_tolerance(
+                baseline_p95, cancelled_p95, tolerance_ns
+            )
         ),
         "detail": (
             "Producer release-to-completion p95 after a registered waiter is "
-            "cancelled before release; tolerance is 25% or 5 ms, whichever "
-            "is larger."
+            "cancelled before release; the two-sided absolute tolerance is "
+            "25% or 5 ms, whichever is larger."
         ),
     }
 
@@ -3164,8 +3656,8 @@ def _measure_invalidation(
                 "key": f"{key}_invalidation",
                 "trials": trial_reports,
                 "operation_latency": _sample_summary(operation_samples),
-                "operation_ns": int(
-                    _percentile(operation_samples, 0.50)
+                "operation_ns": _nearest_rank_percentile(
+                    operation_samples, 50, 100
                 ),
                 "correctness": {
                     "passed": all(
@@ -3447,39 +3939,70 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
 
 
 def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
-    _reset_case(cluster, ttl_ms=1)
+    ttl_ms = 1_000
+    _reset_case(cluster, ttl_ms=ttl_ms)
     reference = _execute_query(cluster, mode="disabled", sql=sql)
-    producer = _execute_query(cluster, mode="same", sql=sql, ttl_ms=1)
-    time.sleep(0.01)
-    before = _stats(cluster)
-    started = time.perf_counter_ns()
-    _run_sql(cluster, "SELECT bioseq_cache_test.request_janitor_sweep()")
-    deadline = time.monotonic() + 10.0
-    remaining = -1
-    while time.monotonic() < deadline:
-        stdout, _ = _run_sql(
-            cluster,
-            "SELECT count(*) FROM bioseq_cache_test.entry_states() "
-            "WHERE state = 'COMPLETE'",
-        )
-        remaining = int(stdout.strip())
-        if remaining == 0:
-            break
-        time.sleep(0.02)
-    return {
+    producer = _execute_query(
+        cluster, mode="same", sql=sql, ttl_ms=ttl_ms
+    )
+    complete_stdout, _ = _run_sql(
+        cluster,
+        "SELECT count(*) FROM bioseq_cache_test.entry_states() "
+        "WHERE state = 'COMPLETE'",
+    )
+    complete_entries = int(complete_stdout.strip())
+    pre_expiry_hit = _execute_query(
+        cluster, mode="same", sql=sql, ttl_ms=ttl_ms
+    )
+    pre_expiry_stats = _stats(cluster)
+    pre_expiry_passed = (
+        complete_entries >= 1
+        and _same_result(reference, producer, False)
+        and _same_result(reference, pre_expiry_hit, False)
+        and pre_expiry_stats["produced"] == 1
+        and pre_expiry_stats["completed_hits"] == 1
+        and pre_expiry_stats["fallbacks"] == 0
+    )
+
+    expiry_wait_started = time.perf_counter_ns()
+    time.sleep(ttl_ms / 1000.0 + 0.10)
+    expiry_wait_ns = time.perf_counter_ns() - expiry_wait_started
+    before_cleanup = _stats(cluster)
+    cleanup_started = time.perf_counter_ns()
+    reclamation = _wait_for_storage_reclamation(cluster)
+    cleanup_ns = time.perf_counter_ns() - cleanup_started
+    stats_after = _stats(cluster)
+    report = {
         "key": "ttl_cleanup",
+        "ttl_ms": ttl_ms,
         "correctness": {
-            "passed": _same_result(reference, producer, False),
+            "passed": (
+                _same_result(reference, producer, False)
+                and _same_result(reference, pre_expiry_hit, False)
+            ),
             "row_count": reference.rows,
             "multiset_sha256": reference.multiset_sha256,
         },
         "producer_time_to_first_row": _first_row_summary([producer]),
-        "eviction_ns": time.perf_counter_ns() - started,
-        "entries_remaining": remaining,
-        "stats_before": before,
-        "stats_after": _stats(cluster),
+        "pre_expiry_hit_time_to_first_row": _first_row_summary(
+            [pre_expiry_hit]
+        ),
+        "pre_expiry": {
+            "passed": pre_expiry_passed,
+            "complete_entries": complete_entries,
+            "stats": pre_expiry_stats,
+        },
+        "expiry_wait_ns": expiry_wait_ns,
+        "cleanup_ns": cleanup_ns,
+        "eviction_ns": cleanup_ns,
+        "entries_remaining": reclamation["complete_entries"],
+        "reclamation": reclamation,
+        "stats_before": before_cleanup,
+        "stats_after": stats_after,
         "runtime_storage_after": _runtime_storage_snapshot(cluster),
     }
+    report["passed"] = _ttl_cleanup_contract_passed(report)
+    return report
 
 
 def _wait_for_storage_reclamation(
@@ -4183,12 +4706,23 @@ def _evaluate_thresholds(
     thresholds.append(
         _threshold(
             "ttl_cleanup_bounded",
-            actual=ttl["entries_remaining"],
-            limit=0,
-            passed=int(ttl["entries_remaining"]) == 0,
+            actual={
+                "ttl_ms": ttl.get("ttl_ms"),
+                "pre_expiry": ttl.get("pre_expiry"),
+                "expiry_wait_ns": ttl.get("expiry_wait_ns"),
+                "cleanup_ns": ttl.get("cleanup_ns"),
+                "reclamation": ttl.get("reclamation"),
+            },
+            limit=(
+                "one usable COMPLETE hit before expiry, a full TTL wait, "
+                "then zero registry entries, storage reservations, blocks, "
+                "and files after a bounded sweep"
+            ),
+            passed=_ttl_cleanup_contract_passed(ttl),
             detail=(
-                "The test API requests cleanup and the benchmark waits for bounded "
-                "entry disappearance; worker-side duration is not inferred."
+                "The benchmark proves publication and a completed hit before "
+                "waiting beyond the configured TTL, then requests cleanup and "
+                "waits for both registry and physical storage reclamation."
             ),
         )
     )
@@ -4280,6 +4814,39 @@ def _evaluate_thresholds(
         )
     )
     file_hit_temperature = toast["file_hit_temperature"]
+    file_prevalidation = file_hit_temperature.get(
+        "full_block_prevalidation", {}
+    )
+    file_checksum = (
+        file_prevalidation.get("validated_result_checksum", {})
+        if isinstance(file_prevalidation, Mapping) else {}
+    )
+    first_cold_file_hit = file_hit_temperature.get(
+        "first_cold_file_hit", {}
+    )
+    cold_physical_io_passed = (
+        isinstance(first_cold_file_hit, Mapping)
+        and _cold_physical_io_measured(
+            first_cold_file_hit.get("process_resources")
+        )
+    )
+    file_prevalidation_passed = (
+        isinstance(file_prevalidation, Mapping)
+        and file_prevalidation.get("status") == "measured"
+        and file_prevalidation.get("passed") is True
+        and _is_measured_integer_metric(
+            file_prevalidation.get("bytes"), minimum=1
+        )
+        and _is_measured_integer_metric(
+            file_prevalidation.get("duration_ns"), minimum=1
+        )
+        and _is_measured_integer_metric(
+            file_prevalidation.get("row_group_count"), minimum=1
+        )
+        and isinstance(file_checksum, Mapping)
+        and file_checksum.get("status") == "measured"
+        and file_checksum.get("passed") is True
+    )
     thresholds.append(
         _threshold(
             "cold_and_warm_file_hit_with_checksum_prepass",
@@ -4288,7 +4855,12 @@ def _evaluate_thresholds(
                 "fsync+DONTNEED cold hit and later warm hits are correct; "
                 "all timings include full checksum validation"
             ),
-            passed=bool(file_hit_temperature["passed"]),
+            passed=(
+                file_hit_temperature.get("status") == "measured"
+                and file_hit_temperature.get("passed") is True
+                and file_prevalidation_passed
+                and cold_physical_io_passed
+            ),
             detail=str(file_hit_temperature["detail"]),
         )
     )
@@ -4364,9 +4936,14 @@ def _evaluate_thresholds(
                 "baseline": waiter_cancel["baseline_release_to_complete"],
                 "cancelled": waiter_cancel["cancelled_release_to_complete"],
                 "p95_delta_ns": waiter_cancel["p95_delta_ns"],
+                "absolute_p95_delta_ns": waiter_cancel[
+                    "absolute_p95_delta_ns"
+                ],
             },
             limit={
-                "p95_delta_ns": f"<={waiter_cancel['tolerance_ns']}"
+                "absolute_p95_delta_ns": (
+                    f"<={waiter_cancel['tolerance_ns']}"
+                )
             },
             passed=bool(waiter_cancel["passed"]),
             detail=str(waiter_cancel["detail"]),
@@ -4414,6 +4991,7 @@ def _evaluate_thresholds(
 def _validate_section45_inventory(
     *,
     core: Mapping[str, Any],
+    streaming_protocol: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
     generic_provider: Mapping[str, Any],
     fanout: Sequence[Mapping[str, Any]],
@@ -4423,18 +5001,48 @@ def _validate_section45_inventory(
 ) -> dict[str, Any]:
     """Reject a report that silently omits a mandatory generic §45 field."""
 
+    if (
+        streaming_protocol.get("status") != "measured"
+        or streaming_protocol.get("passed") is not True
+        or any(
+            not isinstance(streaming_protocol.get(name), int)
+            or isinstance(streaming_protocol.get(name), bool)
+            or streaming_protocol[name] < 0
+            for name in (
+                "first_row_ns",
+                "total_elapsed_ns",
+                "post_first_row_ns",
+                "minimum_post_first_row_ns",
+            )
+        )
+        or streaming_protocol["total_elapsed_ns"]
+            <= streaming_protocol["first_row_ns"]
+        or streaming_protocol["post_first_row_ns"]
+            != streaming_protocol["total_elapsed_ns"]
+                - streaming_protocol["first_row_ns"]
+        or streaming_protocol["post_first_row_ns"]
+            < streaming_protocol["minimum_post_first_row_ns"]
+    ):
+        raise BenchmarkError(
+            "Section 45 first-row metric lacks a delayed-later-row "
+            "streaming protocol proof"
+        )
+
     def require_sample_summary(value: Any, label: str) -> None:
-        if (
-            not isinstance(value, Mapping)
-            or not isinstance(value.get("raw_samples_ns"), list)
-            or not value["raw_samples_ns"]
-            or not all(
-                name in value for name in ("p50_ns", "p95_ns", "p99_ns")
-            )
-        ):
-            raise BenchmarkError(
-                f"Section 45 report lacks raw/p50/p95/p99 samples for {label}"
-            )
+        _validate_sample_summary_contract(
+            value,
+            label,
+            raw_name="raw_samples_ns",
+            require_nonempty=True,
+        )
+
+    _validate_nested_sample_summary_contracts(cases, "cases")
+    _validate_nested_sample_summary_contracts(
+        generic_provider, "generic_provider"
+    )
+    _validate_nested_sample_summary_contracts(fanout, "fanout")
+    _validate_nested_sample_summary_contracts(invalidation, "invalidation")
+    _validate_nested_sample_summary_contracts(thresholds, "thresholds")
 
     case_by_key = {
         str(case.get("key")): case
@@ -4491,18 +5099,97 @@ def _validate_section45_inventory(
             runtime.get("file_bytes")
             if isinstance(runtime, Mapping) else None
         )
+        row_group_count = (
+            runtime.get("row_group_count")
+            if isinstance(runtime, Mapping) else None
+        )
+        prevalidation_bytes = (
+            runtime.get("prevalidation_bytes")
+            if isinstance(runtime, Mapping) else None
+        )
+        prevalidation_duration = (
+            runtime.get("prevalidation_duration_ns")
+            if isinstance(runtime, Mapping) else None
+        )
         if (
             not isinstance(runtime, Mapping)
-            or not isinstance(dsa_bytes, Mapping)
-            or dsa_bytes.get("status") != "measured"
-            or not isinstance(file_bytes, Mapping)
-            or file_bytes.get("status") != "measured"
-            or "row_group_count" not in runtime
-            or "prevalidation_bytes" not in runtime
+            or not _is_measured_integer_metric(
+                dsa_bytes,
+                minimum=0,
+                unit="bytes",
+                source_field=(
+                    "bioseq_cache_test.storage_tier_stats."
+                    "reserved_hot_bytes"
+                ),
+            )
+            or not _is_measured_integer_metric(
+                file_bytes,
+                minimum=0,
+                unit="bytes",
+                source_field=(
+                    "bioseq_cache_test.storage_tier_stats."
+                    "reserved_file_bytes"
+                ),
+            )
+            or not _is_measured_integer_metric(
+                row_group_count,
+                minimum=0 if key == "empty_result" else 1,
+            )
+            or not _is_measured_integer_metric(
+                prevalidation_bytes, minimum=1
+            )
+            or not _is_measured_integer_metric(
+                prevalidation_duration, minimum=1
+            )
         ):
             raise BenchmarkError(
-                f"Section 45 case lacks DSA/file/row-group/prevalidation metrics: {key}"
+                "Section 45 case lacks measured DSA/file/row-group/"
+                f"prevalidation bytes or duration: {key}"
             )
+
+    file_case = case_by_key["large_toasted_values"]
+    file_temperature = file_case.get("file_hit_temperature")
+    file_prevalidation = (
+        file_temperature.get("full_block_prevalidation")
+        if isinstance(file_temperature, Mapping) else None
+    )
+    checksum = (
+        file_prevalidation.get("validated_result_checksum")
+        if isinstance(file_prevalidation, Mapping) else None
+    )
+    first_cold_file_hit = (
+        file_temperature.get("first_cold_file_hit")
+        if isinstance(file_temperature, Mapping) else None
+    )
+    if (
+        not isinstance(file_temperature, Mapping)
+        or file_temperature.get("status") != "measured"
+        or not isinstance(file_prevalidation, Mapping)
+        or file_prevalidation.get("status") != "measured"
+        or file_prevalidation.get("passed") is not True
+        or not _is_measured_integer_metric(
+            file_prevalidation.get("bytes"), minimum=1
+        )
+        or not _is_measured_integer_metric(
+            file_prevalidation.get("duration_ns"), minimum=1
+        )
+        or not _is_measured_integer_metric(
+            file_prevalidation.get("row_group_count"), minimum=1
+        )
+        or not isinstance(checksum, Mapping)
+        or checksum.get("status") != "measured"
+        or checksum.get("passed") is not True
+        or not isinstance(checksum.get("reference"), str)
+        or not checksum["reference"]
+        or not isinstance(first_cold_file_hit, Mapping)
+        or not _cold_physical_io_measured(
+            first_cold_file_hit.get("process_resources")
+        )
+    ):
+        raise BenchmarkError(
+            "Section 45 file hit lacks measured full-block bytes, duration, "
+            "row groups, checksum evidence, or nonzero cold physical I/O"
+        )
 
     fanout_by_clients = {
         int(item.get("clients", 0)): item
@@ -4579,14 +5266,35 @@ def _validate_section45_inventory(
             "Section 45 report has missing, duplicate, or malformed threshold decisions"
         )
     for item in thresholds:
+        name = str(item.get("name"))
+        status = item.get("status")
+        passed = item.get("passed")
         if (
-            item.get("status") not in {"pass", "fail", "not_applicable"}
+            status not in {"pass", "fail", "not_applicable"}
             or "actual" not in item
             or "limit" not in item
             or "detail" not in item
         ):
             raise BenchmarkError(
                 f"Section 45 threshold decision is incomplete: {item!r}"
+            )
+        if name in SECTION45_THRESHOLD_NAMES and status not in {
+            "pass",
+            "fail",
+        }:
+            raise BenchmarkError(
+                "Section 45 mandatory threshold cannot be not_applicable: "
+                f"{name}"
+            )
+        expected_passed = {
+            "pass": True,
+            "fail": False,
+            "not_applicable": None,
+        }[status]
+        if passed is not expected_passed:
+            raise BenchmarkError(
+                "Section 45 threshold status/passed evidence is "
+                f"contradictory: {item!r}"
             )
 
     core_metrics = core.get("metrics")
@@ -4683,6 +5391,7 @@ def run(argv: Sequence[str]) -> int:
     sample_count = int(cases_document.get("samples_per_case", 7))
     cluster = PRIVATE.UniquePrivateCluster(inputs)
     with cluster:
+        streaming_protocol = _verify_streaming_first_row_protocol(cluster)
         core_fragment_path = cluster.run_dir / "core_fragment.json"
         core = _run_core_benchmark(
             core_executable,
@@ -4743,6 +5452,7 @@ def run(argv: Sequence[str]) -> int:
         )
         section45_contract = _validate_section45_inventory(
             core=core,
+            streaming_protocol=streaming_protocol,
             cases=cases,
             generic_provider=generic_provider,
             fanout=fanout,
@@ -4764,6 +5474,7 @@ def run(argv: Sequence[str]) -> int:
             "private_cluster": True,
             "build_tree_dso": str(cache_dso),
             "core": core,
+            "first_row_streaming_protocol": streaming_protocol,
             "harness_unit_tests": harness_tests,
             "disabled_overhead": disabled_overhead,
             "long_source_exact": long_source_exact,
@@ -4815,6 +5526,7 @@ def run(argv: Sequence[str]) -> int:
             "violations": violations,
             "passed": not violations,
         }
+        _validate_nested_sample_summary_contracts(report, "report")
         destination = _write_report(report_dir, report)
         (cluster.run_dir / "report_path.txt").write_text(
             str(destination) + "\n", encoding="utf-8"

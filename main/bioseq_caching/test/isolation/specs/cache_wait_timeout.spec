@@ -2,6 +2,15 @@
 # producer; a later reader consumes the producer's eventual COMPLETE result.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_wait_timeout(id integer PRIMARY KEY, value text NOT NULL);
   INSERT INTO qc_wait_timeout
   SELECT i, md5(i::text) FROM generate_series(1, 100) AS g(i);

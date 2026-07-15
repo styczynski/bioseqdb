@@ -13,11 +13,20 @@ my $node = new_cache_node('cache_partial_cleanup', preload => 1);
 $node->start;
 bootstrap_cache($node);
 
+my $boot_nonce = $node->safe_psql(
+	'postgres',
+	q{SELECT lpad(to_hex(
+	    (bioseq_cache_test.bootstrap_status()->>'boot_nonce')::bigint),
+	    16, '0')});
+my $database_oid = $node->safe_psql(
+	'postgres', 'SELECT oid FROM pg_database WHERE datname = current_database()');
 my $store_dir = File::Spec->catdir(
-	$node->data_dir, 'bioseq_cache', 'storage-v1');
+	$node->data_dir, 'pg_bioseq_cache', $boot_nonce, $database_oid);
 make_path($store_dir, { mode => 0700 });
 my $partial_path = File::Spec->catfile(
-	$store_dir, '.block-0000000000000000-0000000000000000-0.tmp');
+	$store_dir,
+	'.stage-00000000-00000000-0000000000000000-'
+	  . '0000000000000000-0000000000000000.partial');
 open(my $partial, '>', $partial_path) or die "open $partial_path: $!";
 print {$partial} "not a complete cache manifest\n";
 close($partial) or die "close $partial_path: $!";

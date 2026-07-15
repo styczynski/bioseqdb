@@ -2,6 +2,15 @@
 # against the in-flight generation until it converts its reference to a pin.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_ttl_zero(id integer PRIMARY KEY, value text NOT NULL);
   INSERT INTO qc_ttl_zero
   SELECT i, md5(i::text) FROM generate_series(1, 20) AS g(i);

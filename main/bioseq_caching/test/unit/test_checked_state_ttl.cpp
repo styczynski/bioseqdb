@@ -432,7 +432,7 @@ TEST_CASE("monotonic TTL boundaries reject wrap instead of inferring age") {
     REQUIRE_FALSE(expired(incomplete, 0, 0, maximum));
 }
 
-TEST_CASE("zero TTL grants one same-generation waiter read exactly once") {
+TEST_CASE("zero TTL ABA recheck preserves only one waiter entitlement") {
     const CacheTimestamps timestamps{
         .started_ns = 1,
         .completed_ns = 500,
@@ -446,10 +446,16 @@ TEST_CASE("zero TTL grants one same-generation waiter read exactly once") {
 
     REQUIRE_FALSE(completed_ttl_decision(
         timestamps, 0, 0, 500, true, true).readable);
-    REQUIRE(completed_ttl_decision(
-        timestamps, 0, 0, 501, true, false).readable);
+    const auto rebound_before_commit = completed_ttl_decision(
+        timestamps, 0, 0, 501, true, false);
+    REQUIRE(rebound_before_commit.readable);
+    REQUIRE(rebound_before_commit.consume_just_completed_entitlement);
     REQUIRE_FALSE(completed_ttl_decision(
         timestamps, 0, 0, 499, true, false).readable);
+    // A later read cannot reuse the converted waiter's consumed entitlement.
+    REQUIRE_FALSE(completed_ttl_decision(
+        timestamps, 0, 0, 501, true, true).readable);
+    // A second reader never registered against the in-flight generation.
     REQUIRE_FALSE(completed_ttl_decision(
         timestamps, 0, 0, 500, false, false).readable);
 }

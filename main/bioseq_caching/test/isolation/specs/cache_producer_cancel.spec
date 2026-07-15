@@ -2,6 +2,15 @@
 # waiter to a source fallback, and leaves the key available for a fresh claim.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_producer_cancel(id integer PRIMARY KEY, value text NOT NULL);
   INSERT INTO qc_producer_cancel
   SELECT i, md5(i::text) FROM generate_series(1, 100) AS g(i);
@@ -31,6 +40,8 @@ step "pcancel_backend" {
 step "pcancel_release_producer" { SELECT bioseq_cache_test.release_pause('after_building_publish'); }
 step "pcancel_release_waiter" { SELECT bioseq_cache_test.release_pause('after_waiter_registered'); }
 step "pcancel_state" {
+  SELECT 't' AS x
+  FROM bioseq_cache_test.request_janitor_sweep();
   SELECT state, waiter_count, reader_count
   FROM bioseq_cache_test.entry_states()
   WHERE state <> 'RETIRED';

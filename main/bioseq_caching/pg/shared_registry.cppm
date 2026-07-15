@@ -44,9 +44,9 @@ export namespace bioseq::cache::pg::shared_registry {
 
 inline constexpr std::uint32_t kSharedRegistryBootstrapMagicV1 =
     0x42534231U;
-inline constexpr std::uint32_t kSharedRegistryBootstrapAbiVersionV1 = 1;
+inline constexpr std::uint32_t kSharedRegistryBootstrapAbiVersionV1 = 2;
 inline constexpr std::uint32_t kSharedRegistryRootMagicV1 = 0x42535231U;
-inline constexpr std::uint32_t kSharedRegistryRootAbiVersionV1 = 1;
+inline constexpr std::uint32_t kSharedRegistryRootAbiVersionV1 = 2;
 inline constexpr std::uint32_t kSharedRegistryTestMagicV1 = 0x42535431U;
 inline constexpr std::uint32_t kSharedRegistryTestAbiVersionV1 = 2;
 inline constexpr std::uint32_t kDefaultSharedRegistryMaxBackendsV1 = 128;
@@ -152,6 +152,7 @@ struct SharedRegistryConfigV1 {
   std::uint32_t wait_timeout_ms =
       kDefaultSharedRegistryWaitTimeoutMsV1;
   std::uint32_t wait_limit = kDefaultSharedRegistryWaitLimitV1;
+  std::uint64_t dsa_allocator_reserve_bytes = 0;
   std::uint64_t dsa_size_limit_bytes =
       kDefaultSharedRegistryDsaLimitBytesV1;
   std::uint32_t reserved = 0;
@@ -178,6 +179,8 @@ struct SharedRegistryPersistentLayoutV1 {
   std::uint32_t wait_timeout_ms = 0;
   std::uint32_t wait_limit = 0;
   std::uint32_t reserved = 0;
+  std::uint64_t dsa_allocator_reserve_bytes = 0;
+  std::uint64_t fixed_dsa_reserved_bytes = 0;
   std::uint64_t dsa_size_limit_bytes = 0;
 
   [[nodiscard]] bool operator==(
@@ -342,6 +345,7 @@ struct SharedRegistryDiagnosticsV1 {
   std::uint64_t emergency_write_epoch = 0;
   std::uint64_t emergency_change_generation = 0;
   std::uint64_t reserved_dsa_bytes = 0;
+  std::uint64_t fixed_dsa_reserved_bytes = 0;
   std::uint64_t reserved_file_bytes = 0;
   std::uint64_t complete_entries = 0;
   std::uint64_t inflight_entries = 0;
@@ -1176,9 +1180,9 @@ void record_test_cleanup(
   return false;
 }
 
-/** Remove this initializer's area pin, detach its mapping, and probe release. */
+/** Remove this initializer's pin and mapping, optionally probing release. */
 [[nodiscard]] UnpublishedAreaCleanupV1 cleanup_local_unpublished_area(
-    dsa_area *area, bool pinned) noexcept {
+    dsa_area *area, bool pinned, bool verify_release) noexcept {
   UnpublishedAreaCleanupV1 result{
       .handle = area == nullptr ? DSA_HANDLE_INVALID : dsa_get_handle(area),
       .was_pinned = pinned,
@@ -1186,7 +1190,8 @@ void record_test_cleanup(
   const bool unpinned = !pinned || try_unpin_area(area);
   detach_area(area);
   result.pin_removed = unpinned;
-  result.released = unpinned && area_handle_released_once(result.handle);
+  result.released = unpinned && verify_release &&
+                    area_handle_released_once(result.handle);
   record_test_cleanup(result);
   return result;
 }
@@ -1198,8 +1203,10 @@ void shared_registry_backend_exit(int, Datum) noexcept {
   const SharedRegistryOwnerTokenV1 owner = g_initializing_owner;
   const bool unpublished = g_initializing_area != nullptr;
   const bool pinned = g_initializing_area_pinned;
+  /* A release probe calls dsa_attach(), which can raise FATAL once process
+   * exit has begun.  Publish the unpinned handle for takeover verification. */
   const UnpublishedAreaCleanupV1 cleanup = unpublished
-      ? cleanup_local_unpublished_area(area, pinned)
+      ? cleanup_local_unpublished_area(area, pinned, false)
       : UnpublishedAreaCleanupV1{};
   if (!unpublished) {
     detach_area(area);
@@ -1213,6 +1220,7 @@ void shared_registry_backend_exit(int, Datum) noexcept {
   LWLockAcquire(g_bootstrap_lock, LW_EXCLUSIVE);
   if (load_state() == BootstrapState::Initializing &&
       g_bootstrap->initializer == owner) {
+    pg_atomic_write_u64(&g_bootstrap->reserved_dsa_bytes, 0);
     g_bootstrap->cleanup_handle = cleanup.released
         ? DSA_HANDLE_INVALID
         : cleanup.handle;
@@ -1241,12 +1249,13 @@ void record_initializer_failure(
     SharedRegistryErrorV1 error) noexcept {
   dsa_area *area = g_initializing_area;
   const UnpublishedAreaCleanupV1 cleanup = cleanup_local_unpublished_area(
-      area, area != nullptr && g_initializing_area_pinned);
+      area, area != nullptr && g_initializing_area_pinned, true);
   clear_process_attachment();
 
   LWLockAcquire(g_bootstrap_lock, LW_EXCLUSIVE);
   if (load_state() == BootstrapState::Initializing &&
       g_bootstrap->initializer == owner) {
+    pg_atomic_write_u64(&g_bootstrap->reserved_dsa_bytes, 0);
     g_bootstrap->cleanup_handle = cleanup.released
         ? DSA_HANDLE_INVALID
         : cleanup.handle;
@@ -1302,6 +1311,9 @@ void record_initializer_failure(
   LWLockAcquire(g_bootstrap_lock, LW_EXCLUSIVE);
   const bool still_owner = load_state() == BootstrapState::Initializing &&
                            g_bootstrap->initializer == owner;
+  if (still_owner) {
+    pg_atomic_write_u64(&g_bootstrap->reserved_dsa_bytes, 0);
+  }
   if (still_owner && cleanup_required) {
     if (g_bootstrap->live_unpublished_area_count != 0) {
       --g_bootstrap->live_unpublished_area_count;
@@ -1679,6 +1691,7 @@ shared_registry_preload_request(
           kMaximumSharedRegistryTestControlsV1 ||
       config.wait_timeout_ms == 0 || config.wait_limit == 0 ||
       config.wait_limit > kMaximumSharedRegistryWaitLimitV1 ||
+      config.dsa_allocator_reserve_bytes == 0 ||
       config.dsa_size_limit_bytes == 0 || config.reserved != 0) {
     result.error = SharedRegistryErrorV1::InvalidConfiguration;
     return result;
@@ -1737,6 +1750,32 @@ shared_registry_preload_request(
     return result;
   }
 
+  const auto wait_cv_payload = checked_mul(
+      static_cast<std::uint64_t>(reusable->config.max_generations),
+      static_cast<std::uint64_t>(sizeof(ConditionVariable)));
+  if (!wait_cv_payload.has_value()) {
+    result.error = SharedRegistryErrorV1::InvalidConfiguration;
+    return result;
+  }
+  std::array<std::uint64_t, 5> fixed_payloads{
+      sizeof(SharedRegistryRootV1),
+      reusable->layout.total_bytes,
+      *wait_cv_payload,
+      dependency.request.layout.total_bytes,
+      config.extension_metadata_bytes,
+  };
+  const std::size_t fixed_payload_count =
+      config.extension_metadata_bytes == 0 ? 4U : fixed_payloads.size();
+  const auto fixed_dsa_reserved_bytes =
+      conservative_fixed_dsa_reservation_bytes(
+          config.dsa_allocator_reserve_bytes,
+          std::span<const std::uint64_t>{
+              fixed_payloads.data(), fixed_payload_count});
+  if (!fixed_dsa_reserved_bytes.has_value()) {
+    result.error = SharedRegistryErrorV1::InvalidConfiguration;
+    return result;
+  }
+
   result.persistent = SharedRegistryPersistentLayoutV1{
       .root_bytes = sizeof(SharedRegistryRootV1),
       .reusable_bytes = reusable->layout.total_bytes,
@@ -1765,15 +1804,13 @@ shared_registry_preload_request(
       .test_control_count = config.test_control_count,
       .wait_timeout_ms = config.wait_timeout_ms,
       .wait_limit = config.wait_limit,
+      .dsa_allocator_reserve_bytes =
+          config.dsa_allocator_reserve_bytes,
+      .fixed_dsa_reserved_bytes = *fixed_dsa_reserved_bytes,
       .dsa_size_limit_bytes = config.dsa_size_limit_bytes,
   };
-  const std::uint64_t fixed_bytes =
-      static_cast<std::uint64_t>(result.persistent.root_bytes) +
-      result.persistent.reusable_bytes +
-      result.persistent.reusable_wait_cv_bytes +
-      result.persistent.dependency_bytes +
-      result.persistent.extension_metadata_bytes;
-  if (fixed_bytes > result.persistent.dsa_size_limit_bytes) {
+  if (result.persistent.fixed_dsa_reserved_bytes >
+      result.persistent.dsa_size_limit_bytes) {
     result.error = SharedRegistryErrorV1::InvalidConfiguration;
   }
   return result;
@@ -2284,6 +2321,8 @@ shared_registry_diagnostics() noexcept {
       pg_atomic_read_u32(&g_bootstrap->emergency_transition_count);
   result.reserved_dsa_bytes =
       pg_atomic_read_u64(&g_bootstrap->reserved_dsa_bytes);
+  result.fixed_dsa_reserved_bytes =
+      g_bootstrap->layout.fixed_dsa_reserved_bytes;
   result.reserved_file_bytes =
       pg_atomic_read_u64(&g_bootstrap->reserved_file_bytes);
   result.complete_entries =

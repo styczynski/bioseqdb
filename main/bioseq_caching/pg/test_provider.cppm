@@ -123,7 +123,6 @@ enum class MappingFault : std::uint16_t {
 
 enum class DigestFault : std::uint16_t {
     None = 0,
-    RecipeMismatch,
     RuntimeMismatch,
 };
 
@@ -162,6 +161,7 @@ inline std::array<Oid, kMaximumTargetRelations> g_additional_target_relations{};
 inline std::size_t g_additional_target_relation_count = 0;
 inline std::uint64_t g_requested_capabilities = 1;
 inline MappingFault g_mapping_fault = MappingFault::None;
+inline const PlannedStmt* g_persisted_mapping_fault_statement = nullptr;
 inline DigestFault g_digest_fault = DigestFault::None;
 inline ProjectionOrder g_projection_order = ProjectionOrder::Natural;
 inline bool g_force_domain_digest_collision = false;
@@ -1395,6 +1395,7 @@ void shutdown_provider() noexcept {
         }
     }
     g_provider_registered = false;
+    g_persisted_mapping_fault_statement = nullptr;
 }
 
 /** Parse the normative mapping-fault control vocabulary. */
@@ -1567,6 +1568,7 @@ Datum bioseq_cache_test_provider_set_mapping_fault(PG_FUNCTION_ARGS) {
     require_test_superuser();
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     g_mapping_fault = parse_mapping_fault(name);
+    g_persisted_mapping_fault_statement = nullptr;
     pfree(name);
     PG_RETURN_VOID();
 }
@@ -1579,8 +1581,6 @@ Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS) {
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     if (std::strcmp(name, "none") == 0) {
         g_digest_fault = DigestFault::None;
-    } else if (std::strcmp(name, "recipe_mismatch") == 0) {
-        g_digest_fault = DigestFault::RecipeMismatch;
     } else if (std::strcmp(name, "runtime_mismatch") == 0) {
         g_digest_fault = DigestFault::RuntimeMismatch;
     } else {
@@ -1674,6 +1674,7 @@ Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS) {
     require_test_superuser();
     g_requested_capabilities = 1;
     g_mapping_fault = MappingFault::None;
+    g_persisted_mapping_fault_statement = nullptr;
     g_digest_fault = DigestFault::None;
     g_projection_order = ProjectionOrder::Natural;
     g_force_domain_digest_collision = false;
@@ -2228,9 +2229,17 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     EState* estate,
     BioseqCacheDigestSinkV1* sink) {
     ++g_counters.runtime_digest;
-    if (persisted_mapping_fault_active()
-        && !mutate_persisted_mapping_plan(estate)) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+    if (persisted_mapping_fault_active()) {
+        if (estate == nullptr || estate->es_plannedstmt == nullptr) {
+            return BIOSEQ_CACHE_STATUS_ERROR;
+        }
+        if (g_persisted_mapping_fault_statement
+                != estate->es_plannedstmt) {
+            if (!mutate_persisted_mapping_plan(estate)) {
+                return BIOSEQ_CACHE_STATUS_ERROR;
+            }
+            g_persisted_mapping_fault_statement = estate->es_plannedstmt;
+        }
     }
     if (!parse_plan_nodes(
             plan_domain_nodes,
@@ -2613,9 +2622,6 @@ void apply_mapping_fault(
         copyObject(scan->custom_private));
     std::memcpy(
         output->expected_generation_digest, digest.data(), digest.size());
-    if (g_digest_fault == DigestFault::RecipeMismatch) {
-        output->expected_generation_digest[0] ^= 0xa5U;
-    }
     return BIOSEQ_CACHE_STATUS_OK;
 }
 

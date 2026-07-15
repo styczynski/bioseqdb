@@ -455,6 +455,82 @@ inline bool g_forced_coverage_domain_digest_active = false;
 inline CacheDigest256 g_forced_coverage_domain_digest{};
 #endif
 
+/** One allocation-free query-state link drained before DSA/storage detach. */
+struct BackendQueryCleanupLinkV1 {
+    BackendQueryCleanupLinkV1* previous = nullptr;
+    BackendQueryCleanupLinkV1* next = nullptr;
+    void (*cleanup)(void*) noexcept = nullptr;
+    void* state = nullptr;
+    bool linked = false;
+    std::array<std::uint8_t, 7> reserved{};
+};
+
+inline BackendQueryCleanupLinkV1* g_backend_query_cleanup_head = nullptr;
+inline bool g_backend_query_cleanup_exit_registered = false;
+
+void unlink_backend_query_cleanup(
+        BackendQueryCleanupLinkV1& link) noexcept {
+    if (!link.linked) {
+        return;
+    }
+    if (link.previous != nullptr) {
+        link.previous->next = link.next;
+    } else if (g_backend_query_cleanup_head == &link) {
+        g_backend_query_cleanup_head = link.next;
+    }
+    if (link.next != nullptr) {
+        link.next->previous = link.previous;
+    }
+    link = {};
+}
+
+void link_backend_query_cleanup(
+        BackendQueryCleanupLinkV1& link,
+        void* state,
+        void (*cleanup)(void*) noexcept) noexcept {
+    if (link.linked || state == nullptr || cleanup == nullptr) {
+        return;
+    }
+    link.previous = nullptr;
+    link.next = g_backend_query_cleanup_head;
+    link.cleanup = cleanup;
+    link.state = state;
+    link.linked = true;
+    if (g_backend_query_cleanup_head != nullptr) {
+        g_backend_query_cleanup_head->previous = &link;
+    }
+    g_backend_query_cleanup_head = &link;
+}
+
+/** Drain query-owned capabilities while shared mappings are still attached. */
+void cache_backend_query_cleanup_exit(int, Datum) noexcept {
+    while (g_backend_query_cleanup_head != nullptr) {
+        BackendQueryCleanupLinkV1* link = g_backend_query_cleanup_head;
+        void (*cleanup)(void*) noexcept = link->cleanup;
+        void* state = link->state;
+        if (cleanup != nullptr && state != nullptr) {
+            cleanup(state);
+        }
+        if (link->linked) {
+            unlink_backend_query_cleanup(*link);
+        }
+    }
+    g_reusable_registry = {};
+    g_reusable_membership_lock = nullptr;
+    g_reusable_exact_locks = nullptr;
+    g_reusable_coverage_locks = nullptr;
+    g_reusable_wait_slots = nullptr;
+    g_reusable_wait_slot_count = 0;
+}
+
+void register_backend_query_cleanup_exit() noexcept {
+    if (g_backend_query_cleanup_exit_registered) {
+        return;
+    }
+    before_shmem_exit(cache_backend_query_cleanup_exit, Datum{0});
+    g_backend_query_cleanup_exit_registered = true;
+}
+
 #if defined(BIOSEQ_CACHE_TESTING)
 /** Backend-local verifier faults exercise unavailable third-party AM paths. */
 enum class TestExactPlanFault : std::uint8_t {
@@ -462,6 +538,13 @@ enum class TestExactPlanFault : std::uint8_t {
     UnknownCustomScan,
     UnknownTableAccessMethod,
     UnknownIndexAccessMethod,
+    DependencyFinalizationDeclined,
+};
+
+/** Corrupt only one recipe copied into each exact wrapper plan. */
+enum class TestExactRecipeFault : std::uint8_t {
+    None,
+    ExpectedDigestMismatch,
 };
 
 /** Checksum-consistent wire faults exercise total descriptor validation. */
@@ -472,9 +555,13 @@ enum class TestCoverageDescriptorFault : std::uint8_t {
     WrongNodeType,
     MalformedSyntax,
     BindingSignatureMismatch,
+    PlanPrivateShort,
+    PlanPrivateBadVersion,
 };
 
 inline TestExactPlanFault g_test_exact_plan_fault = TestExactPlanFault::None;
+inline TestExactRecipeFault g_test_exact_recipe_fault =
+    TestExactRecipeFault::None;
 inline TestCoverageDescriptorFault g_test_coverage_descriptor_fault =
     TestCoverageDescriptorFault::None;
 #endif
@@ -532,6 +619,35 @@ void observe_runtime_provider_relation_write(
     Oid relation_oid,
     const PhysicalIdentityV1& physical_identity) noexcept;
 
+/** One query-local provider intent retained only for this planner invocation. */
+struct NestedPlannerIntentV1 {
+    Query* query = nullptr;
+    const provider_registry::ProviderV1* provider = nullptr;
+    reuse::PlannerOwnedIntentV1 intent{};
+    bool supported = false;
+};
+
+inline constexpr std::size_t kMaximumSelectedCoverageGatesV1 =
+    static_cast<std::size_t>(kMaxCoverageNodesPerPlan)
+    * static_cast<std::size_t>(kMaxSourcesPerCoverageNode);
+
+struct SelectedCoverageGateV1 {
+    PlannerInfo* origin_root = nullptr;
+    int param_id = -1;
+};
+
+enum class CoverageBypassMarkerV1 : int {
+    Enabled = 0,
+    Provisional = 1,
+    Permanent = 2,
+};
+
+enum class ExactBypassMarkerV1 : int {
+    Enabled = 0,
+    UnsafeFinalizedPlan = 1,
+    CoverageGateFinalizer = 2,
+};
+
 /** Per-planner invocation frame; PostgreSQL backends are single-threaded. */
 struct PlannerFrame {
     PlannerFrame* previous = nullptr;
@@ -545,13 +661,106 @@ struct PlannerFrame {
         provider_registry::kMaximumRegisteredProvidersV1> providers{};
     std::array<reuse::PlannerOwnedIntentV1,
         provider_registry::kMaximumRegisteredProvidersV1> intents{};
+    std::array<NestedPlannerIntentV1,
+        static_cast<std::size_t>(kMaxCoverageNodesPerPlan)>
+        nested_intents{};
+    std::array<SelectedCoverageGateV1,
+        kMaximumSelectedCoverageGatesV1> selected_coverage_gates{};
     std::size_t provider_intent_count = 0;
+    std::size_t nested_intent_count = 0;
+    std::size_t selected_coverage_gate_count = 0;
+    bool selected_coverage_gate_overflow = false;
+    bool nested_coverage_path_created = false;
     bool eligible = false;
 };
 
 inline PlannerFrame* g_planner_frame = nullptr;
 inline bool g_producer_plan_capture_active = false;
 inline MemoryContext g_plan_capture_context = nullptr;
+
+/**
+ * Remember each selected gate until the top root is created.  PostgreSQL
+ * identifies outer Params before create_plan(), so adding a gate only to a
+ * nested root is insufficient: its extParam later propagates into the top
+ * SS_finalize_plan pass.  Re-applying the bounded records at the selected
+ * top CustomPath is the first stable point after every identify pass.
+ */
+[[nodiscard]] bool remember_selected_coverage_gate(
+        PlannerInfo& root, int param_id) {
+    PlannerFrame* frame = g_planner_frame;
+    if (frame == nullptr || root.glob == nullptr || param_id < 0
+        || param_id >= list_length(root.glob->paramExecTypes)
+        || list_nth_oid(root.glob->paramExecTypes, param_id) != BOOLOID
+        || frame->selected_coverage_gate_overflow) {
+        return false;
+    }
+    for (std::size_t index = 0;
+         index < frame->selected_coverage_gate_count;
+         ++index) {
+        const SelectedCoverageGateV1& selected =
+            frame->selected_coverage_gates[index];
+        if (selected.param_id == param_id) {
+            return selected.origin_root == &root;
+        }
+    }
+    if (frame->selected_coverage_gate_count
+            >= frame->selected_coverage_gates.size()) {
+        frame->selected_coverage_gate_overflow = true;
+        return false;
+    }
+    frame->selected_coverage_gates[
+        frame->selected_coverage_gate_count++] = SelectedCoverageGateV1{
+            .origin_root = &root,
+            .param_id = param_id,
+        };
+    for (PlannerInfo* current = &root;
+         current != nullptr;
+         current = current->parent_root) {
+        if (current->glob != root.glob) {
+            frame->selected_coverage_gate_overflow = true;
+            return false;
+        }
+        current->outer_params = bms_add_member(
+            current->outer_params, param_id);
+    }
+    return true;
+}
+
+/** Re-union nested selected gates after all outer-Param identification. */
+[[nodiscard]] bool finalize_selected_coverage_gates(
+        PlannerInfo& root) {
+    PlannerFrame* frame = g_planner_frame;
+    if (frame == nullptr || root.glob == nullptr
+        || frame->selected_coverage_gate_overflow) {
+        return false;
+    }
+    if (root.parent_root != nullptr) {
+        return true;
+    }
+    for (std::size_t index = 0;
+         index < frame->selected_coverage_gate_count;
+         ++index) {
+        const SelectedCoverageGateV1& selected =
+            frame->selected_coverage_gates[index];
+        bool reached_top = false;
+        for (PlannerInfo* current = selected.origin_root;
+             current != nullptr;
+             current = current->parent_root) {
+            if (current->glob != root.glob) {
+                return false;
+            }
+            current->outer_params = bms_add_member(
+                current->outer_params, selected.param_id);
+            if (current == &root) {
+                reached_top = true;
+            }
+        }
+        if (!reached_top) {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct ReusableCoverageState;
 struct BioseqCacheState;
@@ -1610,6 +1819,7 @@ void cache_shmem_startup() {
         && g_reusable_coverage_locks != nullptr
         && g_reusable_wait_slots != nullptr
         && g_reusable_wait_slot_count != 0) {
+        register_backend_query_cleanup_exit();
         return true;
     }
     if (!storage::storage_ready() && !storage::attach_storage()) {
@@ -1641,7 +1851,33 @@ void cache_shmem_startup() {
     g_reusable_wait_slots = attachment->reusable_wait_cvs.data();
     g_reusable_wait_slot_count = static_cast<std::uint32_t>(
         attachment->reusable_wait_cvs.size());
+    register_backend_query_cleanup_exit();
     return true;
+}
+
+/**
+ * Administrative callers must not mistake an unbound process-local adapter
+ * for an empty shared registry.  Fresh backends attach through the validated
+ * shared root; once the cache header is ready, attachment failure is a
+ * fail-closed administrative error rather than a silent zero-row result.
+ */
+[[nodiscard]] bool bind_admin_reusable_registry(const char* operation) {
+    if (bind_shared_reusable_registry()) {
+        return true;
+    }
+    const bool shared_registry_expected = g_preload_requested
+        && g_shared != nullptr
+        && g_shared->magic == kSharedMagic
+        && g_shared->shared_abi_version == kSharedAbiVersion
+        && pg_atomic_read_u32(&g_shared->ready) != 0
+        && pg_atomic_read_u32(&g_shared->bootstrap_failure) == 0;
+    if (shared_registry_expected) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("%s could not attach the bioseq_cache shared registry",
+                    operation != nullptr ? operation : "bioseq_cache admin")));
+    }
+    return false;
 }
 
 /** True only when preload installed and the shared ABI is usable. */
@@ -2482,6 +2718,13 @@ struct CoverageDescriptorFaultVarV1 {
     bool changed = false;
 };
 
+[[nodiscard]] bool coverage_descriptor_wire_fault_active() noexcept {
+    return g_test_coverage_descriptor_fault
+            >= TestCoverageDescriptorFault::RawProducerVar
+        && g_test_coverage_descriptor_fault
+            <= TestCoverageDescriptorFault::BindingSignatureMismatch;
+}
+
 /** Replace exactly one sentinel Var so mixed-form faults remain deterministic. */
 bool mutate_coverage_descriptor_var_walker(Node* node, void* opaque) {
     if (node == nullptr) {
@@ -2507,8 +2750,7 @@ bool mutate_coverage_descriptor_var_walker(Node* node, void* opaque) {
         const bytea* original,
         MemoryContext planner_context) noexcept {
     if (original == nullptr || planner_context == nullptr
-        || g_test_coverage_descriptor_fault
-            == TestCoverageDescriptorFault::None) {
+        || !coverage_descriptor_wire_fault_active()) {
         return const_cast<bytea*>(original);
     }
     const auto bytes = bytea_payload(original);
@@ -3642,6 +3884,110 @@ struct RuntimeDependencyPublishContextV1 {
     bool rolled_back = false;
 };
 
+static_assert(
+    kReusableReferenceOwnersPerGenerationV1
+    <= storage::kWaitersPerManifest);
+
+[[nodiscard]] storage::StorageBackendIdentity storage_waiter_owner(
+        const ReusableReferenceTokenV1& waiter) noexcept {
+    if (!waiter.active || waiter.kind != ReusableReferenceKindV1::Waiter
+        || !waiter.owner.valid()) {
+        return {};
+    }
+    return storage::StorageBackendIdentity{
+        .proc_number = waiter.owner.proc_number,
+        .pid = waiter.owner.pid,
+        .backend_nonce = waiter.owner.backend_nonce,
+        .backend_started_at_us = waiter.owner.backend_started_at_us,
+    };
+}
+
+[[nodiscard]] bool waiter_batch_contains(
+        const ReusableWaiterOwnerBatchV1& batch,
+        const ReusableReferenceTokenV1& waiter) noexcept {
+    for (std::uint32_t index = 0; index < batch.count; ++index) {
+        if (batch.waiters[index] == waiter) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Transfer every still-live registry waiter before COMPLETE is visible. */
+[[nodiscard]] bool register_runtime_manifest_waiters(
+        const ReusableGenerationReferenceV1& reference,
+        const storage::ManifestHandle& manifest,
+        std::span<storage::ManifestWaiterToken> registered) noexcept {
+    if (!reference || !manifest
+        || registered.size()
+            < kReusableReferenceOwnersPerGenerationV1) {
+        return false;
+    }
+    const ReusableWaiterOwnerBatchV1 before =
+        snapshot_reusable_waiter_owners(
+            g_reusable_registry, reference,
+            reusable_partition_callbacks());
+    if (!before) {
+        return false;
+    }
+    std::uint32_t registered_count = 0;
+    bool complete = true;
+    for (std::uint32_t index = 0; index < before.count; ++index) {
+        const storage::StorageBackendIdentity owner =
+            storage_waiter_owner(before.waiters[index]);
+        const storage::RegisterManifestWaiterResult waiter =
+            storage::register_manifest_waiter(manifest, owner);
+        if (!waiter) {
+            complete = false;
+            break;
+        }
+        registered[index] = waiter.token;
+        ++registered_count;
+    }
+
+    ReusableWaiterOwnerBatchV1 after{};
+    if (complete) {
+        after = snapshot_reusable_waiter_owners(
+            g_reusable_registry, reference,
+            reusable_partition_callbacks());
+        complete = static_cast<bool>(after);
+    }
+    if (complete) {
+        for (std::uint32_t index = 0; index < before.count; ++index) {
+            if (waiter_batch_contains(after, before.waiters[index])) {
+                continue;
+            }
+            static_cast<void>(storage::unregister_manifest_waiter(
+                registered[index]));
+            registered[index] = {};
+        }
+        for (std::uint32_t index = 0; index < after.count; ++index) {
+            bool transferred = false;
+            for (std::uint32_t prior = 0;
+                 prior < before.count; ++prior) {
+                transferred = transferred
+                    || (after.waiters[index] == before.waiters[prior]
+                        && static_cast<bool>(registered[prior]));
+            }
+            if (!transferred) {
+                complete = false;
+                break;
+            }
+        }
+    }
+    if (!complete) {
+        for (std::uint32_t index = 0;
+             index < registered_count; ++index) {
+            if (registered[index]) {
+                static_cast<void>(storage::unregister_manifest_waiter(
+                    registered[index]));
+                registered[index] = {};
+            }
+        }
+    }
+    return complete;
+}
+
 /** Dependency -> membership -> partition terminal publication. */
 bool apply_runtime_dependency_publish(
         void* opaque,
@@ -3654,6 +4000,8 @@ bool apply_runtime_dependency_publish(
         return false;
     }
     LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
+    std::array<storage::ManifestWaiterToken,
+        kReusableReferenceOwnersPerGenerationV1> registered_waiters{};
     const auto current = wait_reusable_generation(
         g_reusable_registry,
         context->request.reference,
@@ -3665,12 +4013,27 @@ bool apply_runtime_dependency_publish(
         && current->producer == context->expected_producer
         && current->metadata.dependency_count
             == context->expected_dependency_count) {
-        context->registry_result = publish_reusable_generation(
-            g_reusable_registry,
-            context->request,
-            reusable_partition_callbacks());
-        context->action_applied = context->registry_result
-            == ReusableRegistryErrorV1::None;
+        const bool waiters_registered = register_runtime_manifest_waiters(
+            context->request.reference,
+            storage_manifest_handle(context->request.manifest),
+            registered_waiters);
+        if (waiters_registered) {
+            context->registry_result = publish_reusable_generation(
+                g_reusable_registry,
+                context->request,
+                reusable_partition_callbacks());
+            context->action_applied = context->registry_result
+                == ReusableRegistryErrorV1::None;
+        }
+    }
+    if (!context->action_applied) {
+        for (storage::ManifestWaiterToken& waiter : registered_waiters) {
+            if (waiter) {
+                static_cast<void>(
+                    storage::unregister_manifest_waiter(waiter));
+                waiter = {};
+            }
+        }
     }
     LWLockRelease(g_reusable_membership_lock);
     return context->action_applied;
@@ -3701,7 +4064,8 @@ void rollback_runtime_dependency_publish(void* opaque) noexcept {
 validate_reusable_generation_dependencies_locked(
         const ReusableGenerationSnapshotV1& snapshot,
         std::uint64_t snapshot_binding_completion_count,
-        dependency_runtime::DependencyTicketLockedActionV1 action = {})
+        dependency_runtime::DependencyTicketLockedActionV1 action = {},
+        std::uint64_t continuing_completion_count_override = 0)
         noexcept {
     dependency_runtime::DependencyRuntimeResultV1 rejected{
         .error = dependency_runtime::DependencyRuntimeErrorV1::InvalidArgument,
@@ -3724,7 +4088,9 @@ validate_reusable_generation_dependencies_locked(
     const bool in_flight = snapshot.state == CacheEntryState::Claimed
         || snapshot.state == CacheEntryState::Building;
     const std::uint64_t continuing_completion_count = in_flight
-        ? snapshot.conservative_guard.snapshot_completion_count
+        ? continuing_completion_count_override != 0
+            ? continuing_completion_count_override
+            : snapshot.conservative_guard.snapshot_completion_count
         : 0;
     dependency_runtime::DependencyRuntimeResultV1 result =
         dependency_runtime::validate_dependency_vector_locked(
@@ -5258,8 +5624,7 @@ void release_planner_pin_noerror(
         const ReusableCandidateSnapshotV1& candidate =
             candidates->candidates[index];
 #if defined(BIOSEQ_CACHE_TESTING)
-        if (g_test_coverage_descriptor_fault
-                != TestCoverageDescriptorFault::None) {
+        if (coverage_descriptor_wire_fault_active()) {
             candidate_bytes[index].coverage_descriptor =
                 inject_coverage_descriptor_fault_fail_open(
                     candidate_bytes[index].coverage_descriptor,
@@ -5390,6 +5755,9 @@ void release_planner_pin_noerror(
         copyObject(current_predicates.replay));
     private_nodes = lappend(
         private_nodes, makeInteger(current_gate.param_id));
+    /* Subplan roots remain bypassed unless the finalized main-tree walk clears. */
+    private_nodes = lappend(private_nodes, makeInteger(
+        static_cast<int>(CoverageBypassMarkerV1::Provisional)));
     const Cost overhead = cpu_tuple_cost
         * (provider_path->rows > 0 ? provider_path->rows : 1.0)
         * 0.0001;
@@ -5403,8 +5771,68 @@ void release_planner_pin_noerror(
             .startup_cost = decorated.value.path->startup_cost,
             .total_cost = decorated.value.path->total_cost + overhead,
         });
-    return wrapper != nullptr
+#if defined(BIOSEQ_CACHE_TESTING)
+    if (wrapper != nullptr
+        && g_test_coverage_descriptor_fault
+            == TestCoverageDescriptorFault::PlanPrivateShort) {
+        wrapper->custom_private = list_truncate(
+            wrapper->custom_private,
+            list_length(wrapper->custom_private) - 1);
+    } else if (wrapper != nullptr
+        && g_test_coverage_descriptor_fault
+            == TestCoverageDescriptorFault::PlanPrivateBadVersion) {
+        lfirst(list_nth_cell(wrapper->custom_private, 0)) =
+            makeInteger(INT_MAX);
+    }
+#endif
+    const bool replaced = wrapper != nullptr
         && reuse::replace_provider_path(relation, provider_path, wrapper);
+    if (replaced && root != nullptr && root->parent_root != nullptr
+        && g_planner_frame != nullptr) {
+        g_planner_frame->nested_coverage_path_created = true;
+    }
+    return replaced;
+}
+
+/** Resolve one copied intent for the current Query root without shared Nodes. */
+[[nodiscard]] const BioseqCacheQueryIntentV1* planner_provider_intent(
+        PlannerFrame& frame,
+        PlannerInfo& root,
+        const provider_registry::ProviderV1* provider) noexcept {
+    if (provider == nullptr || root.parse == nullptr) {
+        return nullptr;
+    }
+    if (root.parse == frame.delegated_query) {
+        for (std::size_t index = 0;
+             index < frame.provider_intent_count; ++index) {
+            if (frame.providers[index] == provider) {
+                return &frame.intents[index].value;
+            }
+        }
+        return nullptr;
+    }
+    for (std::size_t index = 0;
+         index < frame.nested_intent_count; ++index) {
+        NestedPlannerIntentV1& cached = frame.nested_intents[index];
+        if (cached.query == root.parse && cached.provider == provider) {
+            return cached.supported ? &cached.intent.value : nullptr;
+        }
+    }
+    if (frame.nested_intent_count >= frame.nested_intents.size()) {
+        return nullptr;
+    }
+    NestedPlannerIntentV1& destination =
+        frame.nested_intents[frame.nested_intent_count++];
+    destination.query = root.parse;
+    destination.provider = provider;
+    reuse::ProviderCallDiagnosticV1 diagnostic{};
+    destination.supported = reuse::invoke_analyze_query_fail_open(
+        provider,
+        root.parse,
+        root.planner_cxt != nullptr ? root.planner_cxt : CurrentMemoryContext,
+        &destination.intent,
+        &diagnostic);
+    return destination.supported ? &destination.intent.value : nullptr;
 }
 
 /** Discover, map, decorate, and replace paths owned by one provider bridge. */
@@ -5416,9 +5844,9 @@ void consider_provider_reusable_paths_impl(
         const provider_registry::ProviderV1* provider) noexcept {
     PlannerFrame* frame = g_planner_frame;
     if (frame == nullptr || !frame->eligible || root == nullptr
-        || relation == nullptr || range_entry == nullptr
+        || root->parse == nullptr || relation == nullptr
+        || range_entry == nullptr
         || provider == nullptr || relation->pathlist == NIL
-        || root->parse != frame->delegated_query
         || range_table_index == 0) {
         return;
     }
@@ -5431,13 +5859,8 @@ void consider_provider_reusable_paths_impl(
         || planner_rt_fetch(range_table_index, root) != range_entry) {
         return;
     }
-    const BioseqCacheQueryIntentV1* intent = nullptr;
-    for (std::size_t index = 0; index < frame->provider_intent_count; ++index) {
-        if (frame->providers[index] == provider) {
-            intent = &frame->intents[index].value;
-            break;
-        }
-    }
+    const BioseqCacheQueryIntentV1* intent = planner_provider_intent(
+        *frame, *root, provider);
     if (intent == nullptr) {
         return;
     }
@@ -5469,9 +5892,16 @@ struct VisibilityTicket {
     bool valid = false;
 };
 
+enum class VisibilityTicketPurposeV1 : std::uint8_t {
+    Admission,
+    Continuation,
+};
+
 /** Bind the committed-write epoch to the statement's already-active snapshot. */
 [[nodiscard]] VisibilityTicket mint_visibility_ticket(
-        WriteObservability observability) noexcept {
+        WriteObservability observability,
+        VisibilityTicketPurposeV1 purpose =
+            VisibilityTicketPurposeV1::Admission) noexcept {
     VisibilityTicket ticket{};
     if (!shared_cache_ready()) {
         return ticket;
@@ -5495,14 +5925,18 @@ struct VisibilityTicket {
     const TransactionId last_write = static_cast<TransactionId>(
         pg_atomic_read_u32(&g_shared->last_committed_write_xid));
     const bool snapshot_completion_stable =
-        snapshot->snapXactCompletionCount == 0
+        purpose == VisibilityTicketPurposeV1::Continuation
+        || snapshot->snapXactCompletionCount == 0
         || snapshot->snapXactCompletionCount == completion;
     const bool stable = snapshot_completion_stable
         && transitions == 0
         && !database_has_prepared_xacts_locked(MyDatabaseId);
     LWLockRelease(ProcArrayLock);
-    if (!stable || (TransactionIdIsValid(last_write)
-            && XidInMVCCSnapshot(last_write, snapshot))) {
+    const bool admission_crossed_committed_write =
+        purpose == VisibilityTicketPurposeV1::Admission
+        && TransactionIdIsValid(last_write)
+        && XidInMVCCSnapshot(last_write, snapshot);
+    if (!stable || admission_crossed_committed_write) {
         return ticket;
     }
     ticket.database_epoch = database_epoch;
@@ -5697,6 +6131,72 @@ void reusable_registry_janitor_sweep_v1() noexcept {
     workspace->~ReusableJanitorLivenessWorkspaceV1();
     pfree(workspace_memory);
 }
+
+#if defined(BIOSEQ_CACHE_TESTING)
+
+/** Snapshot test-drain progress only while membership is fully quiesced. */
+[[nodiscard]] ReusableRegistrySnapshotV1
+test_reusable_registry_snapshot_v1() noexcept {
+    if (!g_reusable_registry || g_reusable_membership_lock == nullptr) {
+        return {};
+    }
+    LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
+    const ReusableRegistrySnapshotV1 snapshot =
+        reusable_registry_snapshot(g_reusable_registry);
+    LWLockRelease(g_reusable_membership_lock);
+    return snapshot;
+}
+
+[[nodiscard]] bool same_test_drain_progress_v1(
+        const ReusableRegistrySnapshotV1& left,
+        const ReusableRegistrySnapshotV1& right) noexcept {
+    return left.indexed_generations == right.indexed_generations
+        && left.retired_generations == right.retired_generations
+        && left.free_generations == right.free_generations
+        && left.inflight_generations == right.inflight_generations
+        && left.complete_generations == right.complete_generations
+        && left.failed_generations == right.failed_generations
+        && left.invalidated_generations == right.invalidated_generations
+        && left.waiter_references == right.waiter_references
+        && left.planner_pins == right.planner_pins
+        && left.reader_pins == right.reader_pins;
+}
+
+/**
+ * Deterministically exercise the production unified janitor from SQL tests.
+ * One cycle covers every generation slot when no references interfere.  A
+ * bounded retry covers owner reaping and the later dependency-release pass;
+ * two unchanged cycles prove that no immediately reclaimable work remains.
+ */
+void drain_reusable_registry_for_testing_v1() noexcept {
+    if (!g_reusable_registry || g_reusable_membership_lock == nullptr
+        || g_reusable_wait_slot_count == 0) {
+        return;
+    }
+    const std::uint32_t passes_per_cycle =
+        (g_reusable_wait_slot_count + kMaximumReusableJanitorBatchV1 - 1U)
+        / kMaximumReusableJanitorBatchV1;
+    constexpr std::uint32_t maximum_cycles =
+        kReusableReferenceOwnersPerGenerationV1 + 2U;
+    ReusableRegistrySnapshotV1 previous =
+        test_reusable_registry_snapshot_v1();
+    std::uint32_t unchanged_cycles = 0;
+    for (std::uint32_t cycle = 0;
+         cycle < maximum_cycles && unchanged_cycles < 2U;
+         ++cycle) {
+        for (std::uint32_t pass = 0; pass < passes_per_cycle; ++pass) {
+            reusable_registry_janitor_sweep_v1();
+        }
+        const ReusableRegistrySnapshotV1 current =
+            test_reusable_registry_snapshot_v1();
+        unchanged_cycles = same_test_drain_progress_v1(previous, current)
+            ? unchanged_cycles + 1U
+            : 0U;
+        previous = current;
+    }
+}
+
+#endif
 
 /** Reject non-disabled use when the library was not preloaded. */
 bool check_query_cache_mode(int* new_value, void**, GucSource) {
@@ -6233,6 +6733,7 @@ struct BioseqCacheState {
     Oid* send_functions;
     Tuplestorestate* replay_store;
     TupleTableSlot* replay_slot;
+    BackendQueryCleanupLinkV1 backend_cleanup;
     MemoryContextCallback cleanup_callback;
     bool cleanup_registered;
     bool cleanup_done;
@@ -6282,6 +6783,19 @@ static_assert(offsetof(BioseqCacheState, css) == 0);
     return marker == nullptr || !IsA(marker, Integer) || intVal(marker) != 0;
 }
 
+[[nodiscard]] int private_force_bypass_marker(
+        const CustomScan& scan) noexcept {
+    if (scan.custom_private == NIL
+        || list_length(scan.custom_private) <= 2) {
+        return -1;
+    }
+    const Node* marker = static_cast<const Node*>(
+        list_nth(scan.custom_private, 2));
+    return marker != nullptr && IsA(marker, Integer)
+        ? intVal(marker)
+        : -1;
+}
+
 /** Mutate only the preallocated scalar; never reshape a finalized Plan. */
 [[nodiscard]] bool set_private_force_bypass(
         CustomScan& scan, bool force_bypass) noexcept {
@@ -6293,7 +6807,14 @@ static_assert(offsetof(BioseqCacheState, css) == 0);
     if (marker == nullptr || !IsA(marker, Integer)) {
         return false;
     }
-    reinterpret_cast<Integer*>(marker)->ival = force_bypass ? 1 : 0;
+    auto* value = reinterpret_cast<Integer*>(marker);
+    if (value->ival
+            == static_cast<int>(ExactBypassMarkerV1::CoverageGateFinalizer)) {
+        return true;
+    }
+    value->ival = force_bypass
+        ? static_cast<int>(ExactBypassMarkerV1::UnsafeFinalizedPlan)
+        : static_cast<int>(ExactBypassMarkerV1::Enabled);
     return true;
 }
 
@@ -6499,7 +7020,7 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
 [[nodiscard]] StringInfo build_runtime_key(
         const CustomScan& scan, EState* estate, TupleDesc descriptor) {
     StringInfo key = makeStringInfo();
-    const std::uint32_t key_format = 6;
+    const std::uint32_t key_format = 7;
     Oid effective_user = InvalidOid;
     int security_context = 0;
     GetUserIdAndSecContext(&effective_user, &security_context);
@@ -6605,6 +7126,397 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
         }
     }
     return key;
+}
+
+const CustomScanMethods& coverage_scan_methods();
+
+/** Stable semantic material carried by one finalized reusable coverage Plan. */
+struct ExactCoverageSemanticFrameV1 {
+    CoverageCurrentPlanViewV1 current{};
+    CoverageDescriptorHeaderV1 descriptor{};
+};
+
+[[nodiscard]] bool exact_coverage_bytes_equal(
+        std::span<const std::byte> left,
+        std::span<const std::byte> right) noexcept {
+    return left.size() == right.size()
+        && (left.empty()
+            || std::memcmp(left.data(), right.data(), left.size()) == 0);
+}
+
+/** A duplicate logical occurrence must describe byte-identical semantics. */
+[[nodiscard]] bool exact_coverage_binding_anchor_equal(
+        const reuse::CoverageFragmentBindingSignatureV1& left,
+        const reuse::CoverageFragmentBindingSignatureV1& right) noexcept {
+    return left.format_version == right.format_version
+        && left.fragment_binding_ordinal == right.fragment_binding_ordinal
+        && left.provider_rte_occurrence_ordinal
+            == right.provider_rte_occurrence_ordinal
+        && left.provider_rte_occurrence_count
+            == right.provider_rte_occurrence_count
+        && left.logical_relation_oid == right.logical_relation_oid
+        && left.selected_relation_oid == right.selected_relation_oid
+        && left.provider_id == right.provider_id
+        && left.flags == right.flags;
+}
+
+[[nodiscard]] bool exact_coverage_frames_equal(
+        const ExactCoverageSemanticFrameV1& left,
+        const ExactCoverageSemanticFrameV1& right) noexcept {
+    const auto& left_header = left.current.header;
+    const auto& right_header = right.current.header;
+    return left_header.provider_id == right_header.provider_id
+        && left_header.provider_abi_version
+            == right_header.provider_abi_version
+        && left_header.compatibility_family_id
+            == right_header.compatibility_family_id
+        && left_header.capability_mask == right_header.capability_mask
+        && left_header.coverage_directory_key
+            == right_header.coverage_directory_key
+        && left_header.generation_digest == right_header.generation_digest
+        && left.descriptor.provider_security_digest_format_version
+            == right.descriptor.provider_security_digest_format_version
+        && left.descriptor.provider_security_flags
+            == right.descriptor.provider_security_flags
+        && left.descriptor.boundary_count == right.descriptor.boundary_count
+        && left.descriptor.lineage_count == right.descriptor.lineage_count
+        && left.descriptor.required_boundary_count
+            == right.descriptor.required_boundary_count
+        && left.descriptor.required_lineage_count
+            == right.descriptor.required_lineage_count
+        && left.descriptor.binding == right.descriptor.binding
+        && exact_coverage_bytes_equal(
+            left.current.canonical_domain_key,
+            right.current.canonical_domain_key)
+        && exact_coverage_bytes_equal(
+            left.current.canonical_generation_key,
+            right.current.canonical_generation_key);
+}
+
+/** Canonical order is the stable provider/relation occurrence identity. */
+[[nodiscard]] bool exact_coverage_frame_less(
+        const ExactCoverageSemanticFrameV1& left,
+        const ExactCoverageSemanticFrameV1& right) noexcept {
+    const auto& l = left.descriptor.binding;
+    const auto& r = right.descriptor.binding;
+    if (l.provider_id != r.provider_id) {
+        return l.provider_id < r.provider_id;
+    }
+    if (l.logical_relation_oid != r.logical_relation_oid) {
+        return l.logical_relation_oid < r.logical_relation_oid;
+    }
+    if (l.provider_rte_occurrence_ordinal
+        != r.provider_rte_occurrence_ordinal) {
+        return l.provider_rte_occurrence_ordinal
+            < r.provider_rte_occurrence_ordinal;
+    }
+    if (l.provider_rte_occurrence_count
+        != r.provider_rte_occurrence_count) {
+        return l.provider_rte_occurrence_count
+            < r.provider_rte_occurrence_count;
+    }
+    if (l.selected_relation_oid != r.selected_relation_oid) {
+        return l.selected_relation_oid < r.selected_relation_oid;
+    }
+    if (l.fragment_binding_ordinal != r.fragment_binding_ordinal) {
+        return l.fragment_binding_ordinal < r.fragment_binding_ordinal;
+    }
+    return l.format_version < r.format_version;
+}
+
+/** Walk all finalized Plan children without recursion cycles or unbounded work. */
+struct ExactCoverageSemanticCollectorV1 {
+    std::array<ExactCoverageSemanticFrameV1,
+        kMaxProviderRecipesPerExactPlan> frames{};
+    std::array<const Plan*, kMaximumExactPlanWalkNodesV1> visited{};
+    std::size_t frame_count = 0;
+    std::size_t visited_count = 0;
+    bool valid = true;
+
+    [[nodiscard]] bool collect_plan(const Plan* plan);
+
+    [[nodiscard]] bool collect_plan_list(const List* plans) {
+        const ListCell* cell = nullptr;
+        foreach(cell, plans) {
+            if (!collect_plan(static_cast<const Plan*>(lfirst(cell)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool insert(
+            const ExactCoverageSemanticFrameV1& candidate) noexcept {
+        const auto& candidate_binding = candidate.descriptor.binding;
+        for (std::size_t index = 0; index < frame_count; ++index) {
+            if (!exact_coverage_binding_anchor_equal(
+                    frames[index].descriptor.binding,
+                    candidate_binding)) {
+                continue;
+            }
+            if (!exact_coverage_frames_equal(frames[index], candidate)) {
+                valid = false;
+                return false;
+            }
+            return true;
+        }
+        if (frame_count >= frames.size()) {
+            valid = false;
+            return false;
+        }
+        frames[frame_count++] = candidate;
+        return true;
+    }
+};
+
+/** Decode and validate one coverage node without retaining physical state. */
+[[nodiscard]] bool collect_exact_coverage_frame(
+        ExactCoverageSemanticCollectorV1& collector,
+        const CustomScan& scan) noexcept {
+    if (scan.custom_private == NIL || list_length(scan.custom_private) < 3
+        || !IsA(list_nth(scan.custom_private, 0), Integer)
+        || !IsA(list_nth(scan.custom_private, 1), Integer)
+        || intVal(list_nth(scan.custom_private, 0))
+            != static_cast<int>(reuse::kReusablePlanFormatVersionV1)) {
+        return false;
+    }
+    ExactCoverageSemanticFrameV1 candidate{};
+    const std::span<const std::byte> current_bytes = binary_node_payload(
+        list_nth(scan.custom_private, 2));
+    if (!decode_current_coverage_plan(current_bytes, &candidate.current)
+        || intVal(list_nth(scan.custom_private, 1)) <= 0
+        || static_cast<std::uint32_t>(
+            intVal(list_nth(scan.custom_private, 1)))
+            != candidate.current.header.provider_id
+        || candidate.current.header.capability_mask == 0
+        || candidate.current.coverage_descriptor.size()
+            < sizeof(CoverageDescriptorHeaderV1)) {
+        return false;
+    }
+    std::memcpy(
+        &candidate.descriptor,
+        candidate.current.coverage_descriptor.data(),
+        sizeof(candidate.descriptor));
+    std::uint64_t expected_descriptor_size = 0;
+    const auto descriptor_crc = coverage_descriptor_payload_crc32c(
+        candidate.current.coverage_descriptor);
+    const auto& header = candidate.current.header;
+    const auto& security = header.coverage_directory_key.security_namespace;
+    const provider_registry::ProviderV1* provider =
+        provider_registry::find_provider_v1(header.provider_id);
+    if (!coverage_descriptor_size(
+            candidate.descriptor, &expected_descriptor_size)
+        || expected_descriptor_size
+            != candidate.current.coverage_descriptor.size()
+        || !descriptor_crc.has_value()
+        || *descriptor_crc != candidate.descriptor.payload_crc32c
+        || provider == nullptr
+        || provider->abi_version != header.provider_abi_version
+        || candidate.descriptor.provider_id != header.provider_id
+        || candidate.descriptor.compatibility_family_id
+            != header.compatibility_family_id
+        || candidate.descriptor.capability_mask != header.capability_mask
+        || candidate.descriptor.binding.provider_id != header.provider_id
+        || candidate.descriptor.provider_security_digest_format_version
+            != BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1
+        || candidate.descriptor.provider_security_flags != 0
+        || std::memcmp(
+            candidate.descriptor.provider_security_digest.data(),
+            security.provider_security_digest.bytes.data(),
+            security.provider_security_digest.bytes.size()) != 0) {
+        return false;
+    }
+    return collector.insert(candidate);
+}
+
+bool ExactCoverageSemanticCollectorV1::collect_plan(const Plan* plan) {
+    if (!valid || plan == nullptr) {
+        return valid;
+    }
+    for (std::size_t index = 0; index < visited_count; ++index) {
+        if (visited[index] == plan) {
+            return true;
+        }
+    }
+    if (visited_count >= visited.size()) {
+        valid = false;
+        return false;
+    }
+    visited[visited_count++] = plan;
+    if (IsA(plan, CustomScan)) {
+        const auto* custom = reinterpret_cast<const CustomScan*>(plan);
+        if (custom->methods == &coverage_scan_methods()
+            && !collect_exact_coverage_frame(*this, *custom)) {
+            valid = false;
+            return false;
+        }
+    }
+    if (!collect_plan(outerPlan(plan)) || !collect_plan(innerPlan(plan))) {
+        return false;
+    }
+    switch (nodeTag(plan)) {
+        case T_SubqueryScan:
+            return collect_plan(
+                reinterpret_cast<const SubqueryScan*>(plan)->subplan);
+        case T_CustomScan:
+            return collect_plan_list(
+                reinterpret_cast<const CustomScan*>(plan)->custom_plans);
+        case T_Append:
+            return collect_plan_list(
+                reinterpret_cast<const Append*>(plan)->appendplans);
+        case T_MergeAppend:
+            return collect_plan_list(
+                reinterpret_cast<const MergeAppend*>(plan)->mergeplans);
+        case T_BitmapAnd:
+            return collect_plan_list(
+                reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans);
+        case T_BitmapOr:
+            return collect_plan_list(
+                reinterpret_cast<const BitmapOr*>(plan)->bitmapplans);
+        case T_Agg:
+            return collect_plan_list(
+                reinterpret_cast<const Agg*>(plan)->chain);
+        case T_Result:
+        case T_ProjectSet:
+        case T_ModifyTable:
+        case T_RecursiveUnion:
+        case T_SeqScan:
+        case T_SampleScan:
+        case T_IndexScan:
+        case T_IndexOnlyScan:
+        case T_BitmapIndexScan:
+        case T_BitmapHeapScan:
+        case T_TidScan:
+        case T_TidRangeScan:
+        case T_FunctionScan:
+        case T_ValuesScan:
+        case T_TableFuncScan:
+        case T_CteScan:
+        case T_NamedTuplestoreScan:
+        case T_WorkTableScan:
+        case T_ForeignScan:
+        case T_NestLoop:
+        case T_MergeJoin:
+        case T_HashJoin:
+        case T_Material:
+        case T_Memoize:
+        case T_Sort:
+        case T_IncrementalSort:
+        case T_Group:
+        case T_WindowAgg:
+        case T_Unique:
+        case T_Gather:
+        case T_GatherMerge:
+        case T_Hash:
+        case T_SetOp:
+        case T_LockRows:
+        case T_Limit:
+            return true;
+        default:
+            valid = false;
+            return false;
+    }
+}
+
+/** Frame all reusable semantics that can affect one exact root's result. */
+[[nodiscard]] bool append_exact_coverage_semantic_key(
+        const CustomScan& scan,
+        EState* estate,
+        StringInfo key) {
+    if (estate == nullptr || estate->es_plannedstmt == nullptr
+        || key == nullptr || scan.custom_plans == NIL
+        || list_length(scan.custom_plans) != 1
+        || list_length(estate->es_plannedstmt->subplans)
+            > static_cast<int>(kMaximumExactSubplansV1)) {
+        return false;
+    }
+    ExactCoverageSemanticCollectorV1 collector{};
+    if (!collector.collect_plan(static_cast<const Plan*>(
+            linitial(scan.custom_plans)))
+        || !collector.collect_plan_list(estate->es_plannedstmt->subplans)
+        || !collector.valid) {
+        return false;
+    }
+    std::sort(
+        collector.frames.begin(),
+        collector.frames.begin()
+            + static_cast<std::ptrdiff_t>(collector.frame_count),
+        exact_coverage_frame_less);
+    constexpr std::uint32_t frame_format = 1;
+    const auto frame_count = static_cast<std::uint32_t>(
+        collector.frame_count);
+    if (!append_key_scalar(key, frame_format)
+        || !append_key_scalar(key, frame_count)) {
+        return false;
+    }
+    for (std::size_t index = 0; index < collector.frame_count; ++index) {
+        const ExactCoverageSemanticFrameV1& frame = collector.frames[index];
+        const auto& header = frame.current.header;
+        const auto& binding = frame.descriptor.binding;
+        const auto& security =
+            header.coverage_directory_key.security_namespace;
+        if (!append_key_scalar(key, header.provider_id)
+            || !append_key_scalar(key, header.provider_abi_version)
+            || !append_key_scalar(key, header.compatibility_family_id)
+            || !append_key_scalar(key, header.capability_mask)
+            || !append_key_scalar(key, binding.format_version)
+            || !append_key_scalar(key, binding.fragment_binding_ordinal)
+            || !append_key_scalar(
+                key, binding.provider_rte_occurrence_ordinal)
+            || !append_key_scalar(
+                key, binding.provider_rte_occurrence_count)
+            || !append_key_scalar(key, binding.logical_relation_oid)
+            || !append_key_scalar(key, binding.selected_relation_oid)
+            || !append_key_scalar(key, binding.provider_id)
+            || !append_key_scalar(key, binding.flags)
+            || !append_key_field(
+                key,
+                binding.binding_role_digest.bytes.data(),
+                binding.binding_role_digest.bytes.size())
+            || !append_key_scalar(key, security.database_oid)
+            || !append_key_scalar(key, security.current_role_oid)
+            || !append_key_scalar(key, security.session_user_oid)
+            || !append_key_scalar(key, security.security_context_flags)
+            || !append_key_scalar(key, security.row_security_mode)
+            || !append_key_scalar(key, security.reserved)
+            || !append_key_field(
+                key,
+                security.provider_security_digest.bytes.data(),
+                security.provider_security_digest.bytes.size())
+            || !append_key_field(
+                key,
+                header.coverage_directory_key.coverage_domain_digest
+                    .bytes.data(),
+                header.coverage_directory_key.coverage_domain_digest
+                    .bytes.size())
+            || !append_key_field(
+                key,
+                header.generation_digest.bytes.data(),
+                header.generation_digest.bytes.size())
+            || !append_key_scalar(
+                key,
+                frame.descriptor
+                    .provider_security_digest_format_version)
+            || !append_key_scalar(
+                key, frame.descriptor.provider_security_flags)
+            || !append_key_scalar(key, frame.descriptor.boundary_count)
+            || !append_key_scalar(key, frame.descriptor.lineage_count)
+            || !append_key_scalar(
+                key, frame.descriptor.required_boundary_count)
+            || !append_key_scalar(
+                key, frame.descriptor.required_lineage_count)
+            || !append_key_field(
+                key,
+                frame.current.canonical_domain_key.data(),
+                frame.current.canonical_domain_key.size())
+            || !append_key_field(
+                key,
+                frame.current.canonical_generation_key.data(),
+                frame.current.canonical_generation_key.size())) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /** Revalidate every finalized provider recipe and frame its semantic bytes. */
@@ -6718,7 +7630,7 @@ void destroy_column_builder(BioseqCacheState& state) noexcept {
         }
         prior_ordinal = ordinal;
     }
-    return true;
+    return append_exact_coverage_semantic_key(scan, estate, key);
 }
 
 #if defined(BIOSEQ_CACHE_TESTING)
@@ -7867,6 +8779,7 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
         return decision;
     }
 
+    storage::ManifestWaiterToken manifest_waiter{};
     ConditionVariablePrepareToSleep(changed);
     PG_TRY();
     {
@@ -7892,9 +8805,17 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
             if (snapshot.state == CacheEntryState::Complete) {
                 const TtlDecision ttl = exact_reusable_ttl_decision(
                     snapshot, true, false);
+                const storage::RegisterManifestWaiterResult entitlement =
+                    snapshot.manifest
+                    ? storage::current_manifest_waiter(snapshot.reference.id)
+                    : storage::RegisterManifestWaiterResult{
+                        .error = storage::StorageError::NotFound,
+                    };
                 if (snapshot.manifest && ttl.readable
                     && visibility_ticket_still_bound(visibility)
+                    && entitlement
                     && convert_runtime_waiter_to_reader(waiter)) {
+                    manifest_waiter = entitlement.token;
                     ReusableGenerationSnapshotV1 rebound{};
                     if (snapshot_current_reusable_generation(
                             reference, &rebound)
@@ -7904,11 +8825,12 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
                         && rebound.state == CacheEntryState::Complete
                         && rebound.manifest == snapshot.manifest
                         && exact_reusable_ttl_decision(
-                            rebound, true, true).readable
+                            rebound, true, false).readable
                         && visibility_ticket_still_bound(visibility)) {
                         const VisibilityTicket refreshed =
                             mint_visibility_ticket(
-                                rebound.metadata.observability);
+                                rebound.metadata.observability,
+                                VisibilityTicketPurposeV1::Continuation);
                         const bool dependencies_stable = refreshed.valid
                             && validate_reusable_generation_dependencies_locked(
                                 rebound,
@@ -7923,8 +8845,10 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
                         decision.completed_snapshot = rebound;
                         decision.manifest_handle = storage_manifest_handle(
                             rebound.manifest);
+                        decision.manifest_waiter_token = manifest_waiter;
                         decision.registered_inflight_waiter = true;
                         decision.ttl_entitlement_consumed = true;
+                        manifest_waiter = {};
                         waiter.active = false;
                     }
                 }
@@ -7950,10 +8874,19 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
     PG_CATCH();
     {
         ConditionVariableCancelSleep();
+        if (manifest_waiter) {
+            static_cast<void>(storage::unregister_manifest_waiter(
+                manifest_waiter));
+            manifest_waiter = {};
+        }
         release_runtime_reusable_reference(waiter);
         PG_RE_THROW();
     }
     PG_END_TRY();
+    if (manifest_waiter) {
+        static_cast<void>(storage::unregister_manifest_waiter(
+            manifest_waiter));
+    }
     release_runtime_reusable_reference(waiter);
     return decision;
 }
@@ -8464,7 +9397,8 @@ struct ExactDependencyVersionsV1 {
     }
     if (claim.disposition == ReusableClaimDispositionV1::ExistingComplete) {
         const VisibilityTicket refreshed = mint_visibility_ticket(
-            snapshot.metadata.observability);
+            snapshot.metadata.observability,
+            VisibilityTicketPurposeV1::Continuation);
         if (claim.token.active
             && claim.token.kind == ReusableReferenceKindV1::ReaderPin
             && snapshot.state == CacheEntryState::Complete
@@ -8702,7 +9636,11 @@ void fail_registry_producer(BioseqCacheState& state) noexcept {
 /** PostgreSQL memory-context cleanup covers ERROR paths that skip EndCustomScan. */
 void cache_state_cleanup(void* argument) noexcept {
     auto* state = static_cast<BioseqCacheState*>(argument);
-    if (state == nullptr || state->cleanup_done) {
+    if (state == nullptr) {
+        return;
+    }
+    unlink_backend_query_cleanup(state->backend_cleanup);
+    if (state->cleanup_done) {
         return;
     }
     state->cleanup_done = true;
@@ -8875,7 +9813,8 @@ void cache_state_cleanup(void* argument) noexcept {
     }
     destroy_column_builder(state);
     const VisibilityTicket refreshed = mint_visibility_ticket(
-        storage_snapshot.metadata.observability);
+        storage_snapshot.metadata.observability,
+        VisibilityTicketPurposeV1::Continuation);
     const std::uint64_t continuing_completion_count =
         storage_snapshot.conservative_guard.snapshot_completion_count;
     if (continuing_completion_count != 0
@@ -8901,6 +9840,10 @@ void cache_state_cleanup(void* argument) noexcept {
     };
     const dependency_runtime::DependencyRuntimeResultV1 validated =
         refreshed.valid
+            && (storage_snapshot.metadata.observability
+                    != WriteObservability::DatabaseWideFallback
+                || refreshed.database_epoch
+                    == state.visibility_database_epoch)
         ? validate_reusable_generation_dependencies_locked(
             storage_snapshot,
             refreshed.completion_count,
@@ -8908,7 +9851,11 @@ void cache_state_cleanup(void* argument) noexcept {
                 .context = &context,
                 .apply = apply_runtime_dependency_publish,
                 .rollback = rollback_runtime_dependency_publish,
-            })
+            },
+            database_guard_requires_completion_v1(
+                    storage_snapshot.conservative_guard.dependency)
+                ? refreshed.completion_count
+                : 0)
         : dependency_runtime::DependencyRuntimeResultV1{
             .error = dependency_runtime::DependencyRuntimeErrorV1::
                 ReferenceValidationFailed,
@@ -9231,6 +10178,8 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             estate->es_query_cxt, &state->cleanup_callback);
         state->cleanup_registered = true;
     }
+    link_backend_query_cleanup(
+        state->backend_cleanup, state, cache_state_cleanup);
 
     if (g_producer_plan_capture_active) {
         initialize_retained_child(*state, node, estate, eflags);
@@ -9407,8 +10356,11 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                 CompleteResultLoadFailureV1::None;
             PG_TRY();
             {
-                storage::PinManifestResult pinned = storage::pin_manifest(
-                    state->entry_id);
+                storage::PinManifestResult pinned =
+                    state->manifest_waiter_owned
+                    ? storage::convert_waiter_to_pin(
+                        state->manifest_waiter_token)
+                    : storage::pin_manifest(state->entry_id);
                 pin_error = pinned.error;
                 if (pinned) {
                     state->manifest_waiter_owned = false;
@@ -9679,6 +10631,7 @@ void cache_explain_custom_scan(
         ? "reuse"
         : mode == QueryCacheMode::Same ? "same" : "disabled";
     const bool force_bypass = private_force_bypass(*scan);
+    const int force_bypass_marker = private_force_bypass_marker(*scan);
     const int runtime_recipe_count = exact_runtime_recipe_count(*scan);
     const int parameter_count = private_list_length(*scan, 3, T_List);
     const int relation_dependency_count =
@@ -9700,7 +10653,10 @@ void cache_explain_custom_scan(
     if (force_bypass) {
         ExplainPropertyText(
             "Cache Bypass Reason",
-            runtime_recipe_count < 0
+            force_bypass_marker == static_cast<int>(
+                    ExactBypassMarkerV1::CoverageGateFinalizer)
+                ? "internal nested-coverage gate finalizer"
+                : runtime_recipe_count < 0
                 ? "provider runtime recipe unavailable"
                 : "unsafe finalized source path",
             explain_state);
@@ -9820,6 +10776,9 @@ struct ExactProviderRecipeCollectorV1 {
     std::uint32_t plan_ordinal = 0;
     std::uint32_t recipe_count = 0;
     bool valid = true;
+#if defined(BIOSEQ_CACHE_TESTING)
+    bool test_recipe_fault_applied = false;
+#endif
 
     [[nodiscard]] bool remember_subplan(int plan_id) noexcept {
         if (plan_id <= 0 || root == nullptr || root->glob == nullptr
@@ -10226,6 +11185,14 @@ bool ExactProviderRecipeCollectorV1::collect_plan(const Plan* plan) {
             valid = false;
             return false;
         }
+#if defined(BIOSEQ_CACHE_TESTING)
+        if (g_test_exact_recipe_fault
+                == TestExactRecipeFault::ExpectedDigestMismatch
+            && !test_recipe_fault_applied) {
+            recipe.value.expected_generation_digest[0] ^= 0xa5U;
+            test_recipe_fault_applied = true;
+        }
+#endif
         Const* expected = make_binary_node(std::span<const std::byte>{
             reinterpret_cast<const std::byte*>(
                 recipe.value.expected_generation_digest),
@@ -10377,9 +11344,19 @@ bool ExactProviderRecipeCollectorV1::collect_plan(const Plan* plan) {
 Plan* cache_plan_custom_path(
         PlannerInfo* root, RelOptInfo* relation, CustomPath* best_path,
         List* target_list, List*, List* custom_plans) {
-    if (root == nullptr || custom_plans == NIL
+    if (root == nullptr || relation == nullptr || best_path == nullptr
+        || custom_plans == NIL
         || list_length(custom_plans) != 1) {
-        return nullptr;
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("BioseqCacheScan selected path is malformed")));
+        pg_unreachable();
+    }
+    if (!finalize_selected_coverage_gates(*root)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("Bioseq cache selected coverage gates are malformed")));
+        pg_unreachable();
     }
     Plan* child = static_cast<Plan*>(linitial(custom_plans));
     List* runtime_recipes = NIL;
@@ -10577,6 +11554,7 @@ struct ReusableCoverageState {
     Bitmapset* requested_predicate_attnos;
     HTAB* occurrence_owners;
     std::array<CoverageRuntimeSourceV1, kMaxSourcesPerCoverageNode> sources;
+    BackendQueryCleanupLinkV1 backend_cleanup;
     MemoryContextCallback cleanup_callback;
 };
 
@@ -11465,11 +12443,21 @@ void discard_coverage_blocks(ReusableCoverageState& state) noexcept {
 
 void release_runtime_reusable_reference(
         ReusableReferenceTokenV1& token) noexcept {
+    const ReusableReferenceTokenV1 owned = token;
     if (token.active && g_reusable_registry) {
         static_cast<void>(release_reusable_reference(
             g_reusable_registry,
             token,
             reusable_partition_callbacks()));
+    }
+    if (owned.active && owned.kind == ReusableReferenceKindV1::Waiter
+        && owned.reference) {
+        const storage::RegisterManifestWaiterResult waiter =
+            storage::current_manifest_waiter(owned.reference.id);
+        if (waiter) {
+            static_cast<void>(
+                storage::unregister_manifest_waiter(waiter.token));
+        }
     }
 }
 
@@ -11561,7 +12549,11 @@ void fail_coverage_producer(ReusableCoverageState& state) noexcept {
 
 void coverage_state_cleanup(void* opaque) noexcept {
     auto* state = static_cast<ReusableCoverageState*>(opaque);
-    if (state == nullptr || state->cleanup_done) {
+    if (state == nullptr) {
+        return;
+    }
+    unlink_backend_query_cleanup(state->backend_cleanup);
+    if (state->cleanup_done) {
         return;
     }
     state->cleanup_done = true;
@@ -11809,7 +12801,8 @@ void coverage_state_cleanup(void* opaque) noexcept {
     PG_END_TRY();
     if (accepted && !source.waited) {
         const VisibilityTicket refreshed = mint_visibility_ticket(
-            source.completed_snapshot.metadata.observability);
+            source.completed_snapshot.metadata.observability,
+            VisibilityTicketPurposeV1::Continuation);
         const bool semantic_identity_matches =
             older_reusable_identity_matches(
                 state, source, current_plan, source.completed_snapshot);
@@ -12005,20 +12998,29 @@ void coverage_state_cleanup(void* opaque) noexcept {
             binary_node_payload(source.descriptor_node));
 }
 
-/** In-flight identity retains the provisional legacy liveness fingerprint. */
+/** In-flight identity is proved by the stored canonical vector and guard. */
 [[nodiscard]] bool older_reusable_inflight_identity_matches(
         const ReusableCoverageState& state,
         const CoverageRuntimeSourceV1& source,
         const CoverageCurrentPlanViewV1& current_plan,
         const ReusableGenerationSnapshotV1& snapshot) noexcept {
-    const CoverageDependencyTicketV1 dependency = coverage_dependency_ticket(
-        source.contract.domain, state.provider);
+    const VisibilityTicket refreshed = mint_visibility_ticket(
+        snapshot.metadata.observability,
+        VisibilityTicketPurposeV1::Continuation);
+    const CoverageDependencyTicketV1 dependency = refreshed.valid
+        ? coverage_dependency_ticket(
+            source.contract.domain,
+            state.provider,
+            refreshed.completion_count)
+        : CoverageDependencyTicketV1{};
     return older_reusable_identity_matches(
             state, source, current_plan, snapshot)
+        && refreshed.valid
         && dependency.valid
         && snapshot.metadata.dependency_count == dependency.dependency_count
-        && snapshot.metadata.dependency_fingerprint == dependency.fingerprint
-        && snapshot.metadata.physical_identity == dependency.physical_identity;
+        && snapshot.metadata.physical_identity == dependency.physical_identity
+        && validate_reusable_generation_dependencies_locked(
+            snapshot, refreshed.completion_count);
 }
 
 /** A completed older source additionally requires one published manifest. */
@@ -12083,7 +13085,8 @@ void coverage_state_cleanup(void* opaque) noexcept {
             }
             if (snapshot.state == CacheEntryState::Complete) {
                 const VisibilityTicket refreshed = mint_visibility_ticket(
-                    snapshot.metadata.observability);
+                    snapshot.metadata.observability,
+                    VisibilityTicketPurposeV1::Continuation);
                 if (older_reusable_identity_matches(
                         state, source, current_plan, snapshot)
                     && snapshot.manifest
@@ -12242,7 +13245,8 @@ void coverage_state_cleanup(void* opaque) noexcept {
     }
     if (initial.state == CacheEntryState::Complete) {
         const VisibilityTicket refreshed = mint_visibility_ticket(
-            initial.metadata.observability);
+            initial.metadata.observability,
+            VisibilityTicketPurposeV1::Continuation);
         const bool accepted = initial.manifest
             && current_reusable_ttl_decision(state, initial).readable
             && provider_visibility_ticket_still_bound(visibility)
@@ -12294,7 +13298,8 @@ void coverage_state_cleanup(void* opaque) noexcept {
             }
             if (snapshot.state == CacheEntryState::Complete) {
                 const VisibilityTicket refreshed = mint_visibility_ticket(
-                    snapshot.metadata.observability);
+                    snapshot.metadata.observability,
+                    VisibilityTicketPurposeV1::Continuation);
                 if (snapshot.manifest
                     && current_reusable_ttl_decision(
                         state, snapshot).readable
@@ -13393,8 +14398,23 @@ void remove_source_occurrence_owners(
     }
     const storage::ManifestHandle expected_handle =
         storage_manifest_handle(completed.manifest);
-    storage::PinManifestResult pinned = storage::pin_manifest(
-        completed.reference.id);
+    storage::PinManifestResult pinned{};
+    if (source.registry_reference.kind
+            == ReusableReferenceKindV1::Waiter) {
+        const storage::RegisterManifestWaiterResult entitlement =
+            storage::current_manifest_waiter(completed.reference.id);
+        if (entitlement) {
+            pinned = storage::convert_waiter_to_pin(entitlement.token);
+            if (!pinned) {
+                static_cast<void>(storage::unregister_manifest_waiter(
+                    entitlement.token));
+            }
+        } else {
+            pinned.error = entitlement.error;
+        }
+    } else {
+        pinned = storage::pin_manifest(completed.reference.id);
+    }
     const bool handle_matches = pinned
         && pinned.pin.handle.slot == expected_handle.slot
         && pinned.pin.handle.slot_sequence == expected_handle.slot_sequence
@@ -13440,7 +14460,9 @@ void remove_source_occurrence_owners(
             source.waited,
             source.ttl_entitlement_consumed).readable;
     const VisibilityTicket refreshed = final_semantic
-        ? mint_visibility_ticket(final_snapshot.metadata.observability)
+        ? mint_visibility_ticket(
+            final_snapshot.metadata.observability,
+            VisibilityTicketPurposeV1::Continuation)
         : VisibilityTicket{};
     const dependency_runtime::DependencyRuntimeResultV1 final_vector =
         refreshed.valid
@@ -13985,7 +15007,9 @@ void release_source_selection_bitmap_admission(
         const ReusableGenerationSnapshotV1& completed,
         TupleDesc raw_descriptor) {
     const VisibilityTicket initial_dependency_visibility =
-        mint_visibility_ticket(completed.metadata.observability);
+        mint_visibility_ticket(
+            completed.metadata.observability,
+            VisibilityTicketPurposeV1::Continuation);
     const bool initial_semantic =
         completed.state == CacheEntryState::Complete
         && current_reusable_snapshot_matches(
@@ -14017,8 +15041,23 @@ void release_source_selection_bitmap_admission(
 
     const storage::ManifestHandle expected_handle =
         storage_manifest_handle(completed.manifest);
-    storage::PinManifestResult pinned = storage::pin_manifest(
-        completed.reference.id);
+    storage::PinManifestResult pinned{};
+    if (state.current_reference_token.kind
+            == ReusableReferenceKindV1::Waiter) {
+        const storage::RegisterManifestWaiterResult entitlement =
+            storage::current_manifest_waiter(completed.reference.id);
+        if (entitlement) {
+            pinned = storage::convert_waiter_to_pin(entitlement.token);
+            if (!pinned) {
+                static_cast<void>(storage::unregister_manifest_waiter(
+                    entitlement.token));
+            }
+        } else {
+            pinned.error = entitlement.error;
+        }
+    } else {
+        pinned = storage::pin_manifest(completed.reference.id);
+    }
     const bool handle_matches = pinned
         && pinned.pin.handle.slot == expected_handle.slot
         && pinned.pin.handle.slot_sequence == expected_handle.slot_sequence
@@ -14060,7 +15099,9 @@ void release_source_selection_bitmap_admission(
     const bool final_ttl = final_semantic
         && current_reusable_ttl_decision(state, final_snapshot).readable;
     const VisibilityTicket final_dependency_visibility = final_semantic
-        ? mint_visibility_ticket(final_snapshot.metadata.observability)
+        ? mint_visibility_ticket(
+            final_snapshot.metadata.observability,
+            VisibilityTicketPurposeV1::Continuation)
         : VisibilityTicket{};
     const dependency_runtime::DependencyRuntimeResultV1 final_vector =
         final_dependency_visibility.valid
@@ -14295,7 +15336,8 @@ capture_cleanup:
     }
     destroy_coverage_builder(state);
     const VisibilityTicket refreshed = mint_visibility_ticket(
-        storage_snapshot.metadata.observability);
+        storage_snapshot.metadata.observability,
+        VisibilityTicketPurposeV1::Continuation);
     const std::uint64_t continuing_completion_count =
         storage_snapshot.conservative_guard.snapshot_completion_count;
     if (continuing_completion_count != 0
@@ -14593,6 +15635,16 @@ void initialize_coverage_child(
 }
 
 /** Claim exact-current work before any retained provider row can execute. */
+/** Coverage defaults to bypass until main-tree finalization clears its marker. */
+[[nodiscard]] bool coverage_force_bypass(
+        const CustomScan* scan) noexcept {
+    return scan == nullptr || scan->custom_private == NIL
+        || list_length(scan->custom_private) < 11
+        || !IsA(list_nth(scan->custom_private, 10), Integer)
+        || intVal(list_nth(scan->custom_private, 10))
+            != static_cast<int>(CoverageBypassMarkerV1::Enabled);
+}
+
 void coverage_begin_custom_scan(
         CustomScanState* node, EState* estate, int eflags) {
     auto* state = reinterpret_cast<ReusableCoverageState*>(node);
@@ -14671,6 +15723,17 @@ void coverage_begin_custom_scan(
         MemoryContextRegisterResetCallback(
             estate->es_query_cxt, &state->cleanup_callback);
         state->cleanup_registered = true;
+    }
+    link_backend_query_cleanup(
+        state->backend_cleanup, state, coverage_state_cleanup);
+
+    const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
+    if (coverage_force_bypass(scan)) {
+        initialize_coverage_child(*state, node, estate, eflags);
+        if (!explain_only && g_shared != nullptr) {
+            pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
+        }
+        return;
     }
 
     maybe_pause(TestPausePoint::BeforeCoveragePreflight);
@@ -14779,12 +15842,13 @@ void coverage_begin_custom_scan(
     }
 
     const bool diagnostic_private_valid = scan->custom_private != NIL
-        && list_length(scan->custom_private) >= 10
+        && list_length(scan->custom_private) >= 11
         && IsA(list_nth(scan->custom_private, 7), String)
         && IsA(list_nth(scan->custom_private, 8), String)
-        && IsA(list_nth(scan->custom_private, 9), Integer);
+        && IsA(list_nth(scan->custom_private, 9), Integer)
+        && IsA(list_nth(scan->custom_private, 10), Integer);
+    const bool force_bypass = coverage_force_bypass(scan);
 
-    const bool explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
     TupleDesc raw_descriptor = node->ss.ss_ScanTupleSlot == nullptr
         ? nullptr
         : node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
@@ -14822,6 +15886,7 @@ void coverage_begin_custom_scan(
         && compile_coverage_predicates(
             *state, *scan, state->predicate_descriptor);
     const bool runtime_allowed = !explain_only
+        && !force_bypass
         && current_contract_ready
         && predicate_states_ready
         && state->runtime_recipe_valid
@@ -15025,7 +16090,8 @@ void coverage_begin_custom_scan(
                                     *state, completed).readable;
                             const VisibilityTicket refreshed = snapshotted
                                 ? mint_visibility_ticket(
-                                    completed.metadata.observability)
+                                    completed.metadata.observability,
+                                    VisibilityTicketPurposeV1::Continuation)
                                 : VisibilityTicket{};
                             const dependency_runtime::
                                 DependencyRuntimeResultV1 validated =
@@ -15669,7 +16735,7 @@ void coverage_explain_custom_scan(
     CoverageCurrentPlanViewV1 current_plan{};
     const bool current_plan_valid = scan != nullptr
         && scan->custom_private != NIL
-        && list_length(scan->custom_private) >= 10
+        && list_length(scan->custom_private) >= 11
         && decode_current_coverage_plan(
             binary_node_payload(list_nth(scan->custom_private, 2)),
             &current_plan);
@@ -15693,6 +16759,8 @@ void coverage_explain_custom_scan(
 
     ExplainPropertyText("Cache Entry Kind", "ReusableCoverage", explain);
     ExplainPropertyText("Cache Mode", "reuse", explain);
+    ExplainPropertyBool(
+        "Cache Force Bypass", coverage_force_bypass(scan), explain);
     ExplainPropertyText(
         "Planned Cache Action",
         planned_branches == 0
@@ -15718,7 +16786,6 @@ void coverage_explain_custom_scan(
         "Provider Runtime Recipe Valid",
         state->runtime_recipe_valid,
         explain);
-
     ReusableGenerationSnapshotV1 snapshot{};
     const bool snapshot_valid = state->current_reference
         && snapshot_current_reusable_generation(
@@ -15896,8 +16963,7 @@ const CustomScanMethods& coverage_scan_methods() {
         PlannerInfo* root,
         const CustomPath& best_path) noexcept {
     if (root == nullptr || root->glob == nullptr
-        || root->parent_root != nullptr
-        || list_length(best_path.custom_private) != 6) {
+        || list_length(best_path.custom_private) < 6) {
         return false;
     }
     const void* sources_node = list_nth(best_path.custom_private, 3);
@@ -15945,10 +17011,12 @@ const CustomScanMethods& coverage_scan_methods() {
         }
     }
     for (std::size_t index = 0; index < gate_index; ++index) {
-        root->outer_params = bms_add_member(
-            root->outer_params, gate_param_ids[index]);
+        if (!remember_selected_coverage_gate(
+                *root, gate_param_ids[index])) {
+            return false;
+        }
     }
-    return true;
+    return finalize_selected_coverage_gates(*root);
 }
 
 /** Add a planner-only dense replay namespace after the provider raw tuple. */
@@ -15957,7 +17025,7 @@ const CustomScanMethods& coverage_scan_methods() {
         const CustomPath& best_path,
         const Plan& child) {
     if (root == nullptr || root->planner_cxt == nullptr
-        || list_length(best_path.custom_private) != 6
+        || list_length(best_path.custom_private) < 6
         || child.targetlist == NIL) {
         return NIL;
     }
@@ -16055,6 +17123,75 @@ const CustomScanMethods& coverage_scan_methods() {
     return valid ? scan_tlist : NIL;
 }
 
+/** A selected CustomPath must always lower to a valid semantics-first Plan. */
+[[nodiscard]] Plan* make_force_bypassed_coverage_plan(
+        PlannerInfo& root,
+        RelOptInfo& relation,
+        const CustomPath& best_path,
+        List* target_list,
+        List* custom_plans) {
+    Plan* child = static_cast<Plan*>(linitial(custom_plans));
+    List* private_nodes = list_make5(
+        makeInteger(reuse::kReusablePlanFormatVersionV1),
+        makeInteger(0),
+        makeInteger(0),
+        static_cast<void*>(NIL),
+        static_cast<void*>(NIL));
+    private_nodes = lappend(private_nodes, makeInteger(-1));
+    private_nodes = lappend(
+        private_nodes,
+        list_make4(
+            makeInteger(0),
+            static_cast<void*>(NIL),
+            makeInteger(0),
+            makeInteger(0)));
+    private_nodes = lappend(
+        private_nodes, makeString(pstrdup("<query text unavailable>")));
+    private_nodes = lappend(private_nodes, makeString(pstrdup("")));
+    private_nodes = lappend(
+        private_nodes, makeInteger(kDiagnosticCanonicalPlanUnavailableV1));
+    private_nodes = lappend(private_nodes, makeInteger(
+        static_cast<int>(CoverageBypassMarkerV1::Permanent)));
+
+    List* scan_tlist = make_coverage_scan_tlist(
+        &root, best_path, *child);
+    if (scan_tlist == NIL) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqReusableCoverageScan fallback projection is malformed")));
+        pg_unreachable();
+    }
+    List* expressions = list_make1(
+        copyObject(list_nth(best_path.custom_private, 4)));
+    const auto* sources = static_cast<const List*>(
+        list_nth(best_path.custom_private, 3));
+    ListCell* cell = nullptr;
+    foreach(cell, sources) {
+        const auto* source = static_cast<const List*>(lfirst(cell));
+        if (source == nullptr || list_length(source) != 7) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqReusableCoverageScan fallback source is malformed")));
+            pg_unreachable();
+        }
+        expressions = lappend(
+            expressions, copyObject(list_nth(source, 6)));
+    }
+
+    auto* scan = makeNode(CustomScan);
+    scan->methods = &coverage_scan_methods();
+    scan->flags = best_path.flags;
+    scan->scan.scanrelid = relation.relid;
+    scan->scan.plan.targetlist = target_list;
+    scan->scan.plan.qual = NIL;
+    scan->custom_plans = custom_plans;
+    scan->custom_private = private_nodes;
+    scan->custom_exprs = expressions;
+    scan->custom_scan_tlist = scan_tlist;
+    scan->custom_relids = bms_copy(relation.relids);
+    return &scan->scan.plan;
+}
+
 /** Finalize the provider recipe only after the decorated child Plan exists. */
 Plan* coverage_plan_custom_path(
         PlannerInfo* root,
@@ -16064,13 +17201,26 @@ Plan* coverage_plan_custom_path(
         List*,
         List* custom_plans) {
     if (root == nullptr || relation == nullptr || best_path == nullptr
-        || list_length(custom_plans) != 1
-        || list_length(best_path->custom_private) != 6
+        || list_length(custom_plans) != 1) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("BioseqReusableCoverageScan selected path is malformed")));
+        pg_unreachable();
+    }
+    if (list_length(best_path->custom_private) != 7
         || !IsA(list_nth(best_path->custom_private, 0), Integer)
         || intVal(list_nth(best_path->custom_private, 0))
             != static_cast<int>(reuse::kReusablePlanFormatVersionV1)
-        || !IsA(list_nth(best_path->custom_private, 1), Integer)) {
-        return nullptr;
+        || !IsA(list_nth(best_path->custom_private, 1), Integer)
+        || !IsA(list_nth(best_path->custom_private, 6), Integer)) {
+        if (!register_selected_gate_params(root, *best_path)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqReusableCoverageScan fallback gates are malformed")));
+            pg_unreachable();
+        }
+        return make_force_bypassed_coverage_plan(
+            *root, *relation, *best_path, target_list, custom_plans);
     }
     const int provider_id = intVal(list_nth(best_path->custom_private, 1));
     const provider_registry::ProviderV1* provider = provider_id > 0
@@ -16079,7 +17229,10 @@ Plan* coverage_plan_custom_path(
         : nullptr;
     Plan* child = static_cast<Plan*>(linitial(custom_plans));
     if (!register_selected_gate_params(root, *best_path)) {
-        return nullptr;
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqReusableCoverageScan selected gates are malformed")));
+        pg_unreachable();
     }
     const bool mappings_valid = planned_source_mappings_valid(
         root, *best_path);
@@ -16145,6 +17298,8 @@ Plan* coverage_plan_custom_path(
     scan->custom_plans = custom_plans;
     scan->custom_private = static_cast<List*>(
         copyObject(best_path->custom_private));
+    void* force_bypass = list_nth(scan->custom_private, 6);
+    scan->custom_private = list_truncate(scan->custom_private, 6);
     scan->custom_private = lappend(scan->custom_private, recipe_private);
     scan->custom_private = lappend(
         scan->custom_private, makeString(display_sql.data));
@@ -16155,6 +17310,7 @@ Plan* coverage_plan_custom_path(
             : pstrdup("")));
     scan->custom_private = lappend(
         scan->custom_private, makeInteger(diagnostic_flags));
+    scan->custom_private = lappend(scan->custom_private, force_bypass);
     List* scan_tlist = make_coverage_scan_tlist(
         root, *best_path, *child);
     scan->custom_exprs = NIL;
@@ -16192,99 +17348,117 @@ const CustomPathMethods& coverage_path_methods() {
     return methods;
 }
 
-[[nodiscard]] bool path_contains_reusable_coverage(const Path* path);
+/** Bounded, cycle-safe inspection of one selected Path tree. */
+struct ReusableCoveragePathProbeV1 {
+    std::array<const Path*, kMaximumExactPlanWalkNodesV1> visited{};
+    std::size_t visited_count = 0;
+    bool valid = true;
 
-/** Inspect only selected child paths; relation pathlists contain alternatives. */
-[[nodiscard]] bool path_list_contains_reusable_coverage(const List* paths) {
-    const ListCell* cell = nullptr;
-    foreach(cell, paths) {
-        if (path_contains_reusable_coverage(
-                static_cast<const Path*>(lfirst(cell)))) {
-            return true;
+    [[nodiscard]] bool contains(const Path* path);
+
+    /** Lists here are selected children, never relation path alternatives. */
+    [[nodiscard]] bool contains_list(const List* paths) {
+        const ListCell* cell = nullptr;
+        foreach(cell, paths) {
+            if (contains(static_cast<const Path*>(lfirst(cell)))) {
+                return true;
+            }
+            if (!valid) {
+                return false;
+            }
         }
-    }
-    return false;
-}
-
-/** Recognize a cache-owned coverage node anywhere in one chosen Path tree. */
-[[nodiscard]] bool path_contains_reusable_coverage(const Path* path) {
-    if (path == nullptr) {
         return false;
     }
+};
+
+/** Recognize a cache-owned coverage node anywhere in one chosen Path tree. */
+bool ReusableCoveragePathProbeV1::contains(const Path* path) {
+    if (!valid || path == nullptr) {
+        return false;
+    }
+    for (std::size_t index = 0; index < visited_count; ++index) {
+        if (visited[index] == path) {
+            return false;
+        }
+    }
+    if (visited_count >= visited.size()) {
+        valid = false;
+        return false;
+    }
+    visited[visited_count++] = path;
     switch (nodeTag(path)) {
         case T_BitmapHeapPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const BitmapHeapPath*>(path)->bitmapqual);
         case T_BitmapAndPath:
-            return path_list_contains_reusable_coverage(
+            return contains_list(
                 reinterpret_cast<const BitmapAndPath*>(path)->bitmapquals);
         case T_BitmapOrPath:
-            return path_list_contains_reusable_coverage(
+            return contains_list(
                 reinterpret_cast<const BitmapOrPath*>(path)->bitmapquals);
         case T_SubqueryScanPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const SubqueryScanPath*>(path)->subpath);
         case T_ForeignPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const ForeignPath*>(path)->fdw_outerpath);
         case T_CustomPath: {
             const auto* custom = reinterpret_cast<const CustomPath*>(path);
             return custom->methods == &coverage_path_methods()
-                || path_list_contains_reusable_coverage(
-                    custom->custom_paths);
+                || contains_list(custom->custom_paths);
         }
         case T_AppendPath:
-            return path_list_contains_reusable_coverage(
+            return contains_list(
                 reinterpret_cast<const AppendPath*>(path)->subpaths);
         case T_MergeAppendPath:
-            return path_list_contains_reusable_coverage(
+            return contains_list(
                 reinterpret_cast<const MergeAppendPath*>(path)->subpaths);
         case T_MaterialPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const MaterialPath*>(path)->subpath);
         case T_MemoizePath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const MemoizePath*>(path)->subpath);
         case T_UniquePath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const UniquePath*>(path)->subpath);
         case T_GatherPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const GatherPath*>(path)->subpath);
         case T_GatherMergePath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const GatherMergePath*>(path)->subpath);
         case T_NestPath:
         case T_MergePath:
         case T_HashPath: {
             const auto* join = reinterpret_cast<const JoinPath*>(path);
-            return path_contains_reusable_coverage(join->outerjoinpath)
-                || path_contains_reusable_coverage(join->innerjoinpath);
+            return contains(join->outerjoinpath)
+                || contains(join->innerjoinpath);
         }
         case T_ProjectionPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const ProjectionPath*>(path)->subpath);
         case T_ProjectSetPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const ProjectSetPath*>(path)->subpath);
         case T_SortPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const SortPath*>(path)->subpath);
         case T_IncrementalSortPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const IncrementalSortPath*>(path)
                     ->spath.subpath);
         case T_GroupPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const GroupPath*>(path)->subpath);
         case T_UpperUniquePath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const UpperUniquePath*>(path)->subpath);
         case T_AggPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const AggPath*>(path)->subpath);
         case T_GroupingSetsPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const GroupingSetsPath*>(path)->subpath);
         case T_MinMaxAggPath: {
             const auto* aggregate = reinterpret_cast<const MinMaxAggPath*>(
@@ -16294,36 +17468,45 @@ const CustomPathMethods& coverage_path_methods() {
                 const auto* info = static_cast<const MinMaxAggInfo*>(
                     lfirst(cell));
                 if (info != nullptr
-                    && path_contains_reusable_coverage(info->path)) {
+                    && contains(info->path)) {
                     return true;
+                }
+                if (!valid) {
+                    return false;
                 }
             }
             return false;
         }
         case T_WindowAggPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const WindowAggPath*>(path)->subpath);
         case T_SetOpPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const SetOpPath*>(path)->subpath);
         case T_RecursiveUnionPath: {
             const auto* recursive =
                 reinterpret_cast<const RecursiveUnionPath*>(path);
-            return path_contains_reusable_coverage(recursive->leftpath)
-                || path_contains_reusable_coverage(recursive->rightpath);
+            return contains(recursive->leftpath)
+                || contains(recursive->rightpath);
         }
         case T_LockRowsPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const LockRowsPath*>(path)->subpath);
         case T_ModifyTablePath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const ModifyTablePath*>(path)->subpath);
         case T_LimitPath:
-            return path_contains_reusable_coverage(
+            return contains(
                 reinterpret_cast<const LimitPath*>(path)->subpath);
         default:
             return false;
     }
+}
+
+[[nodiscard]] bool path_contains_reusable_coverage(const Path* path) {
+    ReusableCoveragePathProbeV1 probe{};
+    const bool found = probe.contains(path);
+    return probe.valid && found;
 }
 
 /** Add one finalized relation dependency without losing topology roots. */
@@ -16539,6 +17722,12 @@ struct ExactPathDependencyCollectorV1 {
 [[nodiscard]] bool finalize_exact_plan_dependencies(
         PlannerInfo& root, const Path& selected_path,
         PlannerFrame& frame) {
+#if defined(BIOSEQ_CACHE_TESTING)
+    if (g_test_exact_plan_fault
+            == TestExactPlanFault::DependencyFinalizationDeclined) {
+        return false;
+    }
+#endif
     if (root.glob == nullptr) {
         return false;
     }
@@ -16569,7 +17758,9 @@ struct ExactPathDependencyCollectorV1 {
 /** Create an exact-result wrapper around one final path. */
 [[nodiscard]] CustomPath* make_exact_cache_path(
         RelOptInfo& output_relation, Path& input_path,
-        const PlannerFrame& frame) {
+        const PlannerFrame& frame,
+        ExactBypassMarkerV1 bypass_marker =
+            ExactBypassMarkerV1::Enabled) {
     auto* path = makeNode(CustomPath);
     path->path.pathtype = T_CustomScan;
     path->path.parent = &output_relation;
@@ -16591,7 +17782,7 @@ struct ExactPathDependencyCollectorV1 {
     path->custom_private = list_make3(
         makeString(pstrdup(frame.canonical_query)),
         makeString(pstrdup(frame.display_sql)),
-        makeInteger(0)); /* force_bypass is preallocated for later verification */
+        makeInteger(static_cast<int>(bypass_marker)));
     path->custom_private = lappend(
         path->custom_private,
         copyObject(frame.referenced_parameters));
@@ -16630,7 +17821,8 @@ void cache_create_upper_paths(
     ListCell* path_cell = nullptr;
     foreach(path_cell, original_paths) {
         Path* input_path = static_cast<Path*>(lfirst(path_cell));
-        if (input_path->param_info != nullptr) {
+        if (input_path->param_info != nullptr
+            || path_contains_reusable_coverage(input_path)) {
             replacements = lappend(replacements, input_path);
         } else {
             PlannerFrame path_frame = *frame;
@@ -16645,6 +17837,23 @@ void cache_create_upper_paths(
                     replacements,
                     make_exact_cache_path(
                         *output_relation, *input_path, path_frame));
+                exact_path_added = true;
+            } else if (frame->nested_coverage_path_created) {
+                /*
+                 * A selected nested coverage Plan will export its private
+                 * Boolean gate through subplan extParam.  Retain one top
+                 * PlanCustomPath callback even when exact dependencies are
+                 * unavailable so those IDs can be re-unioned after
+                 * SS_identify_outer_params.  The wrapper is permanently
+                 * passthrough and can never touch the registry.
+                 */
+                replacements = lappend(
+                    replacements,
+                    make_exact_cache_path(
+                        *output_relation,
+                        *input_path,
+                        path_frame,
+                        ExactBypassMarkerV1::CoverageGateFinalizer));
                 exact_path_added = true;
             } else {
                 replacements = lappend(replacements, input_path);
@@ -17135,6 +18344,166 @@ void verify_exact_cache_plan_fail_open(PlannedStmt& statement) {
     }
 }
 
+/** Collect selected coverage markers before mutating any finalized Plan. */
+struct MainTreeCoverageMarkerCollectorV1 {
+    std::array<const Plan*, kMaximumExactPlanWalkNodesV1> visited{};
+    std::array<Integer*, static_cast<std::size_t>(kMaxCoverageNodesPerPlan)>
+        markers{};
+    std::size_t visited_count = 0;
+    std::size_t marker_count = 0;
+    bool include_enabled = false;
+    bool valid = true;
+
+    [[nodiscard]] bool collect(Plan* plan);
+
+    [[nodiscard]] bool collect_list(List* plans) {
+        ListCell* cell = nullptr;
+        foreach(cell, plans) {
+            if (!collect(static_cast<Plan*>(lfirst(cell)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+bool MainTreeCoverageMarkerCollectorV1::collect(Plan* plan) {
+    if (!valid || plan == nullptr) {
+        return valid;
+    }
+    for (std::size_t index = 0; index < visited_count; ++index) {
+        if (visited[index] == plan) {
+            return true;
+        }
+    }
+    if (visited_count >= visited.size()) {
+        valid = false;
+        return false;
+    }
+    visited[visited_count++] = plan;
+    if (IsA(plan, CustomScan)) {
+        auto* custom = reinterpret_cast<CustomScan*>(plan);
+        if (custom->methods == &coverage_scan_methods()) {
+            if (custom->custom_private == NIL
+                || list_length(custom->custom_private) < 11
+                || !IsA(list_nth(custom->custom_private, 10), Integer)) {
+                valid = false;
+                return false;
+            }
+            auto* marker = static_cast<Integer*>(
+                list_nth(custom->custom_private, 10));
+            const int value = marker->ival;
+            if (value < static_cast<int>(CoverageBypassMarkerV1::Enabled)
+                || value > static_cast<int>(
+                    CoverageBypassMarkerV1::Permanent)) {
+                valid = false;
+                return false;
+            }
+            if (value == static_cast<int>(
+                    CoverageBypassMarkerV1::Provisional)
+                || (include_enabled
+                    && value == static_cast<int>(
+                        CoverageBypassMarkerV1::Enabled))) {
+                if (marker_count >= markers.size()) {
+                    valid = false;
+                    return false;
+                }
+                markers[marker_count++] = marker;
+            }
+        }
+    }
+    if (!collect(outerPlan(plan)) || !collect(innerPlan(plan))) {
+        return false;
+    }
+    switch (nodeTag(plan)) {
+        case T_SubqueryScan:
+            return collect(reinterpret_cast<SubqueryScan*>(plan)->subplan);
+        case T_CustomScan:
+            return collect_list(
+                reinterpret_cast<CustomScan*>(plan)->custom_plans);
+        case T_Append:
+            return collect_list(reinterpret_cast<Append*>(plan)->appendplans);
+        case T_MergeAppend:
+            return collect_list(
+                reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+        case T_BitmapAnd:
+            return collect_list(
+                reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+        case T_BitmapOr:
+            return collect_list(
+                reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+        case T_Agg:
+            return collect_list(reinterpret_cast<Agg*>(plan)->chain);
+        case T_Result:
+        case T_ProjectSet:
+        case T_ModifyTable:
+        case T_RecursiveUnion:
+        case T_SeqScan:
+        case T_SampleScan:
+        case T_IndexScan:
+        case T_IndexOnlyScan:
+        case T_BitmapIndexScan:
+        case T_BitmapHeapScan:
+        case T_TidScan:
+        case T_TidRangeScan:
+        case T_FunctionScan:
+        case T_ValuesScan:
+        case T_TableFuncScan:
+        case T_CteScan:
+        case T_NamedTuplestoreScan:
+        case T_WorkTableScan:
+        case T_ForeignScan:
+        case T_NestLoop:
+        case T_MergeJoin:
+        case T_HashJoin:
+        case T_Material:
+        case T_Memoize:
+        case T_Sort:
+        case T_IncrementalSort:
+        case T_Group:
+        case T_WindowAgg:
+        case T_Unique:
+        case T_Gather:
+        case T_GatherMerge:
+        case T_Hash:
+        case T_SetOp:
+        case T_LockRows:
+        case T_Limit:
+            return true;
+        default:
+            valid = false;
+            return false;
+    }
+}
+
+/** Permanently bypass every separately initialized CTE/InitPlan/SubPlan root. */
+[[nodiscard]] bool mark_subplan_coverage_permanent_fail_open(
+        PlannedStmt& statement) noexcept {
+    MainTreeCoverageMarkerCollectorV1 collector{
+        .include_enabled = true,
+    };
+    if (!collector.collect_list(statement.subplans) || !collector.valid) {
+        return false;
+    }
+    for (std::size_t index = 0; index < collector.marker_count; ++index) {
+        collector.markers[index]->ival = static_cast<int>(
+            CoverageBypassMarkerV1::Permanent);
+    }
+    return true;
+}
+
+/** Enable only provisional main-tree nodes; permanent bypass is sticky. */
+void enable_main_tree_coverage_fail_open(PlannedStmt& statement) noexcept {
+    MainTreeCoverageMarkerCollectorV1 collector{};
+    if (!collector.collect(statement.planTree) || !collector.valid) {
+        return;
+    }
+    for (std::size_t index = 0; index < collector.marker_count; ++index) {
+        collector.markers[index]->ival = static_cast<int>(
+            CoverageBypassMarkerV1::Enabled);
+    }
+}
+
 /** Reentrant planner wrapper that owns canonical bytes for upper-path hooks. */
 PlannedStmt* cache_planner(
         Query* query, const char* query_string,
@@ -17228,9 +18597,13 @@ PlannedStmt* cache_planner(
                 query, query_string, cursor_options, bound_parameters)
             : standard_planner(
                 query, query_string, cursor_options, bound_parameters);
-        if (result != nullptr
-            && merge_finalized_exact_dependencies(*result)) {
-            verify_exact_cache_plan_fail_open(*result);
+        if (result != nullptr) {
+            if (mark_subplan_coverage_permanent_fail_open(*result)) {
+                enable_main_tree_coverage_fail_open(*result);
+            }
+            if (merge_finalized_exact_dependencies(*result)) {
+                verify_exact_cache_plan_fail_open(*result);
+            }
         }
         g_planner_frame = frame.previous;
     }
@@ -18255,7 +19628,32 @@ void cache_process_utility(
     const bool rollback_prepared = transaction != nullptr
         && transaction->kind == TRANS_STMT_ROLLBACK_PREPARED;
     const bool resolving_prepared = commit_prepared || rollback_prepared;
+    dependency_runtime::ExternalPreparedResolutionTokenV1
+        external_prepared_resolution{};
+    bool external_prepared_resolution_started = false;
     if (resolving_prepared) {
+        const bool registry_bound = bind_shared_reusable_registry();
+        const std::uint64_t resolution_identity = registry_bound
+            ? shared_registry::next_shared_registry_claim_sequence()
+            : 0;
+        if (registry_bound && resolution_identity != 0) {
+            const dependency_runtime::DependencyRuntimeResultV1 begun =
+                dependency_runtime::begin_external_prepared_resolution(
+                    commit_prepared
+                        ? dependency_runtime::
+                            ExternalPreparedResolutionKindV1::CommitPrepared
+                        : dependency_runtime::
+                            ExternalPreparedResolutionKindV1::RollbackPrepared,
+                    static_cast<std::uint32_t>(MyDatabaseId),
+                    resolution_identity,
+                    &external_prepared_resolution);
+            external_prepared_resolution_started = begun
+                && static_cast<bool>(external_prepared_resolution);
+        }
+        if (!external_prepared_resolution_started) {
+            dependency_runtime::force_emergency_fallback();
+            mark_shared_cache_failed();
+        }
         g_force_coarse_transition = true;
         begin_database_transition(commit_prepared
             ? DatabaseTransitionPurposeV1::CommitPreparedResolution
@@ -18287,6 +19685,16 @@ void cache_process_utility(
             MemoryContextSwitchTo(TopMemoryContext);
             ErrorData* error = CopyErrorData();
             FlushErrorState();
+            if (external_prepared_resolution_started) {
+                const dependency_runtime::DependencyRuntimeResultV1 finished =
+                    dependency_runtime::finish_external_prepared_resolution(
+                        &external_prepared_resolution,
+                        dependency_runtime::
+                            ExternalPreparedResolutionOutcomeV1::Ambiguous);
+                if (!finished) {
+                    mark_shared_cache_failed();
+                }
+            }
             if (commit_prepared) {
                 g_force_coarse_transition = true;
                 finish_database_transition(true);
@@ -18296,6 +19704,19 @@ void cache_process_utility(
             ReThrowError(error);
         }
         PG_END_TRY();
+        if (external_prepared_resolution_started) {
+            const dependency_runtime::DependencyRuntimeResultV1 finished =
+                dependency_runtime::finish_external_prepared_resolution(
+                    &external_prepared_resolution,
+                    commit_prepared
+                        ? dependency_runtime::
+                            ExternalPreparedResolutionOutcomeV1::Committed
+                        : dependency_runtime::
+                            ExternalPreparedResolutionOutcomeV1::RolledBack);
+            if (!finished) {
+                mark_shared_cache_failed();
+            }
+        }
         finish_database_transition(commit_prepared);
     } else if (g_previous_process_utility_hook != nullptr) {
         g_previous_process_utility_hook(
@@ -19006,7 +20427,8 @@ struct ReusableDiagnosticTextSnapshotV1 {
  */
 [[nodiscard]] std::uint64_t invalidate_reusable_registry(
         const std::optional<PhysicalIdentityV1>& physical_identity) {
-    if (!g_reusable_registry || g_reusable_membership_lock == nullptr
+    if (!bind_admin_reusable_registry("bioseq_cache invalidation")
+        || !g_reusable_registry || g_reusable_membership_lock == nullptr
         || g_reusable_wait_slot_count == 0) {
         return 0;
     }
@@ -19124,6 +20546,10 @@ struct ReusableDiagnosticTextSnapshotV1 {
 /** Precisely invalidate a reusable physical leaf, conservatively if absent. */
 [[nodiscard]] std::uint64_t invalidate_reusable_relation_registry(
         Oid relation_oid) {
+    if (!bind_admin_reusable_registry(
+            "bioseq_cache relation invalidation")) {
+        return 0;
+    }
     PhysicalIdentityV1 physical_identity{};
     if (relation_physical_identity(relation_oid, &physical_identity)
             == RelationPhysicalIdentityStatusV1::Precise) {
@@ -19439,6 +20865,8 @@ Datum bioseq_cache_entries(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache;
     using namespace bioseq::cache::pg;
     require_cache_diagnostics_reader(fcinfo);
+    static_cast<void>(bind_admin_reusable_registry(
+        "bioseq_cache.entries()"));
     Tuplestorestate* tuple_store = nullptr;
     TupleDesc tuple_descriptor = initialize_srf(fcinfo, &tuple_store);
     if (tuple_descriptor->natts != 20) {
@@ -19813,8 +21241,13 @@ Datum bioseq_cache_invalidate_all(PG_FUNCTION_ARGS) {
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("must be superuser to invalidate bioseq_cache")));
     }
-    const std::uint64_t invalidated = invalidate_registry()
-        + invalidate_reusable_registry(std::nullopt);
+    static_cast<void>(bind_admin_reusable_registry(
+        "bioseq_cache.invalidate_all()"));
+    const std::uint64_t legacy_invalidated = invalidate_registry();
+    const std::uint64_t reusable_invalidated =
+        invalidate_reusable_registry(std::nullopt);
+    const std::uint64_t invalidated =
+        legacy_invalidated + reusable_invalidated;
     PG_RETURN_INT64(static_cast<int64>(invalidated));
 }
 
@@ -19826,10 +21259,15 @@ Datum bioseq_cache_invalidate_relation(PG_FUNCTION_ARGS) {
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("must be superuser to invalidate bioseq_cache")));
     }
+    static_cast<void>(bind_admin_reusable_registry(
+        "bioseq_cache.invalidate_relation()"));
     const Oid relation_oid = PG_GETARG_OID(0);
+    const std::uint64_t legacy_invalidated =
+        invalidate_relation_registry(relation_oid);
+    const std::uint64_t reusable_invalidated =
+        invalidate_reusable_relation_registry(relation_oid);
     const std::uint64_t invalidated =
-        invalidate_relation_registry(relation_oid)
-        + invalidate_reusable_relation_registry(relation_oid);
+        legacy_invalidated + reusable_invalidated;
     PG_RETURN_INT64(static_cast<int64>(invalidated));
 }
 
@@ -19891,12 +21329,36 @@ Datum bioseq_cache_test_set_exact_plan_fault(PG_FUNCTION_ARGS) {
     } else if (std::strcmp(name, "unknown_index_am") == 0) {
         g_test_exact_plan_fault =
             TestExactPlanFault::UnknownIndexAccessMethod;
+    } else if (std::strcmp(
+            name, "dependency_finalization_declined") == 0) {
+        g_test_exact_plan_fault =
+            TestExactPlanFault::DependencyFinalizationDeclined;
     } else {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
              errmsg("unknown exact-plan verifier fault: %s", name)));
     }
     pfree(name);
+    PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(bioseq_cache_test_set_exact_recipe_fault);
+Datum bioseq_cache_test_set_exact_recipe_fault(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg;
+    require_cache_test_superuser();
+    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    if (std::strcmp(name, "none") == 0) {
+        g_test_exact_recipe_fault = TestExactRecipeFault::None;
+    } else if (std::strcmp(name, "expected_digest_mismatch") == 0) {
+        g_test_exact_recipe_fault =
+            TestExactRecipeFault::ExpectedDigestMismatch;
+    } else {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unknown exact-recipe fault: %s", name)));
+    }
+    pfree(name);
+    ResetPlanCache();
     PG_RETURN_VOID();
 }
 
@@ -19923,6 +21385,12 @@ Datum bioseq_cache_test_set_coverage_descriptor_fault(PG_FUNCTION_ARGS) {
     } else if (std::strcmp(name, "binding_signature_mismatch") == 0) {
         g_test_coverage_descriptor_fault =
             TestCoverageDescriptorFault::BindingSignatureMismatch;
+    } else if (std::strcmp(name, "plan_private_short") == 0) {
+        g_test_coverage_descriptor_fault =
+            TestCoverageDescriptorFault::PlanPrivateShort;
+    } else if (std::strcmp(name, "plan_private_bad_version") == 0) {
+        g_test_coverage_descriptor_fault =
+            TestCoverageDescriptorFault::PlanPrivateBadVersion;
     } else {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -20186,7 +21654,8 @@ Datum bioseq_cache_test_entry_states(PG_FUNCTION_ARGS) {
     require_cache_test_superuser();
     Tuplestorestate* store = nullptr;
     TupleDesc descriptor = initialize_srf(fcinfo, &store);
-    if (!bind_shared_reusable_registry()
+    if (!bind_admin_reusable_registry(
+            "bioseq_cache_test.entry_states()")
         || g_reusable_wait_slot_count == 0) {
         PG_RETURN_NULL();
     }
@@ -20282,7 +21751,8 @@ Datum bioseq_cache_test_planner_reference_counts(PG_FUNCTION_ARGS) {
     std::uint64_t waiters = 0;
     std::uint64_t planner_pins = 0;
     ReusableGenerationDiagnosticsRowV1* snapshots = nullptr;
-    if (bind_shared_reusable_registry()
+    if (bind_admin_reusable_registry(
+            "bioseq_cache_test.planner_reference_counts()")
         && g_reusable_wait_slot_count != 0) {
         snapshots = static_cast<ReusableGenerationDiagnosticsRowV1*>(
             palloc0(sizeof(ReusableGenerationDiagnosticsRowV1)
@@ -20586,8 +22056,12 @@ PG_FUNCTION_INFO_V1(bioseq_cache_test_request_janitor_sweep);
 Datum bioseq_cache_test_request_janitor_sweep(PG_FUNCTION_ARGS) {
     using namespace bioseq::cache::pg;
     require_cache_test_superuser();
+    static_cast<void>(bind_admin_reusable_registry(
+        "bioseq_cache_test.request_janitor_sweep()"));
     storage::request_janitor_sweep(true);
     static_cast<void>(sweep_registry(true));
+    drain_reusable_registry_for_testing_v1();
+    static_cast<void>(storage::janitor_sweep(0, true));
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (InjectedCoverage& entry : g_shared->injected_coverage) {
         if (entry.used && entry.evictable) {

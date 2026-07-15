@@ -1,6 +1,15 @@
 # One exact key elects one producer and a registered waiter consumes COMPLETE.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_wait(id integer PRIMARY KEY, value text NOT NULL);
   INSERT INTO qc_wait
   SELECT i, md5(i::text) FROM generate_series(1, 100) AS g(i);
@@ -18,8 +27,9 @@ step "same_arm_waiter" { SELECT bioseq_cache_test.arm_pause('after_waiter_regist
 step "same_producer_paused" { SELECT bioseq_cache_test.wait_until_paused('after_building_publish'); }
 step "same_waiter_paused" { SELECT bioseq_cache_test.wait_until_paused('after_waiter_registered'); }
 step "same_state" {
-  SELECT state, waiter_count
-  FROM bioseq_cache_test.entry_states()
+  SELECT state, waiters AS waiter_count
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ExactFinalResult'
   ORDER BY generation;
 }
 step "same_release_producer" { SELECT bioseq_cache_test.release_pause('after_building_publish'); }

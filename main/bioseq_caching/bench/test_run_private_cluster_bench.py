@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import importlib.util
 import json
 from pathlib import Path
@@ -117,16 +118,65 @@ def _section45_inventory() -> dict[str, Any]:
                 "producer": producer,
                 "completed_hit": completed_hit,
                 "runtime_storage": {
-                    "dsa_hot_bytes": {"status": "measured", "value": 1},
-                    "file_bytes": {"status": "measured", "value": 0},
+                    "dsa_hot_bytes": {
+                        "status": "measured",
+                        "value": 1,
+                        "unit": "bytes",
+                        "source_field": (
+                            "bioseq_cache_test.storage_tier_stats."
+                            "reserved_hot_bytes"
+                        ),
+                    },
+                    "file_bytes": {
+                        "status": "measured",
+                        "value": 0,
+                        "unit": "bytes",
+                        "source_field": (
+                            "bioseq_cache_test.storage_tier_stats."
+                            "reserved_file_bytes"
+                        ),
+                    },
                     "row_group_count": {"status": "measured", "value": 1},
                     "prevalidation_bytes": {
+                        "status": "measured",
+                        "value": 1,
+                    },
+                    "prevalidation_duration_ns": {
                         "status": "measured",
                         "value": 1,
                     },
                 },
             }
         )
+        if key == "large_toasted_values":
+            cases[-1]["file_hit_temperature"] = {
+                "status": "measured",
+                "passed": True,
+                "first_cold_file_hit": {
+                    "process_resources": {
+                        "status": "measured",
+                        "page_cache_and_physical_io": {
+                            "status": "measured",
+                            "physical_read_bytes": 4096,
+                        },
+                    },
+                },
+                "full_block_prevalidation": {
+                    "status": "measured",
+                    "passed": True,
+                    "bytes": {"status": "measured", "value": 1},
+                    "duration_ns": {"status": "measured", "value": 1},
+                    "row_group_count": {"status": "measured", "value": 1},
+                    "validated_result_checksum": {
+                        "status": "measured",
+                        "algorithm": "sha256",
+                        "reference": "digest",
+                        "first_cold_file_hit": "digest",
+                        "warm_file_hits": ["digest"],
+                        "passed": True,
+                    },
+                },
+            }
     fanout = [
         {
             "clients": clients,
@@ -159,6 +209,14 @@ def _section45_inventory() -> dict[str, Any]:
     ]
     return {
         "core": {"metrics": {"encoded_stored_bytes": 1}},
+        "streaming_protocol": {
+            "status": "measured",
+            "passed": True,
+            "minimum_post_first_row_ns": 100,
+            "first_row_ns": 10,
+            "total_elapsed_ns": 200,
+            "post_first_row_ns": 190,
+        },
         "cases": cases,
         "generic_provider": {
             "overlapping_predicate_reuse": {
@@ -182,6 +240,118 @@ def _section45_inventory() -> dict[str, Any]:
 
 
 class BenchmarkCorrectnessContractTest(unittest.TestCase):
+    def test_sql_sample_summaries_use_nearest_rank(self) -> None:
+        summary = RUNNER._sample_summary([10, 20, 30, 40])
+
+        self.assertEqual(summary["p50_ns"], 20)
+        self.assertEqual(summary["p95_ns"], 40)
+        self.assertEqual(summary["p99_ns"], 40)
+        with self.assertRaisesRegex(
+            RUNNER.BenchmarkError, "invalid inputs"
+        ):
+            RUNNER._sample_summary([True, 20])
+
+    def test_waiter_latency_uses_two_sided_material_delta(self) -> None:
+        self.assertTrue(
+            RUNNER._latency_delta_within_tolerance(100, 120, 25)
+        )
+        self.assertTrue(
+            RUNNER._latency_delta_within_tolerance(100, 80, 25)
+        )
+        self.assertFalse(
+            RUNNER._latency_delta_within_tolerance(100, 50, 25)
+        )
+
+    def test_first_row_protocol_requires_a_delayed_later_row(self) -> None:
+        streamed = RUNNER.QueryOutput(
+            elapsed_ns=300_000_000,
+            first_row_ns=10_000_000,
+            completed_at_ns=300_000_000,
+            rows=2,
+            ordered_sha256="ordered",
+            multiset_sha256="multiset",
+            stdout_bytes=4,
+        )
+        self.assertTrue(
+            RUNNER._streaming_protocol_probe_passed(
+                streamed,
+                ["1", "2"],
+                minimum_post_first_row_ns=150_000_000,
+            )
+        )
+
+        buffered = dataclasses.replace(
+            streamed, first_row_ns=299_000_000
+        )
+        self.assertFalse(
+            RUNNER._streaming_protocol_probe_passed(
+                buffered,
+                ["1", "2"],
+                minimum_post_first_row_ns=150_000_000,
+            )
+        )
+
+        boolean_timing = dataclasses.replace(streamed, first_row_ns=True)
+        self.assertFalse(
+            RUNNER._streaming_protocol_probe_passed(
+                boolean_timing,
+                ["1", "2"],
+                minimum_post_first_row_ns=150_000_000,
+            )
+        )
+
+    def test_ttl_cleanup_requires_a_usable_complete_generation(self) -> None:
+        valid = {
+            "ttl_ms": 100,
+            "expiry_wait_ns": 100_000_000,
+            "correctness": {"passed": True},
+            "pre_expiry": {
+                "passed": True,
+                "complete_entries": 1,
+                "stats": {
+                    "produced": 1,
+                    "completed_hits": 1,
+                    "fallbacks": 0,
+                },
+            },
+            "reclamation": {
+                "complete_entries": 0,
+                "tier": {
+                    "dsa_blocks": 0,
+                    "file_blocks": 0,
+                    "reserved_hot_bytes": 0,
+                    "reserved_file_bytes": 0,
+                },
+                "store": {"file_count": 0, "bytes": 0},
+            },
+        }
+        self.assertTrue(RUNNER._ttl_cleanup_contract_passed(valid))
+
+        no_publication = copy.deepcopy(valid)
+        no_publication["pre_expiry"]["complete_entries"] = 0
+        no_publication["pre_expiry"]["stats"]["produced"] = 0
+        self.assertFalse(
+            RUNNER._ttl_cleanup_contract_passed(no_publication)
+        )
+
+        boolean_stats = copy.deepcopy(valid)
+        boolean_stats["pre_expiry"]["stats"]["produced"] = True
+        self.assertFalse(
+            RUNNER._ttl_cleanup_contract_passed(boolean_stats)
+        )
+
+        boolean_tier = copy.deepcopy(valid)
+        boolean_tier["reclamation"]["tier"]["dsa_blocks"] = False
+        self.assertFalse(
+            RUNNER._ttl_cleanup_contract_passed(boolean_tier)
+        )
+
+        boolean_store = copy.deepcopy(valid)
+        boolean_store["reclamation"]["store"]["file_count"] = False
+        self.assertFalse(
+            RUNNER._ttl_cleanup_contract_passed(boolean_store)
+        )
+
     def test_sql_case_matrix_requires_every_generic_result_shape(self) -> None:
         cases_path = Path(__file__).with_name("sql_cases.json")
         document = RUNNER._read_cases(cases_path)
@@ -309,6 +479,8 @@ class BenchmarkCorrectnessContractTest(unittest.TestCase):
 
         self.assertEqual(snapshot["dsa_hot_bytes"]["value"], 1234)
         self.assertEqual(snapshot["file_bytes"]["value"], 5678)
+        self.assertEqual(snapshot["dsa_hot_bytes"]["unit"], "bytes")
+        self.assertEqual(snapshot["file_bytes"]["unit"], "bytes")
         self.assertNotEqual(snapshot["dsa_hot_bytes"]["value"], 3)
 
     def test_provider_phase_reports_exact_late_fetch_bytes(self) -> None:
@@ -387,10 +559,144 @@ class BenchmarkCorrectnessContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.BenchmarkError, "DSA/file"):
             RUNNER._validate_section45_inventory(**missing_dsa)
 
+        missing_dsa_value = copy.deepcopy(inventory)
+        missing_dsa_value["cases"][0]["runtime_storage"][
+            "dsa_hot_bytes"
+        ].pop("value")
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "DSA/file"):
+            RUNNER._validate_section45_inventory(**missing_dsa_value)
+
+        boolean_dsa_value = copy.deepcopy(inventory)
+        boolean_dsa_value["cases"][0]["runtime_storage"][
+            "dsa_hot_bytes"
+        ]["value"] = True
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "DSA/file"):
+            RUNNER._validate_section45_inventory(**boolean_dsa_value)
+
+        negative_file_value = copy.deepcopy(inventory)
+        negative_file_value["cases"][0]["runtime_storage"][
+            "file_bytes"
+        ]["value"] = -1
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "DSA/file"):
+            RUNNER._validate_section45_inventory(**negative_file_value)
+
+        wrong_file_unit = copy.deepcopy(inventory)
+        wrong_file_unit["cases"][0]["runtime_storage"][
+            "file_bytes"
+        ]["unit"] = "blocks"
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "DSA/file"):
+            RUNNER._validate_section45_inventory(**wrong_file_unit)
+
+        wrong_dsa_source = copy.deepcopy(inventory)
+        wrong_dsa_source["cases"][0]["runtime_storage"][
+            "dsa_hot_bytes"
+        ]["source_field"] = "dsa_blocks"
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "DSA/file"):
+            RUNNER._validate_section45_inventory(**wrong_dsa_source)
+
+        boolean_streaming = copy.deepcopy(inventory)
+        boolean_streaming["streaming_protocol"]["first_row_ns"] = True
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "streaming"):
+            RUNNER._validate_section45_inventory(**boolean_streaming)
+
+        contradictory_streaming = copy.deepcopy(inventory)
+        contradictory_streaming["streaming_protocol"][
+            "post_first_row_ns"
+        ] = 189
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "streaming"):
+            RUNNER._validate_section45_inventory(**contradictory_streaming)
+
         missing_threshold = copy.deepcopy(inventory)
         missing_threshold["thresholds"].pop()
         with self.assertRaisesRegex(RUNNER.BenchmarkError, "threshold"):
             RUNNER._validate_section45_inventory(**missing_threshold)
+
+    def test_section45_inventory_rejects_unproved_thresholds(self) -> None:
+        not_applicable = _section45_inventory()
+        not_applicable["thresholds"][0].update(
+            {"status": "not_applicable", "passed": None}
+        )
+        with self.assertRaisesRegex(
+            RUNNER.BenchmarkError, "mandatory threshold"
+        ):
+            RUNNER._validate_section45_inventory(**not_applicable)
+
+        missing_passed = _section45_inventory()
+        missing_passed["thresholds"][0].pop("passed")
+        with self.assertRaisesRegex(
+            RUNNER.BenchmarkError, "status/passed evidence"
+        ):
+            RUNNER._validate_section45_inventory(**missing_passed)
+
+        contradictory = _section45_inventory()
+        contradictory["thresholds"][0]["passed"] = False
+        with self.assertRaisesRegex(
+            RUNNER.BenchmarkError, "status/passed evidence"
+        ):
+            RUNNER._validate_section45_inventory(**contradictory)
+
+    def test_section45_inventory_rejects_forged_sql_percentiles(self) -> None:
+        interpolated = _section45_inventory()
+        interpolated["cases"][0]["disabled"]["p95_ns"] = 11
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "percentile"):
+            RUNNER._validate_section45_inventory(**interpolated)
+
+        negative = _section45_inventory()
+        negative["fanout"][0]["waiter_latency"][
+            "raw_samples_ns"
+        ][0] = -1
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "raw samples"):
+            RUNNER._validate_section45_inventory(**negative)
+
+        forged_throughput = _section45_inventory()
+        forged_throughput["cases"][0]["producer"]["throughput"] = {
+            "rows_per_second": {
+                "raw_samples": [10, 20, 30],
+                "p50": 20,
+                "p95": 20,
+                "p99": 30,
+            }
+        }
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "percentile"):
+            RUNNER._validate_section45_inventory(**forged_throughput)
+
+    def test_section45_inventory_rejects_unavailable_prevalidation(self) -> None:
+        unavailable_rows = _section45_inventory()
+        unavailable_rows["cases"][0]["runtime_storage"][
+            "row_group_count"
+        ] = {"status": "unavailable", "value": None}
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "row-group"):
+            RUNNER._validate_section45_inventory(**unavailable_rows)
+
+        unavailable_duration = _section45_inventory()
+        unavailable_duration["cases"][0]["runtime_storage"][
+            "prevalidation_duration_ns"
+        ] = {"status": "unavailable", "value": None}
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "duration"):
+            RUNNER._validate_section45_inventory(**unavailable_duration)
+
+        forged_file = _section45_inventory()
+        next(
+            case for case in forged_file["cases"]
+            if case["key"] == "large_toasted_values"
+        )["file_hit_temperature"] = {
+            "status": "measured",
+            "passed": True,
+            "mandatory_checksum_prepass_included": True,
+        }
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "checksum evidence"):
+            RUNNER._validate_section45_inventory(**forged_file)
+
+        zero_io = _section45_inventory()
+        file_case = next(
+            case for case in zero_io["cases"]
+            if case["key"] == "large_toasted_values"
+        )
+        file_case["file_hit_temperature"]["first_cold_file_hit"][
+            "process_resources"
+        ]["page_cache_and_physical_io"]["physical_read_bytes"] = 0
+        with self.assertRaisesRegex(RUNNER.BenchmarkError, "physical I/O"):
+            RUNNER._validate_section45_inventory(**zero_io)
 
 
 if __name__ == "__main__":

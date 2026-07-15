@@ -1,7 +1,6 @@
 use strict;
 use warnings FATAL => 'all';
 
-use File::Basename qw(basename);
 use File::Spec;
 use FindBin;
 use lib $FindBin::RealBin;
@@ -11,17 +10,22 @@ use Time::HiRes qw(sleep time);
 
 sub cache_files
 {
-	my ($store_dir) = @_;
-	return sort grep { -f $_ }
-	  glob(File::Spec->catfile($store_dir, 'block-*.cache'));
+	my ($store_root, $boot_nonce, $database_oid) = @_;
+	my $database_dir = File::Spec->catdir(
+		$store_root, $boot_nonce, $database_oid);
+	return sort grep {
+		-f $_ && /[0-9a-f]{64}\.[0-9a-f]{16}\.cache$/
+	} glob(File::Spec->catfile($database_dir, '*.cache'));
 }
 
-sub file_boot_nonce
+sub storage_boot_nonce
 {
-	my ($path) = @_;
-	my ($nonce) = basename($path) =~ /^block-([0-9a-f]{16})-[0-9a-f]{16}\.cache$/;
-	die "unexpected cache filename: $path\n" unless defined $nonce;
-	return $nonce;
+	my ($node) = @_;
+	return $node->safe_psql(
+		'postgres',
+		q{SELECT lpad(to_hex(
+		    (bioseq_cache_test.bootstrap_status()->>'boot_nonce')::bigint),
+		    16, '0')});
 }
 
 my $node = new_cache_node(
@@ -84,15 +88,17 @@ is(
 	'64|2080',
 	'fresh producer succeeds after owner cleanup');
 
-my $store_dir = File::Spec->catdir(
-	$node->data_dir, 'bioseq_cache', 'storage-v1');
-my @old_files = cache_files($store_dir);
+my $store_root = File::Spec->catdir(
+	$node->data_dir, 'pg_bioseq_cache');
+my $old_boot_nonce = storage_boot_nonce($node);
+my $database_oid = $node->safe_psql(
+	'postgres', 'SELECT oid FROM pg_database WHERE datname = current_database()');
+my @old_files = cache_files($store_root, $old_boot_nonce, $database_oid);
 cmp_ok(
 	scalar(@old_files),
 	'>=',
 	1,
-	'pre-crash generation owns a file named with its boot nonce');
-my $old_boot_nonce = file_boot_nonce($old_files[0]);
+	'pre-crash generation owns a file in its boot namespace');
 
 my $reader_controller = $node->background_psql('postgres');
 $reader_controller->query_until(
@@ -163,10 +169,11 @@ is(
 		  FROM bioseq_cache.stats()}),
 	'1|0',
 	'first post-crash query is a fresh miss rather than a stale hit');
-my @new_files = cache_files($store_dir);
+my $new_boot_nonce = storage_boot_nonce($node);
+my @new_files = cache_files($store_root, $new_boot_nonce, $database_oid);
 cmp_ok(scalar(@new_files), '>=', 1, 'new boot publishes a fresh file block');
 isnt(
-	file_boot_nonce($new_files[0]),
+	$new_boot_nonce,
 	$old_boot_nonce,
 	'SIGKILL recovery assigns a different storage boot nonce');
 

@@ -1,6 +1,15 @@
 # Cache encoding/storage failure is fail-open and never exposes a partial store.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_failure(id integer PRIMARY KEY, value text NOT NULL);
   INSERT INTO qc_failure
   SELECT i, repeat(md5(i::text), 8) FROM generate_series(1, 50) AS g(i);

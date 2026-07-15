@@ -49,6 +49,9 @@ FROM bioseq_cache.entries()
 WHERE kind = 'ReusableCoverage' AND state = 'COMPLETE'
 \gset single_after_
 
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+
 SELECT a.row_id, b.row_id
 FROM ONLY cache_provider_binding_rows AS a
 CROSS JOIN ONLY cache_provider_binding_rows AS b
@@ -72,6 +75,9 @@ FROM bioseq_cache.entries()
 WHERE kind = 'ReusableCoverage' AND state = 'COMPLETE'
 \gset self_after_
 
+RESET enable_indexonlyscan;
+RESET enable_indexscan;
+
 \o
 SELECT
     :single_before_before_count::bigint
@@ -93,9 +99,12 @@ SELECT
 \ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_descriptor_fault_case.sql
 \set descriptor_fault binding_signature_mismatch
 \ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_descriptor_fault_case.sql
+\set descriptor_fault plan_private_short
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_descriptor_fault_case.sql
+\set descriptor_fault plan_private_bad_version
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_descriptor_fault_case.sql
 \unset descriptor_fault
 
-\o
 SELECT bioseq_cache_test.set_coverage_descriptor_fault('none');
 SELECT bioseq_cache_test.provider_shutdown();
 DROP TABLE cache_provider_binding_rows;

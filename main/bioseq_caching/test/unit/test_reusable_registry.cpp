@@ -546,6 +546,52 @@ TEST_CASE("reusable registry sizes exactly and coalesces only full keys") {
           ReusableRegistryErrorV1::None);
 }
 
+TEST_CASE("terminal publication snapshots every active waiter owner") {
+  RegistryFixture fixture{4, 16U << 10, 1};
+  auto producer_claim = claim_exact(
+      fixture, exact_key(222), digest(222), "waiter-transfer", 1);
+  REQUIRE(producer_claim.disposition ==
+          ReusableClaimDispositionV1::ClaimedProducer);
+  auto first_waiter = claim_exact(
+      fixture, exact_key(222), digest(222), "waiter-transfer", 2);
+  auto second_waiter = claim_exact(
+      fixture, exact_key(222), digest(222), "waiter-transfer", 3);
+  REQUIRE(first_waiter.token.kind == ReusableReferenceKindV1::Waiter);
+  REQUIRE(second_waiter.token.kind == ReusableReferenceKindV1::Waiter);
+
+  const ReusableWaiterOwnerBatchV1 both =
+      snapshot_reusable_waiter_owners(
+          fixture.attachment, producer_claim.reference);
+  REQUIRE(both);
+  REQUIRE(both.count == 2);
+  REQUIRE(std::find(
+              both.waiters.begin(), both.waiters.begin() + both.count,
+              first_waiter.token) != both.waiters.begin() + both.count);
+  REQUIRE(std::find(
+              both.waiters.begin(), both.waiters.begin() + both.count,
+              second_waiter.token) != both.waiters.begin() + both.count);
+
+  REQUIRE(release_reusable_reference(
+              fixture.attachment, first_waiter.token) ==
+          ReusableRegistryErrorV1::None);
+  const ReusableWaiterOwnerBatchV1 remaining =
+      snapshot_reusable_waiter_owners(
+          fixture.attachment, producer_claim.reference);
+  REQUIRE(remaining);
+  REQUIRE(remaining.count == 1);
+  REQUIRE(remaining.waiters[0] == second_waiter.token);
+
+  ReusableGenerationReferenceV1 stale = producer_claim.reference;
+  ++stale.slot_sequence;
+  const ReusableWaiterOwnerBatchV1 rejected =
+      snapshot_reusable_waiter_owners(fixture.attachment, stale);
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error == ReusableRegistryErrorV1::StaleReference);
+  REQUIRE(release_reusable_reference(
+              fixture.attachment, second_waiter.token) ==
+          ReusableRegistryErrorV1::None);
+}
+
 TEST_CASE("unified registry separates exact and coverage digest collisions") {
   RegistryFixture fixture{8};
   const CacheDigest256 forced_collision = digest(201);

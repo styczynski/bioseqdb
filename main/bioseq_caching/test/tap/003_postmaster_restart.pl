@@ -1,7 +1,6 @@
 use strict;
 use warnings FATAL => 'all';
 
-use File::Basename qw(basename);
 use File::Path qw(make_path);
 use File::Spec;
 use FindBin;
@@ -11,17 +10,22 @@ use Test::More;
 
 sub cache_files
 {
-	my ($store_dir) = @_;
-	return sort grep { -f $_ }
-	  glob(File::Spec->catfile($store_dir, 'block-*.cache'));
+	my ($store_root, $boot_nonce, $database_oid) = @_;
+	my $database_dir = File::Spec->catdir(
+		$store_root, $boot_nonce, $database_oid);
+	return sort grep {
+		-f $_ && /[0-9a-f]{64}\.[0-9a-f]{16}\.cache$/
+	} glob(File::Spec->catfile($database_dir, '*.cache'));
 }
 
-sub file_boot_nonce
+sub storage_boot_nonce
 {
-	my ($path) = @_;
-	my ($nonce) = basename($path) =~ /^block-([0-9a-f]{16})-[0-9a-f]{16}\.cache$/;
-	die "unexpected cache filename: $path\n" unless defined $nonce;
-	return $nonce;
+	my ($node) = @_;
+	return $node->safe_psql(
+		'postgres',
+		q{SELECT lpad(to_hex(
+		    (bioseq_cache_test.bootstrap_status()->>'boot_nonce')::bigint),
+		    16, '0')});
 }
 
 my $node = new_cache_node('cache_postmaster_restart', preload => 1);
@@ -44,15 +48,21 @@ cmp_ok(
 	1,
 	'completed entry exists before restart');
 
-my $store_dir = File::Spec->catdir(
-	$node->data_dir, 'bioseq_cache', 'storage-v1');
-my @old_files = cache_files($store_dir);
+my $store_root = File::Spec->catdir(
+	$node->data_dir, 'pg_bioseq_cache');
+my $old_boot_nonce = storage_boot_nonce($node);
+my $database_oid = $node->safe_psql(
+	'postgres', 'SELECT oid FROM pg_database WHERE datname = current_database()');
+my $old_database_dir = File::Spec->catdir(
+	$store_root, $old_boot_nonce, $database_oid);
+my @old_files = cache_files($store_root, $old_boot_nonce, $database_oid);
 cmp_ok(scalar(@old_files), '>=', 1, 'completed entry owns a file-tier block');
-my $old_boot_nonce = file_boot_nonce($old_files[0]);
 
-make_path($store_dir, { mode => 0700 });
+make_path($old_database_dir, { mode => 0700 });
 my $partial_path = File::Spec->catfile(
-	$store_dir, ".block-$old_boot_nonce-ffffffffffffffff-$$.tmp");
+	$old_database_dir,
+	'.stage-00000000-00000000-0000000000000000-'
+	  . '0000000000000000-ffffffffffffffff.partial');
 open(my $partial, '>', $partial_path) or die "open $partial_path: $!";
 print {$partial} "incomplete pre-restart cache block\n";
 close($partial) or die "close $partial_path: $!";
@@ -87,10 +97,11 @@ is(
 	'1|0',
 	'first post-restart execution is a fresh miss, never a stale hit');
 
-my @new_files = cache_files($store_dir);
+my $new_boot_nonce = storage_boot_nonce($node);
+my @new_files = cache_files($store_root, $new_boot_nonce, $database_oid);
 cmp_ok(scalar(@new_files), '>=', 1, 'new boot publishes a fresh file block');
 isnt(
-	file_boot_nonce($new_files[0]),
+	$new_boot_nonce,
 	$old_boot_nonce,
 	'graceful restart assigns a different storage boot nonce');
 

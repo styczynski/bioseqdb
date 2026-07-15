@@ -1,6 +1,15 @@
 # A rolled-back concurrent write does not advance committed dependency epochs.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_rollback(id integer PRIMARY KEY, value text NOT NULL);
   INSERT INTO qc_rollback VALUES (1, 'one'), (2, 'two'), (3, 'three');
   SELECT bioseq_cache.reset_stats();
