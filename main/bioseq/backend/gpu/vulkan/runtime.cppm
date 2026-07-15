@@ -16363,6 +16363,31 @@ bool Runtime::self_test_persisted_shape_v5_finalizer_preclaim_contract(
     const auto rejected_receipt = [&](auto mutate) {
         RuntimeMetalArchivePipelineAudit saved = receipts[10].audit_;
         mutate(receipts[10].audit_);
+        // Receipt mutations exercise the finalizer's frozen PREPARED/USED
+        // equality gate, not the qualification's own self-consistency gate.
+        // Keep the process qualification bound to the mutated live audit so
+        // the receipt remains independently accepted before the finalizer
+        // rejects its drift from the sealed operation proof.
+        RuntimeMetalArchiveProcessQualification& qualification =
+            receipts[10].audit_.cache_qualification;
+        qualification.archive_set = receipts[10].audit_.expected_archives;
+        qualification.vulkan_device_uuid =
+            receipts[10].audit_.runtime_vulkan_device_uuid;
+        qualification.api_version = receipts[10].audit_.api_version;
+        qualification.driver_version = receipts[10].audit_.driver_version;
+        qualification.vendor_id = receipts[10].audit_.vendor_id;
+        qualification.device_id = receipts[10].audit_.device_id;
+        qualification.pipeline_cache_uuid =
+            receipts[10].audit_.pipeline_cache_uuid;
+        qualification.seed_receipt_identity =
+            receipts[10].audit_.seed_receipt_identity;
+        qualification.seed_sha256 = receipts[10].audit_.seed_sha256;
+        qualification.seed_size = receipts[10].audit_.seed_size;
+        qualification.manifest_checksum =
+            receipts[10].audit_.manifest_checksum;
+        qualification.identity =
+            runtime_metal_archive_process_qualification_identity(
+                qualification);
         const bool remained_valid = receipts[10].accepted();
         const bool result = remained_valid
             && rejected(expected, live_features);

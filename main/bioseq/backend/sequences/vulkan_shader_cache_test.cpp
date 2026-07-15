@@ -5229,17 +5229,27 @@ TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
 
     auto& admission =
         bioseq::parallelism::MemoryAdmissionController::instance();
-    const std::uint64_t reserved_before = admission.reserved_bytes();
     const auto base_audit = accepted_runtime_metal_archive_audit();
+    REQUIRE(base_audit.accepted());
+    // Constructing the first audit also once-qualifies and process-retains the
+    // installed helper executable. That reservation intentionally lives until
+    // process shutdown, so leak checks begin after this process-wide baseline.
+    const std::uint64_t reserved_after_process_qualification =
+        admission.reserved_bytes();
     CHECK(gv::RuntimePipelineOperationProof::
           self_test_causal_collector_contract(
               base_audit));
+    CHECK(admission.reserved_bytes()
+          == reserved_after_process_qualification);
     CHECK(gv::Runtime::
           self_test_persisted_shape_v5_finalizer_preclaim_contract(
               base_audit));
+    CHECK(admission.reserved_bytes()
+          == reserved_after_process_qualification);
     CHECK(gv::Runtime::self_test_gpu_cache_partial_delta_contract(
         base_audit));
-    CHECK(admission.reserved_bytes() == reserved_before);
+    CHECK(admission.reserved_bytes()
+          == reserved_after_process_qualification);
 }
 
 TEST_CASE("runtime GPU environment identity is canonical and byte exact",
