@@ -2187,7 +2187,16 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     first.format5_reader_global_position_storage_preparations = 1;
     first.format5_reader_global_position_storage_allocations = 1;
     first.format5_reader_retained_position_count = 37;
-    first.format5_reader_retained_position_capacity = 40;
+    first.format5_reader_retained_position_capacity = 37;
+    first.format5_reader_directory_capacity_bytes = 10;
+    first.format5_reader_query_record_capacity_bytes = 100;
+    first.format5_reader_ordinal_route_capacity_bytes = 20;
+    first.format5_reader_selected_extent_capacity_bytes = 30;
+    first.format5_reader_global_position_capacity_bytes = 296;
+    first.format5_reader_owned_capacity_bytes = 456;
+    first.format5_reader_admitted_bytes = 456;
+    first.format5_reader_exact_position_image_checks = 1;
+    first.format5_reader_retained_layout_checks = 1;
     aggregate.merge(first);
 
     REQUIRE(aggregate.cold_index_sidecar_heap_opens == 2);
@@ -2204,7 +2213,14 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     REQUIRE(aggregate.format5_reader_global_position_storage_allocations == 1);
     REQUIRE(aggregate.format5_reader_position_append_growth_reservations == 0);
     REQUIRE(aggregate.format5_reader_retained_position_count == 37);
-    REQUIRE(aggregate.format5_reader_retained_position_capacity == 40);
+    REQUIRE(aggregate.format5_reader_retained_position_capacity == 37);
+    REQUIRE(aggregate.format5_reader_global_position_capacity_bytes == 296);
+    REQUIRE(aggregate.format5_reader_owned_capacity_bytes == 456);
+    REQUIRE(aggregate.format5_reader_admitted_bytes == 456);
+    REQUIRE(aggregate.format5_reader_exact_position_image_checks == 1);
+    REQUIRE(aggregate.format5_reader_exact_position_image_failures == 0);
+    REQUIRE(aggregate.format5_reader_retained_layout_checks == 1);
+    REQUIRE(aggregate.format5_reader_retained_layout_failures == 0);
     REQUIRE_FALSE(aggregate.format5_reader_memory_evidence_saturated);
     REQUIRE_FALSE(aggregate.stats_saturated);
 
@@ -2214,7 +2230,18 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     second.format5_reader_global_position_storage_allocations = 1;
     second.format5_reader_position_append_growth_reservations = 2;
     second.format5_reader_retained_position_count = 11;
-    second.format5_reader_retained_position_capacity = 16;
+    second.format5_reader_retained_position_capacity = 11;
+    second.format5_reader_directory_capacity_bytes = 5;
+    second.format5_reader_query_record_capacity_bytes = 40;
+    second.format5_reader_ordinal_route_capacity_bytes = 8;
+    second.format5_reader_selected_extent_capacity_bytes = 12;
+    second.format5_reader_global_position_capacity_bytes = 87;
+    second.format5_reader_owned_capacity_bytes = 152;
+    second.format5_reader_admitted_bytes = 153;
+    second.format5_reader_exact_position_image_checks = 1;
+    second.format5_reader_exact_position_image_failures = 1;
+    second.format5_reader_retained_layout_checks = 1;
+    second.format5_reader_retained_layout_failures = 1;
     second.format5_reader_memory_evidence_saturated = true;
     aggregate.merge(second);
 
@@ -2223,7 +2250,14 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     REQUIRE(aggregate.format5_reader_global_position_storage_allocations == 2);
     REQUIRE(aggregate.format5_reader_position_append_growth_reservations == 2);
     REQUIRE(aggregate.format5_reader_retained_position_count == 48);
-    REQUIRE(aggregate.format5_reader_retained_position_capacity == 56);
+    REQUIRE(aggregate.format5_reader_retained_position_capacity == 48);
+    REQUIRE(aggregate.format5_reader_global_position_capacity_bytes == 383);
+    REQUIRE(aggregate.format5_reader_owned_capacity_bytes == 608);
+    REQUIRE(aggregate.format5_reader_admitted_bytes == 609);
+    REQUIRE(aggregate.format5_reader_exact_position_image_checks == 2);
+    REQUIRE(aggregate.format5_reader_exact_position_image_failures == 1);
+    REQUIRE(aggregate.format5_reader_retained_layout_checks == 2);
+    REQUIRE(aggregate.format5_reader_retained_layout_failures == 1);
     REQUIRE(aggregate.format5_reader_memory_evidence_saturated);
     REQUIRE_FALSE(aggregate.stats_saturated);
 

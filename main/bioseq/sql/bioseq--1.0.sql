@@ -2010,6 +2010,12 @@ LANGUAGE C VOLATILE PARALLEL UNSAFE
 AS 'MODULE_PATHNAME',
    'bioseq_last_alignment_format5_reader_memory_evidence';
 
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format5_reader_memory_evidence_v2()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format5_reader_memory_evidence_v2';
+
 CREATE OR REPLACE FUNCTION bioseq.last_alignment_persisted_gpu_operation_evidence_v1()
 RETURNS jsonb
 LANGUAGE C VOLATILE PARALLEL RESTRICTED

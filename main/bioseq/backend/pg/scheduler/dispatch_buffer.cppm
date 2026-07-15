@@ -2200,6 +2200,21 @@ public:
 					if (group.persisted_shape_v5_reader) {
 						const auto memory_evidence =
 							group.persisted_shape_v5_reader->memory_evidence();
+						const std::uint64_t exact_position_bytes =
+							bioseq::parallelism::saturating_mul(
+								memory_evidence.retained_position_count,
+								sizeof(std::uint64_t));
+						const bool exact_position_image =
+							exact_position_bytes
+								!= (std::numeric_limits<std::uint64_t>::max)()
+							&& memory_evidence.retained_position_capacity
+								== memory_evidence.retained_position_count
+							&& memory_evidence.global_position_capacity_bytes
+								== exact_position_bytes;
+						const bool retained_layout =
+							memory_evidence.retained_layout_equation_holds()
+							&& memory_evidence.owned_capacity_bytes
+								== group.persisted_shape_v5_reader->admitted_bytes();
 						read_delta.format5_reader_capacity_accounting_passes =
 							memory_evidence.capacity_accounting_passes;
 						read_delta.
@@ -2215,8 +2230,37 @@ public:
 							memory_evidence.retained_position_count;
 						read_delta.format5_reader_retained_position_capacity =
 							memory_evidence.retained_position_capacity;
+						read_delta.format5_reader_directory_capacity_bytes =
+							memory_evidence.directory_capacity_bytes;
+						read_delta.format5_reader_query_hash_capacity_bytes =
+							memory_evidence.query_hash_capacity_bytes;
+						read_delta.format5_reader_query_record_capacity_bytes =
+							memory_evidence.query_record_capacity_bytes;
+						read_delta.format5_reader_ordinal_route_capacity_bytes =
+							memory_evidence.ordinal_route_capacity_bytes;
+						read_delta.format5_reader_selected_extent_capacity_bytes =
+							memory_evidence.selected_extent_capacity_bytes;
+						read_delta.
+							format5_reader_current_selected_control_capacity_bytes =
+							memory_evidence.current_selected_control_capacity_bytes;
+						read_delta.format5_reader_global_position_capacity_bytes =
+							memory_evidence.global_position_capacity_bytes;
+						read_delta.format5_reader_control_payload_capacity_bytes =
+							memory_evidence.control_payload_capacity_bytes;
+						read_delta.format5_reader_owned_capacity_bytes =
+							memory_evidence.owned_capacity_bytes;
+						read_delta.format5_reader_admitted_bytes =
+							group.persisted_shape_v5_reader->admitted_bytes();
+						read_delta.format5_reader_exact_position_image_checks = 1;
+						read_delta.format5_reader_exact_position_image_failures =
+							exact_position_image ? 0 : 1;
+						read_delta.format5_reader_retained_layout_checks = 1;
+						read_delta.format5_reader_retained_layout_failures =
+							retained_layout ? 0 : 1;
 						read_delta.format5_reader_memory_evidence_saturated =
-							memory_evidence.saturated;
+							memory_evidence.saturated
+							|| exact_position_bytes
+								== (std::numeric_limits<std::uint64_t>::max)();
 					}
 					operational.merge(read_delta);
 					merge_cold_index_preparation_stats(

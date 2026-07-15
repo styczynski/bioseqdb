@@ -927,6 +927,101 @@ template<std::size_t N>
 	return result;
 }
 
+[[nodiscard]] std::string format5_reader_memory_evidence_json_v2(
+		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+{
+	const auto& operational = snapshot.pipeline.operational;
+	std::string result =
+		R"({"schema":"bioseq.format5_reader_memory_evidence","version":2)";
+	result.reserve(2'048);
+	const auto append_signed = [&result](
+			const std::string_view key,
+			const std::int64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	append_signed("execution_id", snapshot.execution_id);
+	append_signed("backend_pid", snapshot.backend_pid);
+	append("database_oid", snapshot.database_oid);
+	append(
+		"format5_reader_capacity_accounting_passes",
+		operational.format5_reader_capacity_accounting_passes);
+	append(
+		"format5_reader_global_position_storage_preparations",
+		operational.format5_reader_global_position_storage_preparations);
+	append(
+		"format5_reader_global_position_storage_allocations",
+		operational.format5_reader_global_position_storage_allocations);
+	append(
+		"format5_reader_position_append_growth_reservations",
+		operational.format5_reader_position_append_growth_reservations);
+	append(
+		"format5_reader_retained_position_count",
+		operational.format5_reader_retained_position_count);
+	append(
+		"format5_reader_retained_position_capacity",
+		operational.format5_reader_retained_position_capacity);
+	append(
+		"format5_reader_directory_capacity_bytes",
+		operational.format5_reader_directory_capacity_bytes);
+	append(
+		"format5_reader_query_hash_capacity_bytes",
+		operational.format5_reader_query_hash_capacity_bytes);
+	append(
+		"format5_reader_query_record_capacity_bytes",
+		operational.format5_reader_query_record_capacity_bytes);
+	append(
+		"format5_reader_ordinal_route_capacity_bytes",
+		operational.format5_reader_ordinal_route_capacity_bytes);
+	append(
+		"format5_reader_selected_extent_capacity_bytes",
+		operational.format5_reader_selected_extent_capacity_bytes);
+	append(
+		"format5_reader_current_selected_control_capacity_bytes",
+		operational.format5_reader_current_selected_control_capacity_bytes);
+	append(
+		"format5_reader_global_position_capacity_bytes",
+		operational.format5_reader_global_position_capacity_bytes);
+	append(
+		"format5_reader_control_payload_capacity_bytes",
+		operational.format5_reader_control_payload_capacity_bytes);
+	append(
+		"format5_reader_owned_capacity_bytes",
+		operational.format5_reader_owned_capacity_bytes);
+	append(
+		"format5_reader_admitted_bytes",
+		operational.format5_reader_admitted_bytes);
+	append(
+		"format5_reader_exact_position_image_checks",
+		operational.format5_reader_exact_position_image_checks);
+	append(
+		"format5_reader_exact_position_image_failures",
+		operational.format5_reader_exact_position_image_failures);
+	append(
+		"format5_reader_retained_layout_checks",
+		operational.format5_reader_retained_layout_checks);
+	append(
+		"format5_reader_retained_layout_failures",
+		operational.format5_reader_retained_layout_failures);
+	result += R"(,"format5_reader_memory_evidence_saturated":)";
+	result += operational.format5_reader_memory_evidence_saturated
+		? "true" : "false";
+	result += R"(,"stats_saturated":)";
+	result += operational.stats_saturated ? "true" : "false";
+	result += '}';
+	return result;
+}
+
 [[nodiscard]] std::string persisted_gpu_operation_evidence_json(
 		const alignment_exec::AlignmentExecutionSnapshot& snapshot,
 		const bool include_cache_qualification_v2)
@@ -2416,6 +2511,23 @@ Datum bioseq_last_alignment_format5_reader_memory_evidence(PG_FUNCTION_ARGS) {
 	(void)validate_alignment_snapshot_environment(snapshot);
 	const std::string encoded =
 		format5_reader_memory_evidence_json(snapshot);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+/* Additive exact-array/layout proof; v1 remains byte-for-byte compatible. */
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_last_alignment_format5_reader_memory_evidence_v2);
+Datum bioseq_last_alignment_format5_reader_memory_evidence_v2(
+		PG_FUNCTION_ARGS) {
+	if (!last_alignment_execution_snapshot.has_value()) {
+		PG_RETURN_NULL();
+	}
+	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+		*last_alignment_execution_snapshot;
+	(void)validate_alignment_snapshot_environment(snapshot);
+	const std::string encoded =
+		format5_reader_memory_evidence_json_v2(snapshot);
 	PG_RETURN_DATUM(DirectFunctionCall1(
 		jsonb_in, CStringGetDatum(encoded.c_str())));
 }

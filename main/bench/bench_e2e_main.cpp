@@ -338,6 +338,20 @@ struct E2eOutput {
     std::int64_t format5_reader_position_append_growth_reservations = -1;
     std::int64_t format5_reader_retained_position_count = -1;
     std::int64_t format5_reader_retained_position_capacity = -1;
+    std::int64_t format5_reader_directory_capacity_bytes = -1;
+    std::int64_t format5_reader_query_hash_capacity_bytes = -1;
+    std::int64_t format5_reader_query_record_capacity_bytes = -1;
+    std::int64_t format5_reader_ordinal_route_capacity_bytes = -1;
+    std::int64_t format5_reader_selected_extent_capacity_bytes = -1;
+    std::int64_t format5_reader_current_selected_control_capacity_bytes = -1;
+    std::int64_t format5_reader_global_position_capacity_bytes = -1;
+    std::int64_t format5_reader_control_payload_capacity_bytes = -1;
+    std::int64_t format5_reader_owned_capacity_bytes = -1;
+    std::int64_t format5_reader_admitted_bytes = -1;
+    std::int64_t format5_reader_exact_position_image_checks = -1;
+    std::int64_t format5_reader_exact_position_image_failures = -1;
+    std::int64_t format5_reader_retained_layout_checks = -1;
+    std::int64_t format5_reader_retained_layout_failures = -1;
     std::int64_t format5_reader_memory_evidence_saturated = -1;
     nlohmann::json format5_reader_memory_evidence = nullptr;
     std::int64_t persisted_gpu_operation_evidence_schema_valid = -1;
@@ -1751,9 +1765,23 @@ inline constexpr auto kFormat5ReaderMemoryEvidenceKeys =
         "format5_reader_position_append_growth_reservations",
         "format5_reader_retained_position_count",
         "format5_reader_retained_position_capacity",
+        "format5_reader_directory_capacity_bytes",
+        "format5_reader_query_hash_capacity_bytes",
+        "format5_reader_query_record_capacity_bytes",
+        "format5_reader_ordinal_route_capacity_bytes",
+        "format5_reader_selected_extent_capacity_bytes",
+        "format5_reader_current_selected_control_capacity_bytes",
+        "format5_reader_global_position_capacity_bytes",
+        "format5_reader_control_payload_capacity_bytes",
+        "format5_reader_owned_capacity_bytes",
+        "format5_reader_admitted_bytes",
+        "format5_reader_exact_position_image_checks",
+        "format5_reader_exact_position_image_failures",
+        "format5_reader_retained_layout_checks",
+        "format5_reader_retained_layout_failures",
         "format5_reader_memory_evidence_saturated", "stats_saturated",
     });
-static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 13);
+static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 27);
 
 inline constexpr auto kSimdExecutionEvidenceKeys =
     std::to_array<std::string_view>({
@@ -2189,7 +2217,7 @@ void capture_format5_reader_memory_evidence(
         E2eOutput& out) {
     const it::row_t row = it::query_one(
         connection,
-        "SELECT bioseq.last_alignment_format5_reader_memory_evidence();");
+        "SELECT bioseq.last_alignment_format5_reader_memory_evidence_v2();");
     if (row.size() != 1) {
         abort_pipeline_proof_capture(
             "Format-5 reader memory evidence has an invalid scalar shape");
@@ -2201,7 +2229,7 @@ void capture_format5_reader_memory_evidence(
         && evidence["schema"].is_string()
         && evidence["schema"] == "bioseq.format5_reader_memory_evidence"
         && evidence["version"].is_number_integer()
-        && evidence["version"] == 1
+        && evidence["version"] == 2
         && evidence["format5_reader_memory_evidence_saturated"].is_boolean()
         && evidence["stats_saturated"].is_boolean();
     if (!header_valid) {
@@ -2242,6 +2270,36 @@ void capture_format5_reader_memory_evidence(
         evidence, "format5_reader_retained_position_count");
     out.format5_reader_retained_position_capacity = required_json_counter(
         evidence, "format5_reader_retained_position_capacity");
+    out.format5_reader_directory_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_directory_capacity_bytes");
+    out.format5_reader_query_hash_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_query_hash_capacity_bytes");
+    out.format5_reader_query_record_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_query_record_capacity_bytes");
+    out.format5_reader_ordinal_route_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_ordinal_route_capacity_bytes");
+    out.format5_reader_selected_extent_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_selected_extent_capacity_bytes");
+    out.format5_reader_current_selected_control_capacity_bytes =
+        required_json_counter(
+            evidence,
+            "format5_reader_current_selected_control_capacity_bytes");
+    out.format5_reader_global_position_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_global_position_capacity_bytes");
+    out.format5_reader_control_payload_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_control_payload_capacity_bytes");
+    out.format5_reader_owned_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_owned_capacity_bytes");
+    out.format5_reader_admitted_bytes = required_json_counter(
+        evidence, "format5_reader_admitted_bytes");
+    out.format5_reader_exact_position_image_checks = required_json_counter(
+        evidence, "format5_reader_exact_position_image_checks");
+    out.format5_reader_exact_position_image_failures = required_json_counter(
+        evidence, "format5_reader_exact_position_image_failures");
+    out.format5_reader_retained_layout_checks = required_json_counter(
+        evidence, "format5_reader_retained_layout_checks");
+    out.format5_reader_retained_layout_failures = required_json_counter(
+        evidence, "format5_reader_retained_layout_failures");
     out.format5_reader_memory_evidence_saturated =
         evidence["format5_reader_memory_evidence_saturated"].get<bool>()
             ? 1 : 0;
@@ -3683,6 +3741,20 @@ inline void require_pipeline_execution_proof(
         && out.format5_reader_position_append_growth_reservations == 0
         && out.format5_reader_retained_position_count == 0
         && out.format5_reader_retained_position_capacity == 0
+        && out.format5_reader_directory_capacity_bytes == 0
+        && out.format5_reader_query_hash_capacity_bytes == 0
+        && out.format5_reader_query_record_capacity_bytes == 0
+        && out.format5_reader_ordinal_route_capacity_bytes == 0
+        && out.format5_reader_selected_extent_capacity_bytes == 0
+        && out.format5_reader_current_selected_control_capacity_bytes == 0
+        && out.format5_reader_global_position_capacity_bytes == 0
+        && out.format5_reader_control_payload_capacity_bytes == 0
+        && out.format5_reader_owned_capacity_bytes == 0
+        && out.format5_reader_admitted_bytes == 0
+        && out.format5_reader_exact_position_image_checks == 0
+        && out.format5_reader_exact_position_image_failures == 0
+        && out.format5_reader_retained_layout_checks == 0
+        && out.format5_reader_retained_layout_failures == 0
         && out.format5_reader_memory_evidence_saturated == 0;
     const __int128 format5_reader_sessions =
         static_cast<__int128>(out.persisted_generation_read_sessions);
@@ -3713,6 +3785,21 @@ inline void require_pipeline_execution_proof(
         && format5_reader_selection_passes % 4 == 0
         && format5_reader_selection_passes / 4
             <= format5_reader_extents / 2;
+    const __int128 format5_reader_exact_position_bytes =
+        static_cast<__int128>(out.format5_reader_retained_position_count)
+            * static_cast<__int128>(sizeof(std::uint64_t));
+    const __int128 format5_reader_layout_bytes =
+        static_cast<__int128>(out.format5_reader_directory_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_query_hash_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_query_record_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_ordinal_route_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_selected_extent_capacity_bytes)
+        + static_cast<__int128>(
+            out.format5_reader_current_selected_control_capacity_bytes)
+        + static_cast<__int128>(
+            out.format5_reader_global_position_capacity_bytes)
+        + static_cast<__int128>(
+            out.format5_reader_control_payload_capacity_bytes);
     const bool format5_reader_memory_gate = expect_persisted && !expect_gpu
         ? out.format5_reader_global_position_storage_preparations
                 == out.persisted_generation_read_sessions
@@ -3721,7 +3808,28 @@ inline void require_pipeline_execution_proof(
             && out.format5_reader_position_append_growth_reservations == 0
             && out.format5_reader_retained_position_count > 0
             && out.format5_reader_retained_position_capacity
-                >= out.format5_reader_retained_position_count
+                == out.format5_reader_retained_position_count
+            && static_cast<__int128>(
+                    out.format5_reader_global_position_capacity_bytes)
+                == format5_reader_exact_position_bytes
+            && out.format5_reader_exact_position_image_checks
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_exact_position_image_failures == 0
+            && out.format5_reader_retained_layout_checks
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_retained_layout_failures == 0
+            && format5_reader_layout_bytes
+                == static_cast<__int128>(
+                    out.format5_reader_owned_capacity_bytes)
+            && out.format5_reader_owned_capacity_bytes
+                == out.format5_reader_admitted_bytes
+            && out.format5_reader_directory_capacity_bytes > 0
+            && out.format5_reader_query_record_capacity_bytes > 0
+            && out.format5_reader_ordinal_route_capacity_bytes > 0
+            && out.format5_reader_selected_extent_capacity_bytes > 0
+            && out.format5_reader_query_hash_capacity_bytes == 0
+            && out.format5_reader_current_selected_control_capacity_bytes == 0
+            && out.format5_reader_control_payload_capacity_bytes == 0
             && format5_reader_accounting_shape
             && out.format5_reader_memory_evidence_saturated == 0
         : no_format5_reader_memory_evidence;
@@ -4116,6 +4224,8 @@ inline void require_pipeline_execution_proof(
             "format5_contract=%lld target_rows=%lld "
             "memory_passes=%lld memory_preparations=%lld "
             "memory_allocations=%lld append_growth=%lld retained=%lld/%lld "
+            "position_bytes=%lld layout=%lld/%lld admitted=%lld "
+            "exact_checks=%lld/%lld layout_checks=%lld/%lld "
             "memory_saturated=%lld\n",
             static_cast<int>(persisted_read_route_proof),
             static_cast<int>(persisted_read_session_proof),
@@ -4140,6 +4250,17 @@ inline void require_pipeline_execution_proof(
                 out.format5_reader_position_append_growth_reservations),
             static_cast<long long>(out.format5_reader_retained_position_count),
             static_cast<long long>(out.format5_reader_retained_position_capacity),
+            static_cast<long long>(
+                out.format5_reader_global_position_capacity_bytes),
+            static_cast<long long>(out.format5_reader_owned_capacity_bytes),
+            static_cast<long long>(format5_reader_layout_bytes),
+            static_cast<long long>(out.format5_reader_admitted_bytes),
+            static_cast<long long>(
+                out.format5_reader_exact_position_image_checks),
+            static_cast<long long>(
+                out.format5_reader_exact_position_image_failures),
+            static_cast<long long>(out.format5_reader_retained_layout_checks),
+            static_cast<long long>(out.format5_reader_retained_layout_failures),
             static_cast<long long>(
                 out.format5_reader_memory_evidence_saturated));
         std::fputs(
@@ -6451,6 +6572,20 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"format5_reader_position_append_growth_reservations", static_cast<double>(o.format5_reader_position_append_growth_reservations)},
         {"format5_reader_retained_position_count", static_cast<double>(o.format5_reader_retained_position_count)},
         {"format5_reader_retained_position_capacity", static_cast<double>(o.format5_reader_retained_position_capacity)},
+        {"format5_reader_directory_capacity_bytes", static_cast<double>(o.format5_reader_directory_capacity_bytes)},
+        {"format5_reader_query_hash_capacity_bytes", static_cast<double>(o.format5_reader_query_hash_capacity_bytes)},
+        {"format5_reader_query_record_capacity_bytes", static_cast<double>(o.format5_reader_query_record_capacity_bytes)},
+        {"format5_reader_ordinal_route_capacity_bytes", static_cast<double>(o.format5_reader_ordinal_route_capacity_bytes)},
+        {"format5_reader_selected_extent_capacity_bytes", static_cast<double>(o.format5_reader_selected_extent_capacity_bytes)},
+        {"format5_reader_current_selected_control_capacity_bytes", static_cast<double>(o.format5_reader_current_selected_control_capacity_bytes)},
+        {"format5_reader_global_position_capacity_bytes", static_cast<double>(o.format5_reader_global_position_capacity_bytes)},
+        {"format5_reader_control_payload_capacity_bytes", static_cast<double>(o.format5_reader_control_payload_capacity_bytes)},
+        {"format5_reader_owned_capacity_bytes", static_cast<double>(o.format5_reader_owned_capacity_bytes)},
+        {"format5_reader_admitted_bytes", static_cast<double>(o.format5_reader_admitted_bytes)},
+        {"format5_reader_exact_position_image_checks", static_cast<double>(o.format5_reader_exact_position_image_checks)},
+        {"format5_reader_exact_position_image_failures", static_cast<double>(o.format5_reader_exact_position_image_failures)},
+        {"format5_reader_retained_layout_checks", static_cast<double>(o.format5_reader_retained_layout_checks)},
+        {"format5_reader_retained_layout_failures", static_cast<double>(o.format5_reader_retained_layout_failures)},
         {"format5_reader_memory_evidence_saturated", static_cast<double>(o.format5_reader_memory_evidence_saturated)},
         {"gpu_seed_dispatches", static_cast<double>(o.gpu_seed_dispatches)},
         {"gpu_chain_dispatches", static_cast<double>(o.gpu_chain_dispatches)},

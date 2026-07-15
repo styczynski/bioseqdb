@@ -584,6 +584,20 @@ struct PipelineOperationalStats {
     std::uint64_t format5_reader_position_append_growth_reservations = 0;
     std::uint64_t format5_reader_retained_position_count = 0;
     std::uint64_t format5_reader_retained_position_capacity = 0;
+    std::uint64_t format5_reader_directory_capacity_bytes = 0;
+    std::uint64_t format5_reader_query_hash_capacity_bytes = 0;
+    std::uint64_t format5_reader_query_record_capacity_bytes = 0;
+    std::uint64_t format5_reader_ordinal_route_capacity_bytes = 0;
+    std::uint64_t format5_reader_selected_extent_capacity_bytes = 0;
+    std::uint64_t format5_reader_current_selected_control_capacity_bytes = 0;
+    std::uint64_t format5_reader_global_position_capacity_bytes = 0;
+    std::uint64_t format5_reader_control_payload_capacity_bytes = 0;
+    std::uint64_t format5_reader_owned_capacity_bytes = 0;
+    std::uint64_t format5_reader_admitted_bytes = 0;
+    std::uint64_t format5_reader_exact_position_image_checks = 0;
+    std::uint64_t format5_reader_exact_position_image_failures = 0;
+    std::uint64_t format5_reader_retained_layout_checks = 0;
+    std::uint64_t format5_reader_retained_layout_failures = 0;
     bool format5_reader_memory_evidence_saturated = false;
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
@@ -835,6 +849,34 @@ struct PipelineOperationalStats {
             rhs.format5_reader_retained_position_count);
         add(format5_reader_retained_position_capacity,
             rhs.format5_reader_retained_position_capacity);
+        add(format5_reader_directory_capacity_bytes,
+            rhs.format5_reader_directory_capacity_bytes);
+        add(format5_reader_query_hash_capacity_bytes,
+            rhs.format5_reader_query_hash_capacity_bytes);
+        add(format5_reader_query_record_capacity_bytes,
+            rhs.format5_reader_query_record_capacity_bytes);
+        add(format5_reader_ordinal_route_capacity_bytes,
+            rhs.format5_reader_ordinal_route_capacity_bytes);
+        add(format5_reader_selected_extent_capacity_bytes,
+            rhs.format5_reader_selected_extent_capacity_bytes);
+        add(format5_reader_current_selected_control_capacity_bytes,
+            rhs.format5_reader_current_selected_control_capacity_bytes);
+        add(format5_reader_global_position_capacity_bytes,
+            rhs.format5_reader_global_position_capacity_bytes);
+        add(format5_reader_control_payload_capacity_bytes,
+            rhs.format5_reader_control_payload_capacity_bytes);
+        add(format5_reader_owned_capacity_bytes,
+            rhs.format5_reader_owned_capacity_bytes);
+        add(format5_reader_admitted_bytes,
+            rhs.format5_reader_admitted_bytes);
+        add(format5_reader_exact_position_image_checks,
+            rhs.format5_reader_exact_position_image_checks);
+        add(format5_reader_exact_position_image_failures,
+            rhs.format5_reader_exact_position_image_failures);
+        add(format5_reader_retained_layout_checks,
+            rhs.format5_reader_retained_layout_checks);
+        add(format5_reader_retained_layout_failures,
+            rhs.format5_reader_retained_layout_failures);
         format5_reader_memory_evidence_saturated =
             format5_reader_memory_evidence_saturated
             || rhs.format5_reader_memory_evidence_saturated;
