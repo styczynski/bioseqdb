@@ -101,6 +101,46 @@ BEGIN
 END
 $$;
 
+-- The exact writer stores the raw child slot, including sort/distinct resjunk,
+-- and the reader reruns the CustomScan projection to recover visible rows.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT id FROM qc_left ORDER BY k NULLS FIRST, id;
+SELECT id FROM qc_left ORDER BY k NULLS FIRST, id;
+SELECT DISTINCT ON (k) id
+FROM qc_left
+ORDER BY k NULLS FIRST, id DESC;
+SELECT DISTINCT ON (k) id
+FROM qc_left
+ORDER BY k NULLS FIRST, id DESC;
+
+DO $$
+DECLARE
+    cache_stats record;
+    sorted_ids integer[];
+    distinct_ids integer[];
+BEGIN
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    SELECT array_agg(id) INTO sorted_ids
+    FROM (SELECT id FROM qc_left ORDER BY k NULLS FIRST, id) AS ordered;
+    SELECT array_agg(id) INTO distinct_ids
+    FROM (
+        SELECT DISTINCT ON (k) id
+        FROM qc_left
+        ORDER BY k NULLS FIRST, id DESC
+    ) AS distinct_ordered;
+    IF sorted_ids IS DISTINCT FROM ARRAY[4, 1, 2, 3]
+       OR distinct_ids IS DISTINCT FROM ARRAY[4, 2, 3]
+       OR cache_stats.produced <> 2
+       OR cache_stats.completed_hits <> 2
+       OR cache_stats.fallbacks <> 0 THEN
+        RAISE EXCEPTION
+            'raw-slot reprojection mismatch: sorted %, distinct %, stats %',
+            sorted_ids, distinct_ids, row_to_json(cache_stats);
+    END IF;
+END
+$$;
+
 SELECT k, count(*), min(id), max(id)
 FROM qc_left
 GROUP BY k
@@ -321,44 +361,27 @@ RETURNS integer
 LANGUAGE SQL IMMUTABLE STRICT
 AS 'SELECT $1 + $2 + 100';
 
-DO $$
-DECLARE
-    cache_stats record;
-    live_entries integer;
-BEGIN
-    SELECT * INTO cache_stats FROM bioseq_cache.stats();
-    SELECT count(*) INTO live_entries
-    FROM bioseq_cache.entries()
-    WHERE state = 'COMPLETE'
-      AND sql LIKE '%qc_replace_sum(id)%';
-    IF cache_stats.invalidations = 0 OR live_entries <> 0 THEN
-        RAISE EXCEPTION
-            'aggregate support replacement invalidation mismatch: invalidations %, live %',
-            cache_stats.invalidations, live_entries;
-    END IF;
-END
-$$;
-
 SELECT bioseq_cache.reset_stats();
-SELECT qc_replace_sum(id) FROM qc_left;
-SELECT qc_replace_sum(id) FROM qc_left;
+SELECT qc_replace_sum(id) FROM qc_left \gset replace_first_
+SELECT qc_replace_sum(id) FROM qc_left \gset replace_second_
+SELECT produced = 1
+       AND completed_hits = 1
+       AND fallbacks = 0 AS replacement_cache_current
+FROM bioseq_cache.stats()
+\gset
+SELECT :replace_first_qc_replace_sum::integer = 410
+       AND :replace_second_qc_replace_sum::integer = 410
+       AS replacement_rows_current
+\gset
+\if :replacement_rows_current
+\else
+DO $$ BEGIN RAISE EXCEPTION 'aggregate replacement returned stale rows'; END $$;
+\endif
 
-DO $$
-DECLARE
-    cache_stats record;
-    observed integer;
-BEGIN
-    SELECT * INTO cache_stats FROM bioseq_cache.stats();
-    SELECT qc_replace_sum(id) INTO observed FROM qc_left;
-    IF observed <> 410
-       OR cache_stats.produced <> 1
-       OR cache_stats.completed_hits <> 1
-       OR cache_stats.fallbacks <> 0 THEN
-        RAISE EXCEPTION 'aggregate support replacement was stale: %, %',
-            observed, row_to_json(cache_stats);
-    END IF;
-END
-$$;
+\if :replacement_cache_current
+\else
+DO $$ BEGIN RAISE EXCEPTION 'aggregate support replacement was stale'; END $$;
+\endif
 
 -- Repeat replacement invalidation when the aggregate executes as a window.
 CREATE FUNCTION qc_replace_window_state(integer, integer)
@@ -408,24 +431,6 @@ RETURNS integer
 LANGUAGE SQL IMMUTABLE STRICT
 AS 'SELECT $1 + $2 + 1000';
 
-DO $$
-DECLARE
-    cache_stats record;
-    live_entries integer;
-BEGIN
-    SELECT * INTO cache_stats FROM bioseq_cache.stats();
-    SELECT count(*) INTO live_entries
-    FROM bioseq_cache.entries()
-    WHERE state = 'COMPLETE'
-      AND sql LIKE '%qc_replace_window_sum(id)%';
-    IF cache_stats.invalidations = 0 OR live_entries <> 0 THEN
-        RAISE EXCEPTION
-            'aggregate-window replacement invalidation mismatch: invalidations %, live %',
-            cache_stats.invalidations, live_entries;
-    END IF;
-END
-$$;
-
 SELECT bioseq_cache.reset_stats();
 SELECT id, qc_replace_window_sum(id) OVER (
     ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
@@ -453,6 +458,54 @@ BEGIN
        OR cache_stats.fallbacks <> 0 THEN
         RAISE EXCEPTION 'aggregate-window replacement was stale: %, %',
             observed, row_to_json(cache_stats);
+    END IF;
+END
+$$;
+
+-- Duplicate relation discovery deduplicates before the cap, and reversing
+-- plan discovery order produces identical canonical dependency material.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT l1.id, l2.id
+FROM qc_left AS l1 JOIN qc_left AS l2 ON l1.id = l2.id
+ORDER BY l1.id, l2.id;
+DO $$
+DECLARE
+    dependency_count integer;
+BEGIN
+    SELECT (dependencies->>'dependency_count')::integer
+    INTO STRICT dependency_count
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ExactFinalResult' AND state = 'COMPLETE';
+    IF dependency_count <> 1 THEN
+        RAISE EXCEPTION 'duplicate relation dependency was not deduplicated: %',
+            dependency_count;
+    END IF;
+END
+$$;
+
+SELECT bioseq_cache.invalidate_all();
+SELECT l.id, r.id
+FROM qc_left AS l JOIN qc_right AS r ON l.k = r.k
+ORDER BY l.id, r.id;
+SELECT l.id, r.id
+FROM qc_right AS r JOIN qc_left AS l ON r.k = l.k
+ORDER BY l.id, r.id;
+DO $$
+DECLARE
+    generation_count integer;
+    fingerprint_count integer;
+BEGIN
+    SELECT count(*),
+           count(DISTINCT dependencies->>'dependency_fingerprint')
+    INTO generation_count, fingerprint_count
+    FROM bioseq_cache.entries()
+    WHERE kind = 'ExactFinalResult' AND state = 'COMPLETE'
+      AND (dependencies->>'dependency_count')::integer = 2;
+    IF generation_count <> 2 OR fingerprint_count <> 1 THEN
+        RAISE EXCEPTION
+            'reverse dependency order changed canonical material: generations %, fingerprints %',
+            generation_count, fingerprint_count;
     END IF;
 END
 $$;

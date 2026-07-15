@@ -81,14 +81,15 @@ EXECUTE qc_unused_param(4, NULL);
 EXECUTE qc_unused_param(4, 'ignored');
 
 DO $$
+DECLARE
+    cache_stats record;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM bioseq_cache.stats()
-        WHERE produced = 2
-          AND completed_hits = 2
-          AND inflight_waits = 0)
-    THEN
-        RAISE EXCEPTION 'unused second PARAM_EXTERN changed the exact key';
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    IF cache_stats.produced <> 2
+       OR cache_stats.completed_hits <> 2
+       OR cache_stats.inflight_waits <> 0 THEN
+        RAISE EXCEPTION 'unused second PARAM_EXTERN changed the exact key: %',
+            row_to_json(cache_stats);
     END IF;
 END
 $$;
@@ -102,12 +103,13 @@ SELECT id FROM qc_same WHERE meta = 3;
 SELECT  id  FROM qc_same /* comment */ WHERE meta = 3;
 
 DO $$
+DECLARE cache_stats record;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM bioseq_cache.stats()
-        WHERE produced = 1 AND completed_hits = 1)
-    THEN
-        RAISE EXCEPTION 'equal analyzed trees did not share';
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    IF cache_stats.produced <> 1
+       OR cache_stats.completed_hits <> 1 THEN
+        RAISE EXCEPTION 'equal analyzed trees did not share: %',
+            row_to_json(cache_stats);
     END IF;
 END
 $$;

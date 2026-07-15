@@ -67,6 +67,14 @@ enum class FormatError : std::uint16_t {
     CorruptBlock,
     CorruptManifest,
     InvalidBlockReference,
+    InvalidRowGroupLimits,
+    RowGroupValueLimitExceeded,
+    TooManyRowGroups,
+    MetadataLimitExceeded,
+    MaximumStoreBytesExceeded,
+    PhysicalBlockLimitExceeded,
+    SinkFailed,
+    InvalidBuilderState,
 };
 
 inline constexpr std::uint16_t kColumnFlagNullable = 1u << 0;
@@ -77,6 +85,20 @@ inline constexpr std::size_t kRowGroupIndexEntryBytes = 24;
 inline constexpr std::size_t kFooterPrefixBytes = 16;
 inline constexpr std::size_t kHeaderCrcOffset = 108;
 inline constexpr std::size_t kGroupCrcOffset = 32;
+inline constexpr std::uint64_t kMaximumColumnStoreBytes = 256ULL << 20U;
+inline constexpr std::uint32_t kMaximumColumnStoreRowGroups = 65'536;
+inline constexpr std::uint64_t kMaximumColumnStoreMetadataBytes = 8ULL << 20U;
+inline constexpr std::uint64_t kMaximumColumnStorePhysicalBlockBytes =
+    64ULL << 20U;
+inline constexpr std::uint32_t kMaximumColumnStorePhysicalBlocks = 32;
+
+enum class ColumnStoreBlockKind : std::uint8_t {
+    Header = 0,
+    Schema = 1,
+    RowGroup = 2,
+    Index = 3,
+    Footer = 4,
+};
 
 struct ColumnSchema {
     std::string name;
@@ -113,6 +135,44 @@ struct RowGroupLimits {
     std::uint32_t rows = kDefaultRowGroupRows;
     std::uint64_t value_bytes = kDefaultRowGroupValueBytes;
 };
+
+/** Exact final v1 size after all row-group bytes have been serialized. */
+[[nodiscard]] inline constexpr std::expected<std::uint64_t, FormatError>
+projected_column_store_bytes(
+    std::uint64_t end_of_groups,
+    std::uint64_t row_group_count) noexcept {
+    if (row_group_count > kMaximumColumnStoreRowGroups) {
+        return std::unexpected(FormatError::TooManyRowGroups);
+    }
+    const auto index_entries = checked_mul(
+        row_group_count,
+        static_cast<std::uint64_t>(kRowGroupIndexEntryBytes));
+    const auto index_bytes = index_entries.has_value()
+        ? checked_add(std::uint64_t{8}, *index_entries)
+        : std::optional<std::uint64_t>{};
+    const auto digest_count = checked_add(row_group_count, std::uint64_t{3});
+    const auto digest_bytes = digest_count.has_value()
+        ? checked_mul(*digest_count, std::uint64_t{32})
+        : std::optional<std::uint64_t>{};
+    const auto footer_bytes = digest_bytes.has_value()
+        ? checked_add(
+            static_cast<std::uint64_t>(kFooterPrefixBytes + 32u),
+            *digest_bytes)
+        : std::optional<std::uint64_t>{};
+    const auto through_index = index_bytes.has_value()
+        ? checked_add(end_of_groups, *index_bytes)
+        : std::optional<std::uint64_t>{};
+    const auto total = through_index.has_value() && footer_bytes.has_value()
+        ? checked_add(*through_index, *footer_bytes)
+        : std::optional<std::uint64_t>{};
+    if (!total.has_value()) {
+        return std::unexpected(FormatError::ArithmeticOverflow);
+    }
+    if (*total > kMaximumColumnStoreBytes) {
+        return std::unexpected(FormatError::MaximumStoreBytesExceeded);
+    }
+    return *total;
+}
 
 /** Encode validity bits with one for non-NULL and deterministic zero tail bits. */
 [[nodiscard]] inline std::vector<std::byte> encode_validity(
@@ -417,6 +477,559 @@ template <column_checksum_policy Policy>
     return *digest;
 }
 
+template <class Sink>
+concept column_store_block_sink = requires(
+    Sink& sink,
+    ColumnStoreBlockKind kind,
+    std::uint64_t ordinal,
+    std::span<const std::byte> bytes,
+    const typename Sink::token_type& token) {
+    typename Sink::token_type;
+    requires std::movable<typename Sink::token_type>;
+    { sink.store(kind, ordinal, bytes) }
+        -> std::same_as<std::expected<typename Sink::token_type, FormatError>>;
+    { sink.discard(token) } noexcept -> std::same_as<void>;
+};
+
+template <column_checksum_policy Policy, column_store_block_sink Sink>
+class StreamingColumnStoreBuilder;
+
+/**
+ * Logical block order plus cleanup ownership after a streaming finalization.
+ * A caller marks the blocks published only after its manifest owns every token.
+ */
+template <column_store_block_sink Sink>
+class StreamedColumnStoreBlocks {
+public:
+    using token_type = typename Sink::token_type;
+
+    StreamedColumnStoreBlocks() = default;
+
+    StreamedColumnStoreBlocks(StreamedColumnStoreBlocks&& other) noexcept {
+        move_from(other);
+    }
+
+    StreamedColumnStoreBlocks& operator=(
+            StreamedColumnStoreBlocks&& other) noexcept {
+        if (this != &other) {
+            discard();
+            move_from(other);
+        }
+        return *this;
+    }
+
+    StreamedColumnStoreBlocks(const StreamedColumnStoreBlocks&) = delete;
+    StreamedColumnStoreBlocks& operator=(
+        const StreamedColumnStoreBlocks&) = delete;
+
+    ~StreamedColumnStoreBlocks() noexcept {
+        discard();
+    }
+
+    [[nodiscard]] std::span<const token_type> tokens() const noexcept {
+        return tokens_;
+    }
+
+    [[nodiscard]] std::uint64_t logical_bytes() const noexcept {
+        return logical_bytes_;
+    }
+
+    [[nodiscard]] std::uint64_t row_count() const noexcept {
+        return row_count_;
+    }
+
+    [[nodiscard]] std::uint32_t row_group_count() const noexcept {
+        return row_group_count_;
+    }
+
+    /** Transfer cleanup responsibility to an atomically published manifest. */
+    void mark_published() noexcept {
+        sink_ = nullptr;
+    }
+
+    /** Discard every still-temporary token exactly once in logical order. */
+    void discard() noexcept {
+        if (sink_ != nullptr) {
+            for (const token_type& token : tokens_) {
+                sink_->discard(token);
+            }
+        }
+        sink_ = nullptr;
+        tokens_.clear();
+    }
+
+private:
+    template <column_checksum_policy, column_store_block_sink>
+    friend class StreamingColumnStoreBuilder;
+
+    StreamedColumnStoreBlocks(
+        Sink* sink,
+        std::vector<token_type> tokens,
+        std::uint64_t logical_bytes,
+        std::uint64_t row_count,
+        std::uint32_t row_group_count) noexcept
+        : sink_(sink),
+          tokens_(std::move(tokens)),
+          logical_bytes_(logical_bytes),
+          row_count_(row_count),
+          row_group_count_(row_group_count) {}
+
+    void move_from(StreamedColumnStoreBlocks& other) noexcept {
+        sink_ = std::exchange(other.sink_, nullptr);
+        tokens_ = std::move(other.tokens_);
+        logical_bytes_ = std::exchange(other.logical_bytes_, 0);
+        row_count_ = std::exchange(other.row_count_, 0);
+        row_group_count_ = std::exchange(other.row_group_count_, 0);
+    }
+
+    Sink* sink_ = nullptr;
+    std::vector<token_type> tokens_;
+    std::uint64_t logical_bytes_ = 0;
+    std::uint64_t row_count_ = 0;
+    std::uint32_t row_group_count_ = 0;
+};
+
+/** Zone order used when physical blocks are assembled into one manifest. */
+enum class ColumnStorePhysicalZone : std::uint8_t {
+    Prefix = 0,
+    RowGroups = 1,
+    Suffix = 2,
+};
+
+/** A sink-local handle for one logical v1 block. */
+struct ColumnStoreLogicalBlockToken {
+    std::uint32_t slot = (std::numeric_limits<std::uint32_t>::max)();
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return slot != (std::numeric_limits<std::uint32_t>::max)();
+    }
+
+    [[nodiscard]] bool operator==(
+        const ColumnStoreLogicalBlockToken&) const noexcept = default;
+};
+
+template <class Sink>
+concept column_store_physical_sink = requires(
+    Sink& sink,
+    std::span<const std::byte> bytes,
+    const typename Sink::token_type& token) {
+    typename Sink::token_type;
+    requires std::copyable<typename Sink::token_type>;
+    { sink.store_physical(bytes) }
+        -> std::same_as<std::expected<typename Sink::token_type, FormatError>>;
+    { sink.discard_physical(token) } noexcept -> std::same_as<void>;
+};
+
+/**
+ * Coalesce logical v1 blocks into bounded physical blocks without changing
+ * their manifest order.  Row groups are written first, while the later-created
+ * prefix and suffix tokens are returned in prefix/group/suffix order.
+ */
+template <column_store_physical_sink PhysicalSink>
+class CoalescingColumnStoreSink {
+public:
+    using token_type = ColumnStoreLogicalBlockToken;
+    using physical_token_type = typename PhysicalSink::token_type;
+
+    explicit CoalescingColumnStoreSink(
+        PhysicalSink& physical_sink,
+        std::uint64_t maximum_physical_block_bytes =
+            kMaximumColumnStorePhysicalBlockBytes,
+        std::uint32_t maximum_physical_blocks =
+            kMaximumColumnStorePhysicalBlocks) noexcept
+        : physical_sink_(&physical_sink),
+          maximum_physical_block_bytes_(maximum_physical_block_bytes),
+          maximum_physical_blocks_(maximum_physical_blocks) {
+        if (maximum_physical_block_bytes_ == 0 ||
+            maximum_physical_block_bytes_ >
+                kMaximumColumnStorePhysicalBlockBytes ||
+            maximum_physical_block_bytes_ >
+                (std::numeric_limits<std::size_t>::max)() ||
+            maximum_physical_blocks_ == 0 ||
+            maximum_physical_blocks_ >
+                kMaximumColumnStorePhysicalBlocks) {
+            initial_error_ = FormatError::InvalidBuilderState;
+            return;
+        }
+        const auto physical_metadata = checked_mul(
+            static_cast<std::uint64_t>(maximum_physical_blocks_),
+            static_cast<std::uint64_t>(sizeof(PhysicalRecord)));
+        if (!physical_metadata.has_value() ||
+            *physical_metadata > kMaximumColumnStoreMetadataBytes) {
+            initial_error_ = FormatError::MetadataLimitExceeded;
+        }
+    }
+
+    CoalescingColumnStoreSink(const CoalescingColumnStoreSink&) = delete;
+    CoalescingColumnStoreSink& operator=(
+        const CoalescingColumnStoreSink&) = delete;
+    CoalescingColumnStoreSink(CoalescingColumnStoreSink&&) = delete;
+    CoalescingColumnStoreSink& operator=(
+        CoalescingColumnStoreSink&&) = delete;
+
+    ~CoalescingColumnStoreSink() noexcept {
+        cleanup_physical();
+    }
+
+    [[nodiscard]] std::expected<token_type, FormatError> store(
+        ColumnStoreBlockKind kind,
+        std::uint64_t ordinal,
+        std::span<const std::byte> bytes) {
+        if (initial_error_.has_value()) {
+            return std::unexpected(*initial_error_);
+        }
+        if (state_ == State::Failed) {
+            return std::unexpected(last_error_);
+        }
+        if (!valid_next_block(kind, ordinal)) {
+            return fail_token(FormatError::InvalidBuilderState);
+        }
+        const auto capacity = ensure_logical_capacity(records_.size() + 1u);
+        if (!capacity.has_value()) {
+            return fail_token(capacity.error());
+        }
+
+        switch (kind) {
+        case ColumnStoreBlockKind::RowGroup: {
+            const auto appended = append_bytes(
+                bytes, ColumnStorePhysicalZone::RowGroups);
+            if (!appended.has_value()) {
+                return std::unexpected(appended.error());
+            }
+            break;
+        }
+        case ColumnStoreBlockKind::Header: {
+            const auto flushed = flush_buffer(
+                ColumnStorePhysicalZone::RowGroups);
+            if (!flushed.has_value()) {
+                return std::unexpected(flushed.error());
+            }
+            state_ = State::Prefix;
+            const auto appended = append_bytes(
+                bytes, ColumnStorePhysicalZone::Prefix);
+            if (!appended.has_value()) {
+                return std::unexpected(appended.error());
+            }
+            break;
+        }
+        case ColumnStoreBlockKind::Schema: {
+            const auto appended = append_bytes(
+                bytes, ColumnStorePhysicalZone::Prefix);
+            if (!appended.has_value()) {
+                return std::unexpected(appended.error());
+            }
+            break;
+        }
+        case ColumnStoreBlockKind::Index: {
+            const auto flushed = flush_buffer(
+                ColumnStorePhysicalZone::Prefix);
+            if (!flushed.has_value()) {
+                return std::unexpected(flushed.error());
+            }
+            state_ = State::Suffix;
+            const auto appended = append_bytes(
+                bytes, ColumnStorePhysicalZone::Suffix);
+            if (!appended.has_value()) {
+                return std::unexpected(appended.error());
+            }
+            break;
+        }
+        case ColumnStoreBlockKind::Footer: {
+            const auto appended = append_bytes(
+                bytes, ColumnStorePhysicalZone::Suffix);
+            if (!appended.has_value()) {
+                return std::unexpected(appended.error());
+            }
+            const auto flushed = flush_buffer(
+                ColumnStorePhysicalZone::Suffix);
+            if (!flushed.has_value()) {
+                return std::unexpected(flushed.error());
+            }
+            state_ = State::Complete;
+            break;
+        }
+        }
+
+        const std::uint32_t slot = static_cast<std::uint32_t>(records_.size());
+        records_.push_back(LogicalRecord{
+            .kind = kind,
+            .discarded = false,
+            .ordinal = ordinal,
+        });
+        if (kind == ColumnStoreBlockKind::RowGroup) {
+            ++row_group_count_;
+        }
+        return token_type{.slot = slot};
+    }
+
+    /** Release logical ownership; the final release frees physical tokens. */
+    void discard(const token_type& token) noexcept {
+        if (token.slot >= records_.size()) {
+            return;
+        }
+        LogicalRecord& record = records_[token.slot];
+        if (record.discarded) {
+            return;
+        }
+        record.discarded = true;
+        ++discarded_record_count_;
+        if (discarded_record_count_ == records_.size() &&
+            state_ != State::Published) {
+            cleanup_physical();
+        }
+    }
+
+    /** Copy the bounded physical capabilities in exact manifest byte order. */
+    [[nodiscard]] std::expected<std::vector<physical_token_type>, FormatError>
+    manifest_tokens(std::span<const token_type> logical_order) const {
+        if (state_ != State::Complete ||
+            !valid_logical_order(logical_order) ||
+            physical_records_.size() > maximum_physical_blocks_) {
+            return std::unexpected(
+                physical_records_.size() > maximum_physical_blocks_
+                    ? FormatError::PhysicalBlockLimitExceeded
+                    : FormatError::InvalidBuilderState);
+        }
+        std::vector<physical_token_type> tokens;
+        tokens.reserve(physical_records_.size());
+        for (const ColumnStorePhysicalZone zone : {
+                 ColumnStorePhysicalZone::Prefix,
+                 ColumnStorePhysicalZone::RowGroups,
+                 ColumnStorePhysicalZone::Suffix}) {
+            for (const PhysicalRecord& record : physical_records_) {
+                if (record.zone == zone) {
+                    tokens.push_back(record.token);
+                }
+            }
+        }
+        if (tokens.empty() || tokens.size() > maximum_physical_blocks_) {
+            return std::unexpected(FormatError::PhysicalBlockLimitExceeded);
+        }
+        return tokens;
+    }
+
+    /** Stop cleanup only after the copied capabilities were atomically owned. */
+    void mark_published() noexcept {
+        state_ = State::Published;
+        physical_records_.clear();
+        buffer_.clear();
+    }
+
+    [[nodiscard]] std::uint32_t physical_block_count() const noexcept {
+        return static_cast<std::uint32_t>(physical_records_.size());
+    }
+
+    [[nodiscard]] std::uint64_t retained_buffer_bytes() const noexcept {
+        return buffer_.size();
+    }
+
+    [[nodiscard]] std::uint64_t retained_metadata_bytes() const noexcept {
+        const auto logical = checked_mul(
+            static_cast<std::uint64_t>(records_.capacity()),
+            static_cast<std::uint64_t>(sizeof(LogicalRecord)));
+        const auto physical = checked_mul(
+            static_cast<std::uint64_t>(physical_records_.capacity()),
+            static_cast<std::uint64_t>(sizeof(PhysicalRecord)));
+        if (!logical.has_value() || !physical.has_value()) {
+            return (std::numeric_limits<std::uint64_t>::max)();
+        }
+        return checked_add(*logical, *physical).value_or(
+            (std::numeric_limits<std::uint64_t>::max)());
+    }
+
+private:
+    enum class State : std::uint8_t {
+        RowGroups,
+        Prefix,
+        Suffix,
+        Complete,
+        Failed,
+        Published,
+    };
+
+    struct LogicalRecord {
+        ColumnStoreBlockKind kind = ColumnStoreBlockKind::Header;
+        bool discarded = false;
+        std::uint16_t reserved = 0;
+        std::uint32_t reserved2 = 0;
+        std::uint64_t ordinal = 0;
+    };
+
+    struct PhysicalRecord {
+        physical_token_type token;
+        ColumnStorePhysicalZone zone = ColumnStorePhysicalZone::RowGroups;
+    };
+
+    [[nodiscard]] bool valid_next_block(
+            ColumnStoreBlockKind kind,
+            std::uint64_t ordinal) const noexcept {
+        switch (kind) {
+        case ColumnStoreBlockKind::RowGroup:
+            return state_ == State::RowGroups &&
+                ordinal == row_group_count_ &&
+                row_group_count_ < kMaximumColumnStoreRowGroups;
+        case ColumnStoreBlockKind::Header:
+            return state_ == State::RowGroups && ordinal == 0;
+        case ColumnStoreBlockKind::Schema:
+            return state_ == State::Prefix && ordinal == 0 &&
+                !records_.empty() &&
+                records_.back().kind == ColumnStoreBlockKind::Header;
+        case ColumnStoreBlockKind::Index:
+            return state_ == State::Prefix && ordinal == 0 &&
+                !records_.empty() &&
+                records_.back().kind == ColumnStoreBlockKind::Schema;
+        case ColumnStoreBlockKind::Footer:
+            return state_ == State::Suffix && ordinal == 0 &&
+                !records_.empty() &&
+                records_.back().kind == ColumnStoreBlockKind::Index;
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::expected<void, FormatError>
+    ensure_logical_capacity(std::size_t logical_count) {
+        constexpr std::size_t maximum_logical_blocks =
+            static_cast<std::size_t>(kMaximumColumnStoreRowGroups) + 4u;
+        if (logical_count > maximum_logical_blocks) {
+            return std::unexpected(FormatError::TooManyRowGroups);
+        }
+        std::size_t target = records_.capacity();
+        if (target < logical_count) {
+            target = target == 0 ? 16u : target;
+            while (target < logical_count) {
+                if (target > maximum_logical_blocks / 2u) {
+                    target = maximum_logical_blocks;
+                    break;
+                }
+                target *= 2u;
+            }
+        }
+        const auto logical_bytes = checked_mul(
+            static_cast<std::uint64_t>(target),
+            static_cast<std::uint64_t>(sizeof(LogicalRecord)));
+        const auto physical_bytes = checked_mul(
+            static_cast<std::uint64_t>(maximum_physical_blocks_),
+            static_cast<std::uint64_t>(sizeof(PhysicalRecord)));
+        const auto total = logical_bytes.has_value() &&
+                physical_bytes.has_value()
+            ? checked_add(*logical_bytes, *physical_bytes)
+            : std::optional<std::uint64_t>{};
+        if (!total.has_value() ||
+            *total > kMaximumColumnStoreMetadataBytes) {
+            return std::unexpected(FormatError::MetadataLimitExceeded);
+        }
+        records_.reserve(target);
+        physical_records_.reserve(maximum_physical_blocks_);
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, FormatError> append_bytes(
+        std::span<const std::byte> bytes,
+        ColumnStorePhysicalZone zone) {
+        while (!bytes.empty()) {
+            const std::size_t limit = static_cast<std::size_t>(
+                maximum_physical_block_bytes_);
+            const std::size_t available = limit - buffer_.size();
+            const std::size_t take = std::min(available, bytes.size());
+            buffer_.insert(
+                buffer_.end(), bytes.begin(), bytes.begin() + take);
+            bytes = bytes.subspan(take);
+            if (buffer_.size() == limit) {
+                const auto flushed = flush_buffer(zone);
+                if (!flushed.has_value()) {
+                    return flushed;
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, FormatError> flush_buffer(
+        ColumnStorePhysicalZone zone) {
+        if (buffer_.empty()) {
+            return {};
+        }
+        if (physical_records_.size() >= maximum_physical_blocks_) {
+            return fail_void(FormatError::PhysicalBlockLimitExceeded);
+        }
+        auto stored = physical_sink_->store_physical(buffer_);
+        if (!stored.has_value()) {
+            return fail_void(FormatError::SinkFailed);
+        }
+        physical_records_.push_back(PhysicalRecord{
+            .token = std::move(*stored),
+            .zone = zone,
+        });
+        buffer_.clear();
+        return {};
+    }
+
+    [[nodiscard]] bool valid_logical_order(
+            std::span<const token_type> order) const noexcept {
+        const std::size_t groups = row_group_count_;
+        if (records_.size() != groups + 4u ||
+            order.size() != records_.size() ||
+            order[0].slot != groups ||
+            order[1].slot != groups + 1u ||
+            order[groups + 2u].slot != groups + 2u ||
+            order[groups + 3u].slot != groups + 3u) {
+            return false;
+        }
+        for (std::size_t index = 0; index < groups; ++index) {
+            if (order[index + 2u].slot != index ||
+                records_[index].kind != ColumnStoreBlockKind::RowGroup ||
+                records_[index].ordinal != index ||
+                records_[index].discarded) {
+                return false;
+            }
+        }
+        return records_[groups].kind == ColumnStoreBlockKind::Header &&
+            records_[groups + 1u].kind == ColumnStoreBlockKind::Schema &&
+            records_[groups + 2u].kind == ColumnStoreBlockKind::Index &&
+            records_[groups + 3u].kind == ColumnStoreBlockKind::Footer &&
+            !records_[groups].discarded &&
+            !records_[groups + 1u].discarded &&
+            !records_[groups + 2u].discarded &&
+            !records_[groups + 3u].discarded;
+    }
+
+    [[nodiscard]] std::expected<void, FormatError> fail_void(
+            FormatError error) noexcept {
+        last_error_ = error;
+        state_ = State::Failed;
+        cleanup_physical();
+        return std::unexpected(error);
+    }
+
+    [[nodiscard]] std::expected<token_type, FormatError> fail_token(
+            FormatError error) noexcept {
+        static_cast<void>(fail_void(error));
+        return std::unexpected(error);
+    }
+
+    void cleanup_physical() noexcept {
+        if (physical_sink_ != nullptr && state_ != State::Published) {
+            for (const PhysicalRecord& record : physical_records_) {
+                physical_sink_->discard_physical(record.token);
+            }
+        }
+        physical_records_.clear();
+        buffer_.clear();
+    }
+
+    PhysicalSink* physical_sink_ = nullptr;
+    std::uint64_t maximum_physical_block_bytes_ = 0;
+    std::uint32_t maximum_physical_blocks_ = 0;
+    std::optional<FormatError> initial_error_;
+    FormatError last_error_ = FormatError::InvalidBuilderState;
+    State state_ = State::RowGroups;
+    std::vector<std::byte> buffer_;
+    std::vector<LogicalRecord> records_;
+    std::vector<PhysicalRecord> physical_records_;
+    std::uint32_t row_group_count_ = 0;
+    std::size_t discarded_record_count_ = 0;
+};
+
 /** Incremental row API; sealed output is one self-validating byte blob. */
 class ColumnStoreBuilder {
 public:
@@ -522,9 +1135,8 @@ public:
     template <column_checksum_policy Policy>
     [[nodiscard]] std::expected<std::vector<std::byte>, FormatError> seal(
         Policy& policy) const {
-        if (groups_.size()
-            > (std::numeric_limits<std::uint32_t>::max)() - 3u) {
-            return std::unexpected(FormatError::ArithmeticOverflow);
+        if (groups_.size() > kMaximumColumnStoreRowGroups) {
+            return std::unexpected(FormatError::TooManyRowGroups);
         }
         auto descriptors = detail::serialize_schema(schema_);
         if (!descriptors.has_value()) {
@@ -538,6 +1150,11 @@ public:
         std::vector<std::byte> store(kColumnStoreHeaderBytes, std::byte{0});
         const std::uint64_t descriptor_offset = store.size();
         store.insert(store.end(), descriptors->begin(), descriptors->end());
+        const auto empty_projection = projected_column_store_bytes(
+            static_cast<std::uint64_t>(store.size()), groups_.size());
+        if (!empty_projection.has_value()) {
+            return std::unexpected(empty_projection.error());
+        }
 
         std::vector<detail::GroupIndexEntry> group_index;
         group_index.reserve(groups_.size());
@@ -552,6 +1169,16 @@ public:
                 return std::unexpected(FormatError::ChecksumUnavailable);
             }
             const std::uint64_t offset = store.size();
+            const auto group_end = checked_add(
+                offset, static_cast<std::uint64_t>(encoded->size()));
+            if (!group_end.has_value()) {
+                return std::unexpected(FormatError::ArithmeticOverflow);
+            }
+            const auto projected = projected_column_store_bytes(
+                *group_end, groups_.size());
+            if (!projected.has_value()) {
+                return std::unexpected(projected.error());
+            }
             store.insert(store.end(), encoded->begin(), encoded->end());
             group_index.push_back(detail::GroupIndexEntry{
                 .offset = offset,
@@ -665,6 +1292,14 @@ public:
         for (const std::uint8_t byte : manifest->bytes) {
             store.push_back(static_cast<std::byte>(byte));
         }
+        const auto measured = projected_column_store_bytes(
+            index_offset, groups_.size());
+        if (!measured.has_value()) {
+            return std::unexpected(measured.error());
+        }
+        if (store.size() != *measured) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
         return store;
     }
 
@@ -673,6 +1308,9 @@ public:
     }
 
 private:
+    template <column_checksum_policy, column_store_block_sink>
+    friend class StreamingColumnStoreBuilder;
+
     /** Serialize one internally columnar row group. */
     template <column_checksum_policy Policy>
     [[nodiscard]] std::expected<std::vector<std::byte>, FormatError>
@@ -872,6 +1510,535 @@ private:
     std::vector<ColumnSchema> schema_;
     RowGroupLimits limits_{};
     std::vector<detail::PendingGroup> groups_;
+    std::uint64_t row_count_ = 0;
+};
+
+/**
+ * One-row-group writer whose immutable blocks are copied directly into a
+ * caller-owned sink.  Completed groups are never retained as byte vectors.
+ */
+template <column_checksum_policy Policy, column_store_block_sink Sink>
+class StreamingColumnStoreBuilder {
+public:
+    using token_type = typename Sink::token_type;
+    using result_type = StreamedColumnStoreBlocks<Sink>;
+
+    StreamingColumnStoreBuilder(
+        ColumnStoreIdentity identity,
+        std::span<const ColumnSchema> schema,
+        Policy& policy,
+        Sink& sink,
+        RowGroupLimits limits = {})
+        : identity_(identity),
+          schema_(schema.begin(), schema.end()),
+          limits_(limits),
+          group_encoder_(identity, schema, limits),
+          policy_(&policy),
+          sink_(&sink) {
+        if (limits_.rows == 0) {
+            limits_.rows = kDefaultRowGroupRows;
+        }
+        if (limits_.value_bytes == 0) {
+            limits_.value_bytes = kDefaultRowGroupValueBytes;
+        }
+        if (limits_.rows > kDefaultRowGroupRows ||
+            limits_.value_bytes > kDefaultRowGroupValueBytes) {
+            initial_error_ = FormatError::InvalidRowGroupLimits;
+            return;
+        }
+        auto descriptors = detail::serialize_schema(schema_);
+        if (!descriptors.has_value()) {
+            initial_error_ = descriptors.error();
+            return;
+        }
+        descriptors_ = std::move(*descriptors);
+        auto descriptor_digest = policy_->sha256(descriptors_);
+        if (!descriptor_digest.has_value()) {
+            initial_error_ = FormatError::ChecksumUnavailable;
+            return;
+        }
+        descriptor_digest_ = *descriptor_digest;
+        const auto initial_bytes = checked_add(
+            static_cast<std::uint64_t>(kColumnStoreHeaderBytes),
+            static_cast<std::uint64_t>(descriptors_.size()));
+        if (!initial_bytes.has_value()) {
+            initial_error_ = FormatError::ArithmeticOverflow;
+            return;
+        }
+        virtual_store_bytes_ = *initial_bytes;
+        const auto empty_size = projected_column_store_bytes(
+            virtual_store_bytes_, 0);
+        if (!empty_size.has_value()) {
+            initial_error_ = empty_size.error();
+            return;
+        }
+        const auto initial_metadata = metadata_bytes_for_capacities(0, 0, 4);
+        if (!initial_metadata.has_value() ||
+            *initial_metadata > kMaximumColumnStoreMetadataBytes) {
+            initial_error_ = FormatError::MetadataLimitExceeded;
+            return;
+        }
+        terminal_tokens_.reserve(4);
+    }
+
+    StreamingColumnStoreBuilder(const StreamingColumnStoreBuilder&) = delete;
+    StreamingColumnStoreBuilder& operator=(
+        const StreamingColumnStoreBuilder&) = delete;
+    StreamingColumnStoreBuilder(StreamingColumnStoreBuilder&&) = delete;
+    StreamingColumnStoreBuilder& operator=(
+        StreamingColumnStoreBuilder&&) = delete;
+
+    ~StreamingColumnStoreBuilder() noexcept {
+        cleanup_tokens();
+    }
+
+    /** Copy one row, flushing the preceding complete group when required. */
+    [[nodiscard]] std::expected<void, FormatError> append_row(
+        std::span<const EncodedColumnValue> values) {
+        if (state_ != State::Open) {
+            return std::unexpected(state_error());
+        }
+        if (initial_error_.has_value()) {
+            return std::unexpected(*initial_error_);
+        }
+        if (values.size() != schema_.size()) {
+            return std::unexpected(FormatError::ColumnCountMismatch);
+        }
+
+        std::uint64_t row_bytes = 0;
+        for (std::size_t column_index = 0;
+             column_index < values.size(); ++column_index) {
+            const ColumnSchema& schema = schema_[column_index];
+            const EncodedColumnValue& value = values[column_index];
+            const ColumnEncoding encoding = schema.descriptor.encoding;
+            if (value.is_null &&
+                (schema.descriptor.flags & kColumnFlagNullable) == 0) {
+                return std::unexpected(FormatError::InvalidNullBitmap);
+            }
+            if (encoding == ColumnEncoding::Dictionary ||
+                encoding == ColumnEncoding::RunLength) {
+                return std::unexpected(FormatError::UnsupportedEncoding);
+            }
+            if (!value.is_null) {
+                if ((encoding == ColumnEncoding::FixedByValue ||
+                     encoding == ColumnEncoding::FixedByReference) &&
+                    (schema.descriptor.type_length <= 0 ||
+                     value.bytes.size() != static_cast<std::size_t>(
+                         schema.descriptor.type_length))) {
+                    return std::unexpected(FormatError::InvalidFixedWidth);
+                }
+                if (encoding == ColumnEncoding::BooleanBits &&
+                    (value.bytes.size() != 1 ||
+                     (value.bytes[0] != std::byte{0} &&
+                      value.bytes[0] != std::byte{1}))) {
+                    return std::unexpected(FormatError::InvalidBoolean);
+                }
+            }
+            const auto next = checked_add(
+                row_bytes, static_cast<std::uint64_t>(value.bytes.size()));
+            if (!next.has_value()) {
+                return std::unexpected(FormatError::ArithmeticOverflow);
+            }
+            row_bytes = *next;
+        }
+        if (row_bytes > limits_.value_bytes) {
+            return std::unexpected(FormatError::RowGroupValueLimitExceeded);
+        }
+
+        bool value_limit_exceeded = false;
+        if (!pending_.rows.empty()) {
+            const auto next = checked_add(pending_.value_bytes, row_bytes);
+            value_limit_exceeded = !next.has_value() ||
+                *next > limits_.value_bytes;
+        }
+        if (!pending_.rows.empty() &&
+            (pending_.rows.size() >= limits_.rows ||
+             value_limit_exceeded)) {
+            auto flushed = flush_pending_group();
+            if (!flushed.has_value()) {
+                return flushed;
+            }
+        }
+
+        detail::OwnedRow row;
+        row.reserve(values.size());
+        for (const EncodedColumnValue& value : values) {
+            row.push_back(detail::OwnedValue{
+                .is_null = value.is_null,
+                .bytes = value.is_null
+                    ? std::vector<std::byte>{}
+                    : std::vector<std::byte>(
+                        value.bytes.begin(), value.bytes.end()),
+            });
+        }
+        const auto next_group_bytes = checked_add(
+            pending_.value_bytes, row_bytes);
+        const auto next_row_count = checked_add(row_count_, std::uint64_t{1});
+        if (!next_group_bytes.has_value() || !next_row_count.has_value()) {
+            return std::unexpected(FormatError::ArithmeticOverflow);
+        }
+        pending_.rows.push_back(std::move(row));
+        pending_.value_bytes = *next_group_bytes;
+        row_count_ = *next_row_count;
+        return {};
+    }
+
+    /** Flush the last group and emit header/schema/index/footer blocks. */
+    [[nodiscard]] std::expected<result_type, FormatError> finalize() {
+        if (state_ != State::Open) {
+            return std::unexpected(state_error());
+        }
+        if (initial_error_.has_value()) {
+            return std::unexpected(*initial_error_);
+        }
+        if (!pending_.rows.empty()) {
+            auto flushed = flush_pending_group();
+            if (!flushed.has_value()) {
+                return std::unexpected(flushed.error());
+            }
+        }
+
+        const std::uint64_t index_offset = virtual_store_bytes_;
+        std::vector<std::byte> index_bytes;
+        append_little_endian(
+            index_bytes, static_cast<std::uint64_t>(group_index_.size()));
+        for (const detail::GroupIndexEntry& group : group_index_) {
+            append_little_endian(index_bytes, group.offset);
+            append_little_endian(index_bytes, group.length);
+            append_little_endian(index_bytes, group.crc32c);
+            append_little_endian(index_bytes, std::uint32_t{0});
+        }
+
+        std::vector<std::byte> header;
+        header.reserve(kColumnStoreHeaderBytes);
+        for (const char byte : kColumnMagic) {
+            header.push_back(static_cast<std::byte>(
+                static_cast<unsigned char>(byte)));
+        }
+        append_little_endian(header, kColumnFormatVersion);
+        append_little_endian(header, identity_.postgres_major);
+        append_little_endian(header, kSharedAbiVersion);
+        append_little_endian(header, std::uint32_t{0});
+        append_little_endian(header, identity_.boot_nonce);
+        append_little_endian(header, identity_.database_oid);
+        append_little_endian(header, identity_.owner_role_oid);
+        append_little_endian(
+            header, static_cast<std::uint8_t>(DataEndian::Little));
+        append_little_endian(header, identity_.datum_width);
+        append_little_endian(
+            header, static_cast<std::uint16_t>(schema_.size()));
+        append_little_endian(header, row_count_);
+        append_little_endian(
+            header, static_cast<std::uint64_t>(group_index_.size()));
+        append_little_endian(
+            header, static_cast<std::uint64_t>(kColumnStoreHeaderBytes));
+        append_little_endian(header, index_offset);
+        for (const std::uint8_t byte : descriptor_digest_.bytes) {
+            header.push_back(static_cast<std::byte>(byte));
+        }
+        append_little_endian(header, std::uint32_t{0});
+        if (header.size() != kColumnStoreHeaderBytes) {
+            return fail_result(FormatError::InvalidSchema);
+        }
+        auto header_crc = policy_->block_crc32c(header);
+        if (!header_crc.has_value()) {
+            return fail_result(FormatError::ChecksumUnavailable);
+        }
+        detail::write_little_endian_at(
+            header, kHeaderCrcOffset, *header_crc);
+
+        auto header_digest = policy_->sha256(header);
+        auto index_digest = policy_->sha256(index_bytes);
+        if (!header_digest.has_value() || !index_digest.has_value()) {
+            return fail_result(FormatError::ChecksumUnavailable);
+        }
+        std::vector<CacheDigest256> block_digests;
+        block_digests.reserve(group_digests_.size() + 3u);
+        block_digests.push_back(*header_digest);
+        block_digests.push_back(descriptor_digest_);
+        block_digests.insert(
+            block_digests.end(),
+            group_digests_.begin(), group_digests_.end());
+        block_digests.push_back(*index_digest);
+        auto manifest = policy_->manifest_sha256(block_digests);
+        if (!manifest.has_value()) {
+            return fail_result(FormatError::ChecksumUnavailable);
+        }
+
+        std::vector<std::byte> footer;
+        for (const char byte : kColumnFooterMagic) {
+            footer.push_back(static_cast<std::byte>(
+                static_cast<unsigned char>(byte)));
+        }
+        append_little_endian(
+            footer, static_cast<std::uint32_t>(block_digests.size()));
+        append_little_endian(footer, std::uint32_t{0});
+        for (const CacheDigest256& digest : block_digests) {
+            for (const std::uint8_t byte : digest.bytes) {
+                footer.push_back(static_cast<std::byte>(byte));
+            }
+        }
+        for (const std::uint8_t byte : manifest->bytes) {
+            footer.push_back(static_cast<std::byte>(byte));
+        }
+
+        const auto final_bytes = projected_column_store_bytes(
+            index_offset, group_index_.size());
+        if (!final_bytes.has_value()) {
+            return fail_result(final_bytes.error());
+        }
+        const auto index_end = checked_add(
+            index_offset, static_cast<std::uint64_t>(index_bytes.size()));
+        const auto measured_final = index_end.has_value()
+            ? checked_add(
+                *index_end, static_cast<std::uint64_t>(footer.size()))
+            : std::optional<std::uint64_t>{};
+        if (!measured_final.has_value() || *measured_final != *final_bytes) {
+            return fail_result(FormatError::ArithmeticOverflow);
+        }
+
+        if (!store_terminal(ColumnStoreBlockKind::Header, header) ||
+            !store_terminal(ColumnStoreBlockKind::Schema, descriptors_) ||
+            !store_terminal(ColumnStoreBlockKind::Index, index_bytes) ||
+            !store_terminal(ColumnStoreBlockKind::Footer, footer)) {
+            return std::unexpected(failure_error_);
+        }
+
+        group_tokens_.insert(
+            group_tokens_.begin(), std::move(terminal_tokens_[1]));
+        group_tokens_.insert(
+            group_tokens_.begin(), std::move(terminal_tokens_[0]));
+        group_tokens_.push_back(std::move(terminal_tokens_[2]));
+        group_tokens_.push_back(std::move(terminal_tokens_[3]));
+        terminal_tokens_.clear();
+        state_ = State::Finalized;
+        return result_type{
+            sink_, std::move(group_tokens_), *final_bytes, row_count_,
+            static_cast<std::uint32_t>(group_index_.size())};
+    }
+
+    [[nodiscard]] std::uint64_t row_count() const noexcept {
+        return row_count_;
+    }
+
+    [[nodiscard]] std::uint32_t pending_row_count() const noexcept {
+        return static_cast<std::uint32_t>(pending_.rows.size());
+    }
+
+    [[nodiscard]] std::uint64_t retained_value_bytes() const noexcept {
+        return pending_.value_bytes;
+    }
+
+    [[nodiscard]] std::uint32_t emitted_row_group_count() const noexcept {
+        return static_cast<std::uint32_t>(group_index_.size());
+    }
+
+    [[nodiscard]] std::uint64_t retained_metadata_bytes() const noexcept {
+        const auto bytes = metadata_bytes_for_capacities(
+            group_index_.capacity(),
+            group_digests_.capacity(),
+            group_tokens_.capacity() + terminal_tokens_.capacity());
+        return bytes.value_or((std::numeric_limits<std::uint64_t>::max)());
+    }
+
+private:
+    enum class State : std::uint8_t {
+        Open,
+        Failed,
+        Finalized,
+    };
+
+    [[nodiscard]] FormatError state_error() const noexcept {
+        return state_ == State::Failed
+            ? failure_error_ : FormatError::InvalidBuilderState;
+    }
+
+    [[nodiscard]] std::expected<void, FormatError> flush_pending_group() {
+        if (pending_.rows.empty()) {
+            return {};
+        }
+        if (group_index_.size() >= kMaximumColumnStoreRowGroups) {
+            return fail_void(FormatError::TooManyRowGroups);
+        }
+        const auto capacity = ensure_metadata_capacity(
+            group_index_.size() + 1u);
+        if (!capacity.has_value()) {
+            return fail_void(capacity.error());
+        }
+        auto encoded = group_encoder_.serialize_group(
+            pending_, virtual_store_bytes_, *policy_);
+        if (!encoded.has_value()) {
+            return fail_void(encoded.error());
+        }
+        auto group_crc = policy_->block_crc32c(*encoded);
+        auto group_digest = policy_->sha256(*encoded);
+        if (!group_crc.has_value() || !group_digest.has_value()) {
+            return fail_void(FormatError::ChecksumUnavailable);
+        }
+        const auto group_end = checked_add(
+            virtual_store_bytes_,
+            static_cast<std::uint64_t>(encoded->size()));
+        if (!group_end.has_value()) {
+            return fail_void(FormatError::ArithmeticOverflow);
+        }
+        const auto projected = projected_column_store_bytes(
+            *group_end, group_index_.size() + 1u);
+        if (!projected.has_value()) {
+            return fail_void(projected.error());
+        }
+        auto stored = sink_->store(
+            ColumnStoreBlockKind::RowGroup,
+            static_cast<std::uint64_t>(group_index_.size()), *encoded);
+        if (!stored.has_value()) {
+            return fail_void(FormatError::SinkFailed);
+        }
+        group_tokens_.push_back(std::move(*stored));
+        group_index_.push_back(detail::GroupIndexEntry{
+            .offset = virtual_store_bytes_,
+            .length = encoded->size(),
+            .crc32c = *group_crc,
+        });
+        group_digests_.push_back(*group_digest);
+        virtual_store_bytes_ = *group_end;
+        pending_ = detail::PendingGroup{
+            .first_row_ordinal = row_count_,
+        };
+        return {};
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t> metadata_bytes_for_capacities(
+            std::uint64_t index_capacity,
+            std::uint64_t digest_capacity,
+            std::uint64_t token_capacity) const noexcept {
+        std::optional<std::uint64_t> result{
+            static_cast<std::uint64_t>(descriptors_.capacity())};
+        const auto schema_storage = checked_mul(
+            static_cast<std::uint64_t>(schema_.capacity()),
+            static_cast<std::uint64_t>(sizeof(ColumnSchema) * 2u));
+        if (!schema_storage.has_value()) {
+            return std::nullopt;
+        }
+        result = checked_add(*result, *schema_storage);
+        for (const ColumnSchema& column : schema_) {
+            const auto names = checked_mul(
+                static_cast<std::uint64_t>(column.name.capacity()),
+                std::uint64_t{2});
+            if (!result.has_value() || !names.has_value()) {
+                return std::nullopt;
+            }
+            result = checked_add(*result, *names);
+        }
+        const auto index_bytes = checked_mul(
+            index_capacity,
+            static_cast<std::uint64_t>(sizeof(detail::GroupIndexEntry)));
+        const auto digest_bytes = checked_mul(
+            digest_capacity,
+            static_cast<std::uint64_t>(sizeof(CacheDigest256)));
+        const auto token_bytes = checked_mul(
+            token_capacity,
+            static_cast<std::uint64_t>(sizeof(token_type)));
+        if (!result.has_value() || !index_bytes.has_value() ||
+            !digest_bytes.has_value() || !token_bytes.has_value()) {
+            return std::nullopt;
+        }
+        result = checked_add(*result, *index_bytes);
+        if (!result.has_value()) {
+            return std::nullopt;
+        }
+        result = checked_add(*result, *digest_bytes);
+        if (!result.has_value()) {
+            return std::nullopt;
+        }
+        return checked_add(*result, *token_bytes);
+    }
+
+    [[nodiscard]] std::expected<void, FormatError>
+    ensure_metadata_capacity(std::size_t group_count) {
+        if (group_count > kMaximumColumnStoreRowGroups) {
+            return std::unexpected(FormatError::TooManyRowGroups);
+        }
+        std::size_t target = group_index_.capacity();
+        if (target < group_count) {
+            target = target == 0 ? 16u : target;
+            while (target < group_count) {
+                if (target > kMaximumColumnStoreRowGroups / 2u) {
+                    target = kMaximumColumnStoreRowGroups;
+                    break;
+                }
+                target *= 2u;
+            }
+        }
+        const auto token_capacity = checked_add(
+            static_cast<std::uint64_t>(target), std::uint64_t{4});
+        const auto metadata = token_capacity.has_value()
+            ? metadata_bytes_for_capacities(target, target, *token_capacity)
+            : std::optional<std::uint64_t>{};
+        if (!metadata.has_value() ||
+            *metadata > kMaximumColumnStoreMetadataBytes) {
+            return std::unexpected(FormatError::MetadataLimitExceeded);
+        }
+        group_index_.reserve(target);
+        group_digests_.reserve(target);
+        group_tokens_.reserve(static_cast<std::size_t>(*token_capacity));
+        return {};
+    }
+
+    [[nodiscard]] bool store_terminal(
+            ColumnStoreBlockKind kind,
+            std::span<const std::byte> bytes) {
+        auto stored = sink_->store(kind, 0, bytes);
+        if (!stored.has_value()) {
+            static_cast<void>(fail_void(FormatError::SinkFailed));
+            return false;
+        }
+        terminal_tokens_.push_back(std::move(*stored));
+        return true;
+    }
+
+    [[nodiscard]] std::expected<void, FormatError> fail_void(
+            FormatError error) noexcept {
+        failure_error_ = error;
+        state_ = State::Failed;
+        cleanup_tokens();
+        return std::unexpected(error);
+    }
+
+    [[nodiscard]] std::expected<result_type, FormatError> fail_result(
+            FormatError error) noexcept {
+        static_cast<void>(fail_void(error));
+        return std::unexpected(error);
+    }
+
+    void cleanup_tokens() noexcept {
+        if (sink_ != nullptr && state_ != State::Finalized) {
+            for (const token_type& token : group_tokens_) {
+                sink_->discard(token);
+            }
+            for (const token_type& token : terminal_tokens_) {
+                sink_->discard(token);
+            }
+        }
+        group_tokens_.clear();
+        terminal_tokens_.clear();
+    }
+
+    ColumnStoreIdentity identity_{};
+    std::vector<ColumnSchema> schema_;
+    RowGroupLimits limits_{};
+    ColumnStoreBuilder group_encoder_;
+    Policy* policy_ = nullptr;
+    Sink* sink_ = nullptr;
+    std::optional<FormatError> initial_error_;
+    FormatError failure_error_ = FormatError::InvalidBuilderState;
+    State state_ = State::Open;
+    std::vector<std::byte> descriptors_;
+    CacheDigest256 descriptor_digest_{};
+    detail::PendingGroup pending_{};
+    std::vector<detail::GroupIndexEntry> group_index_;
+    std::vector<CacheDigest256> group_digests_;
+    std::vector<token_type> group_tokens_;
+    std::vector<token_type> terminal_tokens_;
+    std::uint64_t virtual_store_bytes_ = 0;
     std::uint64_t row_count_ = 0;
 };
 
@@ -1138,6 +2305,9 @@ validate_column_store(
     const ColumnStoreIdentity& expected_identity,
     std::span<const ColumnSchema> expected_schema,
     Policy& policy) {
+    if (store.size() > kMaximumColumnStoreBytes) {
+        return std::unexpected(FormatError::MaximumStoreBytesExceeded);
+    }
     if (store.size() < kColumnStoreHeaderBytes + kFooterPrefixBytes + 32u) {
         return std::unexpected(FormatError::Truncated);
     }
@@ -1170,6 +2340,9 @@ validate_column_store(
         || !column_count || !row_count || !group_count
         || !descriptor_offset || !index_offset) {
         return std::unexpected(FormatError::Truncated);
+    }
+    if (*group_count > kMaximumColumnStoreRowGroups) {
+        return std::unexpected(FormatError::TooManyRowGroups);
     }
     CacheDigest256 stored_schema_digest{};
     for (std::uint8_t& byte : stored_schema_digest.bytes) {
@@ -1342,8 +2515,7 @@ validate_column_store(
     auto indexed_group_count = read_little_endian<std::uint64_t>(
         store, index_cursor);
     if (!indexed_group_count || *indexed_group_count != *group_count
-        || *indexed_group_count
-            > (std::numeric_limits<std::uint32_t>::max)() - 3u) {
+        || *indexed_group_count > kMaximumColumnStoreRowGroups) {
         return std::unexpected(FormatError::InvalidOffsets);
     }
     const auto index_entries_bytes = checked_mul(

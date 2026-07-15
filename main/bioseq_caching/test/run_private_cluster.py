@@ -83,6 +83,68 @@ def _run_checked(
     return completed
 
 
+def _run_captured(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    output_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command whose nonzero exit status is part of the test oracle."""
+    completed = subprocess.run(
+        list(command),
+        env=dict(env) if env is not None else None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(completed.stdout, encoding="utf-8")
+    return completed
+
+
+def _validate_extension_package(
+    control: Path, install_script: Path, bootstrap: Path
+) -> None:
+    """Reject a relocatable, unguarded, or build-path-tainted package."""
+    control_text = control.read_text(encoding="utf-8")
+    install_text = install_script.read_text(encoding="utf-8")
+    bootstrap_text = bootstrap.read_text(encoding="utf-8")
+    required_control_lines = {
+        "default_version = '1.0'",
+        "relocatable = false",
+        "schema = 'bioseq_cache'",
+        "module_pathname = '$libdir/bioseq_cache'",
+    }
+    control_lines = {line.strip() for line in control_text.splitlines()}
+    missing = sorted(required_control_lines - control_lines)
+    if missing:
+        raise ClusterCommandError(
+            "bioseq_cache extension control contract is incomplete: "
+            + ", ".join(missing)
+        )
+    install_lines = install_text.splitlines()
+    first_line = next((line.strip() for line in install_lines if line.strip()), "")
+    expected_guard = (
+        '\\echo Use "CREATE EXTENSION bioseq_cache" to load this file. \\quit'
+    )
+    if first_line != expected_guard:
+        raise ClusterCommandError("bioseq_cache install script lacks its psql guard")
+    if (
+        "'MODULE_PATHNAME'" not in install_text
+        or "__BIOSEQ_CACHE_BUILD_DSO__" in install_text
+    ):
+        raise ClusterCommandError(
+            "bioseq_cache install script has an invalid module pathname"
+        )
+    if "\\quit" in bootstrap_text or "'MODULE_PATHNAME'" in bootstrap_text:
+        raise ClusterCommandError(
+            "bioseq_cache build-tree bootstrap is guarded or not build-bound"
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class ClusterInputs:
     bindir: Path
@@ -93,6 +155,9 @@ class ClusterInputs:
     kind: str
     bioseq_dso: Path | None = None
     bioseq_bootstrap: Path | None = None
+    load_cache: bool = True
+    extension_control: Path | None = None
+    extension_script: Path | None = None
 
 
 class UniquePrivateCluster:
@@ -117,6 +182,8 @@ class UniquePrivateCluster:
         self.database_user = getpass.getuser()
         self._started = False
         self._database_created = False
+        self._extension_overlay_root: Path | None = None
+        self._overlay_postgres: Path | None = None
 
     def _program(self, name: str) -> Path:
         program = self.inputs.bindir / name
@@ -142,16 +209,178 @@ class UniquePrivateCluster:
             f"port = {self.port}",
             f"unix_socket_directories = {_postgresql_conf_literal(str(self.socket_dir))}",
             f"dynamic_library_path = {_postgresql_conf_literal(dynamic_path)}",
-            "shared_preload_libraries = 'bioseq_cache'",
-            "",
         ]
+        if self.inputs.load_cache:
+            additions.append("shared_preload_libraries = 'bioseq_cache'")
+        additions.append("")
         with (self.data_dir / "postgresql.conf").open("a", encoding="utf-8") as stream:
             if base and not base.endswith("\n"):
                 base += "\n"
             stream.write(base)
             stream.write("\n".join(additions))
 
+    def _pg_config_directory(self, option: str, label: str) -> Path:
+        completed = _run_checked([str(self._program("pg_config")), option])
+        rendered = completed.stdout.strip()
+        if not rendered:
+            raise ClusterCommandError(f"pg_config returned an empty {label}")
+        path = Path(rendered).expanduser().resolve()
+        if not path.is_dir():
+            raise ClusterCommandError(f"PostgreSQL {label} is not a directory: {path}")
+        return path
+
+    def _prepare_extension_overlay(self) -> None:
+        """Relocate one private postmaster so it sees the build-tree package.
+
+        PostgreSQL 17 has no extension-control search path.  Its installation
+        paths are relocatable relative to the running `postgres` executable,
+        so a private copy of that executable can use a private SHAREDIR without
+        changing the host PostgreSQL installation.
+        """
+        if self.inputs.extension_control is None:
+            return
+        if self.inputs.extension_script is None:
+            raise ClusterCommandError(
+                "extension control and install script must be supplied together"
+            )
+
+        configured_bindir = self._pg_config_directory("--bindir", "bindir")
+        configured_sharedir = self._pg_config_directory("--sharedir", "SHAREDIR")
+        configured_pkglibdir = self._pg_config_directory(
+            "--pkglibdir", "PKGLIBDIR"
+        )
+        install_root = Path(
+            os.path.commonpath(
+                (
+                    str(configured_bindir),
+                    str(configured_sharedir),
+                    str(configured_pkglibdir),
+                )
+            )
+        )
+        overlay_root = self.run_dir / "extension_install_overlay"
+        overlay_bindir = overlay_root / configured_bindir.relative_to(install_root)
+        overlay_sharedir = overlay_root / configured_sharedir.relative_to(install_root)
+        overlay_pkglibdir = overlay_root / configured_pkglibdir.relative_to(install_root)
+        overlay_bindir.mkdir(parents=True)
+        overlay_sharedir.mkdir(parents=True)
+        overlay_pkglibdir.mkdir(parents=True, exist_ok=True)
+
+        for source in configured_sharedir.iterdir():
+            if source.name == "extension":
+                continue
+            destination = overlay_sharedir / source.name
+            if not destination.exists():
+                destination.symlink_to(source, target_is_directory=source.is_dir())
+
+        overlay_extension = overlay_sharedir / "extension"
+        overlay_extension.mkdir()
+        shutil.copy2(
+            self.inputs.extension_control,
+            overlay_extension / "bioseq_cache.control",
+        )
+        shutil.copy2(
+            self.inputs.extension_script,
+            overlay_extension / "bioseq_cache--1.0.sql",
+        )
+
+        for source in configured_pkglibdir.iterdir():
+            destination = overlay_pkglibdir / source.name
+            if destination.exists():
+                continue
+            destination.symlink_to(source, target_is_directory=source.is_dir())
+
+        overlay_postgres = overlay_bindir / "postgres"
+        shutil.copy2(self._program("postgres"), overlay_postgres)
+        self._extension_overlay_root = overlay_root
+        self._overlay_postgres = overlay_postgres
+        self._append_lifecycle(
+            "prepared private relocated PostgreSQL extension package overlay "
+            f"{overlay_root}"
+        )
+
+    def _prove_fixed_extension_schema(self) -> None:
+        if self.inputs.extension_control is None:
+            return
+
+        self.psql(
+            "CREATE SCHEMA another_schema;",
+            output_name="extension_schema_setup.log",
+        )
+        command = [
+            str(self._program("psql")),
+            "-XAt",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-v",
+            "VERBOSITY=verbose",
+            "--host",
+            str(self.socket_dir),
+            "--port",
+            str(self.port),
+            "--username",
+            self.database_user,
+            "--dbname",
+            self.database,
+            "--command",
+            "CREATE EXTENSION bioseq_cache SCHEMA another_schema;",
+        ]
+        rejected = _run_captured(
+            command,
+            output_path=self.run_dir / "extension_wrong_schema.log",
+        )
+        expected_message = (
+            'extension "bioseq_cache" must be installed in schema "bioseq_cache"'
+        )
+        if rejected.returncode == 0:
+            raise ClusterCommandError(
+                "PostgreSQL accepted bioseq_cache in a non-contract schema"
+            )
+        if "0A000" not in rejected.stdout or expected_message not in rejected.stdout:
+            raise ClusterCommandError(
+                "PostgreSQL did not produce the fixed-schema rejection oracle:\n"
+                + rejected.stdout
+            )
+
+        package = self.psql(
+            "SELECT version, relocatable, schema "
+            "FROM pg_available_extension_versions "
+            "WHERE name = 'bioseq_cache' ORDER BY version;",
+            output_name="extension_package_visible.log",
+        )
+        if package.strip() != "1.0|f|bioseq_cache":
+            raise ClusterCommandError(
+                "private PostgreSQL did not expose the expected extension package: "
+                + package.strip()
+            )
+        installed = self.psql(
+            "SELECT count(*) FROM pg_extension WHERE extname = 'bioseq_cache';",
+            output_name="extension_rejection_state.log",
+        )
+        if installed.strip() != "0":
+            raise ClusterCommandError(
+                "rejected schema attempt left bioseq_cache installed"
+            )
+        self.psql(
+            "DROP SCHEMA another_schema;",
+            output_name="extension_schema_cleanup.log",
+        )
+        self._append_lifecycle(
+            "proved CREATE EXTENSION bioseq_cache SCHEMA another_schema rejects "
+            "with SQLSTATE 0A000"
+        )
+
     def start(self) -> None:
+        if self.inputs.extension_control is not None:
+            if self.inputs.extension_script is None:
+                raise ClusterCommandError(
+                    "extension control and install script must be supplied together"
+                )
+            _validate_extension_package(
+                self.inputs.extension_control,
+                self.inputs.extension_script,
+                self.inputs.cache_bootstrap,
+            )
         self.run_dir.mkdir(parents=True, exist_ok=False)
         self.runner_output_dir.mkdir()
         self._append_lifecycle(f"initializing data directory {self.data_dir}")
@@ -171,17 +400,21 @@ class UniquePrivateCluster:
             output_path=self.run_dir / "initdb.log",
         )
         self._write_configuration()
+        self._prepare_extension_overlay()
         self._append_lifecycle(f"starting private node on port {self.port}")
+        start_command = [
+            str(self._program("pg_ctl")),
+            "--pgdata",
+            str(self.data_dir),
+            "--log",
+            str(self.server_log),
+            "--wait",
+        ]
+        if self._overlay_postgres is not None:
+            start_command.extend(("-p", str(self._overlay_postgres)))
+        start_command.append("start")
         _run_checked(
-            [
-                str(self._program("pg_ctl")),
-                "--pgdata",
-                str(self.data_dir),
-                "--log",
-                str(self.server_log),
-                "--wait",
-                "start",
-            ],
+            start_command,
             output_path=self.run_dir / "pg_ctl_start.log",
         )
         self._started = True
@@ -199,7 +432,9 @@ class UniquePrivateCluster:
             output_path=self.run_dir / "createdb.log",
         )
         self._database_created = True
-        self._bootstrap(self.inputs.cache_bootstrap, "cache")
+        self._prove_fixed_extension_schema()
+        if self.inputs.load_cache:
+            self._bootstrap(self.inputs.cache_bootstrap, "cache")
         if self.inputs.bioseq_bootstrap is not None:
             self._bootstrap(self.inputs.bioseq_bootstrap, "provider")
 
@@ -323,10 +558,14 @@ class UniquePrivateCluster:
         self._copy_collector_logs()
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.socket_dir, ignore_errors=True)
+        if self._extension_overlay_root is not None:
+            shutil.rmtree(self._extension_overlay_root, ignore_errors=True)
         if self.run_dir.exists():
             self._append_lifecycle("private data and socket directories removed")
         self._started = False
         self._database_created = False
+        self._extension_overlay_root = None
+        self._overlay_postgres = None
 
     def __enter__(self) -> "UniquePrivateCluster":
         self.start()
@@ -442,6 +681,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--bioseq-dso")
     parser.add_argument("--bootstrap", required=True)
     parser.add_argument("--bioseq-bootstrap")
+    parser.add_argument("--extension-control")
+    parser.add_argument("--extension-script")
     parser.add_argument(
         "--config",
         default=str(Path(__file__).with_name("postgresql.conf.in")),
@@ -468,6 +709,20 @@ def _inputs_from_args(args: argparse.Namespace) -> ClusterInputs:
         raise ClusterCommandError(
             "--bioseq-dso and --bioseq-bootstrap must be supplied together"
         )
+    extension_control = (
+        _resolved_file(args.extension_control, "extension control")
+        if args.extension_control
+        else None
+    )
+    extension_script = (
+        _resolved_file(args.extension_script, "extension install script")
+        if args.extension_script
+        else None
+    )
+    if (extension_control is None) != (extension_script is None):
+        raise ClusterCommandError(
+            "--extension-control and --extension-script must be supplied together"
+        )
     output_root = Path(args.output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     return ClusterInputs(
@@ -479,6 +734,8 @@ def _inputs_from_args(args: argparse.Namespace) -> ClusterInputs:
         kind=args.kind,
         bioseq_dso=bioseq_dso,
         bioseq_bootstrap=bioseq_bootstrap,
+        extension_control=extension_control,
+        extension_script=extension_script,
     )
 
 

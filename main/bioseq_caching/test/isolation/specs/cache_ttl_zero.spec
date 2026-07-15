@@ -21,12 +21,34 @@ step "ttl_waiter_paused" { SELECT bioseq_cache_test.wait_until_paused('after_wai
 step "ttl_release_producer" { SELECT bioseq_cache_test.release_pause('before_terminal_publish'); }
 step "ttl_sweep" { SELECT bioseq_cache_test.request_janitor_sweep(); }
 step "ttl_before_waiter" {
-  SELECT state, waiter_count, reader_count
-  FROM bioseq_cache_test.entry_states()
-  ORDER BY generation;
+  SELECT count(*) = 1 AS one_generation,
+         count(*) FILTER (
+           WHERE state = 'COMPLETE' AND waiters = 1 AND readers = 0
+         ) = 1 AS waiter_entitled
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ExactFinalResult' AND sql LIKE '%qc_ttl_zero%';
+}
+step "ttl_new_reader_stats" {
+  SELECT produced = 2 AS newcomer_missed,
+         completed_hits = 0 AS waiter_still_pending,
+         inflight_waits = 1 AS one_entitled_waiter,
+         fallbacks = 0 AS no_fallback
+  FROM bioseq_cache.stats();
 }
 step "ttl_release_waiter" { SELECT bioseq_cache_test.release_pause('after_waiter_registered'); }
 step "ttl_sweep_after" { SELECT bioseq_cache_test.request_janitor_sweep(); }
+step "ttl_after_sweep" {
+  SELECT count(*) = 0 AS no_remaining_generation
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ExactFinalResult' AND sql LIKE '%qc_ttl_zero%';
+}
+step "ttl_final_stats" {
+  SELECT produced = 2 AS two_producers,
+         completed_hits = 1 AS entitled_waiter_hit,
+         inflight_waits = 1 AS one_inflight_wait,
+         fallbacks = 0 AS no_fallback
+  FROM bioseq_cache.stats();
+}
 
 session "producer"
 step "ttl_producer_mode" {
@@ -59,4 +81,5 @@ permutation "ttl_arm_producer" "ttl_arm_waiter" "ttl_producer_mode"
   "ttl_produce" "ttl_producer_paused" "ttl_waiter_mode" "ttl_wait"
   "ttl_waiter_paused" "ttl_release_producer" "ttl_sweep"
   "ttl_before_waiter" "ttl_new_reader_mode" "ttl_new_read"
-  "ttl_release_waiter" "ttl_sweep_after"
+  "ttl_new_reader_stats" "ttl_release_waiter" "ttl_sweep_after"
+  "ttl_after_sweep" "ttl_final_stats"

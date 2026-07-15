@@ -29,6 +29,9 @@ target_sources(bioseq_cache_core
       "${CMAKE_CURRENT_LIST_DIR}/column_format.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/reusable_registry.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/write_observation.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/object_definition_dependencies.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/transition_ledger.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/dependency_directory.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/../pg/reusable_planning.cppm")
 
 add_library(bioseq::cache_core ALIAS bioseq_cache_core)

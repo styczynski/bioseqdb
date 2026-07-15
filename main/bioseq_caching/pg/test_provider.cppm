@@ -39,6 +39,7 @@ extern "C" {
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -69,9 +70,13 @@ inline constexpr std::size_t kMaximumPlanNodeCount = 1024;
 inline constexpr std::size_t kMaximumRequiredBoundaryCount =
     kMaximumPlanNodeCount - kPlanFixedNodeCount;
 inline constexpr std::size_t kDigestBytes = 32;
+inline constexpr std::size_t kMaximumTargetRelations = 16;
 inline constexpr char kApiRendezvousName[] = "bioseq_cache.api.v1";
 inline constexpr char kBridgeRendezvousName[] =
     "bioseq_cache.planner_bridge.v1";
+inline constexpr std::uint32_t kPgRelFileLocatorIdentityKindV1 = 1;
+inline constexpr std::size_t kPgRelFileLocatorIdentityBytesV1 =
+    sizeof(Oid) + sizeof(Oid) + sizeof(RelFileNumber);
 
 enum class MappingFault : std::uint16_t {
     None = 0,
@@ -97,6 +102,7 @@ enum class MappingFault : std::uint16_t {
     DecoratedBoundarySchemaMismatch,
     DecoratedLineageSchemaMismatch,
     ProviderError,
+    LateFetchErrorOnce,
     PersistedWrongTopTag,
     PersistedShortTop,
     PersistedLongTop,
@@ -139,6 +145,8 @@ struct CallbackCounters {
     std::uint64_t late_fetch_batch = 0;
     std::uint64_t late_fetch_references = 0;
     std::uint64_t late_fetch_values = 0;
+    std::uint64_t late_fetch_bytes = 0;
+    std::uint64_t late_fetch_errors = 0;
     std::uint64_t planner_bridge_calls = 0;
     std::uint64_t executor_rows = 0;
     std::uint64_t gated_expensive_rows = 0;
@@ -150,6 +158,8 @@ struct CallbackCounters {
 };
 
 inline Oid g_target_relation_oid = InvalidOid;
+inline std::array<Oid, kMaximumTargetRelations> g_additional_target_relations{};
+inline std::size_t g_additional_target_relation_count = 0;
 inline std::uint64_t g_requested_capabilities = 1;
 inline MappingFault g_mapping_fault = MappingFault::None;
 inline DigestFault g_digest_fault = DigestFault::None;
@@ -162,6 +172,37 @@ inline set_rel_pathlist_hook_type g_previous_set_rel_pathlist_hook = nullptr;
 inline CallbackCounters g_counters{};
 inline std::array<std::uint8_t, kDigestBytes> g_provider_security_digest{};
 
+[[nodiscard]] bool configured_target_relation(Oid relation_oid) noexcept {
+    if (!OidIsValid(relation_oid)) {
+        return false;
+    }
+    if (relation_oid == g_target_relation_oid) {
+        return true;
+    }
+    for (std::size_t index = 0;
+         index < g_additional_target_relation_count;
+         ++index) {
+        if (g_additional_target_relations[index] == relation_oid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool add_configured_target_relation(
+        Oid relation_oid) noexcept {
+    if (!OidIsValid(relation_oid) || configured_target_relation(relation_oid)) {
+        return OidIsValid(relation_oid);
+    }
+    if (g_additional_target_relation_count
+        >= g_additional_target_relations.size()) {
+        return false;
+    }
+    g_additional_target_relations[
+        g_additional_target_relation_count++] = relation_oid;
+    return true;
+}
+
 /** Require superuser for every mutation of the deterministic test provider. */
 void require_test_superuser() {
     if (!superuser()) {
@@ -169,6 +210,60 @@ void require_test_superuser() {
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("bioseq_cache test-provider controls require superuser")));
     }
+}
+
+/** Encode the cache ABI's padding-free PostgreSQL locator identity. */
+[[nodiscard]] bool provider_relation_physical_identity(
+        Oid relation_oid,
+        BioseqCachePhysicalIdentityV1* output) {
+    if (!OidIsValid(relation_oid) || output == nullptr
+        || kPgRelFileLocatorIdentityBytesV1 > sizeof(output->bytes)) {
+        return false;
+    }
+    Relation relation = table_open(relation_oid, AccessShareLock);
+    const RelFileLocator locator = relation->rd_locator;
+    table_close(relation, AccessShareLock);
+    if (!OidIsValid(locator.spcOid) || !OidIsValid(locator.dbOid)
+        || !RelFileNumberIsValid(locator.relNumber)) {
+        return false;
+    }
+    *output = BioseqCachePhysicalIdentityV1{
+        .struct_size = sizeof(BioseqCachePhysicalIdentityV1),
+        .kind = kPgRelFileLocatorIdentityKindV1,
+        .length = static_cast<std::uint32_t>(
+            kPgRelFileLocatorIdentityBytesV1),
+    };
+    std::size_t offset = 0;
+    std::memcpy(output->bytes + offset, &locator.spcOid, sizeof(locator.spcOid));
+    offset += sizeof(locator.spcOid);
+    std::memcpy(output->bytes + offset, &locator.dbOid, sizeof(locator.dbOid));
+    offset += sizeof(locator.dbOid);
+    std::memcpy(
+        output->bytes + offset, &locator.relNumber, sizeof(locator.relNumber));
+    return true;
+}
+
+/** Emit a provider-complete write marker before transaction PRE_COMMIT. */
+[[nodiscard]] bool record_provider_relation_write(Oid relation_oid) {
+    BioseqCachePhysicalIdentityV1 identity{};
+    void** slot = find_rendezvous_variable(kApiRendezvousName);
+    if (!provider_relation_physical_identity(relation_oid, &identity)
+        || slot == nullptr || *slot == nullptr) {
+        return false;
+    }
+    const auto* api = static_cast<const BioseqCacheApiV1*>(*slot);
+    if (api->struct_size < sizeof(*api)
+        || api->abi_version != bioseq::cache::kProviderAbiVersion
+        || api->postgres_major
+            != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
+        || api->record_relation_write == nullptr) {
+        return false;
+    }
+    api->record_relation_write(
+        static_cast<std::uint32_t>(MyDatabaseId),
+        static_cast<std::uint32_t>(relation_oid),
+        &identity);
+    return true;
 }
 
 /** Reconstruct a uint64 from two PostgreSQL Integer Nodes. */
@@ -571,7 +666,9 @@ void provider_explain_custom_scan(
     scan->flags = best_path->flags;
     scan->scan.scanrelid = 0;
     scan->scan.plan.targetlist = target_list;
-    scan->scan.plan.qual = extract_actual_clauses(clauses, false);
+    List* all_clauses = list_concat(
+        list_copy(clauses), list_copy(best_path->custom_restrictinfo));
+    scan->scan.plan.qual = extract_actual_clauses(all_clauses, false);
     scan->custom_exprs = static_cast<List*>(
         copyObject(scan->scan.plan.qual));
     scan->custom_private = static_cast<List*>(
@@ -686,6 +783,53 @@ void fill_column_schema(
     return nullptr;
 }
 
+struct NormalizedPredicateContextV1 {
+    const BioseqCachePathDomainV1* domain = nullptr;
+    bool valid = true;
+};
+
+/** Semantic callbacks reject any query-global Var leaked by the adapter. */
+bool normalized_predicate_walker(Node* node, void* opaque) {
+    if (node == nullptr) {
+        return false;
+    }
+    auto* context = static_cast<NormalizedPredicateContextV1*>(opaque);
+    if (context == nullptr || context->domain == nullptr
+        || !context->valid) {
+        return true;
+    }
+    if (IsA(node, Var)) {
+        const auto* variable = reinterpret_cast<const Var*>(node);
+        const auto* column = variable->varattno > 0
+            ? find_schema_column(
+                context->domain->boundary_columns,
+                context->domain->boundary_column_count,
+                static_cast<std::uint32_t>(variable->varattno))
+            : nullptr;
+        context->valid = variable->varno == INDEX_VAR
+            && variable->varnosyn == INDEX_VAR
+            && variable->varattnosyn == variable->varattno
+            && variable->varlevelsup == 0
+            && bms_is_empty(variable->varnullingrels)
+            && variable->location == -1
+            && column != nullptr
+            && variable->vartype == column->type_oid
+            && variable->vartypmod == column->typmod
+            && variable->varcollid == column->collation_oid;
+        return !context->valid;
+    }
+    return expression_tree_walker(
+        node, normalized_predicate_walker, opaque);
+}
+
+[[nodiscard]] bool provider_received_normalized_predicate(
+        const BioseqCachePathDomainV1& domain) {
+    NormalizedPredicateContextV1 context{.domain = &domain};
+    static_cast<void>(normalized_predicate_walker(
+        reinterpret_cast<Node*>(domain.coverage_predicate), &context));
+    return context.valid;
+}
+
 /** Query analysis admits only statements containing the configured table. */
 [[nodiscard]] BioseqCacheStatusV1 provider_analyze_query(
     const Query* query,
@@ -701,7 +845,7 @@ void fill_column_schema(
     foreach(cell, query->rtable) {
         const auto* entry = static_cast<const RangeTblEntry*>(lfirst(cell));
         if (entry != nullptr && entry->rtekind == RTE_RELATION
-            && entry->relid == g_target_relation_oid) {
+            && configured_target_relation(entry->relid)) {
             found = true;
             break;
         }
@@ -739,10 +883,16 @@ void fill_column_schema(
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
 
-    const auto* range_entry = rt_fetch(
-        relation_info->relid, root->parse->rtable);
+    const bool index_valid = root->simple_rte_array != nullptr
+        ? relation_info->relid
+            < static_cast<Index>(root->simple_rel_array_size)
+        : relation_info->relid
+            <= static_cast<Index>(list_length(root->parse->rtable));
+    const auto* range_entry = index_valid
+        ? planner_rt_fetch(relation_info->relid, root)
+        : nullptr;
     if (range_entry == nullptr || range_entry->rtekind != RTE_RELATION
-        || range_entry->relid != g_target_relation_oid) {
+        || !configured_target_relation(range_entry->relid)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     Oid recipe_relation_oid = InvalidOid;
@@ -893,7 +1043,8 @@ void fill_column_schema(
     BioseqCacheDigestSinkV1* sink) {
     ++g_counters.domain_digest;
     if (domain == nullptr || domain->provider_id != kProviderId
-        || domain->coverage_predicate == nullptr) {
+        || domain->coverage_predicate == nullptr
+        || !provider_received_normalized_predicate(*domain)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     Oid relation_oid = InvalidOid;
@@ -1121,7 +1272,7 @@ void provider_set_rel_pathlist_hook(
     if (root == nullptr || relation == nullptr || range_entry == nullptr
         || range_entry->rtekind != RTE_RELATION
         || (range_entry->inh && has_subclass(range_entry->relid))
-        || range_entry->relid != g_target_relation_oid
+        || !configured_target_relation(range_entry->relid)
         || !g_provider_registered) {
         return;
     }
@@ -1252,7 +1403,7 @@ void shutdown_provider() noexcept {
         const char* name;
         MappingFault value;
     };
-    static constexpr std::array<NamedFault, 39> faults{{
+    static constexpr std::array<NamedFault, 40> faults{{
         {"none", MappingFault::None},
         {"null_pointer_nonzero_count", MappingFault::NullPointerNonzeroCount},
         {"short_boundary_map", MappingFault::ShortBoundaryMap},
@@ -1276,6 +1427,7 @@ void shutdown_provider() noexcept {
         {"decorated_boundary_schema_mismatch", MappingFault::DecoratedBoundarySchemaMismatch},
         {"decorated_lineage_schema_mismatch", MappingFault::DecoratedLineageSchemaMismatch},
         {"provider_error", MappingFault::ProviderError},
+        {"late_fetch_error_once", MappingFault::LateFetchErrorOnce},
         {"persisted_wrong_top_tag", MappingFault::PersistedWrongTopTag},
         {"persisted_short_top", MappingFault::PersistedShortTop},
         {"persisted_long_top", MappingFault::PersistedLongTop},
@@ -1354,6 +1506,57 @@ Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS) {
              errdetail("Required columns: row_id bigint, base_id bigint, occurrence_no integer, capability_mask bigint.")));
     }
     g_target_relation_oid = relation_oid;
+    g_additional_target_relations.fill(InvalidOid);
+    g_additional_target_relation_count = 0;
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_record_write(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_record_write);
+Datum bioseq_cache_test_provider_record_write(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    const Oid relation_oid = PG_GETARG_OID(0);
+    if (!record_provider_relation_write(relation_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("generic test-provider write marker could not be recorded")));
+    }
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_add_relation);
+Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    const Oid relation_oid = PG_GETARG_OID(0);
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    Relation relation = table_open(relation_oid, AccessShareLock);
+    const bool compatible =
+        (relation->rd_rel->relkind == RELKIND_RELATION
+            || relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+        && relation_contract_attnos(
+            relation_oid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno);
+    table_close(relation, AccessShareLock);
+    if (!compatible) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("generic test-provider relation has the wrong contract"),
+             errdetail("Required columns: row_id bigint, base_id bigint, occurrence_no integer, capability_mask bigint.")));
+    }
+    if (!add_configured_target_relation(relation_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("generic test-provider relation target limit exceeded")));
+    }
     PG_RETURN_VOID();
 }
 
@@ -1495,6 +1698,7 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
         "\"decorate_path\":%llu,\"build_recipe\":%llu,"
         "\"extract_occurrence\":%llu,\"late_fetch_batch\":%llu,"
         "\"late_fetch_references\":%llu,\"late_fetch_values\":%llu,"
+        "\"late_fetch_bytes\":%llu,\"late_fetch_errors\":%llu,"
         "\"planner_bridge_calls\":%llu,\"executor_rows\":%llu,"
         "\"gated_expensive_rows\":%llu,"
         "\"last_boundary_column_count\":%llu,"
@@ -1516,6 +1720,8 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
         static_cast<unsigned long long>(g_counters.late_fetch_batch),
         static_cast<unsigned long long>(g_counters.late_fetch_references),
         static_cast<unsigned long long>(g_counters.late_fetch_values),
+        static_cast<unsigned long long>(g_counters.late_fetch_bytes),
+        static_cast<unsigned long long>(g_counters.late_fetch_errors),
         static_cast<unsigned long long>(g_counters.planner_bridge_calls),
         static_cast<unsigned long long>(g_counters.executor_rows),
         static_cast<unsigned long long>(g_counters.gated_expensive_rows),
@@ -1621,6 +1827,13 @@ void emit_batch_failure_statuses(
     BioseqCacheLateFetchSinkV1* sink) {
     ++g_counters.late_fetch_batch;
     g_counters.late_fetch_references += occurrence_count;
+    if (g_mapping_fault == MappingFault::LateFetchErrorOnce) {
+        g_mapping_fault = MappingFault::None;
+        ++g_counters.late_fetch_errors;
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("injected generic cache-provider late-fetch error")));
+    }
     Oid relation_oid = InvalidOid;
     AttrNumber row_attno = 0;
     AttrNumber base_attno = 0;
@@ -1725,8 +1938,24 @@ void emit_batch_failure_statuses(
                  requested < attribute_count;
                  ++requested) {
                 bool is_null = false;
+                const AttrNumber requested_attno =
+                    attribute_numbers[requested];
                 const Datum value = slot_getattr(
-                    slot, attribute_numbers[requested], &is_null);
+                    slot, requested_attno, &is_null);
+                std::uint64_t value_bytes = 0;
+                if (!is_null) {
+                    const Form_pg_attribute attribute =
+                        TupleDescAttr(descriptor, requested_attno - 1);
+                    const Size datum_bytes = datumGetSize(
+                        value, attribute->attbyval, attribute->attlen);
+                    if (datum_bytes
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - g_counters.late_fetch_bytes) {
+                        terminal[reference] = BIOSEQ_CACHE_STATUS_ERROR;
+                        break;
+                    }
+                    value_bytes = static_cast<std::uint64_t>(datum_bytes);
+                }
                 const BioseqCacheStatusV1 status = sink->emit_value(
                     sink->opaque,
                     reference,
@@ -1738,6 +1967,7 @@ void emit_batch_failure_statuses(
                     break;
                 }
                 ++g_counters.late_fetch_values;
+                g_counters.late_fetch_bytes += value_bytes;
             }
         }
         ExecClearTuple(slot);
@@ -2092,6 +2322,7 @@ void apply_mapping_fault(
         case MappingFault::None:
         case MappingFault::DecoratedBoundarySchemaMismatch:
         case MappingFault::DecoratedLineageSchemaMismatch:
+        case MappingFault::LateFetchErrorOnce:
         case MappingFault::PersistedWrongTopTag:
         case MappingFault::PersistedShortTop:
         case MappingFault::PersistedLongTop:

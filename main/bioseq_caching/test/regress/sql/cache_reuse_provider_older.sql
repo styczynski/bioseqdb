@@ -30,6 +30,27 @@ SELECT bioseq_cache_test.provider_reset();
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache_test.request_janitor_sweep();
 
+-- Create the plan-capture helper before producing any reusable source.  Calling
+-- it from SELECT keeps the analyzed statement outside a write-capable DO
+-- utility boundary.
+CREATE FUNCTION pg_temp.cache_provider_older_plan()
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    plan_text text;
+BEGIN
+    EXECUTE
+        'EXPLAIN (ANALYZE, FORMAT JSON, VERBOSE, COSTS OFF, '
+        'TIMING OFF, SUMMARY OFF) '
+        'SELECT row_id FROM cache_provider_older_rows '
+        'WHERE nullable_value IS NULL '
+        'OR nullable_value BETWEEN 5 AND 20 ORDER BY row_id'
+        INTO plan_text;
+    RETURN plan_text::jsonb;
+END
+$$;
+
 -- Source A stores row_id plus occurrence lineage, but nullable_value is used
 -- only by its predicate and must remain absent from the stored boundary.
 SELECT row_id
@@ -50,6 +71,52 @@ SELECT bioseq_cache_test.provider_set_mapping_fault('none');
 -- counters and forcing a fresh plan that maps both older generations.
 SELECT bioseq_cache_test.provider_reset();
 SELECT bioseq_cache.reset_stats();
+
+-- Execute the older-source merge under structured EXPLAIN ANALYZE so the
+-- runtime branch count, residual gate, and provider work are proved rather
+-- than inferred from planner metadata.
+SELECT pg_temp.cache_provider_older_plan() AS plan
+\gset older_runtime_
+
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'older_runtime_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child.value
+    FROM plan_nodes
+    CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+), proof AS (
+    SELECT
+        (SELECT node
+         FROM plan_nodes
+         WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'
+         LIMIT 1) AS cache_node,
+        (SELECT node
+         FROM plan_nodes
+         WHERE node ? 'Test Provider Rows'
+         LIMIT 1) AS provider_node
+)
+SELECT ('structured older reusable runtime proof failed: '
+        || row_to_json(proof)::text)::bigint
+FROM proof
+WHERE cache_node IS NULL
+   OR cache_node->>'Actual Cache Action'
+        <> '[Reuse] Reused selected branches and produced residual'
+   OR (cache_node->>'Reusable Sources')::bigint <> 3
+   OR (cache_node->>'Selected Cache Branches')::bigint <> 2
+   OR (cache_node->>'Provider Runtime Recipe Valid')::boolean IS NOT TRUE
+   OR (cache_node->>'Actual Rows')::bigint <> 5
+   OR cache_node->>'State' <> 'COMPLETE'
+   OR jsonb_typeof(cache_node->'Cache Branch 1') <> 'object'
+   OR jsonb_typeof(cache_node->'Cache Branch 2') <> 'object'
+   OR jsonb_typeof(cache_node->'Residual Child') <> 'object'
+   OR provider_node IS NULL
+   OR (provider_node->>'Test Provider Rows')::bigint <> 1
+   OR (provider_node->>'Test Provider Gated Work')::bigint <> 1
+   OR (provider_node->>'Actual Rows')::bigint <> 1;
+
+-- Replay the generation produced by the analyzed merge and prove its exact
+-- values.  No provider row may execute during this current-generation hit.
 \o
 SELECT row_id
 FROM cache_provider_older_rows
@@ -106,7 +173,7 @@ WITH failed AS (
         :older_stats_gated_expensive_rows::bigint AS gated_expensive_rows
     WHERE :older_stats_produced::bigint <> 1
        OR :older_stats_completed_hits::bigint <> 0
-       OR :older_stats_reuse_hits::bigint <> 1
+       OR :older_stats_reuse_hits::bigint <> 2
        OR :older_stats_fallbacks::bigint <> 0
        OR :older_stats_extract_occurrence::bigint <> 1
        OR :older_stats_late_fetch_batch::bigint <> 2

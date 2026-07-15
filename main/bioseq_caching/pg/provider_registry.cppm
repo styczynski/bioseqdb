@@ -3,10 +3,11 @@
  * provider_registry.cppm
  *     Backend-local provider registry and PostgreSQL rendezvous publication.
  *
- * The registry deliberately owns no provider memory.  A registered function
- * table remains provider-owned for as long as its DSO is mapped in this
- * backend.  All exported operations are bounded, allocation-free and
- * non-throwing so malformed or late-loaded providers fail closed.
+ * The registry owns bounded copies of validated provider tables and names.
+ * Callback and PostgreSQL method pointers remain valid only while the provider
+ * DSO is mapped, so providers unregister before unload.  All exported
+ * operations are bounded, allocation-free and non-throwing so malformed or
+ * late-loaded providers fail closed.
  *
  *-------------------------------------------------------------------------
  */
@@ -15,6 +16,8 @@ module;
 extern "C" {
 #include "postgres.h"
 #include "fmgr.h"
+#include "miscadmin.h"
+#include "utils/errcodes.h"
 }
 
 #include <cstddef>
@@ -110,7 +113,8 @@ namespace bioseq::cache::pg::provider_registry::detail {
 
 struct ProviderSlot {
     std::uint32_t provider_id;
-    const ProviderV1* provider;
+    ProviderV1 provider;
+    char provider_name[kMaximumProviderNameBytesV1];
 };
 
 static_assert(std::is_standard_layout_v<ProviderSlot>);
@@ -152,6 +156,9 @@ inline constexpr std::uint32_t kKnownProviderFlags =
 
 [[nodiscard]] bool provider_names_equal(
         const char* left, const char* right) noexcept {
+    if (left == nullptr || right == nullptr) {
+        return false;
+    }
     for (std::size_t index = 0; index < kMaximumProviderNameBytesV1; ++index) {
         if (left[index] != right[index]) {
             return false;
@@ -161,6 +168,63 @@ inline constexpr std::uint32_t kKnownProviderFlags =
         }
     }
     return false;
+}
+
+[[nodiscard]] bool provider_tables_equal(
+        const ProviderV1& left, const ProviderV1& right) noexcept {
+    return left.abi_version == right.abi_version
+        && left.postgres_major == right.postgres_major
+        && left.provider_id == right.provider_id
+        && left.provider_flags == right.provider_flags
+        && left.reserved == right.reserved
+        && provider_names_equal(left.provider_name, right.provider_name)
+        && left.provider_scan_methods == right.provider_scan_methods
+        && left.analyze_query == right.analyze_query
+        && left.describe_path == right.describe_path
+        && left.append_domain_semantic_digest
+            == right.append_domain_semantic_digest
+        && left.append_generation_semantic_digest
+            == right.append_generation_semantic_digest
+        && left.append_runtime_generation_semantic_digest
+            == right.append_runtime_generation_semantic_digest
+        && left.map_reusable_source == right.map_reusable_source
+        && left.decorate_path == right.decorate_path
+        && left.build_plan_digest_recipe == right.build_plan_digest_recipe
+        && left.extract_occurrence == right.extract_occurrence
+        && left.late_fetch_batch == right.late_fetch_batch
+        && left.explain_domain == right.explain_domain;
+}
+
+void clear_provider_slot(ProviderSlot& slot) noexcept {
+    slot = {};
+}
+
+void copy_provider_slot(
+        ProviderSlot& destination, const ProviderSlot& source) noexcept {
+    destination.provider_id = source.provider_id;
+    destination.provider = source.provider;
+    for (std::size_t index = 0; index < kMaximumProviderNameBytesV1;
+         ++index) {
+        destination.provider_name[index] = source.provider_name[index];
+    }
+    destination.provider.provider_name = destination.provider_name;
+}
+
+void capture_provider(
+        ProviderSlot& destination, const ProviderV1& source) noexcept {
+    clear_provider_slot(destination);
+    destination.provider_id = source.provider_id;
+    destination.provider = source;
+    destination.provider.struct_size =
+        static_cast<std::uint32_t>(sizeof(ProviderV1));
+    for (std::size_t index = 0; index < kMaximumProviderNameBytesV1;
+         ++index) {
+        destination.provider_name[index] = source.provider_name[index];
+        if (source.provider_name[index] == '\0') {
+            break;
+        }
+    }
+    destination.provider.provider_name = destination.provider_name;
 }
 
 [[nodiscard]] bool baseline_callbacks_present(
@@ -297,14 +361,15 @@ bool register_provider_v1(const ProviderV1* provider) noexcept {
     if (position < detail::g_provider_count
         && detail::g_provider_slots[position].provider_id
             == provider->provider_id) {
-        return detail::g_provider_slots[position].provider == provider;
+        return detail::provider_tables_equal(
+            detail::g_provider_slots[position].provider, *provider);
     }
 
     for (std::size_t index = 0; index < detail::g_provider_count; ++index) {
-        const ProviderV1* registered = detail::g_provider_slots[index].provider;
-        if (registered->provider_scan_methods == provider->provider_scan_methods
+        const ProviderV1& registered = detail::g_provider_slots[index].provider;
+        if (registered.provider_scan_methods == provider->provider_scan_methods
             || detail::provider_names_equal(
-                registered->provider_name, provider->provider_name)) {
+                registered.provider_name, provider->provider_name)) {
             return false;
         }
     }
@@ -314,9 +379,11 @@ bool register_provider_v1(const ProviderV1* provider) noexcept {
     }
     for (std::size_t index = detail::g_provider_count;
          index > position; --index) {
-        detail::g_provider_slots[index] = detail::g_provider_slots[index - 1];
+        detail::copy_provider_slot(
+            detail::g_provider_slots[index],
+            detail::g_provider_slots[index - 1]);
     }
-    detail::g_provider_slots[position] = {provider->provider_id, provider};
+    detail::capture_provider(detail::g_provider_slots[position], *provider);
     ++detail::g_provider_count;
     detail::advance_generation();
     return true;
@@ -333,10 +400,13 @@ void unregister_provider_v1(std::uint32_t provider_id) noexcept {
     }
     for (std::size_t index = position + 1;
          index < detail::g_provider_count; ++index) {
-        detail::g_provider_slots[index - 1] = detail::g_provider_slots[index];
+        detail::copy_provider_slot(
+            detail::g_provider_slots[index - 1],
+            detail::g_provider_slots[index]);
     }
     --detail::g_provider_count;
-    detail::g_provider_slots[detail::g_provider_count] = {};
+    detail::clear_provider_slot(
+        detail::g_provider_slots[detail::g_provider_count]);
     detail::advance_generation();
 }
 
@@ -349,7 +419,7 @@ const ProviderV1* find_provider_v1(std::uint32_t provider_id) noexcept {
         || detail::g_provider_slots[position].provider_id != provider_id) {
         return nullptr;
     }
-    return detail::g_provider_slots[position].provider;
+    return &detail::g_provider_slots[position].provider;
 }
 
 ProviderSnapshotV1 snapshot_providers_v1() noexcept {
@@ -359,7 +429,8 @@ ProviderSnapshotV1 snapshot_providers_v1() noexcept {
         static_cast<std::uint32_t>(detail::g_provider_count);
     snapshot.generation = detail::g_provider_generation;
     for (std::size_t index = 0; index < detail::g_provider_count; ++index) {
-        snapshot.providers[index] = detail::g_provider_slots[index].provider;
+        snapshot.providers[index] =
+            &detail::g_provider_slots[index].provider;
     }
     return snapshot;
 }
@@ -399,11 +470,16 @@ void after_provider_rel_paths_v1(
         const ProviderV1* provider) noexcept {
     const PlannerBridgeObserverV1 observer = detail::g_planner_bridge_observer;
     if (observer == nullptr || root == nullptr || rel == nullptr
-        || rti == 0 || rte == nullptr || provider == nullptr
-        || find_provider_v1(provider->provider_id) != provider) {
+        || rti == 0 || rte == nullptr || !validate_provider_v1(provider)) {
         return;
     }
-    observer(root, rel, rti, rte, provider);
+    const ProviderV1* const registered =
+        find_provider_v1(provider->provider_id);
+    if (registered == nullptr
+        || !detail::provider_tables_equal(*registered, *provider)) {
+        return;
+    }
+    observer(root, rel, rti, rte, registered);
 }
 
 bool initialize_provider_registry_v1() noexcept {
@@ -451,3 +527,69 @@ const PlannerBridgeV1& planner_bridge_v1() noexcept {
 }
 
 } // namespace bioseq::cache::pg::provider_registry
+
+#if defined(BIOSEQ_CACHE_TESTING)
+extern "C" {
+
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_registry_owns_copy);
+
+Datum bioseq_cache_test_provider_registry_owns_copy(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::provider_registry;
+
+    if (!superuser()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+             errmsg("provider registry copy probe requires superuser")));
+    }
+
+    const ProviderSnapshotV1 before = snapshot_providers_v1();
+    if (before.provider_count == 0 || before.providers[0] == nullptr
+        || find_provider_v1(1U) != nullptr) {
+        PG_RETURN_BOOL(false);
+    }
+
+    const ProviderV1& source = *before.providers[0];
+    const std::uint32_t source_id = source.provider_id;
+    const auto source_analyze = source.analyze_query;
+    char probe_name[] = "registry-copy-probe";
+    ProviderV1 candidate = source;
+    candidate.provider_id = 1U;
+    candidate.provider_name = probe_name;
+    candidate.provider_scan_methods =
+        reinterpret_cast<const CustomScanMethods*>(&candidate);
+    const auto probe_methods = candidate.provider_scan_methods;
+
+    if (!register_provider_v1(&candidate)) {
+        PG_RETURN_BOOL(false);
+    }
+
+    probe_name[0] = 'X';
+    candidate.provider_id = 2U;
+    candidate.provider_name = "mutated";
+    candidate.provider_scan_methods = nullptr;
+    candidate.analyze_query = nullptr;
+
+    const ProviderV1* const stored = find_provider_v1(1U);
+    bool valid = stored != nullptr
+        && stored != &candidate
+        && stored->provider_id == 1U
+        && stored->provider_name != probe_name
+        && bioseq::cache::pg::provider_registry::detail::provider_names_equal(
+            stored->provider_name, "registry-copy-probe")
+        && stored->provider_scan_methods == probe_methods
+        && stored->analyze_query == source_analyze
+        && validate_provider_v1(stored);
+
+    unregister_provider_v1(1U);
+    const ProviderV1* const restored = find_provider_v1(source_id);
+    valid = valid
+        && find_provider_v1(1U) == nullptr
+        && restored != nullptr
+        && restored->provider_id == source_id
+        && restored->analyze_query == source_analyze
+        && snapshot_providers_v1().provider_count == before.provider_count;
+    PG_RETURN_BOOL(valid);
+}
+
+} // extern "C"
+#endif

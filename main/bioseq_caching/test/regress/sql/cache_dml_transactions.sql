@@ -44,6 +44,81 @@ COPY qc_dml FROM STDIN WITH (FORMAT csv);
 \.
 SELECT id, payload FROM qc_dml WHERE meta = 3 ORDER BY id;
 
+-- EXPLAIN without ANALYZE is read-only even for a DML statement.  ANALYZE
+-- executes that statement, so its ResultRelInfo must still enter the normal
+-- write-observation path instead of relying on utility classification.
+CREATE TABLE qc_explain_dml(id integer PRIMARY KEY, payload text NOT NULL);
+INSERT INTO qc_explain_dml VALUES (1, 'before');
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT id, payload FROM qc_explain_dml ORDER BY id;
+SELECT id, payload FROM qc_explain_dml ORDER BY id;
+EXPLAIN (FORMAT JSON, COSTS OFF)
+INSERT INTO qc_explain_dml VALUES (2, 'planned only');
+SELECT invalidations = 0 AS explain_plan_preserved_cache
+FROM bioseq_cache.stats() \gset
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+SELECT invalidations = 0 AS explain_disable_preserved_cache
+FROM bioseq_cache.stats() \gset
+SELECT count(*) = 1 AS explain_was_read_only FROM qc_explain_dml \gset
+SELECT invalidations = 0 AS explain_probe_preserved_cache
+FROM bioseq_cache.stats() \gset
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT produced = 1
+       AND completed_hits = 1
+       AND invalidations = 0 AS explain_preserved_cache
+FROM bioseq_cache.stats() \gset
+\if :explain_was_read_only
+\else
+DO $$ BEGIN RAISE EXCEPTION 'plain EXPLAIN executed its DML'; END $$;
+\endif
+\if :explain_plan_preserved_cache
+\else
+DO $$ BEGIN RAISE EXCEPTION 'plain EXPLAIN marked its plan dirty'; END $$;
+\endif
+\if :explain_disable_preserved_cache
+\else
+DO $$ BEGIN RAISE EXCEPTION 'disabling cache invalidated reusable state'; END $$;
+\endif
+\if :explain_probe_preserved_cache
+\else
+DO $$ BEGIN RAISE EXCEPTION 'disabled read probe invalidated reusable state'; END $$;
+\endif
+\if :explain_preserved_cache
+\else
+DO $$
+DECLARE cache_stats record;
+BEGIN
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    RAISE EXCEPTION 'plain EXPLAIN invalidated reusable state: %',
+        row_to_json(cache_stats);
+END $$;
+\endif
+EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF)
+INSERT INTO qc_explain_dml VALUES (2, 'analyzed');
+SELECT id, payload FROM qc_explain_dml ORDER BY id;
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+SELECT count(*) = 2 AS explain_analyze_wrote FROM qc_explain_dml \gset
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT produced = 2
+       AND completed_hits = 1
+       AND invalidations > 0 AS explain_analyze_invalidated
+FROM bioseq_cache.stats() \gset
+\if :explain_analyze_wrote
+\else
+DO $$ BEGIN RAISE EXCEPTION 'EXPLAIN ANALYZE did not execute its DML'; END $$;
+\endif
+\if :explain_analyze_invalidated
+\else
+DO $$
+DECLARE cache_stats record;
+BEGIN
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    RAISE EXCEPTION 'EXPLAIN ANALYZE DML did not invalidate: %',
+        row_to_json(cache_stats);
+END $$;
+\endif
+
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache.reset_stats();
 SELECT id, payload FROM qc_dml WHERE meta = 3 ORDER BY id;
@@ -64,6 +139,62 @@ BEGIN
     END IF;
 END
 $$;
+
+-- A committed target write selects a new dependency generation; the first
+-- post-change execution produces current rows and the second reuses them.
+CREATE TABLE qc_generation_rollover(id integer PRIMARY KEY, value text NOT NULL);
+INSERT INTO qc_generation_rollover VALUES (1, 'old');
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT array_agg(value ORDER BY id) AS values
+FROM qc_generation_rollover \gset rollover_before_first_
+SELECT array_agg(value ORDER BY id) AS values
+FROM qc_generation_rollover \gset rollover_before_second_
+UPDATE qc_generation_rollover SET value = 'new' WHERE id = 1;
+SELECT array_agg(value ORDER BY id) AS values
+FROM qc_generation_rollover \gset rollover_after_first_
+SELECT array_agg(value ORDER BY id) AS values
+FROM qc_generation_rollover \gset rollover_after_second_
+SELECT :'rollover_before_first_values'::text[] = ARRAY['old']
+       AND :'rollover_before_second_values'::text[] = ARRAY['old']
+       AND :'rollover_after_first_values'::text[] = ARRAY['new']
+       AND :'rollover_after_second_values'::text[] = ARRAY['new']
+       AND produced = 2 AND completed_hits = 2
+       AND fallbacks = 0 AS committed_rollover_ok
+FROM bioseq_cache.stats() \gset
+\if :committed_rollover_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'committed write generation rollover failed'; END $$;
+\endif
+DROP TABLE qc_generation_rollover;
+
+-- A rolled-back write to an unrelated relation leaves the COMPLETE target
+-- generation usable; this is a hit oracle, not an eager-retirement oracle.
+CREATE TABLE qc_rollback_target(id integer PRIMARY KEY, value text NOT NULL);
+CREATE TABLE qc_rollback_unrelated(id integer PRIMARY KEY, value text NOT NULL);
+INSERT INTO qc_rollback_target VALUES (1, 'stable');
+INSERT INTO qc_rollback_unrelated VALUES (1, 'before');
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT array_agg(value ORDER BY id) AS values
+FROM qc_rollback_target \gset unrelated_before_
+BEGIN;
+UPDATE qc_rollback_unrelated SET value = 'rolled back' WHERE id = 1;
+ROLLBACK;
+SELECT array_agg(value ORDER BY id) AS values
+FROM qc_rollback_target \gset unrelated_after_
+SELECT :'unrelated_before_values'::text[] = ARRAY['stable']
+       AND :'unrelated_after_values'::text[] = ARRAY['stable']
+       AND produced = 1 AND completed_hits = 1
+       AND invalidations = 0 AND fallbacks = 0
+       AS unrelated_rollback_hit_ok
+FROM bioseq_cache.stats() \gset
+\if :unrelated_rollback_hit_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'unrelated rollback did not preserve COMPLETE hit'; END $$;
+\endif
+DROP TABLE qc_rollback_unrelated;
+DROP TABLE qc_rollback_target;
 
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache.reset_stats();
@@ -329,19 +460,32 @@ COPY qc_copy_routing FROM STDIN WITH (FORMAT csv);
 \.
 ROLLBACK;
 SELECT id, payload FROM qc_copy_routing ORDER BY id;
-
+SELECT produced = 1
+       AND completed_hits = 2
+       AND invalidations = 0 AS copy_rollback_preserved_cache
+FROM bioseq_cache.stats() \gset
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+SELECT array_agg(id ORDER BY id) = ARRAY[1,101] AS copy_rollback_rows_ok
+FROM qc_copy_routing \gset
+SET bioseq.query_cache_optimisation_mode = 'same';
+\if :copy_rollback_preserved_cache
+\else
 DO $$
+DECLARE cache_stats record;
 BEGIN
-    IF (SELECT array_agg(id ORDER BY id) FROM qc_copy_routing)
-       IS DISTINCT FROM ARRAY[1,101]
-       OR NOT EXISTS (
-           SELECT 1 FROM bioseq_cache.stats()
-           WHERE produced = 1 AND completed_hits = 2)
-    THEN
-        RAISE EXCEPTION 'rolled-back routed COPY invalidated or leaked rows';
-    END IF;
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    RAISE EXCEPTION
+        'rolled-back routed COPY invalidated reusable state: %',
+        row_to_json(cache_stats);
 END
 $$;
+\endif
+\if :copy_rollback_rows_ok
+\else
+DO $$ BEGIN
+    RAISE EXCEPTION 'rolled-back routed COPY leaked rows';
+END $$;
+\endif
 
 -- A rolled-back TRUNCATE retains the completed generation.
 CREATE TABLE qc_truncate_rollback(id integer PRIMARY KEY);
@@ -482,129 +626,198 @@ SELECT value, value * 10
 FROM generate_series(1, 1024) AS generated(value);
 SET max_parallel_workers_per_gather = 0;
 
-DO $$
+CREATE FUNCTION pg_temp.qc_dependency_plan(query_text text) RETURNS jsonb
+LANGUAGE plpgsql VOLATILE AS $$
 DECLARE
-    dependency_limit integer;
-    leaf_count integer;
-    query_sql text;
     plan_text text;
-    plan jsonb;
-    cache_node jsonb;
-    actual_dependency_count integer;
-    planned_leaf_count integer;
-    first_rows bigint;
-    first_total bigint;
-    second_rows bigint;
-    second_total bigint;
-    expected_total bigint;
-    cache_stats record;
 BEGIN
-    FOREACH dependency_limit IN ARRAY ARRAY[1023, 1024, 1025] LOOP
-        leaf_count := dependency_limit - 1;
-        expected_total := leaf_count::bigint * (leaf_count + 1)::bigint / 2;
-        query_sql := format(
-            'SELECT count(*)::bigint, sum(partition_key)::bigint '
-            'FROM qc_dependency_partitioned WHERE partition_key <= %s',
-            leaf_count);
-
-        PERFORM set_config(
-            'bioseq.query_cache_optimisation_mode', 'disabled', true);
-        EXECUTE 'EXPLAIN (FORMAT JSON, COSTS OFF) ' || query_sql
-            INTO plan_text;
-        plan := plan_text::jsonb;
-        WITH RECURSIVE plan_nodes(node) AS (
-            SELECT plan->0->'Plan'
-          UNION ALL
-            SELECT child
-            FROM plan_nodes,
-                 LATERAL jsonb_array_elements(
-                     COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
-        )
-        SELECT count(*) INTO planned_leaf_count
-        FROM plan_nodes
-        WHERE node->>'Relation Name' LIKE 'qc_dependency_leaf_%';
-        IF planned_leaf_count <> leaf_count THEN
-            RAISE EXCEPTION
-                'dependency fixture planned % leaves, expected % for limit %',
-                planned_leaf_count, leaf_count, dependency_limit;
-        END IF;
-
-        PERFORM set_config(
-            'bioseq.query_cache_optimisation_mode', 'same', true);
-        PERFORM bioseq_cache.invalidate_all();
-        PERFORM bioseq_cache.reset_stats();
-        EXECUTE 'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) ' || query_sql
-            INTO plan_text;
-        plan := plan_text::jsonb;
-        WITH RECURSIVE plan_nodes(node) AS (
-            SELECT plan->0->'Plan'
-          UNION ALL
-            SELECT child
-            FROM plan_nodes,
-                 LATERAL jsonb_array_elements(
-                     COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
-        )
-        SELECT node INTO cache_node
-        FROM plan_nodes
-        WHERE node->>'Node Type' = 'Custom Scan'
-          AND node->>'Custom Plan Provider' = 'BioseqCacheScan'
-        LIMIT 1;
-        actual_dependency_count := CASE
-            WHEN cache_node IS NULL THEN NULL
-            ELSE (cache_node->>'Cache Dependency Count')::integer
-        END;
-
-        IF dependency_limit <= 1024 THEN
-            IF cache_node IS NULL
-               OR actual_dependency_count IS DISTINCT FROM dependency_limit THEN
-                RAISE EXCEPTION
-                    'bounded dependency metadata mismatch: expected %, actual %, wrapped %',
-                    dependency_limit,
-                    actual_dependency_count,
-                    cache_node IS NOT NULL;
-            END IF;
-        ELSIF cache_node IS NOT NULL THEN
-            RAISE EXCEPTION
-                '1025-dependency plan was wrapped with % dependencies',
-                actual_dependency_count;
-        END IF;
-
-        EXECUTE query_sql INTO first_rows, first_total;
-        EXECUTE query_sql INTO second_rows, second_total;
-        SELECT * INTO cache_stats FROM bioseq_cache.stats();
-        IF first_rows <> leaf_count
-           OR second_rows <> leaf_count
-           OR first_total <> expected_total
-           OR second_total <> expected_total THEN
-            RAISE EXCEPTION
-                'dependency boundary result mismatch at %: %, %, %, %',
-                dependency_limit,
-                first_rows, first_total, second_rows, second_total;
-        END IF;
-
-        IF dependency_limit <= 1024 THEN
-            IF cache_stats.produced <> 1
-               OR cache_stats.completed_hits <> 1
-               OR cache_stats.inflight_waits <> 0
-               OR cache_stats.fallbacks <> 0 THEN
-                RAISE EXCEPTION
-                    'bounded dependency execution mismatch at %: %',
-                    dependency_limit, row_to_json(cache_stats);
-            END IF;
-        ELSIF cache_stats.produced <> 0
-              OR cache_stats.completed_hits <> 0
-              OR cache_stats.inflight_waits <> 0
-              OR cache_stats.fallbacks <> 0
-              OR EXISTS (
-                    SELECT 1 FROM bioseq_cache_test.entry_states()
-                    WHERE state IN ('BUILDING', 'COMPLETE')) THEN
-            RAISE EXCEPTION
-                '1025-dependency bypass touched shared state: %',
-                row_to_json(cache_stats);
-        END IF;
-    END LOOP;
+    EXECUTE 'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) ' || query_text
+        INTO plan_text;
+    RETURN plan_text::jsonb;
 END
 $$;
+
+\set dep_query_1023 'SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total FROM qc_dependency_partitioned WHERE partition_key <= 1022'
+\set dep_query_1024 'SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total FROM qc_dependency_partitioned WHERE partition_key <= 1023'
+\set dep_query_1025 'SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total FROM qc_dependency_partitioned WHERE partition_key <= 1024'
+
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+SELECT pg_temp.qc_dependency_plan(:'dep_query_1023')::text AS plan
+\gset dep1023_base_
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'dep1023_base_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child
+    FROM plan_nodes,
+         LATERAL jsonb_array_elements(
+             COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+)
+SELECT count(*) = 1022 AS dep1023_leaf_plan_ok
+FROM plan_nodes
+WHERE node->>'Relation Name' LIKE 'qc_dependency_leaf_%' \gset
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT pg_temp.qc_dependency_plan(:'dep_query_1023')::text AS plan
+\gset dep1023_cache_
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'dep1023_cache_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child
+    FROM plan_nodes,
+         LATERAL jsonb_array_elements(
+             COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+)
+SELECT count(*) = 1
+       AND COALESCE(max((node->>'Cache Dependency Count')::integer), -1)
+           = 1023 AS dep1023_cache_plan_ok
+FROM plan_nodes
+WHERE node->>'Node Type' = 'Custom Scan'
+  AND node->>'Custom Plan Provider' = 'BioseqCacheScan' \gset
+\if :dep1023_leaf_plan_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'dependency fixture did not plan 1022 leaves'; END $$;
+\endif
+\if :dep1023_cache_plan_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION '1023-dependency plan metadata mismatch'; END $$;
+\endif
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total
+FROM qc_dependency_partitioned WHERE partition_key <= 1022 \gset dep1023_first_
+SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total
+FROM qc_dependency_partitioned WHERE partition_key <= 1022 \gset dep1023_second_
+SELECT :dep1023_first_row_count::bigint = 1022
+       AND :dep1023_second_row_count::bigint = 1022
+       AND :dep1023_first_total::bigint = 522753
+       AND :dep1023_second_total::bigint = 522753
+       AND produced = 1 AND completed_hits = 1
+       AND inflight_waits = 0 AND fallbacks = 0 AS dep1023_execution_ok
+FROM bioseq_cache.stats() \gset
+\if :dep1023_execution_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION '1023-dependency execution mismatch'; END $$;
+\endif
+
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+SELECT pg_temp.qc_dependency_plan(:'dep_query_1024')::text AS plan
+\gset dep1024_base_
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'dep1024_base_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child
+    FROM plan_nodes,
+         LATERAL jsonb_array_elements(
+             COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+)
+SELECT count(*) = 1023 AS dep1024_leaf_plan_ok
+FROM plan_nodes
+WHERE node->>'Relation Name' LIKE 'qc_dependency_leaf_%' \gset
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT pg_temp.qc_dependency_plan(:'dep_query_1024')::text AS plan
+\gset dep1024_cache_
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'dep1024_cache_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child
+    FROM plan_nodes,
+         LATERAL jsonb_array_elements(
+             COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+)
+SELECT count(*) = 1
+       AND COALESCE(max((node->>'Cache Dependency Count')::integer), -1)
+           = 1024 AS dep1024_cache_plan_ok
+FROM plan_nodes
+WHERE node->>'Node Type' = 'Custom Scan'
+  AND node->>'Custom Plan Provider' = 'BioseqCacheScan' \gset
+\if :dep1024_leaf_plan_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'dependency fixture did not plan 1023 leaves'; END $$;
+\endif
+\if :dep1024_cache_plan_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION '1024-dependency plan metadata mismatch'; END $$;
+\endif
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total
+FROM qc_dependency_partitioned WHERE partition_key <= 1023 \gset dep1024_first_
+SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total
+FROM qc_dependency_partitioned WHERE partition_key <= 1023 \gset dep1024_second_
+SELECT :dep1024_first_row_count::bigint = 1023
+       AND :dep1024_second_row_count::bigint = 1023
+       AND :dep1024_first_total::bigint = 523776
+       AND :dep1024_second_total::bigint = 523776
+       AND produced = 1 AND completed_hits = 1
+       AND inflight_waits = 0 AND fallbacks = 0 AS dep1024_execution_ok
+FROM bioseq_cache.stats() \gset
+\if :dep1024_execution_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION '1024-dependency execution mismatch'; END $$;
+\endif
+
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+SELECT pg_temp.qc_dependency_plan(:'dep_query_1025')::text AS plan
+\gset dep1025_base_
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'dep1025_base_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child
+    FROM plan_nodes,
+         LATERAL jsonb_array_elements(
+             COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+)
+SELECT count(*) = 1024 AS dep1025_leaf_plan_ok
+FROM plan_nodes
+WHERE node->>'Relation Name' LIKE 'qc_dependency_leaf_%' \gset
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT pg_temp.qc_dependency_plan(:'dep_query_1025')::text AS plan
+\gset dep1025_cache_
+SET bioseq.query_cache_optimisation_mode = 'disabled';
+WITH RECURSIVE plan_nodes(node) AS (
+    SELECT :'dep1025_cache_plan'::jsonb->0->'Plan'
+  UNION ALL
+    SELECT child
+    FROM plan_nodes,
+         LATERAL jsonb_array_elements(
+             COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+)
+SELECT count(*) = 0 AS dep1025_cache_plan_ok
+FROM plan_nodes
+WHERE node->>'Node Type' = 'Custom Scan'
+  AND node->>'Custom Plan Provider' = 'BioseqCacheScan' \gset
+\if :dep1025_leaf_plan_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'dependency fixture did not plan 1024 leaves'; END $$;
+\endif
+\if :dep1025_cache_plan_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION '1025-dependency plan entered the registry'; END $$;
+\endif
+SET bioseq.query_cache_optimisation_mode = 'same';
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache.reset_stats();
+SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total
+FROM qc_dependency_partitioned WHERE partition_key <= 1024 \gset dep1025_first_
+SELECT count(*)::bigint AS row_count, sum(partition_key)::bigint AS total
+FROM qc_dependency_partitioned WHERE partition_key <= 1024 \gset dep1025_second_
+SELECT :dep1025_first_row_count::bigint = 1024
+       AND :dep1025_second_row_count::bigint = 1024
+       AND :dep1025_first_total::bigint = 524800
+       AND :dep1025_second_total::bigint = 524800
+       AND produced = 0 AND completed_hits = 0
+       AND inflight_waits = 0 AND fallbacks = 0
+       AND NOT EXISTS (
+           SELECT 1 FROM bioseq_cache_test.entry_states()
+           WHERE state IN ('BUILDING', 'COMPLETE')) AS dep1025_execution_ok
+FROM bioseq_cache.stats() \gset
+\if :dep1025_execution_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION '1025-dependency bypass touched shared state'; END $$;
+\endif
 
 RESET max_parallel_workers_per_gather;
 DROP TABLE qc_dependency_partitioned;

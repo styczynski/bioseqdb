@@ -93,6 +93,12 @@ public:
     /** Release all currently owned bytes exactly once. */
     void release() noexcept;
 
+    /** Transfer an admitted reservation into a separately tracked owner. */
+    [[nodiscard]] std::uint64_t disown() noexcept {
+        admission_ = nullptr;
+        return std::exchange(bytes_, 0);
+    }
+
 private:
     /** Transfer ownership and clear the source permit. */
     void move_from(CachePermit& other) noexcept {

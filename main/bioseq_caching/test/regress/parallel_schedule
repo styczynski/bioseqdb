@@ -5,6 +5,9 @@ test: cache_types
 test: cache_dml_transactions
 test: cache_joins_upper
 test: cache_eligibility_security_explain
+test: cache_provider_registry
 test: cache_reuse_provider
 test: cache_reuse_provider_older
+test: cache_reuse_provider_source_error
+test: cache_reuse_provider_binding
 test: cache_reuse_security

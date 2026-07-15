@@ -31,6 +31,56 @@ CACHE_ROOT = SCRIPT_DIR.parent
 REPOSITORY_ROOT = CACHE_ROOT.parents[1]
 PRIVATE_RUNNER_PATH = CACHE_ROOT / "test" / "run_private_cluster.py"
 
+GENERIC_SQL_CASE_KEYS = frozenset(
+    {
+        "narrow_fixed_rows",
+        "wide_nullable_rows",
+        "large_toasted_values",
+        "empty_result",
+        "highly_selective_result",
+        "ordered_result",
+        "limit_exact_result",
+    }
+)
+ORDERED_SQL_CASE_KEYS = frozenset({"ordered_result", "limit_exact_result"})
+CORE_BENCHMARK_NAMES = frozenset(
+    {
+        "column_encode",
+        "column_full_prevalidation",
+        "column_fixed_decode",
+        "admission_reserve_release",
+        "memory_copy_reference",
+    }
+)
+SECTION45_THRESHOLD_NAMES = frozenset(
+    {
+        "disabled_planning_overhead_percent",
+        "disabled_execution_overhead_percent",
+        "disabled_no_cache_plan_and_correct_result",
+        "compact_result_producer_overhead_percent",
+        "completed_hit_speedup",
+        "one_child_execution_under_fanout",
+        "fanout_request_locking_behavior",
+        "fanout_wait_duration_measured",
+        "row_and_checksum_correctness",
+        "manifest_exact_hit_behavior",
+        "insert_update_delete_invalidation",
+        "eviction_under_pressure",
+        "conservative_unrelated_commit_rejection",
+        "ttl_cleanup_bounded",
+        "internal_disk_ceiling_and_free_space_floor",
+        "internal_storage_tier_metrics",
+        "cold_and_warm_file_hit_with_checksum_prepass",
+        "fixed_decode_memory_copy_order_bandwidth",
+        "generic_reusable_current_hit",
+        "generic_overlapping_predicate_reuse",
+        "provider_partition_fragment_reuse",
+        "waiter_cancel_producer_latency",
+        "backend_postmaster_rss_and_physical_io_measured",
+        "repeated_eviction_resource_reclamation",
+    }
+)
+
 
 def _load_private_runner() -> Any:
     spec = importlib.util.spec_from_file_location(
@@ -60,6 +110,257 @@ class QueryOutput:
     ordered_sha256: str
     multiset_sha256: str
     stdout_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class _ProcessSample:
+    rss_bytes: int
+    read_characters: int | None
+    write_characters: int | None
+    read_bytes: int | None
+    write_bytes: int | None
+
+
+def _postmaster_pid(cluster: Any) -> int:
+    path = cluster.data_dir / "postmaster.pid"
+    try:
+        pid = int(path.read_text(encoding="utf-8").splitlines()[0])
+    except (OSError, ValueError, IndexError) as error:
+        raise BenchmarkError(f"cannot read private postmaster PID from {path}") from error
+    if pid <= 0:
+        raise BenchmarkError(f"invalid private postmaster PID: {pid}")
+    return pid
+
+
+def _process_children(pid: int) -> set[int]:
+    pending = [pid]
+    descendants: set[int] = set()
+    while pending:
+        parent = pending.pop()
+        path = Path(f"/proc/{parent}/task/{parent}/children")
+        try:
+            children = [int(value) for value in path.read_text().split()]
+        except (OSError, ValueError):
+            continue
+        for child in children:
+            if child > 0 and child not in descendants:
+                descendants.add(child)
+                pending.append(child)
+    return descendants
+
+
+def _read_process_sample(pid: int) -> _ProcessSample | None:
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        status = status_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    rss_bytes: int | None = None
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                with contextlib.suppress(ValueError):
+                    rss_bytes = int(fields[1]) * 1024
+            break
+    if rss_bytes is None:
+        return None
+
+    read_characters: int | None = None
+    write_characters: int | None = None
+    read_bytes: int | None = None
+    write_bytes: int | None = None
+    try:
+        io_document = Path(f"/proc/{pid}/io").read_text(encoding="utf-8")
+    except OSError:
+        io_document = ""
+    for line in io_document.splitlines():
+        name, separator, value = line.partition(":")
+        if separator == "":
+            continue
+        if name == "rchar":
+            with contextlib.suppress(ValueError):
+                read_characters = int(value.strip())
+        elif name == "wchar":
+            with contextlib.suppress(ValueError):
+                write_characters = int(value.strip())
+        elif name == "read_bytes":
+            with contextlib.suppress(ValueError):
+                read_bytes = int(value.strip())
+        elif name == "write_bytes":
+            with contextlib.suppress(ValueError):
+                write_bytes = int(value.strip())
+    return _ProcessSample(
+        rss_bytes=rss_bytes,
+        read_characters=read_characters,
+        write_characters=write_characters,
+        read_bytes=read_bytes,
+        write_bytes=write_bytes,
+    )
+
+
+def _process_resource_snapshot(cluster: Any) -> dict[str, Any]:
+    if not Path("/proc/self/status").is_file():
+        return _unavailable_metric("Linux /proc process accounting is unavailable.")
+    postmaster = _postmaster_pid(cluster)
+    parent = _read_process_sample(postmaster)
+    if parent is None:
+        return _unavailable_metric("The private postmaster disappeared during sampling.")
+    backends = [
+        sample
+        for pid in _process_children(postmaster)
+        if (sample := _read_process_sample(pid)) is not None
+    ]
+    return {
+        "status": "measured",
+        "postmaster_rss_bytes": parent.rss_bytes,
+        "maximum_backend_rss_bytes": max(
+            (sample.rss_bytes for sample in backends), default=0
+        ),
+        "process_tree_rss_bytes": parent.rss_bytes
+        + sum(sample.rss_bytes for sample in backends),
+        "observed_backend_processes": len(backends),
+    }
+
+
+class _ProcessResourceSampler:
+    """Sample private PostgreSQL RSS and kernel-accounted I/O by process."""
+
+    def __init__(self, cluster: Any, interval_seconds: float = 0.005) -> None:
+        self._cluster = cluster
+        self._interval_seconds = interval_seconds
+        self._postmaster = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._sample_count = 0
+        self._postmaster_peak_rss = 0
+        self._backend_peak_rss = 0
+        self._tree_peak_rss = 0
+        self._baseline_io: dict[int, tuple[int, int, int, int]] = {}
+        self._maximum_io: dict[int, tuple[int, int, int, int]] = {}
+        self._io_available = False
+        self._available = Path("/proc/self/status").is_file()
+
+    def _sample(self, *, initial: bool = False) -> None:
+        if not self._available:
+            return
+        pids = {self._postmaster, *_process_children(self._postmaster)}
+        samples: dict[int, _ProcessSample] = {}
+        for pid in pids:
+            sample = _read_process_sample(pid)
+            if sample is not None:
+                samples[pid] = sample
+        parent = samples.get(self._postmaster)
+        if parent is None:
+            return
+        backend_rss = [
+            sample.rss_bytes
+            for pid, sample in samples.items()
+            if pid != self._postmaster
+        ]
+        self._sample_count += 1
+        self._postmaster_peak_rss = max(
+            self._postmaster_peak_rss, parent.rss_bytes
+        )
+        self._backend_peak_rss = max(
+            self._backend_peak_rss, max(backend_rss, default=0)
+        )
+        self._tree_peak_rss = max(
+            self._tree_peak_rss,
+            sum(sample.rss_bytes for sample in samples.values()),
+        )
+        for pid, sample in samples.items():
+            if (
+                sample.read_characters is None
+                or sample.write_characters is None
+                or sample.read_bytes is None
+                or sample.write_bytes is None
+            ):
+                continue
+            self._io_available = True
+            if pid not in self._baseline_io:
+                self._baseline_io[pid] = (
+                    (
+                        sample.read_characters,
+                        sample.write_characters,
+                        sample.read_bytes,
+                        sample.write_bytes,
+                    )
+                    if initial
+                    else (0, 0, 0, 0)
+                )
+            prior = self._maximum_io.get(pid, (0, 0, 0, 0))
+            self._maximum_io[pid] = (
+                max(prior[0], sample.read_characters),
+                max(prior[1], sample.write_characters),
+                max(prior[2], sample.read_bytes),
+                max(prior[3], sample.write_bytes),
+            )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            self._sample()
+
+    def __enter__(self) -> "_ProcessResourceSampler":
+        if self._available:
+            self._postmaster = _postmaster_pid(self._cluster)
+            self._sample(initial=True)
+            self._thread = threading.Thread(
+                target=self._run,
+                name="bioseq-cache-resource-sampler",
+                daemon=True,
+            )
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._sample()
+
+    def report(self) -> dict[str, Any]:
+        if not self._available or self._sample_count == 0:
+            return _unavailable_metric(
+                "Linux /proc RSS and per-process I/O accounting is unavailable."
+            )
+        io: dict[str, Any]
+        if self._io_available:
+            read_characters = 0
+            write_characters = 0
+            read_bytes = 0
+            write_bytes = 0
+            for pid, maximum in self._maximum_io.items():
+                baseline = self._baseline_io.get(pid, (0, 0, 0, 0))
+                read_characters += max(0, maximum[0] - baseline[0])
+                write_characters += max(0, maximum[1] - baseline[1])
+                read_bytes += max(0, maximum[2] - baseline[2])
+                write_bytes += max(0, maximum[3] - baseline[3])
+            io = {
+                "status": "measured",
+                "logical_read_bytes": read_characters,
+                "logical_write_bytes": write_characters,
+                "physical_read_bytes": read_bytes,
+                "physical_write_bytes": write_bytes,
+                "detail": (
+                    "Linux /proc/<pid>/io rchar/wchar page-cache-inclusive "
+                    "traffic and read_bytes/write_bytes physical traffic, "
+                    "summed over the private postmaster process tree."
+                ),
+            }
+        else:
+            io = _unavailable_metric(
+                "Linux per-process physical-I/O counters are unavailable."
+            )
+        return {
+            "status": "measured",
+            "samples": self._sample_count,
+            "interval_ns": int(self._interval_seconds * 1_000_000_000),
+            "peak_postmaster_rss_bytes": self._postmaster_peak_rss,
+            "peak_backend_rss_bytes": self._backend_peak_rss,
+            "peak_process_tree_rss_bytes": self._tree_peak_rss,
+            "page_cache_and_physical_io": io,
+        }
 
 
 def _required_path(environment_name: str, *, directory: bool = False) -> Path:
@@ -111,12 +412,52 @@ def _read_cases(path: Path) -> dict[str, Any]:
     for case in cases:
         if not isinstance(case, dict) or not required.issubset(case):
             raise BenchmarkError(f"malformed benchmark case: {case!r}")
-        key = str(case["key"])
+        key_value = case["key"]
+        category = case["category"]
+        ordered = case["ordered"]
+        sql = case["sql"]
+        if (
+            not isinstance(key_value, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]*", key_value) is None
+            or not isinstance(category, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]*", category) is None
+            or type(ordered) is not bool
+            or not isinstance(sql, str)
+            or not sql.strip()
+        ):
+            raise BenchmarkError(f"malformed benchmark case: {case!r}")
+        key = key_value
         if key in seen:
             raise BenchmarkError(f"duplicate benchmark key: {key}")
         seen.add(key)
-        if ";" in str(case["sql"]):
+        if ";" in sql:
             raise BenchmarkError(f"benchmark SQL must be one statement: {key}")
+        if ordered != (key in ORDERED_SQL_CASE_KEYS):
+            raise BenchmarkError(
+                f"benchmark case has the wrong ordered-checksum contract: {key}"
+            )
+    missing = sorted(GENERIC_SQL_CASE_KEYS - seen)
+    if missing:
+        raise BenchmarkError(
+            f"mandatory generic SQL benchmark cases are absent: {missing}"
+        )
+    try:
+        fixture_rows = int(document.get("fixture_rows", 0))
+        samples_per_case = int(document.get("samples_per_case", 0))
+    except (TypeError, ValueError) as error:
+        raise BenchmarkError("benchmark fixture/sample sizes are not integers") from error
+    if (
+        not isinstance(document.get("fixture_rows"), int)
+        or isinstance(document.get("fixture_rows"), bool)
+        or not isinstance(document.get("samples_per_case"), int)
+        or isinstance(document.get("samples_per_case"), bool)
+        or fixture_rows < 2_000
+        or samples_per_case < 3
+    ):
+        raise BenchmarkError(
+            "generic SQL benchmark requires at least 2,000 fixture rows and "
+            "three samples per case"
+        )
     return document
 
 
@@ -137,9 +478,215 @@ def _run_core_benchmark(executable: Path, output: Path, log: Path) -> dict[str, 
     if not output.is_file():
         raise BenchmarkError("core benchmark did not write its JSON fragment")
     fragment = json.loads(output.read_text(encoding="utf-8"))
+    return _validate_core_benchmark_fragment(fragment)
+
+
+def _run_harness_unit_tests() -> dict[str, Any]:
+    """Run the benchmark-only contract suite before allocating a cluster."""
+    test_path = SCRIPT_DIR / "test_run_private_cluster_bench.py"
+    completed = subprocess.run(
+        [sys.executable, str(test_path), "-v"],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise BenchmarkError(
+            "benchmark harness unit tests failed before the timed run:\n"
+            + completed.stdout
+        )
+    match = re.search(r"Ran (\d+) tests?", completed.stdout)
+    return {
+        "passed": True,
+        "test_count": int(match.group(1)) if match is not None else None,
+        "command": [sys.executable, str(test_path), "-v"],
+        "output": completed.stdout.splitlines(),
+    }
+
+
+def _validate_core_benchmark_fragment(fragment: Any) -> dict[str, Any]:
+    """Reject standalone-core reports without complete metric/correctness proof."""
     if not isinstance(fragment, dict):
         raise BenchmarkError("core benchmark fragment is not a JSON object")
+    rows = fragment.get("rows")
+    sample_count = fragment.get("samples")
+    if (
+        fragment.get("schema_version") != 1
+        or not isinstance(rows, int)
+        or isinstance(rows, bool)
+        or rows <= 0
+        or not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count < 3
+    ):
+        raise BenchmarkError(
+            "core benchmark fragment has invalid schema, row, or sample metadata"
+        )
+    correctness = fragment.get("correctness")
+    if not isinstance(correctness, dict) or correctness.get("passed") is not True:
+        raise BenchmarkError("core benchmark fragment has no passing correctness proof")
+    required_correctness = {
+        "row_count",
+        "expected_ordered_checksum",
+        "actual_ordered_checksum",
+        "column_blob_digest",
+        "expected_iteration_guard",
+        "decode_guard",
+        "memory_copy_guard",
+        "admission_final_reserved_bytes",
+    }
+    if not required_correctness.issubset(correctness):
+        raise BenchmarkError(
+            "core benchmark correctness proof is missing row/checksum evidence"
+        )
+    checksum_names = (
+        "expected_ordered_checksum",
+        "actual_ordered_checksum",
+        "column_blob_digest",
+    )
+    if (
+        not isinstance(correctness["row_count"], int)
+        or isinstance(correctness["row_count"], bool)
+        or correctness["row_count"] != rows
+        or not all(
+            isinstance(correctness[name], str) and correctness[name]
+            for name in checksum_names
+        )
+        or correctness["expected_ordered_checksum"]
+        != correctness["actual_ordered_checksum"]
+        or not all(
+            isinstance(correctness[name], int)
+            and not isinstance(correctness[name], bool)
+            and 0 <= correctness[name] <= (1 << 64) - 1
+            for name in (
+                "expected_iteration_guard",
+                "decode_guard",
+                "memory_copy_guard",
+            )
+        )
+        or correctness["decode_guard"]
+            != correctness["expected_iteration_guard"]
+        or correctness["memory_copy_guard"]
+            != correctness["expected_iteration_guard"]
+        or correctness["admission_final_reserved_bytes"] != 0
+    ):
+        raise BenchmarkError(
+            "core benchmark correctness row count or ordered checksum is invalid"
+        )
+    metrics = fragment.get("metrics")
+    required_metrics = {
+        "encoded_logical_bytes",
+        "encoded_stored_bytes",
+        "row_group_count",
+        "full_block_prevalidation_bytes",
+        "full_block_prevalidation_p50_ns",
+        "full_block_prevalidation_p95_ns",
+        "full_block_prevalidation_p99_ns",
+        "fixed_decode_bytes_per_second",
+        "memory_copy_bytes_per_second",
+    }
+    if not isinstance(metrics, dict) or not required_metrics.issubset(metrics):
+        raise BenchmarkError(
+            "core benchmark fragment is missing mandatory storage metrics"
+        )
+    if any(
+        not isinstance(metrics[name], (int, float))
+        or isinstance(metrics[name], bool)
+        or metrics[name] < 0
+        for name in required_metrics
+    ):
+        raise BenchmarkError(
+            "core benchmark fragment has nonnumeric or negative storage metrics"
+        )
+    if (
+        metrics["encoded_logical_bytes"] <= 0
+        or metrics["encoded_stored_bytes"] <= 0
+        or metrics["row_group_count"] <= 0
+        or metrics["full_block_prevalidation_bytes"]
+        != metrics["encoded_stored_bytes"]
+        or metrics["fixed_decode_bytes_per_second"] <= 0
+        or metrics["memory_copy_bytes_per_second"] <= 0
+    ):
+        raise BenchmarkError(
+            "core benchmark fragment has inconsistent storage/decode metrics"
+        )
+    benchmarks = fragment.get("benchmarks")
+    if not isinstance(benchmarks, list) or not benchmarks:
+        raise BenchmarkError("core benchmark fragment has no raw benchmark samples")
+    benchmark_names = [
+        benchmark.get("name")
+        for benchmark in benchmarks
+        if isinstance(benchmark, dict)
+    ]
+    if (
+        not CORE_BENCHMARK_NAMES.issubset(benchmark_names)
+        or len(benchmark_names) != len(set(benchmark_names))
+    ):
+        raise BenchmarkError(
+            "core benchmark fragment has missing or duplicate mandatory series"
+        )
+    for benchmark in benchmarks:
+        raw_samples = benchmark.get("raw_samples_ns") \
+            if isinstance(benchmark, dict) else None
+        if (
+            not isinstance(benchmark, dict)
+            or not isinstance(raw_samples, list)
+            or len(raw_samples) != sample_count
+            or not all(
+                isinstance(sample, int)
+                and not isinstance(sample, bool)
+                and sample >= 0
+                for sample in raw_samples
+            )
+            or not all(
+                name in benchmark for name in ("p50_ns", "p95_ns", "p99_ns")
+            )
+            or not all(
+                isinstance(benchmark.get(name), int)
+                and not isinstance(benchmark.get(name), bool)
+                and benchmark[name] >= 0
+                for name in ("p50_ns", "p95_ns", "p99_ns")
+            )
+            or not isinstance(benchmark.get("operations"), int)
+            or isinstance(benchmark.get("operations"), bool)
+            or benchmark["operations"] <= 0
+        ):
+            raise BenchmarkError(
+                f"core benchmark entry lacks raw/p50/p95/p99 proof: {benchmark!r}"
+            )
+        expected_percentiles = {
+            "p50_ns": _nearest_rank_percentile(raw_samples, 50, 100),
+            "p95_ns": _nearest_rank_percentile(raw_samples, 95, 100),
+            "p99_ns": _nearest_rank_percentile(raw_samples, 99, 100),
+        }
+        if any(
+            benchmark[name] != value
+            for name, value in expected_percentiles.items()
+        ):
+            raise BenchmarkError(
+                "core benchmark percentile does not match raw samples: "
+                f"{benchmark!r}"
+            )
     return fragment
+
+
+def _nearest_rank_percentile(
+    samples: Sequence[int], numerator: int, denominator: int
+) -> int:
+    """Return the integer nearest-rank percentile used by the C++ CLI."""
+    if (
+        not samples
+        or numerator <= 0
+        or denominator <= 0
+        or numerator > denominator
+    ):
+        raise BenchmarkError("nearest-rank percentile has invalid inputs")
+    ordered = sorted(samples)
+    rank = (numerator * len(ordered) + denominator - 1) // denominator
+    return ordered[max(1, rank) - 1]
 
 
 def _psql_command(cluster: Any, sql: str) -> list[str]:
@@ -541,12 +1088,18 @@ def _digest_output(
 def _execute_query(
     cluster: Any,
     *,
-    mode: str,
+    mode: str | None,
     sql: str,
     ttl_ms: int | None = None,
 ) -> QueryOutput:
-    settings = f"SET bioseq.query_cache_optimisation_mode = '{mode}';\n"
+    settings = (
+        ""
+        if mode is None
+        else f"SET bioseq.query_cache_optimisation_mode = '{mode}';\n"
+    )
     if ttl_ms is not None:
+        if mode is None:
+            raise BenchmarkError("cache TTL requires a cache-enabled query mode")
         settings += f"SET bioseq.query_cache_ttl = {ttl_ms};\n"
     stdout, elapsed, first_row_ns, completed_at_ns = _run_query_streaming(
         cluster,
@@ -599,6 +1152,27 @@ def _throughput_summary(outputs: Sequence[QueryOutput]) -> dict[str, Any]:
     return {
         "rows_per_second": summary(row_rates, "rows/s"),
         "output_bytes_per_second": summary(byte_rates, "bytes/s"),
+    }
+
+
+def _fixed_quantity_throughput(
+    quantity: int,
+    outputs: Sequence[QueryOutput],
+    unit: str,
+) -> dict[str, Any]:
+    if quantity < 0 or not outputs:
+        raise BenchmarkError("throughput requires a nonnegative quantity and samples")
+    samples = [
+        int(quantity * 1_000_000_000 / max(1, output.elapsed_ns))
+        for output in outputs
+    ]
+    return {
+        "raw_samples": samples,
+        "p50": int(_percentile(samples, 0.50)),
+        "p95": int(_percentile(samples, 0.95)),
+        "p99": int(_percentile(samples, 0.99)),
+        "unit": unit,
+        "quantity_per_execution": quantity,
     }
 
 
@@ -676,6 +1250,15 @@ def _entry_runtime_snapshot(cluster: Any) -> dict[str, Any]:
             ("prevalidation_ns", "prevalidation_duration_ns"),
             "No isolated prevalidation duration is exposed by the generic admin API.",
         ),
+        "prevalidation_bytes": aggregate(
+            ("prevalidation_bytes", "full_block_prevalidation_bytes"),
+            "No per-entry full-block prevalidation byte count is exposed by "
+            "the generic admin API.",
+        ),
+        "row_group_count": aggregate(
+            ("row_group_count", "row_groups"),
+            "No per-entry row-group count is exposed by the generic admin API.",
+        ),
         "child_executions": aggregate(
             ("child_executions", "child_execution_count"),
             "No executor child-Begin/execution count is exposed by the generic admin API.",
@@ -717,13 +1300,47 @@ def _test_storage_tier_snapshot(cluster: Any) -> dict[str, Any]:
     values = stdout.strip().split("\t")
     if len(values) != 5 or values[0] not in {"t", "f"}:
         raise BenchmarkError(f"unexpected storage tier test output: {stdout!r}")
+    try:
+        numeric = [int(value) for value in values[1:]]
+    except ValueError as error:
+        raise BenchmarkError(
+            f"nonnumeric storage tier test output: {stdout!r}"
+        ) from error
+    if any(value < 0 for value in numeric):
+        raise BenchmarkError(f"negative storage tier test output: {stdout!r}")
     return {
         "force_file_tier": values[0] == "t",
-        "dsa_blocks": int(values[1]),
-        "file_blocks": int(values[2]),
-        "reserved_hot_bytes": int(values[3]),
-        "reserved_file_bytes": int(values[4]),
+        "dsa_blocks": numeric[0],
+        "file_blocks": numeric[1],
+        "reserved_hot_bytes": numeric[2],
+        "reserved_file_bytes": numeric[3],
     }
+
+
+def _runtime_storage_snapshot(cluster: Any) -> dict[str, Any]:
+    """Combine production diagnostics with exact test-ledger byte evidence."""
+    runtime = _entry_runtime_snapshot(cluster)
+    tier = _test_storage_tier_snapshot(cluster)
+    runtime["test_tier_evidence"] = tier
+    runtime["dsa_hot_bytes"] = {
+        "status": "measured",
+        "value": tier["reserved_hot_bytes"],
+        "source_field": "bioseq_cache_test.storage_tier_stats.reserved_hot_bytes",
+        "detail": (
+            "The cache-only private benchmark exposes the physical storage "
+            "ledger so Section 45 never substitutes block counts for bytes."
+        ),
+    }
+    runtime["file_bytes"] = {
+        "status": "measured",
+        "value": tier["reserved_file_bytes"],
+        "source_field": "bioseq_cache_test.storage_tier_stats.reserved_file_bytes",
+        "detail": (
+            "Reserved file-tier bytes are read from the test-only physical "
+            "storage ledger in the disposable benchmark node."
+        ),
+    }
+    return runtime
 
 
 def _same_result(reference: QueryOutput, candidate: QueryOutput, ordered: bool) -> bool:
@@ -770,6 +1387,8 @@ PROVIDER_COUNTER_NAMES = (
     "extract_occurrence",
     "late_fetch_batch",
     "late_fetch_references",
+    "late_fetch_values",
+    "late_fetch_bytes",
     "planner_bridge_calls",
     "executor_rows",
     "gated_expensive_rows",
@@ -795,9 +1414,90 @@ def _counter_delta(
 
 
 def _storage_snapshot(cluster: Any) -> dict[str, Any]:
+    runtime = _runtime_storage_snapshot(cluster)
     return {
-        "runtime_admin": _entry_runtime_snapshot(cluster),
-        "test_tier_evidence": _test_storage_tier_snapshot(cluster),
+        "runtime_admin": runtime,
+        "test_tier_evidence": runtime["test_tier_evidence"],
+        "dsa_bytes": runtime["dsa_hot_bytes"],
+        "file_bytes": runtime["file_bytes"],
+    }
+
+
+def _cache_store_usage(cluster: Any) -> dict[str, int]:
+    directory = cluster.data_dir / "bioseq_cache" / "store"
+    sizes: list[int] = []
+    if directory.is_dir():
+        for path in directory.iterdir():
+            with contextlib.suppress(OSError):
+                if path.is_file():
+                    sizes.append(path.stat().st_size)
+    return {
+        "file_count": len(sizes),
+        "bytes": sum(sizes),
+    }
+
+
+def _filesystem_policy_snapshot(cluster: Any) -> dict[str, Any]:
+    """Measure the v1 file-admission ceiling and free-space floor."""
+    usage = shutil.disk_usage(cluster.run_dir)
+    policy_ceiling = min(128 << 30, usage.total // 10)
+    free_floor = max(10 << 30, usage.total // 10)
+    return {
+        "status": "measured",
+        "filesystem_total_bytes": usage.total,
+        "filesystem_used_bytes": usage.used,
+        "filesystem_free_bytes": usage.free,
+        "policy_file_ceiling_bytes": policy_ceiling,
+        "policy_free_space_floor_bytes": free_floor,
+        "free_space_floor_preserved": usage.free >= free_floor,
+        "policy_source": (
+            "DOC0371 FileAdmissionPolicy v1: min(128 GiB, 10% capacity) "
+            "ceiling and max(10 GiB, 10% capacity) free-space floor."
+        ),
+    }
+
+
+def _drop_cache_store_page_cache(cluster: Any) -> dict[str, Any]:
+    if not hasattr(os, "posix_fadvise") or not hasattr(
+        os, "POSIX_FADV_DONTNEED"
+    ):
+        return _unavailable_metric(
+            "POSIX_FADV_DONTNEED is unavailable on this benchmark host."
+        )
+    directory = cluster.data_dir / "bioseq_cache" / "store"
+    files = [] if not directory.is_dir() else sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.name.endswith(".cache")
+    )
+    if not files:
+        return _unavailable_metric(
+            "The forced file-tier producer created no cache block files."
+        )
+    advised_bytes = 0
+    try:
+        for path in files:
+            descriptor = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+            try:
+                os.fsync(descriptor)
+                os.posix_fadvise(
+                    descriptor, 0, 0, os.POSIX_FADV_DONTNEED
+                )
+                advised_bytes += path.stat().st_size
+            finally:
+                os.close(descriptor)
+    except OSError as error:
+        return _unavailable_metric(
+            f"Cannot evict forced file-tier pages with posix_fadvise: {error}"
+        )
+    return {
+        "status": "measured",
+        "file_count": len(files),
+        "advised_bytes": advised_bytes,
+        "advice": "POSIX_FADV_DONTNEED",
+        "detail": (
+            "Every complete cache block was fsynced and advised DONTNEED "
+            "before the first timed completed hit."
+        ),
     }
 
 
@@ -811,13 +1511,38 @@ def _provider_phase_report(
     cache_after: Mapping[str, Any],
     provider_before: Mapping[str, Any],
     provider_after: Mapping[str, Any],
+    input_rows: int,
 ) -> dict[str, Any]:
     if not outputs:
         raise BenchmarkError("provider benchmark phase has no output samples")
+    if input_rows <= 0:
+        raise BenchmarkError("provider benchmark phase has no positive input size")
     digest_name = "ordered_sha256" if ordered else "multiset_sha256"
     digest_value = (
         reference.ordered_sha256 if ordered else reference.multiset_sha256
     )
+    cache_delta = _counter_delta(
+        cache_before, cache_after, tuple(cache_before.keys())
+    )
+    provider_delta = _counter_delta(
+        provider_before, provider_after, PROVIDER_COUNTER_NAMES
+    )
+    executor_rows = provider_delta["executor_rows"]
+    gated_rows = provider_delta["gated_expensive_rows"]
+    late_fetch_references = provider_delta["late_fetch_references"]
+    late_fetch_values = provider_delta["late_fetch_values"]
+    late_fetch_byte_count = provider_delta["late_fetch_bytes"]
+    if late_fetch_byte_count < 0:
+        raise BenchmarkError("generic provider reported negative late-fetch bytes")
+    late_fetch_bytes = {
+        "status": "measured",
+        "value": late_fetch_byte_count,
+        "detail": (
+            "Sum of datumGetSize for every successfully emitted non-null "
+            "late-fetch value; null values and occurrence/status envelopes "
+            "contribute zero bytes."
+        ),
+    }
     return {
         "correctness": {
             "passed": all(
@@ -837,18 +1562,57 @@ def _provider_phase_report(
         "cache_stats": {
             "before": dict(cache_before),
             "after": dict(cache_after),
-            "delta": _counter_delta(
-                cache_before, cache_after, tuple(cache_before.keys())
-            ),
+            "delta": cache_delta,
         },
         "provider_stats": {
             "before": dict(provider_before),
             "after": dict(provider_after),
-            "delta": _counter_delta(
-                provider_before, provider_after, PROVIDER_COUNTER_NAMES
+            "delta": provider_delta,
+        },
+        "predicate_runtime": {
+            "late_fetch_rows": {
+                "status": "measured",
+                "value": late_fetch_references,
+            },
+            "late_fetch_values": {
+                "status": "measured",
+                "value": late_fetch_values,
+            },
+            "late_fetch_bytes": late_fetch_bytes,
+            "selection_ratio": {
+                "status": "measured",
+                "value": reference.rows / input_rows,
+                "selected_rows": reference.rows,
+                "input_rows": input_rows,
+                "detail": (
+                    "Correctness-checked output occurrences divided by the "
+                    "fixture occurrences available to the provider relation."
+                ),
+            },
+            "provider_gate_pass_ratio": (
+                {
+                    "status": "measured",
+                    "value": gated_rows / executor_rows,
+                    "gated_expensive_rows": gated_rows,
+                    "executor_rows": executor_rows,
+                    "detail": (
+                        "The test provider increments executor_rows only after "
+                        "its gate passes; this is a gate-accounting check, not "
+                        "the benchmark selection ratio."
+                    ),
+                }
+                if executor_rows > 0
+                else {
+                    "status": "not_applicable",
+                    "value": None,
+                    "detail": "This phase executed no provider rows.",
+                }
             ),
         },
-        "storage": _storage_snapshot(cluster),
+        "storage": {
+            **_storage_snapshot(cluster),
+            "filesystem_policy": _filesystem_policy_snapshot(cluster),
+        },
     }
 
 
@@ -863,11 +1627,18 @@ def _reset_case(cluster: Any, *, ttl_ms: int = 3_600_000) -> None:
     )
 
 
-def _measure_explain(cluster: Any, *, mode: str, sql: str) -> dict[str, Any]:
+def _measure_explain(
+    cluster: Any, *, mode: str | None, sql: str
+) -> dict[str, Any]:
+    settings = (
+        ""
+        if mode is None
+        else f"SET bioseq.query_cache_optimisation_mode = '{mode}'; "
+    )
     stdout, _ = _run_sql(
         cluster,
-        f"SET bioseq.query_cache_optimisation_mode = '{mode}'; "
-        f"EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF) {sql}",
+        settings
+        + f"EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, TIMING OFF) {sql}",
     )
     document = json.loads(stdout)
     root = document[0]
@@ -925,7 +1696,7 @@ def _parse_cache_storage(value: Any) -> dict[str, Any]:
 def _measure_explain_samples(
     cluster: Any,
     *,
-    mode: str,
+    mode: str | None,
     sql: str,
     sample_count: int,
 ) -> dict[str, Any]:
@@ -981,7 +1752,235 @@ def _measure_explain_samples(
         ],
         "cache_janitor": [property["janitor"] for property in properties],
         "cache_storage": storage,
+        "cache_plan_count": len(properties),
     }
+
+
+_MICROPLANNING_SQL = (
+    "SELECT sum(a_value + b_value + c_value + d_value + e_value + f_value) "
+    "FROM generate_series(1, 4) AS a(a_value) "
+    "JOIN generate_series(1, 4) AS b(b_value) ON b_value = a_value "
+    "JOIN generate_series(1, 4) AS c(c_value) ON c_value = b_value "
+    "JOIN generate_series(1, 4) AS d(d_value) ON d_value = c_value "
+    "JOIN generate_series(1, 4) AS e(e_value) ON e_value = d_value "
+    "JOIN generate_series(1, 4) AS f(f_value) ON f_value = e_value"
+)
+
+
+def _long_execution_sql(rows: int) -> str:
+    return (
+        "SELECT sum((value * 17) % 1000003) "
+        "FROM generate_series(1::bigint, "
+        f"{rows}::bigint) AS source_rows(value)"
+    )
+
+
+def _measure_disabled_hook_overhead(
+    cluster: Any,
+    inputs: Any,
+    *,
+    configured_sample_count: int,
+) -> dict[str, Any]:
+    baseline_inputs = dataclasses.replace(
+        inputs,
+        kind="bench-no-hook",
+        load_cache=False,
+        bioseq_dso=None,
+        bioseq_bootstrap=None,
+    )
+    planning_sample_count = max(31, configured_sample_count * 5)
+    execution_sample_count = max(3, min(5, configured_sample_count))
+    with PRIVATE.UniquePrivateCluster(baseline_inputs) as baseline_cluster:
+        settings_stdout, _ = _run_sql(
+            baseline_cluster,
+            "SELECT count(*) FROM pg_settings "
+            "WHERE name = 'bioseq.query_cache_optimisation_mode'",
+        )
+        extension_stdout, _ = _run_sql(
+            baseline_cluster,
+            "SELECT count(*) FROM pg_extension WHERE extname = 'bioseq_cache'",
+        )
+        cache_setting_stdout, _ = _run_sql(
+            cluster,
+            "SELECT count(*) FROM pg_settings "
+            "WHERE name = 'bioseq.query_cache_optimisation_mode'",
+        )
+        if settings_stdout.strip() != "0" or extension_stdout.strip() != "0":
+            raise BenchmarkError(
+                "no-hook baseline unexpectedly loaded or bootstrapped bioseq_cache"
+            )
+        if cache_setting_stdout.strip() != "1":
+            raise BenchmarkError(
+                "cache-enabled benchmark node exposes no cache mode GUC"
+            )
+
+        for _ in range(5):
+            _measure_explain(
+                baseline_cluster, mode=None, sql=_MICROPLANNING_SQL
+            )
+            _measure_explain(
+                cluster, mode="disabled", sql=_MICROPLANNING_SQL
+            )
+        baseline_planning_samples: list[int] = []
+        disabled_planning_samples: list[int] = []
+        planning_cache_plans = 0
+        for sample in range(planning_sample_count):
+            if sample % 2 == 0:
+                baseline_sample = _measure_explain(
+                    baseline_cluster, mode=None, sql=_MICROPLANNING_SQL
+                )
+                disabled_sample = _measure_explain(
+                    cluster, mode="disabled", sql=_MICROPLANNING_SQL
+                )
+            else:
+                disabled_sample = _measure_explain(
+                    cluster, mode="disabled", sql=_MICROPLANNING_SQL
+                )
+                baseline_sample = _measure_explain(
+                    baseline_cluster, mode=None, sql=_MICROPLANNING_SQL
+                )
+            baseline_planning_samples.append(
+                int(float(baseline_sample["planning_ms"]) * 1_000_000)
+            )
+            disabled_planning_samples.append(
+                int(float(disabled_sample["planning_ms"]) * 1_000_000)
+            )
+            planning_cache_plans += int(
+                disabled_sample["cache_properties"] is not None
+            )
+
+        target_execution_ms = 1_100.0
+        execution_rows = 8_000_000
+        calibration: list[dict[str, Any]] = []
+        for _ in range(8):
+            sql = _long_execution_sql(execution_rows)
+            measured = _measure_explain(
+                baseline_cluster, mode=None, sql=sql
+            )
+            calibration.append(
+                {
+                    "rows": execution_rows,
+                    "execution_ms": measured["execution_ms"],
+                }
+            )
+            if measured["execution_ms"] >= target_execution_ms:
+                break
+            scale = min(
+                4.0,
+                max(
+                    1.25,
+                    target_execution_ms
+                    / max(1.0, float(measured["execution_ms"]))
+                    * 1.10,
+                ),
+            )
+            execution_rows = int(execution_rows * scale) + 1
+            if execution_rows > 512_000_000:
+                break
+        if calibration[-1]["execution_ms"] < 1_000.0:
+            raise BenchmarkError(
+                "cannot calibrate a one-second no-hook execution baseline: "
+                f"{calibration!r}"
+            )
+
+        execution_sql = _long_execution_sql(execution_rows)
+        baseline_execution_samples: list[int] = []
+        disabled_execution_samples: list[int] = []
+        execution_cache_plans = 0
+        for sample in range(execution_sample_count):
+            if sample % 2 == 0:
+                baseline_sample = _measure_explain(
+                    baseline_cluster, mode=None, sql=execution_sql
+                )
+                disabled_sample = _measure_explain(
+                    cluster, mode="disabled", sql=execution_sql
+                )
+            else:
+                disabled_sample = _measure_explain(
+                    cluster, mode="disabled", sql=execution_sql
+                )
+                baseline_sample = _measure_explain(
+                    baseline_cluster, mode=None, sql=execution_sql
+                )
+            baseline_execution_samples.append(
+                int(float(baseline_sample["execution_ms"]) * 1_000_000)
+            )
+            disabled_execution_samples.append(
+                int(float(disabled_sample["execution_ms"]) * 1_000_000)
+            )
+            execution_cache_plans += int(
+                disabled_sample["cache_properties"] is not None
+            )
+
+        reference = _execute_query(
+            baseline_cluster, mode=None, sql=execution_sql
+        )
+        candidate = _execute_query(
+            cluster, mode="disabled", sql=execution_sql
+        )
+        baseline_planning = _sample_summary(baseline_planning_samples)
+        disabled_planning = _sample_summary(disabled_planning_samples)
+        baseline_execution = _sample_summary(baseline_execution_samples)
+        disabled_execution = _sample_summary(disabled_execution_samples)
+        baseline_planning_ns = int(baseline_planning["p50_ns"])
+        disabled_planning_ns = int(disabled_planning["p50_ns"])
+        baseline_execution_ns = int(baseline_execution["p50_ns"])
+        disabled_execution_ns = int(disabled_execution["p50_ns"])
+        if baseline_planning_ns <= 0 or baseline_execution_ns <= 0:
+            raise BenchmarkError("no-hook baseline produced a zero-duration median")
+        return {
+            "baseline": {
+                "kind": "private_node_without_cache_preload_or_bootstrap",
+                "run_directory": str(baseline_cluster.run_dir),
+                "cache_setting_count": 0,
+                "cache_extension_count": 0,
+                "planning_query": _MICROPLANNING_SQL,
+                "planning": baseline_planning,
+                "planning_sample_count": planning_sample_count,
+                "execution_query": execution_sql,
+                "execution_rows": execution_rows,
+                "execution": baseline_execution,
+                "execution_sample_count": execution_sample_count,
+                "calibration": calibration,
+                "correctness": {
+                    "row_count": reference.rows,
+                    "ordered_sha256": reference.ordered_sha256,
+                    "multiset_sha256": reference.multiset_sha256,
+                },
+            },
+            "disabled_hook": {
+                "cache_setting_count": 1,
+                "planning": disabled_planning,
+                "execution": disabled_execution,
+                "planning_cache_plan_count": planning_cache_plans,
+                "execution_cache_plan_count": execution_cache_plans,
+                "correctness": {
+                    "passed": _same_result(reference, candidate, True),
+                    "row_count": candidate.rows,
+                    "ordered_sha256": candidate.ordered_sha256,
+                    "multiset_sha256": candidate.multiset_sha256,
+                },
+            },
+            "disabled_planning_overhead_percent": (
+                (disabled_planning_ns - baseline_planning_ns)
+                / baseline_planning_ns
+                * 100.0
+            ),
+            "disabled_execution_overhead_percent": (
+                (disabled_execution_ns - baseline_execution_ns)
+                / baseline_execution_ns
+                * 100.0
+            ),
+            "source_execution_exceeds_one_second": (
+                baseline_execution_ns >= 1_000_000_000
+            ),
+            "detail": (
+                "Paired samples alternate between simultaneous disposable "
+                "PostgreSQL nodes. The baseline has neither cache preload nor "
+                "bootstrap; server EXPLAIN timings exclude connection startup "
+                "and cache-mode SET time."
+            ),
+        }
 
 
 def _measure_case(
@@ -992,8 +1991,9 @@ def _measure_case(
 ) -> dict[str, Any]:
     sql = str(case["sql"])
     ordered = bool(case["ordered"])
+    if sample_count <= 0:
+        raise BenchmarkError("SQL benchmark sample count must be positive")
     _reset_case(cluster)
-    reference = _execute_query(cluster, mode="disabled", sql=sql)
     disabled_explain = _measure_explain_samples(
         cluster,
         mode="disabled",
@@ -1001,18 +2001,67 @@ def _measure_case(
         sample_count=sample_count,
     )
 
-    _reset_case(cluster)
     force_file_tier = str(case["category"]) == "file_tier_candidate"
-    if force_file_tier:
-        _run_sql(
-            cluster, "SELECT bioseq_cache_test.set_force_file_tier(true)"
+    if force_file_tier and sample_count < 2:
+        raise BenchmarkError(
+            "file-tier cold/warm comparison requires at least two samples"
         )
+    producer_samples: list[QueryOutput] = []
+    reference_samples: list[QueryOutput] = []
+    producer_stats: list[dict[str, int]] = []
+    cold_resources: dict[str, Any] = {
+        "status": "not_applicable",
+        "detail": "The case does not use the forced file tier.",
+    }
+    warm_resources = dict(cold_resources)
     try:
-        producer = _execute_query(cluster, mode="same", sql=sql)
-        hit_samples = [
-            _execute_query(cluster, mode="same", sql=sql)
-            for _ in range(sample_count)
-        ]
+        for sample in range(sample_count):
+            _reset_case(cluster)
+            if force_file_tier:
+                _run_sql(
+                    cluster,
+                    "SELECT bioseq_cache_test.set_force_file_tier(true)",
+                )
+            if sample % 2 == 0:
+                reference_samples.append(
+                    _execute_query(cluster, mode="disabled", sql=sql)
+                )
+                producer_samples.append(
+                    _execute_query(cluster, mode="same", sql=sql)
+                )
+            else:
+                producer_samples.append(
+                    _execute_query(cluster, mode="same", sql=sql)
+                )
+                reference_samples.append(
+                    _execute_query(cluster, mode="disabled", sql=sql)
+                )
+            producer_stats.append(_stats(cluster))
+        page_cache_drop = (
+            _drop_cache_store_page_cache(cluster)
+            if force_file_tier
+            else {
+                "status": "not_applicable",
+                "detail": "The case does not use the forced file tier.",
+            }
+        )
+        hit_samples: list[QueryOutput]
+        if force_file_tier:
+            with _ProcessResourceSampler(cluster) as cold_sampler:
+                first_hit = _execute_query(cluster, mode="same", sql=sql)
+            cold_resources = cold_sampler.report()
+            with _ProcessResourceSampler(cluster) as warm_sampler:
+                warm_hits = [
+                    _execute_query(cluster, mode="same", sql=sql)
+                    for _ in range(sample_count - 1)
+                ]
+            warm_resources = warm_sampler.report()
+            hit_samples = [first_hit, *warm_hits]
+        else:
+            hit_samples = [
+                _execute_query(cluster, mode="same", sql=sql)
+                for _ in range(sample_count)
+            ]
         same_explain = _measure_explain_samples(
             cluster,
             mode="same",
@@ -1020,21 +2069,30 @@ def _measure_case(
             sample_count=sample_count,
         )
         case_stats = _stats(cluster)
-        runtime = _entry_runtime_snapshot(cluster)
-        runtime["test_tier_evidence"] = _test_storage_tier_snapshot(cluster)
+        runtime = _runtime_storage_snapshot(cluster)
+        runtime["filesystem_policy"] = _filesystem_policy_snapshot(cluster)
     finally:
         if force_file_tier:
             _run_sql(
                 cluster, "SELECT bioseq_cache_test.set_force_file_tier(false)"
             )
     runtime["storage_explain"] = same_explain["cache_storage"]
-    correctness = _same_result(reference, producer, ordered) and all(
-        _same_result(reference, sample, ordered) for sample in hit_samples
+    reference = reference_samples[0]
+    correctness = all(
+        _same_result(reference, sample, ordered)
+        for sample in [*reference_samples, *producer_samples, *hit_samples]
     )
     hit_action = "[Hit] exact final result"
+    producer_behavior = all(
+        stats["produced"] == 1
+        and stats["completed_hits"] == 0
+        and stats["fallbacks"] == 0
+        for stats in producer_stats
+    )
     cache_behavior = {
         "passed": (
-            case_stats["produced"] == 1
+            producer_behavior
+            and case_stats["produced"] == 1
             and case_stats["completed_hits"] >= sample_count * 2
             and len(same_explain["actual_cache_actions"]) == sample_count
             and all(
@@ -1046,10 +2104,17 @@ def _measure_case(
         "completed_hits": case_stats["completed_hits"],
         "minimum_expected_completed_hits": sample_count * 2,
         "explain_actions": same_explain["actual_cache_actions"],
+        "producer_trials_passed": producer_behavior,
+        "producer_trial_stats": producer_stats,
     }
-    reference_ns = reference.elapsed_ns
+    reference_ns = int(_percentile(
+        [sample.elapsed_ns for sample in reference_samples], 0.50
+    ))
+    producer_ns = int(_percentile(
+        [sample.elapsed_ns for sample in producer_samples], 0.50
+    ))
     producer_delta = (
-        ((producer.elapsed_ns - reference_ns) / reference_ns) * 100.0
+        ((producer_ns - reference_ns) / reference_ns) * 100.0
         if reference_ns > 0
         else 0.0
     )
@@ -1067,6 +2132,67 @@ def _measure_case(
         else None
     )
     hit_first_row = _first_row_summary(hit_samples)
+    file_hit_temperature: dict[str, Any]
+    if force_file_tier:
+        if len(hit_samples) < 2:
+            raise BenchmarkError(
+                "file-tier cold/warm comparison requires at least two hit samples"
+            )
+        first_hit = hit_samples[0]
+        warm_hits = hit_samples[1:]
+        warm_p50 = int(_percentile(
+            [sample.elapsed_ns for sample in warm_hits], 0.50
+        ))
+        file_hit_temperature = {
+            "status": "measured"
+            if page_cache_drop["status"] == "measured"
+            else "unavailable",
+            "page_cache_drop": page_cache_drop,
+            "first_cold_file_hit": {
+                **_sample_summary([first_hit.elapsed_ns]),
+                "time_to_first_row": _first_row_summary([first_hit]),
+                "process_resources": cold_resources,
+                "correctness_passed": _same_result(
+                    reference, first_hit, ordered
+                ),
+            },
+            "warm_file_hits": {
+                **_sample_summary(
+                    [sample.elapsed_ns for sample in warm_hits]
+                ),
+                "time_to_first_row": _first_row_summary(warm_hits),
+                "process_resources": warm_resources,
+                "correctness_passed": all(
+                    _same_result(reference, sample, ordered)
+                    for sample in warm_hits
+                ),
+            },
+            "cold_to_warm_p50_ratio": (
+                first_hit.elapsed_ns / warm_p50 if warm_p50 > 0 else None
+            ),
+            "mandatory_checksum_prepass_included": True,
+            "passed": (
+                page_cache_drop["status"] == "measured"
+                and page_cache_drop["file_count"] > 0
+                and page_cache_drop["advised_bytes"] > 0
+                and _same_result(reference, first_hit, ordered)
+                and all(
+                    _same_result(reference, sample, ordered)
+                    for sample in warm_hits
+                )
+            ),
+            "detail": (
+                "The first completed file hit follows fsync plus "
+                "POSIX_FADV_DONTNEED. Both first and warm timings include "
+                "the mandatory full-block checksum validation prepass."
+            ),
+        }
+    else:
+        file_hit_temperature = {
+            "status": "not_applicable",
+            "passed": None,
+            "detail": "The case does not use the forced file tier.",
+        }
     return {
         "key": str(case["key"]),
         "category": str(case["category"]),
@@ -1079,21 +2205,50 @@ def _measure_case(
         },
         "cache_behavior": cache_behavior,
         "disabled": {
-            **_sample_summary([reference.elapsed_ns]),
-            "time_to_first_row": _first_row_summary([reference]),
-            "throughput": _throughput_summary([reference]),
+            **_sample_summary(
+                [sample.elapsed_ns for sample in reference_samples]
+            ),
+            "time_to_first_row": _first_row_summary(reference_samples),
+            "throughput": _throughput_summary(reference_samples),
             **disabled_explain,
         },
         "producer": {
-            **_sample_summary([producer.elapsed_ns]),
-            "time_to_first_row": _first_row_summary([producer]),
-            "throughput": _throughput_summary([producer]),
+            **_sample_summary(
+                [sample.elapsed_ns for sample in producer_samples]
+            ),
+            "time_to_first_row": _first_row_summary(producer_samples),
+            "throughput": _throughput_summary(producer_samples),
+            "encoded_throughput": {
+                "logical_bytes_per_second": _fixed_quantity_throughput(
+                    case_stats["logical_bytes"],
+                    producer_samples,
+                    "logical bytes/s",
+                ),
+                "stored_bytes_per_second": _fixed_quantity_throughput(
+                    case_stats["stored_bytes"],
+                    producer_samples,
+                    "stored bytes/s",
+                ),
+            },
             "baseline_delta_percent": producer_delta,
+            "paired_sample_count": sample_count,
         },
         "completed_hit": {
             **_sample_summary([sample.elapsed_ns for sample in hit_samples]),
             "time_to_first_row": hit_first_row,
             "throughput": _throughput_summary(hit_samples),
+            "cache_read_throughput": {
+                "logical_bytes_per_second": _fixed_quantity_throughput(
+                    case_stats["logical_bytes"],
+                    hit_samples,
+                    "logical bytes/s",
+                ),
+                "stored_bytes_per_second": _fixed_quantity_throughput(
+                    case_stats["stored_bytes"],
+                    hit_samples,
+                    "stored bytes/s",
+                ),
+            },
             "speedup_vs_disabled": speedup,
             **same_explain,
         },
@@ -1106,8 +2261,142 @@ def _measure_case(
                 "prevalidation, but is not reported as an isolated duration."
             ),
         },
+        "file_hit_temperature": file_hit_temperature,
         "runtime_storage": runtime,
+        "encoded_bytes": {
+            "logical": case_stats["logical_bytes"],
+            "stored": case_stats["stored_bytes"],
+        },
         "stats": case_stats,
+    }
+
+
+def _long_exact_sql(right_rows: int) -> str:
+    return (
+        "SELECT sum((left_rows.id * 17 + right_rows.id) % 1000003) "
+        "FROM cache_bench_narrow AS left_rows "
+        "CROSS JOIN cache_bench_narrow AS right_rows "
+        f"WHERE right_rows.id <= {right_rows}"
+    )
+
+
+def _measure_long_source_exact_hit(
+    cluster: Any,
+    *,
+    configured_sample_count: int,
+) -> dict[str, Any]:
+    sample_count = max(3, min(5, configured_sample_count))
+    target_execution_ms = 1_100.0
+    right_rows = 128
+    calibration: list[dict[str, Any]] = []
+    for _ in range(8):
+        sql = _long_exact_sql(right_rows)
+        measured = _measure_explain(cluster, mode="disabled", sql=sql)
+        calibration.append(
+            {
+                "right_rows": right_rows,
+                "execution_ms": measured["execution_ms"],
+            }
+        )
+        if measured["execution_ms"] >= target_execution_ms:
+            break
+        scale = min(
+            4.0,
+            max(
+                1.25,
+                target_execution_ms
+                / max(1.0, float(measured["execution_ms"]))
+                * 1.10,
+            ),
+        )
+        right_rows = min(20_000, int(right_rows * scale) + 1)
+    if calibration[-1]["execution_ms"] < 1_000.0:
+        raise BenchmarkError(
+            "cannot calibrate a one-second heap exact-cache source: "
+            f"{calibration!r}"
+        )
+    sql = _long_exact_sql(right_rows)
+    _reset_case(cluster)
+    references = [
+        _execute_query(cluster, mode="disabled", sql=sql)
+        for _ in range(sample_count)
+    ]
+    reference = references[0]
+    producer = _execute_query(cluster, mode="same", sql=sql)
+    hits = [
+        _execute_query(cluster, mode="same", sql=sql)
+        for _ in range(sample_count)
+    ]
+    explain = _measure_explain_samples(
+        cluster,
+        mode="same",
+        sql=sql,
+        sample_count=sample_count,
+    )
+    stats = _stats(cluster)
+    hit_p50_ns = int(_percentile(
+        [output.elapsed_ns for output in hits], 0.50
+    ))
+    correct = (
+        all(_same_result(reference, output, True) for output in references)
+        and _same_result(reference, producer, True)
+        and all(_same_result(reference, hit, True) for hit in hits)
+    )
+    hit_action = "[Hit] exact final result"
+    behavior = (
+        stats["produced"] == 1
+        and stats["completed_hits"] >= sample_count * 2
+        and stats["fallbacks"] == 0
+        and len(explain["actual_cache_actions"]) == sample_count
+        and all(
+            action == hit_action for action in explain["actual_cache_actions"]
+        )
+    )
+    return {
+        "key": "one_second_compact_exact_result",
+        "sql": sql,
+        "calibration": calibration,
+        "right_rows": right_rows,
+        "correctness": {
+            "passed": correct,
+            "row_count": reference.rows,
+            "ordered_sha256": reference.ordered_sha256,
+            "multiset_sha256": reference.multiset_sha256,
+        },
+        "disabled": {
+            **_sample_summary([output.elapsed_ns for output in references]),
+            "time_to_first_row": _first_row_summary(references),
+            "throughput": _throughput_summary(references),
+        },
+        "producer": {
+            **_sample_summary([producer.elapsed_ns]),
+            "time_to_first_row": _first_row_summary([producer]),
+            "throughput": _throughput_summary([producer]),
+        },
+        "completed_hit": {
+            **_sample_summary([output.elapsed_ns for output in hits]),
+            "time_to_first_row": _first_row_summary(hits),
+            "throughput": _throughput_summary(hits),
+            "speedup_vs_disabled": (
+                int(_percentile(
+                    [output.elapsed_ns for output in references], 0.50
+                )) / hit_p50_ns
+                if hit_p50_ns > 0
+                else None
+            ),
+            **explain,
+        },
+        "source_execution_exceeds_one_second": (
+            int(_percentile(
+                [output.elapsed_ns for output in references], 0.50
+            )) >= 1_000_000_000
+        ),
+        "cache_behavior": {
+            "passed": behavior,
+            "stats": stats,
+            "explain_actions": explain["actual_cache_actions"],
+        },
+        "runtime_storage": _runtime_storage_snapshot(cluster),
     }
 
 
@@ -1119,6 +2408,7 @@ def _measure_generic_provider_reuse(
 ) -> dict[str, Any]:
     if fixture_rows <= 0 or sample_count <= 0:
         raise BenchmarkError("generic provider benchmark sizes must be positive")
+    partition_input_rows = max(512, fixture_rows // 4)
     projection = (
         "SELECT row_id, base_id, occurrence_no, nullable_value, "
         "payload, capability_mask "
@@ -1161,6 +2451,7 @@ def _measure_generic_provider_reuse(
             cache_after=disabled_cache_after,
             provider_before=disabled_provider_before,
             provider_after=disabled_provider_after,
+            input_rows=fixture_rows,
         )
 
         session.reset_provider()
@@ -1178,6 +2469,7 @@ def _measure_generic_provider_reuse(
             cache_after=producer_cache_after,
             provider_before=producer_provider_before,
             provider_after=producer_provider_after,
+            input_rows=fixture_rows,
         )
 
         session.reset_provider()
@@ -1198,6 +2490,7 @@ def _measure_generic_provider_reuse(
             cache_after=hit_cache_after,
             provider_before=hit_provider_before,
             provider_after=hit_provider_after,
+            input_rows=fixture_rows,
         )
 
         disabled_cache_delta = disabled["cache_stats"]["delta"]
@@ -1250,6 +2543,7 @@ def _measure_generic_provider_reuse(
             cache_after=overlap_source_cache_after,
             provider_before=overlap_source_provider_before,
             provider_after=overlap_source_provider_after,
+            input_rows=fixture_rows,
         )
 
         session.reset_provider()
@@ -1269,6 +2563,7 @@ def _measure_generic_provider_reuse(
             cache_after=overlap_disabled_cache_after,
             provider_before=overlap_disabled_provider_before,
             provider_after=overlap_disabled_provider_after,
+            input_rows=fixture_rows,
         )
 
         session.reset_provider()
@@ -1286,6 +2581,7 @@ def _measure_generic_provider_reuse(
             cache_after=overlap_reuse_cache_after,
             provider_before=overlap_reuse_provider_before,
             provider_after=overlap_reuse_provider_after,
+            input_rows=fixture_rows,
         )
         overlap_cache_delta = overlap_reuse["cache_stats"]["delta"]
         overlap_provider_delta = overlap_reuse["provider_stats"]["delta"]
@@ -1348,6 +2644,7 @@ def _measure_generic_provider_reuse(
             cache_after=partition_disabled_cache_after,
             provider_before=partition_disabled_provider_before,
             provider_after=partition_disabled_provider_after,
+            input_rows=partition_input_rows,
         )
 
         session.reset_provider()
@@ -1367,6 +2664,7 @@ def _measure_generic_provider_reuse(
             cache_after=partition_producer_cache_after,
             provider_before=partition_producer_provider_before,
             provider_after=partition_producer_provider_after,
+            input_rows=partition_input_rows,
         )
 
         cache_before_neighbor_write = _stats(cluster)
@@ -1398,6 +2696,7 @@ def _measure_generic_provider_reuse(
             cache_after=partition_hit_cache_after,
             provider_before=partition_hit_provider_before,
             provider_after=partition_hit_provider_after,
+            input_rows=partition_input_rows,
         )
         partition_cache_delta = partition_hit["cache_stats"]["delta"]
         partition_provider_delta = partition_hit["provider_stats"]["delta"]
@@ -1442,7 +2741,7 @@ def _measure_generic_provider_reuse(
     return {
         "fixture": {
             "provider_rows": fixture_rows,
-            "partition_rows_per_leaf": max(512, fixture_rows // 4),
+            "partition_rows_per_leaf": partition_input_rows,
             "measurement_scope": (
                 "One persistent backend keeps provider counters local; wall "
                 "and first-row samples start when each SQL command is sent and "
@@ -1547,6 +2846,8 @@ def _measure_waiter_cancel_latency(
     cluster: Any, sql: str, sample_count: int
 ) -> dict[str, Any]:
     trials = max(3, min(sample_count, 5))
+    _reset_case(cluster)
+    reference = _execute_query(cluster, mode="disabled", sql=sql)
 
     def trial(
         cancel_waiter: bool, sequence: int
@@ -1618,8 +2919,8 @@ def _measure_waiter_cancel_latency(
     cancelled_p95 = int(_percentile(cancelled_latency, 0.95))
     tolerance_ns = max(int(baseline_p95 * 0.25), 5_000_000)
     correctness = all(
-        _same_result(baseline[0][0], sample[0], False)
-        for sample in [*baseline[1:], *cancelled]
+        _same_result(reference, sample[0], False)
+        for sample in [*baseline, *cancelled]
     )
 
     def behavior_matches(
@@ -1652,7 +2953,13 @@ def _measure_waiter_cancel_latency(
         "cancelled_release_to_complete": _sample_summary(cancelled_latency),
         "p95_delta_ns": cancelled_p95 - baseline_p95,
         "tolerance_ns": tolerance_ns,
-        "correctness": {"passed": correctness},
+        "correctness": {
+            "passed": correctness,
+            "oracle": "independent disabled execution",
+            "row_count": reference.rows,
+            "ordered_sha256": reference.ordered_sha256,
+            "multiset_sha256": reference.multiset_sha256,
+        },
         "cache_behavior": {
             "passed": behavior_passed,
             "baseline_stats": [sample[2] for sample in baseline],
@@ -1690,6 +2997,8 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
         )
         waiters = [executor.submit(execute) for _ in range(clients - 1)]
         waiters_observed_at = _wait_for_waiters(cluster, clients - 1)
+        controlled_wait_seconds = 0.05
+        time.sleep(controlled_wait_seconds)
         released_at = time.perf_counter_ns()
         pause.release()
         producer_output = producer.result()
@@ -1698,9 +3007,33 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
         completed_at = time.perf_counter_ns()
 
     fanout_stats = _stats(cluster)
-    runtime = _entry_runtime_snapshot(cluster)
+    runtime = _runtime_storage_snapshot(cluster)
     correct = all(_same_result(reference, output, False) for output in outputs)
     child_executions = _exact_child_execution_snapshot(cluster)
+    cache_behavior = {
+        "passed": (
+            fanout_stats["produced"] == 1
+            and fanout_stats["completed_hits"] == 0
+            and fanout_stats["inflight_waits"] == clients - 1
+            and fanout_stats["fallbacks"] == 0
+            and fanout_stats["invalidations"] == 0
+            and child_executions["status"] == "measured"
+            and child_executions["value"] == 1
+        ),
+        "expected_producers": 1,
+        "expected_inflight_waits": clients - 1,
+        "stats": fanout_stats,
+        "child_executions": child_executions,
+    }
+    observed_wait_lower_bound_ns = released_at - waiters_observed_at
+    query_start_to_release = [
+        max(
+            0,
+            released_at
+            - (output.completed_at_ns - output.elapsed_ns),
+        )
+        for output in waiter_outputs
+    ]
     return {
         "key": f"inflight_fanout_{clients}",
         "clients": clients,
@@ -1715,10 +3048,19 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
         "producer_time_to_first_row": _first_row_summary([producer_output]),
         "producer_throughput": _throughput_summary([producer_output]),
         "waiter_time_to_first_row": _first_row_summary(waiter_outputs),
+        "waiter_latency": _sample_summary(
+            [output.elapsed_ns for output in waiter_outputs]
+        ),
         "waiter_throughput": _throughput_summary(waiter_outputs),
         "wait_duration": {
-            "status": "partially_measured",
-            "waiters_observed_to_release_ns": released_at - waiters_observed_at,
+            "status": "bounded_measurement",
+            "controlled_hold_target_ns": int(
+                controlled_wait_seconds * 1_000_000_000
+            ),
+            "condition_wait_lower_bound_ns": observed_wait_lower_bound_ns,
+            "query_start_to_release_upper_bounds": _sample_summary(
+                query_start_to_release
+            ),
             "release_to_waiter_completion": _sample_summary(
                 [
                     max(0, output.completed_at_ns - released_at)
@@ -1726,85 +3068,258 @@ def _measure_fanout(cluster: Any, clients: int, sql: str) -> dict[str, Any]:
                 ]
             ),
             "server_condition_variable_duration": _unavailable_metric(
-                "The runtime exposes waiter counts but no per-waiter CV timestamps."
+                "The runtime exposes waiter counts but no exact per-waiter CV "
+                "timestamps; the report records measured lower/upper bounds."
+            ),
+            "detail": (
+                "All waiters are observed in the shared registry, then held "
+                "for 50 ms before release. The observed-to-release interval is "
+                "a lower bound; query-start-to-release is an upper bound that "
+                "includes planning and lookup."
             ),
         },
         "release_to_all_complete_ns": completed_at - released_at,
         "runtime_storage": runtime,
         "stats": fanout_stats,
         "child_execution_count": child_executions,
+        "cache_behavior": cache_behavior,
     }
 
 
-def _measure_invalidation(cluster: Any) -> list[dict[str, Any]]:
+def _measure_invalidation(
+    cluster: Any, sample_count: int
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    operations = [
-        ("insert", "INSERT INTO cache_bench_mutable VALUES (20001, 1, 200010)"),
-        ("update", "UPDATE cache_bench_mutable SET payload = payload + 1 WHERE id = 1"),
-        ("delete", "DELETE FROM cache_bench_mutable WHERE id = 2"),
-    ]
+    trials = max(3, min(5, sample_count))
+
+    def operation_sql(key: str, trial: int) -> str:
+        if key == "insert":
+            row_id = 1_000_000_000 + trial
+            return (
+                "INSERT INTO cache_bench_mutable VALUES "
+                f"({row_id}, 1, {row_id * 10})"
+            )
+        if key == "update":
+            return (
+                "UPDATE cache_bench_mutable SET payload = payload + 1 "
+                "WHERE id = 1"
+            )
+        return f"DELETE FROM cache_bench_mutable WHERE id = {trial + 2}"
+
     query = "SELECT id, group_id, payload FROM cache_bench_mutable ORDER BY id"
-    for key, operation in operations:
-        _reset_case(cluster)
-        producer = _execute_query(cluster, mode="same", sql=query)
-        before = _stats(cluster)
-        started = time.perf_counter_ns()
-        _run_sql(cluster, operation)
-        invalidation_ns = time.perf_counter_ns() - started
-        reference = _execute_query(cluster, mode="disabled", sql=query)
-        output = _execute_query(cluster, mode="same", sql=query)
-        after = _stats(cluster)
-        results.append(
-            {
-                "key": f"{key}_invalidation",
-                "operation_ns": invalidation_ns,
-                "correctness": {
-                    "passed": _same_result(reference, output, True),
+    for key in ("insert", "update", "delete"):
+        trial_reports: list[dict[str, Any]] = []
+        producers: list[QueryOutput] = []
+        post_write_outputs: list[QueryOutput] = []
+        for trial in range(trials):
+            _reset_case(cluster)
+            pre_write_reference = _execute_query(
+                cluster, mode="disabled", sql=query
+            )
+            producer = _execute_query(cluster, mode="same", sql=query)
+            before = _stats(cluster)
+            operation = operation_sql(key, trial)
+            started = time.perf_counter_ns()
+            _run_sql(cluster, operation)
+            invalidation_ns = time.perf_counter_ns() - started
+            reference = _execute_query(cluster, mode="disabled", sql=query)
+            output = _execute_query(cluster, mode="same", sql=query)
+            after = _stats(cluster)
+            producers.append(producer)
+            post_write_outputs.append(output)
+            trial_reports.append(
+                {
+                    "trial": trial + 1,
+                    "operation": operation,
+                    "operation_ns": invalidation_ns,
+                    "producer_correctness_passed": _same_result(
+                        pre_write_reference, producer, True
+                    ),
+                    "post_write_correctness_passed": _same_result(
+                        reference, output, True
+                    ),
+                    "pre_write_row_count": pre_write_reference.rows,
+                    "pre_write_ordered_sha256": (
+                        pre_write_reference.ordered_sha256
+                    ),
                     "row_count": reference.rows,
                     "ordered_sha256": reference.ordered_sha256,
                     "multiset_sha256": reference.multiset_sha256,
+                    "invalidation_observed": (
+                        after["produced"] == before["produced"] + 1
+                        and after["completed_hits"]
+                            == before["completed_hits"]
+                        and after["fallbacks"] == before["fallbacks"]
+                        and after["invalidations"] > before["invalidations"]
+                    ),
+                    "stats_before_write": before,
+                    "stats_after_write": after,
+                }
+            )
+        operation_samples = [
+            int(trial["operation_ns"]) for trial in trial_reports
+        ]
+        results.append(
+            {
+                "key": f"{key}_invalidation",
+                "trials": trial_reports,
+                "operation_latency": _sample_summary(operation_samples),
+                "operation_ns": int(
+                    _percentile(operation_samples, 0.50)
+                ),
+                "correctness": {
+                    "passed": all(
+                        bool(trial["producer_correctness_passed"])
+                        and bool(trial["post_write_correctness_passed"])
+                        for trial in trial_reports
+                    ),
+                    "oracle": (
+                        "independent disabled executions before and after each write"
+                    ),
+                    "pre_write_row_counts": [
+                        int(trial["pre_write_row_count"])
+                        for trial in trial_reports
+                    ],
+                    "pre_write_ordered_sha256": [
+                        str(trial["pre_write_ordered_sha256"])
+                        for trial in trial_reports
+                    ],
+                    "row_counts": [
+                        int(trial["row_count"]) for trial in trial_reports
+                    ],
+                    "ordered_sha256": [
+                        str(trial["ordered_sha256"])
+                        for trial in trial_reports
+                    ],
+                    "multiset_sha256": [
+                        str(trial["multiset_sha256"])
+                        for trial in trial_reports
+                    ],
                 },
-                "producer_time_to_first_row": _first_row_summary([producer]),
-                "post_write_time_to_first_row": _first_row_summary([output]),
-                "invalidation_observed": after["produced"] > before["produced"],
-                "stats_before_write": before,
-                "stats_after_write": after,
-                "runtime_storage": _entry_runtime_snapshot(cluster),
+                "producer_time_to_first_row": _first_row_summary(producers),
+                "post_write_time_to_first_row": _first_row_summary(
+                    post_write_outputs
+                ),
+                "invalidation_observed": all(
+                    bool(trial["invalidation_observed"])
+                    for trial in trial_reports
+                ),
+                "runtime_storage": _runtime_storage_snapshot(cluster),
             }
         )
     return results
 
 
 def _measure_unrelated_commit(cluster: Any, sql: str) -> dict[str, Any]:
+    def insert_unrelated() -> int:
+        started = time.perf_counter_ns()
+        _run_sql(
+            cluster,
+            "INSERT INTO cache_bench_unrelated "
+            "SELECT COALESCE(max(id), 0) + 1 FROM cache_bench_unrelated",
+        )
+        return time.perf_counter_ns() - started
+
+    # First prove that a generic completed entry is not reused across an
+    # unrelated committed write in the database-wide conservative domain.
     _reset_case(cluster)
     reference = _execute_query(cluster, mode="disabled", sql=sql)
     producer = _execute_query(cluster, mode="same", sql=sql)
     before = _stats(cluster)
-    started = time.perf_counter_ns()
-    _run_sql(cluster, "INSERT INTO cache_bench_unrelated VALUES (1)")
-    commit_ns = time.perf_counter_ns() - started
+    commit_ns = insert_unrelated()
     after_commit = _execute_query(cluster, mode="same", sql=sql)
     after = _stats(cluster)
+    completed_rejection = (
+        after["produced"] == before["produced"] + 1
+        and after["completed_hits"] == before["completed_hits"]
+        and after["fallbacks"] == before["fallbacks"]
+        and after["invalidations"] > before["invalidations"]
+    )
+
+    # Then pin the producer immediately before terminal publication. The
+    # unrelated commit must reject that publication; a later request produces
+    # once, and only its successor may be a completed hit.
+    _reset_case(cluster)
+    paused_reference = _execute_query(cluster, mode="disabled", sql=sql)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor, \
+            _PauseController(cluster, "before_terminal_publish") as pause:
+        paused_producer = executor.submit(
+            _execute_query, cluster, mode="same", sql=sql
+        )
+        _run_sql(
+            cluster,
+            "SELECT bioseq_cache_test.wait_until_paused("
+            "'before_terminal_publish')",
+        )
+        paused_commit_ns = insert_unrelated()
+        pause.release()
+        paused_output = paused_producer.result()
+    rejected_stats = _stats(cluster)
+    complete_stdout, _ = _run_sql(
+        cluster,
+        "SELECT count(*) FROM bioseq_cache_test.entry_states() "
+        "WHERE state = 'COMPLETE'",
+    )
+    rejected_complete_entries = int(complete_stdout.strip())
+    fresh_output = _execute_query(cluster, mode="same", sql=sql)
+    hit_output = _execute_query(cluster, mode="same", sql=sql)
+    final_stats = _stats(cluster)
+    paused_correctness = all(
+        _same_result(paused_reference, output, False)
+        for output in (paused_output, fresh_output, hit_output)
+    )
+    paused_rejection = (
+        rejected_complete_entries == 0
+        and rejected_stats["produced"] == 0
+        and rejected_stats["completed_hits"] == 0
+        and rejected_stats["fallbacks"] == 1
+        and final_stats["produced"] == 1
+        and final_stats["completed_hits"] == 1
+        and final_stats["fallbacks"] == 1
+    )
     return {
         "key": "conservative_unrelated_commit",
         "correctness": {
             "passed": (
                 _same_result(reference, producer, False)
                 and _same_result(reference, after_commit, False)
+                and paused_correctness
             ),
             "row_count": reference.rows,
             "multiset_sha256": reference.multiset_sha256,
         },
-        "unrelated_commit_ns": commit_ns,
-        "producer_time_to_first_row": _first_row_summary([producer]),
-        "post_commit_time_to_first_row": _first_row_summary([after_commit]),
+        "completed_entry_rejection": {
+            "unrelated_commit_ns": commit_ns,
+            "producer_time_to_first_row": _first_row_summary([producer]),
+            "post_commit_time_to_first_row": _first_row_summary(
+                [after_commit]
+            ),
+            "passed": completed_rejection,
+            "stats_before_commit": before,
+            "stats_after_commit": after,
+        },
+        "paused_publication_rejection": {
+            "unrelated_commit_ns": paused_commit_ns,
+            "producer_time_to_first_row": _first_row_summary(
+                [paused_output]
+            ),
+            "fresh_producer_time_to_first_row": _first_row_summary(
+                [fresh_output]
+            ),
+            "completed_hit_time_to_first_row": _first_row_summary(
+                [hit_output]
+            ),
+            "complete_entries_after_rejected_publish": (
+                rejected_complete_entries
+            ),
+            "stats_after_rejected_publish": rejected_stats,
+            "final_stats": final_stats,
+            "passed": paused_rejection and paused_correctness,
+        },
         "conservative_rejection_observed": (
-            after["produced"] > before["produced"]
-            and after["completed_hits"] == before["completed_hits"]
+            completed_rejection and paused_rejection
         ),
-        "stats_before_commit": before,
-        "stats_after_commit": after,
-        "runtime_storage": _entry_runtime_snapshot(cluster),
+        "runtime_storage": _runtime_storage_snapshot(cluster),
     }
 
 
@@ -1819,6 +3334,8 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
     first_sql = ""
     last_sql = ""
     request_count = 0
+    correct_request_count = 0
+    request_oracle = hashlib.sha256()
 
     for index in range(maximum_requests):
         sql = (
@@ -1830,7 +3347,16 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
         last_sql = sql
         reference = _execute_query(cluster, mode="disabled", sql=sql)
         candidate = _execute_query(cluster, mode="same", sql=sql)
-        all_correct = all_correct and _same_result(reference, candidate, True)
+        request_correct = _same_result(reference, candidate, True)
+        all_correct = all_correct and request_correct
+        correct_request_count += int(request_correct)
+        request_oracle.update(
+            (
+                f"{index + 1}\0{reference.rows}\0"
+                f"{reference.ordered_sha256}\0{candidate.rows}\0"
+                f"{candidate.ordered_sha256}\n"
+            ).encode("ascii")
+        )
         request_latencies.append(candidate.elapsed_ns)
         request_first_rows.append(candidate)
         request_count = index + 1
@@ -1840,7 +3366,7 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
                 break
 
     fill_stats = _stats(cluster)
-    fill_runtime = _entry_runtime_snapshot(cluster)
+    fill_runtime = _runtime_storage_snapshot(cluster)
 
     trigger_index = request_count + 1
     trigger_sql = (
@@ -1876,6 +3402,9 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
         "correctness": {
             "passed": all_correct,
             "row_count_per_request": 4,
+            "generated_request_count": request_count,
+            "correct_generated_request_count": correct_request_count,
+            "request_oracle_sha256": request_oracle.hexdigest(),
             "first_ordered_sha256": first_reference.ordered_sha256,
             "last_ordered_sha256": last_reference.ordered_sha256,
         },
@@ -1884,6 +3413,14 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
         "eviction_observed": fill_stats["evictions"] > 0,
         "trigger_query": {
             **_sample_summary([trigger_output.elapsed_ns]),
+            "eviction_time": {
+                **_sample_summary([trigger_output.elapsed_ns]),
+                "detail": (
+                    "Client wall time for the request that advances the "
+                    "eviction counter; no isolated server eviction timer is "
+                    "currently exposed."
+                ),
+            },
             "time_to_first_row": _first_row_summary([trigger_output]),
             "eviction_counter_advanced": (
                 after_trigger["evictions"] > before_trigger["evictions"]
@@ -1911,7 +3448,8 @@ def _measure_eviction_pressure(cluster: Any) -> dict[str, Any]:
 
 def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
     _reset_case(cluster, ttl_ms=1)
-    _execute_query(cluster, mode="same", sql=sql, ttl_ms=1)
+    reference = _execute_query(cluster, mode="disabled", sql=sql)
+    producer = _execute_query(cluster, mode="same", sql=sql, ttl_ms=1)
     time.sleep(0.01)
     before = _stats(cluster)
     started = time.perf_counter_ns()
@@ -1930,11 +3468,210 @@ def _measure_ttl_and_eviction(cluster: Any, sql: str) -> dict[str, Any]:
         time.sleep(0.02)
     return {
         "key": "ttl_cleanup",
+        "correctness": {
+            "passed": _same_result(reference, producer, False),
+            "row_count": reference.rows,
+            "multiset_sha256": reference.multiset_sha256,
+        },
+        "producer_time_to_first_row": _first_row_summary([producer]),
         "eviction_ns": time.perf_counter_ns() - started,
         "entries_remaining": remaining,
         "stats_before": before,
         "stats_after": _stats(cluster),
-        "runtime_storage_after": _entry_runtime_snapshot(cluster),
+        "runtime_storage_after": _runtime_storage_snapshot(cluster),
+    }
+
+
+def _wait_for_storage_reclamation(
+    cluster: Any, timeout_seconds: float = 20.0
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        _run_sql(cluster, "SELECT bioseq_cache_test.request_janitor_sweep()")
+        stdout, _ = _run_sql(
+            cluster,
+            "SELECT count(*) FROM bioseq_cache_test.entry_states() "
+            "WHERE state = 'COMPLETE'",
+        )
+        tier = _test_storage_tier_snapshot(cluster)
+        store = _cache_store_usage(cluster)
+        latest = {
+            "complete_entries": int(stdout.strip()),
+            "tier": tier,
+            "store": store,
+        }
+        if (
+            latest["complete_entries"] == 0
+            and tier["dsa_blocks"] == 0
+            and tier["file_blocks"] == 0
+            and tier["reserved_hot_bytes"] == 0
+            and tier["reserved_file_bytes"] == 0
+            and store["file_count"] == 0
+            and store["bytes"] == 0
+        ):
+            return latest
+        time.sleep(0.05)
+    raise BenchmarkError(
+        f"cache storage was not reclaimed within {timeout_seconds}s: {latest!r}"
+    )
+
+
+def _measure_repeated_eviction_cycles(cluster: Any) -> dict[str, Any]:
+    cycle_count = 3
+    entries_per_cycle = 8
+    ttl_ms = 500
+    cycles: list[dict[str, Any]] = []
+    _reset_case(cluster, ttl_ms=ttl_ms)
+    _wait_for_storage_reclamation(cluster)
+
+    for cycle in range(cycle_count):
+        outputs: list[QueryOutput] = []
+        references: list[QueryOutput] = []
+        with _ProcessResourceSampler(cluster) as resources:
+            _run_sql(
+                cluster, "SELECT bioseq_cache_test.set_force_file_tier(true)"
+            )
+            try:
+                for entry in range(entries_per_cycle):
+                    first_id = cycle * 512 + entry * 32 + 1
+                    sql = (
+                        "SELECT id, group_id, payload "
+                        "FROM cache_bench_narrow WHERE id BETWEEN "
+                        f"{first_id} AND {first_id + 31} ORDER BY id"
+                    )
+                    reference = _execute_query(
+                        cluster, mode="disabled", sql=sql
+                    )
+                    output = _execute_query(
+                        cluster,
+                        mode="same",
+                        sql=sql,
+                        ttl_ms=ttl_ms,
+                    )
+                    references.append(reference)
+                    outputs.append(output)
+                peak_tier = _test_storage_tier_snapshot(cluster)
+                peak_store = _cache_store_usage(cluster)
+                peak_filesystem = _filesystem_policy_snapshot(cluster)
+            finally:
+                _run_sql(
+                    cluster,
+                    "SELECT bioseq_cache_test.set_force_file_tier(false)",
+                )
+
+            time.sleep(ttl_ms / 1000.0 + 0.10)
+            cleanup_started = time.perf_counter_ns()
+            reclaimed = _wait_for_storage_reclamation(cluster)
+            cleanup_ns = time.perf_counter_ns() - cleanup_started
+            after_cleanup = _process_resource_snapshot(cluster)
+        resource_report = resources.report()
+        correctness = all(
+            _same_result(reference, output, True)
+            for reference, output in zip(references, outputs)
+        )
+        cycles.append(
+            {
+                "cycle": cycle + 1,
+                "entries": entries_per_cycle,
+                "correctness": {
+                    "passed": correctness,
+                    "row_counts": [output.rows for output in outputs],
+                    "ordered_sha256": [
+                        output.ordered_sha256 for output in outputs
+                    ],
+                },
+                "peak_tier": peak_tier,
+                "peak_store": peak_store,
+                "peak_filesystem_policy": peak_filesystem,
+                "cleanup_ns": cleanup_ns,
+                "post_cleanup": reclaimed,
+                "post_cleanup_resources": after_cleanup,
+                "resource_interval": resource_report,
+            }
+        )
+
+    first_resources = cycles[0]["resource_interval"]
+    resources_measured = all(
+        cycle["resource_interval"]["status"] == "measured"
+        for cycle in cycles
+    )
+    rss_limits: dict[str, int] = {}
+    rss_bounded = False
+    if resources_measured:
+        rss_limits = {
+            "peak_postmaster_rss_bytes": int(
+                first_resources["peak_postmaster_rss_bytes"]
+                + max(
+                    16 << 20,
+                    first_resources["peak_postmaster_rss_bytes"] // 4,
+                )
+            ),
+            "peak_backend_rss_bytes": int(
+                first_resources["peak_backend_rss_bytes"]
+                + max(
+                    32 << 20,
+                    first_resources["peak_backend_rss_bytes"] // 4,
+                )
+            ),
+            "peak_process_tree_rss_bytes": int(
+                first_resources["peak_process_tree_rss_bytes"]
+                + max(
+                    64 << 20,
+                    first_resources["peak_process_tree_rss_bytes"] // 4,
+                )
+            ),
+        }
+        rss_bounded = all(
+            all(
+                int(cycle["resource_interval"][name]) <= limit
+                for cycle in cycles[1:]
+            )
+            for name, limit in rss_limits.items()
+        )
+
+    storage_reclaimed = all(
+        cycle["peak_tier"]["file_blocks"] > 0
+        and cycle["peak_tier"]["reserved_file_bytes"] > 0
+        and cycle["peak_store"]["file_count"] > 0
+        and cycle["post_cleanup"]["tier"]["dsa_blocks"] == 0
+        and cycle["post_cleanup"]["tier"]["file_blocks"] == 0
+        and cycle["post_cleanup"]["tier"]["reserved_hot_bytes"] == 0
+        and cycle["post_cleanup"]["tier"]["reserved_file_bytes"] == 0
+        and cycle["post_cleanup"]["store"]["file_count"] == 0
+        and cycle["post_cleanup"]["store"]["bytes"] == 0
+        for cycle in cycles
+    )
+    disk_policy_preserved = all(
+        cycle["peak_filesystem_policy"]["free_space_floor_preserved"]
+        and cycle["peak_store"]["bytes"]
+            <= cycle["peak_filesystem_policy"]["policy_file_ceiling_bytes"]
+        for cycle in cycles
+    )
+    correctness = all(
+        bool(cycle["correctness"]["passed"]) for cycle in cycles
+    )
+    return {
+        "cycles": cycles,
+        "rss_growth_limits": rss_limits,
+        "rss_bounded": rss_bounded,
+        "storage_reclaimed": storage_reclaimed,
+        "disk_policy_preserved": disk_policy_preserved,
+        "correctness": {"passed": correctness},
+        "passed": (
+            correctness
+            and storage_reclaimed
+            and disk_policy_preserved
+            and resources_measured
+            and rss_bounded
+        ),
+        "detail": (
+            "Three equal forced-file-tier generations are expired and swept. "
+            "Every cycle must return file/DSA reservations and physical files "
+            "to zero, preserve the internal file ceiling/free-space floor, "
+            "and keep later-cycle process peaks bounded relative to the fully "
+            "warmed first cycle."
+        ),
     }
 
 
@@ -2022,15 +3759,104 @@ def _setup_fixture(cluster: Any, rows: int) -> None:
     _run_sql(cluster, setup_sql)
 
 
-def _git_commit() -> str:
+def _git_output(arguments: Sequence[str]) -> str:
     completed = subprocess.run(
-        ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "HEAD"],
+        ["git", "-C", str(REPOSITORY_ROOT), *arguments],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         check=False,
     )
-    return completed.stdout.strip() if completed.returncode == 0 else "unknown"
+    if completed.returncode != 0:
+        raise BenchmarkError(
+            f"git {' '.join(arguments)} failed: {completed.stdout}"
+        )
+    return completed.stdout
+
+
+def _git_metadata() -> dict[str, Any]:
+    commit = _git_output(("rev-parse", "HEAD")).strip()
+    status = _git_output(("status", "--porcelain=v1", "--untracked-files=normal"))
+    tracked_diff = _git_output(("diff", "--binary", "HEAD", "--"))
+    return {
+        "commit": commit,
+        "worktree_dirty": status != "",
+        "porcelain_status": status.splitlines(),
+        "tracked_diff_sha256": hashlib.sha256(
+            tracked_diff.encode("utf-8")
+        ).hexdigest(),
+        "detail": (
+            "The commit identifies HEAD; status and the tracked-diff digest "
+            "identify an intentionally uncommitted benchmark candidate."
+        ),
+    }
+
+
+def _cmake_assignment(document: str, name: str) -> str | None:
+    match = re.search(
+        rf'^set\({re.escape(name)}\s+"?([^"\)]+)"?\)$',
+        document,
+        flags=re.MULTILINE,
+    )
+    return match.group(1) if match is not None else None
+
+
+def _build_tree_metadata(cache_dso: Path) -> dict[str, Any]:
+    build_directory = next(
+        (
+            parent
+            for parent in (cache_dso.parent, *cache_dso.parents)
+            if (parent / "CMakeCache.txt").is_file()
+        ),
+        None,
+    )
+    if build_directory is None:
+        raise BenchmarkError(
+            f"cannot locate the CMake build tree containing {cache_dso}"
+        )
+    compiler_documents = list(
+        (build_directory / "CMakeFiles").glob(
+            "*/CMakeCXXCompiler.cmake"
+        )
+    )
+    if not compiler_documents:
+        raise BenchmarkError(
+            f"CMake C++ compiler metadata is absent from {build_directory}"
+        )
+    compiler_metadata_path = max(
+        compiler_documents, key=lambda path: path.stat().st_mtime_ns
+    )
+    compiler_document = compiler_metadata_path.read_text(encoding="utf-8")
+    compiler_path = _cmake_assignment(
+        compiler_document, "CMAKE_CXX_COMPILER"
+    )
+    compiler_id = _cmake_assignment(
+        compiler_document, "CMAKE_CXX_COMPILER_ID"
+    )
+    compiler_version = _cmake_assignment(
+        compiler_document, "CMAKE_CXX_COMPILER_VERSION"
+    )
+    if not compiler_path or not compiler_id or not compiler_version:
+        raise BenchmarkError(
+            "CMake C++ compiler metadata is incomplete: "
+            f"{compiler_metadata_path}"
+        )
+    return {
+        "build_directory": str(build_directory),
+        "effective_preset": build_directory.name,
+        "compiler": {
+            "id": compiler_id,
+            "version": compiler_version,
+            "path": compiler_path,
+            "display": f"{compiler_id} {compiler_version} ({compiler_path})",
+        },
+        "cmake_compiler_metadata": str(compiler_metadata_path),
+        "requested_preset_environment": (
+            os.environ.get("CMAKE_PRESET_NAME")
+            or os.environ.get("BIOSEQ_BUILD_PRESET")
+            or None
+        ),
+    }
 
 
 def _core_metric(core: Mapping[str, Any], name: str) -> float | None:
@@ -2064,6 +3890,8 @@ def _threshold(
 
 def _evaluate_thresholds(
     core: Mapping[str, Any],
+    disabled_overhead: Mapping[str, Any],
+    long_source_exact: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]],
     generic_provider: Mapping[str, Any],
     fanout: Sequence[Mapping[str, Any]],
@@ -2072,27 +3900,67 @@ def _evaluate_thresholds(
     eviction_pressure: Mapping[str, Any],
     unrelated_commit: Mapping[str, Any],
     ttl: Mapping[str, Any],
-    disk_free_bytes: int,
+    repeated_eviction: Mapping[str, Any],
+    resource_usage: Mapping[str, Any],
+    disk_snapshot: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     thresholds: list[dict[str, Any]] = []
-    planning_overhead = _core_metric(core, "disabled_planning_overhead_percent")
+    planning_overhead = float(
+        disabled_overhead["disabled_planning_overhead_percent"]
+    )
     thresholds.append(
         _threshold(
             "disabled_planning_overhead_percent",
             actual=planning_overhead,
             limit="<5",
-            passed=None if planning_overhead is None else planning_overhead < 5.0,
-            detail="Core fragment owns no-hook versus disabled-hook microplanning comparison.",
+            passed=planning_overhead < 5.0,
+            detail=(
+                "Measured no-hook versus disabled-hook private-node "
+                "microplanning medians; this threshold is mandatory."
+            ),
         )
     )
-    execution_overhead = _core_metric(core, "disabled_execution_overhead_percent")
+    execution_overhead = float(
+        disabled_overhead["disabled_execution_overhead_percent"]
+    )
+    long_source = bool(
+        disabled_overhead["source_execution_exceeds_one_second"]
+    )
     thresholds.append(
         _threshold(
             "disabled_execution_overhead_percent",
             actual=execution_overhead,
             limit="<1 for source execution >=1s",
-            passed=None if execution_overhead is None else execution_overhead < 1.0,
-            detail="Core/SQL baseline comparison; only applicable to one-second scans.",
+            passed=long_source and execution_overhead < 1.0,
+            detail=(
+                "Measured no-hook versus disabled-hook execution medians after "
+                "calibrating the source above one second; this threshold is mandatory."
+            ),
+        )
+    )
+    disabled_evidence = disabled_overhead["disabled_hook"]
+    thresholds.append(
+        _threshold(
+            "disabled_no_cache_plan_and_correct_result",
+            actual={
+                "planning_cache_plan_count": disabled_evidence[
+                    "planning_cache_plan_count"
+                ],
+                "execution_cache_plan_count": disabled_evidence[
+                    "execution_cache_plan_count"
+                ],
+                "correctness": disabled_evidence["correctness"],
+            },
+            limit="zero cache plans and checksum equality",
+            passed=(
+                int(disabled_evidence["planning_cache_plan_count"]) == 0
+                and int(disabled_evidence["execution_cache_plan_count"]) == 0
+                and bool(disabled_evidence["correctness"]["passed"])
+            ),
+            detail=(
+                "The disabled comparison is rejected if either structured "
+                "EXPLAIN contains a cache node or the long-query checksum differs."
+            ),
         )
     )
     compact = next(case for case in cases if case["key"] == "narrow_fixed_rows")
@@ -2103,18 +3971,32 @@ def _evaluate_thresholds(
             actual=producer_delta,
             limit="<10",
             passed=producer_delta < 10.0,
-            detail="Same-mode first producer versus disabled reference wall time.",
+            detail=(
+                "Paired p50 client wall time across independently reset cold "
+                "same-mode producers versus disabled references."
+            ),
         )
     )
-    source_ns = int(compact["disabled"]["p50_ns"])
-    hit_speedup = float(compact["completed_hit"]["speedup_vs_disabled"] or 0.0)
+    source_ns = int(long_source_exact["disabled"]["p50_ns"])
+    hit_speedup = float(
+        long_source_exact["completed_hit"]["speedup_vs_disabled"] or 0.0
+    )
     thresholds.append(
         _threshold(
             "completed_hit_speedup",
             actual=hit_speedup,
-            limit=">=5 when source exceeds 1s",
-            passed=None if source_ns < 1_000_000_000 else hit_speedup >= 5.0,
-            detail="Threshold is conditional on source execution duration.",
+            limit=">=5 with a measured source execution >=1s",
+            passed=(
+                source_ns >= 1_000_000_000
+                and bool(long_source_exact["source_execution_exceeds_one_second"])
+                and hit_speedup >= 5.0
+                and bool(long_source_exact["correctness"]["passed"])
+                and bool(long_source_exact["cache_behavior"]["passed"])
+            ),
+            detail=(
+                "The calibrated one-second compact result makes this threshold "
+                "mandatory rather than conditionally not applicable."
+            ),
         )
     )
     child_counts_measured = all(
@@ -2141,6 +4023,47 @@ def _evaluate_thresholds(
             ),
         )
     )
+    thresholds.append(
+        _threshold(
+            "fanout_request_locking_behavior",
+            actual={
+                item["clients"]: item["cache_behavior"] for item in fanout
+            },
+            limit=(
+                "one producer, clients-1 in-flight waits, no completed-hit "
+                "or fallback substitution, and correct rows for 2/8/32 clients"
+            ),
+            passed=all(
+                bool(item["cache_behavior"]["passed"])
+                and bool(item["correctness"]["passed"])
+                for item in fanout
+            ),
+            detail=(
+                "The child counter is paired with request-family counters so "
+                "an accidental passthrough cannot satisfy the fanout gate."
+            ),
+        )
+    )
+    wait_duration_passed = all(
+        item["wait_duration"]["status"] == "bounded_measurement"
+        and item["wait_duration"]["condition_wait_lower_bound_ns"]
+            >= int(item["wait_duration"]["controlled_hold_target_ns"] * 0.9)
+        for item in fanout
+    )
+    thresholds.append(
+        _threshold(
+            "fanout_wait_duration_measured",
+            actual={
+                item["clients"]: item["wait_duration"] for item in fanout
+            },
+            limit="measured wait bounds include at least 90% of a 50 ms hold",
+            passed=wait_duration_passed,
+            detail=(
+                "Registry waiter observation precedes the controlled hold, so "
+                "observed-to-release is a conservative condition-wait lower bound."
+            ),
+        )
+    )
     correctness_passed = all(bool(case["correctness"]["passed"]) for case in cases)
     correctness_passed = correctness_passed and all(
         bool(item["correctness"]["passed"]) for item in fanout
@@ -2156,6 +4079,21 @@ def _evaluate_thresholds(
     )
     correctness_passed = correctness_passed and bool(
         generic_provider["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        repeated_eviction["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        long_source_exact["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        waiter_cancel["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        ttl["correctness"]["passed"]
+    )
+    correctness_passed = correctness_passed and bool(
+        disabled_overhead["disabled_hook"]["correctness"]["passed"]
     )
     thresholds.append(
         _threshold(
@@ -2223,12 +4161,22 @@ def _evaluate_thresholds(
     thresholds.append(
         _threshold(
             "conservative_unrelated_commit_rejection",
-            actual=unrelated_commit["conservative_rejection_observed"],
-            limit="post-commit execution is a miss, not a completed hit",
+            actual={
+                "completed_entry": unrelated_commit[
+                    "completed_entry_rejection"
+                ],
+                "paused_publication": unrelated_commit[
+                    "paused_publication_rejection"
+                ],
+            },
+            limit=(
+                "post-commit execution misses and a producer spanning the "
+                "unrelated commit cannot publish"
+            ),
             passed=bool(unrelated_commit["conservative_rejection_observed"]),
             detail=(
-                "An unadapted generic dependency must conservatively reject a "
-                "completed entry after an unrelated committed write."
+                "The database-wide generic transition domain is checked both "
+                "before lookup and atomically at terminal publication."
             ),
         )
     )
@@ -2244,14 +4192,45 @@ def _evaluate_thresholds(
             ),
         )
     )
-    minimum_free = int(os.environ.get("BIOSEQ_CACHE_BENCH_MIN_FREE_BYTES", 1 << 30))
+    case_disk_snapshots = {
+        case["key"]: case["runtime_storage"]["filesystem_policy"]
+        for case in cases
+    }
+    cycle_disk_snapshots = {
+        f"cycle_{cycle['cycle']}": cycle["peak_filesystem_policy"]
+        for cycle in repeated_eviction["cycles"]
+    }
+    all_disk_snapshots = {
+        "report_end": dict(disk_snapshot),
+        **case_disk_snapshots,
+        **cycle_disk_snapshots,
+    }
+    internal_disk_policy_passed = all(
+        bool(snapshot["free_space_floor_preserved"])
+        for snapshot in all_disk_snapshots.values()
+    ) and all(
+        case["runtime_storage"]["test_tier_evidence"][
+            "reserved_file_bytes"
+        ]
+        <= case["runtime_storage"]["filesystem_policy"][
+            "policy_file_ceiling_bytes"
+        ]
+        for case in cases
+    ) and bool(repeated_eviction["disk_policy_preserved"])
     thresholds.append(
         _threshold(
-            "disk_free_space_floor",
-            actual=disk_free_bytes,
-            limit=f">={minimum_free}",
-            passed=disk_free_bytes >= minimum_free,
-            detail="Free space at report creation; cache internal policy remains authoritative.",
+            "internal_disk_ceiling_and_free_space_floor",
+            actual=all_disk_snapshots,
+            limit=(
+                "every measured point preserves max(10 GiB, 10% capacity) "
+                "free and forced-file cycles stay below min(128 GiB, 10%)"
+            ),
+            passed=internal_disk_policy_passed,
+            detail=(
+                "The v1 internal policy is checked during every SQL case, at "
+                "each forced-file peak, and after the complete run. The separate "
+                "structured-storage gate checks configured reservation ceilings."
+            ),
         )
     )
     compact_storage = compact["completed_hit"]["cache_storage"]
@@ -2300,11 +4279,26 @@ def _evaluate_thresholds(
             ),
         )
     )
+    file_hit_temperature = toast["file_hit_temperature"]
+    thresholds.append(
+        _threshold(
+            "cold_and_warm_file_hit_with_checksum_prepass",
+            actual=file_hit_temperature,
+            limit=(
+                "fsync+DONTNEED cold hit and later warm hits are correct; "
+                "all timings include full checksum validation"
+            ),
+            passed=bool(file_hit_temperature["passed"]),
+            detail=str(file_hit_temperature["detail"]),
+        )
+    )
     decode_bandwidth = _core_metric(core, "fixed_decode_bytes_per_second")
     memcpy_bandwidth = _core_metric(core, "memory_copy_bytes_per_second")
-    decode_passed = None
-    if decode_bandwidth is not None and memcpy_bandwidth is not None:
-        decode_passed = decode_bandwidth >= memcpy_bandwidth
+    decode_passed = (
+        decode_bandwidth is not None
+        and memcpy_bandwidth is not None
+        and decode_bandwidth >= memcpy_bandwidth
+    )
     thresholds.append(
         _threshold(
             "fixed_decode_memory_copy_order_bandwidth",
@@ -2378,7 +4372,254 @@ def _evaluate_thresholds(
             detail=str(waiter_cancel["detail"]),
         )
     )
+    resources_measured = (
+        resource_usage.get("status") == "measured"
+        and int(resource_usage.get("peak_postmaster_rss_bytes", 0)) > 0
+        and int(resource_usage.get("peak_backend_rss_bytes", 0)) > 0
+        and resource_usage.get("page_cache_and_physical_io", {}).get("status")
+        == "measured"
+    )
+    thresholds.append(
+        _threshold(
+            "backend_postmaster_rss_and_physical_io_measured",
+            actual=resource_usage,
+            limit="measured nonzero RSS peaks and Linux physical-I/O counters",
+            passed=resources_measured,
+            detail=(
+                "A high-frequency /proc sampler covers the private PostgreSQL "
+                "process tree for the complete generic SQL benchmark."
+            ),
+        )
+    )
+    thresholds.append(
+        _threshold(
+            "repeated_eviction_resource_reclamation",
+            actual={
+                "rss_growth_limits": repeated_eviction["rss_growth_limits"],
+                "rss_bounded": repeated_eviction["rss_bounded"],
+                "storage_reclaimed": repeated_eviction["storage_reclaimed"],
+                "cycles": repeated_eviction["cycles"],
+            },
+            limit=(
+                "three correct forced-file cycles return blocks, reservations, "
+                "and files to zero without later-cycle RSS growth"
+            ),
+            passed=bool(repeated_eviction["passed"]),
+            detail=str(repeated_eviction["detail"]),
+        )
+    )
     return thresholds
+
+
+def _validate_section45_inventory(
+    *,
+    core: Mapping[str, Any],
+    cases: Sequence[Mapping[str, Any]],
+    generic_provider: Mapping[str, Any],
+    fanout: Sequence[Mapping[str, Any]],
+    invalidation: Sequence[Mapping[str, Any]],
+    thresholds: Sequence[Mapping[str, Any]],
+    resource_usage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reject a report that silently omits a mandatory generic §45 field."""
+
+    def require_sample_summary(value: Any, label: str) -> None:
+        if (
+            not isinstance(value, Mapping)
+            or not isinstance(value.get("raw_samples_ns"), list)
+            or not value["raw_samples_ns"]
+            or not all(
+                name in value for name in ("p50_ns", "p95_ns", "p99_ns")
+            )
+        ):
+            raise BenchmarkError(
+                f"Section 45 report lacks raw/p50/p95/p99 samples for {label}"
+            )
+
+    case_by_key = {
+        str(case.get("key")): case
+        for case in cases
+        if isinstance(case, Mapping)
+    }
+    if len(case_by_key) != len(cases):
+        raise BenchmarkError("Section 45 SQL result cases have duplicate keys")
+    missing_cases = sorted(GENERIC_SQL_CASE_KEYS - case_by_key.keys())
+    if missing_cases:
+        raise BenchmarkError(
+            f"Section 45 report omits generic result cases: {missing_cases}"
+        )
+    for key in sorted(GENERIC_SQL_CASE_KEYS):
+        case = case_by_key[key]
+        correctness = case.get("correctness")
+        digest_name = (
+            "ordered_sha256" if bool(case.get("ordered"))
+            else "multiset_sha256"
+        )
+        if (
+            not isinstance(correctness, Mapping)
+            or type(correctness.get("passed")) is not bool
+            or not isinstance(correctness.get("row_count"), int)
+            or correctness["row_count"] < 0
+            or not isinstance(correctness.get(digest_name), str)
+            or not correctness[digest_name]
+        ):
+            raise BenchmarkError(
+                f"Section 45 case lacks its row/checksum oracle: {key}"
+            )
+        for phase in ("disabled", "producer", "completed_hit"):
+            phase_value = case.get(phase)
+            require_sample_summary(phase_value, f"{key}.{phase}")
+            if (
+                not isinstance(phase_value.get("time_to_first_row"), Mapping)
+                or not isinstance(phase_value.get("throughput"), Mapping)
+            ):
+                raise BenchmarkError(
+                    f"Section 45 case lacks first-row/throughput metrics: {key}.{phase}"
+                )
+        disabled = case["disabled"]
+        completed_hit = case["completed_hit"]
+        require_sample_summary(disabled.get("planning"), f"{key}.planning")
+        require_sample_summary(
+            completed_hit.get("planning"), f"{key}.hit_planning"
+        )
+        runtime = case.get("runtime_storage")
+        dsa_bytes = (
+            runtime.get("dsa_hot_bytes")
+            if isinstance(runtime, Mapping) else None
+        )
+        file_bytes = (
+            runtime.get("file_bytes")
+            if isinstance(runtime, Mapping) else None
+        )
+        if (
+            not isinstance(runtime, Mapping)
+            or not isinstance(dsa_bytes, Mapping)
+            or dsa_bytes.get("status") != "measured"
+            or not isinstance(file_bytes, Mapping)
+            or file_bytes.get("status") != "measured"
+            or "row_group_count" not in runtime
+            or "prevalidation_bytes" not in runtime
+        ):
+            raise BenchmarkError(
+                f"Section 45 case lacks DSA/file/row-group/prevalidation metrics: {key}"
+            )
+
+    fanout_by_clients = {
+        int(item.get("clients", 0)): item
+        for item in fanout
+        if isinstance(item, Mapping)
+    }
+    if set(fanout_by_clients) != {2, 8, 32}:
+        raise BenchmarkError(
+            "Section 45 report requires fanout measurements for 2, 8, and 32 clients"
+        )
+    for clients, item in fanout_by_clients.items():
+        if (
+            not isinstance(item.get("correctness"), Mapping)
+            or not isinstance(item.get("waiter_latency"), Mapping)
+            or not isinstance(item.get("wait_duration"), Mapping)
+            or not isinstance(item.get("child_execution_count"), Mapping)
+            or not isinstance(item.get("cache_behavior"), Mapping)
+        ):
+            raise BenchmarkError(
+                f"Section 45 fanout evidence is incomplete for {clients} clients"
+            )
+        require_sample_summary(
+            item["waiter_latency"], f"fanout_{clients}.waiter_latency"
+        )
+
+    invalidation_by_key = {
+        str(item.get("key")): item
+        for item in invalidation
+        if isinstance(item, Mapping)
+    }
+    required_invalidation = {
+        "insert_invalidation",
+        "update_invalidation",
+        "delete_invalidation",
+    }
+    if set(invalidation_by_key) != required_invalidation:
+        raise BenchmarkError(
+            "Section 45 report requires INSERT/UPDATE/DELETE invalidation cases"
+        )
+    for key, item in invalidation_by_key.items():
+        require_sample_summary(item.get("operation_latency"), key)
+        if not isinstance(item.get("correctness"), Mapping):
+            raise BenchmarkError(f"Section 45 invalidation oracle is absent: {key}")
+
+    overlap = generic_provider.get("overlapping_predicate_reuse")
+    overlap_reuse = overlap.get("reuse") if isinstance(overlap, Mapping) else None
+    predicate = (
+        overlap_reuse.get("predicate_runtime")
+        if isinstance(overlap_reuse, Mapping) else None
+    )
+    if (
+        not isinstance(predicate, Mapping)
+        or "late_fetch_rows" not in predicate
+        or "late_fetch_bytes" not in predicate
+        or "selection_ratio" not in predicate
+        or not isinstance(predicate.get("late_fetch_bytes"), Mapping)
+        or predicate["late_fetch_bytes"].get("status") != "measured"
+    ):
+        raise BenchmarkError(
+            "Section 45 reusable report omits late-fetch or selection metrics"
+        )
+
+    threshold_names = [
+        str(item.get("name"))
+        for item in thresholds
+        if isinstance(item, Mapping)
+    ]
+    if (
+        len(threshold_names) != len(thresholds)
+        or len(threshold_names) != len(set(threshold_names))
+        or not SECTION45_THRESHOLD_NAMES.issubset(threshold_names)
+    ):
+        raise BenchmarkError(
+            "Section 45 report has missing, duplicate, or malformed threshold decisions"
+        )
+    for item in thresholds:
+        if (
+            item.get("status") not in {"pass", "fail", "not_applicable"}
+            or "actual" not in item
+            or "limit" not in item
+            or "detail" not in item
+        ):
+            raise BenchmarkError(
+                f"Section 45 threshold decision is incomplete: {item!r}"
+            )
+
+    core_metrics = core.get("metrics")
+    if not isinstance(core_metrics, Mapping):
+        raise BenchmarkError("Section 45 core storage metrics are absent")
+    resource_status = resource_usage.get("status")
+    if resource_status not in {"measured", "unavailable"} or (
+        resource_status == "measured"
+        and not isinstance(
+            resource_usage.get("page_cache_and_physical_io"), Mapping
+        )
+    ):
+        raise BenchmarkError("Section 45 RSS/I/O measurement envelope is absent")
+    return {
+        "status": "complete",
+        "generic_case_keys": sorted(GENERIC_SQL_CASE_KEYS),
+        "fanout_clients": sorted(fanout_by_clients),
+        "invalidation_cases": sorted(required_invalidation),
+        "threshold_names": sorted(SECTION45_THRESHOLD_NAMES),
+        "metric_groups": [
+            "planning_p50_p95_p99",
+            "time_to_first_row_and_total_latency",
+            "producer_and_cache_read_throughput",
+            "waiter_latency_and_wait_bounds",
+            "logical_stored_row_group_dsa_file_prevalidation",
+            "cold_warm_file_hits",
+            "backend_postmaster_rss_and_page_cache_physical_io",
+            "child_and_cache_action_counters",
+            "late_fetch_and_selection_ratio",
+            "invalidation_and_eviction_latency",
+            "row_count_ordered_or_multiset_sha256",
+        ],
+    }
 
 
 def _write_report(report_dir: Path, report: Mapping[str, Any]) -> Path:
@@ -2415,9 +4656,11 @@ def run(argv: Sequence[str]) -> int:
             "generic runner contains no Bioseq/mmsearch cases; provider benchmarks "
             "must be supplied by the provider integration target"
         )
+    harness_tests = _run_harness_unit_tests()
     cache_dso = _required_path("BIOSEQ_CACHE_DSO")
     cache_bootstrap = _required_path("BIOSEQ_CACHE_BOOTSTRAP_SQL")
     core_executable = _required_path("BIOSEQ_CACHE_CORE_BENCH")
+    build_metadata = _build_tree_metadata(cache_dso)
     report_value = os.environ.get("BIOSEQ_CACHE_REPORT_DIR")
     if not report_value:
         raise BenchmarkError("BIOSEQ_CACHE_REPORT_DIR is required")
@@ -2436,6 +4679,8 @@ def run(argv: Sequence[str]) -> int:
         output_root=run_output_root,
         kind="bench",
     )
+    fixture_rows = int(cases_document.get("fixture_rows", 20_000))
+    sample_count = int(cases_document.get("samples_per_case", 7))
     cluster = PRIVATE.UniquePrivateCluster(inputs)
     with cluster:
         core_fragment_path = cluster.run_dir / "core_fragment.json"
@@ -2444,33 +4689,46 @@ def run(argv: Sequence[str]) -> int:
             core_fragment_path,
             cluster.run_dir / "core_benchmark.log",
         )
-        fixture_rows = int(cases_document.get("fixture_rows", 20_000))
-        sample_count = int(cases_document.get("samples_per_case", 7))
-        _setup_fixture(cluster, fixture_rows)
-        generic_provider = _measure_generic_provider_reuse(
+        disabled_overhead = _measure_disabled_hook_overhead(
             cluster,
-            fixture_rows=fixture_rows,
-            sample_count=sample_count,
+            inputs,
+            configured_sample_count=sample_count,
         )
-        cases = [
-            _measure_case(cluster, case, sample_count=sample_count)
-            for case in cases_document["cases"]
-        ]
-        fanout_sql = str(cases_document["cases"][0]["sql"])
-        fanout = [
-            _measure_fanout(cluster, clients, fanout_sql)
-            for clients in (2, 8, 32)
-        ]
-        waiter_cancel = _measure_waiter_cancel_latency(
-            cluster, fanout_sql, sample_count
-        )
-        invalidation = _measure_invalidation(cluster)
-        eviction_pressure = _measure_eviction_pressure(cluster)
-        unrelated_commit = _measure_unrelated_commit(cluster, fanout_sql)
-        ttl = _measure_ttl_and_eviction(cluster, fanout_sql)
+        with _ProcessResourceSampler(cluster) as resource_sampler:
+            _setup_fixture(cluster, fixture_rows)
+            long_source_exact = _measure_long_source_exact_hit(
+                cluster,
+                configured_sample_count=sample_count,
+            )
+            generic_provider = _measure_generic_provider_reuse(
+                cluster,
+                fixture_rows=fixture_rows,
+                sample_count=sample_count,
+            )
+            cases = [
+                _measure_case(cluster, case, sample_count=sample_count)
+                for case in cases_document["cases"]
+            ]
+            fanout_sql = str(cases_document["cases"][0]["sql"])
+            fanout = [
+                _measure_fanout(cluster, clients, fanout_sql)
+                for clients in (2, 8, 32)
+            ]
+            waiter_cancel = _measure_waiter_cancel_latency(
+                cluster, fanout_sql, sample_count
+            )
+            invalidation = _measure_invalidation(cluster, sample_count)
+            eviction_pressure = _measure_eviction_pressure(cluster)
+            unrelated_commit = _measure_unrelated_commit(cluster, fanout_sql)
+            ttl = _measure_ttl_and_eviction(cluster, fanout_sql)
+            repeated_eviction = _measure_repeated_eviction_cycles(cluster)
+        resource_usage = resource_sampler.report()
         disk = shutil.disk_usage(cluster.run_dir)
+        disk_snapshot = _filesystem_policy_snapshot(cluster)
         thresholds = _evaluate_thresholds(
             core,
+            disabled_overhead,
+            long_source_exact,
             cases,
             generic_provider,
             fanout,
@@ -2479,21 +4737,36 @@ def run(argv: Sequence[str]) -> int:
             eviction_pressure,
             unrelated_commit,
             ttl,
-            disk.free,
+            repeated_eviction,
+            resource_usage,
+            disk_snapshot,
+        )
+        section45_contract = _validate_section45_inventory(
+            core=core,
+            cases=cases,
+            generic_provider=generic_provider,
+            fanout=fanout,
+            invalidation=invalidation,
+            thresholds=thresholds,
+            resource_usage=resource_usage,
         )
         violations = [item for item in thresholds if item["status"] == "fail"]
+        git_metadata = _git_metadata()
         report = {
             "schema_version": 1,
             "benchmark": "bioseq_cache",
             "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "git_commit": _git_commit(),
-            "preset": os.environ.get("CMAKE_PRESET_NAME")
-            or os.environ.get("BIOSEQ_BUILD_PRESET")
-            or "unknown",
-            "compiler": core.get("compiler") or os.environ.get("CXX") or "unknown",
+            "git_commit": git_metadata["commit"],
+            "source_state": git_metadata,
+            "preset": build_metadata["effective_preset"],
+            "compiler": build_metadata["compiler"]["display"],
+            "build_metadata": build_metadata,
             "private_cluster": True,
             "build_tree_dso": str(cache_dso),
             "core": core,
+            "harness_unit_tests": harness_tests,
+            "disabled_overhead": disabled_overhead,
+            "long_source_exact": long_source_exact,
             "generic_provider_reuse": generic_provider,
             "cases": cases,
             "fanout": fanout,
@@ -2502,12 +4775,42 @@ def run(argv: Sequence[str]) -> int:
             "eviction_pressure": eviction_pressure,
             "unrelated_commit": unrelated_commit,
             "ttl_eviction": ttl,
+            "repeated_eviction": repeated_eviction,
             "storage": {
                 "filesystem_total_bytes": disk.total,
                 "filesystem_used_bytes": disk.used,
                 "filesystem_free_bytes": disk.free,
+                "internal_policy": disk_snapshot,
                 "runtime_admin": cases[0]["runtime_storage"],
             },
+            "process_resources": resource_usage,
+            "baseline_deltas": {
+                "disabled_planning_overhead_percent": disabled_overhead[
+                    "disabled_planning_overhead_percent"
+                ],
+                "disabled_execution_overhead_percent": disabled_overhead[
+                    "disabled_execution_overhead_percent"
+                ],
+                "compact_producer_overhead_percent": next(
+                    case["producer"]["baseline_delta_percent"]
+                    for case in cases
+                    if case["key"] == "narrow_fixed_rows"
+                ),
+                "one_second_completed_hit_speedup": long_source_exact[
+                    "completed_hit"
+                ]["speedup_vs_disabled"],
+                "file_cold_to_warm_p50_ratio": next(
+                    case["file_hit_temperature"].get(
+                        "cold_to_warm_p50_ratio"
+                    )
+                    for case in cases
+                    if case["key"] == "large_toasted_values"
+                ),
+                "waiter_cancel_producer_p95_delta_ns": waiter_cancel[
+                    "p95_delta_ns"
+                ],
+            },
+            "section45_contract": section45_contract,
             "thresholds": thresholds,
             "violations": violations,
             "passed": not violations,

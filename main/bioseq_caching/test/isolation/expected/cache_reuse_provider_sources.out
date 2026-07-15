@@ -1,0 +1,213 @@
+Parsed test spec with 4 sessions
+
+starting permutation: sources_arm sources_a_init sources_a_relation sources_a_mode sources_a_prepare sources_a_freeze sources_b_init sources_b_relation sources_b_mode sources_b_prepare sources_b_freeze sources_c_init sources_c_relation sources_c_mode sources_a_query sources_a_paused sources_b_query sources_c_query sources_c_paused sources_state sources_release_builders sources_release_consumer sources_c_stats
+reset_stats
+-----------
+           
+(1 row)
+
+step sources_arm: 
+  SELECT bioseq_cache_test.arm_pause('after_building_publish');
+  SELECT bioseq_cache_test.arm_pause('after_waiter_registered');
+
+arm_pause
+---------
+         
+(1 row)
+
+arm_pause
+---------
+         
+(1 row)
+
+step sources_a_init: 
+  SELECT bioseq_cache_test.provider_init();
+  SELECT bioseq_cache_test.provider_reset();
+
+provider_init
+-------------
+             
+(1 row)
+
+provider_reset
+--------------
+              
+(1 row)
+
+step sources_a_relation: SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_sources');
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step sources_a_mode: SET bioseq.query_cache_optimisation_mode = 'reuse';
+step sources_a_prepare: 
+  SET plan_cache_mode = force_generic_plan;
+  PREPARE cache_provider_sources_a AS
+  SELECT row_id
+  FROM cache_provider_iso_sources
+  WHERE nullable_value <= 10
+  ORDER BY row_id;
+
+step sources_a_freeze: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_sources_a', 1, 0);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step sources_b_init: 
+  SELECT bioseq_cache_test.provider_init();
+  SELECT bioseq_cache_test.provider_reset();
+
+provider_init
+-------------
+             
+(1 row)
+
+provider_reset
+--------------
+              
+(1 row)
+
+step sources_b_relation: SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_sources');
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step sources_b_mode: SET bioseq.query_cache_optimisation_mode = 'reuse';
+step sources_b_prepare: 
+  SET plan_cache_mode = force_generic_plan;
+  PREPARE cache_provider_sources_b AS
+  SELECT row_id
+  FROM cache_provider_iso_sources
+  WHERE nullable_value >= 5
+  ORDER BY row_id;
+
+step sources_b_freeze: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_sources_b', 1, 0);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step sources_c_init: 
+  SELECT bioseq_cache_test.provider_init();
+  SELECT bioseq_cache_test.provider_reset();
+
+provider_init
+-------------
+             
+(1 row)
+
+provider_reset
+--------------
+              
+(1 row)
+
+step sources_c_relation: SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_sources');
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step sources_c_mode: SET bioseq.query_cache_optimisation_mode = 'reuse';
+step sources_a_query: 
+  EXECUTE cache_provider_sources_a;
+ <waiting ...>
+step sources_a_paused: SELECT bioseq_cache_test.wait_until_paused('after_building_publish');
+wait_until_paused
+-----------------
+                 
+(1 row)
+
+step sources_b_query: 
+  EXECUTE cache_provider_sources_b;
+ <waiting ...>
+step sources_c_query: 
+  SELECT row_id
+  FROM cache_provider_iso_sources
+  WHERE nullable_value IS NULL OR nullable_value BETWEEN 5 AND 20
+  ORDER BY row_id;
+ <waiting ...>
+step sources_c_paused: SELECT bioseq_cache_test.wait_until_paused('after_waiter_registered');
+wait_until_paused
+-----------------
+                 
+(1 row)
+
+step sources_state: 
+  SELECT count(*) AS building, count(*) = 2 AS exactly_two
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ReusableCoverage' AND state = 'BUILDING';
+
+building|exactly_two
+--------+-----------
+       2|t          
+(1 row)
+
+step sources_release_builders: SELECT bioseq_cache_test.release_pause('after_building_publish');
+release_pause
+-------------
+             
+(1 row)
+
+step sources_a_query: <... completed>
+row_id
+------
+     2
+     3
+     4
+     5
+(4 rows)
+
+step sources_b_query: <... completed>
+row_id
+------
+     3
+     4
+     5
+     6
+(4 rows)
+
+step sources_release_consumer: SELECT bioseq_cache_test.release_pause('after_waiter_registered');
+release_pause
+-------------
+             
+(1 row)
+
+step sources_c_query: <... completed>
+row_id
+------
+     1
+     3
+     4
+     5
+     6
+(5 rows)
+
+step sources_c_stats: 
+  SELECT
+    cache_stats.produced = 3 AS three_completed_producers,
+    cache_stats.reuse_hits = 1 AS one_two_source_reuse,
+    cache_stats.inflight_waits = 2 AS waited_for_both_older_claims,
+    cache_stats.fallbacks = 0 AS no_fallback,
+    (stats->>'late_fetch_batch')::bigint = 2 AS two_late_fetch_batches,
+    (stats->>'late_fetch_references')::bigint = 8 AS eight_late_fetch_references,
+    (stats->>'late_fetch_values')::bigint = 8 AS eight_late_fetch_values,
+    (stats->>'executor_rows')::bigint = 1 AS one_residual_row,
+    (stats->>'last_required_boundary_count')::bigint = 1
+      AS one_required_boundary_column
+  FROM (SELECT bioseq_cache_test.provider_stats() AS stats) AS provider
+  CROSS JOIN bioseq_cache.stats() AS cache_stats;
+
+three_completed_producers|one_two_source_reuse|waited_for_both_older_claims|no_fallback|two_late_fetch_batches|eight_late_fetch_references|eight_late_fetch_values|one_residual_row|one_required_boundary_column
+-------------------------+--------------------+----------------------------+-----------+----------------------+---------------------------+-----------------------+----------------+----------------------------
+t                        |t                   |t                           |t          |t                     |t                          |t                      |t               |t                           
+(1 row)
+

@@ -706,3 +706,42 @@ TEST_CASE("reuse waits obey descending owned claim order") {
     REQUIRE_FALSE(claim_order_allows_wait(91, owned));
     REQUIRE_FALSE(claim_order_allows_wait(0, owned));
 }
+
+TEST_CASE("fragment binding semantics ignore raw RTI and separate occurrences") {
+    CoverageFragmentBindingSignatureV1 first{
+        .provider_rte_occurrence_ordinal = 0,
+        .provider_rte_occurrence_count = 2,
+        .logical_relation_oid = 4100,
+        .selected_relation_oid = 4101,
+        .provider_id = 77,
+    };
+    first.binding_role_digest.bytes[0] = 0xa5;
+    CoverageFragmentBindingSignatureV1 second = first;
+    second.provider_rte_occurrence_ordinal = 1;
+    REQUIRE(valid_coverage_fragment_binding(first));
+    REQUIRE(valid_coverage_fragment_binding(second));
+
+    const std::array<std::byte, 3> predicate{
+        std::byte{0x11}, std::byte{0x22}, std::byte{0x33}};
+    std::array<std::byte, 256> first_bytes{};
+    std::array<std::byte, 256> second_bytes{};
+    const auto first_size = write_coverage_binding_semantics(
+        CoverageCanonicalKeyKindV1::Generation,
+        first,
+        predicate,
+        first_bytes);
+    const auto second_size = write_coverage_binding_semantics(
+        CoverageCanonicalKeyKindV1::Generation,
+        second,
+        predicate,
+        second_bytes);
+    REQUIRE(first_size.has_value());
+    REQUIRE(second_size.has_value());
+    REQUIRE(*first_size == *second_size);
+    REQUIRE_FALSE(std::equal(
+        first_bytes.begin(), first_bytes.begin() + *first_size,
+        second_bytes.begin()));
+
+    first.provider_rte_occurrence_ordinal = 2;
+    REQUIRE_FALSE(valid_coverage_fragment_binding(first));
+}

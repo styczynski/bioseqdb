@@ -1,11 +1,6 @@
 Parsed test spec with 4 sessions
 
 starting permutation: prepared_arm prepared_producer_mode prepared_produce prepared_paused prepared_begin prepared_write prepared_prepare prepared_unrelated prepared_release prepared_consumer_mode prepared_before_commit prepared_commit prepared_after_commit prepared_hit prepared_stats prepared_remaining
-invalidate_all
---------------
-             0
-(1 row)
-
 reset_stats
 -----------
            

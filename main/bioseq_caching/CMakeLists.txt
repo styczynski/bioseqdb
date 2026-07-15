@@ -22,6 +22,9 @@ target_sources(postgresql_bioseq_cache
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/pg/provider_registry.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/pg/shared_registry.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/pg/dependency_runtime.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/pg/object_dependency_hooks.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_adapter.cppm"
@@ -54,6 +57,13 @@ endif()
 set(BIOSEQ_CACHE_MODULE_PATH "MODULE_PATHNAME")
 configure_file(
   "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_cache_objects.sql.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_objects.install.sql"
+  @ONLY)
+file(READ
+  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_objects.install.sql"
+  BIOSEQ_CACHE_INSTALL_OBJECTS)
+configure_file(
+  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_cache_extension.sql.in"
   "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
   @ONLY)
 
@@ -137,12 +147,16 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_regress
     COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_LIST_DIR}/test/test_run_private_cluster.py"
+    COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
       --kind regress
       --runner "${BIOSEQ_CACHE_PG_REGRESS}"
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
+      --extension-control "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
+      --extension-script "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
       --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/regress"
       --schedule "${CMAKE_CURRENT_LIST_DIR}/test/regress/parallel_schedule"
       --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_regress"
@@ -157,6 +171,8 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
+      --extension-control "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
+      --extension-script "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
       --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/isolation"
       --schedule "${CMAKE_CURRENT_LIST_DIR}/test/isolation/isolation_schedule"
       --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_isolation"
@@ -170,6 +186,8 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
+      --extension-control "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
+      --extension-script "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
       --prove "${BIOSEQ_CACHE_PROVE}"
       --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/tap"
       --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_tap"

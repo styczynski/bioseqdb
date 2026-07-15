@@ -188,6 +188,15 @@ TEST_CASE("shared admission never exceeds the live 25-percent ceiling") {
     REQUIRE(static_cast<bool>(moved));
     moved.release();
     REQUIRE(admission.reserved_bytes() == 0);
+
+    {
+        auto retained = admission.try_reserve(64);
+        REQUIRE(retained.has_value());
+        REQUIRE(retained->disown() == 64);
+    }
+    REQUIRE(admission.reserved_bytes() == 64);
+    counter.subtract(64);
+    REQUIRE(admission.reserved_bytes() == 0);
 }
 
 TEST_CASE("admission reports pressure, overflow, and file floors") {

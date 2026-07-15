@@ -3,10 +3,10 @@
 3|12|0|5|first match|3
 4|12|1|5|second match|3
 5|13|0|10|ten|3
-{"produced": 1, "fallbacks": 0, "reuse_hits": 0, "executor_rows": 4, "extract_occurrence": 4, "gated_expensive_rows": 4}
+{"produced": 2, "fallbacks": 0, "reuse_hits": 0, "executor_rows": 4, "completed_hits": 0, "extract_occurrence": 4, "gated_expensive_rows": 4}
 2|11|0|0|zero|3
 3|12|0|5|first match|3
 4|12|1|5|second match|3
 5|13|0|10|ten|3
-{"produced": 1, "fallbacks": 0, "reuse_hits": 1, "executor_rows": 4, "extract_occurrence": 4, "gated_expensive_rows": 4}
+{"produced": 2, "fallbacks": 0, "reuse_hits": 0, "executor_rows": 4, "completed_hits": 1, "extract_occurrence": 4, "gated_expensive_rows": 4}
 cache_reuse_provider: ok
