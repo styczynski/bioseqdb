@@ -1959,7 +1959,7 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS
 					"(evidence.value->>'format5_reader_owned_capacity_bytes')::bigint "
 					" = (evidence.value->>'format5_reader_admitted_bytes')::bigint "
 					"AND (evidence.value->>"
-					"'format5_reader_query_hash_capacity_bytes')::bigint = 0 "
+					"'format5_reader_query_hash_capacity_bytes')::bigint > 0 "
 					"AND (evidence.value->>"
 					"'format5_reader_current_selected_control_capacity_bytes')::bigint = 0 "
 					"AND (evidence.value->>"

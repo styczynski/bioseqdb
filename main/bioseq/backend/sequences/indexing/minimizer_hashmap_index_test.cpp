@@ -8717,7 +8717,12 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     minimizers.reserve(query_count);
     queries.reserve(query_count);
     for (std::uint64_t index = 0; index < query_count; ++index) {
-        const std::uint64_t hash = index + 1u;
+        // Odd multiplication is a permutation modulo 2^30 and spreads this
+        // mostly-unique fixture across the same 30-bit domain as production
+        // ntHash keys. This exercises actual high-bit radix occupancy rather
+        // than putting every synthetic key in bucket zero.
+        const std::uint64_t hash =
+            ((index + 1u) * 2'654'435'761ULL) & ((1ULL << 30u) - 1u);
         minimizers.emplace_back(hash, retained_bp(index) << 1u);
         queries.push_back(hash);
     }
@@ -8754,15 +8759,31 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.position_append_growth_reservations == 0u);
     REQUIRE(evidence.retained_position_count == query_count);
     REQUIRE(evidence.retained_position_capacity == query_count);
-    REQUIRE(evidence.query_record_size_bytes == 40u);
+    REQUIRE(evidence.query_record_size_bytes == 32u);
     REQUIRE(evidence.query_record_count == query_count);
     REQUIRE(evidence.query_record_capacity >= query_count);
     REQUIRE(evidence.query_record_capacity_bytes
         == evidence.query_record_capacity * evidence.query_record_size_bytes);
-    REQUIRE(evidence.query_hash_capacity_bytes == 0u);
-    REQUIRE(evidence.released_query_hash_capacity_bytes
-        >= query_count * sizeof(std::uint64_t));
+    REQUIRE(evidence.query_route_radix_bits == 8u);
+    REQUIRE(evidence.query_route_radix_bucket_count == 256u);
+    REQUIRE(evidence.query_route_radix_nonempty_bucket_count == 256u);
+    REQUIRE(evidence.query_route_radix_max_bucket_size == 11u);
+    REQUIRE(evidence.query_hash_capacity_bytes
+        >= query_count * sizeof(std::uint64_t)
+            + (evidence.query_route_radix_bucket_count + 1u)
+                * sizeof(std::uint32_t));
+    REQUIRE(evidence.released_query_hash_capacity_bytes == 0u);
     REQUIRE(evidence.decoded_control_records == query_count);
+    REQUIRE(evidence.query_route_control_lookups
+        == evidence.decoded_control_records);
+    REQUIRE(evidence.query_route_matches == query_count);
+    const std::uint64_t global_lower_bound_probe_ceiling =
+        evidence.query_route_control_lookups
+        * (std::bit_width(query_count - 1u) + 1u);
+    REQUIRE(evidence.query_route_hash_probes * 2u
+        < global_lower_bound_probe_ceiling);
+    REQUIRE(evidence.query_route_hash_probes
+        <= evidence.query_route_control_lookups * 5u);
     REQUIRE(evidence.retained_selected_control_records == query_count);
     REQUIRE(evidence.selected_control_size_bytes == 8u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
@@ -8783,15 +8804,24 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         <= extent_count / 2u);
     REQUIRE(evidence.capacity_accounting_passes == 7u + 3u * extent_count);
     REQUIRE_FALSE(evidence.saturated);
-    REQUIRE(reader->lookup(1u).positions.front() == retained_bp(0u) << 1u);
-    REQUIRE(reader->lookup(query_count).positions.front()
+    REQUIRE(reader->lookup(queries.front()).positions.front()
+        == retained_bp(0u) << 1u);
+    REQUIRE(reader->lookup(queries.back()).positions.front()
         == retained_bp(query_count - 1u) << 1u);
 
     // Exercise the statement-level aggregate equation with a second reader
     // that selects only the first of the three control extents. Production
     // merges these per-reader counters, so the aggregate must retain the same
     // 7R + E + 4S shape even when readers select different extent counts.
-    const std::array<std::uint64_t, 1> sparse_queries{1u};
+    const std::array<std::uint64_t, 1> sparse_queries{queries.front()};
+    const std::uint64_t sparse_selected_extent_count =
+        static_cast<std::uint64_t>(std::ranges::count_if(
+            generation->directory.entries(),
+            [&](const MinimizerBucketDirEntry& entry) {
+                return entry.lo_hash <= sparse_queries.front()
+                    && sparse_queries.front() <= entry.hi_hash;
+            }));
+    REQUIRE(sparse_selected_extent_count > 0u);
     auto sparse_reader = PreparedShapeV5QueryReader::begin(
         admission,
         generation->head,
@@ -8813,12 +8843,21 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.position_append_growth_reservations == 0u);
     REQUIRE(sparse_evidence.retained_position_count == 1u);
     REQUIRE(sparse_evidence.retained_position_capacity == 1u);
-    REQUIRE(sparse_evidence.query_record_size_bytes == 40u);
+    REQUIRE(sparse_evidence.query_record_size_bytes == 32u);
     REQUIRE(sparse_evidence.query_record_count == 1u);
-    REQUIRE(sparse_evidence.query_hash_capacity_bytes == 0u);
-    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes
-        >= sizeof(std::uint64_t));
+    REQUIRE(sparse_evidence.query_route_radix_bits == 0u);
+    REQUIRE(sparse_evidence.query_route_radix_bucket_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_nonempty_bucket_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_max_bucket_size == 1u);
+    REQUIRE(sparse_evidence.query_hash_capacity_bytes
+        >= sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
+    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes == 0u);
     REQUIRE(sparse_evidence.decoded_control_records > 1u);
+    REQUIRE(sparse_evidence.query_route_control_lookups
+        == sparse_evidence.decoded_control_records);
+    REQUIRE(sparse_evidence.query_route_matches == 1u);
+    REQUIRE(sparse_evidence.query_route_hash_probes
+        <= sparse_evidence.query_route_control_lookups * 2u);
     REQUIRE(sparse_evidence.retained_selected_control_records
         == sparse_evidence.decoded_control_records);
     REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
@@ -8829,12 +8868,15 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.owned_capacity_bytes
         == sparse_reader->admitted_bytes());
     REQUIRE(sparse_evidence.capacity_accounting_passes
-        == 7u + extent_count + 4u);
+        == 7u + extent_count + 4u * sparse_selected_extent_count);
     REQUIRE_FALSE(sparse_evidence.saturated);
 
     // A selected query absent from the target still crosses the same global
     // controls/positions boundary, but exact P=0 must remain allocation-free.
-    const std::array<std::uint64_t, 1> absent_queries{query_count + 1u};
+    const std::array<std::uint64_t, 1> absent_queries{
+        queries.front() ^ 1u};
+    REQUIRE(std::ranges::find(queries, absent_queries.front())
+        == queries.end());
     auto empty_reader = PreparedShapeV5QueryReader::begin(
         admission,
         generation->head,
@@ -8873,7 +8915,7 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(aggregate_passes >= aggregate_fixed_passes);
     REQUIRE((aggregate_passes - aggregate_fixed_passes) % 4u == 0u);
     REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
-        == segment_count + 1u);
+        == segment_count + sparse_selected_extent_count);
     REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
         <= aggregate_extents / 2u);
 }
@@ -9061,12 +9103,19 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         constexpr std::uint64_t adversarial_query_count = 100'000'000u;
         constexpr std::uint64_t prior_query_owned_bytes =
             adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));
-        constexpr std::uint64_t exact_query_owned_bytes =
+        constexpr std::uint64_t exact_query_state_and_hash_bytes =
             adversarial_query_count * 40u;
+        // ceil(Q / 8) needs 24 high radix bits for this adversarial Q.
+        constexpr std::uint64_t exact_query_radix_bytes =
+            ((1ULL << 24u) + 1u) * sizeof(std::uint32_t);
+        constexpr std::uint64_t exact_query_owned_bytes =
+            exact_query_state_and_hash_bytes + exact_query_radix_bytes;
         STATIC_REQUIRE(prior_query_owned_bytes == 8'000'000'000u);
-        STATIC_REQUIRE(exact_query_owned_bytes == 4'000'000'000u);
+        STATIC_REQUIRE(exact_query_state_and_hash_bytes == 4'000'000'000u);
+        STATIC_REQUIRE(exact_query_radix_bytes == 67'108'868u);
+        STATIC_REQUIRE(exact_query_owned_bytes == 4'067'108'868u);
         STATIC_REQUIRE(prior_query_owned_bytes - exact_query_owned_bytes
-            == 4'000'000'000u);
+            == 3'932'891'132u);
         require_wire_error(
             plan_prepared_shape_v5_position_image(
                 (std::numeric_limits<std::uint64_t>::max)(), 0u),

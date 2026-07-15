@@ -3885,7 +3885,7 @@ inline void require_pipeline_execution_proof(
             && out.format5_reader_query_record_capacity_bytes > 0
             && out.format5_reader_ordinal_route_capacity_bytes > 0
             && out.format5_reader_selected_extent_capacity_bytes > 0
-            && out.format5_reader_query_hash_capacity_bytes == 0
+            && out.format5_reader_query_hash_capacity_bytes > 0
             && out.format5_reader_current_selected_control_capacity_bytes == 0
             && out.format5_reader_control_payload_capacity_bytes == 0
             && format5_reader_accounting_shape

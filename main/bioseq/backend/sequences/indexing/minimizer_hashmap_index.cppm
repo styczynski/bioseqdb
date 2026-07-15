@@ -4614,7 +4614,6 @@ struct PreparedQueryRecord;
 
 template <class Hash>
 struct PreparedQueryRecord<Hash, true> {
-    Hash hash = 0;
     std::uint64_t global_occurrence_count = 0;
     std::uint64_t global_position_offset = 0;
     std::uint64_t global_positions_written = 0;
@@ -4631,7 +4630,7 @@ struct PreparedQueryRecord<Hash, false> {
     std::vector<std::uint64_t> positions;
 };
 
-static_assert(sizeof(PreparedQueryRecord<std::uint64_t, true>) == 40u);
+static_assert(sizeof(PreparedQueryRecord<std::uint64_t, true>) == 32u);
 static_assert(sizeof(PreparedQueryRecord<std::uint64_t, false>) == 64u);
 
 template <>
@@ -4875,6 +4874,14 @@ protected:
 
     std::vector<hash_type> protocol_query_hashes_;
     std::vector<QueryRecord> protocol_query_records_;
+    // Format 5 searches the compact canonical hash image through one exact,
+    // admitted high-bit radix directory.  Keeping hashes out of the 32-byte
+    // mutable record avoids pulling three unrelated cache lines into every
+    // control-route comparison.
+    std::unique_ptr<std::uint32_t[]> protocol_query_radix_offsets_;
+    std::size_t protocol_query_radix_offset_count_ = 0u;
+    std::uint32_t protocol_query_radix_bits_ = 0u;
+    std::uint32_t protocol_query_hash_bits_ = 0u;
     // Format 5 knows the final retained position count before allocation.
     // Keep one exact array rather than a vector whose conservative admission
     // peak is 2x the requested bytes. Format 4 does not use this member.
@@ -4909,6 +4916,12 @@ protected:
         std::uint64_t retained_selected_control_records = 0;
         std::uint64_t retained_selected_control_capacity_bytes = 0;
         std::uint64_t released_query_hash_capacity_bytes = 0;
+        std::uint64_t query_route_radix_bucket_count = 0;
+        std::uint64_t query_route_radix_nonempty_bucket_count = 0;
+        std::uint64_t query_route_radix_max_bucket_size = 0;
+        std::uint64_t query_route_control_lookups = 0;
+        std::uint64_t query_route_hash_probes = 0;
+        std::uint64_t query_route_matches = 0;
         bool saturated = false;
     };
     mutable ProtocolMemoryEvidence protocol_memory_evidence_{};
@@ -4991,6 +5004,9 @@ protected:
         add(protocol_query_hashes_.capacity(), sizeof(hash_type));
         add(protocol_query_records_.capacity(), sizeof(QueryRecord));
         if constexpr (Traits::global_controls_then_positions) {
+            add(protocol_query_radix_offset_count_, sizeof(std::uint32_t));
+        }
+        if constexpr (Traits::global_controls_then_positions) {
             add(protocol_global_position_count_, sizeof(std::uint64_t));
         } else {
             for (const QueryRecord& record : protocol_query_records_) {
@@ -5057,6 +5073,10 @@ protected:
         std::vector<std::size_t>{}.swap(protocol_ordinal_to_selected_);
         protocol_global_positions_.reset();
         protocol_global_position_count_ = 0u;
+        protocol_query_radix_offsets_.reset();
+        protocol_query_radix_offset_count_ = 0u;
+        protocol_query_radix_bits_ = 0u;
+        protocol_query_hash_bits_ = 0u;
         std::vector<QueryRecord>{}.swap(protocol_query_records_);
         std::vector<hash_type>{}.swap(protocol_query_hashes_);
         protocol_global_position_storage_prepared_ = false;
@@ -5078,6 +5098,10 @@ protected:
     void mark_protocol_moved_from() noexcept {
         protocol_global_positions_.reset();
         protocol_global_position_count_ = 0u;
+        protocol_query_radix_offsets_.reset();
+        protocol_query_radix_offset_count_ = 0u;
+        protocol_query_radix_bits_ = 0u;
+        protocol_query_hash_bits_ = 0u;
         protocol_global_position_storage_prepared_ = false;
         protocol_initialized_ = true;
         protocol_ready_ = false;
@@ -5085,7 +5109,7 @@ protected:
         protocol_failure_ = MinimizerGenerationWireError::row_order;
     }
 
-    void increment_memory_evidence_(std::uint64_t& counter) noexcept {
+    void increment_memory_evidence_(std::uint64_t& counter) const noexcept {
         if (counter == (std::numeric_limits<std::uint64_t>::max)()) {
             protocol_memory_evidence_.saturated = true;
         } else {
@@ -5095,7 +5119,7 @@ protected:
 
     void add_memory_evidence_(
             std::uint64_t& counter,
-            std::uint64_t delta) noexcept {
+            std::uint64_t delta) const noexcept {
         if (counter > (std::numeric_limits<std::uint64_t>::max)() - delta) {
             counter = (std::numeric_limits<std::uint64_t>::max)();
             protocol_memory_evidence_.saturated = true;
@@ -5172,7 +5196,8 @@ protected:
                 ? static_cast<std::uint64_t>(
                     protocol_session_->control_bytes.capacity()) : 0u,
             .releasable_protocol_query_hash_bytes =
-                protocol_initialized_
+                !Traits::global_controls_then_positions
+                    && protocol_initialized_
                     && protocol_query_records_.size()
                         == protocol_query_hashes_.size()
                 ? saturating_mul(
@@ -5343,22 +5368,116 @@ protected:
         return {};
     }
 
-    [[nodiscard]] std::size_t query_index_for_hash(
-            std::uint64_t hash) const noexcept {
+    static constexpr std::size_t query_radix_target_mean_ = 8u;
+
+    struct QueryRadixPlan {
+        std::uint32_t hash_bits = 0u;
+        std::uint32_t radix_bits = 0u;
+        std::size_t bucket_count = 1u;
+        std::size_t offset_count = 2u;
+    };
+
+    /// Size the high-bit directory so a uniform query union averages at most
+    /// one 64-byte cache line of canonical u64 hashes per bucket.  Q is
+    /// already bounded below UINT32_MAX by the route sentinel contract.
+    [[nodiscard]] static std::expected<QueryRadixPlan,
+        MinimizerGenerationWireError>
+    plan_query_radix_(
+            std::size_t query_count,
+            std::uint64_t max_hash) noexcept {
+        const std::uint32_t hash_bits = static_cast<std::uint32_t>(
+            std::bit_width(max_hash));
+        const std::size_t required_buckets =
+            query_count / query_radix_target_mean_
+            + (query_count % query_radix_target_mean_ != 0u ? 1u : 0u);
+        const std::uint32_t requested_bits = required_buckets <= 1u
+            ? 0u
+            : static_cast<std::uint32_t>(std::bit_width(
+                static_cast<std::uint64_t>(required_buckets - 1u)));
+        const std::uint32_t radix_bits =
+            (std::min)(hash_bits, requested_bits);
+        if (radix_bits >= std::numeric_limits<std::size_t>::digits) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        const std::size_t bucket_count = std::size_t{1u} << radix_bits;
+        if (bucket_count == (std::numeric_limits<std::size_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        return QueryRadixPlan{
+            .hash_bits = hash_bits,
+            .radix_bits = radix_bits,
+            .bucket_count = bucket_count,
+            .offset_count = bucket_count + 1u,
+        };
+    }
+
+    [[nodiscard]] static std::size_t query_radix_bucket_(
+            hash_type hash,
+            std::uint32_t hash_bits,
+            std::uint32_t radix_bits) noexcept {
+        if (radix_bits == 0u) return 0u;
+        return static_cast<std::size_t>(
+            static_cast<std::uint64_t>(hash)
+                >> (hash_bits - radix_bits));
+    }
+
+    [[nodiscard]] std::size_t query_index_for_hash_impl_(
+            std::uint64_t hash,
+            bool record_control_probe) const noexcept {
         if (hash > (std::numeric_limits<hash_type>::max)()) return no_route;
         const hash_type narrowed = static_cast<hash_type>(hash);
         if constexpr (Traits::global_controls_then_positions) {
-            const auto found = std::lower_bound(
-                protocol_query_records_.begin(),
-                protocol_query_records_.end(), narrowed,
-                [](const QueryRecord& record, hash_type wanted) noexcept {
-                    return record.hash < wanted;
-                });
-            return found != protocol_query_records_.end()
-                    && found->hash == narrowed
-                ? static_cast<std::size_t>(
-                    found - protocol_query_records_.begin())
-                : no_route;
+            if (record_control_probe) {
+                increment_memory_evidence_(protocol_memory_evidence_.
+                    query_route_control_lookups);
+            }
+            if (!protocol_query_radix_offsets_
+                || protocol_query_radix_offset_count_ < 2u
+                || protocol_query_hashes_.size()
+                    != protocol_query_records_.size()) {
+                return no_route;
+            }
+            const std::size_t bucket = query_radix_bucket_(
+                narrowed, protocol_query_hash_bits_,
+                protocol_query_radix_bits_);
+            if (bucket + 1u >= protocol_query_radix_offset_count_) {
+                return no_route;
+            }
+            std::size_t first = protocol_query_radix_offsets_[bucket];
+            const std::size_t end =
+                protocol_query_radix_offsets_[bucket + 1u];
+            if (first > end || end > protocol_query_hashes_.size()) {
+                return no_route;
+            }
+            std::size_t last = end;
+            while (first < last) {
+                const std::size_t middle = first + (last - first) / 2u;
+                if (record_control_probe) {
+                    increment_memory_evidence_(protocol_memory_evidence_.
+                        query_route_hash_probes);
+                }
+                if (protocol_query_hashes_[middle] < narrowed) {
+                    first = middle + 1u;
+                } else {
+                    last = middle;
+                }
+            }
+            if (first < end) {
+                if (record_control_probe) {
+                    increment_memory_evidence_(protocol_memory_evidence_.
+                        query_route_hash_probes);
+                }
+                if (protocol_query_hashes_[first] == narrowed) {
+                    if (record_control_probe) {
+                        increment_memory_evidence_(protocol_memory_evidence_.
+                            query_route_matches);
+                    }
+                    return first;
+                }
+            }
+            return no_route;
         } else {
             const auto found = std::lower_bound(
                 protocol_query_hashes_.begin(),
@@ -5368,6 +5487,16 @@ protected:
                     found - protocol_query_hashes_.begin())
                 : no_route;
         }
+    }
+
+    [[nodiscard]] std::size_t query_index_for_hash(
+            std::uint64_t hash) const noexcept {
+        return query_index_for_hash_impl_(hash, false);
+    }
+
+    [[nodiscard]] std::size_t query_index_for_control_hash(
+            std::uint64_t hash) const noexcept {
+        return query_index_for_hash_impl_(hash, true);
     }
 
     [[nodiscard]] bool query_intersects_entry(
@@ -5565,6 +5694,17 @@ protected:
                 std::unique(protocol_query_hashes_.begin(),
                     protocol_query_hashes_.end()),
                 protocol_query_hashes_.end());
+            if constexpr (Traits::global_controls_then_positions) {
+                // The caller may provide duplicate hashes.  Canonicalize into
+                // a right-sized contiguous image before it becomes the
+                // permanent radix search surface; the existing 2x query-hash
+                // reservation covers the old and new vectors at this peak.
+                std::vector<hash_type> canonical;
+                canonical.reserve(protocol_query_hashes_.size());
+                canonical.assign(protocol_query_hashes_.begin(),
+                    protocol_query_hashes_.end());
+                protocol_query_hashes_.swap(canonical);
+            }
         } catch (const std::bad_alloc&) {
             capture_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::query_hash_allocation,
@@ -5597,30 +5737,49 @@ protected:
             }
         }
 
+        QueryRadixPlan query_radix_plan{};
+        if constexpr (Traits::global_controls_then_positions) {
+            const auto planned = plan_query_radix_(
+                protocol_query_hashes_.size(), this->profile_.max_hash);
+            if (!planned) return protocol_poison<void>(planned.error());
+            query_radix_plan = *planned;
+        }
+
         const auto entries = this->directory_.entries();
         std::size_t selected_count = 0;
         for (const auto& entry : entries) {
             selected_count += query_intersects_entry(entry) ? 1u : 0u;
         }
-        std::uint64_t route_bytes = 0;
-        route_bytes = bioseq::parallelism::saturating_add(
-            route_bytes,
+        std::uint64_t route_vector_bytes = 0;
+        route_vector_bytes = bioseq::parallelism::saturating_add(
+            route_vector_bytes,
             bioseq::parallelism::saturating_mul(
                 protocol_query_hashes_.size(), sizeof(QueryRecord)));
-        route_bytes = bioseq::parallelism::saturating_add(
-            route_bytes,
+        route_vector_bytes = bioseq::parallelism::saturating_add(
+            route_vector_bytes,
             bioseq::parallelism::saturating_mul(
                 entries.size(), sizeof(std::size_t)));
-        route_bytes = bioseq::parallelism::saturating_add(
-            route_bytes,
+        route_vector_bytes = bioseq::parallelism::saturating_add(
+            route_vector_bytes,
             bioseq::parallelism::saturating_mul(
                 selected_count, sizeof(SelectedExtent)));
+        const std::uint64_t query_radix_bytes =
+            Traits::global_controls_then_positions
+            ? bioseq::parallelism::saturating_mul(
+                query_radix_plan.offset_count, sizeof(std::uint32_t))
+            : 0u;
+        const std::uint64_t route_bytes =
+            bioseq::parallelism::saturating_add(
+                route_vector_bytes, query_radix_bytes);
         PermitGrowthGuard route_guard{*this};
         projected = bioseq::parallelism::saturating_add(
             protocol_owned_capacity_bytes(),
-            bioseq::parallelism::saturating_mul(
-                route_bytes,
-                bioseq::parallelism::kVectorPreallocationHeadroomFactor));
+            bioseq::parallelism::saturating_add(
+                bioseq::parallelism::saturating_mul(
+                    route_vector_bytes,
+                    bioseq::parallelism::
+                        kVectorPreallocationHeadroomFactor),
+                query_radix_bytes));
         if (route_bytes == (std::numeric_limits<std::uint64_t>::max)()
             || projected == (std::numeric_limits<std::uint64_t>::max)()) {
             return protocol_poison<void>(
@@ -5655,9 +5814,60 @@ protected:
                 MinimizerGenerationWireError::admission);
         }
         try {
-            protocol_query_records_.reserve(protocol_query_hashes_.size());
-            for (const hash_type hash : protocol_query_hashes_) {
-                protocol_query_records_.push_back(QueryRecord{.hash = hash});
+            if constexpr (Traits::global_controls_then_positions) {
+                std::unique_ptr<std::uint32_t[]> radix_offsets;
+                radix_offsets =
+                    std::make_unique_for_overwrite<std::uint32_t[]>(
+                        query_radix_plan.offset_count);
+                std::size_t query_index = 0u;
+                std::uint64_t nonempty_buckets = 0u;
+                std::uint64_t max_bucket_size = 0u;
+                for (std::size_t bucket = 0u;
+                     bucket < query_radix_plan.bucket_count; ++bucket) {
+                    radix_offsets[bucket] =
+                        static_cast<std::uint32_t>(query_index);
+                    const std::size_t bucket_begin = query_index;
+                    while (query_index < protocol_query_hashes_.size()
+                        && query_radix_bucket_(
+                            protocol_query_hashes_[query_index],
+                            query_radix_plan.hash_bits,
+                            query_radix_plan.radix_bits) == bucket) {
+                        ++query_index;
+                    }
+                    const std::uint64_t bucket_size =
+                        static_cast<std::uint64_t>(
+                            query_index - bucket_begin);
+                    nonempty_buckets += bucket_size != 0u ? 1u : 0u;
+                    max_bucket_size = (std::max)(
+                        max_bucket_size, bucket_size);
+                }
+                if (query_index != protocol_query_hashes_.size()) {
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::hash_range);
+                }
+                radix_offsets[query_radix_plan.bucket_count] =
+                    static_cast<std::uint32_t>(query_index);
+                protocol_query_records_.resize(
+                    protocol_query_hashes_.size());
+                protocol_query_radix_offsets_ = std::move(radix_offsets);
+                protocol_query_radix_offset_count_ =
+                    query_radix_plan.offset_count;
+                protocol_query_radix_bits_ = query_radix_plan.radix_bits;
+                protocol_query_hash_bits_ = query_radix_plan.hash_bits;
+                protocol_memory_evidence_.query_route_radix_bucket_count =
+                    query_radix_plan.bucket_count;
+                protocol_memory_evidence_.
+                    query_route_radix_nonempty_bucket_count =
+                        nonempty_buckets;
+                protocol_memory_evidence_.query_route_radix_max_bucket_size =
+                    max_bucket_size;
+            } else {
+                protocol_query_records_.reserve(
+                    protocol_query_hashes_.size());
+                for (const hash_type hash : protocol_query_hashes_) {
+                    protocol_query_records_.push_back(
+                        QueryRecord{.hash = hash});
+                }
             }
             protocol_ordinal_to_selected_.assign(entries.size(), no_route);
             protocol_selected_extents_.reserve(selected_count);
@@ -5689,28 +5899,6 @@ protected:
                 projected, 0u, 0u, route_bytes);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
-        }
-        if constexpr (Traits::global_controls_then_positions) {
-            const std::uint64_t released_bytes =
-                bioseq::parallelism::saturating_mul(
-                    static_cast<std::uint64_t>(
-                        protocol_query_hashes_.capacity()),
-                    sizeof(hash_type));
-            if (released_bytes
-                    == (std::numeric_limits<std::uint64_t>::max)()
-                || released_bytes > this->permit_.bytes()) {
-                return protocol_poison<void>(
-                    MinimizerGenerationWireError::arithmetic_overflow);
-            }
-            {
-                std::vector<hash_type> empty;
-                protocol_query_hashes_.swap(empty);
-            }
-            this->permit_.shrink_to(this->permit_.bytes() - released_bytes);
-            add_memory_evidence_(
-                protocol_memory_evidence_.
-                    released_query_hash_capacity_bytes,
-                released_bytes);
         }
         initialize_physical_cursor();
         protocol_initialized_ = true;
@@ -5849,7 +6037,8 @@ protected:
                 std::size_t routed_control_count = 0u;
                 for (const auto& control : *decoded) {
                     const std::size_t query_index =
-                        query_index_for_hash(WireOps::hash(control));
+                        query_index_for_control_hash(
+                            WireOps::hash(control));
                     const std::uint64_t begin =
                         WireOps::position_begin(control);
                     const std::uint64_t end = WireOps::position_end(control);
@@ -6524,37 +6713,32 @@ protected:
             std::uint64_t hash) const noexcept {
         if (!protocol_ready_
             || hash > (std::numeric_limits<hash_type>::max)()) return {};
-        const hash_type narrowed = static_cast<hash_type>(hash);
-        const auto found = std::lower_bound(
-            protocol_query_records_.begin(),
-            protocol_query_records_.end(), narrowed,
-            [](const QueryRecord& record, hash_type wanted) {
-                return record.hash < wanted;
-            });
-        if (found == protocol_query_records_.end()
-            || found->hash != narrowed) return {};
+        const std::size_t query_index = query_index_for_hash(hash);
+        if (query_index == no_route
+            || query_index >= protocol_query_records_.size()) return {};
+        const QueryRecord& found = protocol_query_records_[query_index];
         std::span<const std::uint64_t> positions;
         if constexpr (Traits::global_controls_then_positions) {
-            if (found->positions_complete
-                && found->global_occurrence_count != 0u
-                && found->global_position_offset
+            if (found.positions_complete
+                && found.global_occurrence_count != 0u
+                && found.global_position_offset
                     <= protocol_global_position_count_
-                && found->global_occurrence_count
+                && found.global_occurrence_count
                     <= protocol_global_position_count_
-                        - found->global_position_offset) {
+                        - found.global_position_offset) {
                 positions = std::span<const std::uint64_t>{
                     protocol_global_positions_.get()
                         + static_cast<std::size_t>(
-                            found->global_position_offset),
+                            found.global_position_offset),
                     static_cast<std::size_t>(
-                        found->global_occurrence_count)};
+                        found.global_occurrence_count)};
             }
         } else {
-            positions = found->positions;
+            positions = found.positions;
         }
         return ProtocolLookup{
-            .global_occurrence_count = found->global_occurrence_count,
-            .positions_complete = found->positions_complete,
+            .global_occurrence_count = found.global_occurrence_count,
+            .positions_complete = found.positions_complete,
             .positions = positions,
         };
     }
@@ -6607,8 +6791,17 @@ struct PreparedShapeV5QueryReaderMemoryEvidence {
     std::uint64_t query_record_count = 0;
     std::uint64_t query_record_capacity = 0;
     std::uint64_t query_record_capacity_bytes = 0;
+    // Canonical u64 query hashes plus the exact high-bit radix offsets.  The
+    // aggregate SQL key retains this stable name and exact owner equation.
     std::uint64_t query_hash_capacity_bytes = 0;
     std::uint64_t released_query_hash_capacity_bytes = 0;
+    std::uint64_t query_route_radix_bits = 0;
+    std::uint64_t query_route_radix_bucket_count = 0;
+    std::uint64_t query_route_radix_nonempty_bucket_count = 0;
+    std::uint64_t query_route_radix_max_bucket_size = 0;
+    std::uint64_t query_route_control_lookups = 0;
+    std::uint64_t query_route_hash_probes = 0;
+    std::uint64_t query_route_matches = 0;
     std::uint64_t decoded_control_records = 0;
     std::uint64_t retained_selected_control_records = 0;
     std::uint64_t selected_control_size_bytes = 0;
@@ -6816,10 +7009,16 @@ public:
             static_cast<std::uint64_t>(
                 this->protocol_query_records_.capacity()),
             sizeof(typename ProtocolCore::QueryRecord));
-        const std::uint64_t query_hash_capacity_bytes = saturating_mul(
+        std::uint64_t query_hash_capacity_bytes = saturating_mul(
             static_cast<std::uint64_t>(
                 this->protocol_query_hashes_.capacity()),
             sizeof(typename ProtocolCore::hash_type));
+        query_hash_capacity_bytes = saturating_add(
+            query_hash_capacity_bytes,
+            saturating_mul(
+                static_cast<std::uint64_t>(
+                    this->protocol_query_radix_offset_count_),
+                sizeof(std::uint32_t)));
         const std::uint64_t ordinal_route_capacity_bytes = saturating_mul(
             static_cast<std::uint64_t>(
                 this->protocol_ordinal_to_selected_.capacity()),
@@ -6882,6 +7081,24 @@ public:
             .released_query_hash_capacity_bytes =
                 this->protocol_memory_evidence_.
                     released_query_hash_capacity_bytes,
+            .query_route_radix_bits =
+                this->protocol_query_radix_bits_,
+            .query_route_radix_bucket_count =
+                this->protocol_memory_evidence_.
+                    query_route_radix_bucket_count,
+            .query_route_radix_nonempty_bucket_count =
+                this->protocol_memory_evidence_.
+                    query_route_radix_nonempty_bucket_count,
+            .query_route_radix_max_bucket_size =
+                this->protocol_memory_evidence_.
+                    query_route_radix_max_bucket_size,
+            .query_route_control_lookups =
+                this->protocol_memory_evidence_.
+                    query_route_control_lookups,
+            .query_route_hash_probes =
+                this->protocol_memory_evidence_.query_route_hash_probes,
+            .query_route_matches =
+                this->protocol_memory_evidence_.query_route_matches,
             .decoded_control_records =
                 this->protocol_memory_evidence_.decoded_control_records,
             .retained_selected_control_records =
