@@ -88,6 +88,17 @@ public:
     }
     [[nodiscard]] bool has_rows() const noexcept { return status() == PGRES_TUPLES_OK; }
 
+    /// @brief The five-character SQLSTATE of a failed result, else empty.
+    [[nodiscard]] std::string error_sqlstate() const {
+        if (handle_ != nullptr) {
+            if (const char* sqlstate =
+                    PQresultErrorField(handle_, PG_DIAG_SQLSTATE)) {
+                return std::string(sqlstate);
+            }
+        }
+        return {};
+    }
+
 private:
     void reset() noexcept {
         if (handle_) {
@@ -139,7 +150,7 @@ public:
         result outcome(PQexec(handle_, std::string(sql).c_str()));
         const ExecStatusType status = outcome.status();
         if (status == PGRES_FATAL_ERROR || status == PGRES_BAD_RESPONSE) {
-            throw query_error(current_error_message(), current_sqlstate());
+            throw query_error(current_error_message(), outcome.error_sqlstate());
         }
         return outcome;
     }
@@ -164,7 +175,6 @@ private:
         const char* message = PQerrorMessage(handle_);
         return message ? std::string(message) : std::string{};
     }
-    [[nodiscard]] std::string current_sqlstate() const { return {}; }
 
     static void receive_notice(void* self, const PGresult* raw) {
         auto* owner = static_cast<connection*>(self);

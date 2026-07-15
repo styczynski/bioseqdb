@@ -623,7 +623,7 @@ namespace {
 /// @return Zero on success; two on usage errors; three on execution failure.
 [[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
-        "conninfo", "setup", "visible", "teardown"};
+        "conninfo", "setup", "visible", "teardown", "expect-sqlstate"};
     const auto options = parse_options(args, value_keys, {});
     const std::string conninfo = require_option(options, "conninfo");
 
@@ -636,6 +636,10 @@ namespace {
     if (const auto found = options.find("teardown"); found != options.end()) {
         example.teardown_sql = found->second;
     }
+    if (const auto found = options.find("expect-sqlstate"); found != options.end()) {
+        example.expectation = sql_expectation::error;
+        example.expected_sqlstate = found->second;
+    }
 
     private_cluster_executor executor(conninfo);
     const std::expected<sql_example_result, diagnostic> outcome =
@@ -646,7 +650,10 @@ namespace {
         return 3;
     }
     for (const sql_result_set& result : outcome->visible_results) {
-        if (result.kind == sql_result_kind::rows) {
+        if (result.kind == sql_result_kind::error) {
+            std::println("ERROR SQLSTATE={}: {}",
+                         result.sqlstate.value_or(""), result.primary_message);
+        } else if (result.kind == sql_result_kind::rows) {
             std::string header;
             for (const sql_column& column : result.columns) {
                 header += (header.empty() ? "" : " | ") + column.name;

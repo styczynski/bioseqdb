@@ -58,10 +58,26 @@ public:
             if (!example.setup_sql.empty()) {
                 (void)connection.exec(example.setup_sql);
             }
-            const bioseq::libpq::result visible = connection.exec(example.visible_sql);
-            outcome.visible_results.push_back(project_result(visible));
+            // The visible SQL is where the success/error expectation applies
+            // (§13.5): a success example must not raise; an error example must
+            // raise the expected SQLSTATE (or any, when unspecified).
+            if (example.expectation == sql_expectation::error) {
+                if (auto captured = run_expected_error(connection, example); !captured) {
+                    return std::unexpected(std::move(captured.error()));
+                } else {
+                    outcome.visible_results.push_back(std::move(*captured));
+                }
+            } else {
+                const bioseq::libpq::result visible =
+                    connection.exec(example.visible_sql);
+                outcome.visible_results.push_back(project_result(visible));
+            }
             if (!example.teardown_sql.empty()) {
-                (void)connection.exec(example.teardown_sql);
+                try {
+                    (void)connection.exec(example.teardown_sql);
+                } catch (const bioseq::libpq::query_error&) {
+                    // Teardown is best-effort after a captured expected error.
+                }
             }
             for (const bioseq::libpq::notice& raw : connection.take_notices()) {
                 outcome.notices.push_back(sql_notice{
@@ -77,6 +93,38 @@ public:
     }
 
 private:
+    // Runs the visible SQL of an error example, capturing the raised SQLSTATE.
+    // A success (no error) or a wrong SQLSTATE is a failed expectation.
+    [[nodiscard]] static std::expected<sql_result_set, diagnostic> run_expected_error(
+        bioseq::libpq::connection& connection, sql_example const& example) {
+        try {
+            (void)connection.exec(example.visible_sql);
+        } catch (const bioseq::libpq::query_error& error) {
+            const std::string sqlstate(error.sqlstate());
+            if (example.expected_sqlstate
+                && *example.expected_sqlstate != sqlstate) {
+                diagnostic mismatch;
+                mismatch.severity = diagnostic_severity::error;
+                mismatch.phase = "execute";
+                mismatch.code = sqlstate;
+                mismatch.message = "expected SQLSTATE " + *example.expected_sqlstate
+                    + " but got " + sqlstate + ": " + error.what();
+                return std::unexpected(mismatch);
+            }
+            sql_result_set captured;
+            captured.kind = sql_result_kind::error;
+            captured.sqlstate = sqlstate;
+            captured.primary_message = error.what();
+            return captured;
+        }
+        diagnostic unexpected_success;
+        unexpected_success.severity = diagnostic_severity::error;
+        unexpected_success.phase = "execute";
+        unexpected_success.message =
+            "example expected an error but the visible SQL succeeded";
+        return std::unexpected(unexpected_success);
+    }
+
     [[nodiscard]] static sql_result_set project_result(const bioseq::libpq::result& result) {
         sql_result_set set;
         if (result.has_rows()) {
