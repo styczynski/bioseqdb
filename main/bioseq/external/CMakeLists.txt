@@ -26,7 +26,7 @@ if(NOT TARGET bioseq_codegen)
 endif()
 
 # gives CMake stable target names and byproduct contracts before generation.
-include("${CMAKE_CURRENT_SOURCE_DIR}/codegen/annotation_registry.cmake")
+include("${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/annotation_registry.cmake")
 file(GLOB_RECURSE _bioseq_external_scan_inputs CONFIGURE_DEPENDS
   "${_bioseq_external_source_root}/*.cppm")
 list(SORT _bioseq_external_scan_inputs)
@@ -117,10 +117,10 @@ add_custom_command(
     "-DDEPFILE:FILEPATH=${_bioseq_external_scan_depfile}"
     "-DSOURCE_LIST_FILE:FILEPATH=${_bioseq_external_source_list_file}"
     "-DANNOTATION_HANDLERS:STRING=${_bioseq_external_annotation_handlers}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/codegen/scan_annotations.cmake"
+    -P "${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/scan_annotations.cmake"
   DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/codegen/annotation_registry.cmake"
-    "${CMAKE_CURRENT_SOURCE_DIR}/codegen/scan_annotations.cmake"
+    "${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/annotation_registry.cmake"
+    "${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/scan_annotations.cmake"
     "${_bioseq_external_source_list_file}"
   DEPFILE "${_bioseq_external_scan_depfile}"
   COMMENT "Scanning Bioseq annotation graph"
