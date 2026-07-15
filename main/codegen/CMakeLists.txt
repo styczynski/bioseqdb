@@ -66,9 +66,29 @@ set(_codegen_module_files
   "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/backend/common/hashing.cppm")
 set(_codegen_base_dirs
   "${_codegen_src}"
-  "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq")
-set(_codegen_compile_defs "")
+  "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq"
+  "${BIOSEQ_REPOSITORY_ROOT}/main/common"
+  "${CMAKE_BINARY_DIR}/generated")
 set(_codegen_link_libs "")
+set(_codegen_component_imports "")
+set(_codegen_component_entries "")
+
+# yaml-cpp 0.8.0 is the sole frontmatter/config parser, shared by whichever of
+# the external or website components is enabled.
+if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL OR BIOSEQ_CODEGEN_ENABLE_WEBSITE)
+  set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+  set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+  set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+  if(NOT TARGET yaml-cpp::yaml-cpp)
+    FetchContent_Declare(yaml-cpp
+      GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+      GIT_TAG 0.8.0
+      GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(yaml-cpp)
+  endif()
+  list(APPEND _codegen_link_libs yaml-cpp::yaml-cpp)
+endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
   set(CPPAST_BUILD_TEST OFF CACHE BOOL "" FORCE)
@@ -83,18 +103,6 @@ if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
     CXX_EXTENSIONS ON
     CXX_MODULE_STD OFF)
 
-  set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-  set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-  set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
-  if(NOT TARGET yaml-cpp::yaml-cpp)
-    FetchContent_Declare(yaml-cpp
-      GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-      GIT_TAG 0.8.0
-      GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(yaml-cpp)
-  endif()
-
   list(APPEND _codegen_module_files
     "${_codegen_src}/external/model.cppm"
     "${_codegen_src}/external/annotation_parser.cppm"
@@ -106,21 +114,111 @@ if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
     "${_codegen_src}/external/contract_tests.cppm"
     "${_codegen_src}/external/index.cppm"
     "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/external/http_validation.cppm")
-  list(APPEND _codegen_compile_defs BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
-  list(APPEND _codegen_link_libs cppast yaml-cpp::yaml-cpp)
+  list(APPEND _codegen_link_libs cppast)
+  string(APPEND _codegen_component_imports "import bioseq.codegen.external;\n")
+  string(APPEND _codegen_component_entries
+    "        {\"external\", &bioseq::codegen::external::self_test, "
+    "&bioseq::codegen::external::run},\n")
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
-  # Website component sources/dependencies are wired in a later phase.
-  list(APPEND _codegen_compile_defs BIOSEQ_CODEGEN_ENABLE_WEBSITE)
+  # Website structural pass and rendering pull C and legacy-C++ dependencies.
+  # Compile them without module scanning or import std so they never enter the
+  # generator's C++26 module graph; contain their headers in the owning units.
+  # They keep the C++26 standard (Boost.Filesystem 1.90 needs std::atomic_ref).
+  set(_saved_scan "${CMAKE_CXX_SCAN_FOR_MODULES}")
+  set(_saved_module_std "${CMAKE_CXX_MODULE_STD}")
+  set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+  set(CMAKE_CXX_MODULE_STD OFF)
+
+  # MD4C 0.5.3: link md4c (typed callbacks), never md4c-html; no md2html/shared.
+  set(BUILD_MD2HTML_EXECUTABLE OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  add_subdirectory("${BIOSEQ_REPOSITORY_ROOT}/md4c-master"
+    "${CMAKE_BINARY_DIR}/md4c" EXCLUDE_FROM_ALL)
+
+  # pugixml v1.15 pinned by hash through the normal FetchContent cache.
+  if(NOT TARGET pugixml::pugixml)
+    FetchContent_Declare(pugixml
+      URL "https://github.com/zeux/pugixml/releases/download/v1.15/pugixml-1.15.tar.gz"
+      URL_HASH
+      SHA256=655ade57fa703fb421c2eb9a0113b5064bddb145d415dd1f88c79353d90d511a)
+    FetchContent_MakeAvailable(pugixml)
+  endif()
+
+  # Jinja2Cpp 1.3.2 with its default Boost.JSON binding; internal deps mode
+  # fetches Boost 1.90 (json/regex) and exposes Boost::json for website/json.
+  set(JINJA2CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(JINJA2CPP_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(JINJA2CPP_DEPS_MODE "internal" CACHE STRING "" FORCE)
+  set(JINJA2CPP_WITH_JSON_BINDINGS "boost" CACHE STRING "" FORCE)
+  set(JINJA2CPP_USE_REGEX "std" CACHE STRING "" FORCE)
+  add_subdirectory("${BIOSEQ_REPOSITORY_ROOT}/Jinja2Cpp-master"
+    "${CMAKE_BINARY_DIR}/jinja2cpp" EXCLUDE_FROM_ALL)
+  # Jinja2Cpp 1.3.2 is not C++23/26-clean (its nonstd::expected aliases
+  # std::expected and its polymorphic value trips a libstdc++ <optional>
+  # constraint); build it and its renderer shim at their native C++17.
+  set_target_properties(jinja2cpp PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_SCAN_FOR_MODULES OFF)
+  add_library(bioseq_codegen_jinja_shim STATIC
+    "${_codegen_src}/website/template_renderer_impl.cpp")
+  set_target_properties(bioseq_codegen_jinja_shim PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+    CXX_SCAN_FOR_MODULES OFF CXX_MODULE_STD OFF POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(bioseq_codegen_jinja_shim PRIVATE jinja2cpp)
+
+  set(CMAKE_CXX_SCAN_FOR_MODULES "${_saved_scan}")
+  set(CMAKE_CXX_MODULE_STD "${_saved_module_std}")
+
+  # libpq is discovered via pkg-config so the isolated GCC generator does not
+  # depend on the extension's vcpkg libpq. Only bioseq.libpq.client includes it.
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
+
+  list(APPEND _codegen_module_files
+    "${BIOSEQ_REPOSITORY_ROOT}/main/common/libpq/index.cppm"
+    "${_codegen_src}/website/model/index.cppm"
+    "${_codegen_src}/website/front_matter.cppm"
+    "${_codegen_src}/website/markdown_extensions.cppm"
+    "${_codegen_src}/website/markdown.cppm"
+    "${_codegen_src}/website/doxygen_xml.cppm"
+    "${_codegen_src}/website/clang_entity_index.cppm"
+    "${_codegen_src}/website/entity_index.cppm"
+    "${_codegen_src}/website/json.cppm"
+    "${_codegen_src}/website/search.cppm"
+    "${_codegen_src}/website/template_renderer.cppm"
+    "${_codegen_src}/website/version_assembler.cppm"
+    "${_codegen_src}/website/postgres/executor.cppm"
+    "${_codegen_src}/website/postgres/catalog.cppm"
+    "${_codegen_src}/website/postgres/index.cppm"
+    "${_codegen_src}/website/site_builder.cppm"
+    "${_codegen_src}/website/contract_tests.cppm"
+    "${_codegen_src}/website/index.cppm")
+  list(APPEND _codegen_link_libs
+    md4c pugixml::pugixml bioseq_codegen_jinja_shim Boost::json PkgConfig::LIBPQ)
+  string(APPEND _codegen_component_imports "import bioseq.codegen.website;\n")
+  string(APPEND _codegen_component_entries
+    "        {\"website\", &bioseq::codegen::website::self_test, "
+    "&bioseq::codegen::website::run},\n")
 endif()
+
+# Generate the component registry the CLI dispatches through, listing exactly
+# the components compiled into this binary. This keeps cli.cppm free of any
+# per-component preprocessor gating.
+set(BIOSEQ_CODEGEN_COMPONENT_IMPORTS "${_codegen_component_imports}")
+set(BIOSEQ_CODEGEN_COMPONENT_ENTRIES "${_codegen_component_entries}")
+configure_file(
+  "${_codegen_src}/component_registry.cppm.in"
+  "${CMAKE_BINARY_DIR}/generated/component_registry.cppm"
+  @ONLY)
+list(APPEND _codegen_module_files
+  "${CMAKE_BINARY_DIR}/generated/component_registry.cppm")
 
 add_executable(bioseq_codegen "${_codegen_src}/main.cpp")
 target_sources(bioseq_codegen
   PRIVATE FILE_SET CXX_MODULES
     BASE_DIRS ${_codegen_base_dirs}
     FILES ${_codegen_module_files})
-target_compile_definitions(bioseq_codegen PRIVATE ${_codegen_compile_defs})
 if(_codegen_link_libs)
   target_link_libraries(bioseq_codegen PRIVATE ${_codegen_link_libs})
 endif()
