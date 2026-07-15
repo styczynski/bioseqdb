@@ -1355,6 +1355,8 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 				made.error(), begin_admission_evidence));
 			return;
 		}
+		bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+			query_hashes, *query_hash_permit);
 		std::optional<ShapeReader> shape_reader{
 			std::in_place, std::move(*made)};
 		std::optional<MinimizerGenerationWireError> callback_error;

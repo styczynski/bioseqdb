@@ -8708,7 +8708,26 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.global_position_storage_allocations == 1u);
     REQUIRE(evidence.position_append_growth_reservations == 0u);
     REQUIRE(evidence.retained_position_count == query_count);
-    REQUIRE(evidence.retained_position_capacity >= query_count);
+    REQUIRE(evidence.retained_position_capacity == query_count);
+    REQUIRE(evidence.query_record_size_bytes == 40u);
+    REQUIRE(evidence.query_record_count == query_count);
+    REQUIRE(evidence.query_record_capacity >= query_count);
+    REQUIRE(evidence.query_record_capacity_bytes
+        == evidence.query_record_capacity * evidence.query_record_size_bytes);
+    REQUIRE(evidence.query_hash_capacity_bytes == 0u);
+    REQUIRE(evidence.released_query_hash_capacity_bytes
+        >= query_count * sizeof(std::uint64_t));
+    REQUIRE(evidence.decoded_control_records == query_count);
+    REQUIRE(evidence.retained_selected_control_records == query_count);
+    REQUIRE(evidence.selected_control_size_bytes == 40u);
+    REQUIRE(evidence.retained_selected_control_capacity_bytes
+        >= query_count * evidence.selected_control_size_bytes);
+    REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
+    REQUIRE(evidence.global_position_capacity_bytes
+        == evidence.retained_position_capacity * sizeof(std::uint64_t));
+    REQUIRE(evidence.control_payload_capacity_bytes == 0u);
+    REQUIRE(evidence.retained_layout_equation_holds());
+    REQUIRE(evidence.owned_capacity_bytes == reader->admitted_bytes());
     const std::uint64_t extent_count =
         generation->directory.entries().size() * 2u;
     const std::uint64_t fixed_passes = 7u + extent_count;
@@ -8748,10 +8767,54 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.global_position_storage_allocations == 1u);
     REQUIRE(sparse_evidence.position_append_growth_reservations == 0u);
     REQUIRE(sparse_evidence.retained_position_count == 1u);
-    REQUIRE(sparse_evidence.retained_position_capacity >= 1u);
+    REQUIRE(sparse_evidence.retained_position_capacity == 1u);
+    REQUIRE(sparse_evidence.query_record_size_bytes == 40u);
+    REQUIRE(sparse_evidence.query_record_count == 1u);
+    REQUIRE(sparse_evidence.query_hash_capacity_bytes == 0u);
+    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes
+        >= sizeof(std::uint64_t));
+    REQUIRE(sparse_evidence.decoded_control_records > 1u);
+    REQUIRE(sparse_evidence.retained_selected_control_records
+        == sparse_evidence.decoded_control_records);
+    REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
+        >= sparse_evidence.decoded_control_records
+            * sparse_evidence.selected_control_size_bytes);
+    REQUIRE(sparse_evidence.current_selected_control_capacity_bytes == 0u);
+    REQUIRE(sparse_evidence.retained_layout_equation_holds());
+    REQUIRE(sparse_evidence.owned_capacity_bytes
+        == sparse_reader->admitted_bytes());
     REQUIRE(sparse_evidence.capacity_accounting_passes
         == 7u + extent_count + 4u);
     REQUIRE_FALSE(sparse_evidence.saturated);
+
+    // A selected query absent from the target still crosses the same global
+    // controls/positions boundary, but exact P=0 must remain allocation-free.
+    const std::array<std::uint64_t, 1> absent_queries{query_count + 1u};
+    auto empty_reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        absent_queries,
+        10u);
+    REQUIRE(empty_reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(empty_reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(empty_reader->finish().has_value());
+    const auto empty_evidence = empty_reader->memory_evidence();
+    REQUIRE(empty_evidence.global_position_storage_preparations == 1u);
+    REQUIRE(empty_evidence.global_position_storage_allocations == 0u);
+    REQUIRE(empty_evidence.retained_position_count == 0u);
+    REQUIRE(empty_evidence.retained_position_capacity == 0u);
+    REQUIRE(empty_evidence.global_position_capacity_bytes == 0u);
+    REQUIRE(empty_evidence.retained_layout_equation_holds());
+    REQUIRE(empty_evidence.owned_capacity_bytes
+        == empty_reader->admitted_bytes());
+    REQUIRE(empty_reader->lookup(absent_queries.front()).positions.empty());
 
     constexpr std::uint64_t aggregate_sessions = 2u;
     const std::uint64_t aggregate_extents = aggregate_sessions * extent_count;
@@ -8810,7 +8873,7 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         Substage::control_decode_allocation,
         Substage::control_decode_reconcile,
         Substage::position_image_reservation,
-        Substage::position_image_resize,
+        Substage::position_image_allocation,
         Substage::position_image_reconcile,
     };
 
@@ -8879,16 +8942,17 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         REQUIRE(evidence.projected_bytes > 0u);
         REQUIRE(evidence.query_record_count == queries.size());
         REQUIRE(evidence.query_record_capacity >= queries.size());
-        REQUIRE(evidence.releasable_protocol_query_hash_bytes
-            >= queries.size() * sizeof(std::uint64_t));
+        REQUIRE(evidence.releasable_protocol_query_hash_bytes == 0u);
         if (wanted == Substage::position_image_reservation
-            || wanted == Substage::position_image_resize
+            || wanted == Substage::position_image_allocation
             || wanted == Substage::position_image_reconcile) {
             REQUIRE(evidence.retained_position_count == queries.size());
             REQUIRE(evidence.retained_position_bytes
                 == queries.size() * sizeof(std::uint64_t));
-            REQUIRE(evidence.vector_headroom_bytes
-                == 2u * evidence.retained_position_bytes);
+            REQUIRE(evidence.vector_headroom_bytes == 0u);
+            REQUIRE(evidence.projected_bytes
+                == evidence.owned_capacity_bytes
+                    + evidence.retained_position_bytes);
         }
         REQUIRE(made->failed());
         REQUIRE(admission.reserved_bytes() == 0u);
@@ -8924,8 +8988,18 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         const auto ordinary = plan_prepared_shape_v5_position_image(3u, 5u);
         REQUIRE(ordinary.has_value());
         REQUIRE(ordinary->retained_position_bytes == 24u);
-        REQUIRE(ordinary->vector_headroom_bytes == 48u);
-        REQUIRE(ordinary->projected_bytes == 53u);
+        REQUIRE(ordinary->vector_headroom_bytes == 0u);
+        REQUIRE(ordinary->projected_bytes == 29u);
+        constexpr std::uint64_t adversarial_count = 100'000'000u;
+        const auto adversarial = plan_prepared_shape_v5_position_image(
+            adversarial_count, 17u);
+        REQUIRE(adversarial.has_value());
+        REQUIRE(adversarial->retained_position_bytes == 800'000'000u);
+        REQUIRE(adversarial->vector_headroom_bytes == 0u);
+        REQUIRE(adversarial->projected_bytes == 800'000'017u);
+        REQUIRE(adversarial->projected_bytes - 17u
+            < adversarial->retained_position_bytes
+                * bioseq::parallelism::kVectorPreallocationHeadroomFactor);
         require_wire_error(
             plan_prepared_shape_v5_position_image(
                 (std::numeric_limits<std::uint64_t>::max)(), 0u),
@@ -9292,6 +9366,41 @@ TEST_CASE("DOC0373 Format-5 reader releases admission on every terminal path",
                 REQUIRE(destination.accept(row_view(*row)).has_value());
             }
             REQUIRE(destination.finish().has_value());
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("move after exact position allocation transfers array ownership") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        {
+            auto made = begin(admission);
+            REQUIRE(made.has_value());
+            REQUIRE(made->accept(row_view(*payload.front())).has_value());
+            const auto before_move = made->memory_evidence();
+            REQUIRE(before_move.global_position_storage_preparations == 1u);
+            REQUIRE(before_move.global_position_storage_allocations == 1u);
+            REQUIRE(before_move.retained_position_count == 2u);
+            REQUIRE(before_move.retained_position_capacity == 2u);
+            REQUIRE(before_move.global_position_capacity_bytes
+                == 2u * sizeof(std::uint64_t));
+            REQUIRE(before_move.owned_capacity_bytes
+                == made->admitted_bytes());
+            const std::uint64_t reserved = admission.reserved_bytes();
+
+            PreparedShapeV5QueryReader destination{std::move(*made)};
+            REQUIRE(made->failed());
+            REQUIRE(made->admitted_bytes() == 0u);
+            REQUIRE(made->memory_evidence().retained_position_count == 0u);
+            REQUIRE(made->memory_evidence().retained_position_capacity == 0u);
+            REQUIRE(admission.reserved_bytes() == reserved);
+            REQUIRE(destination.memory_evidence().retained_position_count
+                == 2u);
+            REQUIRE(destination.accept(row_view(*payload.back())).has_value());
+            REQUIRE(destination.finish().has_value());
+            const auto found = destination.lookup(1u);
+            REQUIRE(found.positions.size() == 2u);
+            REQUIRE(found.positions[0] == 2u);
+            REQUIRE(found.positions[1] == 4u);
         }
         REQUIRE(admission.reserved_bytes() == 0u);
     }

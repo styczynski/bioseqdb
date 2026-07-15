@@ -3966,7 +3966,7 @@ enum class PreparedShapeV5QueryAdmissionSubstage : std::uint8_t {
     control_decode_allocation,
     control_decode_reconcile,
     position_image_reservation,
-    position_image_resize,
+    position_image_allocation,
     position_image_reconcile,
 };
 
@@ -4005,8 +4005,8 @@ prepared_shape_v5_query_admission_substage_name(
             return "control_decode_reconcile";
         case PreparedShapeV5QueryAdmissionSubstage::position_image_reservation:
             return "position_image_reservation";
-        case PreparedShapeV5QueryAdmissionSubstage::position_image_resize:
-            return "position_image_resize";
+        case PreparedShapeV5QueryAdmissionSubstage::position_image_allocation:
+            return "position_image_allocation";
         case PreparedShapeV5QueryAdmissionSubstage::position_image_reconcile:
             return "position_image_reconcile";
     }
@@ -4078,16 +4078,15 @@ plan_prepared_shape_v5_position_image(
     const std::uint64_t retained_position_bytes =
         bioseq::parallelism::saturating_mul(
             retained_position_count, sizeof(std::uint64_t));
-    const std::uint64_t vector_headroom_bytes =
-        bioseq::parallelism::saturating_mul(
-            retained_position_bytes,
-            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    // The Format-5 image is one exact owned array: unlike a vector reserve,
+    // its requested element count and admitted ownership are both exactly P.
+    // Keep the legacy diagnostic field explicit at zero so SQL evidence can
+    // distinguish this path from conservative vector preallocation.
+    constexpr std::uint64_t vector_headroom_bytes = 0u;
     const std::uint64_t projected_bytes =
         bioseq::parallelism::saturating_add(
-            owned_capacity_bytes, vector_headroom_bytes);
+            owned_capacity_bytes, retained_position_bytes);
     if (retained_position_bytes
-                == (std::numeric_limits<std::uint64_t>::max)()
-        || vector_headroom_bytes
                 == (std::numeric_limits<std::uint64_t>::max)()
         || projected_bytes
                 == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -4607,6 +4606,34 @@ namespace minimizer_prepared_reader_detail {
 template <class Traits>
 struct PreparedQueryWireOps;
 
+/// Format 5 stores retained positions in one flat image and therefore must not
+/// pay for one empty `std::vector` object per query hash.  Format 4 keeps the
+/// existing per-record vector because its control/position phases interleave.
+template <class Hash, bool FlatPositionImage>
+struct PreparedQueryRecord;
+
+template <class Hash>
+struct PreparedQueryRecord<Hash, true> {
+    Hash hash = 0;
+    std::uint64_t global_occurrence_count = 0;
+    std::uint64_t global_position_offset = 0;
+    std::uint64_t global_positions_written = 0;
+    bool positions_complete = true;
+};
+
+template <class Hash>
+struct PreparedQueryRecord<Hash, false> {
+    Hash hash = 0;
+    std::uint64_t global_occurrence_count = 0;
+    std::uint64_t global_position_offset = 0;
+    std::uint64_t global_positions_written = 0;
+    bool positions_complete = true;
+    std::vector<std::uint64_t> positions;
+};
+
+static_assert(sizeof(PreparedQueryRecord<std::uint64_t, true>) == 40u);
+static_assert(sizeof(PreparedQueryRecord<std::uint64_t, false>) == 64u);
+
 template <>
 struct PreparedQueryWireOps<CodecTraits<
     MinimizerGenerationWireFormat::grouped_hash32_segment_local32>> {
@@ -4773,20 +4800,8 @@ protected:
     static constexpr std::size_t no_route =
         (std::numeric_limits<std::size_t>::max)();
 
-    struct QueryRecord {
-        hash_type hash = 0;
-        std::uint64_t global_occurrence_count = 0;
-        // Format 5 learns every target-global occurrence count while reading
-        // the globally ordered control half of the payload.  Its position
-        // half therefore writes into one pre-admitted flat allocation instead
-        // of growing one vector (and re-running live OS memory probes) for
-        // every query hash.  Format 4 retains the per-record vector because
-        // its controls and positions are interleaved by segment.
-        std::uint64_t global_position_offset = 0;
-        std::uint64_t global_positions_written = 0;
-        bool positions_complete = true;
-        std::vector<std::uint64_t> positions;
-    };
+    using QueryRecord = PreparedQueryRecord<
+        hash_type, Traits::global_controls_then_positions>;
 
     struct SelectedControl {
         std::size_t query_index = no_route;
@@ -4813,7 +4828,11 @@ protected:
 
     std::vector<hash_type> protocol_query_hashes_;
     std::vector<QueryRecord> protocol_query_records_;
-    std::vector<std::uint64_t> protocol_global_positions_;
+    // Format 5 knows the final retained position count before allocation.
+    // Keep one exact array rather than a vector whose conservative admission
+    // peak is 2x the requested bytes. Format 4 does not use this member.
+    std::unique_ptr<std::uint64_t[]> protocol_global_positions_;
+    std::size_t protocol_global_position_count_ = 0u;
     std::vector<std::size_t> protocol_ordinal_to_selected_;
     std::vector<SelectedExtent> protocol_selected_extents_;
     std::optional<ExtentSession> protocol_session_{};
@@ -4839,6 +4858,10 @@ protected:
         std::uint64_t global_position_storage_preparations = 0;
         std::uint64_t global_position_storage_allocations = 0;
         std::uint64_t position_append_growth_reservations = 0;
+        std::uint64_t decoded_control_records = 0;
+        std::uint64_t retained_selected_control_records = 0;
+        std::uint64_t retained_selected_control_capacity_bytes = 0;
+        std::uint64_t released_query_hash_capacity_bytes = 0;
         bool saturated = false;
     };
     mutable ProtocolMemoryEvidence protocol_memory_evidence_{};
@@ -4871,7 +4894,7 @@ protected:
         add(protocol_query_hashes_.capacity(), sizeof(hash_type));
         add(protocol_query_records_.capacity(), sizeof(QueryRecord));
         if constexpr (Traits::global_controls_then_positions) {
-            add(protocol_global_positions_.capacity(), sizeof(std::uint64_t));
+            add(protocol_global_position_count_, sizeof(std::uint64_t));
         } else {
             for (const QueryRecord& record : protocol_query_records_) {
                 add(record.positions.capacity(), sizeof(std::uint64_t));
@@ -4934,7 +4957,8 @@ protected:
         protocol_session_.reset();
         std::vector<SelectedExtent>{}.swap(protocol_selected_extents_);
         std::vector<std::size_t>{}.swap(protocol_ordinal_to_selected_);
-        std::vector<std::uint64_t>{}.swap(protocol_global_positions_);
+        protocol_global_positions_.reset();
+        protocol_global_position_count_ = 0u;
         std::vector<QueryRecord>{}.swap(protocol_query_records_);
         std::vector<hash_type>{}.swap(protocol_query_hashes_);
         protocol_global_position_storage_prepared_ = false;
@@ -4954,6 +4978,8 @@ protected:
     }
 
     void mark_protocol_moved_from() noexcept {
+        protocol_global_positions_.reset();
+        protocol_global_position_count_ = 0u;
         protocol_global_position_storage_prepared_ = false;
         protocol_initialized_ = true;
         protocol_ready_ = false;
@@ -4966,6 +4992,17 @@ protected:
             protocol_memory_evidence_.saturated = true;
         } else {
             ++counter;
+        }
+    }
+
+    void add_memory_evidence_(
+            std::uint64_t& counter,
+            std::uint64_t delta) noexcept {
+        if (counter > (std::numeric_limits<std::uint64_t>::max)() - delta) {
+            counter = (std::numeric_limits<std::uint64_t>::max)();
+            protocol_memory_evidence_.saturated = true;
+        } else {
+            counter += delta;
         }
     }
 
@@ -5091,7 +5128,7 @@ protected:
     /// Format 5 persists all controls before all positions.  At the phase
     /// boundary every selected hash's target-global occurrence count is final,
     /// so admit and allocate the complete retained-position image once.  This
-    /// is intentionally one flat vector: a query union with Q mostly-unique
+    /// is intentionally one exact flat array: a query union with Q mostly-unique
     /// hashes must not perform Q live Mach/host memory probes, Q heap
     /// allocations, or Q full ownership walks before it can read positions.
     [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
@@ -5101,7 +5138,8 @@ protected:
         }
         if (protocol_global_position_storage_prepared_
             || !protocol_position_phase_ || protocol_entry_index_ != 0u
-            || protocol_session_ || !protocol_global_positions_.empty()) {
+            || protocol_session_ || protocol_global_positions_
+            || protocol_global_position_count_ != 0u) {
             return std::unexpected(MinimizerGenerationWireError::row_order);
         }
         increment_memory_evidence_(
@@ -5109,8 +5147,7 @@ protected:
 
         std::uint64_t retained_count = 0;
         for (QueryRecord& record : protocol_query_records_) {
-            if (!record.positions.empty()
-                || record.global_position_offset != 0u
+            if (record.global_position_offset != 0u
                 || record.global_positions_written != 0u) {
                 return std::unexpected(
                     MinimizerGenerationWireError::row_order);
@@ -5125,7 +5162,8 @@ protected:
             }
             retained_count += record.global_occurrence_count;
         }
-        if (retained_count > protocol_global_positions_.max_size()) {
+        if (retained_count
+                > (std::numeric_limits<std::size_t>::max)()) {
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
@@ -5156,23 +5194,29 @@ protected:
                 &position_failure);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
-        if (inject_admission_failure_(
+        if (retained_count != 0u
+            && inject_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
-                    position_image_resize)) {
+                    position_image_allocation)) {
             capture_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
-                    position_image_resize,
+                    position_image_allocation,
                 projected, retained_count, retained_bytes, headroom,
                 nullptr, true);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         try {
-            protocol_global_positions_.resize(
-                static_cast<std::size_t>(retained_count));
+            if (retained_count != 0u) {
+                protocol_global_positions_ =
+                    std::make_unique_for_overwrite<std::uint64_t[]>(
+                        static_cast<std::size_t>(retained_count));
+            }
+            protocol_global_position_count_ =
+                static_cast<std::size_t>(retained_count);
         } catch (const std::bad_alloc&) {
             capture_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
-                    position_image_resize,
+                    position_image_allocation,
                 projected, retained_count, retained_bytes, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
@@ -5206,13 +5250,27 @@ protected:
             std::uint64_t hash) const noexcept {
         if (hash > (std::numeric_limits<hash_type>::max)()) return no_route;
         const hash_type narrowed = static_cast<hash_type>(hash);
-        const auto found = std::lower_bound(
-            protocol_query_hashes_.begin(),
-            protocol_query_hashes_.end(), narrowed);
-        return found != protocol_query_hashes_.end() && *found == narrowed
-            ? static_cast<std::size_t>(
-                found - protocol_query_hashes_.begin())
-            : no_route;
+        if constexpr (Traits::global_controls_then_positions) {
+            const auto found = std::lower_bound(
+                protocol_query_records_.begin(),
+                protocol_query_records_.end(), narrowed,
+                [](const QueryRecord& record, hash_type wanted) noexcept {
+                    return record.hash < wanted;
+                });
+            return found != protocol_query_records_.end()
+                    && found->hash == narrowed
+                ? static_cast<std::size_t>(
+                    found - protocol_query_records_.begin())
+                : no_route;
+        } else {
+            const auto found = std::lower_bound(
+                protocol_query_hashes_.begin(),
+                protocol_query_hashes_.end(), narrowed);
+            return found != protocol_query_hashes_.end() && *found == narrowed
+                ? static_cast<std::size_t>(
+                    found - protocol_query_hashes_.begin())
+                : no_route;
+        }
     }
 
     [[nodiscard]] bool query_intersects_entry(
@@ -5527,6 +5585,28 @@ protected:
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
+        if constexpr (Traits::global_controls_then_positions) {
+            const std::uint64_t released_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(
+                        protocol_query_hashes_.capacity()),
+                    sizeof(hash_type));
+            if (released_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || released_bytes > this->permit_.bytes()) {
+                return protocol_poison<void>(
+                    MinimizerGenerationWireError::arithmetic_overflow);
+            }
+            {
+                std::vector<hash_type> empty;
+                protocol_query_hashes_.swap(empty);
+            }
+            this->permit_.shrink_to(this->permit_.bytes() - released_bytes);
+            add_memory_evidence_(
+                protocol_memory_evidence_.
+                    released_query_hash_capacity_bytes,
+                released_bytes);
+        }
         initialize_physical_cursor();
         protocol_initialized_ = true;
         return {};
@@ -5542,9 +5622,13 @@ protected:
         std::uint64_t transient = bioseq::parallelism::saturating_mul(
             entry.control_element_count,
             sizeof(typename WireOps::control_type));
-        std::uint64_t retained = selected_index == no_route ? 0u
-            : bioseq::parallelism::saturating_mul(
-                entry.control_element_count, sizeof(SelectedControl));
+        // Keep every control in an intersected extent. Besides query routing,
+        // these records preserve strict per-control position-order validation
+        // for authenticated controls whose hashes were not queried.
+        const std::uint64_t retained_control_count =
+            selected_index == no_route ? 0u : entry.control_element_count;
+        std::uint64_t retained = bioseq::parallelism::saturating_mul(
+            retained_control_count, sizeof(SelectedControl));
         const std::uint64_t additional =
             bioseq::parallelism::saturating_add(transient, retained);
         const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
@@ -5591,9 +5675,13 @@ protected:
                 const auto decoded = WireOps::decode_controls(
                     bytes, entry, this->profile_);
                 if (!decoded) return std::unexpected(decoded.error());
+                add_memory_evidence_(
+                    protocol_memory_evidence_.decoded_control_records,
+                    static_cast<std::uint64_t>(decoded->size()));
                 if (selected_index == no_route) return {};
                 SelectedExtent& selected =
                     protocol_selected_extents_[selected_index];
+                const std::size_t retained_before = selected.controls.size();
                 selected.controls.reserve(decoded->size());
                 for (const auto& control : *decoded) {
                     const std::size_t query_index =
@@ -5619,8 +5707,11 @@ protected:
                         record.global_occurrence_count += count;
                         if (record.global_occurrence_count
                                 > protocol_max_occ_) {
-                            std::vector<std::uint64_t>{}.swap(
-                                record.positions);
+                            if constexpr (!Traits::
+                                    global_controls_then_positions) {
+                                std::vector<std::uint64_t>{}.swap(
+                                    record.positions);
+                            }
                             record.positions_complete = false;
                         }
                     }
@@ -5630,6 +5721,18 @@ protected:
                         .position_end = end,
                     });
                 }
+                add_memory_evidence_(
+                    protocol_memory_evidence_.
+                        retained_selected_control_records,
+                    static_cast<std::uint64_t>(
+                        selected.controls.size() - retained_before));
+                add_memory_evidence_(
+                    protocol_memory_evidence_.
+                        retained_selected_control_capacity_bytes,
+                    bioseq::parallelism::saturating_mul(
+                        static_cast<std::uint64_t>(
+                            selected.controls.capacity()),
+                        sizeof(SelectedControl)));
                 selected.controls_complete = true;
                 return {};
             } catch (const std::bad_alloc&) {
@@ -5673,9 +5776,9 @@ protected:
                 || record.global_positions_written
                     >= record.global_occurrence_count
                 || record.global_position_offset
-                    > protocol_global_positions_.size()
+                    > protocol_global_position_count_
                 || record.global_positions_written
-                    > protocol_global_positions_.size()
+                    > protocol_global_position_count_
                         - record.global_position_offset) {
                 return std::unexpected(
                     MinimizerGenerationWireError::element_count);
@@ -5683,7 +5786,7 @@ protected:
             const std::uint64_t destination =
                 record.global_position_offset
                 + record.global_positions_written;
-            if (destination >= protocol_global_positions_.size()) {
+            if (destination >= protocol_global_position_count_) {
                 return std::unexpected(
                     MinimizerGenerationWireError::element_count);
             }
@@ -5697,56 +5800,58 @@ protected:
                 static_cast<std::size_t>(destination)] = value;
             ++record.global_positions_written;
             return {};
-        }
-        if (!record.positions.empty() && value <= record.positions.back()) {
-            return std::unexpected(
-                MinimizerGenerationWireError::position_range);
-        }
-        if (record.positions.size() == record.positions.capacity()) {
-            increment_memory_evidence_(
-                protocol_memory_evidence_.
-                    position_append_growth_reservations);
-            const std::size_t maximum = static_cast<std::size_t>(
-                std::min<std::uint64_t>(
-                    protocol_max_occ_, record.positions.max_size()));
-            const std::size_t required = record.positions.size() + 1u;
-            if (required > maximum) {
+        } else {
+            if (!record.positions.empty()
+                && value <= record.positions.back()) {
                 return std::unexpected(
-                    MinimizerGenerationWireError::arithmetic_overflow);
+                    MinimizerGenerationWireError::position_range);
             }
-            std::size_t wanted = record.positions.empty()
-                ? std::min<std::size_t>(maximum, 8u)
-                : record.positions.capacity() > maximum / 2u
-                    ? maximum : record.positions.capacity() * 2u;
-            wanted = std::max(wanted, required);
-            PermitGrowthGuard guard{*this};
-            const std::uint64_t additional =
-                bioseq::parallelism::saturating_mul(
-                    wanted, sizeof(std::uint64_t));
-            const std::uint64_t projected =
-                bioseq::parallelism::saturating_add(
-                    protocol_owned_capacity_bytes(),
+            if (record.positions.size() == record.positions.capacity()) {
+                increment_memory_evidence_(
+                    protocol_memory_evidence_.
+                        position_append_growth_reservations);
+                const std::size_t maximum = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        protocol_max_occ_, record.positions.max_size()));
+                const std::size_t required = record.positions.size() + 1u;
+                if (required > maximum) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::arithmetic_overflow);
+                }
+                std::size_t wanted = record.positions.empty()
+                    ? std::min<std::size_t>(maximum, 8u)
+                    : record.positions.capacity() > maximum / 2u
+                        ? maximum : record.positions.capacity() * 2u;
+                wanted = std::max(wanted, required);
+                PermitGrowthGuard guard{*this};
+                const std::uint64_t additional =
                     bioseq::parallelism::saturating_mul(
-                        additional,
-                        bioseq::parallelism::
-                            kVectorPreallocationHeadroomFactor));
-            if (!guard.grow(projected)) {
-                return std::unexpected(
-                    MinimizerGenerationWireError::admission);
+                        wanted, sizeof(std::uint64_t));
+                const std::uint64_t projected =
+                    bioseq::parallelism::saturating_add(
+                        protocol_owned_capacity_bytes(),
+                        bioseq::parallelism::saturating_mul(
+                            additional,
+                            bioseq::parallelism::
+                                kVectorPreallocationHeadroomFactor));
+                if (!guard.grow(projected)) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::admission);
+                }
+                try {
+                    record.positions.reserve(wanted);
+                } catch (const std::bad_alloc&) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::admission);
+                }
+                if (!guard.reconcile()) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::admission);
+                }
             }
-            try {
-                record.positions.reserve(wanted);
-            } catch (const std::bad_alloc&) {
-                return std::unexpected(
-                    MinimizerGenerationWireError::admission);
-            }
-            if (!guard.reconcile()) {
-                return std::unexpected(
-                    MinimizerGenerationWireError::admission);
-            }
+            record.positions.push_back(value);
+            return {};
         }
-        record.positions.push_back(value);
-        return {};
     }
 
     [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
@@ -6075,9 +6180,9 @@ protected:
                     if (record.global_positions_written
                             != record.global_occurrence_count
                         || record.global_position_offset
-                            > protocol_global_positions_.size()
+                            > protocol_global_position_count_
                         || record.global_occurrence_count
-                            > protocol_global_positions_.size()
+                            > protocol_global_position_count_
                                 - record.global_position_offset) {
                         return protocol_poison<void>(
                             MinimizerGenerationWireError::element_count);
@@ -6118,12 +6223,12 @@ protected:
             if (found->positions_complete
                 && found->global_occurrence_count != 0u
                 && found->global_position_offset
-                    <= protocol_global_positions_.size()
+                    <= protocol_global_position_count_
                 && found->global_occurrence_count
-                    <= protocol_global_positions_.size()
+                    <= protocol_global_position_count_
                         - found->global_position_offset) {
                 positions = std::span<const std::uint64_t>{
-                    protocol_global_positions_.data()
+                    protocol_global_positions_.get()
                         + static_cast<std::size_t>(
                             found->global_position_offset),
                     static_cast<std::size_t>(
@@ -6142,17 +6247,18 @@ protected:
     [[nodiscard]] std::size_t
     protocol_retained_position_count() const noexcept {
         if constexpr (Traits::global_controls_then_positions) {
-            return protocol_global_positions_.size();
-        }
-        std::size_t count = 0;
-        for (const QueryRecord& record : protocol_query_records_) {
-            if (record.positions.size()
-                    > (std::numeric_limits<std::size_t>::max)() - count) {
-                return (std::numeric_limits<std::size_t>::max)();
+            return protocol_global_position_count_;
+        } else {
+            std::size_t count = 0;
+            for (const QueryRecord& record : protocol_query_records_) {
+                if (record.positions.size()
+                        > (std::numeric_limits<std::size_t>::max)() - count) {
+                    return (std::numeric_limits<std::size_t>::max)();
+                }
+                count += record.positions.size();
             }
-            count += record.positions.size();
+            return count;
         }
-        return count;
     }
 
     [[nodiscard]] const PreparedShapeV5QueryAdmissionEvidence&
@@ -6179,8 +6285,45 @@ struct PreparedShapeV5QueryReaderMemoryEvidence {
     std::uint64_t global_position_storage_allocations = 0;
     std::uint64_t position_append_growth_reservations = 0;
     std::uint64_t retained_position_count = 0;
+    // Exact allocated array elements. For Format 5 this must equal the
+    // retained count; the exported capacity name remains stable for E2E SQL.
     std::uint64_t retained_position_capacity = 0;
+    std::uint64_t query_record_size_bytes = 0;
+    std::uint64_t query_record_count = 0;
+    std::uint64_t query_record_capacity = 0;
+    std::uint64_t query_record_capacity_bytes = 0;
+    std::uint64_t query_hash_capacity_bytes = 0;
+    std::uint64_t released_query_hash_capacity_bytes = 0;
+    std::uint64_t decoded_control_records = 0;
+    std::uint64_t retained_selected_control_records = 0;
+    std::uint64_t selected_control_size_bytes = 0;
+    std::uint64_t retained_selected_control_capacity_bytes = 0;
+    std::uint64_t current_selected_control_capacity_bytes = 0;
+    std::uint64_t directory_capacity_bytes = 0;
+    std::uint64_t ordinal_route_capacity_bytes = 0;
+    std::uint64_t selected_extent_capacity_bytes = 0;
+    // Exact array bytes, not allocator headroom or vector capacity.
+    std::uint64_t global_position_capacity_bytes = 0;
+    std::uint64_t control_payload_capacity_bytes = 0;
+    std::uint64_t owned_capacity_bytes = 0;
     bool saturated = false;
+
+    [[nodiscard]] bool retained_layout_equation_holds() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        std::uint64_t accounted = directory_capacity_bytes;
+        accounted = saturating_add(accounted, query_hash_capacity_bytes);
+        accounted = saturating_add(accounted, query_record_capacity_bytes);
+        accounted = saturating_add(accounted, ordinal_route_capacity_bytes);
+        accounted = saturating_add(accounted, selected_extent_capacity_bytes);
+        accounted = saturating_add(
+            accounted, current_selected_control_capacity_bytes);
+        accounted = saturating_add(
+            accounted, global_position_capacity_bytes);
+        accounted = saturating_add(
+            accounted, control_payload_capacity_bytes);
+        return accounted != (std::numeric_limits<std::uint64_t>::max)()
+            && accounted == owned_capacity_bytes;
+    }
 };
 
 /// Backend-independent scalar Format-5 reader. The facade consumes the same
@@ -6346,6 +6489,57 @@ public:
 
     [[nodiscard]] PreparedShapeV5QueryReaderMemoryEvidence
     memory_evidence() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t current_selected_control_capacity_bytes = 0u;
+        for (const auto& extent : this->protocol_selected_extents_) {
+            current_selected_control_capacity_bytes = saturating_add(
+                current_selected_control_capacity_bytes,
+                saturating_mul(
+                    static_cast<std::uint64_t>(extent.controls.capacity()),
+                    sizeof(typename ProtocolCore::SelectedControl)));
+        }
+        const std::uint64_t query_record_capacity_bytes = saturating_mul(
+            static_cast<std::uint64_t>(
+                this->protocol_query_records_.capacity()),
+            sizeof(typename ProtocolCore::QueryRecord));
+        const std::uint64_t query_hash_capacity_bytes = saturating_mul(
+            static_cast<std::uint64_t>(
+                this->protocol_query_hashes_.capacity()),
+            sizeof(typename ProtocolCore::hash_type));
+        const std::uint64_t ordinal_route_capacity_bytes = saturating_mul(
+            static_cast<std::uint64_t>(
+                this->protocol_ordinal_to_selected_.capacity()),
+            sizeof(std::size_t));
+        const std::uint64_t selected_extent_capacity_bytes = saturating_mul(
+            static_cast<std::uint64_t>(
+                this->protocol_selected_extents_.capacity()),
+            sizeof(typename ProtocolCore::SelectedExtent));
+        const std::uint64_t global_position_capacity_bytes = saturating_mul(
+            static_cast<std::uint64_t>(
+                this->protocol_global_position_count_),
+            sizeof(std::uint64_t));
+        const std::uint64_t control_payload_capacity_bytes =
+            this->protocol_session_
+            ? static_cast<std::uint64_t>(
+                this->protocol_session_->control_bytes.capacity()) : 0u;
+        std::uint64_t owned_capacity_bytes =
+            this->directory_.owned_capacity_bytes();
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes, query_hash_capacity_bytes);
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes, query_record_capacity_bytes);
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes, ordinal_route_capacity_bytes);
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes, selected_extent_capacity_bytes);
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes,
+            current_selected_control_capacity_bytes);
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes, global_position_capacity_bytes);
+        owned_capacity_bytes = saturating_add(
+            owned_capacity_bytes, control_payload_capacity_bytes);
         return PreparedShapeV5QueryReaderMemoryEvidence{
             .capacity_accounting_passes =
                 this->protocol_memory_evidence_.capacity_accounting_passes,
@@ -6360,10 +6554,43 @@ public:
                     position_append_growth_reservations,
             .retained_position_count =
                 static_cast<std::uint64_t>(
-                    this->protocol_global_positions_.size()),
+                    this->protocol_global_position_count_),
             .retained_position_capacity =
                 static_cast<std::uint64_t>(
-                    this->protocol_global_positions_.capacity()),
+                    this->protocol_global_position_count_),
+            .query_record_size_bytes =
+                sizeof(typename ProtocolCore::QueryRecord),
+            .query_record_count = static_cast<std::uint64_t>(
+                this->protocol_query_records_.size()),
+            .query_record_capacity = static_cast<std::uint64_t>(
+                this->protocol_query_records_.capacity()),
+            .query_record_capacity_bytes = query_record_capacity_bytes,
+            .query_hash_capacity_bytes = query_hash_capacity_bytes,
+            .released_query_hash_capacity_bytes =
+                this->protocol_memory_evidence_.
+                    released_query_hash_capacity_bytes,
+            .decoded_control_records =
+                this->protocol_memory_evidence_.decoded_control_records,
+            .retained_selected_control_records =
+                this->protocol_memory_evidence_.
+                    retained_selected_control_records,
+            .selected_control_size_bytes =
+                sizeof(typename ProtocolCore::SelectedControl),
+            .retained_selected_control_capacity_bytes =
+                this->protocol_memory_evidence_.
+                    retained_selected_control_capacity_bytes,
+            .current_selected_control_capacity_bytes =
+                current_selected_control_capacity_bytes,
+            .directory_capacity_bytes =
+                this->directory_.owned_capacity_bytes(),
+            .ordinal_route_capacity_bytes = ordinal_route_capacity_bytes,
+            .selected_extent_capacity_bytes =
+                selected_extent_capacity_bytes,
+            .global_position_capacity_bytes =
+                global_position_capacity_bytes,
+            .control_payload_capacity_bytes =
+                control_payload_capacity_bytes,
+            .owned_capacity_bytes = owned_capacity_bytes,
             .saturated = this->protocol_memory_evidence_.saturated,
         };
     }
