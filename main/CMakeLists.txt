@@ -27,6 +27,24 @@ option(BIOSEQ_BUILD_CACHE
   "Build the independent PostgreSQL query cache extension" ON)
 option(BIOSEQ_BUILD_PAPERS
   "Build paper and chart targets" ON)
+option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
+  "Configure generated external API clients and their integration tests" OFF)
+option(BIOSEQ_BUILD_WEBSITE
+  "Build versioned static documentation website" OFF)
+set(BIOSEQ_WEBSITE_VERSION "" CACHE STRING
+  "Website source version directory, for example v0.1")
+set(BIOSEQ_WEBSITE_BASE_PATH "" CACHE STRING
+  "URL base path; empty uses site.yaml")
+set(BIOSEQ_WEBSITE_OUTPUT_DIRECTORY "" CACHE PATH
+  "Build-tree site output; empty uses <binary>/website/site")
+set(BIOSEQ_WEBSITE_SOURCE_REVISION "" CACHE STRING
+  "40-hex source commit; empty resolves Git HEAD")
+set(BIOSEQ_WEBSITE_VERSION_ARTIFACTS "" CACHE STRING
+  "Semicolon-separated successful historical site roots to assemble")
+option(BIOSEQ_WEBSITE_INCLUDE_DRAFTS
+  "Render validated draft tutorials" OFF)
+option(BIOSEQ_WEBSITE_BROWSER_TESTS
+  "Run pinned Playwright acceptance tests" OFF)
 
 # Change this (or override it without editing this file):
 # CMAKE_NAMED_ENV_TYPE selects the per-machine toolchain block below. Resolution
@@ -286,6 +304,26 @@ include(AddPostgreSQLExtension)
 # https://cliutils.gitlab.io/modern-cmake/chapters/testing.html
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   include(CTest)
+endif()
+
+# Provision the reusable isolated code generator once for the enabled component
+# union (external API clients + website). The external/website consumers depend
+# on the returned bioseq_codegen / bioseq_codegen_project targets and never
+# create another ExternalProject.
+include(BioseqCodegen)
+set(_bioseq_codegen_components)
+if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
+  list(APPEND _bioseq_codegen_components external)
+endif()
+if(BIOSEQ_BUILD_WEBSITE)
+  list(APPEND _bioseq_codegen_components website)
+endif()
+if(_bioseq_codegen_components)
+  bioseq_add_codegen(
+    TARGET bioseq_codegen
+    PROJECT_TARGET bioseq_codegen_project
+    BINARY_DIR "${CMAKE_BINARY_DIR}/codegen"
+    COMPONENTS ${_bioseq_codegen_components})
 endif()
 
 # Include extensions and their shared code

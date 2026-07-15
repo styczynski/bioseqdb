@@ -149,10 +149,12 @@ function(bioseq_add_codegen)
     USES_TERMINAL_CONFIGURE TRUE
     USES_TERMINAL_BUILD TRUE)
 
+  # Imported handle for the built executable. Consumers order their generation
+  # custom commands via DEPENDS on ${ARG_PROJECT_TARGET} plus the byproduct
+  # path; add_dependencies() is not valid on an imported target.
   add_executable(${ARG_TARGET} IMPORTED GLOBAL)
   set_target_properties(${ARG_TARGET} PROPERTIES
     IMPORTED_LOCATION "${_executable}")
-  add_dependencies(${ARG_TARGET} ${ARG_PROJECT_TARGET})
 
   set(BIOSEQ_CODEGEN_EXECUTABLE "${_executable}" CACHE INTERNAL
     "Path to the built bioseq_codegen host-tool executable")
