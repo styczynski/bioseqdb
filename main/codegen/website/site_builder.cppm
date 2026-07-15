@@ -901,6 +901,61 @@ void atomic_publish(const fs::path& staging, const fs::path& output) {
     fs::remove_all(staging, error);
 }
 
+[[nodiscard]] std::size_t count_substring(std::string_view text, std::string_view needle) {
+    std::size_t total = 0;
+    std::size_t position = text.find(needle);
+    while (position != std::string_view::npos) {
+        ++total;
+        position = text.find(needle, position + needle.size());
+    }
+    return total;
+}
+
+// Fails the build if a generated HTML page violates the §14/§15.4/§15.5/§20.7
+// invariants: no unrendered template placeholder, no javascript: URL, no inline
+// event handler or style, no external script/stylesheet resource, exactly one
+// <h1>, the meta CSP present, and frame-ancestors kept out of the meta element.
+void validate_generated_html(std::string_view route, std::string_view html) {
+    const auto fail = [&](std::string_view why) {
+        throw std::runtime_error("generated HTML validation failed for "
+                                 + std::string(route) + ": " + std::string(why));
+    };
+    if (html.find("{{") != std::string_view::npos
+        || html.find("}}") != std::string_view::npos) {
+        fail("contains an unrendered template placeholder");
+    }
+    if (html.find("javascript:") != std::string_view::npos) {
+        fail("contains a javascript: URL");
+    }
+    for (const std::string_view handler :
+         {" onclick=", " onload=", " onerror=", " onmouseover=", " onfocus=",
+          " onsubmit=", " onchange="}) {
+        if (html.find(handler) != std::string_view::npos) {
+            fail("contains an inline event handler");
+        }
+    }
+    if (html.find(" style=") != std::string_view::npos) {
+        fail("contains an inline style attribute");
+    }
+    if (html.find("src=\"http") != std::string_view::npos
+        || html.find("src='http") != std::string_view::npos) {
+        fail("references an external script/media resource");
+    }
+    if (html.find("<link") != std::string_view::npos
+        && html.find("stylesheet\" href=\"http") != std::string_view::npos) {
+        fail("references an external stylesheet");
+    }
+    if (count_substring(html, "<h1") != 1) {
+        fail("must contain exactly one <h1>");
+    }
+    if (html.find("Content-Security-Policy") == std::string_view::npos) {
+        fail("missing the meta Content-Security-Policy");
+    }
+    if (html.find("frame-ancestors") != std::string_view::npos) {
+        fail("frame-ancestors must not appear in the meta CSP");
+    }
+}
+
 // Writes one rendered artifact into staging at a site-relative "/" route,
 // recording its route and content SHA-256 for the manifest. The manifest itself
 // is written afterward and is never one of these entries (§16).
@@ -911,6 +966,9 @@ struct staging_writer {
     void emit(std::string_view route, std::string_view content) {
         if (!route.starts_with("/")) {
             throw std::runtime_error("site route must be absolute: " + std::string(route));
+        }
+        if (route.ends_with(".html")) {
+            validate_generated_html(route, content);
         }
         const fs::path destination = root / route.substr(1);
         fs::create_directories(destination.parent_path());
