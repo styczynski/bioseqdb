@@ -240,18 +240,17 @@ TEST_CASE("DOC0371 publication RETURNING must equal every proven head byte",
 
 TEST_CASE("DOC0371 admitted owned buffers die before their permit",
           "[indexing][chunk-io][rev3][admission]") {
-    auto& admission =
-        bioseq::parallelism::MemoryAdmissionController::instance();
+    bioseq::parallelism::MemoryAdmissionController admission;
     REQUIRE(admission.reserved_bytes() == 0u);
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
     admission.set_index_memory_cap_bytes(1u << 20u);
     std::uint64_t observed_during_buffer_destruction = 0;
 
     struct BufferLifetimeProbe {
+        bioseq::parallelism::MemoryAdmissionController* admission = nullptr;
         std::uint64_t* observed = nullptr;
         ~BufferLifetimeProbe() {
-            *observed = bioseq::parallelism::MemoryAdmissionController::instance()
-                .reserved_bytes();
+            *observed = admission->reserved_bytes();
         }
     };
     struct AdmittedOwner {
@@ -265,6 +264,7 @@ TEST_CASE("DOC0371 admitted owned buffers die before their permit",
         AdmittedOwner owner{
             .permit = std::move(*permit),
             .buffer = BufferLifetimeProbe{
+                .admission = &admission,
                 .observed = &observed_during_buffer_destruction},
         };
         REQUIRE(admission.reserved_bytes() == 4096u);

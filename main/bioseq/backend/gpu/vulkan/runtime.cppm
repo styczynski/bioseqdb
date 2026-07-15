@@ -4188,6 +4188,10 @@ public:
     [[nodiscard]] std::uint64_t generate_units_dispatch_count() const noexcept {
         return generate_units_dispatch_count_.load(std::memory_order_relaxed);
     }
+    [[nodiscard]] std::uint64_t pipeline_cache_metadata_reserved_bytes() {
+        std::lock_guard<std::mutex> guard(mu_);
+        return pipeline_cache_metadata_permit_.bytes();
+    }
     [[nodiscard]] PersistedShapeV5CoordinateAcceptedOperation
     finalize_persisted_shape_v5_coordinate_operation(
         PersistedShapeV5CoordinateOperationProof&& proof);

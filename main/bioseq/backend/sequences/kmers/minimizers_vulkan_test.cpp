@@ -487,6 +487,8 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
     auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
     const std::uint64_t baseline = admission.reserved_bytes();
+    const std::uint64_t cache_metadata_before =
+        runtime.pipeline_cache_metadata_reserved_bytes();
     struct RestoreCap {
         bioseq::parallelism::MemoryAdmissionController& admission;
         std::uint64_t previous = 0u;
@@ -590,7 +592,18 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
             exact_host_size_bytes,
             bioseq::parallelism::kVectorPreallocationHeadroomFactor);
     calibration.reset();
-    REQUIRE(admission.reserved_bytes() == baseline);
+    const std::uint64_t cache_metadata_after =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    // Pipeline cache entries are retained by the process Runtime; query result
+    // device/host ownership must still be gone when its result is destroyed.
+    REQUIRE(cache_metadata_after > 0u);
+    REQUIRE(cache_metadata_after >= cache_metadata_before);
+    const std::uint64_t cache_metadata_delta =
+        cache_metadata_after - cache_metadata_before;
+    REQUIRE(admission.reserved_bytes()
+            == bioseq::parallelism::saturating_add(
+                baseline, cache_metadata_delta));
+    const std::uint64_t operation_baseline = admission.reserved_bytes();
 
     // Recompute after calibration because the persistent Vulkan arena may have
     // established a new physical high-water allocation.
@@ -615,7 +628,8 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
     REQUIRE(two_phase_peak < former_simultaneous_peak);
 
     admission.set_index_memory_cap_bytes(
-        bioseq::parallelism::saturating_add(baseline, two_phase_peak));
+        bioseq::parallelism::saturating_add(
+            operation_baseline, two_phase_peak));
     bioseq::parallelism::MemoryAdmissionFailure former_failure{};
     auto former_simultaneous_permit = admission.try_reserve(
         former_simultaneous_peak,
@@ -641,7 +655,7 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
             == result->device->words.allocation_bytes);
     REQUIRE(result->host_permit->bytes() == exact_host_capacity_bytes);
     REQUIRE(admission.reserved_bytes()
-            == baseline + result->device->words.allocation_bytes
+            == operation_baseline + result->device->words.allocation_bytes
                 + exact_host_capacity_bytes);
 
     const auto scalar = cpu_sketch<MinimizerT>(
@@ -661,7 +675,7 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
         static_cast<std::uint32_t>(window_size));
 
     result.reset();
-    REQUIRE(admission.reserved_bytes() == baseline);
+    REQUIRE(admission.reserved_bytes() == operation_baseline);
 }
 
 template <class Alphabet>
@@ -1309,6 +1323,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
 
     auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
     const std::uint64_t baseline = admission.reserved_bytes();
+    const std::uint64_t cache_metadata_before =
+        runtime.pipeline_cache_metadata_reserved_bytes();
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
     const std::uint64_t pessimistic_capacity =
@@ -1383,6 +1399,9 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(resident->slots.allocation_bytes == slots_allocation);
     REQUIRE(resident->positions.allocation_bytes == positions_allocation);
     const std::uint64_t adopted_reservation = admission.reserved_bytes();
+    const std::uint64_t cache_metadata_at_adoption =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    REQUIRE(cache_metadata_at_adoption >= cache_metadata_before);
 
     // Seed twice through the same resident buffers.  Each completed fence copies
     // anchors to owned host storage and then trims only the arena; the adopted
@@ -1419,7 +1438,14 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE_FALSE(arena.download_buffer().valid());
     REQUIRE(resident->slots.buffer == slots_handle);
     REQUIRE(resident->positions.buffer == positions_handle);
-    REQUIRE(admission.reserved_bytes() == adopted_reservation);
+    const std::uint64_t steady_cache_metadata =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    REQUIRE(steady_cache_metadata >= cache_metadata_at_adoption);
+    const std::uint64_t steady_adopted_reservation =
+        bioseq::parallelism::saturating_add(
+            adopted_reservation,
+            steady_cache_metadata - cache_metadata_at_adoption);
+    REQUIRE(admission.reserved_bytes() == steady_adopted_reservation);
 
     const auto second = runtime.run_phase_c_seed_roundtrip(
         inputs, sequence.bp_size(), 15u, 500);
@@ -1430,10 +1456,14 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(resident->positions.buffer == positions_handle);
     REQUIRE(resident->slots.allocation_bytes == slots_allocation);
     REQUIRE(resident->positions.allocation_bytes == positions_allocation);
-    REQUIRE(admission.reserved_bytes() == adopted_reservation);
+    REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes()
+            == steady_cache_metadata);
+    REQUIRE(admission.reserved_bytes() == steady_adopted_reservation);
 
     resident.reset();
-    REQUIRE(admission.reserved_bytes() == baseline);
+    REQUIRE(admission.reserved_bytes()
+            == bioseq::parallelism::saturating_add(
+                baseline, steady_cache_metadata - cache_metadata_before));
 }
 
 TEST_CASE("vulkan minimizer: ungated all-N target publishes proven empty index",
