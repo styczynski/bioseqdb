@@ -16,6 +16,7 @@ import bioseq.alignment.utils;
 import bioseq.alignment.block_aligner;
 import bioseq.alignment.ksw2_batched;
 import bioseq.sequences.minimap_port;
+import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.chaining.utils;
 import bioseq.common.context;
 import bioseq.storage.lazy;
@@ -128,6 +129,7 @@ enum class FixtureKind {
     SingleSeedCollision,
     MultiSeedMismatch,
     OffDiagonalGap,
+    OutOfBandGap,
     LeftExtensionOrientation,
 };
 
@@ -136,12 +138,18 @@ enum class FixtureKind {
         FixtureKind kind,
         std::int32_t max_gap = 0,
         bool do_cigar = true) {
+    const std::size_t query_length = kind == FixtureKind::OutOfBandGap
+        ? 256u
+        : 128u;
+    const std::size_t target_length = kind == FixtureKind::OutOfBandGap
+        ? 256u
+        : 128u;
     std::string query_text = kind == FixtureKind::LeftExtensionOrientation
         ? (reverse ? "TTTTTTTTACGTACGT" : "ACGTACGTAAAAAAAA")
-        : std::string(128, reverse ? 'T' : 'A');
+        : std::string(query_length, reverse ? 'T' : 'A');
     std::string target_text = kind == FixtureKind::LeftExtensionOrientation
         ? "ACGTAAAAAAAAA"
-        : std::string(128, 'A');
+        : std::string(target_length, 'A');
     std::vector<::bioseq::chaining::Anchor> anchors;
     if (kind == FixtureKind::SingleSeedCollision) {
         anchors.push_back(make_anchor(31, reverse));
@@ -157,6 +165,9 @@ enum class FixtureKind {
     } else if (kind == FixtureKind::OffDiagonalGap) {
         anchors.push_back(make_anchor(31, reverse));
         anchors.push_back(make_anchor(63, 66, reverse, 8));
+    } else if (kind == FixtureKind::OutOfBandGap) {
+        anchors.push_back(make_anchor(31, reverse));
+        anchors.push_back(make_anchor(63, 200, reverse, 8));
     } else {
         anchors.push_back(make_anchor(15, 12, reverse, 8));
     }
@@ -300,6 +311,58 @@ TEST_CASE("Exact gap fills disable z-drop with the supported sentinel",
         check_exact_region(regions.ksw2, 3, 40, 43);
         check_exact_region(regions.block, 3, 40, 43);
         check_exact_region(regions.batched, 3, 40, 43);
+    }
+}
+
+TEST_CASE("Exact mandatory gaps are unbanded before SneakySnake rejection",
+          "[edit-distance][bandwidth][sneaky-snake][ksw2][block-aligner][batched]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+
+    constexpr sequence_size_t query_gap_length = 40;
+    constexpr sequence_size_t target_gap_length = 177;
+    constexpr sequence_size_t length_difference =
+        target_gap_length - query_gap_length;
+    const Minimap2Params params = exact_alignment_params();
+    const std::int32_t normal_align_bandwidth = static_cast<std::int32_t>(
+        params.bandwidth * 1.5 + 1.0);
+    REQUIRE(length_difference
+            > static_cast<sequence_size_t>(normal_align_bandwidth));
+
+    const std::vector<std::uint8_t> query_ranks(query_gap_length, 0u);
+    const std::vector<std::uint8_t> target_ranks(target_gap_length, 0u);
+    const SneakySnakeResult prefilter = sneaky_snake_scalar(
+        query_ranks, target_ranks, 16u);
+    REQUIRE(prefilter.lower_bound == length_difference);
+    REQUIRE_FALSE(sneaky_snake_accepted(prefilter));
+
+    for (const bool reverse : {false, true}) {
+        CAPTURE(reverse);
+        const BackendRegions regions = run_fixture(
+            reverse, FixtureKind::OutOfBandGap);
+        check_exact_region(
+            regions.ksw2,
+            length_difference,
+            query_gap_length,
+            target_gap_length);
+        check_exact_region(
+            regions.block,
+            length_difference,
+            query_gap_length,
+            target_gap_length);
+        check_exact_region(
+            regions.batched,
+            length_difference,
+            query_gap_length,
+            target_gap_length);
+        CHECK(regions.batched.query_start == regions.ksw2.query_start);
+        CHECK(regions.batched.query_end == regions.ksw2.query_end);
+        CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
+        CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
+        CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
+        CHECK(format_cigar(regions.batched.cigar)
+              == format_cigar(regions.ksw2.cigar));
+        CHECK(prefilter.lower_bound == regions.ksw2.edit_distance);
     }
 }
 

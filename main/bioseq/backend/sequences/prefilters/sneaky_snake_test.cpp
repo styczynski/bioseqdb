@@ -15,6 +15,7 @@
 #include <vector>
 
 import bioseq.sequences.prefilters.sneaky_snake;
+import bioseq.sequences.prefilters.sneaky_snake_vulkan;
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
@@ -104,9 +105,15 @@ struct BatchFixture {
     fixture.queries.reserve(job_count);
     fixture.targets.reserve(job_count);
 
+    constexpr std::array<std::uint32_t, 4u> boundary_lengths{
+        511u, 512u, 513u, 1025u};
+
     for (std::size_t index = 0u; index < job_count; ++index) {
-        const std::uint32_t query_length = random.next() % 81u;
-        const bool equal_length = index % 4u != 0u;
+        const std::uint32_t query_length = index < boundary_lengths.size()
+            ? boundary_lengths[index]
+            : random.next() % 81u;
+        const bool equal_length = index < boundary_lengths.size()
+            || index % 4u != 0u;
         const std::uint32_t target_length = equal_length
             ? query_length
             : random.next() % 81u;
@@ -329,6 +336,48 @@ TEST_CASE(
                 REQUIRE(sneaky_snake_accepted(scalar[index]));
             }
         }
+    }
+}
+
+TEST_CASE(
+    "SneakySnake hardware Vulkan batch matches scalar across submaze boundaries",
+    "[sneaky_snake][prefilter][vulkan][hardware]")
+{
+    namespace vp = bioseq::sequences::prefilters;
+    if (!vp::vulkan_sneaky_snake_supported()) {
+        SKIP("hardware Vulkan device unavailable");
+    }
+
+    BatchFixture fixture = random_batch(12u);
+    std::vector<vp::SneakySnakeVulkanJob> gpu_jobs;
+    gpu_jobs.reserve(fixture.jobs.size());
+    for (const SneakySnakeJob& job : fixture.jobs) {
+        gpu_jobs.push_back(vp::SneakySnakeVulkanJob{
+            .query_offset = job.query_offset,
+            .target_offset = job.target_offset,
+            .query_length = job.query_length,
+            .target_length = job.target_length,
+            .max_edits = job.max_edits,
+        });
+    }
+
+    const SneakySnakeBatchInput input{
+        .query_ranks = fixture.query_ranks,
+        .target_ranks = fixture.target_ranks,
+        .jobs = fixture.jobs,
+    };
+    const auto scalar = sneaky_snake_scalar_batch(input);
+    const auto gpu = vp::run_sneaky_snake_vulkan_batch(
+        fixture.query_ranks, fixture.target_ranks, gpu_jobs);
+    REQUIRE(gpu.size() == scalar.size());
+    for (std::size_t index = 0u; index < scalar.size(); ++index) {
+        CAPTURE(index, fixture.jobs[index].query_length,
+                fixture.jobs[index].target_length,
+                fixture.jobs[index].max_edits);
+        CHECK(gpu[index].lower_bound == scalar[index].lower_bound);
+        CHECK(gpu[index].status == scalar[index].status);
+        CHECK(gpu[index].accepted == scalar[index].accepted);
+        CHECK(gpu[index].reserved == scalar[index].reserved);
     }
 }
 

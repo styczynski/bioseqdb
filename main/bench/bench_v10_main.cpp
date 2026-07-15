@@ -92,6 +92,7 @@ using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::PrefilterBackendType;
+using bioseq::simd::HWY_NAMESPACE::SneakySnakePrefilterExecutionProof;
 using bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
 using bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
 using bioseq::simd::HWY_NAMESPACE::PackedPaperNthashExecutionProof;
@@ -143,6 +144,10 @@ struct AlignerOutput {
     std::uint32_t edit_threshold = 0u;
     bool        prefilter_enabled = false;
     PrefilterBackendType prefilter_backend = PrefilterBackendType::AUTO;
+    SneakySnakePrefilterExecutionProof
+        sneaky_snake_prefilter_execution_proof{};
+    bool sneaky_snake_prefilter_execution_proof_present = false;
+    bool sneaky_snake_prefilter_execution_proof_accepted = false;
     bool        phase_c_gpu_index_ownership_proof_accepted = false;
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
     TwoStackExecutionProof exact_simd_query_execution_proof{};
@@ -2044,6 +2049,9 @@ struct AlgorithmDispatch {
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
         dispatch.params.compute_edit_distance    = true;
         dispatch.params.prefilter_max_edits      = max_edits;
+        dispatch.params.exact_edit_filter_enabled = true;
+        dispatch.params.exact_edit_filter_exclusive_upper_bound =
+            static_cast<std::int64_t>(max_edits) + 1;
         dispatch.enforce_edit_threshold          = true;
         if (algo != "bioseq_prefilter_off") {
             dispatch.params.prefilter_enabled = true;
@@ -3157,7 +3165,8 @@ static_assert([] {
                  input.targets_acgt[pair_index].size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (dispatch.explicit_vulkan
+            if (dispatch.enforce_edit_threshold
+                || dispatch.explicit_vulkan
                 || dispatch.explicit_prefilter_vulkan
                 || strict_xxl_gate) {
                 throw;
@@ -3172,13 +3181,17 @@ static_assert([] {
                  input.targets_acgt[pair_index].size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (dispatch.explicit_prefilter_vulkan || strict_xxl_gate) throw;
+            if (dispatch.enforce_edit_threshold
+                || dispatch.explicit_prefilter_vulkan
+                || strict_xxl_gate) throw;
             every_pair_route_proven = false;
             continue;
         } catch (...) {
             bioseq_log<ERR>("[bench_v10] aligner threw non-std exception (algo='{}', pair_index={})",
                  algo, pair_index);
-            if (dispatch.explicit_prefilter_vulkan || strict_xxl_gate) throw;
+            if (dispatch.enforce_edit_threshold
+                || dispatch.explicit_prefilter_vulkan
+                || strict_xxl_gate) throw;
             every_pair_route_proven = false;
             continue;
         }
@@ -3216,6 +3229,11 @@ static_assert([] {
             output.ksw2_batched_execution_proof.combine(
                 results.ksw2_batched_execution_proof);
             output.ksw2_batched_execution_proof_present = true;
+        }
+        if (results.sneaky_snake_prefilter_execution_proof_present) {
+            output.sneaky_snake_prefilter_execution_proof.combine(
+                results.sneaky_snake_prefilter_execution_proof);
+            output.sneaky_snake_prefilter_execution_proof_present = true;
         }
         if (capture_full_route_proof) {
             if (results.simd_chaining_execution_proof_present) {
@@ -3256,6 +3274,58 @@ static_assert([] {
             output.partial_vulkan_execution_proof);
     output.selected_route_execution_proof_accepted =
         every_pair_route_proven;
+    if (dispatch.enforce_edit_threshold && !every_pair_route_proven) {
+        throw std::runtime_error(fmt::format(
+            "exact-threshold benchmark row '{}' did not complete and prove "
+            "every input pair",
+            algo));
+    }
+    const bool prefilter_proof_is_zero =
+        output.sneaky_snake_prefilter_execution_proof
+            == SneakySnakePrefilterExecutionProof{};
+    if (!dispatch.params.prefilter_enabled) {
+        if (output.sneaky_snake_prefilter_execution_proof_present
+            || !prefilter_proof_is_zero) {
+            throw std::runtime_error(fmt::format(
+                "prefilter-off row '{}' emitted SneakySnake execution proof",
+                algo));
+        }
+    } else {
+        const bool require_evaluated_vulkan_jobs =
+            dispatch.params.prefilter_backend == PrefilterBackendType::VULKAN
+            && dispatch.params.prefilter_max_edits <= 31u;
+        output.sneaky_snake_prefilter_execution_proof_accepted =
+            output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                dispatch.params.prefilter_backend,
+                require_evaluated_vulkan_jobs,
+                require_evaluated_vulkan_jobs);
+        if (!output.sneaky_snake_prefilter_execution_proof_accepted) {
+            const auto& proof =
+                output.sneaky_snake_prefilter_execution_proof;
+            throw std::runtime_error(fmt::format(
+                "prefilter row '{}' lacks accepted operation proof: "
+                "present={} backend={} dispatches={} scalar={} simd={} "
+                "vulkan={} jobs={} evaluated={} length_only={} "
+                "unsupported={} rejected_jobs={} rejected_regions={} "
+                "survivors={} saturated={}",
+                algo,
+                output.sneaky_snake_prefilter_execution_proof_present,
+                static_cast<unsigned>(dispatch.params.prefilter_backend),
+                proof.dispatches,
+                proof.scalar_dispatches,
+                proof.simd_dispatches,
+                proof.vulkan_dispatches,
+                proof.jobs,
+                proof.evaluated_jobs,
+                proof.length_difference_jobs,
+                proof.unsupported_jobs,
+                proof.rejected_jobs,
+                proof.rejected_regions,
+                proof.surviving_regions,
+                proof.saturated));
+        }
+    }
     if (strict_xxl_gate
         && (output.total_pairs != 1
             || output.total_results != 1
@@ -3700,19 +3770,57 @@ evaluate_simd_chaining_endpoint_qualification(
     metrics.emplace("prefilter_enabled",
         output.prefilter_enabled ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_off",
-        !output.prefilter_enabled ? 1.0 : 0.0);
+        !output.prefilter_enabled
+            && !output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof
+                == SneakySnakePrefilterExecutionProof{}
+        ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_scalar",
-        output.prefilter_enabled
-            && output.prefilter_backend == PrefilterBackendType::SCALAR
+        output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                PrefilterBackendType::SCALAR)
         ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_simd",
-        output.prefilter_enabled
-            && output.prefilter_backend == PrefilterBackendType::SIMD
+        output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                PrefilterBackendType::SIMD)
         ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_vulkan",
-        output.prefilter_enabled
-            && output.prefilter_backend == PrefilterBackendType::VULKAN
+        output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                PrefilterBackendType::VULKAN,
+                /*require_evaluated_jobs=*/true,
+                /*forbid_unsupported_jobs=*/true)
         ? 1.0 : 0.0);
+    metrics.emplace("prefilter_execution_proof_present",
+        output.sneaky_snake_prefilter_execution_proof_present ? 1.0 : 0.0);
+    metrics.emplace("prefilter_execution_proof_accepted",
+        output.sneaky_snake_prefilter_execution_proof_accepted ? 1.0 : 0.0);
+    metrics.emplace("prefilter_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.dispatches));
+    metrics.emplace("prefilter_scalar_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.scalar_dispatches));
+    metrics.emplace("prefilter_simd_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.simd_dispatches));
+    metrics.emplace("prefilter_vulkan_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.vulkan_dispatches));
+    metrics.emplace("prefilter_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.jobs));
+    metrics.emplace("prefilter_evaluated_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.evaluated_jobs));
+    metrics.emplace("prefilter_length_difference_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof
+            .length_difference_jobs));
+    metrics.emplace("prefilter_unsupported_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.unsupported_jobs));
+    metrics.emplace("prefilter_rejected_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.rejected_jobs));
+    metrics.emplace("prefilter_rejected_regions", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.rejected_regions));
+    metrics.emplace("prefilter_surviving_regions", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.surviving_regions));
+    metrics.emplace("prefilter_execution_proof_saturated",
+        output.sneaky_snake_prefilter_execution_proof.saturated ? 1.0 : 0.0);
     metrics.emplace("ksw2_left_calls", static_cast<double>(
         output.scalar_pipeline_execution_proof.ksw2_left_calls));
     metrics.emplace("ksw2_gap_calls", static_cast<double>(

@@ -1098,6 +1098,15 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
 		REQUIRE(std::stoll(*row[5]) == 0);
     }
     require_batch_join_stats(ctx, 1, 2);
+
+    const auto wrapped_sequence_helper = sql_error(
+        ctx,
+        batch_join_sql(
+            1,
+            "bioseq.edit(COALESCE(t.seq0, t.seq0)) AS edit_distance"));
+    REQUIRE(wrapped_sequence_helper.sqlstate == "0A000");
+    REQUIRE(wrapped_sequence_helper.contains(
+        "bioseq.edit projection must reference the mmsearch target column"));
 }
 
 TEST_CASE("BioseqBatchJoin base ProjectionPath guard is exact and fail closed",
@@ -2778,6 +2787,19 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
     REQUIRE(plan_contains(plan, "PrefilterStage"));
     REQUIRE(plan_contains(plan, "SneakySnake edit lower bound"));
     REQUIRE(plan_contains(plan, "max_edits: 9"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 10"));
+
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 1;",
+        kSneakySnakeEdits,
+        query_literal)) == 1);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 0;",
+        kSneakySnakeEdits,
+        query_literal)) == 0);
 
     exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
     REQUIRE(query_scalar_int(ctx, fmt::format(
@@ -2801,6 +2823,15 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
         query_literal));
     REQUIRE(wrong_projection.sqlstate == "0A000");
     REQUIRE(wrong_projection.contains(
+        "bioseq.edit projection must reference the mmsearch target column"));
+
+    const auto wrapped_wrong_projection = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(COALESCE(seq1, seq1)) FROM {} "
+        "WHERE mmsearch(seq0, {});",
+        kSneakySnakeEdits,
+        query_literal));
+    REQUIRE(wrapped_wrong_projection.sqlstate == "0A000");
+    REQUIRE(wrapped_wrong_projection.contains(
         "bioseq.edit projection must reference the mmsearch target column"));
 }
 

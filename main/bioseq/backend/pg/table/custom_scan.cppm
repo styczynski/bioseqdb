@@ -778,12 +778,18 @@ storage_prunable_quals_without_mmsearch(List* quals, const BioseqStubOids& oids)
 		const BioseqStubOids& oids) noexcept {
 	if (function == nullptr || function->funcid != oids.edit_oid) return true;
 	if (list_length(function->args) != 1) return false;
-	Var* argument = pg_node_try_as<Var>(
-		reinterpret_cast<Node*>(linitial(function->args)));
-	if (argument == nullptr
-		|| argument->vartype != oids.bioseq_seq_type_oid) {
+	Node* argument_node = reinterpret_cast<Node*>(linitial(function->args));
+	if (argument_node == nullptr
+		|| exprType(argument_node) != oids.bioseq_seq_type_oid) {
 		/* Preserve the established target-owned row-marker helper form. */
 		return true;
+	}
+	Var* argument = pg_node_try_as<Var>(argument_node);
+	if (argument == nullptr) {
+		/* A sequence-valued wrapper (COALESCE, cast, PHV expression, etc.)
+		 * has biological identity that the shared MatchResult cannot safely
+		 * infer.  Only the exact mmsearch target Var is supported. */
+		return false;
 	}
 	return target_relid != 0
 		&& target_sequence_attno > 0
@@ -4877,6 +4883,19 @@ struct batch_join_placeholder_registration_visitor {
 				return registration.invalid
 					? pg_walk_step::stop : pg_walk_step::skip_subtree;
 			}
+			FuncExpr* wrapped_helper = pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(placeholder->phexpr));
+			if (registration.oids != nullptr
+				&& wrapped_helper != nullptr
+				&& !edit_sequence_argument_matches_target(
+					wrapped_helper,
+					registration.target_relid,
+					registration.target_sequence_attno,
+					*registration.oids)) {
+				registration.invalid = true;
+				registration.edit_sequence_mismatch = true;
+				return pg_walk_step::stop;
+			}
 			/* A generic PHV containing a helper has evaluation/nulling semantics
 			 * that this join cannot reproduce.  Do not descend and accidentally
 			 * register only the inner FuncExpr. */
@@ -4893,19 +4912,19 @@ struct batch_join_placeholder_registration_visitor {
 			if (registration.oids != nullptr
 				&& is_bioseq_projection_funcid(
 					function->funcid, *registration.oids)) {
-				FuncExpr* exact = batch_join_exact_target_helper(
-					reinterpret_cast<Node*>(function), registration.target_relid);
-				if (exact == nullptr) {
-					registration.invalid = true;
-					return pg_walk_step::stop;
-				}
 				if (!edit_sequence_argument_matches_target(
-						exact,
+						function,
 						registration.target_relid,
 						registration.target_sequence_attno,
 						*registration.oids)) {
 					registration.invalid = true;
 					registration.edit_sequence_mismatch = true;
+					return pg_walk_step::stop;
+				}
+				FuncExpr* exact = batch_join_exact_target_helper(
+					reinterpret_cast<Node*>(function), registration.target_relid);
+				if (exact == nullptr) {
+					registration.invalid = true;
 					return pg_walk_step::stop;
 				}
 				batch_join_register_placeholder_site(
@@ -6393,6 +6412,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
 	aligner_params.compute_edit_distance = features.uses_edit;
+	aligner_params.exact_edit_filter_enabled =
+		runtime.edit_predicate_active;
+	aligner_params.exact_edit_filter_exclusive_upper_bound =
+		runtime.edit_exclusive_upper_bound;
 	if (runtime.edit_predicate_active
 		&& runtime.edit_exclusive_upper_bound > 0
 		&& static_cast<std::uint64_t>(runtime.edit_exclusive_upper_bound - 1)

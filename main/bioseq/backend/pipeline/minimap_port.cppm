@@ -192,6 +192,162 @@ enum class PrefilterBackendType : uint8_t {
     VULKAN  = 3,
 };
 
+/// Operation-originated evidence for the SneakySnake prefilter stage.
+///
+/// A selector never populates this value.  The stage records one dispatch only
+/// after the selected backend has returned a complete result batch and the
+/// per-region survivor decision has been applied.  This makes the proof useful
+/// to benchmark and SQL callers that must distinguish requested policy from
+/// real maze execution.
+struct SneakySnakePrefilterExecutionProof {
+    std::uint64_t dispatches = 0;
+    std::uint64_t scalar_dispatches = 0;
+    std::uint64_t simd_dispatches = 0;
+    std::uint64_t vulkan_dispatches = 0;
+    std::uint64_t jobs = 0;
+    std::uint64_t evaluated_jobs = 0;
+    std::uint64_t length_difference_jobs = 0;
+    std::uint64_t unsupported_jobs = 0;
+    std::uint64_t rejected_jobs = 0;
+    std::uint64_t rejected_regions = 0;
+    std::uint64_t surviving_regions = 0;
+    bool saturated = false;
+
+    static constexpr void add(
+            std::uint64_t& destination,
+            const std::uint64_t increment,
+            bool& saturated_flag) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                            - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            saturated_flag = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    constexpr void record_batch(
+            const PrefilterBackendType backend,
+            const std::uint64_t job_count,
+            const std::uint64_t evaluated_count,
+            const std::uint64_t length_difference_count,
+            const std::uint64_t unsupported_count,
+            const std::uint64_t rejected_job_count,
+            const std::uint64_t rejected_region_count,
+            const std::uint64_t surviving_region_count) noexcept {
+        add(dispatches, 1u, saturated);
+        switch (backend) {
+            case PrefilterBackendType::SCALAR:
+                add(scalar_dispatches, 1u, saturated);
+                break;
+            case PrefilterBackendType::SIMD:
+                add(simd_dispatches, 1u, saturated);
+                break;
+            case PrefilterBackendType::VULKAN:
+                add(vulkan_dispatches, 1u, saturated);
+                break;
+            case PrefilterBackendType::AUTO:
+                // AUTO must be resolved before an operation can be attested.
+                saturated = true;
+                break;
+        }
+        add(jobs, job_count, saturated);
+        add(evaluated_jobs, evaluated_count, saturated);
+        add(length_difference_jobs, length_difference_count, saturated);
+        add(unsupported_jobs, unsupported_count, saturated);
+        add(rejected_jobs, rejected_job_count, saturated);
+        add(rejected_regions, rejected_region_count, saturated);
+        add(surviving_regions, surviving_region_count, saturated);
+    }
+
+    constexpr void combine(
+            const SneakySnakePrefilterExecutionProof& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        add(dispatches, other.dispatches, overflow);
+        add(scalar_dispatches, other.scalar_dispatches, overflow);
+        add(simd_dispatches, other.simd_dispatches, overflow);
+        add(vulkan_dispatches, other.vulkan_dispatches, overflow);
+        add(jobs, other.jobs, overflow);
+        add(evaluated_jobs, other.evaluated_jobs, overflow);
+        add(length_difference_jobs, other.length_difference_jobs, overflow);
+        add(unsupported_jobs, other.unsupported_jobs, overflow);
+        add(rejected_jobs, other.rejected_jobs, overflow);
+        add(rejected_regions, other.rejected_regions, overflow);
+        add(surviving_regions, other.surviving_regions, overflow);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool accepted(
+            const PrefilterBackendType expected_backend,
+            const bool require_evaluated_jobs = false,
+            const bool forbid_unsupported_jobs = false) const noexcept {
+        if (saturated || dispatches == 0u || jobs == 0u
+            || evaluated_jobs > jobs
+            || length_difference_jobs > jobs - evaluated_jobs
+            || unsupported_jobs
+                != jobs - evaluated_jobs - length_difference_jobs
+            || rejected_jobs > jobs
+            || rejected_regions > (std::numeric_limits<std::uint64_t>::max)()
+                    - surviving_regions
+            || rejected_regions + surviving_regions == 0u
+            || scalar_dispatches > dispatches
+            || simd_dispatches > dispatches - scalar_dispatches
+            || vulkan_dispatches
+                != dispatches - scalar_dispatches - simd_dispatches
+            || (require_evaluated_jobs && evaluated_jobs == 0u)
+            || (forbid_unsupported_jobs && unsupported_jobs != 0u)) {
+            return false;
+        }
+        switch (expected_backend) {
+            case PrefilterBackendType::SCALAR:
+                return scalar_dispatches == dispatches
+                    && simd_dispatches == 0u
+                    && vulkan_dispatches == 0u;
+            case PrefilterBackendType::SIMD:
+                return scalar_dispatches == 0u
+                    && simd_dispatches == dispatches
+                    && vulkan_dispatches == 0u;
+            case PrefilterBackendType::VULKAN:
+                return scalar_dispatches == 0u
+                    && simd_dispatches == 0u
+                    && vulkan_dispatches == dispatches;
+            case PrefilterBackendType::AUTO:
+                return false;
+        }
+        return false;
+    }
+
+    constexpr bool operator==(
+        const SneakySnakePrefilterExecutionProof&) const noexcept = default;
+};
+
+static_assert([] {
+    SneakySnakePrefilterExecutionProof proof{};
+    proof.record_batch(
+        PrefilterBackendType::SIMD, 4u, 2u, 1u, 1u, 1u, 1u, 2u);
+    SneakySnakePrefilterExecutionProof tail{};
+    tail.record_batch(
+        PrefilterBackendType::SIMD, 2u, 2u, 0u, 0u, 0u, 0u, 1u);
+    proof.combine(tail);
+    return proof.dispatches == 2u
+        && proof.jobs == 6u
+        && proof.evaluated_jobs == 4u
+        && proof.accepted(PrefilterBackendType::SIMD);
+}());
+static_assert([] {
+    SneakySnakePrefilterExecutionProof proof{};
+    proof.record_batch(
+        PrefilterBackendType::SCALAR,
+        (std::numeric_limits<std::uint64_t>::max)(),
+        (std::numeric_limits<std::uint64_t>::max)(),
+        0u, 0u, 0u, 0u, 1u);
+    proof.record_batch(
+        PrefilterBackendType::SCALAR, 1u, 1u, 0u, 0u, 0u, 0u, 1u);
+    return proof.saturated
+        && proof.jobs == (std::numeric_limits<std::uint64_t>::max)()
+        && !proof.accepted(PrefilterBackendType::SCALAR);
+}());
+
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
     switch (mode) {
         case ChainingAlgorithmType::SCALAR_MM2:      return "Minimap2 Scalar";
@@ -289,6 +445,16 @@ struct Minimap2Params {
     /// enforce bioseq.edit(...) predicates after SneakySnake's lower-bound
     /// gate admits a candidate.
     bool    compute_edit_distance = false;
+
+    /// Apply the authoritative strict edit predicate to aligned regions before
+    /// the final primary/secondary and MAPQ pass.  This is deliberately
+    /// separate from `prefilter_enabled`: SneakySnake may conservatively admit
+    /// a candidate (or be unavailable for the threshold), whereas this filter
+    /// always uses the exact traced edit count.  The signed exclusive bound
+    /// preserves SQL `<` semantics, including the reject-all `bound <= 0`
+    /// case, without unsigned conversion surprises.
+    bool         exact_edit_filter_enabled = false;
+    std::int64_t exact_edit_filter_exclusive_upper_bound = 0;
 
     /// Enable the query-scoped SneakySnake lower-bound stage.  The threshold
     /// is the largest admissible exact edit count (so SQL `edit(...) < 10`
@@ -2045,7 +2211,8 @@ struct AlignOnePhase {
                         static_cast<size_t>(rs),
                         static_cast<size_t>(re),
                         scoring_matrix, params,
-                        align_bandwidth, -1,
+                        params.compute_edit_distance ? -1 : align_bandwidth,
+                        -1,
                         params.compute_edit_distance
                             ? -1
                             : params.zdrop,
@@ -3330,6 +3497,8 @@ struct MatchResultCollection {
     BlockAlignerExecutionProof block_aligner_execution_proof{};
     ScalarPipelineExecutionProof scalar_pipeline_execution_proof{};
     Ksw2BatchedExecutionProof ksw2_batched_execution_proof{};
+    SneakySnakePrefilterExecutionProof
+        sneaky_snake_prefilter_execution_proof{};
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
     bool exact_simd_query_execution_proof_present = false;
     bool exact_simd_target_execution_proof_present = false;
@@ -3339,6 +3508,7 @@ struct MatchResultCollection {
     bool block_aligner_execution_proof_present = false;
     bool scalar_pipeline_execution_proof_present = false;
     bool ksw2_batched_execution_proof_present = false;
+    bool sneaky_snake_prefilter_execution_proof_present = false;
 
     MatchResultCollection() = default;
     explicit MatchResultCollection(std::vector<MatchResult>&& results_vec)
@@ -3390,6 +3560,12 @@ struct MatchResultCollection {
             const Ksw2BatchedExecutionProof& proof) noexcept {
         ksw2_batched_execution_proof.combine(proof);
         ksw2_batched_execution_proof_present = true;
+    }
+
+    void record_sneaky_snake_prefilter_execution_proof(
+            const SneakySnakePrefilterExecutionProof& proof) noexcept {
+        sneaky_snake_prefilter_execution_proof.combine(proof);
+        sneaky_snake_prefilter_execution_proof_present = true;
     }
 
     void record_scalar_query_minimizer_execution_proof(
@@ -3444,6 +3620,10 @@ struct MatchResultCollection {
         if (other.ksw2_batched_execution_proof_present) {
             record_ksw2_batched_execution_proof(
                 other.ksw2_batched_execution_proof);
+        }
+        if (other.sneaky_snake_prefilter_execution_proof_present) {
+            record_sneaky_snake_prefilter_execution_proof(
+                other.sneaky_snake_prefilter_execution_proof);
         }
         partial_vulkan_execution_proof.combine(
             other.partial_vulkan_execution_proof);

@@ -282,7 +282,10 @@ template <bool Reverse,
 
     const KswAlignResult result = ksw2_align_pair<Reverse>(
         query_seq, target_seq, qs, qe, rs, re,
-        scoring_matrix, params, align_bandwidth,
+        scoring_matrix, params,
+        params.compute_edit_distance && fill.kind == FillKind::GapBetween
+            ? -1
+            : align_bandwidth,
         end_bonus_for_fill,
         params.compute_edit_distance && fill.kind == FillKind::GapBetween
             ? -1
@@ -538,7 +541,7 @@ inline void stitch_cigars_into_regions(
 
             if (fill.cigar_scratch != nullptr) {
                 const auto& scratch = *fill.cigar_scratch;
-                for (const CigarOp op : scratch) {
+                for (const CigarOp op : scratch.as_const_span()) {
                     if (!region.cigar.empty()
                         && region.cigar.back().opcode == op.opcode) {
                         region.cigar.back().length += op.length;

@@ -2507,6 +2507,20 @@ struct ProbeBatchSink {
     [[gnu::always_inline]] void on_completed() noexcept { ++*on_completed_count; }
 };
 
+struct ExactFilterProbeSink {
+    std::vector<AlignRegion>* observed;
+    int* on_batch_count;
+
+    void on_batch_pair(
+        std::span<AlignRegion> regions,
+        std::span<const ::bioseq::chaining::Anchor> /*anchors*/) {
+        observed->assign(regions.begin(), regions.end());
+        ++*on_batch_count;
+    }
+
+    void on_completed() noexcept {}
+};
+
 TEST_CASE("EmitToken trait surface", "[pipe][emit-token-traits]") {
     SECTION("EmitTokenTraits") {
         static_assert(!std::is_copy_constructible_v<EmitToken<SinkStage>>);
@@ -2579,6 +2593,106 @@ TEST_CASE("MapqStage::process_pair delegates exactly once",
         std::span<AlignRegion>{regions.data(), regions.size()},
         std::span<::bioseq::chaining::Anchor>{anchors.data(), anchors.size()});
     REQUIRE(on_batch_count == 1);
+}
+
+TEST_CASE("ExactEditFilterStage applies strict bounds and resets classification state",
+          "[pipe][edit-distance][exact-filter]")
+{
+    using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    params.compute_edit_distance = true;
+    params.exact_edit_filter_enabled = true;
+    params.exact_edit_filter_exclusive_upper_bound = 5;
+
+    std::vector<AlignRegion> observed;
+    int on_batch_count = 0;
+    ExactFilterProbeSink probe{&observed, &on_batch_count};
+    ExactEditFilterStage stage{{}, params};
+    auto bound = stage.template attach<Cep>(probe);
+
+    std::vector<AlignRegion> regions(4);
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+        AlignRegion& region = regions[index];
+        region.has_alignment = true;
+        region.anchor_start = static_cast<std::int32_t>(100u + index);
+        region.parent = 91;
+        region.secondary_score = 92;
+        region.secondary_count = 93;
+        region.secondary_dp_max = 94;
+        region.mapq = 95;
+    }
+    regions[0].edit_distance = 5;
+    regions[1].edit_distance = 4;
+    regions[2].edit_distance = 0;
+    regions[3].edit_distance = 8;
+    std::vector<::bioseq::chaining::Anchor> anchors;
+
+    bound.on_batch_pair(
+        std::span<AlignRegion>{regions},
+        std::span<::bioseq::chaining::Anchor>{anchors});
+
+    REQUIRE(on_batch_count == 1);
+    REQUIRE(observed.size() == 2);
+    REQUIRE(observed[0].anchor_start == 101);
+    REQUIRE(observed[1].anchor_start == 102);
+    for (std::size_t index = 0; index < observed.size(); ++index) {
+        CAPTURE(index);
+        CHECK(observed[index].region_id == static_cast<std::int32_t>(index));
+        CHECK(observed[index].parent == -1);
+        CHECK(observed[index].secondary_score == 0);
+        CHECK(observed[index].secondary_count == 0);
+        CHECK(observed[index].secondary_dp_max == 0);
+        CHECK(observed[index].mapq == 0);
+    }
+}
+
+TEST_CASE("ExactEditFilterStage rejects nonpositive bounds and missing traceback",
+          "[pipe][edit-distance][exact-filter][fail-loud]")
+{
+    using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
+    std::vector<::bioseq::chaining::Anchor> anchors;
+
+    SECTION("nonpositive bound rejects every exact alignment") {
+        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        params.compute_edit_distance = true;
+        params.exact_edit_filter_enabled = true;
+        params.exact_edit_filter_exclusive_upper_bound = 0;
+        std::vector<AlignRegion> observed;
+        int on_batch_count = 0;
+        ExactFilterProbeSink probe{&observed, &on_batch_count};
+        ExactEditFilterStage stage{{}, params};
+        auto bound = stage.template attach<Cep>(probe);
+        std::vector<AlignRegion> regions(1);
+        regions[0].has_alignment = true;
+        regions[0].edit_distance = 0;
+
+        bound.on_batch_pair(
+            std::span<AlignRegion>{regions},
+            std::span<::bioseq::chaining::Anchor>{anchors});
+        REQUIRE(on_batch_count == 1);
+        REQUIRE(observed.empty());
+    }
+
+    SECTION("missing traceback fails loudly") {
+        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        params.compute_edit_distance = true;
+        params.exact_edit_filter_enabled = true;
+        params.exact_edit_filter_exclusive_upper_bound = 1;
+        std::vector<AlignRegion> observed;
+        int on_batch_count = 0;
+        ExactFilterProbeSink probe{&observed, &on_batch_count};
+        ExactEditFilterStage stage{{}, params};
+        auto bound = stage.template attach<Cep>(probe);
+        std::vector<AlignRegion> regions(1);
+        regions[0].has_alignment = false;
+
+        REQUIRE_THROWS_WITH(
+            bound.on_batch_pair(
+                std::span<AlignRegion>{regions},
+                std::span<::bioseq::chaining::Anchor>{anchors}),
+            "exact edit filter received a region without alignment traceback");
+        REQUIRE(on_batch_count == 0);
+    }
 }
 
 // DOC0254 §14.4 — `SingleEmissionInvariant`.

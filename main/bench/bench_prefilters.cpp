@@ -4,9 +4,11 @@
  *
  * Dataset parsing, byte-rank materialisation, the bundled-source oracle, and
  * thresholded edit-distance truth are prepared in on_input.  The measured
- * kernel region contains only the selected original/scalar/SIMD/Vulkan
- * prefilter invocation.  The Vulkan-labelled row is explicitly unavailable
- * on hosts without a hardware Vulkan device and never falls back to CPU.
+ * backend-batch region contains only the complete selected
+ * original/scalar/SIMD/Vulkan prefilter invocation.  Runtime correctness
+ * validation runs after that region.  The Vulkan-labelled row is explicitly
+ * unavailable on hosts without a hardware Vulkan device and never falls back
+ * to CPU.
  */
 #include "common_simd.h"
 #include "common.h"
@@ -50,10 +52,13 @@ namespace vulkan_prefilter = bioseq::sequences::prefilters;
 
 constexpr std::uint32_t kDefaultMaxEdits = 8u;
 constexpr std::size_t kDefaultPairLimit = 1'024u;
+constexpr std::uint32_t kVulkanMaxEdits =
+    bioseq::gpu::vulkan::k_gpu_sneaky_snake_max_edits;
 
 struct PreparedThreshold {
     std::vector<SneakySnakeJob> cpu_jobs;
     std::vector<vulkan_prefilter::SneakySnakeVulkanJob> vulkan_jobs;
+    std::vector<SneakySnakeResult> scalar_oracle_results;
     std::vector<std::uint8_t> reference_accepted;
     std::vector<std::uint8_t> truth_within_threshold;
 };
@@ -65,7 +70,9 @@ struct PrefilterInput {
     std::vector<std::uint8_t> target_ranks;
     std::map<std::uint32_t, PreparedThreshold> prepared;
     std::uint64_t total_bases = 0u;
-    std::uint64_t preprocessing_ns = 0u;
+    /// One-time, shared batch input construction. It is not attributable to
+    /// any one algorithm/threshold callback.
+    std::uint64_t input_preparation_ns = 0u;
     std::uint64_t oracle_preparation_ns = 0u;
     bool valid = false;
     std::string error;
@@ -75,10 +82,15 @@ struct PrefilterOutput {
     std::vector<std::uint8_t> accepted;
     std::vector<std::uint32_t> lower_bounds;
     std::vector<std::uint32_t> statuses;
-    std::uint64_t kernel_ns = 0u;
+    /// Complete selected batch API call. For Vulkan this deliberately includes
+    /// upload, dispatch, synchronization, and result readback.
+    std::uint64_t backend_batch_ns = 0u;
     std::uint64_t callback_ns = 0u;
+    std::uint64_t validation_ns = 0u;
     bool backend_available = true;
     bool lower_bounds_available = false;
+    bool runtime_validation_performed = false;
+    bool runtime_validation_passed = false;
 };
 
 [[nodiscard]] std::int64_t read_int_field(
@@ -202,7 +214,9 @@ struct PrefilterOutput {
     const std::size_t sequence_length = raw_length > 0
         ? static_cast<std::size_t>(raw_length) : 250u;
     const std::size_t sequence_bytes = pair_count * sequence_length * 4u;
-    const std::size_t job_and_truth_bytes = pair_count * 128u;
+    // Covers jobs plus source/truth/scalar-oracle records for the configured
+    // threshold sweep (currently at most six distinct E values).
+    const std::size_t job_and_truth_bytes = pair_count * 512u;
     return RunConstraints{
         .base_memory = sequence_bytes + job_and_truth_bytes,
         .extra_memory = sequence_bytes + job_and_truth_bytes,
@@ -227,7 +241,7 @@ void append_rank_bytes(
 {
     PrefilterInput input;
     try {
-        const auto preprocessing_start = std::chrono::steady_clock::now();
+        const auto input_preparation_start = std::chrono::steady_clock::now();
         const std::string relative_path = read_string_field(data, "path", {});
         if (relative_path.empty()) {
             throw std::invalid_argument(
@@ -329,13 +343,25 @@ void append_rank_bytes(
             }
             input.prepared.emplace(threshold, std::move(prepared));
         }
-        const auto preprocessing_end = std::chrono::steady_clock::now();
-        input.preprocessing_ns = static_cast<std::uint64_t>(
+        const auto input_preparation_end = std::chrono::steady_clock::now();
+        input.input_preparation_ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
-                preprocessing_end - preprocessing_start).count());
+                input_preparation_end - input_preparation_start).count());
 
         const auto oracle_start = std::chrono::steady_clock::now();
         for (auto& [threshold, prepared] : input.prepared) {
+            prepared.scalar_oracle_results =
+                bioseq::simd::HWY_NAMESPACE::sneaky_snake_scalar_batch(
+                    SneakySnakeBatchInput{
+                        .query_ranks = input.query_ranks,
+                        .target_ranks = input.target_ranks,
+                        .jobs = prepared.cpu_jobs,
+                    });
+            if (prepared.scalar_oracle_results.size()
+                != input.queries.size()) {
+                throw std::runtime_error(
+                    "SneakySnake scalar oracle returned the wrong result count");
+            }
             prepared.reference_accepted.resize(input.queries.size());
             prepared.truth_within_threshold.resize(input.queries.size());
             for (std::size_t index = 0u; index < input.queries.size(); ++index) {
@@ -370,11 +396,114 @@ void append_rank_bytes(
     return input;
 }
 
+[[noreturn]] void throw_validation_failure(
+    std::string_view algorithm,
+    std::uint32_t threshold,
+    std::size_t index,
+    std::string_view reason)
+{
+    throw std::runtime_error(
+        "SneakySnake runtime validation failed for algorithm='"
+        + std::string{algorithm}
+        + "' E=" + std::to_string(threshold)
+        + " pair=" + std::to_string(index)
+        + ": " + std::string{reason});
+}
+
+[[nodiscard]] constexpr bool same_result(
+    const SneakySnakeResult& lhs,
+    const SneakySnakeResult& rhs) noexcept
+{
+    return lhs.lower_bound == rhs.lower_bound
+        && lhs.status == rhs.status
+        && lhs.accepted == rhs.accepted
+        && lhs.reserved == rhs.reserved;
+}
+
+void validate_available_backend(
+    std::string_view algorithm,
+    std::uint32_t threshold,
+    const PrefilterInput& input,
+    const PreparedThreshold& prepared,
+    const std::vector<SneakySnakeResult>& cpu_results,
+    const std::vector<vulkan_prefilter::SneakySnakeVulkanResult>& vulkan_results,
+    const PrefilterOutput& output)
+{
+    const std::size_t expected_count = input.queries.size();
+    if (output.accepted.size() != expected_count) {
+        throw_validation_failure(
+            algorithm, threshold, output.accepted.size(),
+            "output decision count differs from input pair count");
+    }
+
+    if (algorithm == "sneakysnake_scalar"
+        || algorithm == "sneakysnake_simd") {
+        if (cpu_results.size() != prepared.scalar_oracle_results.size()) {
+            throw_validation_failure(
+                algorithm, threshold, cpu_results.size(),
+                "CPU result count differs from the untimed scalar oracle");
+        }
+        for (std::size_t index = 0u; index < cpu_results.size(); ++index) {
+            if (!same_result(
+                    cpu_results[index],
+                    prepared.scalar_oracle_results[index])) {
+                throw_validation_failure(
+                    algorithm, threshold, index,
+                    "lower-bound/status/decision differs from scalar oracle");
+            }
+        }
+    } else if (algorithm == "sneakysnake_vulkan") {
+        if (threshold > kVulkanMaxEdits) {
+            throw_validation_failure(
+                algorithm, threshold, 0u,
+                "configured threshold exceeds the Vulkan evaluated domain");
+        }
+        if (vulkan_results.size() != prepared.scalar_oracle_results.size()) {
+            throw_validation_failure(
+                algorithm, threshold, vulkan_results.size(),
+                "Vulkan result count differs from the untimed scalar oracle");
+        }
+        for (std::size_t index = 0u; index < vulkan_results.size(); ++index) {
+            const auto& actual = vulkan_results[index];
+            const auto& expected = prepared.scalar_oracle_results[index];
+            if (actual.lower_bound != expected.lower_bound
+                || actual.status != expected.status
+                || actual.accepted != expected.accepted
+                || actual.reserved != expected.reserved) {
+                throw_validation_failure(
+                    algorithm, threshold, index,
+                    "Vulkan lower-bound/status/decision differs from scalar oracle");
+            }
+            if (actual.status != static_cast<std::uint32_t>(
+                    SneakySnakeStatus::success)) {
+                throw_validation_failure(
+                    algorithm, threshold, index,
+                    "Vulkan row did not execute the evaluated maze path");
+            }
+        }
+    }
+
+    for (std::size_t index = 0u; index < expected_count; ++index) {
+        const bool accepted = output.accepted[index] != 0u;
+        if (accepted != (prepared.reference_accepted[index] != 0u)) {
+            throw_validation_failure(
+                algorithm, threshold, index,
+                "decision differs from the bundled-source compatible fixture oracle");
+        }
+        if (!accepted && prepared.truth_within_threshold[index] != 0u) {
+            throw_validation_failure(
+                algorithm, threshold, index,
+                "false rejection against exact thresholded edit-distance truth");
+        }
+    }
+}
+
 [[nodiscard]] PrefilterOutput run_prefilter(
     std::string_view algorithm,
     const ParamMap& params,
     const PrefilterInput& input)
 {
+    const auto callback_start = std::chrono::steady_clock::now();
     if (!input.valid) {
         throw std::runtime_error("invalid SneakySnake benchmark input: " + input.error);
     }
@@ -385,7 +514,6 @@ void append_rank_bytes(
             "SneakySnake threshold was not prepared by on_input");
     }
     const PreparedThreshold& prepared = prepared_it->second;
-    const auto callback_start = std::chrono::steady_clock::now();
     PrefilterOutput output;
     output.accepted.resize(input.queries.size());
 
@@ -396,13 +524,13 @@ void append_rank_bytes(
         return output;
     }
 
-    static const auto* kernel_region =
-        bioseq::instr::register_region_static("sneaky_snake_kernel");
-    const auto kernel_start = std::chrono::steady_clock::now();
+    static const auto* backend_batch_region =
+        bioseq::instr::register_region_static("sneaky_snake_backend_batch");
+    const auto backend_batch_start = std::chrono::steady_clock::now();
     std::vector<SneakySnakeResult> cpu_results;
     std::vector<vulkan_prefilter::SneakySnakeVulkanResult> vulkan_results;
     {
-        auto kernel_scope = bioseq::instr::region(kernel_region);
+        auto backend_batch_scope = bioseq::instr::region(backend_batch_region);
         if (algorithm == "sneakysnake_original") {
             for (std::size_t index = 0u; index < input.queries.size(); ++index) {
                 const int length = static_cast<int>(input.queries[index].size());
@@ -440,10 +568,10 @@ void append_rank_bytes(
                 + std::string{algorithm});
         }
     }
-    const auto kernel_end = std::chrono::steady_clock::now();
-    output.kernel_ns = static_cast<std::uint64_t>(
+    const auto backend_batch_end = std::chrono::steady_clock::now();
+    output.backend_batch_ns = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kernel_end - kernel_start).count());
+            backend_batch_end - backend_batch_start).count());
 
     if (!cpu_results.empty()) {
         output.lower_bounds_available = true;
@@ -468,6 +596,20 @@ void append_rank_bytes(
             output.statuses[index] = vulkan_results[index].status;
         }
     }
+    const auto validation_start = std::chrono::steady_clock::now();
+    validate_available_backend(
+        algorithm,
+        threshold,
+        input,
+        prepared,
+        cpu_results,
+        vulkan_results,
+        output);
+    output.runtime_validation_performed = true;
+    output.runtime_validation_passed = true;
+    output.validation_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - validation_start).count());
     output.callback_ns = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - callback_start).count());
@@ -475,7 +617,7 @@ void append_rank_bytes(
 }
 
 [[nodiscard]] std::map<std::string, double> evaluate_prefilter(
-    std::string_view /*algorithm*/,
+    std::string_view algorithm,
     const ParamMap& params,
     const PrefilterInput& input,
     const PrefilterOutput& output)
@@ -484,23 +626,33 @@ void append_rank_bytes(
     std::map<std::string, double> metrics;
     metrics.emplace("input_valid", input.valid ? 1.0 : 0.0);
     metrics.emplace("backend_available", output.backend_available ? 1.0 : 0.0);
-    metrics.emplace("preprocessing_ns", static_cast<double>(input.preprocessing_ns));
+    metrics.emplace("input_preparation_ns", static_cast<double>(
+        input.input_preparation_ns));
     metrics.emplace("oracle_preparation_ns", static_cast<double>(
         input.oracle_preparation_ns));
     metrics.emplace("pair_count", static_cast<double>(input.queries.size()));
     metrics.emplace("base_count", static_cast<double>(input.total_bases));
+    metrics.emplace("runtime_validation_performed",
+        output.runtime_validation_performed ? 1.0 : 0.0);
+    metrics.emplace("runtime_validation_passed",
+        output.backend_available
+            ? (output.runtime_validation_passed ? 1.0 : 0.0)
+            : not_measured);
+    metrics.emplace("vulkan_validation_required",
+        algorithm == "sneakysnake_vulkan" && output.backend_available
+            ? 1.0 : 0.0);
     if (!output.backend_available) {
         for (std::string_view name : {
-                 "kernel_ns", "postprocessing_ns", "end_to_end_ns",
-                 "result_count_valid",
+                 "backend_batch_ns", "callback_non_backend_ns",
+                 "callback_total_ns", "validation_ns", "result_count_valid",
                  "accepted_count", "rejected_count", "rejection_rate",
                  "evaluated_count", "reference_decision_mismatches",
                  "reference_decision_mismatch_rate", "true_similar_count",
                  "true_dissimilar_count", "false_accept_count",
                  "false_reject_count", "false_accept_rate",
-                 "false_reject_rate", "pairs_per_second",
-                 "bases_per_second", "end_to_end_pairs_per_second",
-                 "end_to_end_bases_per_second", "lower_bound_sum",
+                 "false_reject_rate", "backend_pairs_per_second",
+                 "backend_bases_per_second", "callback_pairs_per_second",
+                 "callback_bases_per_second", "lower_bound_sum",
                  "lower_bound_max"}) {
             metrics.emplace(std::string{name}, not_measured);
         }
@@ -550,18 +702,19 @@ void append_rank_bytes(
     }
 
     const double pair_count = static_cast<double>(input.queries.size());
-    const double kernel_ns = static_cast<double>(output.kernel_ns);
-    const double postprocessing_ns = static_cast<double>(
-        output.callback_ns >= output.kernel_ns
-            ? output.callback_ns - output.kernel_ns : 0u);
-    const double end_to_end_ns = static_cast<double>(
-        input.preprocessing_ns + output.callback_ns);
+    const double backend_batch_ns = static_cast<double>(
+        output.backend_batch_ns);
+    const double callback_non_backend_ns = static_cast<double>(
+        output.callback_ns >= output.backend_batch_ns
+            ? output.callback_ns - output.backend_batch_ns : 0u);
+    const double callback_total_ns = static_cast<double>(output.callback_ns);
     const auto rate = [] (double count, double nanoseconds) noexcept {
         return nanoseconds > 0.0 ? count * 1.0e9 / nanoseconds : 0.0;
     };
-    metrics.emplace("kernel_ns", kernel_ns);
-    metrics.emplace("postprocessing_ns", postprocessing_ns);
-    metrics.emplace("end_to_end_ns", end_to_end_ns);
+    metrics.emplace("backend_batch_ns", backend_batch_ns);
+    metrics.emplace("callback_non_backend_ns", callback_non_backend_ns);
+    metrics.emplace("callback_total_ns", callback_total_ns);
+    metrics.emplace("validation_ns", static_cast<double>(output.validation_ns));
     metrics.emplace("result_count_valid", result_count_valid ? 1.0 : 0.0);
     metrics.emplace("accepted_count", static_cast<double>(accepted_count));
     metrics.emplace("rejected_count", static_cast<double>(rejected_count));
@@ -583,13 +736,14 @@ void append_rank_bytes(
     metrics.emplace("false_reject_rate", true_similar == 0u ? 0.0
         : static_cast<double>(false_rejects)
             / static_cast<double>(true_similar));
-    metrics.emplace("pairs_per_second", rate(pair_count, kernel_ns));
-    metrics.emplace("bases_per_second", rate(
-        static_cast<double>(input.total_bases), kernel_ns));
-    metrics.emplace("end_to_end_pairs_per_second", rate(
-        pair_count, end_to_end_ns));
-    metrics.emplace("end_to_end_bases_per_second", rate(
-        static_cast<double>(input.total_bases), end_to_end_ns));
+    metrics.emplace("backend_pairs_per_second", rate(
+        pair_count, backend_batch_ns));
+    metrics.emplace("backend_bases_per_second", rate(
+        static_cast<double>(input.total_bases), backend_batch_ns));
+    metrics.emplace("callback_pairs_per_second", rate(
+        pair_count, callback_total_ns));
+    metrics.emplace("callback_bases_per_second", rate(
+        static_cast<double>(input.total_bases), callback_total_ns));
     metrics.emplace("lower_bound_sum", output.lower_bounds_available
         ? static_cast<double>(lower_bound_sum) : not_measured);
     metrics.emplace("lower_bound_max", output.lower_bounds_available

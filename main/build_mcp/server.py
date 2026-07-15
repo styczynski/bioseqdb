@@ -103,11 +103,16 @@ WORKSPACE_ROOT = PROJECT_ROOT.parent
 # box-side server.py is invoked with BIOSEQ_BUILD_PRESET=aws-x64-linux, so the
 # worker configures/builds build/aws-x64-linux/ (the Linux/libc++/x64-linux-triplet
 # tree the verify.sh provisioning already populated) instead of the macOS/arm64
-# bench-opt tree. On a normal local checkout the env vars are unset and these
-# fall back to the everyday DOC0270 presets. The build dir always derives from the
+# bench-opt tree. Explicit environment overrides remain authoritative; without
+# one, Linux hosts select the existing aws-x64-linux family and non-Linux hosts
+# retain the everyday DOC0270 bench-opt family. The build dir always derives from the
 # preset name (every CMakePresets entry uses binaryDir ${sourceDir}/build/${presetName}),
 # so overriding the preset name is sufficient — no separate dir override needed.
-DEFAULT_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET", "bench-opt")
+_HOST_DEFAULT_BUILD_PRESET = (
+    "aws-x64-linux" if sys.platform.startswith("linux") else "bench-opt"
+)
+DEFAULT_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_BUILD_PRESET", _HOST_DEFAULT_BUILD_PRESET)
 
 
 def _default_debug_preset(production_preset: str) -> str:
@@ -1441,8 +1446,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     # explicit start_build argument below is the sole supported override.
     env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
-    if not _is_aws_preset(active_preset):
-        _ensure_local_toolchain_environment(env, active_build_dir)
+    # The local MCP may itself run on the provisioned Linux build host.  Keep
+    # the provisioned environment when present, but also recover VCPKG_ROOT
+    # from an existing configured tree for a fresh sibling test/debug tree.
+    _ensure_local_toolchain_environment(env, active_build_dir)
     if _is_aws_clang_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
     elif _is_aws_gcc_preset(active_preset):

@@ -6523,6 +6523,7 @@ struct PrefilterStage
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>* target_seq_;
+    MatchResultCollection* proof_dst_ = nullptr;
 
     [[nodiscard]] static constexpr std::string_view backend_name(
         PrefilterBackendType backend) noexcept {
@@ -6680,15 +6681,33 @@ struct PrefilterStage
                 "SneakySnake backend returned the wrong result count");
         }
 
+        const std::size_t input_region_count = regions.size();
+        std::uint64_t evaluated_jobs = 0u;
+        std::uint64_t length_difference_jobs = 0u;
+        std::uint64_t unsupported_jobs = 0u;
+        std::uint64_t rejected_jobs = 0u;
         std::vector<std::uint64_t> lower_bounds(regions.size(), 0u);
         std::vector<bool> keep(regions.size(), true);
         for (std::size_t index = 0; index < results.size(); ++index) {
             const SneakySnakeResult& result = results[index];
             const std::size_t region_index = job_regions[index];
-            if (result.status == static_cast<std::uint32_t>(
-                    SneakySnakeStatus::unsupported_conservative)) {
-                continue;
+            switch (static_cast<SneakySnakeStatus>(result.status)) {
+                case SneakySnakeStatus::success:
+                    ++evaluated_jobs;
+                    break;
+                case SneakySnakeStatus::conservative_unequal:
+                    ++length_difference_jobs;
+                    break;
+                case SneakySnakeStatus::unsupported_conservative:
+                    ++unsupported_jobs;
+                    break;
+                default:
+                    throw std::runtime_error(
+                        "SneakySnake backend returned an unknown status");
             }
+            if (!sneaky_snake_accepted(result)) ++rejected_jobs;
+            if (result.status == static_cast<std::uint32_t>(
+                    SneakySnakeStatus::unsupported_conservative)) continue;
             lower_bounds[region_index] =
                 bioseq::parallelism::saturating_add(
                     lower_bounds[region_index],
@@ -6707,6 +6726,21 @@ struct PrefilterStage
             }
             ++output_size;
         }
+        if (proof_dst_ == nullptr) {
+            throw std::logic_error(
+                "SneakySnake prefilter stage has no execution-proof sink");
+        }
+        SneakySnakePrefilterExecutionProof call_proof{};
+        call_proof.record_batch(
+            selected,
+            static_cast<std::uint64_t>(jobs.size()),
+            evaluated_jobs,
+            length_difference_jobs,
+            unsupported_jobs,
+            rejected_jobs,
+            static_cast<std::uint64_t>(input_region_count - output_size),
+            static_cast<std::uint64_t>(output_size));
+        proof_dst_->record_sneaky_snake_prefilter_execution_proof(call_proof);
         return std::move(token).emit_batch_pair(
             std::span<AlignRegion>{regions.data(), output_size},
             std::span<const Anchor>{anchors.data(), anchors.size()});
@@ -6730,6 +6764,85 @@ struct PrefilterStage
                 "domain", "mandatory seed-to-seed global fills"});
             algorithm.computed_properties.push_back({
                 "survivor_check", "exact post-alignment edit distance"});
+            desc.algorithm = std::move(algorithm);
+        }
+        return desc;
+    }
+};
+
+/**
+ * Authoritative exact edit-distance predicate gate.
+ *
+ * This runs after traceback has populated `AlignRegion::edit_distance` and
+ * before the final primary/secondary and MAPQ pass.  Consequently a candidate
+ * that does not satisfy the SQL predicate cannot influence the classification
+ * or mapping-quality metadata of a candidate that does.  The earlier
+ * SneakySnake stage remains only a conservative work-avoidance gate.
+ */
+struct ExactEditFilterStage
+    : StageBase<ExactEditFilterStage, AlignRegion> {
+    static constexpr std::string_view stage_name = "ExactEditFilterStage";
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+
+    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    EmittedToken<Sink> process_pair(
+        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (!params.exact_edit_filter_enabled) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+        if (!params.compute_edit_distance) {
+            throw std::logic_error(
+                "exact edit filter requires exact edit-distance accounting");
+        }
+
+        const std::int64_t exclusive_upper_bound =
+            params.exact_edit_filter_exclusive_upper_bound;
+        std::size_t output_size = 0;
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            AlignRegion& region = regions.data()[index];
+            if (!region.has_alignment) {
+                throw std::runtime_error(
+                    "exact edit filter received a region without alignment traceback");
+            }
+            const bool keep = exclusive_upper_bound > 0
+                && region.edit_distance < static_cast<std::uint64_t>(
+                    exclusive_upper_bound);
+            if (!keep) continue;
+
+            if (output_size != index) {
+                regions.data()[output_size] = std::move(region);
+            }
+            AlignRegion& survivor = regions.data()[output_size];
+            survivor.region_id = static_cast<std::int32_t>(output_size);
+            survivor.parent = -1;
+            survivor.secondary_score = 0;
+            survivor.secondary_count = 0;
+            survivor.secondary_dp_max = 0;
+            survivor.mapq = 0;
+            ++output_size;
+        }
+
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), output_size},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
+    }
+
+    template <is_constexpr_aligner_params Cep>
+    [[nodiscard]] StageDescription describe() const {
+        StageDescription desc;
+        desc.stage_name = std::string{stage_name};
+        if (params.exact_edit_filter_enabled) {
+            StageAlgorithmDescription algorithm;
+            algorithm.name = "Exact edit-distance predicate";
+            algorithm.parameters.push_back({
+                "exclusive_upper_bound",
+                std::to_string(
+                    params.exact_edit_filter_exclusive_upper_bound)});
+            algorithm.computed_properties.push_back({
+                "classification_domain", "exact predicate survivors"});
             desc.algorithm = std::move(algorithm);
         }
         return desc;
@@ -7038,11 +7151,12 @@ template <is_constexpr_aligner_params Cep,
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
         PrefilterStage<QR, TR, Scanner>{
-            {}, params, &query_seq, &target_seq },
+            {}, params, &query_seq, &target_seq, &output_collection },
         AlignStage<kernel_t<BAA>, QR, TR, Scanner>{
             {}, params, &scoring_matrix, &query_seq, &target_seq,
             params.do_cigar || params.compute_edit_distance,
             alignment_proof_dst },
+        ExactEditFilterStage{{}, params},
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
         MapqStage{ {}, params, params.compute_mapq },
@@ -7116,6 +7230,7 @@ template <is_constexpr_aligner_params Cep,
         && !params.compute_divergence
         && !params.compute_mapq
         && !params.compute_edit_distance
+        && !params.exact_edit_filter_enabled
         && !params.prefilter_enabled
         && params.max_occ >= 0
         && (!params.do_cigar || params.vulkan_extend_enabled);
@@ -7174,6 +7289,7 @@ template <is_constexpr_aligner_params Cep,
         && !params.compute_divergence
         && !params.compute_mapq
         && !params.compute_edit_distance
+        && !params.exact_edit_filter_enabled
         && !params.prefilter_enabled
         && params.max_occ >= 0;
 }
