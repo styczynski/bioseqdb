@@ -3662,6 +3662,78 @@ struct PersistedShapeV5CoordinateOperationAcceptanceAudit {
     }
 };
 
+/// Allocation-free pre-finalizer view of the exact operation authority fields
+/// later copied into the SQL evidence ledger.
+struct PersistedShapeV5CoordinateOperationEvidencePreview {
+    PersistedShapeV5CoordinateOperationAcceptanceAudit acceptance{};
+    std::uint64_t query_pipeline_operation_identity = 0u;
+    std::uint64_t shape_pipeline_operation_identity = 0u;
+    std::array<std::uint64_t, 2> query_submission_ordinals{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    RuntimeGpuCacheMetricsAudit maximum_cache_metrics{};
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return acceptance.accepted()
+            && query_pipeline_operation_identity != 0u
+            && shape_pipeline_operation_identity
+                == acceptance.operation_identity
+            && query_pipeline_operation_identity
+                != shape_pipeline_operation_identity
+            && query_submission_ordinals[0] != 0u
+            && query_submission_ordinals[1] != 0u
+            && query_submission_ordinals[0]
+                != query_submission_ordinals[1]
+            && api_version != 0u && driver_version != 0u
+            && seed_size != 0u && manifest_checksum != 0u
+            && maximum_cache_metrics.accepted()
+            && maximum_cache_metrics.token_identity
+                == acceptance.operation_identity
+            && std::any_of(
+                device_uuid.begin(), device_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](const std::uint8_t value) { return value != 0u; });
+    }
+};
+
+/// Exact full-stage job payload plus its structured Shape submission receipts.
+struct PersistedShapeV5CoordinateJobEvidencePreview {
+    PersistedShapeV5CoordinateJobAudit audit{};
+    std::uint64_t shape_pipeline_operation_identity = 0u;
+    std::array<std::uint64_t, 4> shape_submission_ordinals{};
+
+    [[nodiscard]] bool accepted() const noexcept {
+        if (!audit.accepted() || audit.anchor_count == 0u
+            || audit.range_count == 0u || audit.result.valid != 1u
+            || shape_pipeline_operation_identity == 0u) {
+            return false;
+        }
+        for (std::size_t i = 0u;
+             i < shape_submission_ordinals.size(); ++i) {
+            if (shape_submission_ordinals[i] == 0u) return false;
+            for (std::size_t prior = 0u; prior < i; ++prior) {
+                if (shape_submission_ordinals[prior]
+                        == shape_submission_ordinals[i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
 class PersistedShapeV5CoordinateAcceptedOperation {
 public:
     PersistedShapeV5CoordinateAcceptedOperation() = default;
@@ -3775,6 +3847,93 @@ public:
     [[nodiscard]] RuntimeGpuCacheMetricsAudit
     cache_metrics_preview() const noexcept {
         return maximum_cache_metrics();
+    }
+    [[nodiscard]] PersistedShapeV5CoordinateOperationEvidencePreview
+    operation_evidence_preview() const noexcept {
+        PersistedShapeV5CoordinateOperationEvidencePreview result{};
+        if (!all_jobs_accepted()
+            || !query_pipeline_proof_.accepted_query_sketch()
+            || !shape_pipeline_proof_.accepted_shape_v5_coordinate()) {
+            return result;
+        }
+        const RuntimePipelineOperationAudit& query =
+            query_pipeline_proof_.audit();
+        const RuntimePipelineOperationAudit& shape =
+            shape_pipeline_proof_.audit();
+        if (query.jobs.size() != 1u
+            || query.jobs.front().committed_submissions != 2u
+            || shape.committed_submissions
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - query.committed_submissions) {
+            return result;
+        }
+        result.acceptance =
+            PersistedShapeV5CoordinateOperationAcceptanceAudit{
+                .operation_identity = operation_identity_,
+                .expected_job_count = static_cast<std::uint64_t>(
+                    records_.size()),
+                .consumed_count = static_cast<std::uint64_t>(
+                    consumed_count()),
+                .accepted_count = static_cast<std::uint64_t>(
+                    accepted_count()),
+                .burned_count = static_cast<std::uint64_t>(
+                    burned_count()),
+                .query_pipeline_receipt_count =
+                    static_cast<std::uint64_t>(query.prepared_count),
+                .shape_pipeline_receipt_count =
+                    static_cast<std::uint64_t>(shape.prepared_count),
+                .committed_submission_count = query.committed_submissions
+                    + shape.committed_submissions,
+                .seed_receipt_identity = query.seed_receipt_identity,
+            };
+        result.query_pipeline_operation_identity =
+            query.operation_identity;
+        result.shape_pipeline_operation_identity =
+            shape.operation_identity;
+        result.query_submission_ordinals[0] =
+            query.jobs.front().submission_ordinals[0];
+        result.query_submission_ordinals[1] =
+            query.jobs.front().submission_ordinals[1];
+        result.device_uuid = query.device_uuid;
+        result.api_version = query.api_version;
+        result.driver_version = query.driver_version;
+        result.vendor_id = query.vendor_id;
+        result.device_id = query.device_id;
+        result.pipeline_cache_uuid = query.pipeline_cache_uuid;
+        result.seed_sha256 = query.seed_sha256;
+        result.seed_size = query.seed_size;
+        result.manifest_checksum = query.manifest_checksum;
+        result.maximum_cache_metrics = maximum_cache_metrics();
+        return result.accepted()
+            ? result
+            : PersistedShapeV5CoordinateOperationEvidencePreview{};
+    }
+    [[nodiscard]] std::optional<
+        PersistedShapeV5CoordinateJobEvidencePreview>
+    job_evidence_preview(const std::size_t problem_index) const noexcept {
+        if (!all_jobs_accepted() || problem_index >= records_.size()
+            || !shape_pipeline_proof_.accepted_shape_v5_coordinate()) {
+            return std::nullopt;
+        }
+        const RuntimePipelineOperationAudit& shape =
+            shape_pipeline_proof_.audit();
+        if (problem_index >= shape.jobs.size()) return std::nullopt;
+        const RuntimePipelineJobUseAudit& use = shape.jobs[problem_index];
+        if (use.committed_submissions != 4u
+            || use.submission_operation_identity
+                != shape.operation_identity) {
+            return std::nullopt;
+        }
+        PersistedShapeV5CoordinateJobEvidencePreview result{
+            .audit = records_[problem_index].audit,
+            .shape_pipeline_operation_identity =
+                use.submission_operation_identity,
+            .shape_submission_ordinals = use.submission_ordinals,
+        };
+        return result.accepted()
+            ? std::optional<
+                PersistedShapeV5CoordinateJobEvidencePreview>{result}
+            : std::nullopt;
     }
 
     /// Contract-only test hook.  It returns no proof or evidence and therefore

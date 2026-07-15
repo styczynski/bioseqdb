@@ -2138,6 +2138,632 @@ persisted_shape_v5_coordinate_publication_counts_valid(
         && counts.staged_jobs == counts.expected_jobs;
 }
 
+static_assert(std::is_trivially_copyable_v<PipelineExecutionStats>);
+static_assert(std::is_standard_layout_v<PipelineExecutionStats>);
+
+/// Maximum statement-local persisted-GPU evidence retained for SQL proof.
+/// This is the production dispatch ceiling, not a silently growing cache.
+inline constexpr std::uint64_t
+    persisted_gpu_operation_evidence_capacity = 8192u;
+
+/// One causal queue submission, represented without Vulkan handles/pointers.
+struct PersistedGpuStructuredSubmissionEvidence {
+    std::uint64_t operation_identity = 0u;
+    std::uint64_t ordinal = 0u;
+    std::uint64_t submit_wait_identity = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return operation_identity != 0u && ordinal != 0u
+            && ordinal <= sql_bigint_value_max
+            && submit_wait_identity != 0u;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuStructuredSubmissionEvidence&) const noexcept =
+        default;
+};
+
+/// Immutable numeric Vulkan/cache identity copied from the runtime proof.
+struct PersistedGpuEnvironmentEvidence {
+    std::array<std::uint8_t, 16> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, 16> pipeline_cache_uuid{};
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return api_version != 0u && driver_version != 0u
+            && seed_size != 0u && seed_size <= sql_bigint_value_max
+            && manifest_checksum != 0u
+            && std::any_of(
+                device_uuid.begin(), device_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](const std::uint8_t value) { return value != 0u; });
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuEnvironmentEvidence&) const noexcept = default;
+};
+
+/// Report-once cache counters attached to the accepted operation authority.
+struct PersistedGpuCacheMetricsEvidence {
+    std::uint64_t token_identity = 0u;
+    std::uint64_t pipeline_cache_loads = 0u;
+    std::uint64_t pipeline_cache_seed_bytes = 0u;
+    std::uint64_t pipeline_cache_load_ns = 0u;
+    std::uint64_t pipeline_creates = 0u;
+    std::uint64_t pipeline_creation_ns = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool load_shape = pipeline_cache_loads == 0u
+            ? pipeline_cache_seed_bytes == 0u
+                && pipeline_cache_load_ns == 0u
+            : pipeline_cache_loads == 1u
+                && pipeline_cache_seed_bytes != 0u
+                && pipeline_cache_load_ns != 0u;
+        const bool create_shape = pipeline_creates == 0u
+            ? pipeline_creation_ns == 0u
+            : pipeline_creation_ns != 0u;
+        return token_identity != 0u && load_shape && create_shape
+            && pipeline_cache_loads <= sql_bigint_value_max
+            && pipeline_cache_seed_bytes <= sql_bigint_value_max
+            && pipeline_cache_load_ns <= sql_bigint_value_max
+            && pipeline_creates <= sql_bigint_value_max
+            && pipeline_creation_ns <= sql_bigint_value_max;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedGpuCacheMetricsEvidence&) const noexcept = default;
+};
+
+/// Coordinate result copied after the runtime's status/readback checks.
+struct PersistedGpuCoordinateResultEvidence {
+    std::uint64_t query_start = 0u;
+    std::uint64_t query_end = 0u;
+    std::uint64_t target_start = 0u;
+    std::uint64_t target_end = 0u;
+    std::uint64_t match_length = 0u;
+    std::uint64_t block_length = 0u;
+    std::int32_t chain_score = 0;
+    std::int32_t seed_count = 0;
+    bool is_reverse = false;
+    bool valid = false;
+
+    [[nodiscard]] constexpr bool accepted(
+        const std::uint64_t query_length,
+        const std::uint64_t target_length) const noexcept {
+        return valid && seed_count > 0
+            && query_start < query_end && query_end <= query_length
+            && target_start < target_end && target_end <= target_length
+            && match_length <= block_length
+            && match_length <= query_end - query_start
+            && match_length <= target_end - target_start
+            && block_length <= query_end - query_start
+                + target_end - target_start
+            && query_start <= sql_bigint_value_max
+            && query_end <= sql_bigint_value_max
+            && target_start <= sql_bigint_value_max
+            && target_end <= sql_bigint_value_max
+            && match_length <= sql_bigint_value_max
+            && block_length <= sql_bigint_value_max;
+    }
+};
+
+/// Full-stage causal evidence for one logical target/query coordinate result.
+struct PersistedGpuJobEvidence {
+    std::uint64_t logical_target_row = 0u;
+    std::uint64_t logical_query_ordinal = 0u;
+    std::uint32_t query_index = 0u;
+    std::uint64_t query_length = 0u;
+    std::uint64_t target_length = 0u;
+    std::uint64_t query_minimizer_count = 0u;
+    std::uint64_t query_tile_count = 0u;
+    std::uint64_t query_count_dispatches = 0u;
+    std::uint64_t query_scan_dispatches = 0u;
+    std::uint64_t query_emit_dispatches = 0u;
+    std::uint64_t query_completed_roundtrips = 0u;
+    std::uint64_t direct_count_dispatches = 0u;
+    std::uint64_t direct_scan_dispatches = 0u;
+    std::uint64_t anchor_count = 0u;
+    std::uint64_t direct_emit_dispatches = 0u;
+    std::uint64_t sort_operations = 0u;
+    std::uint64_t range_build_dispatches = 0u;
+    std::uint64_t range_count = 0u;
+    std::uint64_t chain_dispatches = 0u;
+    std::uint64_t chain_backtrack_dispatches = 0u;
+    std::uint64_t coordinate_dispatches = 0u;
+    std::array<PersistedGpuStructuredSubmissionEvidence, 4> submissions{};
+    std::uint64_t count_status_checks = 0u;
+    std::uint64_t emit_status_checks = 0u;
+    std::uint32_t status_or = 0u;
+    std::uint64_t result_readbacks = 0u;
+    std::uint64_t coordinate_vote_dispatches = 0u;
+    std::uint64_t cpu_or_simd_biological_calls = 0u;
+    std::uint64_t recompute_calls = 0u;
+    std::uint64_t fallback_calls = 0u;
+    PersistedGpuCoordinateResultEvidence coordinate{};
+
+    [[nodiscard]] constexpr bool accepted(
+        const std::uint64_t shape_operation_identity) const noexcept {
+        if (logical_target_row > sql_bigint_value_max
+            || logical_query_ordinal > sql_bigint_value_max
+            || query_length == 0u || query_length > sql_bigint_value_max
+            || target_length == 0u || target_length > sql_bigint_value_max
+            || query_minimizer_count == 0u
+            || query_minimizer_count > sql_bigint_value_max
+            || query_tile_count == 0u
+            || query_tile_count > sql_bigint_value_max
+            || query_count_dispatches != 1u
+            || query_scan_dispatches != 3u
+            || query_emit_dispatches != 1u
+            || query_completed_roundtrips != 2u
+            || direct_count_dispatches != 1u
+            || direct_scan_dispatches != 3u
+            || anchor_count == 0u || anchor_count > sql_bigint_value_max
+            || direct_emit_dispatches != 1u
+            || sort_operations != 1u
+            || range_build_dispatches != 1u
+            || range_count == 0u || range_count > sql_bigint_value_max
+            || chain_dispatches != 1u
+            || chain_backtrack_dispatches != 1u
+            || coordinate_dispatches != 1u
+            || count_status_checks != 1u
+            || emit_status_checks != 1u
+            || status_or != 0u || result_readbacks != 1u
+            || coordinate_vote_dispatches != 0u
+            || cpu_or_simd_biological_calls != 0u
+            || recompute_calls != 0u || fallback_calls != 0u
+            || !coordinate.accepted(query_length, target_length)) {
+            return false;
+        }
+        for (std::size_t i = 0u; i < submissions.size(); ++i) {
+            if (!submissions[i].accepted()
+                || submissions[i].operation_identity
+                    != shape_operation_identity) {
+                return false;
+            }
+            for (std::size_t prior = 0u; prior < i; ++prior) {
+                if (submissions[prior].ordinal == submissions[i].ordinal
+                    || submissions[prior].submit_wait_identity
+                        == submissions[i].submit_wait_identity) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
+/// One publication-wave envelope. The final cache delta may be replaced only
+/// by the runtime authority immediately before allocation-free ledger linking.
+struct PersistedGpuOperationEvidence {
+    std::uint64_t operation_identity = 0u;
+    PersistedShapeV5CoordinatePublicationCounts publication{};
+    std::uint64_t published_jobs = 0u;
+    std::uint64_t publication_commits = 0u;
+    std::uint64_t query_pipeline_receipt_count = 0u;
+    std::uint64_t shape_pipeline_receipt_count = 0u;
+    std::uint64_t submission_count = 0u;
+    std::uint64_t query_pipeline_operation_identity = 0u;
+    std::uint64_t shape_pipeline_operation_identity = 0u;
+    std::array<std::uint64_t, 2> query_submission_ordinals{};
+    std::uint64_t seed_receipt_identity = 0u;
+    std::uint64_t generation_id = 0u;
+    std::uint64_t source_identity = 0u;
+    std::uint64_t cold_load_identity = 0u;
+    PersistedGpuEnvironmentEvidence environment{};
+    PersistedGpuCacheMetricsEvidence cache_metrics{};
+
+    [[nodiscard]] bool accepted(
+        const std::span<const PersistedGpuJobEvidence> jobs) const noexcept {
+        if (operation_identity == 0u
+            || !persisted_shape_v5_coordinate_publication_counts_valid(
+                publication)
+            || published_jobs != publication.expected_jobs
+            || publication_commits != 1u
+            || query_pipeline_receipt_count != 3u
+            || shape_pipeline_receipt_count < 7u
+            || shape_pipeline_receipt_count > 10u
+            || submission_count < 6u
+            || submission_count > sql_bigint_value_max
+            || query_pipeline_operation_identity == 0u
+            || shape_pipeline_operation_identity == 0u
+            || query_pipeline_operation_identity
+                == shape_pipeline_operation_identity
+            || query_submission_ordinals[0] == 0u
+            || query_submission_ordinals[1] == 0u
+            || query_submission_ordinals[0]
+                == query_submission_ordinals[1]
+            || query_submission_ordinals[0] > sql_bigint_value_max
+            || query_submission_ordinals[1] > sql_bigint_value_max
+            || seed_receipt_identity == 0u
+            || generation_id == 0u
+            || generation_id > sql_bigint_value_max
+            || source_identity == 0u || cold_load_identity == 0u
+            || !environment.accepted() || !cache_metrics.accepted()
+            || cache_metrics.token_identity != operation_identity
+            || jobs.size() != publication.expected_jobs) {
+            return false;
+        }
+        std::uint64_t shape_ordinal_count = 0u;
+        for (std::size_t job_index = 0u; job_index < jobs.size(); ++job_index) {
+            const PersistedGpuJobEvidence& job = jobs[job_index];
+            if (!job.accepted(shape_pipeline_operation_identity)) return false;
+            for (std::size_t prior = 0u; prior < job_index; ++prior) {
+                if (jobs[prior].logical_target_row == job.logical_target_row
+                    && jobs[prior].logical_query_ordinal
+                        == job.logical_query_ordinal) {
+                    return false;
+                }
+            }
+            for (std::size_t submission_index = 0u;
+                 submission_index < job.submissions.size();
+                 ++submission_index) {
+                const auto& submission = job.submissions[submission_index];
+                bool previously_seen = false;
+                for (std::size_t prior_job = 0u;
+                     prior_job <= job_index && !previously_seen;
+                     ++prior_job) {
+                    const std::size_t prior_submission_limit =
+                        prior_job == job_index
+                        ? submission_index
+                        : jobs[prior_job].submissions.size();
+                    for (std::size_t prior_submission = 0u;
+                         prior_submission < prior_submission_limit;
+                         ++prior_submission) {
+                        previously_seen =
+                            jobs[prior_job].submissions[prior_submission]
+                                .ordinal == submission.ordinal;
+                        if (previously_seen) break;
+                    }
+                }
+                if (!previously_seen) {
+                    if (shape_ordinal_count == sql_bigint_value_max) {
+                        return false;
+                    }
+                    ++shape_ordinal_count;
+                }
+            }
+        }
+        return submission_count == 2u + shape_ordinal_count;
+    }
+};
+
+class PersistedGpuOperationEvidenceLedger;
+
+/// Pre-finalizer authority proving one sealed chunk can be linked without any
+/// later allocation, duplicate search, range check, or capacity decision.
+class PersistedGpuOperationEvidenceAppendAuthority {
+public:
+    PersistedGpuOperationEvidenceAppendAuthority() = default;
+    PersistedGpuOperationEvidenceAppendAuthority(
+        const PersistedGpuOperationEvidenceAppendAuthority&) = delete;
+    PersistedGpuOperationEvidenceAppendAuthority& operator=(
+        const PersistedGpuOperationEvidenceAppendAuthority&) = delete;
+    PersistedGpuOperationEvidenceAppendAuthority(
+        PersistedGpuOperationEvidenceAppendAuthority&& other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)) {}
+    PersistedGpuOperationEvidenceAppendAuthority& operator=(
+        PersistedGpuOperationEvidenceAppendAuthority&& other) noexcept {
+        if (this != &other) {
+            owner_ = std::exchange(other.owner_, nullptr);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept { return owner_ != nullptr; }
+
+private:
+    explicit PersistedGpuOperationEvidenceAppendAuthority(
+        PersistedGpuOperationEvidenceLedger& owner) noexcept
+        : owner_(&owner) {}
+
+    PersistedGpuOperationEvidenceLedger* owner_ = nullptr;
+    friend class PersistedGpuOperationEvidenceLedger;
+};
+
+/// One admitted operation chunk. The job vector dies before its permit, and
+/// the ledger removes next links iteratively before destroying each chunk.
+class PersistedGpuOperationEvidenceChunk {
+public:
+    PersistedGpuOperationEvidenceChunk() = default;
+    PersistedGpuOperationEvidenceChunk(
+        const PersistedGpuOperationEvidenceChunk&) = delete;
+    PersistedGpuOperationEvidenceChunk& operator=(
+        const PersistedGpuOperationEvidenceChunk&) = delete;
+    PersistedGpuOperationEvidenceChunk(
+        PersistedGpuOperationEvidenceChunk&&) = delete;
+    PersistedGpuOperationEvidenceChunk& operator=(
+        PersistedGpuOperationEvidenceChunk&&) = delete;
+
+    /// Admit and allocate one exact operation/job image before finalization.
+    [[nodiscard]] static std::unique_ptr<
+        PersistedGpuOperationEvidenceChunk> prepare(
+            const std::size_t job_count) noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        if (job_count == 0u
+            || job_count > persisted_gpu_operation_evidence_capacity
+            || job_count > std::vector<PersistedGpuJobEvidence>{}.max_size()) {
+            return nullptr;
+        }
+        const std::uint64_t retained = saturating_add(
+            sizeof(PersistedGpuOperationEvidenceChunk),
+            saturating_mul(
+                static_cast<std::uint64_t>(job_count),
+                sizeof(PersistedGpuJobEvidence)));
+        const std::uint64_t peak = saturating_mul(
+            retained,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            return nullptr;
+        }
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) return nullptr;
+        try {
+            auto chunk = std::make_unique<
+                PersistedGpuOperationEvidenceChunk>();
+            chunk->capacity_permit_ = std::move(*permit);
+            chunk->jobs_.resize(job_count);
+            const std::uint64_t actual = saturating_add(
+                sizeof(PersistedGpuOperationEvidenceChunk),
+                saturating_mul(
+                    static_cast<std::uint64_t>(chunk->jobs_.capacity()),
+                    sizeof(PersistedGpuJobEvidence)));
+            if (actual == (std::numeric_limits<std::uint64_t>::max)()
+                || actual > chunk->capacity_permit_.bytes()) {
+                return nullptr;
+            }
+            chunk->capacity_permit_.shrink_to(actual);
+            return chunk;
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    [[nodiscard]] PersistedGpuOperationEvidence& operation() noexcept {
+        return operation_;
+    }
+    [[nodiscard]] std::span<PersistedGpuJobEvidence> jobs() noexcept {
+        return jobs_;
+    }
+    [[nodiscard]] const PersistedGpuOperationEvidence& operation()
+        const noexcept { return operation_; }
+    [[nodiscard]] std::span<const PersistedGpuJobEvidence> jobs()
+        const noexcept { return jobs_; }
+    [[nodiscard]] const PersistedGpuOperationEvidenceChunk* next()
+        const noexcept { return next_.get(); }
+
+    /// Freeze populated fields after every full-stage/range/equation check.
+    [[nodiscard]] bool seal() noexcept {
+        sealed_ = operation_.accepted(jobs_);
+        return sealed_;
+    }
+    [[nodiscard]] bool sealed() const noexcept {
+        return sealed_;
+    }
+
+    /// Replace the prevalidated maximum with the final report-once delta.
+    void publish_cache_metrics(
+        const PersistedGpuCacheMetricsEvidence& metrics) noexcept {
+        const PersistedGpuCacheMetricsEvidence maximum =
+            operation_.cache_metrics;
+        sealed_ = sealed_ && metrics.accepted() && maximum.accepted()
+            && metrics.token_identity == maximum.token_identity
+            && metrics.pipeline_cache_loads
+                <= maximum.pipeline_cache_loads
+            && metrics.pipeline_cache_seed_bytes
+                <= maximum.pipeline_cache_seed_bytes
+            && metrics.pipeline_cache_load_ns
+                <= maximum.pipeline_cache_load_ns
+            && metrics.pipeline_creates <= maximum.pipeline_creates
+            && metrics.pipeline_creation_ns
+                <= maximum.pipeline_creation_ns;
+        cache_metrics_published_ = true;
+        operation_.cache_metrics = metrics;
+    }
+    [[nodiscard]] bool cache_metrics_published() const noexcept {
+        return cache_metrics_published_;
+    }
+
+private:
+    // Declared first: jobs/next are destroyed before their admission permit.
+    bioseq::parallelism::MemoryPermit capacity_permit_{};
+    std::unique_ptr<PersistedGpuOperationEvidenceChunk> next_{};
+    std::vector<PersistedGpuJobEvidence> jobs_{};
+    PersistedGpuOperationEvidence operation_{};
+    bool cache_metrics_published_ = false;
+    bool sealed_ = false;
+    friend class PersistedGpuOperationEvidenceLedger;
+};
+
+/// Statement-root-owned causal evidence ledger. It never owns through stats;
+/// schedulers retain only a borrowed pointer to this root object.
+class PersistedGpuOperationEvidenceLedger {
+public:
+    PersistedGpuOperationEvidenceLedger() = default;
+    PersistedGpuOperationEvidenceLedger(
+        const PersistedGpuOperationEvidenceLedger&) = delete;
+    PersistedGpuOperationEvidenceLedger& operator=(
+        const PersistedGpuOperationEvidenceLedger&) = delete;
+    PersistedGpuOperationEvidenceLedger(
+        PersistedGpuOperationEvidenceLedger&& other) noexcept {
+        move_from(other);
+    }
+    PersistedGpuOperationEvidenceLedger& operator=(
+        PersistedGpuOperationEvidenceLedger&& other) noexcept {
+        if (this != &other) {
+            clear_iterative();
+            move_from(other);
+        }
+        return *this;
+    }
+    ~PersistedGpuOperationEvidenceLedger() { clear_iterative(); }
+
+    /// Complete all duplicate/capacity/range checks before runtime finalizer.
+    [[nodiscard]] PersistedGpuOperationEvidenceAppendAuthority prepare_append(
+        const std::unique_ptr<PersistedGpuOperationEvidenceChunk>& chunk)
+        noexcept {
+        if (frozen_ || invalid_ || chunk == nullptr || !chunk->sealed()
+            || chunk->cache_metrics_published()
+            || operation_count_ >= persisted_gpu_operation_evidence_capacity
+            || job_count_ > persisted_gpu_operation_evidence_capacity
+                - chunk->jobs().size()) {
+            invalidate(chunk == nullptr ? 0u : 1u, true);
+            return {};
+        }
+        const auto& operation = chunk->operation();
+        for (const PersistedGpuOperationEvidenceChunk* existing = head_.get();
+             existing != nullptr; existing = existing->next()) {
+            if (existing->operation().operation_identity
+                    == operation.operation_identity) {
+                invalidate(1u, false);
+                return {};
+            }
+            for (const auto& job : chunk->jobs()) {
+                for (const auto& old_job : existing->jobs()) {
+                    if (existing->operation().operation_identity
+                            == operation.operation_identity
+                        && old_job.logical_target_row
+                            == job.logical_target_row
+                        && old_job.logical_query_ordinal
+                            == job.logical_query_ordinal) {
+                        invalidate(1u, false);
+                        return {};
+                    }
+                }
+            }
+            if (existing->operation().generation_id
+                    != operation.generation_id
+                || existing->operation().source_identity
+                    != operation.source_identity
+                || existing->operation().environment
+                    != operation.environment) {
+                invalidate(1u, false);
+                return {};
+            }
+        }
+        return PersistedGpuOperationEvidenceAppendAuthority{*this};
+    }
+
+    /// Allocation-free/noexcept link after accepted Runtime authority exists.
+    void commit_append(
+        PersistedGpuOperationEvidenceAppendAuthority&& authority,
+        std::unique_ptr<PersistedGpuOperationEvidenceChunk>&& chunk) noexcept {
+        DEBUG_ASSERT(authority.owner_ == this,
+            "persisted GPU evidence append authority owner changed");
+        DEBUG_ASSERT(chunk != nullptr && chunk->sealed()
+            && chunk->cache_metrics_published(),
+            "persisted GPU evidence chunk was not publication-ready");
+        PersistedGpuOperationEvidenceChunk* appended = chunk.get();
+        if (tail_ == nullptr) {
+            head_ = std::move(chunk);
+        } else {
+            tail_->next_ = std::move(chunk);
+        }
+        tail_ = appended;
+        ++operation_count_;
+        job_count_ += tail_->jobs_.size();
+        authority.owner_ = nullptr;
+    }
+
+    /// Freeze at ExecutorFinish before move into the immutable snapshot.
+    void freeze() noexcept { frozen_ = true; }
+
+    [[nodiscard]] bool complete() const noexcept {
+        if (!frozen_ || invalid_ || saturated_ || dropped_operation_count_ != 0u
+            || operation_count_ > persisted_gpu_operation_evidence_capacity
+            || job_count_ > persisted_gpu_operation_evidence_capacity) {
+            return false;
+        }
+        std::uint64_t operations = 0u;
+        std::uint64_t jobs = 0u;
+        for (const PersistedGpuOperationEvidenceChunk* chunk = head_.get();
+             chunk != nullptr; chunk = chunk->next()) {
+            if (!chunk->sealed() || !chunk->cache_metrics_published()) {
+                return false;
+            }
+            ++operations;
+            jobs += chunk->jobs().size();
+        }
+        return operations == operation_count_ && jobs == job_count_;
+    }
+    [[nodiscard]] bool accepted() const noexcept {
+        return operation_count_ != 0u && job_count_ != 0u && complete();
+    }
+    [[nodiscard]] bool saturated() const noexcept { return saturated_; }
+    [[nodiscard]] std::uint64_t dropped_operation_count() const noexcept {
+        return dropped_operation_count_;
+    }
+    [[nodiscard]] std::uint64_t operation_count() const noexcept {
+        return operation_count_;
+    }
+    [[nodiscard]] std::uint64_t job_count() const noexcept {
+        return job_count_;
+    }
+    [[nodiscard]] const PersistedGpuOperationEvidenceChunk* head()
+        const noexcept { return head_.get(); }
+
+private:
+    void invalidate(
+        const std::uint64_t dropped,
+        const bool saturated) noexcept {
+        invalid_ = true;
+        saturated_ = saturated_ || saturated;
+        if (dropped > (std::numeric_limits<std::uint64_t>::max)()
+                - dropped_operation_count_) {
+            dropped_operation_count_ =
+                (std::numeric_limits<std::uint64_t>::max)();
+            saturated_ = true;
+        } else {
+            dropped_operation_count_ += dropped;
+        }
+    }
+
+    void clear_iterative() noexcept {
+        tail_ = nullptr;
+        while (head_ != nullptr) {
+            auto next = std::move(head_->next_);
+            head_ = std::move(next);
+        }
+    }
+
+    void move_from(PersistedGpuOperationEvidenceLedger& other) noexcept {
+        head_ = std::move(other.head_);
+        tail_ = std::exchange(other.tail_, nullptr);
+        operation_count_ = std::exchange(other.operation_count_, 0u);
+        job_count_ = std::exchange(other.job_count_, 0u);
+        dropped_operation_count_ = std::exchange(
+            other.dropped_operation_count_, 0u);
+        invalid_ = std::exchange(other.invalid_, false);
+        saturated_ = std::exchange(other.saturated_, false);
+        frozen_ = std::exchange(other.frozen_, false);
+    }
+
+    std::unique_ptr<PersistedGpuOperationEvidenceChunk> head_{};
+    PersistedGpuOperationEvidenceChunk* tail_ = nullptr;
+    std::uint64_t operation_count_ = 0u;
+    std::uint64_t job_count_ = 0u;
+    std::uint64_t dropped_operation_count_ = 0u;
+    bool invalid_ = false;
+    bool saturated_ = false;
+    bool frozen_ = false;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedGpuOperationEvidenceLedger>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedGpuOperationEvidenceLedger>);
+
 /// Convert the runtime-minted fixed GPU identity into the statement proof
 /// without allocating or inferring cache state from descriptive counters.
 /// Only the immutable all-hit policy accepted by the persisted operation can
