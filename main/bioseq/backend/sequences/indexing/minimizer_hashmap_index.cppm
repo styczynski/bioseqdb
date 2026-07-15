@@ -4807,13 +4807,17 @@ protected:
         std::size_t query_index = no_route;
         std::uint64_t position_begin = 0;
         std::uint64_t position_end = 0;
-        std::optional<std::uint64_t> previous_position{};
     };
 
     struct SelectedExtent {
         std::vector<SelectedControl> controls;
         std::size_t next_control = 0;
         std::uint64_t next_position = 0;
+        // The physical cursor consumes one control at a time.  A prior
+        // position therefore belongs to the current control, not every
+        // retained control record.  next_position > position_begin is the
+        // exact validity bit and naturally resets at each control boundary.
+        std::uint64_t previous_position = 0;
         bool controls_complete = false;
         bool positions_complete = false;
     };
@@ -5888,12 +5892,12 @@ protected:
                         selected->controls[selected->next_control];
                     if (selected->next_position >= control.position_begin
                         && selected->next_position < control.position_end) {
-                        if (control.previous_position
-                            && *decoded <= *control.previous_position) {
+                        if (selected->next_position > control.position_begin
+                            && *decoded <= selected->previous_position) {
                             return std::unexpected(
                                 MinimizerGenerationWireError::position_range);
                         }
-                        control.previous_position = *decoded;
+                        selected->previous_position = *decoded;
                         if (control.query_index != no_route) {
                             QueryRecord& record =
                                 protocol_query_records_[control.query_index];

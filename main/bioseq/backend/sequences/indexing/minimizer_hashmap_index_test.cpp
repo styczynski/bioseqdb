@@ -8438,7 +8438,9 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
         {1u, (3u << 1u) | 1u},
         {1u, (9u << 1u)},
-        {2u, (11u << 1u) | 1u},
+        // A new hash may restart below the previous hash's last coordinate.
+        // This proves the reader's strict-order state resets per control.
+        {2u, (1u << 1u) | 1u},
     };
     VectorReplayMinimizerProducer producer{minimizers};
     CollectingMinimizerRowSink sink;
@@ -8496,6 +8498,7 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     REQUIRE((std::vector<std::uint64_t>{
         hash1.positions.begin(), hash1.positions.end()}
         == std::vector<std::uint64_t>{7u, 18u}));
+    REQUIRE(reader->lookup(2u).positions.front() == 3u);
     REQUIRE(reader->lookup(999u).positions.empty());
 
     SECTION("padding byte") {
@@ -8547,6 +8550,29 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
                 *minimizer_position_segment_core(
                     generation->manifest, 0u),
                 generation->directory.profile()),
+            MinimizerGenerationWireError::position_range);
+    }
+    SECTION("prepared reader retains strict order state") {
+        auto corrupt = sink.rows[entry.control_chunk_count];
+        test_write_le<std::uint16_t>(
+            corrupt.bytes, 2u,
+            test_read_le<std::uint16_t>(corrupt.bytes, 0u));
+        recompute_row_checksum(corrupt);
+        auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u);
+        REQUIRE(made.has_value());
+        for (std::size_t index = 0;
+             index < entry.control_chunk_count; ++index) {
+            REQUIRE(made->accept(row_view(sink.rows[index])).has_value());
+        }
+        require_wire_error(
+            made->accept(row_view(corrupt)),
             MinimizerGenerationWireError::position_range);
     }
     SECTION("positions cannot escape their persisted segment") {
@@ -8719,7 +8745,7 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         >= query_count * sizeof(std::uint64_t));
     REQUIRE(evidence.decoded_control_records == query_count);
     REQUIRE(evidence.retained_selected_control_records == query_count);
-    REQUIRE(evidence.selected_control_size_bytes == 40u);
+    REQUIRE(evidence.selected_control_size_bytes == 24u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
         >= query_count * evidence.selected_control_size_bytes);
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
@@ -9086,6 +9112,28 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     REQUIRE(first_position->bytes.size() == 8064u);
     REQUIRE(sink.max_callback_bytes == 8064u);
     require_complete_generation_rows(*generation, sink.rows);
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    const std::array<std::uint64_t, 1> query{7u};
+    auto reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(65'534u),
+        generation->directory.encoded_bytes(),
+        query,
+        65'534u);
+    REQUIRE(reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(reader->finish().has_value());
+    const auto lookup = reader->lookup(7u);
+    REQUIRE(lookup.positions.size() == position_count);
+    REQUIRE(lookup.positions.front() == 0u);
+    REQUIRE(lookup.positions.back() == (position_count - 1u) << 1u);
 }
 
 TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",
