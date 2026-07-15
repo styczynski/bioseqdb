@@ -913,12 +913,14 @@ inline void record_unattested_job(
     stats.merge_job(job);
 }
 
-/// Consume one runtime-sealed persisted Shape-V5 coordinate proof.  This is a
-/// dedicated GPU recorder: MatchResultCollection and CPU/SIMD route labels are
-/// deliberately absent, and a missing/tampered/second consume publishes only
-/// mixed-invalid identities with no stage evidence.
-inline void record_persisted_shape_v5_coordinate_job(
-        ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
+/// Consume one runtime-sealed persisted Shape-V5 coordinate proof into a local
+/// job value.  Nothing caller-visible is mutated here: a missing, tampered or
+/// repeated consume burns only the runtime record and returns no staged job.
+/// The accepted operation authority supplies the immutable GPU environment
+/// after every job and the complete causal receipt union have been validated.
+[[nodiscard]] inline std::optional<
+    ::bioseq::pipeline_stats::PipelineJobExecutionStats>
+stage_persisted_shape_v5_coordinate_job(
         const Minimap2Params& params,
         const ::bioseq::pipeline_stats::TargetIndexSource requested_source,
         bioseq::gpu::vulkan::PersistedShapeV5CoordinateOperationProof& proof,
@@ -939,53 +941,73 @@ inline void record_persisted_shape_v5_coordinate_job(
             == ::bioseq::pipeline_stats::TargetIndexSource::persisted
         && evidence.has_value()
         && evidence->accepted();
-    job.actual_backend = accepted
-        ? ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
-        : ::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid;
-    job.actual_target_index_source = accepted
-        ? ::bioseq::pipeline_stats::TargetIndexSource::persisted
-        : ::bioseq::pipeline_stats::TargetIndexSource::mixed_invalid;
-    if (accepted) {
-        job.persisted_generation_id = evidence->audit().generation_id;
-        job.persisted_source_identity = evidence->audit().source_identity;
-    }
-    const std::size_t effective_workers =
-        bioseq::parallelism::GlobalPool::instance().max_concurrency();
-    job.environment.effective_cpu_workers = effective_workers
-            > static_cast<std::size_t>(
-                (std::numeric_limits<std::uint32_t>::max)())
-        ? (std::numeric_limits<std::uint32_t>::max)()
-        : static_cast<std::uint32_t>(effective_workers);
+    if (!accepted) return std::nullopt;
+    job.actual_backend = ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu;
+    job.actual_target_index_source =
+        ::bioseq::pipeline_stats::TargetIndexSource::persisted;
+    job.persisted_generation_id = evidence->audit().generation_id;
+    job.persisted_source_identity = evidence->audit().source_identity;
     job.logical_target_row = expectation.logical_target_row;
     job.query_ordinal = expectation.logical_query_ordinal;
-    if (accepted) {
-        const auto mark = [&job](
-                const ::bioseq::pipeline_stats::PipelineStage stage,
-                const ::bioseq::pipeline_stats::ExecutionEngine engine) {
-            auto& coverage = job.stages.coverage[
-                ::bioseq::pipeline_stats::stage_index(stage)];
-            coverage.eligible_jobs = 1u;
-            coverage.executed_jobs[
-                ::bioseq::pipeline_stats::engine_index(engine)] = 1u;
-        };
-        using Stage = ::bioseq::pipeline_stats::PipelineStage;
-        using Engine = ::bioseq::pipeline_stats::ExecutionEngine;
-        mark(Stage::query_sketch, Engine::vulkan_gpu);
-        mark(Stage::persisted_index_decode, Engine::host_io);
-        if (evidence->audit().query_record.minimizer_count != 0u) {
-            mark(Stage::partition_selection, Engine::vulkan_gpu);
-            mark(Stage::seed_lookup, Engine::vulkan_gpu);
-        }
-        if (evidence->audit().range_count != 0u) {
-            mark(Stage::chain_score, Engine::vulkan_gpu);
-            mark(Stage::chain_backtrack, Engine::vulkan_gpu);
-            mark(Stage::region_generation, Engine::vulkan_gpu);
-        }
+    const auto mark = [&job](
+            const ::bioseq::pipeline_stats::PipelineStage stage,
+            const ::bioseq::pipeline_stats::ExecutionEngine engine) {
+        auto& coverage = job.stages.coverage[
+            ::bioseq::pipeline_stats::stage_index(stage)];
+        coverage.eligible_jobs = 1u;
+        coverage.executed_jobs[
+            ::bioseq::pipeline_stats::engine_index(engine)] = 1u;
+    };
+    using Stage = ::bioseq::pipeline_stats::PipelineStage;
+    using Engine = ::bioseq::pipeline_stats::ExecutionEngine;
+    mark(Stage::query_sketch, Engine::vulkan_gpu);
+    mark(Stage::persisted_index_decode, Engine::host_io);
+    if (evidence->audit().query_record.minimizer_count != 0u) {
+        mark(Stage::partition_selection, Engine::vulkan_gpu);
+        mark(Stage::seed_lookup, Engine::vulkan_gpu);
     }
-    /* Immutable device/driver and pipeline-cache evidence intentionally stays
-     * absent.  The canonical validator therefore keeps this coordinate-only
-     * milestone unattested until that independent proof is implemented. */
-    stats.merge_job(job);
+    if (evidence->audit().range_count != 0u) {
+        mark(Stage::chain_score, Engine::vulkan_gpu);
+        mark(Stage::chain_backtrack, Engine::vulkan_gpu);
+        mark(Stage::region_generation, Engine::vulkan_gpu);
+    }
+    return job;
+}
+
+/// Conservative admission envelope for the N-job capacities that coexist
+/// between persisted Shape-V5 execution and atomic SQL publication.  The
+/// returned reservation covers transient proof/staging overlap; the result map
+/// that leaves process_sequences_typed() remains part of the pre-existing
+/// caller-owned output contract.
+[[nodiscard]] inline std::uint64_t
+persisted_shape_v5_publication_staging_bytes(
+        const std::uint64_t job_count) noexcept {
+    using StagedJob = ::bioseq::pipeline_stats::PipelineJobExecutionStats;
+    using ResultMap = std::map<int32_t, std::vector<MatchResult>>;
+    using ResultMapValue = typename ResultMap::value_type;
+
+    std::uint64_t bytes_per_job = 0u;
+    const auto add = [&bytes_per_job](const std::uint64_t bytes) noexcept {
+        bytes_per_job = bioseq::parallelism::saturating_add(
+            bytes_per_job, bytes);
+    };
+    add(sizeof(bioseq::gpu::vulkan::PhaseCSeedCoordinateJob));
+    add(sizeof(std::size_t));
+    add(sizeof(bioseq::gpu::vulkan::GpuCoordinateOnlyResultWire));
+    // Runtime owns separate retained permits for proof records and both
+    // causal audit-job vectors; counting them here would double-reserve them.
+    add(sizeof(StagedJob));
+    // At most one ordered-map node per job. Four pointers cover
+    // parent/left/right plus allocator/alignment bookkeeping.
+    add(sizeof(ResultMapValue));
+    add(4u * sizeof(void*));
+    // Repeated query ids can geometrically grow result vectors, but total
+    // capacity remains below two elements per appended coordinate result.
+    add(bioseq::parallelism::saturating_mul(2u, sizeof(MatchResult)));
+
+    return bioseq::parallelism::saturating_mul(
+        bioseq::parallelism::saturating_mul(job_count, bytes_per_job),
+        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
 }
 
 inline void record_target_row(
@@ -4271,11 +4293,12 @@ template <class S>
                 cached_query_minimizer_proof;
             bool cached_query_minimizer_proof_operation_accounted = false;
             constexpr std::size_t kGpuBatchMinRows = 2;
+			bool persisted_transaction_active = false;
 
             if (selected_vulkan_execution(dispatch_params)
                 && !pipe::complete_all_gpu_tuple_selected(dispatch_params)) {
-                add_operational_counter(
-                    stats, stats.operational.backend_declines);
+				add_operational_counter(
+					stats, stats.operational.backend_declines);
                 bioseq::gpu::vulkan::VulkanRuntimeError err{
                     "requested Vulkan components do not form the complete "
                     "supported all-GPU tuple; generic CPU/SIMD biological "
@@ -4286,8 +4309,8 @@ template <class S>
 
             if (selected_vulkan_execution(dispatch_params)
                 && batch_size < kGpuBatchMinRows) {
-                add_operational_counter(
-                    stats, stats.operational.backend_declines);
+				add_operational_counter(
+					stats, stats.operational.backend_declines);
                 bioseq::gpu::vulkan::VulkanRuntimeError err{
                     "selected Vulkan execution received a one-job wave; "
                     "silent CPU/SIMD fallthrough is forbidden"};
@@ -4304,8 +4327,8 @@ template <class S>
                 if ((!pipe::phase_c_coordinate_only_active(dispatch_params)
                      && !selected_vulkan_bounded_cigar)
                     || !pipe::phase_c_index_build_active(dispatch_params)) {
-                    add_operational_counter(
-                        stats, stats.operational.backend_declines);
+					add_operational_counter(
+						stats, stats.operational.backend_declines);
                     bioseq::gpu::vulkan::VulkanRuntimeError err{
                         "selected Vulkan batch requires coordinate-only projection "
                         "or bounded GPU CIGAR extension, "
@@ -4318,8 +4341,8 @@ template <class S>
                 auto& runtime =
                     bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
                 if (!runtime.usable()) {
-                    add_operational_counter(
-                        stats, stats.operational.backend_declines);
+					add_operational_counter(
+						stats, stats.operational.backend_declines);
                     bioseq::gpu::vulkan::VulkanRuntimeError err{
                         "selected Vulkan batch runtime unavailable: "
                         + runtime.initialization_error()};
@@ -4364,6 +4387,7 @@ template <class S>
                 };
 
                 try {
+					persisted_transaction_active = gpu_persisted_prepared;
                     const std::size_t w =
                         static_cast<std::size_t>(dispatch_params.window_size);
                     const std::size_t k =
@@ -4448,10 +4472,8 @@ template <class S>
                         query_sketch_authority =
                             std::move(gpu_batch_sketch->query_authority);
                     }
-                    add_stage_host_time(
-                        stats,
-                        ::bioseq::pipeline_stats::PipelineStage::query_sketch,
-                        gpu_batch_now_ns() - gpu_query_sketch_begin_ns);
+                    const std::uint64_t gpu_query_sketch_host_ns =
+                        gpu_batch_now_ns() - gpu_query_sketch_begin_ns;
 
 					/* A restart-cold persisted GPU target arrives here as three
 					 * authenticated PostgreSQL-owned Format-5 buffers.  Consume that
@@ -4482,6 +4504,27 @@ template <class S>
 								"persisted GPU Format-5 source or max_occ contract is invalid");
 						}
 
+						/* Atomic publication keeps the direct inputs, runtime results
+						 * and staged SQL values alive together. Admit that transient overlap
+						 * before the first covered N-job reserve. */
+						const std::uint64_t publication_staging_bytes =
+							persisted_shape_v5_publication_staging_bytes(
+								static_cast<std::uint64_t>(query_sidecars.size()));
+						if (publication_staging_bytes
+								== (std::numeric_limits<std::uint64_t>::max)()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 publication staging admission overflow");
+						}
+						auto publication_staging_permit =
+							bioseq::parallelism::MemoryAdmissionController::instance()
+								.try_reserve(publication_staging_bytes);
+						if (!publication_staging_permit.has_value()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 publication staging admission was rejected");
+						}
+
+						using StagedJob = ::bioseq::pipeline_stats::
+							PipelineJobExecutionStats;
 						std::vector<bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>
 							direct_jobs;
 						std::vector<std::size_t> direct_job_rows;
@@ -4619,6 +4662,7 @@ template <class S>
 						const auto& direct = coord_run.shape_v5_direct;
 						const bool direct_proof_valid = direct.selected
 							&& direct.direct_count_scan_emit_completed
+							&& direct_job_rows.size() == direct_jobs.size()
 							&& direct.problem_count == direct_jobs.size()
 							&& coord_run.stats.problem_count == direct_jobs.size()
 							&& coord_run.results.size() == direct_jobs.size()
@@ -4645,52 +4689,62 @@ template <class S>
 								"persisted GPU Format-5 direct-route proof is incomplete or inconsistent");
 						}
 
+						::bioseq::pipeline_stats::PipelineExecutionStats
+							staged_stats{};
+						add_stage_host_time(
+							staged_stats,
+							::bioseq::pipeline_stats::PipelineStage::query_sketch,
+							gpu_query_sketch_host_ns);
 						add_operational_counter(
-							stats,
-							stats.operational.gpu_seed_dispatches,
+							staged_stats,
+							staged_stats.operational.gpu_seed_dispatches,
 							coord_run.stats.seed_count_dispatches
 								+ coord_run.stats.seed_emit_dispatches);
 						add_operational_counter(
-							stats,
-							stats.operational.gpu_chain_dispatches,
+							staged_stats,
+							staged_stats.operational.gpu_chain_dispatches,
 							coord_run.stats.chain_dispatches);
 						add_operational_counter(
-							stats,
-							stats.operational.gpu_chain_backtrack_dispatches,
+							staged_stats,
+							staged_stats.operational.gpu_chain_backtrack_dispatches,
 							coord_run.stats.chain_backtrack_dispatches);
 						const std::uint64_t resident_cache_hits =
 							static_cast<std::uint64_t>(direct_jobs.size())
 							- (prepared_gpu_target->dispatch_waves == 0u ? 1u : 0u);
 						add_operational_counter(
-							stats,
-							stats.operational.gpu_persisted_resident_cache_hits,
+							staged_stats,
+							staged_stats.operational.gpu_persisted_resident_cache_hits,
 							resident_cache_hits);
+
+						std::vector<StagedJob> staged_jobs;
+						staged_jobs.reserve(direct_jobs.size());
+						decltype(results) staged_results;
+						std::array<bool, kDispatchBatchCapacity> staged_rows{};
 
 						for (std::size_t problem_index = 0;
 							 problem_index < direct_jobs.size();
 							 ++problem_index) {
 							const std::size_t row = direct_job_rows[problem_index];
-							scanner_pg_ctx->target_index_sources[row] =
-								::bioseq::pipeline_stats::TargetIndexSource::persisted;
-							scanner_pg_ctx->persisted_generation_ids[row] =
-								prepared_gpu_target->resident_view.generation_id;
-							scanner_pg_ctx->persisted_source_identities[row] =
-								prepared_gpu_target->resident_view.source_identity;
-							const auto& coord = coord_run.results[problem_index];
-							if (coord.valid != 0u) {
-								const std::uint32_t query_index =
-									direct_jobs[problem_index].query_index;
-								results[query_ids[row]].push_back(
-									pipe::phase_c_coordinate_to_match_result(
-										coord,
-										query_sidecars[query_index].query_len,
-										static_cast<sequence_size_t>(
-											prepared_gpu_target->target_bp_size)));
+							if (row >= batch_size || row >= kDispatchBatchCapacity
+								|| staged_rows[row] || query_ids[row] < 0
+								|| direct_jobs[problem_index].logical_target_row
+									> ::bioseq::pipeline_stats::sql_bigint_value_max
+								|| direct_jobs[problem_index].logical_query_ordinal
+									> ::bioseq::pipeline_stats::sql_bigint_value_max
+								|| prepared_gpu_target->resident_view.generation_id
+									> ::bioseq::pipeline_stats::sql_bigint_value_max
+								|| scanner_pg_ctx->target_index_sources[row]
+									!= ::bioseq::pipeline_stats::TargetIndexSource::none
+								|| scanner_pg_ctx->persisted_generation_ids[row] != 0u
+								|| scanner_pg_ctx->persisted_source_identities[row] != 0u) {
+								throw bioseq::gpu::vulkan::VulkanRuntimeError(
+									"persisted GPU Format-5 staged row publication is invalid");
 							}
+							staged_rows[row] = true;
+							const auto& coord = coord_run.results[problem_index];
 							const auto& query_record =
 								query_records[direct_jobs[problem_index].query_index];
-							record_persisted_shape_v5_coordinate_job(
-								stats,
+							auto staged_job = stage_persisted_shape_v5_coordinate_job(
 								dispatch_params,
 								requested_source,
 								coord_run.operation_proof,
@@ -4743,34 +4797,250 @@ template <class S>
 												.logical_query_ordinal,
 											.query_record = query_record,
 											.result = coord,
-											.configuration =
-												coordinate_configuration,
-										});
+										.configuration =
+											coordinate_configuration,
+									});
+							if (!staged_job.has_value()) {
+								continue;
+							}
+							staged_jobs.push_back(std::move(*staged_job));
+							if (coord.valid != 0u) {
+								const std::uint32_t query_index =
+									direct_jobs[problem_index].query_index;
+								staged_results[query_ids[row]].push_back(
+									pipe::phase_c_coordinate_to_match_result(
+										coord,
+										query_sidecars[query_index].query_len,
+										static_cast<sequence_size_t>(
+											prepared_gpu_target->target_bp_size)));
+							}
 						}
-						if (!coord_run.operation_proof.fully_consumed()) {
+						const std::uint64_t expected_jobs =
+							static_cast<std::uint64_t>(direct_jobs.size());
+						const std::uint64_t proof_jobs = static_cast<std::uint64_t>(
+							coord_run.operation_proof.job_count());
+						const std::uint64_t consumed_jobs =
+							static_cast<std::uint64_t>(
+								coord_run.operation_proof.consumed_count());
+						const std::uint64_t pending_jobs = proof_jobs >= consumed_jobs
+							? proof_jobs - consumed_jobs
+							: (std::numeric_limits<std::uint64_t>::max)();
+						const ::bioseq::pipeline_stats::
+							PersistedShapeV5CoordinatePublicationCounts
+							publication_counts{
+								.expected_jobs = expected_jobs,
+								.proof_jobs = proof_jobs,
+								.consumed_jobs = consumed_jobs,
+								.accepted_jobs = static_cast<std::uint64_t>(
+									coord_run.operation_proof.accepted_count()),
+								.burned_jobs = static_cast<std::uint64_t>(
+									coord_run.operation_proof.burned_count()),
+								.pending_jobs = pending_jobs,
+								.staged_jobs = static_cast<std::uint64_t>(
+									staged_jobs.size()),
+							};
+						if (!::bioseq::pipeline_stats::
+								persisted_shape_v5_coordinate_publication_counts_valid(
+									publication_counts)
+							|| !coord_run.operation_proof.all_jobs_accepted()) {
 							throw bioseq::gpu::vulkan::VulkanRuntimeError(
-								"persisted GPU Format-5 operation proof left unconsumed jobs");
+								"persisted GPU Format-5 operation proof was not accepted exactly once");
 						}
-						if (record_target_operational_outcomes) {
-							record_target_row(stats);
-							record_target_index_outcome(
-								stats,
-								requested_source,
-								::bioseq::pipeline_stats::TargetIndexSource::persisted);
-						}
-						if (prepared_gpu_target->dispatched_query_count
-								> (std::numeric_limits<std::uint64_t>::max)()
-									- direct_jobs.size()
+						const bool lifecycle_prestate_valid =
+							prepared_gpu_target->query_count != 0u
+							&& prepared_gpu_target->query_count
+								<= ::bioseq::pipeline_stats::sql_bigint_value_max
+							&& prepared_gpu_target->dispatched_query_count
+								<= prepared_gpu_target->query_count
+							&& (prepared_gpu_target->dispatched_query_count == 0u
+								? prepared_gpu_target->dispatch_waves == 0u
+								: prepared_gpu_target->dispatch_waves != 0u)
+							&& expected_jobs <= prepared_gpu_target->query_count
+								- prepared_gpu_target->dispatched_query_count;
+						if (!lifecycle_prestate_valid
+							|| prepared_gpu_target->dispatched_query_count
+								> ::bioseq::pipeline_stats::sql_bigint_value_max
+									- expected_jobs
 							|| prepared_gpu_target->dispatch_waves
-								== (std::numeric_limits<std::uint64_t>::max)()) {
+								>= ::bioseq::pipeline_stats::sql_bigint_value_max) {
 							throw bioseq::gpu::vulkan::VulkanRuntimeError(
 								"persisted GPU Format-5 lifecycle counters overflow");
 						}
-						prepared_gpu_target->dispatched_query_count +=
-							direct_jobs.size();
-						++prepared_gpu_target->dispatch_waves;
+
+						if (!results.empty()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 result staging did not start empty");
+						}
+						const std::size_t effective_workers =
+							bioseq::parallelism::GlobalPool::instance().max_concurrency();
+						if (effective_workers == 0u
+							|| effective_workers
+								> ::bioseq::pipeline_stats::sql_integer_value_max) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 CPU worker identity is invalid");
+						}
+						const auto cache_metrics_preview =
+							coord_run.operation_proof.cache_metrics_preview();
+						const auto environment_preview =
+							coord_run.operation_proof.environment_preview();
+						const auto staged_environment = ::bioseq::pipeline_stats::
+							make_persisted_shape_v5_gpu_environment_proof(
+								environment_preview, effective_workers);
+						const auto maximum_cache_metrics = ::bioseq::pipeline_stats::
+							make_persisted_shape_v5_gpu_cache_metrics_delta(
+								cache_metrics_preview);
+						/* These are immutable/bounded maxima, not counters to publish. They
+						 * let every environment, SQL range and prospective-merge rejection
+						 * happen before the finalizer claims report-once cache bits. */
+						if (!staged_environment.has_value()
+							|| !maximum_cache_metrics.has_value()
+							|| environment_preview.gpu_device_uuid
+								!= prepared_gpu_target->resident_view.device_uuid
+							|| (cache_metrics_preview.gpu_pipeline_cache_loads != 0u
+								&& cache_metrics_preview.gpu_pipeline_cache_seed_bytes
+									!= environment_preview.seed_size)) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 environment/cache preview is invalid");
+						}
+						for (StagedJob& job : staged_jobs) {
+							job.environment = *staged_environment;
+							staged_stats.merge_job(job);
+						}
+						if (record_target_operational_outcomes) {
+							record_target_row(staged_stats);
+							record_target_index_outcome(
+								staged_stats,
+								requested_source,
+								::bioseq::pipeline_stats::TargetIndexSource::persisted);
+						}
+						auto maximum_staged_stats = staged_stats;
+						maximum_staged_stats.merge_operational(*maximum_cache_metrics);
+						auto maximum_prospective_stats = stats;
+						maximum_prospective_stats.merge(maximum_staged_stats);
+						if (!::bioseq::pipeline_stats::
+								persisted_shape_v5_coordinate_prospective_stats_valid(
+									stats,
+									maximum_staged_stats,
+									maximum_prospective_stats,
+									expected_jobs)) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 prospective stats are invalid");
+						}
+
+						/* Every allocation, row check and overflow check is complete.
+						 * The runtime finalizer validates the causal receipt union and
+						 * performs the final immutable-policy live gate before minting
+						 * this move-only authority. */
+						auto accepted_operation = runtime.
+							finalize_persisted_shape_v5_coordinate_operation(
+								std::move(coord_run.operation_proof));
+						const auto& acceptance = accepted_operation.audit();
+						const bool accepted_operation_valid =
+							accepted_operation.accepted();
+						const auto& authoritative_environment =
+							accepted_operation.environment_binding();
+						const auto authoritative_cache_metrics =
+							accepted_operation.cache_metrics_audit();
+						::bioseq::pipeline_stats::PipelineOperationalStats
+							authoritative_cache_delta{};
+						authoritative_cache_delta.gpu_pipeline_cache_loads =
+							authoritative_cache_metrics.gpu_pipeline_cache_loads;
+						authoritative_cache_delta.gpu_pipeline_cache_seed_bytes =
+							authoritative_cache_metrics.gpu_pipeline_cache_seed_bytes;
+						authoritative_cache_delta.gpu_pipeline_cache_load_ns =
+							authoritative_cache_metrics.gpu_pipeline_cache_load_ns;
+						authoritative_cache_delta.gpu_pipeline_creates =
+							authoritative_cache_metrics.gpu_pipeline_creates;
+						authoritative_cache_delta.gpu_pipeline_creation_ns =
+							authoritative_cache_metrics.gpu_pipeline_creation_ns;
+						auto committed_staged_stats = staged_stats;
+						committed_staged_stats.merge_operational(
+							authoritative_cache_delta);
+						auto prospective_stats = stats;
+						prospective_stats.merge(committed_staged_stats);
+
+						/* The report-once token must be the final authority staged into the
+						 * prospective aggregate. Consume it only when publication is now
+						 * inevitable; a copied environment receipt cannot replay these
+						 * counters. */
+						auto cache_metrics_delta =
+							accepted_operation.take_cache_metrics_delta();
+						static_assert(std::is_nothrow_copy_constructible_v<
+							::bioseq::pipeline_stats::PipelineExecutionStats>);
+						static_assert(std::is_nothrow_copy_assignable_v<
+							::bioseq::pipeline_stats::PipelineExecutionStats>);
+						static_assert(noexcept(
+							committed_staged_stats.merge_operational(
+								authoritative_cache_delta)));
+						static_assert(noexcept(
+							prospective_stats.merge(committed_staged_stats)));
+						static_assert(std::is_nothrow_move_constructible_v<
+							decltype(results)>);
+						static_assert(noexcept(results.swap(staged_results)));
+						static_assert(noexcept(::bioseq::pipeline_stats::
+							persisted_shape_v5_gpu_environment_binding_matches(
+								authoritative_environment, environment_preview)));
+						static_assert(noexcept(::bioseq::pipeline_stats::
+							persisted_shape_v5_gpu_cache_metrics_bounded_by(
+								authoritative_cache_metrics, cache_metrics_preview)));
+						static_assert(noexcept(cache_metrics_delta.consume()));
+						const auto commit_publication = [&]() noexcept -> bool {
+							const bool authority_exact = accepted_operation_valid
+								&& acceptance.accepted()
+								&& acceptance.expected_job_count == expected_jobs
+								&& acceptance.consumed_count == expected_jobs
+								&& acceptance.accepted_count == expected_jobs
+								&& acceptance.burned_count == 0u
+								&& cache_metrics_preview.token_identity
+									== acceptance.operation_identity
+								&& authoritative_cache_metrics.token_identity
+									== acceptance.operation_identity
+								&& ::bioseq::pipeline_stats::
+									persisted_shape_v5_gpu_environment_binding_matches(
+										authoritative_environment,
+										environment_preview)
+								&& ::bioseq::pipeline_stats::
+									persisted_shape_v5_gpu_cache_metrics_bounded_by(
+										authoritative_cache_metrics,
+										cache_metrics_preview)
+								&& (authoritative_cache_metrics.gpu_pipeline_cache_loads
+										== 0u
+									|| authoritative_cache_metrics
+										.gpu_pipeline_cache_seed_bytes
+										== authoritative_environment.seed_size)
+								&& cache_metrics_delta.accepted()
+								&& cache_metrics_delta.audit()
+									== authoritative_cache_metrics;
+							if (!authority_exact) return false;
+							/* accepted() plus the exact audit equality above are consume()'s
+							 * complete precondition. Burn the one-shot authority now; no
+							 * rejecting edge may follow before SQL-visible publication. */
+							(void)cache_metrics_delta.consume();
+							results.swap(staged_results);
+							stats = prospective_stats;
+							for (const std::size_t row : direct_job_rows) {
+								scanner_pg_ctx->target_index_sources[row] =
+									::bioseq::pipeline_stats::TargetIndexSource::persisted;
+								scanner_pg_ctx->persisted_generation_ids[row] =
+									prepared_gpu_target->resident_view.generation_id;
+								scanner_pg_ctx->persisted_source_identities[row] =
+									prepared_gpu_target->resident_view.source_identity;
+							}
+							prepared_gpu_target->dispatched_query_count += expected_jobs;
+							++prepared_gpu_target->dispatch_waves;
+							return true;
+						};
+						static_assert(noexcept(commit_publication()));
+						if (!commit_publication()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 cache metrics token did not consume once");
+						}
 						return results;
 					}
+					add_stage_host_time(
+						stats,
+						::bioseq::pipeline_stats::PipelineStage::query_sketch,
+						gpu_query_sketch_host_ns);
 
                     std::vector<GpuBatchTargetSidecar> targets;
                     std::vector<std::uint32_t> row_to_target_index(
@@ -5600,8 +5870,14 @@ template <class S>
                     record_gpu_batch_outcomes();
                     return results;
                 } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& err) {
-                    add_operational_counter(
-                        stats, stats.operational.backend_declines);
+					/* The persisted Shape-V5 lane is transactional.  Its proof,
+					 * results, stats, source identities and lifecycle remain local on
+					 * every failure; do not leak a diagnostic mutation into the caller
+					 * while converting the exception to PostgreSQL. */
+					if (!persisted_transaction_active) {
+						add_operational_counter(
+							stats, stats.operational.backend_declines);
+					}
                     raise_vulkan_pg_error(
                         "Vulkan batched resident coordinate", err.what());
                 }
@@ -5614,8 +5890,10 @@ template <class S>
 			 * reaching this guard proves that its admission was bypassed (most notably
 			 * by the integration-only forced-chunked route). */
 			if (selected_vulkan_execution(dispatch_params)) {
-				add_operational_counter(
-					stats, stats.operational.backend_declines);
+				if (!persisted_transaction_active) {
+					add_operational_counter(
+						stats, stats.operational.backend_declines);
+				}
 				const std::string detail = chunked_scanner_forced
 					? "selected Vulkan execution cannot use the forced chunked scanner; generic CPU/SIMD biological fallback is forbidden"
 					: pipe::complete_all_gpu_tuple_selected(dispatch_params)

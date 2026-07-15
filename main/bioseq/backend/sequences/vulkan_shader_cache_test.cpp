@@ -4558,6 +4558,13 @@ accepted_runtime_metal_archive_audit() {
     audit.command_interpose_immutable_fail_closed = true;
     audit.configured_vulkan_device_uuid = configuration.vulkan_device_uuid;
     audit.runtime_vulkan_device_uuid = configuration.vulkan_device_uuid;
+    audit.api_version = 0x00403000u;
+    audit.driver_version = 0x01020304u;
+    audit.vendor_id = 0x0000106bu;
+    audit.device_id = 0x00000001u;
+    audit.pipeline_cache_uuid[0] = 0x42u;
+    audit.pipeline_cache_uuid[15] = 0x24u;
+    audit.pipeline_create_ns = 17u;
     audit.expected_metal_registry_id =
         configuration.metal_device_registry_id;
     audit.command_loader_metal_registry_id =
@@ -4819,6 +4826,18 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
         invalid.runtime_vulkan_device_uuid[1] = 0x44u;
         CHECK_FALSE(invalid.accepted());
         invalid = accepted;
+        invalid.api_version = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.driver_version = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.pipeline_cache_uuid = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.pipeline_create_ns = 0u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
         ++invalid.loader_metal_registry_id;
         CHECK_FALSE(invalid.accepted());
         invalid = accepted;
@@ -4870,4 +4889,114 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
         invalid.outer_vulkan_pipeline_succeeded = false;
         CHECK_FALSE(invalid.accepted());
     }
+}
+
+TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
+          "[vulkan][metal-archive-receipt][pipeline-use-proof][admission]") {
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::RuntimePipelineOperationProof>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::RuntimePipelineOperationProof>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::PersistedShapeV5CoordinateAcceptedOperation>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::PersistedShapeV5CoordinateAcceptedOperation>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<
+                   gv::RuntimeGpuCacheMetricsDelta>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+                   gv::RuntimeGpuCacheMetricsDelta>);
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    CHECK(gv::RuntimePipelineOperationProof::
+          self_test_causal_collector_contract(
+              accepted_runtime_metal_archive_audit()));
+    CHECK(admission.reserved_bytes() == reserved_before);
+}
+
+TEST_CASE("runtime GPU environment identity is canonical and byte exact",
+          "[vulkan][metal-archive-receipt][environment]") {
+    gv::VulkanFeatureSet features{};
+    features.api_version = 0x01020304u;
+    features.driver_version = 0xa0b0c0d0u;
+    features.vendor_id = 0x0000106bu;
+    features.device_id = 0x0000002au;
+    for (std::size_t i = 0u; i < features.pipeline_cache_uuid.size(); ++i) {
+        features.pipeline_cache_uuid[i] = static_cast<std::uint8_t>(i);
+    }
+    const auto identity = gv::canonical_vulkan_driver_identity(features);
+    CHECK(std::string(identity.data())
+          == "api=01020304;driver=a0b0c0d0;vendor=0000106b;"
+             "device=0000002a;pcuuid=000102030405060708090a0b0c0d0e0f");
+    const auto terminator = std::find(
+        identity.begin(), identity.end(), '\0');
+    REQUIRE(terminator != identity.end());
+    CHECK(std::all_of(
+        std::next(terminator), identity.end(),
+        [](char byte) { return byte == '\0'; }));
+
+    auto changed = features;
+    ++changed.api_version;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    ++changed.driver_version;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    ++changed.vendor_id;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    ++changed.device_id;
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+    changed = features;
+    std::swap(changed.pipeline_cache_uuid[0],
+              changed.pipeline_cache_uuid[1]);
+    CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
+}
+
+TEST_CASE("runtime GPU cache delta is bounded by its pre-finalizer maximum",
+          "[vulkan][metal-archive-receipt][cache-metrics]") {
+    const gv::RuntimeGpuCacheMetricsAudit maximum{
+        .token_identity = 77u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = 4096u,
+        .gpu_pipeline_cache_load_ns = 11u,
+        .gpu_pipeline_creates = 8u,
+        .gpu_pipeline_creation_ns = 88u,
+    };
+    const gv::RuntimeGpuCacheMetricsAudit first = maximum;
+    const gv::RuntimeGpuCacheMetricsAudit later{
+        .token_identity = 77u,
+    };
+    REQUIRE(maximum.accepted());
+    CHECK(first.componentwise_bounded_by(maximum));
+    CHECK(later.componentwise_bounded_by(maximum));
+    auto invalid = later;
+    invalid.token_identity = 78u;
+    CHECK_FALSE(invalid.componentwise_bounded_by(maximum));
+    invalid = first;
+    ++invalid.gpu_pipeline_creation_ns;
+    CHECK_FALSE(invalid.componentwise_bounded_by(maximum));
+    invalid = first;
+    invalid.saturated = true;
+    CHECK_FALSE(invalid.componentwise_bounded_by(maximum));
+}
+
+TEST_CASE("Shape-V5 radix pass count is exact at byte boundaries",
+          "[vulkan][pipeline-use-proof][shape-v5][radix]") {
+    const auto passes = [](std::uint64_t target_end) {
+        return gv::runtime_shape_v5_radix_pass_count(
+            0u, target_end + 1u);
+    };
+    CHECK(passes(0u) == 1u);                    // 1 bit
+    CHECK(passes(0xffu) == 1u);                 // 8 bits
+    CHECK(passes(0x100u) == 2u);                // 9 bits
+    CHECK(passes(0xffffu) == 2u);               // 16 bits
+    CHECK(passes(0x10000u) == 3u);              // 17 bits
+    CHECK(passes(std::uint64_t{1} << 62u) == 8u); // 63 bits
+    CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(0u, 0u));
+    CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(
+        0u, (std::uint64_t{1} << 63u) + 1u));
+    CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(
+        (std::numeric_limits<std::uint64_t>::max)(), 2u));
 }

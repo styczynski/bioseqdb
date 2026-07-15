@@ -362,6 +362,261 @@ TEST_CASE("DOC0371 canonical pipeline stages have stable ordinals and names",
     }
 }
 
+TEST_CASE("persisted Shape-V5 publication rejects burned fully-consumed proof",
+          "[vulkan][pipe][shape-v5][publication][transaction][burn]") {
+    using namespace bioseq::pipeline_stats;
+    using Counts = PersistedShapeV5CoordinatePublicationCounts;
+
+    constexpr Counts accepted{
+        .expected_jobs = 2,
+        .proof_jobs = 2,
+        .consumed_jobs = 2,
+        .accepted_jobs = 2,
+        .burned_jobs = 0,
+        .pending_jobs = 0,
+        .staged_jobs = 2,
+    };
+    static_assert(persisted_shape_v5_coordinate_publication_counts_valid(
+        accepted));
+    REQUIRE(persisted_shape_v5_coordinate_publication_counts_valid(accepted));
+
+    /* This is the exact former fail-open shape: consume() marked both records
+     * consumed even though the second expectation mismatched and burned. */
+    constexpr Counts burned_but_fully_consumed{
+        .expected_jobs = 2,
+        .proof_jobs = 2,
+        .consumed_jobs = 2,
+        .accepted_jobs = 1,
+        .burned_jobs = 1,
+        .pending_jobs = 0,
+        .staged_jobs = 1,
+    };
+    static_assert(!persisted_shape_v5_coordinate_publication_counts_valid(
+        burned_but_fully_consumed));
+    REQUIRE_FALSE(persisted_shape_v5_coordinate_publication_counts_valid(
+        burned_but_fully_consumed));
+
+    const auto rejected = [](Counts counts) {
+        REQUIRE_FALSE(
+            persisted_shape_v5_coordinate_publication_counts_valid(counts));
+    };
+    auto malformed = accepted;
+    malformed.expected_jobs = 0;
+    rejected(malformed);
+    malformed = accepted;
+    malformed.proof_jobs = 1;
+    rejected(malformed);
+    malformed = accepted;
+    malformed.consumed_jobs = 1;
+    rejected(malformed);
+    malformed = accepted;
+    malformed.accepted_jobs = 1;
+    rejected(malformed);
+    malformed = accepted;
+    malformed.burned_jobs = 1;
+    rejected(malformed);
+    malformed = accepted;
+    malformed.pending_jobs = 1;
+    rejected(malformed);
+    malformed = accepted;
+    malformed.staged_jobs = 1;
+    rejected(malformed);
+}
+
+TEST_CASE("persisted Shape-V5 environment binding maps without inference",
+          "[vulkan][pipe][shape-v5][publication][transaction][environment]") {
+    namespace gv = bioseq::gpu::vulkan;
+    using namespace bioseq::pipeline_stats;
+    gv::RuntimeGpuExecutionEnvironmentBinding binding{};
+    binding.gpu_environment_present = true;
+    binding.gpu_device_uuid[0] = 0x61u;
+    binding.gpu_driver_identity[0] = 'v';
+    binding.gpu_driver_identity[1] = 'k';
+    binding.cache_policy = gv::RuntimePipelineCachePolicyEvidence::
+        immutable_preseed_all_hit;
+    binding.seed_sha256[0] = 0xa5u;
+    binding.seed_size = 4096u;
+    binding.manifest_checksum = 0x12345678u;
+    binding.pipeline_cache_all_hit = true;
+    REQUIRE(binding.accepted());
+    static_assert(noexcept(make_persisted_shape_v5_gpu_environment_proof(
+        binding, 4u)));
+
+    const auto mapped = make_persisted_shape_v5_gpu_environment_proof(
+        binding, 4u);
+    REQUIRE(mapped.has_value());
+    REQUIRE(mapped->effective_cpu_workers == 4u);
+    REQUIRE(mapped->gpu_environment_present);
+    REQUIRE(mapped->gpu_device_uuid == binding.gpu_device_uuid);
+    REQUIRE(mapped->gpu_driver_identity == binding.gpu_driver_identity);
+    REQUIRE(mapped->gpu_pipeline_cache_policy
+            == PipelineCachePolicy::immutable_preseed_all_hit);
+    REQUIRE(mapped->gpu_pipeline_cache_seed_sha256 == binding.seed_sha256);
+    REQUIRE(mapped->gpu_pipeline_cache_seed_size == binding.seed_size);
+    REQUIRE(mapped->gpu_pipeline_cache_manifest_checksum
+            == binding.manifest_checksum);
+    REQUIRE(mapped->gpu_pipeline_cache_hit == OptionalProofBool::true_value);
+    REQUIRE(environment_is_valid_for_backend(
+        *mapped, ExecutedBackend::vulkan_gpu));
+    REQUIRE(persisted_shape_v5_gpu_environment_binding_matches(
+        binding, binding));
+    auto drifted_binding = binding;
+    drifted_binding.gpu_driver_identity[1] = 'x';
+    REQUIRE_FALSE(persisted_shape_v5_gpu_environment_binding_matches(
+        drifted_binding, binding));
+
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_environment_proof(
+        binding, 0u).has_value());
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_environment_proof(
+        binding,
+        static_cast<std::size_t>(sql_integer_value_max) + 1u).has_value());
+    auto invalid = binding;
+    invalid.gpu_device_uuid = {};
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_environment_proof(
+        invalid, 4u).has_value());
+    invalid = binding;
+    invalid.cache_policy = gv::RuntimePipelineCachePolicyEvidence::invalid;
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_environment_proof(
+        invalid, 4u).has_value());
+    invalid = binding;
+    invalid.pipeline_cache_all_hit = false;
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_environment_proof(
+        invalid, 4u).has_value());
+    invalid = binding;
+    invalid.seed_size = sql_bigint_value_max + 1u;
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_environment_proof(
+        invalid, 4u).has_value());
+
+    gv::RuntimeGpuCacheMetricsAudit cache_metrics{
+        .token_identity = 0x999u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = binding.seed_size,
+        .gpu_pipeline_cache_load_ns = 37u,
+        .gpu_pipeline_creates = 11u,
+        .gpu_pipeline_creation_ns = 91u,
+        .saturated = false,
+    };
+    static_assert(noexcept(
+        make_persisted_shape_v5_gpu_cache_metrics_delta(cache_metrics)));
+    const auto cache_delta =
+        make_persisted_shape_v5_gpu_cache_metrics_delta(cache_metrics);
+    REQUIRE(cache_delta.has_value());
+    REQUIRE(cache_delta->gpu_pipeline_cache_loads == 1u);
+    REQUIRE(cache_delta->gpu_pipeline_cache_seed_bytes == binding.seed_size);
+    REQUIRE(cache_delta->gpu_pipeline_cache_load_ns == 37u);
+    REQUIRE(cache_delta->gpu_pipeline_creates == 11u);
+    REQUIRE(cache_delta->gpu_pipeline_creation_ns == 91u);
+    auto cache_metrics_preview = cache_metrics;
+    cache_metrics_preview.gpu_pipeline_cache_load_ns = 50u;
+    cache_metrics_preview.gpu_pipeline_creates = 15u;
+    cache_metrics_preview.gpu_pipeline_creation_ns = 120u;
+    REQUIRE(persisted_shape_v5_gpu_cache_metrics_bounded_by(
+        cache_metrics, cache_metrics_preview));
+    auto out_of_bounds = cache_metrics;
+    out_of_bounds.gpu_pipeline_creates = 16u;
+    REQUIRE_FALSE(persisted_shape_v5_gpu_cache_metrics_bounded_by(
+        out_of_bounds, cache_metrics_preview));
+    auto wrong_token = cache_metrics;
+    wrong_token.token_identity += 1u;
+    REQUIRE_FALSE(persisted_shape_v5_gpu_cache_metrics_bounded_by(
+        wrong_token, cache_metrics_preview));
+    const gv::RuntimeGpuCacheMetricsAudit already_reported{
+        .token_identity = 0x1000u,
+    };
+    REQUIRE(already_reported.accepted());
+    const auto zero_delta =
+        make_persisted_shape_v5_gpu_cache_metrics_delta(already_reported);
+    REQUIRE(zero_delta.has_value());
+    REQUIRE(zero_delta->gpu_pipeline_cache_loads == 0u);
+    REQUIRE(zero_delta->gpu_pipeline_creates == 0u);
+    const gv::RuntimeGpuCacheMetricsAudit zero_for_same_operation{
+        .token_identity = cache_metrics.token_identity,
+    };
+    REQUIRE(persisted_shape_v5_gpu_cache_metrics_bounded_by(
+        zero_for_same_operation, cache_metrics_preview));
+    cache_metrics.saturated = true;
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_cache_metrics_delta(
+        cache_metrics).has_value());
+    cache_metrics.saturated = false;
+    cache_metrics.token_identity = 0u;
+    REQUIRE_FALSE(make_persisted_shape_v5_gpu_cache_metrics_delta(
+        cache_metrics).has_value());
+}
+
+TEST_CASE("persisted Shape-V5 prospective publication is exact across waves",
+          "[vulkan][pipe][shape-v5][publication][transaction][stats]") {
+    using namespace bioseq::pipeline_stats;
+    const auto make_wave = [](const std::size_t jobs,
+                              const std::uint64_t first_query) {
+        PipelineExecutionStats wave{};
+        for (std::size_t i = 0; i < jobs; ++i) {
+            auto job = make_attested_job(
+                ExecutedBackend::vulkan_gpu,
+                TargetIndexSource::persisted);
+            job.logical_target_row = 73;
+            job.query_ordinal = first_query + i;
+            wave.merge_job(job);
+        }
+        return wave;
+    };
+
+    for (const std::size_t jobs : {std::size_t{1}, std::size_t{8}}) {
+        CAPTURE(jobs);
+        const PipelineExecutionStats before{};
+        const auto staged = make_wave(jobs, 100);
+        auto prospective = before;
+        prospective.merge(staged);
+        REQUIRE(persisted_shape_v5_coordinate_prospective_stats_valid(
+            before,
+            staged,
+            prospective,
+            static_cast<std::uint64_t>(jobs)));
+    }
+
+    auto staged_with_cache_metrics = make_wave(1, 150);
+    staged_with_cache_metrics.operational.gpu_pipeline_cache_loads = 1u;
+    staged_with_cache_metrics.operational.gpu_pipeline_cache_seed_bytes = 4096u;
+    staged_with_cache_metrics.operational.gpu_pipeline_cache_load_ns = 37u;
+    staged_with_cache_metrics.operational.gpu_pipeline_creates = 7u;
+    staged_with_cache_metrics.operational.gpu_pipeline_creation_ns = 91u;
+    PipelineExecutionStats cache_metrics_prospective{};
+    cache_metrics_prospective.merge(staged_with_cache_metrics);
+    REQUIRE(persisted_shape_v5_coordinate_prospective_stats_valid(
+        PipelineExecutionStats{},
+        staged_with_cache_metrics,
+        cache_metrics_prospective,
+        1u));
+
+    const auto before = make_wave(1, 200);
+    const auto staged = make_wave(1, 201);
+    auto prospective = before;
+    prospective.merge(staged);
+    REQUIRE(persisted_shape_v5_coordinate_prospective_stats_valid(
+        before, staged, prospective, 1));
+
+    auto drifted = staged;
+    drifted.environment.effective_cpu_workers += 1;
+    auto drifted_prospective = before;
+    drifted_prospective.merge(drifted);
+    REQUIRE_FALSE(persisted_shape_v5_coordinate_prospective_stats_valid(
+        before, drifted, drifted_prospective, 1));
+
+    auto wrong_generation = staged;
+    wrong_generation.persisted_generation_id += 1;
+    auto generation_prospective = before;
+    generation_prospective.merge(wrong_generation);
+    REQUIRE_FALSE(persisted_shape_v5_coordinate_prospective_stats_valid(
+        before, wrong_generation, generation_prospective, 1));
+
+    auto unattested = staged;
+    unattested.fully_attested_alignment_jobs = 0;
+    unattested.unattested_alignment_jobs = 1;
+    REQUIRE_FALSE(persisted_shape_v5_coordinate_prospective_stats_valid(
+        before, unattested, prospective, 1));
+    REQUIRE_FALSE(persisted_shape_v5_coordinate_prospective_stats_valid(
+        before, staged, prospective, 0));
+}
+
 TEST_CASE("DOC0371 measured modes match the literal exclusive-engine matrix",
           "[pipe][pipeline-stats][abi][engine-matrix]") {
     using namespace bioseq::pipeline_stats;

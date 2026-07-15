@@ -2111,6 +2111,167 @@ struct PipelineExecutionStats {
     }
 };
 
+/// Fixed publication equation checked by the PostgreSQL owner before one
+/// persisted Shape-V5 GPU wave becomes visible.  `consumed_jobs` alone is not
+/// authority: a mismatched expectation deliberately burns its record, so a
+/// proof may be fully consumed while still being ineligible for publication.
+struct PersistedShapeV5CoordinatePublicationCounts {
+    std::uint64_t expected_jobs = 0;
+    std::uint64_t proof_jobs = 0;
+    std::uint64_t consumed_jobs = 0;
+    std::uint64_t accepted_jobs = 0;
+    std::uint64_t burned_jobs = 0;
+    std::uint64_t pending_jobs = 0;
+    std::uint64_t staged_jobs = 0;
+};
+
+[[nodiscard]] constexpr bool
+persisted_shape_v5_coordinate_publication_counts_valid(
+    const PersistedShapeV5CoordinatePublicationCounts& counts) noexcept {
+    return counts.expected_jobs != 0
+        && counts.expected_jobs <= sql_bigint_value_max
+        && counts.proof_jobs == counts.expected_jobs
+        && counts.consumed_jobs == counts.expected_jobs
+        && counts.accepted_jobs == counts.expected_jobs
+        && counts.burned_jobs == 0
+        && counts.pending_jobs == 0
+        && counts.staged_jobs == counts.expected_jobs;
+}
+
+/// Convert the runtime-minted fixed GPU identity into the statement proof
+/// without allocating or inferring cache state from descriptive counters.
+/// Only the immutable all-hit policy accepted by the persisted operation can
+/// become an all-GPU execution environment.
+[[nodiscard]] inline std::optional<ExecutionEnvironmentProof>
+make_persisted_shape_v5_gpu_environment_proof(
+    const ::bioseq::gpu::vulkan::RuntimeGpuExecutionEnvironmentBinding&
+        binding,
+    const std::size_t effective_cpu_workers) noexcept {
+    using RuntimePolicy = ::bioseq::gpu::vulkan::
+        RuntimePipelineCachePolicyEvidence;
+    if (!binding.accepted()
+        || binding.cache_policy
+            != RuntimePolicy::immutable_preseed_all_hit
+        || effective_cpu_workers == 0
+        || effective_cpu_workers > sql_integer_value_max
+        || binding.seed_size > sql_bigint_value_max) {
+        return std::nullopt;
+    }
+    ExecutionEnvironmentProof environment{};
+    environment.effective_cpu_workers =
+        static_cast<std::uint32_t>(effective_cpu_workers);
+    environment.gpu_environment_present = binding.gpu_environment_present;
+    environment.gpu_device_uuid = binding.gpu_device_uuid;
+    environment.gpu_driver_identity = binding.gpu_driver_identity;
+    environment.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::immutable_preseed_all_hit;
+    environment.gpu_pipeline_cache_seed_sha256 = binding.seed_sha256;
+    environment.gpu_pipeline_cache_seed_size = binding.seed_size;
+    environment.gpu_pipeline_cache_manifest_checksum =
+        binding.manifest_checksum;
+    environment.gpu_pipeline_cache_hit = binding.pipeline_cache_all_hit
+        ? OptionalProofBool::true_value
+        : OptionalProofBool::false_value;
+    return environment_is_valid_for_backend(
+            environment, ExecutedBackend::vulkan_gpu)
+        ? std::optional<ExecutionEnvironmentProof>{environment}
+        : std::nullopt;
+}
+
+/// Convert the separately-owned report-once cache token into an operational
+/// delta.  The descriptive environment proof is intentionally insufficient to
+/// manufacture these counters, and the token identity itself is not replayed
+/// into the SQL aggregate.
+[[nodiscard]] inline std::optional<PipelineOperationalStats>
+make_persisted_shape_v5_gpu_cache_metrics_delta(
+    const ::bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& audit) noexcept {
+    if (!audit.accepted()
+        || audit.gpu_pipeline_cache_loads > sql_bigint_value_max
+        || audit.gpu_pipeline_cache_seed_bytes > sql_bigint_value_max
+        || audit.gpu_pipeline_cache_load_ns > sql_bigint_value_max
+        || audit.gpu_pipeline_creates > sql_bigint_value_max
+        || audit.gpu_pipeline_creation_ns > sql_bigint_value_max) {
+        return std::nullopt;
+    }
+    PipelineOperationalStats delta{};
+    delta.gpu_pipeline_cache_loads = audit.gpu_pipeline_cache_loads;
+    delta.gpu_pipeline_cache_seed_bytes =
+        audit.gpu_pipeline_cache_seed_bytes;
+    delta.gpu_pipeline_cache_load_ns = audit.gpu_pipeline_cache_load_ns;
+    delta.gpu_pipeline_creates = audit.gpu_pipeline_creates;
+    delta.gpu_pipeline_creation_ns = audit.gpu_pipeline_creation_ns;
+    return delta;
+}
+
+/// The runtime's sealed proof exposes an immutable environment preview before
+/// it commits report-once cache bits.  Final authority must reproduce every
+/// fixed field exactly; descriptive equivalence is not enough.
+[[nodiscard]] inline bool
+persisted_shape_v5_gpu_environment_binding_matches(
+    const ::bioseq::gpu::vulkan::RuntimeGpuExecutionEnvironmentBinding& actual,
+    const ::bioseq::gpu::vulkan::RuntimeGpuExecutionEnvironmentBinding&
+        preview) noexcept {
+    return actual.accepted() && preview.accepted()
+        && actual == preview;
+}
+
+/// The pre-finalizer cache audit is a componentwise maximum claim, not the
+/// counter delta to publish.  An accepted final report-once token may publish
+/// only the same operation identity and values bounded by that validated
+/// maximum.
+[[nodiscard]] inline bool
+persisted_shape_v5_gpu_cache_metrics_bounded_by(
+    const ::bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& actual,
+    const ::bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& preview) noexcept {
+    return actual.componentwise_bounded_by(preview);
+}
+
+/// Validate a staged persisted-GPU stats delta and the prospective aggregate
+/// without mutating the caller.  The scheduler performs this check before the
+/// allocation-free commit so environment or persisted-generation drift cannot
+/// revoke earlier jobs after any result/source/lifecycle state is published.
+[[nodiscard]] constexpr bool
+persisted_shape_v5_coordinate_prospective_stats_valid(
+    const PipelineExecutionStats& before,
+    const PipelineExecutionStats& staged,
+    const PipelineExecutionStats& prospective,
+    const std::uint64_t expected_jobs) noexcept {
+    if (expected_jobs == 0 || expected_jobs > sql_bigint_value_max
+        || before.attempted_alignment_jobs
+            > sql_bigint_value_max - expected_jobs) {
+        return false;
+    }
+    const std::uint64_t expected_total =
+        before.attempted_alignment_jobs + expected_jobs;
+    return PipelineExecutionStats::can_retain_full_attestation(before)
+        && PipelineExecutionStats::can_retain_full_attestation(staged)
+        && PipelineExecutionStats::can_retain_full_attestation(prospective)
+        && staged.requested_backend == ExecutedBackend::vulkan_gpu
+        && staged.actual_backend == ExecutedBackend::vulkan_gpu
+        && staged.requested_target_index_source
+            == TargetIndexSource::persisted
+        && staged.actual_target_index_source == TargetIndexSource::persisted
+        && staged.attempted_alignment_jobs == expected_jobs
+        && staged.fully_attested_alignment_jobs == expected_jobs
+        && staged.unattested_alignment_jobs == 0
+        && prospective.attempted_alignment_jobs == expected_total
+        && prospective.fully_attested_alignment_jobs == expected_total
+        && prospective.unattested_alignment_jobs == 0
+        && prospective.requested_backend == ExecutedBackend::vulkan_gpu
+        && prospective.actual_backend == ExecutedBackend::vulkan_gpu
+        && prospective.requested_target_index_source
+            == TargetIndexSource::persisted
+        && prospective.actual_target_index_source
+            == TargetIndexSource::persisted
+        && prospective.persisted_generation_id
+            == staged.persisted_generation_id
+        && prospective.persisted_source_identity
+            == staged.persisted_source_identity
+        && ExecutionEnvironmentProof::payload_equal(
+            prospective.environment, staged.environment)
+        && !prospective.environment.mixed_invalid;
+}
+
 } // namespace bioseq::pipeline_stats
 
 export {

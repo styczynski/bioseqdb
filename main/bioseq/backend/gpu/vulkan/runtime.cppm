@@ -22,6 +22,7 @@ module;
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
@@ -34,10 +35,12 @@ module;
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -82,6 +85,10 @@ struct VulkanFeatureSet {
     bool timeline_semaphore = false;
     bool software_device = false;
     std::uint32_t device_type = 0;
+    std::uint32_t api_version = 0;
+    std::uint32_t driver_version = 0;
+    std::uint32_t vendor_id = 0;
+    std::uint32_t device_id = 0;
     std::uint32_t max_workgroup_invocations = 0;
     std::uint32_t max_workgroup_size_x = 0;
     std::uint32_t max_workgroup_size_y = 0;
@@ -92,8 +99,48 @@ struct VulkanFeatureSet {
     std::uint64_t min_storage_buffer_offset_alignment = 1;
     std::uint64_t device_local_bytes = 0;
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
     std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
+
+/// Canonical allocation-free Vulkan driver identity used by SQL/report proof.
+/// Numeric fields avoid unstable marketing strings and preserve the exact
+/// pipeline-cache compatibility UUID byte order reported by Vulkan.
+[[nodiscard]] inline std::array<char, 128>
+canonical_vulkan_driver_identity(const VulkanFeatureSet& features) noexcept {
+    std::array<char, 128> result{};
+    constexpr char hex[] = "0123456789abcdef";
+    std::size_t cursor = 0u;
+    const auto append_literal = [&result, &cursor](std::string_view value) {
+        if (cursor > result.size() - value.size() - 1u) return false;
+        for (const char ch : value) result[cursor++] = ch;
+        return true;
+    };
+    const auto append_u32 = [&result, &cursor](std::uint32_t value) {
+        constexpr char digits[] = "0123456789abcdef";
+        if (cursor > result.size() - 9u) return false;
+        for (std::uint32_t shift = 28u;; shift -= 4u) {
+            result[cursor++] = digits[(value >> shift) & 0x0fu];
+            if (shift == 0u) break;
+        }
+        return true;
+    };
+    if (!append_literal("api=") || !append_u32(features.api_version)
+        || !append_literal(";driver=")
+        || !append_u32(features.driver_version)
+        || !append_literal(";vendor=") || !append_u32(features.vendor_id)
+        || !append_literal(";device=") || !append_u32(features.device_id)
+        || !append_literal(";pcuuid=")) {
+        return {};
+    }
+    for (const std::uint8_t byte : features.pipeline_cache_uuid) {
+        if (cursor > result.size() - 3u) return {};
+        result[cursor++] = hex[byte >> 4u];
+        result[cursor++] = hex[byte & 0x0fu];
+    }
+    result[cursor] = '\0';
+    return result;
+}
 
 /// RAII owner for one (VkBuffer, VkDeviceMemory) pair. Move-only; destruction
 /// routes through `Runtime::destroy_buffer` (the single cleanup path).
@@ -534,6 +581,12 @@ struct RuntimeMetalArchivePipelineAudit {
     std::uint64_t command_source_wrapper_methods = 0u;
     std::array<std::uint8_t, VK_UUID_SIZE> configured_vulkan_device_uuid{};
     std::array<std::uint8_t, VK_UUID_SIZE> runtime_vulkan_device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::uint64_t pipeline_create_ns = 0u;
     std::uint64_t expected_metal_registry_id = 0u;
     std::uint64_t loader_metal_registry_id = 0u;
     std::uint64_t intercepted_metal_registry_id = 0u;
@@ -593,6 +646,11 @@ struct RuntimeMetalArchivePipelineAudit {
                 runtime_vulkan_device_uuid.begin(),
                 runtime_vulkan_device_uuid.end(),
                 [](std::uint8_t byte) { return byte != 0u; })
+            && api_version != 0u && driver_version != 0u
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](std::uint8_t byte) { return byte != 0u; })
+            && pipeline_create_ns != 0u
             && expected_metal_registry_id != 0u
             && command_loader_metal_registry_id
                 == expected_metal_registry_id
@@ -618,6 +676,10 @@ struct RuntimeMetalArchivePipelineAudit {
     }
 };
 
+namespace runtime_detail {
+class RuntimeGpuCacheMetricsClaimPlan;
+}
+
 /// Move-only immutable proof retained by the canonical Vulkan pipeline cache
 /// entry.  Cache views share that same object; they cannot mint another proof.
 class RuntimeMetalArchivePipelineReceipt {
@@ -629,10 +691,16 @@ public:
         const RuntimeMetalArchivePipelineReceipt&) = delete;
     RuntimeMetalArchivePipelineReceipt(
         RuntimeMetalArchivePipelineReceipt&& other) noexcept
-        : audit_(std::exchange(other.audit_, {})) {}
+        : audit_(std::exchange(other.audit_, {})),
+          metrics_claimed_(std::exchange(
+              other.metrics_claimed_, false)) {}
     RuntimeMetalArchivePipelineReceipt& operator=(
         RuntimeMetalArchivePipelineReceipt&& other) noexcept {
-        if (this != &other) audit_ = std::exchange(other.audit_, {});
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            metrics_claimed_ = std::exchange(
+                other.metrics_claimed_, false);
+        }
         return *this;
     }
 
@@ -678,12 +746,1438 @@ private:
         : audit_(std::move(audit)) {}
 
     RuntimeMetalArchivePipelineAudit audit_{};
+    mutable bool metrics_claimed_ = false;
     friend class Runtime;
+    friend class RuntimePipelineOperationProof;
+    friend class runtime_detail::RuntimeGpuCacheMetricsClaimPlan;
 };
 
 static_assert(!std::is_copy_constructible_v<RuntimeMetalArchivePipelineReceipt>);
 static_assert(std::is_nothrow_move_constructible_v<
               RuntimeMetalArchivePipelineReceipt>);
+
+inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
+inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 11u;
+
+/// Exact 8-bit radix pass count for the persisted Shape-V5 target coordinate
+/// domain.  Kept public and allocation-free so portable contract tests can pin
+/// every byte-width boundary used by causal dispatch validation.
+[[nodiscard]] inline std::optional<std::uint32_t>
+runtime_shape_v5_radix_pass_count(
+    std::uint64_t target_position_offset,
+    std::uint64_t target_len) noexcept {
+    if (target_len == 0u
+        || target_position_offset
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - (target_len - 1u)) {
+        return std::nullopt;
+    }
+    const std::uint64_t target_end =
+        target_position_offset + target_len - 1u;
+    if (target_end >= (std::uint64_t{1} << 63u)) {
+        return std::nullopt;
+    }
+    const std::uint32_t bits = target_end == 0u
+        ? 1u
+        : 64u - static_cast<std::uint32_t>(
+            std::countl_zero(target_end));
+    return std::clamp<std::uint32_t>((bits + 7u) / 8u, 1u, 8u);
+}
+
+enum class RuntimePipelineOperationKind : std::uint8_t {
+    invalid,
+    query_sketch,
+    shape_v5_coordinate,
+};
+
+struct RuntimeGpuCacheMetricsAudit {
+    std::uint64_t token_identity = 0u;
+    std::uint64_t gpu_pipeline_cache_loads = 0u;
+    std::uint64_t gpu_pipeline_cache_seed_bytes = 0u;
+    std::uint64_t gpu_pipeline_cache_load_ns = 0u;
+    std::uint64_t gpu_pipeline_creates = 0u;
+    std::uint64_t gpu_pipeline_creation_ns = 0u;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool seed_shape = gpu_pipeline_cache_loads == 0u
+            ? gpu_pipeline_cache_seed_bytes == 0u
+                && gpu_pipeline_cache_load_ns == 0u
+            : gpu_pipeline_cache_loads == 1u
+                && gpu_pipeline_cache_seed_bytes != 0u
+                && gpu_pipeline_cache_load_ns != 0u;
+        const bool create_shape = gpu_pipeline_creates == 0u
+            ? gpu_pipeline_creation_ns == 0u
+            : gpu_pipeline_creation_ns != 0u;
+        return token_identity != 0u && !saturated
+            && seed_shape && create_shape;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const RuntimeGpuCacheMetricsAudit&) const noexcept = default;
+    [[nodiscard]] constexpr bool componentwise_bounded_by(
+        const RuntimeGpuCacheMetricsAudit& maximum) const noexcept {
+        return accepted() && maximum.accepted()
+            && token_identity == maximum.token_identity
+            && gpu_pipeline_cache_loads
+                <= maximum.gpu_pipeline_cache_loads
+            && gpu_pipeline_cache_seed_bytes
+                <= maximum.gpu_pipeline_cache_seed_bytes
+            && gpu_pipeline_cache_load_ns
+                <= maximum.gpu_pipeline_cache_load_ns
+            && gpu_pipeline_creates <= maximum.gpu_pipeline_creates
+            && gpu_pipeline_creation_ns
+                <= maximum.gpu_pipeline_creation_ns;
+    }
+};
+
+namespace runtime_detail {
+
+/// Fixed, nonallocating transaction prepared before the final immutable live
+/// gate. Construction only observes report-once state. Destruction without
+/// commit is a no-op, so a gate failure cannot consume seed/pipeline metrics.
+/// Runtime holds its queue/cache mutex across prepare, gate and commit.
+class RuntimeGpuCacheMetricsClaimPlan {
+public:
+    RuntimeGpuCacheMetricsClaimPlan() = default;
+    RuntimeGpuCacheMetricsClaimPlan(
+        const RuntimeGpuCacheMetricsClaimPlan&) = delete;
+    RuntimeGpuCacheMetricsClaimPlan& operator=(
+        const RuntimeGpuCacheMetricsClaimPlan&) = delete;
+    RuntimeGpuCacheMetricsClaimPlan(
+        RuntimeGpuCacheMetricsClaimPlan&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          claims_(std::exchange(other.claims_, {})),
+          claim_count_(std::exchange(other.claim_count_, 0u)),
+          claim_seed_(std::exchange(other.claim_seed_, false)),
+          valid_(std::exchange(other.valid_, false)),
+          committed_(std::exchange(other.committed_, false)) {}
+    RuntimeGpuCacheMetricsClaimPlan& operator=(
+        RuntimeGpuCacheMetricsClaimPlan&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            claims_ = std::exchange(other.claims_, {});
+            claim_count_ = std::exchange(other.claim_count_, 0u);
+            claim_seed_ = std::exchange(other.claim_seed_, false);
+            valid_ = std::exchange(other.valid_, false);
+            committed_ = std::exchange(other.committed_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] static RuntimeGpuCacheMetricsClaimPlan prepare(
+        std::uint64_t token_identity,
+        const RuntimeGpuCacheMetricsAudit& maximum,
+        bool seed_already_claimed,
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>
+            receipts) noexcept {
+        RuntimeGpuCacheMetricsClaimPlan plan{};
+        plan.audit_.token_identity = token_identity;
+        if (token_identity == 0u || !maximum.accepted()
+            || maximum.token_identity != token_identity
+            || receipts.empty() || receipts.size() > plan.claims_.size()) {
+            return plan;
+        }
+        const RuntimeMetalArchivePipelineReceipt* first = receipts.front();
+        if (first == nullptr || !first->accepted()) return plan;
+        plan.claim_seed_ = !seed_already_claimed;
+        if (plan.claim_seed_) {
+            plan.audit_.gpu_pipeline_cache_loads = 1u;
+            plan.audit_.gpu_pipeline_cache_seed_bytes =
+                first->audit().seed_size;
+            plan.audit_.gpu_pipeline_cache_load_ns =
+                first->audit().seed_load_ns;
+        }
+        for (std::size_t i = 0u; i < receipts.size(); ++i) {
+            const RuntimeMetalArchivePipelineReceipt* receipt = receipts[i];
+            if (receipt == nullptr || !receipt->accepted()
+                || receipt->audit().seed_size != first->audit().seed_size
+                || receipt->audit().seed_load_ns
+                    != first->audit().seed_load_ns) {
+                return RuntimeGpuCacheMetricsClaimPlan{};
+            }
+            for (std::size_t prior = 0u; prior < i; ++prior) {
+                if (receipts[prior] == receipt) {
+                    return RuntimeGpuCacheMetricsClaimPlan{};
+                }
+            }
+            if (receipt->metrics_claimed_) continue;
+            if (plan.claim_count_ == plan.claims_.size()
+                || plan.audit_.gpu_pipeline_creates
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || receipt->audit().pipeline_create_ns
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - plan.audit_.gpu_pipeline_creation_ns) {
+                return RuntimeGpuCacheMetricsClaimPlan{};
+            }
+            plan.claims_[plan.claim_count_++] = receipt;
+            ++plan.audit_.gpu_pipeline_creates;
+            plan.audit_.gpu_pipeline_creation_ns +=
+                receipt->audit().pipeline_create_ns;
+        }
+        plan.valid_ = plan.audit_.componentwise_bounded_by(maximum);
+        return plan;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return valid_ && audit_.accepted();
+    }
+    [[nodiscard]] bool committed() const noexcept { return committed_; }
+    [[nodiscard]] const RuntimeGpuCacheMetricsAudit& audit()
+        const noexcept { return audit_; }
+
+    void commit(bool& seed_claimed) noexcept {
+        if (!accepted() || committed_) return;
+        if (claim_seed_) seed_claimed = true;
+        for (std::size_t i = 0u; i < claim_count_; ++i) {
+            claims_[i]->metrics_claimed_ = true;
+        }
+        committed_ = true;
+    }
+
+private:
+    RuntimeGpuCacheMetricsAudit audit_{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> claims_{};
+    std::size_t claim_count_ = 0u;
+    bool claim_seed_ = false;
+    bool valid_ = false;
+    bool committed_ = false;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    RuntimeGpuCacheMetricsClaimPlan>);
+static_assert(std::is_nothrow_move_constructible_v<
+    RuntimeGpuCacheMetricsClaimPlan>);
+
+}  // namespace runtime_detail
+
+class RuntimeGpuCacheMetricsDelta {
+public:
+    RuntimeGpuCacheMetricsDelta() = default;
+    RuntimeGpuCacheMetricsDelta(const RuntimeGpuCacheMetricsDelta&) = delete;
+    RuntimeGpuCacheMetricsDelta& operator=(
+        const RuntimeGpuCacheMetricsDelta&) = delete;
+    RuntimeGpuCacheMetricsDelta(
+        RuntimeGpuCacheMetricsDelta&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          issued_(std::exchange(other.issued_, false)) {}
+    RuntimeGpuCacheMetricsDelta& operator=(
+        RuntimeGpuCacheMetricsDelta&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            issued_ = std::exchange(other.issued_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return issued_ && audit_.accepted();
+    }
+    [[nodiscard]] const RuntimeGpuCacheMetricsAudit& audit() const noexcept {
+        return audit_;
+    }
+    [[nodiscard]] std::optional<RuntimeGpuCacheMetricsAudit>
+    consume() noexcept {
+        if (!accepted()) return std::nullopt;
+        RuntimeGpuCacheMetricsAudit result = audit_;
+        audit_ = {};
+        issued_ = false;
+        return result;
+    }
+
+private:
+    RuntimeGpuCacheMetricsAudit audit_{};
+    bool issued_ = false;
+    friend class Runtime;
+};
+
+static_assert(!std::is_copy_constructible_v<RuntimeGpuCacheMetricsDelta>);
+static_assert(std::is_nothrow_move_constructible_v<
+    RuntimeGpuCacheMetricsDelta>);
+
+enum class RuntimePipelineCachePolicyEvidence : std::uint8_t {
+    invalid,
+    immutable_preseed_all_hit,
+};
+
+struct RuntimeGpuExecutionEnvironmentBinding {
+    bool gpu_environment_present = false;
+    std::array<std::uint8_t, VK_UUID_SIZE> gpu_device_uuid{};
+    std::array<char, 128> gpu_driver_identity{};
+    RuntimePipelineCachePolicyEvidence cache_policy =
+        RuntimePipelineCachePolicyEvidence::invalid;
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    bool pipeline_cache_all_hit = false;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return gpu_environment_present
+            && std::any_of(
+                gpu_device_uuid.begin(), gpu_device_uuid.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                gpu_driver_identity.begin(), gpu_driver_identity.end(),
+                [](char value) { return value != '\0'; })
+            && cache_policy
+                == RuntimePipelineCachePolicyEvidence::
+                    immutable_preseed_all_hit
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && seed_size != 0u && manifest_checksum != 0u
+            && pipeline_cache_all_hit;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const RuntimeGpuExecutionEnvironmentBinding&) const noexcept = default;
+};
+
+struct RuntimePipelinePreparedAudit {
+    ShaderVariantKey shader_key{};
+    std::uint64_t receipt_identity = 0u;
+    std::uint64_t prepared_calls = 0u;
+};
+
+struct RuntimePipelineJobUseAudit {
+    std::array<std::uint64_t, k_runtime_pipeline_kind_slots> dispatches{};
+    std::array<std::uint64_t, k_runtime_pipeline_kind_slots> workgroups{};
+    std::uint64_t submission_operation_identity = 0u;
+    std::array<std::uint64_t, 4> submission_ordinals{};
+    std::uint64_t committed_submissions = 0u;
+    std::uint64_t minimizer_count = 0u;
+    std::uint64_t target_len = 0u;
+    std::uint64_t target_position_offset = 0u;
+    std::uint64_t anchor_count = 0u;
+    std::uint64_t range_count = 0u;
+    bool shape_contract_set = false;
+    bool saturated = false;
+
+    [[nodiscard]] std::uint64_t count(ShaderKind kind) const noexcept {
+        const std::size_t slot = static_cast<std::size_t>(kind);
+        return slot < dispatches.size() ? dispatches[slot] : 0u;
+    }
+};
+
+struct RuntimePipelineOperationAudit {
+    RuntimePipelineOperationKind kind = RuntimePipelineOperationKind::invalid;
+    std::uint64_t operation_identity = 0u;
+    std::array<RuntimePipelinePreparedAudit,
+               k_runtime_pipeline_prepared_slots> prepared{};
+    std::size_t prepared_count = 0u;
+    std::vector<RuntimePipelineJobUseAudit> jobs{};
+    std::uint64_t committed_submissions = 0u;
+    std::uint64_t begun_command_generations = 0u;
+    std::uint64_t committed_command_generations = 0u;
+    std::uint64_t burned_pending_uses = 0u;
+    bool pending = false;
+    bool invalid = false;
+    bool saturated = false;
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    std::uint64_t seed_receipt_identity = 0u;
+    RuntimeMetalArchiveSetIdentity archive_set{};
+    RuntimeGpuCacheMetricsAudit cache_metrics{};
+};
+
+class RuntimePipelineUseCollector;
+class PersistedShapeV5CoordinateOperationProof;
+
+/// Move-only causal proof that binds PREPARED cache receipts to dispatches
+/// committed only after submit, fence wait, immutable live gate, and reset.
+class RuntimePipelineOperationProof {
+public:
+    RuntimePipelineOperationProof() = default;
+    RuntimePipelineOperationProof(const RuntimePipelineOperationProof&) =
+        delete;
+    RuntimePipelineOperationProof& operator=(
+        const RuntimePipelineOperationProof&) = delete;
+    RuntimePipelineOperationProof(
+        RuntimePipelineOperationProof&& other) noexcept
+        : capacity_permit_(std::move(other.capacity_permit_)),
+          audit_(std::move(other.audit_)),
+          receipts_(std::exchange(other.receipts_, {})),
+          issued_(std::exchange(other.issued_, false)) {
+        other.audit_ = {};
+    }
+    RuntimePipelineOperationProof& operator=(
+        RuntimePipelineOperationProof&& other) noexcept {
+        if (this != &other) {
+            // Vector move-assignment releases the old admitted allocation
+            // while its permit is still live.  Only then may the old permit
+            // be replaced by the source permit.
+            audit_ = std::move(other.audit_);
+            capacity_permit_ = std::move(other.capacity_permit_);
+            receipts_ = std::exchange(other.receipts_, {});
+            issued_ = std::exchange(other.issued_, false);
+            other.audit_ = {};
+        }
+        return *this;
+    }
+
+    [[nodiscard]] const RuntimePipelineOperationAudit& audit()
+        const noexcept { return audit_; }
+    [[nodiscard]] bool accepted_query_sketch() const noexcept;
+    [[nodiscard]] bool accepted_shape_v5_coordinate() const noexcept;
+    [[nodiscard]] static bool self_test_causal_collector_contract(
+        RuntimeMetalArchivePipelineAudit base_audit);
+
+private:
+    [[nodiscard]] bool accepted_common() const noexcept;
+    [[nodiscard]] std::uint64_t prepared_calls(
+        ShaderKind kind) const noexcept;
+    [[nodiscard]] bool prepared_exactly(
+        std::span<const ShaderKind> required,
+        std::uint64_t radix_prepared_calls = 0u) const noexcept;
+
+    // Declared before the vector owner so destruction deallocates jobs before
+    // releasing their reservation (members are destroyed in reverse order).
+    bioseq::parallelism::MemoryPermit capacity_permit_{};
+    RuntimePipelineOperationAudit audit_{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> receipts_{};
+    bool issued_ = false;
+    friend class Runtime;
+    friend class RuntimePipelineUseCollector;
+    friend class PersistedShapeV5CoordinateOperationProof;
+};
+
+static_assert(!std::is_copy_constructible_v<RuntimePipelineOperationProof>);
+static_assert(std::is_nothrow_move_constructible_v<
+    RuntimePipelineOperationProof>);
+
+inline bool RuntimePipelineOperationProof::accepted_common() const noexcept {
+    if (!issued_ || audit_.operation_identity == 0u
+        || audit_.kind == RuntimePipelineOperationKind::invalid
+        || audit_.jobs.empty() || audit_.prepared_count == 0u
+        || audit_.prepared_count > audit_.prepared.size()
+        || audit_.committed_submissions == 0u
+        || audit_.committed_command_generations
+            != audit_.committed_submissions
+        || audit_.begun_command_generations
+            != audit_.committed_command_generations
+        || audit_.burned_pending_uses != 0u || audit_.pending
+        || audit_.invalid || audit_.saturated
+        || !audit_.cache_metrics.accepted()
+        || audit_.cache_metrics.token_identity != audit_.operation_identity
+        || audit_.api_version == 0u || audit_.driver_version == 0u
+        || audit_.seed_size == 0u || audit_.manifest_checksum == 0u
+        || audit_.seed_receipt_identity == 0u
+        || !audit_.archive_set.accepted()
+        || std::all_of(
+            audit_.device_uuid.begin(), audit_.device_uuid.end(),
+            [](std::uint8_t value) { return value == 0u; })
+        || std::all_of(
+            audit_.pipeline_cache_uuid.begin(),
+            audit_.pipeline_cache_uuid.end(),
+            [](std::uint8_t value) { return value == 0u; })
+        || std::all_of(
+            audit_.seed_sha256.begin(), audit_.seed_sha256.end(),
+            [](std::uint8_t value) { return value == 0u; })) {
+        return false;
+    }
+    for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+        const RuntimePipelinePreparedAudit& prepared = audit_.prepared[i];
+        const RuntimeMetalArchivePipelineReceipt* receipt = receipts_[i];
+        if (receipt == nullptr || !receipt->accepted()
+            || prepared.prepared_calls == 0u
+            || prepared.receipt_identity == 0u
+            || !valid_shader_variant_key(prepared.shader_key)) {
+            return false;
+        }
+        const RuntimeMetalArchivePipelineAudit& pipeline = receipt->audit();
+        if (pipeline.receipt_identity != prepared.receipt_identity
+            || pipeline.shader_key != prepared.shader_key
+            || pipeline.runtime_vulkan_device_uuid != audit_.device_uuid
+            || pipeline.api_version != audit_.api_version
+            || pipeline.driver_version != audit_.driver_version
+            || pipeline.vendor_id != audit_.vendor_id
+            || pipeline.device_id != audit_.device_id
+            || pipeline.pipeline_cache_uuid != audit_.pipeline_cache_uuid
+            || pipeline.seed_sha256 != audit_.seed_sha256
+            || pipeline.seed_size != audit_.seed_size
+            || pipeline.manifest_checksum != audit_.manifest_checksum
+            || pipeline.seed_receipt_identity
+                != audit_.seed_receipt_identity
+            || pipeline.expected_archives != audit_.archive_set) {
+            return false;
+        }
+    }
+    for (const RuntimePipelineJobUseAudit& job : audit_.jobs) {
+        if (job.saturated || job.committed_submissions == 0u) return false;
+        if (job.submission_operation_identity != audit_.operation_identity
+            || job.committed_submissions > job.submission_ordinals.size()) {
+            return false;
+        }
+        for (std::size_t i = 0u;
+             i < job.submission_ordinals.size(); ++i) {
+            if (i < job.committed_submissions) {
+                if (job.submission_ordinals[i] == 0u) return false;
+                for (std::size_t prior = 0u; prior < i; ++prior) {
+                    if (job.submission_ordinals[prior]
+                        == job.submission_ordinals[i]) return false;
+                }
+            } else if (job.submission_ordinals[i] != 0u) {
+                return false;
+            }
+        }
+        for (std::size_t kind = 0u;
+             kind < job.dispatches.size(); ++kind) {
+            if ((job.dispatches[kind] == 0u)
+                    != (job.workgroups[kind] == 0u)
+                || (job.dispatches[kind] != 0u
+                    && job.workgroups[kind] < job.dispatches[kind])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+inline std::uint64_t RuntimePipelineOperationProof::prepared_calls(
+    ShaderKind kind) const noexcept {
+    const std::uint32_t raw = static_cast<std::uint32_t>(kind);
+    for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+        if (audit_.prepared[i].shader_key.kind == raw) {
+            return audit_.prepared[i].prepared_calls;
+        }
+    }
+    return 0u;
+}
+
+inline bool RuntimePipelineOperationProof::prepared_exactly(
+    std::span<const ShaderKind> required,
+    std::uint64_t radix_prepared_calls) const noexcept {
+    const std::size_t expected_count = required.size()
+        + (radix_prepared_calls == 0u ? 0u : 3u);
+    if (audit_.prepared_count != expected_count) return false;
+    for (const ShaderKind kind : required) {
+        if (prepared_calls(kind) != 1u) return false;
+    }
+    const std::array radix{
+        ShaderKind::phase_c_sort_radix_histogram,
+        ShaderKind::phase_c_sort_radix_scan,
+        ShaderKind::phase_c_sort_radix_scatter,
+    };
+    for (const ShaderKind kind : radix) {
+        if (prepared_calls(kind) != radix_prepared_calls) return false;
+    }
+    for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+        const ShaderKind actual = static_cast<ShaderKind>(
+            audit_.prepared[i].shader_key.kind);
+        const bool base = std::find(required.begin(), required.end(), actual)
+            != required.end();
+        const bool sort = std::find(radix.begin(), radix.end(), actual)
+            != radix.end();
+        if (!base && !(radix_prepared_calls != 0u && sort)) return false;
+    }
+    return true;
+}
+
+inline bool RuntimePipelineOperationProof::accepted_query_sketch()
+    const noexcept {
+    constexpr std::array required{
+        ShaderKind::phase_c_sketch_tile,
+        ShaderKind::phase_c_prefix_scan_block,
+        ShaderKind::phase_c_prefix_scan_add,
+    };
+    if (!accepted_common()
+        || audit_.kind != RuntimePipelineOperationKind::query_sketch
+        || audit_.jobs.size() != 1u || audit_.committed_submissions != 2u
+        || !prepared_exactly(required)) {
+        return false;
+    }
+    const RuntimePipelineJobUseAudit& job = audit_.jobs.front();
+    if (job.committed_submissions != 2u
+        || job.count(ShaderKind::phase_c_sketch_tile) != 2u
+        || job.count(ShaderKind::phase_c_prefix_scan_block) != 1u
+        || job.count(ShaderKind::phase_c_prefix_scan_add) != 2u) {
+        return false;
+    }
+    std::uint64_t total = 0u;
+    for (const std::uint64_t count : job.dispatches) {
+        if (count > (std::numeric_limits<std::uint64_t>::max)() - total) {
+            return false;
+        }
+        total += count;
+    }
+    return total == 5u;
+}
+
+inline bool RuntimePipelineOperationProof::accepted_shape_v5_coordinate()
+    const noexcept {
+    constexpr std::array required{
+        ShaderKind::phase_c_shape_v5_seed_count,
+        ShaderKind::phase_c_shape_v5_seed_emit,
+        ShaderKind::phase_c_prefix_scan_block,
+        ShaderKind::phase_c_prefix_scan_add,
+        ShaderKind::phase_c_chain_range_build,
+        ShaderKind::phase_c_coordinate_reduce,
+        ShaderKind::chain_tiled_dp_u64,
+    };
+    if (!accepted_common()
+        || audit_.kind
+            != RuntimePipelineOperationKind::shape_v5_coordinate) {
+        return false;
+    }
+    std::uint64_t anchored_jobs = 0u;
+    for (const RuntimePipelineJobUseAudit& job : audit_.jobs) {
+        if (!job.shape_contract_set || job.minimizer_count == 0u
+            || job.target_len == 0u
+            || job.target_position_offset
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - (job.target_len - 1u)) {
+            return false;
+        }
+        const auto pass_count = runtime_shape_v5_radix_pass_count(
+            job.target_position_offset, job.target_len);
+        if (!pass_count.has_value()) return false;
+        const std::uint64_t passes = *pass_count;
+        const bool front =
+            job.count(ShaderKind::phase_c_shape_v5_seed_count) == 1u
+            && job.count(ShaderKind::phase_c_prefix_scan_block) == 1u
+            && job.count(ShaderKind::phase_c_prefix_scan_add) == 2u;
+        if (!front) return false;
+        std::uint64_t expected_total = 4u;
+        std::uint64_t expected_submissions = 1u;
+        if (job.anchor_count == 0u) {
+            if (job.range_count != 0u) return false;
+        } else {
+            ++anchored_jobs;
+            expected_total = 6u + 3u * passes;
+            expected_submissions = 3u;
+            if (job.count(ShaderKind::phase_c_shape_v5_seed_emit) != 1u
+                || job.count(ShaderKind::phase_c_sort_radix_histogram)
+                    != passes
+                || job.count(ShaderKind::phase_c_sort_radix_scan) != passes
+                || job.count(ShaderKind::phase_c_sort_radix_scatter)
+                    != passes
+                || job.count(ShaderKind::phase_c_chain_range_build) != 1u) {
+                return false;
+            }
+            if (job.range_count != 0u) {
+                expected_total += 2u;
+                expected_submissions = 4u;
+                if (job.count(ShaderKind::chain_tiled_dp_u64) != 1u
+                    || job.count(ShaderKind::phase_c_coordinate_reduce)
+                        != 1u) {
+                    return false;
+                }
+            }
+        }
+        std::uint64_t actual_total = 0u;
+        for (const std::uint64_t count : job.dispatches) {
+            if (count > (std::numeric_limits<std::uint64_t>::max)()
+                    - actual_total) {
+                return false;
+            }
+            actual_total += count;
+        }
+        if (actual_total != expected_total
+            || job.committed_submissions != expected_submissions
+            || job.count(ShaderKind::phase_c_coordinate_vote_reduce) != 0u
+            || job.count(
+                ShaderKind::phase_c_coordinate_vote_reduce_batch) != 0u
+            || job.count(ShaderKind::phase_c_sketch_tile) != 0u) {
+            return false;
+        }
+    }
+    return prepared_exactly(required, anchored_jobs);
+}
+
+class RuntimePipelineUseCollector {
+public:
+    RuntimePipelineUseCollector(const RuntimePipelineUseCollector&) = delete;
+    RuntimePipelineUseCollector& operator=(
+        const RuntimePipelineUseCollector&) = delete;
+    RuntimePipelineUseCollector(RuntimePipelineUseCollector&&) = delete;
+    RuntimePipelineUseCollector& operator=(
+        RuntimePipelineUseCollector&&) = delete;
+    ~RuntimePipelineUseCollector() { burn_pending(); }
+
+private:
+    struct PendingJob {
+        std::array<std::uint64_t,
+                   k_runtime_pipeline_kind_slots> dispatches{};
+        std::array<std::uint64_t,
+                   k_runtime_pipeline_kind_slots> workgroups{};
+    };
+
+    [[nodiscard]] static std::unique_ptr<RuntimePipelineUseCollector> create(
+        RuntimePipelineOperationKind kind,
+        std::size_t job_count,
+        std::uint64_t operation_identity) {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        if (kind == RuntimePipelineOperationKind::invalid
+            || job_count == 0u || operation_identity == 0u
+            || job_count
+                > std::vector<RuntimePipelineJobUseAudit>{}.max_size()
+            || job_count > std::vector<PendingJob>{}.max_size()) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector shape is invalid");
+        }
+        std::uint64_t retained = sizeof(RuntimePipelineUseCollector);
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(job_count),
+                sizeof(RuntimePipelineJobUseAudit)));
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(job_count),
+                sizeof(PendingJob)));
+        const std::uint64_t peak = saturating_mul(
+            retained,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector admission saturated");
+        }
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(shader_cache_message(
+                "runtime pipeline receipt collector admission denied: reason=",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                " requested=", failure.requested_bytes));
+        }
+        std::unique_ptr<RuntimePipelineUseCollector> result;
+        try {
+            result.reset(new RuntimePipelineUseCollector(
+                kind, job_count, operation_identity, std::move(*permit)));
+        } catch (const std::bad_alloc&) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector allocation failed after admission");
+        }
+        result->reconcile_capacity_permit();
+        return result;
+    }
+
+    RuntimePipelineUseCollector(
+        RuntimePipelineOperationKind kind,
+        std::size_t job_count,
+        std::uint64_t operation_identity,
+        bioseq::parallelism::MemoryPermit capacity_permit)
+        : capacity_permit_(std::move(capacity_permit)),
+          pending_(job_count) {
+        audit_.kind = kind;
+        audit_.operation_identity = operation_identity;
+        audit_.jobs.resize(job_count);
+        audit_.cache_metrics.token_identity = operation_identity;
+        submission_ordinal_cursor_ = 0u;
+    }
+
+    [[nodiscard]] std::uint64_t retained_capacity_bytes() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t retained = sizeof(RuntimePipelineUseCollector);
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(audit_.jobs.capacity()),
+                sizeof(RuntimePipelineJobUseAudit)));
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(pending_.capacity()),
+                sizeof(PendingJob)));
+        return retained;
+    }
+
+    void reconcile_capacity_permit() {
+        const std::uint64_t retained = retained_capacity_bytes();
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || !capacity_permit_
+            || retained > capacity_permit_.bytes()) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector exceeded admitted capacity");
+        }
+        capacity_permit_.shrink_to(retained);
+    }
+
+    static bool add_counter(
+        std::uint64_t& destination, std::uint64_t value) noexcept {
+        if (value > (std::numeric_limits<std::uint64_t>::max)()
+                - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            return false;
+        }
+        destination += value;
+        return true;
+    }
+
+    void invalidate() noexcept { audit_.invalid = true; }
+
+    void prepare(
+        const ShaderVariantKey& key,
+        const RuntimeMetalArchivePipelineReceipt* receipt) noexcept {
+        if (audit_.invalid || receipt == nullptr || !receipt->accepted()
+            || receipt->audit().shader_key != key
+            || receipt->audit().pipeline_create_ns == 0u) {
+            invalidate();
+            return;
+        }
+        std::size_t slot = audit_.prepared_count;
+        for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+            if (audit_.prepared[i].shader_key == key) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == audit_.prepared_count) {
+            if (slot == audit_.prepared.size()) {
+                invalidate();
+                return;
+            }
+            audit_.prepared[slot] = RuntimePipelinePreparedAudit{
+                .shader_key = key,
+                .receipt_identity = receipt->audit().receipt_identity,
+                .prepared_calls = 0u,
+            };
+            receipts_[slot] = receipt;
+            ++audit_.prepared_count;
+        } else if (receipts_[slot] != receipt
+                   || audit_.prepared[slot].receipt_identity
+                       != receipt->audit().receipt_identity) {
+            invalidate();
+            return;
+        }
+        if (!add_counter(audit_.prepared[slot].prepared_calls, 1u)) {
+            audit_.saturated = true;
+            return;
+        }
+
+        const RuntimeMetalArchivePipelineAudit& source = receipt->audit();
+        if (!environment_sealed_) {
+            audit_.device_uuid = source.runtime_vulkan_device_uuid;
+            audit_.api_version = source.api_version;
+            audit_.driver_version = source.driver_version;
+            audit_.vendor_id = source.vendor_id;
+            audit_.device_id = source.device_id;
+            audit_.pipeline_cache_uuid = source.pipeline_cache_uuid;
+            audit_.seed_sha256 = source.seed_sha256;
+            audit_.seed_size = source.seed_size;
+            audit_.manifest_checksum = source.manifest_checksum;
+            audit_.seed_receipt_identity = source.seed_receipt_identity;
+            audit_.archive_set = source.expected_archives;
+            environment_sealed_ = true;
+        } else if (source.runtime_vulkan_device_uuid != audit_.device_uuid
+                   || source.api_version != audit_.api_version
+                   || source.driver_version != audit_.driver_version
+                   || source.vendor_id != audit_.vendor_id
+                   || source.device_id != audit_.device_id
+                   || source.pipeline_cache_uuid
+                       != audit_.pipeline_cache_uuid
+                   || source.seed_sha256 != audit_.seed_sha256
+                   || source.seed_size != audit_.seed_size
+                   || source.manifest_checksum != audit_.manifest_checksum
+                   || source.seed_receipt_identity
+                       != audit_.seed_receipt_identity
+                   || source.expected_archives != audit_.archive_set) {
+            invalidate();
+            return;
+        }
+        // Report-once counters are deliberately not claimed during PREPARE.
+        // A command that later resets, burns, or fails causal validation must
+        // not steal metrics from the next wholly accepted operation. The
+        // finalizer claims the canonical seed/receipt bits transactionally
+        // under Runtime::mu_ after the immutable live gate succeeds.
+    }
+
+    void set_shape_input(
+        std::size_t job_index,
+        std::uint64_t minimizer_count,
+        std::uint64_t target_len,
+        std::uint64_t target_position_offset) noexcept {
+        if (job_index >= audit_.jobs.size()) {
+            invalidate();
+            return;
+        }
+        RuntimePipelineJobUseAudit& job = audit_.jobs[job_index];
+        job.minimizer_count = minimizer_count;
+        job.target_len = target_len;
+        job.target_position_offset = target_position_offset;
+        job.shape_contract_set = true;
+    }
+
+    void set_shape_outcome(
+        std::size_t job_index,
+        std::uint64_t anchor_count,
+        std::uint64_t range_count) noexcept {
+        if (job_index >= audit_.jobs.size()
+            || !audit_.jobs[job_index].shape_contract_set) {
+            invalidate();
+            return;
+        }
+        audit_.jobs[job_index].anchor_count = anchor_count;
+        audit_.jobs[job_index].range_count = range_count;
+    }
+
+    void begin(VkCommandBuffer command_buffer) noexcept {
+        if (active_) {
+            burn_pending();
+            invalidate();
+        }
+        if (command_buffer == VK_NULL_HANDLE || audit_.invalid) {
+            invalidate();
+            return;
+        }
+        active_ = true;
+        command_identity_ = vulkan_handle_identity(command_buffer);
+        if (command_identity_ == 0u
+            || !add_counter(audit_.begun_command_generations, 1u)) {
+            audit_.saturated = true;
+            invalidate();
+            return;
+        }
+        active_generation_ = audit_.begun_command_generations;
+    }
+
+    void use(
+        VkCommandBuffer command_buffer,
+        std::size_t job_index,
+        const ShaderVariantKey& key,
+        const RuntimeMetalArchivePipelineReceipt* receipt,
+        std::uint32_t group_count,
+        std::uint64_t observed_generation = 0u) noexcept {
+        if (!active_ || audit_.invalid || job_index >= pending_.size()
+            || vulkan_handle_identity(command_buffer) != command_identity_
+            || group_count == 0u
+            || (observed_generation != 0u
+                && observed_generation != active_generation_)
+            || receipt == nullptr || !receipt->accepted()) {
+            invalidate();
+            return;
+        }
+        bool prepared = false;
+        for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+            if (audit_.prepared[i].shader_key == key
+                && receipts_[i] == receipt
+                && audit_.prepared[i].receipt_identity
+                    == receipt->audit().receipt_identity) {
+                prepared = true;
+                break;
+            }
+        }
+        const std::size_t kind = key.kind;
+        if (!prepared || kind >= k_runtime_pipeline_kind_slots
+            || !add_counter(pending_[job_index].dispatches[kind], 1u)
+            || !add_counter(
+                pending_[job_index].workgroups[kind], group_count)) {
+            audit_.jobs[job_index].saturated = true;
+            audit_.saturated = true;
+            invalidate();
+            return;
+        }
+        audit_.pending = true;
+    }
+
+public:
+    void commit(VkCommandBuffer command_buffer) noexcept {
+        if (!active_
+            || vulkan_handle_identity(command_buffer) != command_identity_) {
+            burn_pending();
+            invalidate();
+            return;
+        }
+        bool any = false;
+        if (submission_ordinal_cursor_
+            == (std::numeric_limits<std::uint64_t>::max)()) {
+            burn_pending();
+            audit_.saturated = true;
+            invalidate();
+            return;
+        }
+        const std::uint64_t submission_ordinal =
+            ++submission_ordinal_cursor_;
+        for (std::size_t job_index = 0u;
+             job_index < pending_.size(); ++job_index) {
+            bool touched = false;
+            for (std::size_t kind = 0u;
+                 kind < k_runtime_pipeline_kind_slots; ++kind) {
+                const std::uint64_t count =
+                    pending_[job_index].dispatches[kind];
+                if (count == 0u) continue;
+                touched = true;
+                any = true;
+                if (!add_counter(
+                        audit_.jobs[job_index].dispatches[kind], count)) {
+                    audit_.jobs[job_index].saturated = true;
+                    audit_.saturated = true;
+                }
+                if (!add_counter(
+                        audit_.jobs[job_index].workgroups[kind],
+                        pending_[job_index].workgroups[kind])) {
+                    audit_.jobs[job_index].saturated = true;
+                    audit_.saturated = true;
+                }
+                pending_[job_index].dispatches[kind] = 0u;
+                pending_[job_index].workgroups[kind] = 0u;
+            }
+            if (touched) {
+                RuntimePipelineJobUseAudit& job = audit_.jobs[job_index];
+                if (job.committed_submissions
+                        >= job.submission_ordinals.size()
+                    || submission_ordinal == 0u
+                    || (job.submission_operation_identity != 0u
+                        && job.submission_operation_identity
+                            != audit_.operation_identity)) {
+                    job.saturated = true;
+                    audit_.saturated = true;
+                    invalidate();
+                } else {
+                    job.submission_operation_identity =
+                        audit_.operation_identity;
+                    job.submission_ordinals[
+                        job.committed_submissions] = submission_ordinal;
+                    if (!add_counter(job.committed_submissions, 1u)) {
+                        job.saturated = true;
+                        audit_.saturated = true;
+                    }
+                }
+            }
+        }
+        if (!any || !add_counter(audit_.committed_submissions, 1u)
+            || !add_counter(audit_.committed_command_generations, 1u)) {
+            invalidate();
+        }
+        active_ = false;
+        command_identity_ = 0u;
+        active_generation_ = 0u;
+        audit_.pending = false;
+    }
+
+    void burn_pending() noexcept {
+        if (!active_) return;
+        for (auto& job : pending_) {
+            for (std::size_t kind = 0u;
+                 kind < job.dispatches.size(); ++kind) {
+                std::uint64_t& count = job.dispatches[kind];
+                if (count != 0u
+                    && !add_counter(audit_.burned_pending_uses, count)) {
+                    audit_.saturated = true;
+                }
+                count = 0u;
+                job.workgroups[kind] = 0u;
+            }
+        }
+        active_ = false;
+        command_identity_ = 0u;
+        active_generation_ = 0u;
+        audit_.pending = false;
+    }
+
+    void burn_before_reset(VkCommandBuffer command_buffer) noexcept {
+        if (!active_) return;
+        if (vulkan_handle_identity(command_buffer) != command_identity_) {
+            invalidate();
+        }
+        burn_pending();
+        // A begun generation that reaches reset without a causal commit is
+        // never an accepted empty command.  This also rejects the no-use case
+        // where burned_pending_uses alone would remain zero.
+        invalidate();
+    }
+
+private:
+    [[nodiscard]] RuntimePipelineOperationProof seal() noexcept {
+        if (active_) {
+            audit_.pending = true;
+            burn_pending();
+            invalidate();
+        }
+        RuntimePipelineOperationProof proof{};
+        proof.audit_ = std::move(audit_);
+        proof.receipts_ = receipts_;
+        proof.issued_ = true;
+        // Pending storage no longer contributes to the sealed proof. Destroy
+        // it before shrinking/transferring the permit. Keep the collector
+        // object itself covered until its unique_ptr owner destroys it; the
+        // resulting small over-reservation then travels with the jobs vector
+        // for the complete lifetime of the move-only proof.
+        {
+            std::vector<PendingJob> empty;
+            pending_.swap(empty);
+        }
+        {
+            // The standard allocator transfers this capacity, but explicitly
+            // clear any valid moved-from residue before the permit leaves the
+            // collector so the ownership proof is allocator-independent.
+            std::vector<RuntimePipelineJobUseAudit> empty;
+            audit_.jobs.swap(empty);
+        }
+        const std::uint64_t retained_jobs =
+            bioseq::parallelism::saturating_add(
+                sizeof(RuntimePipelineUseCollector),
+                bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(proof.audit_.jobs.capacity()),
+                sizeof(RuntimePipelineJobUseAudit)));
+        if (retained_jobs
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || retained_jobs > capacity_permit_.bytes()) {
+            proof.audit_.invalid = true;
+        } else {
+            capacity_permit_.shrink_to(retained_jobs);
+        }
+        proof.capacity_permit_ = std::move(capacity_permit_);
+        receipts_.fill(nullptr);
+        audit_ = {};
+        return proof;
+    }
+
+    // Kept before both vector owners: they release capacity before the permit.
+    bioseq::parallelism::MemoryPermit capacity_permit_{};
+    RuntimePipelineOperationAudit audit_{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> receipts_{};
+    std::vector<PendingJob> pending_{};
+    std::uint64_t command_identity_ = 0u;
+    std::uint64_t active_generation_ = 0u;
+    std::uint64_t submission_ordinal_cursor_ = 0u;
+    bool environment_sealed_ = false;
+    bool active_ = false;
+
+    friend class Runtime;
+    friend class RuntimePipelineOperationProof;
+};
+
+inline bool RuntimePipelineOperationProof::
+self_test_causal_collector_contract(
+    RuntimeMetalArchivePipelineAudit base_audit) {
+    if (!base_audit.accepted() || base_audit.pipeline_create_ns == 0u) {
+        return false;
+    }
+    const std::array<ShaderVariantKey, 11> keys{
+        make_shader_key(
+            ShaderKind::phase_c_sketch_tile, 384u, 64u, 10u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_block, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_shape_v5_seed_count, 384u, 128u, 3u),
+        make_shader_key(
+            ShaderKind::phase_c_shape_v5_seed_emit, 384u, 128u, 3u),
+        make_shader_key(
+            ShaderKind::phase_c_chain_range_build, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_coordinate_reduce, 384u, 128u, 1u),
+        make_shader_key(
+            ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_scan, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_scatter, 384u, 1u, 1u),
+    };
+    if (!std::all_of(
+            keys.begin(), keys.end(),
+            [](const ShaderVariantKey& key) {
+                return valid_shader_variant_key(key);
+            })) {
+        return false;
+    }
+    std::array<RuntimeMetalArchivePipelineReceipt, 11> receipts{};
+    bool seed_claimed = false;
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        RuntimeMetalArchivePipelineAudit audit = base_audit;
+        audit.receipt_identity = 1000u + i;
+        audit.scope_identity = 2000u + i;
+        audit.shader_key = keys[i];
+        receipts[i] = RuntimeMetalArchivePipelineReceipt{
+            std::move(audit)};
+        if (!receipts[i].accepted()) return false;
+    }
+    const auto command = [](std::uintptr_t identity) {
+        return reinterpret_cast<VkCommandBuffer>(identity);
+    };
+    const auto prepare_query = [&keys, &receipts](
+        RuntimePipelineUseCollector& collector) {
+        for (std::size_t i = 0u; i < 3u; ++i) {
+            collector.prepare(keys[i], &receipts[i]);
+        }
+    };
+    const auto query_golden = [&]() {
+        auto collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch, 1u, 101u);
+        prepare_query(*collector);
+        collector->begin(command(1u));
+        collector->use(command(1u), 0u, keys[0], &receipts[0], 3u);
+        collector->use(command(1u), 0u, keys[1], &receipts[1], 2u);
+        collector->use(command(1u), 0u, keys[2], &receipts[2], 2u);
+        collector->commit(command(1u));
+        collector->begin(command(2u));
+        collector->use(command(2u), 0u, keys[0], &receipts[0], 3u);
+        collector->use(command(2u), 0u, keys[2], &receipts[2], 1u);
+        collector->commit(command(2u));
+        return collector->seal();
+    };
+
+    RuntimePipelineOperationProof query{};
+    try {
+        query = query_golden();
+    } catch (...) {
+        return false;
+    }
+    if (!query.accepted_query_sketch()
+        || query.audit_.begun_command_generations != 2u
+        || query.audit_.committed_command_generations != 2u
+        || query.audit_.jobs[0].submission_operation_identity != 101u
+        || query.audit_.jobs[0].submission_ordinals[0] != 1u
+        || query.audit_.jobs[0].submission_ordinals[1] != 2u
+        || query.audit_.jobs[0].count(
+            ShaderKind::phase_c_sketch_tile) != 2u
+        || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
+            ShaderKind::phase_c_sketch_tile)] != 6u
+        || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
+            ShaderKind::phase_c_prefix_scan_block)] != 2u
+        || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
+            ShaderKind::phase_c_prefix_scan_add)] != 3u
+        || !query.capacity_permit_) {
+        return false;
+    }
+    RuntimePipelineOperationProof moved_query{std::move(query)};
+    if (query.accepted_query_sketch() || query.capacity_permit_
+        || !moved_query.accepted_query_sketch()
+        || !moved_query.capacity_permit_) {
+        return false;
+    }
+    query = std::move(moved_query);
+    if (moved_query.accepted_query_sketch()
+        || moved_query.capacity_permit_
+        || !query.accepted_query_sketch()) {
+        return false;
+    }
+
+    const auto rejected_query = [&](std::uint64_t identity, int mode) {
+        auto collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch, 1u, identity);
+        prepare_query(*collector);
+        const VkCommandBuffer begun =
+            command(static_cast<std::uintptr_t>(identity));
+        collector->begin(begun);
+        if (mode != 1) {
+            collector->use(
+                mode == 4 ? command(
+                    static_cast<std::uintptr_t>(identity + 1000u)) : begun,
+                0u, keys[0], mode == 5 ? &receipts[1] : &receipts[0],
+                mode == 6 ? 0u : 1u,
+                mode == 2 ? 2u : 0u);
+        }
+        if (mode <= 2 || mode >= 4) {
+            collector->burn_before_reset(begun);
+        }
+        return collector->seal();
+    };
+    try {
+        const RuntimePipelineOperationProof reset = rejected_query(102u, 0);
+        const RuntimePipelineOperationProof empty = rejected_query(103u, 1);
+        const RuntimePipelineOperationProof stale = rejected_query(104u, 2);
+        const RuntimePipelineOperationProof uncommitted =
+            rejected_query(105u, 3);
+        const RuntimePipelineOperationProof wrong_command =
+            rejected_query(106u, 4);
+        const RuntimePipelineOperationProof wrong_receipt =
+            rejected_query(107u, 5);
+        const RuntimePipelineOperationProof zero_groups =
+            rejected_query(108u, 6);
+        if (reset.accepted_query_sketch()
+            || reset.audit_.burned_pending_uses != 1u
+            || empty.accepted_query_sketch()
+            || empty.audit_.begun_command_generations != 1u
+            || stale.accepted_query_sketch()
+            || uncommitted.accepted_query_sketch()
+            || wrong_command.accepted_query_sketch()
+            || wrong_receipt.accepted_query_sketch()
+            || zero_groups.accepted_query_sketch()) {
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+
+    RuntimePipelineOperationProof shape{};
+    try {
+        auto collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::shape_v5_coordinate, 3u, 202u);
+        constexpr std::array<std::size_t, 7> base_slots{
+            3u, 4u, 1u, 2u, 5u, 6u, 7u};
+        for (const std::size_t slot : base_slots) {
+            collector->prepare(keys[slot], &receipts[slot]);
+        }
+        // One radix pipeline retrieval per anchored job, independent of the
+        // number of byte passes recorded in that job's command.
+        for (std::size_t repeat = 0u; repeat < 2u; ++repeat) {
+            for (std::size_t slot = 8u; slot < 11u; ++slot) {
+                collector->prepare(keys[slot], &receipts[slot]);
+            }
+        }
+        collector->set_shape_input(0u, 1u, 1u, 0u);
+        collector->set_shape_input(1u, 1u, 255u, 0u);
+        collector->set_shape_input(2u, 1u, 65536u, 0u);
+        collector->set_shape_outcome(0u, 0u, 0u);
+        collector->set_shape_outcome(1u, 1u, 0u);
+        collector->set_shape_outcome(2u, 1u, 1u);
+
+        collector->begin(command(11u));
+        for (std::size_t job = 0u; job < 3u; ++job) {
+            collector->use(command(11u), job, keys[3], &receipts[3], 1u);
+            collector->use(command(11u), job, keys[1], &receipts[1], 1u);
+            collector->use(command(11u), job, keys[2], &receipts[2], 1u);
+            collector->use(command(11u), job, keys[2], &receipts[2], 1u);
+        }
+        collector->commit(command(11u));
+
+        collector->begin(command(12u));
+        for (std::size_t job = 1u; job < 3u; ++job) {
+            collector->use(command(12u), job, keys[4], &receipts[4], 1u);
+        }
+        collector->commit(command(12u));
+
+        collector->begin(command(13u));
+        for (std::size_t slot = 8u; slot < 11u; ++slot) {
+            collector->use(command(13u), 1u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
+        }
+        collector->use(command(13u), 1u, keys[5], &receipts[5], 1u);
+        collector->use(command(13u), 2u, keys[5], &receipts[5], 1u);
+        collector->commit(command(13u));
+
+        collector->begin(command(14u));
+        collector->use(command(14u), 2u, keys[7], &receipts[7], 1u);
+        collector->use(command(14u), 2u, keys[6], &receipts[6], 1u);
+        collector->commit(command(14u));
+        shape = collector->seal();
+    } catch (...) {
+        return false;
+    }
+    if (!shape.accepted_shape_v5_coordinate()
+        || shape.audit_.begun_command_generations != 4u
+        || shape.audit_.committed_command_generations != 4u
+        || !shape.capacity_permit_) {
+        return false;
+    }
+    constexpr std::array<std::uint64_t, 3> expected_submissions{1u, 3u, 4u};
+    for (std::size_t job = 0u; job < shape.audit_.jobs.size(); ++job) {
+        const RuntimePipelineJobUseAudit& audit = shape.audit_.jobs[job];
+        if (audit.submission_operation_identity != 202u
+            || audit.committed_submissions != expected_submissions[job]
+            || audit.count(
+                ShaderKind::phase_c_coordinate_vote_reduce) != 0u
+            || audit.count(
+                ShaderKind::phase_c_coordinate_vote_reduce_batch) != 0u) {
+            return false;
+        }
+        for (std::size_t ordinal = 0u;
+             ordinal < audit.committed_submissions; ++ordinal) {
+            if (audit.submission_ordinals[ordinal] != ordinal + 1u) {
+                return false;
+            }
+        }
+        for (std::size_t kind = 0u; kind < audit.dispatches.size(); ++kind) {
+            if (audit.dispatches[kind] != audit.workgroups[kind]) {
+                return false;
+            }
+        }
+    }
+    if (query.audit_.jobs[0].submission_ordinals[0]
+            != shape.audit_.jobs[0].submission_ordinals[0]
+        || query.audit_.jobs[0].submission_operation_identity
+            == shape.audit_.jobs[0].submission_operation_identity) {
+        return false;
+    }
+
+    // PREPARE, reset/burn and sealing are descriptive only. Exercise the exact
+    // fixed transaction used by the production finalizer: abandoning a plan
+    // models a live-gate failure; the following accepted commit reports all
+    // counters, and the next accepted operation reports zero.
+    if (std::any_of(
+            receipts.begin(), receipts.end(),
+            [](const auto& receipt) { return receipt.metrics_claimed_; })
+        || seed_claimed) {
+        return false;
+    }
+    RuntimeGpuCacheMetricsAudit maximum{
+        .token_identity = 303u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = receipts[0].audit().seed_size,
+        .gpu_pipeline_cache_load_ns = receipts[0].audit().seed_load_ns,
+        .gpu_pipeline_creates =
+            static_cast<std::uint64_t>(receipts.size()),
+    };
+    for (const RuntimeMetalArchivePipelineReceipt& receipt : receipts) {
+        if (receipt.audit().pipeline_create_ns
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - maximum.gpu_pipeline_creation_ns) {
+            return false;
+        }
+        maximum.gpu_pipeline_creation_ns +=
+            receipt.audit().pipeline_create_ns;
+    }
+    std::array<const RuntimeMetalArchivePipelineReceipt*, 11>
+        receipt_pointers{};
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        receipt_pointers[i] = &receipts[i];
+    }
+    const auto pointers =
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+            receipt_pointers.data(), receipt_pointers.size()};
+    {
+        auto abandoned = runtime_detail::
+            RuntimeGpuCacheMetricsClaimPlan::prepare(
+                maximum.token_identity, maximum, seed_claimed, pointers);
+        if (!abandoned.accepted()
+            || abandoned.audit() != maximum
+            || abandoned.committed()) {
+            return false;
+        }
+    }
+    if (seed_claimed
+        || std::any_of(
+            receipts.begin(), receipts.end(),
+            [](const auto& receipt) { return receipt.metrics_claimed_; })) {
+        return false;
+    }
+    auto first = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        maximum.token_identity, maximum, seed_claimed, pointers);
+    if (!first.accepted() || first.audit() != maximum) return false;
+    first.commit(seed_claimed);
+    if (!first.committed() || !seed_claimed
+        || std::any_of(
+            receipts.begin(), receipts.end(),
+            [](const auto& receipt) { return !receipt.metrics_claimed_; })) {
+        return false;
+    }
+    RuntimeGpuCacheMetricsAudit later_maximum = maximum;
+    later_maximum.token_identity = 304u;
+    auto later = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        later_maximum.token_identity, later_maximum,
+        seed_claimed, pointers);
+    if (!later.accepted()
+        || later.audit().token_identity != later_maximum.token_identity
+        || later.audit().gpu_pipeline_cache_loads != 0u
+        || later.audit().gpu_pipeline_cache_seed_bytes != 0u
+        || later.audit().gpu_pipeline_cache_load_ns != 0u
+        || later.audit().gpu_pipeline_creates != 0u
+        || later.audit().gpu_pipeline_creation_ns != 0u) {
+        return false;
+    }
+    later.commit(seed_claimed);
+    return later.committed() && seed_claimed;
+}
 
 /// Install-once production seam.  The supervisor calls this from its runtime
 /// prepare hook, before the first Runtime singleton construction.
@@ -876,6 +2370,7 @@ public:
             && materialization_
                 == VulkanSketchHostMaterialization::device_only
             && dispatch_proof_.accepted()
+            && pipeline_proof_.accepted_query_sketch()
             && window_size_ != 0u
             && kmer_size_ != 0u
             && minimizer_word_kind_ <= 3u
@@ -940,6 +2435,7 @@ private:
         materialization_ =
             VulkanSketchHostMaterialization::host_and_device;
         dispatch_proof_ = RuntimeSketchBatchDispatchProof{};
+        pipeline_proof_ = RuntimePipelineOperationProof{};
         device_uuid_.fill(0u);
         query_records_.clear();
         query_tile_counts_.clear();
@@ -961,6 +2457,7 @@ private:
         pos_bits_ = other.pos_bits_;
         materialization_ = other.materialization_;
         dispatch_proof_ = other.dispatch_proof_;
+        pipeline_proof_ = std::move(other.pipeline_proof_);
         device_uuid_ = other.device_uuid_;
         query_records_ = std::move(other.query_records_);
         query_tile_counts_ = std::move(other.query_tile_counts_);
@@ -983,6 +2480,7 @@ private:
     VulkanSketchHostMaterialization materialization_ =
         VulkanSketchHostMaterialization::host_and_device;
     RuntimeSketchBatchDispatchProof dispatch_proof_{};
+    RuntimePipelineOperationProof pipeline_proof_{};
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid_{};
     std::vector<PhaseCSeedQueryRecordWire> query_records_{};
     std::vector<std::uint32_t> query_tile_counts_{};
@@ -2101,6 +3599,7 @@ public:
         PersistedShapeV5CoordinateJobEvidence&& other) noexcept {
         if (this != &other) {
             audit_ = {};
+            pipeline_operation_identity_ = 0u;
             issued_ = false;
             move_from(other);
         }
@@ -2108,7 +3607,8 @@ public:
     }
 
     [[nodiscard]] bool accepted() const noexcept {
-        return issued_ && audit_.accepted();
+        return issued_ && pipeline_operation_identity_ != 0u
+            && audit_.accepted();
     }
     [[nodiscard]] const PersistedShapeV5CoordinateJobAudit& audit()
         const noexcept {
@@ -2121,13 +3621,92 @@ private:
     void move_from(PersistedShapeV5CoordinateJobEvidence& other) noexcept {
         audit_ = other.audit_;
         issued_ = other.issued_;
+        pipeline_operation_identity_ = other.pipeline_operation_identity_;
         other.audit_ = {};
         other.issued_ = false;
+        other.pipeline_operation_identity_ = 0u;
     }
 
     PersistedShapeV5CoordinateJobAudit audit_{};
+    std::uint64_t pipeline_operation_identity_ = 0u;
     bool issued_ = false;
 };
+
+struct PersistedShapeV5CoordinateOperationAcceptanceAudit {
+    std::uint64_t operation_identity = 0u;
+    std::uint64_t expected_job_count = 0u;
+    std::uint64_t consumed_count = 0u;
+    std::uint64_t accepted_count = 0u;
+    std::uint64_t burned_count = 0u;
+    std::uint64_t query_pipeline_receipt_count = 0u;
+    std::uint64_t shape_pipeline_receipt_count = 0u;
+    std::uint64_t committed_submission_count = 0u;
+    std::uint64_t seed_receipt_identity = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return operation_identity != 0u && expected_job_count != 0u
+            && consumed_count == expected_job_count
+            && accepted_count == expected_job_count
+            && burned_count == 0u
+            && query_pipeline_receipt_count == 3u
+            && shape_pipeline_receipt_count >= 7u
+            && shape_pipeline_receipt_count <= 10u
+            && committed_submission_count >= 3u
+            && seed_receipt_identity != 0u;
+    }
+};
+
+class PersistedShapeV5CoordinateAcceptedOperation {
+public:
+    PersistedShapeV5CoordinateAcceptedOperation() = default;
+    PersistedShapeV5CoordinateAcceptedOperation(
+        const PersistedShapeV5CoordinateAcceptedOperation&) = delete;
+    PersistedShapeV5CoordinateAcceptedOperation& operator=(
+        const PersistedShapeV5CoordinateAcceptedOperation&) = delete;
+    PersistedShapeV5CoordinateAcceptedOperation(
+        PersistedShapeV5CoordinateAcceptedOperation&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          environment_(std::exchange(other.environment_, {})),
+          cache_metrics_(std::move(other.cache_metrics_)),
+          issued_(std::exchange(other.issued_, false)) {}
+    PersistedShapeV5CoordinateAcceptedOperation& operator=(
+        PersistedShapeV5CoordinateAcceptedOperation&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            environment_ = std::exchange(other.environment_, {});
+            cache_metrics_ = std::move(other.cache_metrics_);
+            issued_ = std::exchange(other.issued_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return issued_ && audit_.accepted() && environment_.accepted()
+            && cache_metrics_.accepted();
+    }
+    [[nodiscard]] const PersistedShapeV5CoordinateOperationAcceptanceAudit&
+    audit() const noexcept { return audit_; }
+    [[nodiscard]] const RuntimeGpuExecutionEnvironmentBinding&
+    environment_binding() const noexcept { return environment_; }
+    [[nodiscard]] const RuntimeGpuCacheMetricsAudit&
+    cache_metrics_audit() const noexcept { return cache_metrics_.audit(); }
+    [[nodiscard]] RuntimeGpuCacheMetricsDelta
+    take_cache_metrics_delta() noexcept {
+        return std::move(cache_metrics_);
+    }
+
+private:
+    PersistedShapeV5CoordinateOperationAcceptanceAudit audit_{};
+    RuntimeGpuExecutionEnvironmentBinding environment_{};
+    RuntimeGpuCacheMetricsDelta cache_metrics_{};
+    bool issued_ = false;
+    friend class Runtime;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedShapeV5CoordinateAcceptedOperation>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedShapeV5CoordinateAcceptedOperation>);
 
 /// Runtime-sealed, move-only proof for one Shape-V5 coordinate batch.  Each
 /// logical job can be consumed exactly once and only with matching resident,
@@ -2146,7 +3725,9 @@ public:
     PersistedShapeV5CoordinateOperationProof& operator=(
         PersistedShapeV5CoordinateOperationProof&& other) noexcept {
         if (this != &other) {
-            records_.clear();
+            release_records();
+            query_pipeline_proof_ = {};
+            shape_pipeline_proof_ = {};
             move_from(other);
         }
         return *this;
@@ -2158,13 +3739,36 @@ public:
     [[nodiscard]] std::size_t job_count() const noexcept {
         return sealed() ? records_.size() : 0u;
     }
+    [[nodiscard]] std::size_t consumed_count() const noexcept {
+        return sealed() ? accepted_count_ + burned_count_ : 0u;
+    }
+    [[nodiscard]] std::size_t accepted_count() const noexcept {
+        return sealed() ? accepted_count_ : 0u;
+    }
+    [[nodiscard]] std::size_t burned_count() const noexcept {
+        return sealed() ? burned_count_ : 0u;
+    }
     [[nodiscard]] bool fully_consumed() const noexcept {
         return sealed()
             && !records_.empty()
             && std::all_of(
                 records_.begin(),
-                records_.end(),
-                [](const auto& record) { return record.consumed; });
+                records_.end(), [](const auto& record) {
+                    return record.state != RecordState::fresh;
+                });
+    }
+    [[nodiscard]] bool all_jobs_accepted() const noexcept {
+        return sealed() && fully_consumed()
+            && accepted_count_ == records_.size()
+            && burned_count_ == 0u && causal_proofs_accepted();
+    }
+    [[nodiscard]] RuntimeGpuExecutionEnvironmentBinding
+    environment_preview() const noexcept {
+        return preview_environment();
+    }
+    [[nodiscard]] RuntimeGpuCacheMetricsAudit
+    cache_metrics_preview() const noexcept {
+        return maximum_cache_metrics();
     }
 
     /// Contract-only test hook.  It returns no proof or evidence and therefore
@@ -2184,12 +3788,20 @@ public:
         }
         PersistedShapeV5CoordinateOperationProof issued{};
         issued.operation_identity_ = audits[0].operation_identity;
-        issued.records_.push_back(Record{.audit = audits[0]});
-        issued.records_.push_back(Record{.audit = audits[1]});
+        try {
+            issued.admit_records(2u);
+        } catch (...) {
+            return false;
+        }
+        issued.records_[0].audit = audits[0];
+        issued.records_[1].audit = audits[1];
+        issued.test_causal_accepted_ = true;
         issued.sealed_ = true;
 
         PersistedShapeV5CoordinateOperationProof proof{std::move(issued)};
         if (issued.sealed() || issued.job_count() != 0u
+            || issued.records_capacity_permit_
+            || !proof.records_capacity_permit_
             || !proof.sealed() || proof.job_count() != 2u) {
             return false;
         }
@@ -2205,12 +3817,20 @@ public:
         tampered_second.source_identity ^= 1u;
         if (proof.consume(tampered_second).has_value()) return false;
         if (proof.consume(expectations[1]).has_value()) return false;
-        if (!proof.fully_consumed()) return false;
+        if (!proof.fully_consumed() || proof.accepted_count() != 1u
+            || proof.burned_count() != 1u
+            || proof.all_jobs_accepted()) return false;
 
         PersistedShapeV5CoordinateOperationProof all_valid{};
         all_valid.operation_identity_ = audits[0].operation_identity;
-        all_valid.records_.push_back(Record{.audit = audits[0]});
-        all_valid.records_.push_back(Record{.audit = audits[1]});
+        try {
+            all_valid.admit_records(2u);
+        } catch (...) {
+            return false;
+        }
+        all_valid.records_[0].audit = audits[0];
+        all_valid.records_[1].audit = audits[1];
+        all_valid.test_causal_accepted_ = true;
         all_valid.sealed_ = true;
         auto valid_first = all_valid.consume(expectations[0]);
         auto valid_second = all_valid.consume(expectations[1]);
@@ -2218,7 +3838,11 @@ public:
             && valid_second.has_value() && valid_second->accepted()
             && !all_valid.consume(expectations[0]).has_value()
             && !all_valid.consume(expectations[1]).has_value()
-            && all_valid.fully_consumed();
+            && all_valid.fully_consumed()
+            && all_valid.accepted_count() == 2u
+            && all_valid.burned_count() == 0u
+            && all_valid.records_capacity_permit_
+            && all_valid.all_jobs_accepted();
     }
 
     [[nodiscard]] std::optional<PersistedShapeV5CoordinateJobEvidence>
@@ -2227,8 +3851,7 @@ public:
             return std::nullopt;
         }
         Record& record = records_[expected.problem_index];
-        if (record.consumed) return std::nullopt;
-        record.consumed = true;
+        if (record.state != RecordState::fresh) return std::nullopt;
         const auto& audit = record.audit;
         const auto& query = expected.query_record;
         const bool identities_match = audit.problem_index
@@ -2265,11 +3888,17 @@ public:
             && audit.query_record.flags == query.flags
             && coordinate_result_wire_equal(audit.result, expected.result)
             && audit.configuration == expected.configuration;
-        if (!identities_match || !audit.accepted()) {
+        if (!identities_match || !audit.accepted()
+            || !causal_proofs_accepted()) {
+            record.state = RecordState::burned;
+            ++burned_count_;
             return std::nullopt;
         }
+        record.state = RecordState::accepted;
+        ++accepted_count_;
         PersistedShapeV5CoordinateJobEvidence evidence{};
         evidence.audit_ = audit;
+        evidence.pipeline_operation_identity_ = operation_identity_;
         evidence.issued_ = true;
         return evidence;
     }
@@ -2277,22 +3906,238 @@ public:
 private:
     friend class Runtime;
 
+    enum class RecordState : std::uint8_t {
+        fresh,
+        accepted,
+        burned,
+    };
+
     struct Record {
         PersistedShapeV5CoordinateJobAudit audit{};
-        bool consumed = false;
+        RecordState state = RecordState::fresh;
     };
+
+    struct PipelineReceiptUnion {
+        std::array<ShaderVariantKey,
+                   k_runtime_pipeline_prepared_slots> keys{};
+        std::array<const RuntimeMetalArchivePipelineReceipt*,
+                   k_runtime_pipeline_prepared_slots> receipts{};
+        std::size_t count = 0u;
+        bool valid = false;
+    };
+
+    [[nodiscard]] PipelineReceiptUnion receipt_union() const noexcept {
+        PipelineReceiptUnion result{};
+        if (!sealed_ || test_causal_accepted_
+            || !query_pipeline_proof_.accepted_query_sketch()
+            || !shape_pipeline_proof_.accepted_shape_v5_coordinate()) {
+            return result;
+        }
+        const auto merge = [&result](
+            const RuntimePipelineOperationProof& operation) {
+            for (std::size_t i = 0u;
+                 i < operation.audit_.prepared_count; ++i) {
+                std::size_t slot = result.count;
+                for (std::size_t existing = 0u;
+                     existing < result.count; ++existing) {
+                    if (result.keys[existing]
+                            == operation.audit_.prepared[i].shader_key) {
+                        slot = existing;
+                        break;
+                    }
+                }
+                if (slot == result.count) {
+                    if (result.count == result.keys.size()) return false;
+                    result.keys[result.count] =
+                        operation.audit_.prepared[i].shader_key;
+                    result.receipts[result.count] =
+                        operation.receipts_[i];
+                    ++result.count;
+                } else if (result.receipts[slot]
+                           != operation.receipts_[i]) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!merge(query_pipeline_proof_)
+            || !merge(shape_pipeline_proof_)
+            || result.count == 0u
+            || result.count
+                != shape_pipeline_proof_.audit_.prepared_count + 1u) {
+            return {};
+        }
+        result.valid = true;
+        return result;
+    }
+
+    [[nodiscard]] RuntimeGpuExecutionEnvironmentBinding
+    preview_environment() const noexcept {
+        const PipelineReceiptUnion union_receipts = receipt_union();
+        if (!union_receipts.valid) return {};
+        const RuntimePipelineOperationAudit& query =
+            query_pipeline_proof_.audit_;
+        const RuntimePipelineOperationAudit& shape =
+            shape_pipeline_proof_.audit_;
+        if (query.device_uuid != shape.device_uuid
+            || query.api_version != shape.api_version
+            || query.driver_version != shape.driver_version
+            || query.vendor_id != shape.vendor_id
+            || query.device_id != shape.device_id
+            || query.pipeline_cache_uuid != shape.pipeline_cache_uuid
+            || query.seed_sha256 != shape.seed_sha256
+            || query.seed_size != shape.seed_size
+            || query.manifest_checksum != shape.manifest_checksum
+            || query.seed_receipt_identity
+                != shape.seed_receipt_identity
+            || query.archive_set != shape.archive_set) {
+            return {};
+        }
+        VulkanFeatureSet identity{};
+        identity.api_version = query.api_version;
+        identity.driver_version = query.driver_version;
+        identity.vendor_id = query.vendor_id;
+        identity.device_id = query.device_id;
+        identity.pipeline_cache_uuid = query.pipeline_cache_uuid;
+        RuntimeGpuExecutionEnvironmentBinding result{
+            .gpu_environment_present = true,
+            .gpu_device_uuid = query.device_uuid,
+            .gpu_driver_identity =
+                canonical_vulkan_driver_identity(identity),
+            .cache_policy = RuntimePipelineCachePolicyEvidence::
+                immutable_preseed_all_hit,
+            .seed_sha256 = query.seed_sha256,
+            .seed_size = query.seed_size,
+            .manifest_checksum = query.manifest_checksum,
+            .pipeline_cache_all_hit = true,
+        };
+        return result.accepted() ? result
+                                 : RuntimeGpuExecutionEnvironmentBinding{};
+    }
+
+    [[nodiscard]] RuntimeGpuCacheMetricsAudit
+    maximum_cache_metrics() const noexcept {
+        const PipelineReceiptUnion union_receipts = receipt_union();
+        if (!union_receipts.valid) return {};
+        RuntimeGpuCacheMetricsAudit result{
+            .token_identity = operation_identity_,
+            .gpu_pipeline_cache_loads = 1u,
+            .gpu_pipeline_cache_seed_bytes =
+                query_pipeline_proof_.audit_.seed_size,
+        };
+        const RuntimeMetalArchivePipelineReceipt* first =
+            union_receipts.receipts[0];
+        if (first == nullptr || !first->accepted()) return {};
+        result.gpu_pipeline_cache_load_ns = first->audit().seed_load_ns;
+        for (std::size_t i = 0u; i < union_receipts.count; ++i) {
+            const RuntimeMetalArchivePipelineReceipt* receipt =
+                union_receipts.receipts[i];
+            if (receipt == nullptr || !receipt->accepted()
+                || receipt->audit().seed_load_ns
+                    != result.gpu_pipeline_cache_load_ns
+                || result.gpu_pipeline_creates
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || receipt->audit().pipeline_create_ns
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - result.gpu_pipeline_creation_ns) {
+                return {};
+            }
+            ++result.gpu_pipeline_creates;
+            result.gpu_pipeline_creation_ns +=
+                receipt->audit().pipeline_create_ns;
+        }
+        return result.accepted() ? result : RuntimeGpuCacheMetricsAudit{};
+    }
+
+    void admit_records(std::size_t record_count) {
+        using bioseq::parallelism::saturating_mul;
+        if (record_count == 0u || !records_.empty()
+            || records_capacity_permit_
+            || record_count > records_.max_size()) {
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation record shape is invalid");
+        }
+        const std::uint64_t logical = saturating_mul(
+            static_cast<std::uint64_t>(record_count), sizeof(Record));
+        const std::uint64_t peak = saturating_mul(
+            logical,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        if (logical == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation record admission saturated");
+        }
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(shader_cache_message(
+                "persisted Shape-V5 operation record admission denied: reason=",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                " requested=", failure.requested_bytes));
+        }
+        try {
+            records_.resize(record_count);
+        } catch (const std::bad_alloc&) {
+            std::vector<Record> empty;
+            records_.swap(empty);
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation record allocation failed after admission");
+        }
+        const std::uint64_t retained = saturating_mul(
+            static_cast<std::uint64_t>(records_.capacity()),
+            sizeof(Record));
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || retained > permit->bytes()) {
+            std::vector<Record> empty;
+            records_.swap(empty);
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation records exceeded admitted capacity");
+        }
+        permit->shrink_to(retained);
+        records_capacity_permit_ = std::move(*permit);
+    }
+
+    void release_records() noexcept {
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            records_, records_capacity_permit_);
+    }
+
+    [[nodiscard]] bool causal_proofs_accepted() const noexcept {
+        return test_causal_accepted_
+            || (query_pipeline_proof_.accepted_query_sketch()
+                && shape_pipeline_proof_.accepted_shape_v5_coordinate());
+    }
 
     void move_from(PersistedShapeV5CoordinateOperationProof& other) noexcept {
         operation_identity_ = other.operation_identity_;
         records_ = std::move(other.records_);
+        records_capacity_permit_ = std::move(
+            other.records_capacity_permit_);
+        query_pipeline_proof_ = std::move(other.query_pipeline_proof_);
+        shape_pipeline_proof_ = std::move(other.shape_pipeline_proof_);
+        accepted_count_ = other.accepted_count_;
+        burned_count_ = other.burned_count_;
+        test_causal_accepted_ = other.test_causal_accepted_;
         sealed_ = other.sealed_;
         other.operation_identity_ = 0u;
         other.records_.clear();
+        other.accepted_count_ = 0u;
+        other.burned_count_ = 0u;
+        other.test_causal_accepted_ = false;
         other.sealed_ = false;
     }
 
     std::uint64_t operation_identity_ = 0u;
+    // Declared before records_: record capacity is destroyed before release.
+    bioseq::parallelism::MemoryPermit records_capacity_permit_{};
     std::vector<Record> records_{};
+    RuntimePipelineOperationProof query_pipeline_proof_{};
+    RuntimePipelineOperationProof shape_pipeline_proof_{};
+    std::size_t accepted_count_ = 0u;
+    std::size_t burned_count_ = 0u;
+    bool test_causal_accepted_ = false;
     bool sealed_ = false;
 };
 
@@ -2343,6 +4188,9 @@ public:
     [[nodiscard]] std::uint64_t generate_units_dispatch_count() const noexcept {
         return generate_units_dispatch_count_.load(std::memory_order_relaxed);
     }
+    [[nodiscard]] PersistedShapeV5CoordinateAcceptedOperation
+    finalize_persisted_shape_v5_coordinate_operation(
+        PersistedShapeV5CoordinateOperationProof&& proof);
 
     [[nodiscard]] Buffer create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     [[nodiscard]] Buffer create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
@@ -2698,12 +4546,20 @@ private:
         std::string entry_name = "main";
         std::unique_ptr<const RuntimeMetalArchivePipelineReceipt>
             metal_archive_receipt{};
+        std::uint64_t pipeline_create_ns = 0u;
 
         PipelineEntry() = default;
         PipelineEntry(const PipelineEntry&) = delete;
         PipelineEntry& operator=(const PipelineEntry&) = delete;
         PipelineEntry(PipelineEntry&&) noexcept = default;
         PipelineEntry& operator=(PipelineEntry&&) noexcept = default;
+    };
+
+    struct ChainingPipeline {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        ShaderVariantKey shader_key{};
+        const RuntimeMetalArchivePipelineReceipt* metal_archive_receipt =
+            nullptr;
     };
 
     /// DOC0307 §4.5 — one cached Phase B compute pipeline with its own
@@ -2738,6 +4594,7 @@ private:
         std::string entry_name = "main";
         std::unique_ptr<const RuntimeMetalArchivePipelineReceipt>
             metal_archive_receipt{};
+        std::uint64_t pipeline_create_ns = 0u;
 
         PhaseBPipelineOwner() = default;
         PhaseBPipelineOwner(const PhaseBPipelineOwner&) = delete;
@@ -2787,7 +4644,9 @@ private:
     void record_phase_c_dispatch_locked(
         VkCommandBuffer cmd, const PhaseBPipeline& pipe,
         std::span<const VkDescriptorBufferInfo> infos,
-        const void* push, std::uint32_t push_size, std::uint32_t group_count);
+        const void* push, std::uint32_t push_size, std::uint32_t group_count,
+        RuntimePipelineUseCollector* collector = nullptr,
+        std::size_t collector_job_index = 0u);
     // Record one full device radix sort (all passes) into an open command
     // buffer. Sorts the key/value arena slices in place via ping-pong scratch.
     void record_radix_sort_locked(
@@ -2797,7 +4656,9 @@ private:
         const GpuArenaSlice& histogram,
         const GpuSortPlan& plan, std::uint32_t num_workgroups,
         std::uint32_t elems_per_wg, std::uint32_t value_words,
-        bool& result_in_scratch);
+        bool& result_in_scratch,
+        RuntimePipelineUseCollector* collector = nullptr,
+        std::size_t collector_job_index = 0u);
     // DOC0345 Patch B — two-key stable sort: radix by value (encoded_pos) then
     // radix by key (kmer). Because the second sort is stable the result is
     // (kmer, encoded_pos) ordered.
@@ -2823,7 +4684,7 @@ private:
         std::size_t normal_capacity,
         std::size_t phase_b_capacity);
     void reconcile_pipeline_cache_metadata_locked() noexcept;
-    VkPipeline create_pipeline_locked(const ChainingPipelineKey& key);
+    ChainingPipeline create_pipeline_locked(const ChainingPipelineKey& key);
     void upload_locked(Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
                        VkAccessFlags dst_access);
     void download_locked(Buffer& transfer_scratch, const Buffer& src, std::span<std::byte> bytes);
@@ -2862,6 +4723,7 @@ private:
     bioseq::parallelism::MemoryPermit pipeline_cache_metadata_permit_;
     std::vector<PipelineEntry> pipeline_cache_;
     std::vector<PhaseBPipelineOwner> phase_b_pipelines_;
+    bool seed_metrics_claimed_ = false;
     std::uint32_t gpu_anchor_sort_capacity_ = 0;
     std::optional<GpuArena> phase_c_arena_;  // DOC0310 §7 — lazily created.
     VkDescriptorPool phase_c_pool_ = VK_NULL_HANDLE;  // DOC0310 — fresh-set pool.
@@ -6044,6 +7906,14 @@ void Runtime::init() {
         std::end(id_properties.deviceUUID),
         features_.device_uuid.begin());
     features_.device_type = static_cast<std::uint32_t>(props.deviceType);
+    features_.api_version = props.apiVersion;
+    features_.driver_version = props.driverVersion;
+    features_.vendor_id = props.vendorID;
+    features_.device_id = props.deviceID;
+    std::copy(
+        std::begin(props.pipelineCacheUUID),
+        std::end(props.pipelineCacheUUID),
+        features_.pipeline_cache_uuid.begin());
     features_.software_device = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     features_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
     features_.max_workgroup_size_x = props.limits.maxComputeWorkGroupSize[0];
@@ -6540,7 +8410,8 @@ void Runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
     if (retained == 0u) pipeline_cache_metadata_permit_.release();
 }
 
-VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
+Runtime::ChainingPipeline Runtime::create_pipeline_locked(
+    const ChainingPipelineKey& key) {
     const bool provider_used = use_shader_provider_locked();
     const bool archive_receipt_required = provider_used
         || runtime_metal_archive_configuration_installed();
@@ -6556,7 +8427,14 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
                 throw VulkanRuntimeError(
                     "cached chaining pipeline lacks its accepted immutable Metal archive receipt");
             }
-            return entry.handles.pipeline;
+            return ChainingPipeline{
+                .pipeline = entry.handles.pipeline,
+                .shader_key = make_shader_key(
+                    ShaderKind::chain_tiled_dp_u64,
+                    key.tile_size, key.local_size, 0u),
+                .metal_archive_receipt =
+                    entry.metal_archive_receipt.get(),
+            };
         }
     }
 
@@ -6657,8 +8535,15 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
             "immutable Metal archive scope rejected chaining pipeline before creation: {}",
             rejected ? "missing required receipt" : rejected.error()));
     }
+    const auto create_begin = std::chrono::steady_clock::now();
     const VkResult pr = vkCreateComputePipelines(
         device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline);
+    const auto create_elapsed = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - create_begin).count();
+    candidate.pipeline_create_ns = std::max<std::uint64_t>(
+        1u, create_elapsed > 0
+            ? static_cast<std::uint64_t>(create_elapsed) : 1u);
     auto archive_verdict = archive_scope.finish(pr);
     if (!archive_verdict) {
         throw VulkanRuntimeError(fmt::format(
@@ -6680,9 +8565,16 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
     }
 
     if (archive_verdict->has_value()) {
+        RuntimeMetalArchivePipelineAudit& audit = **archive_verdict;
+        audit.api_version = features_.api_version;
+        audit.driver_version = features_.driver_version;
+        audit.vendor_id = features_.vendor_id;
+        audit.device_id = features_.device_id;
+        audit.pipeline_cache_uuid = features_.pipeline_cache_uuid;
+        audit.pipeline_create_ns = candidate.pipeline_create_ns;
         candidate.metal_archive_receipt.reset(
             new RuntimeMetalArchivePipelineReceipt(
-                std::move(**archive_verdict)));
+                std::move(audit)));
     }
     pipeline_cache_.push_back(std::move(candidate));
     try {
@@ -6691,7 +8583,12 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
             key.tile_size, key.local_size);
     } catch (...) {
     }
-    return pipeline_cache_.back().handles.pipeline;
+    const PipelineEntry& retained = pipeline_cache_.back();
+    return ChainingPipeline{
+        .pipeline = retained.handles.pipeline,
+        .shader_key = shader_key,
+        .metal_archive_receipt = retained.metal_archive_receipt.get(),
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -6763,7 +8660,7 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
     // workgroups — range_count is just data, no workgroup-count throw.
     const std::uint32_t chain_groups =
         std::min(range_count, features_.max_workgroup_count_x);
-    const VkPipeline pipeline = create_pipeline_locked(key);
+    const VkPipeline pipeline = create_pipeline_locked(key).pipeline;
 
     // H2D: write the anchors/ranges and the caller-initialised best-scores /
     // predecessors straight into the host-visible device buffers.
@@ -6887,7 +8784,7 @@ GpuCoordinateChainTraceResult Runtime::run_chaining_coordinate_trace_roundtrip(
 
     const std::uint32_t chain_groups =
         std::min(range_count, features_.max_workgroup_count_x);
-    const VkPipeline pipeline = create_pipeline_locked(key);
+    const VkPipeline pipeline = create_pipeline_locked(key).pipeline;
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
 
@@ -7639,9 +9536,16 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             "immutable Metal archive scope rejected compute pipeline before creation: {}",
             rejected ? "missing required receipt" : rejected.error()));
     }
+    const auto create_begin = std::chrono::steady_clock::now();
     const VkResult pr = vkCreateComputePipelines(
         device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
         &entry.handles.pipeline);
+    const auto create_elapsed = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - create_begin).count();
+    entry.pipeline_create_ns = std::max<std::uint64_t>(
+        1u, create_elapsed > 0
+            ? static_cast<std::uint64_t>(create_elapsed) : 1u);
     auto archive_verdict = archive_scope.finish(pr);
     if (!archive_verdict) {
         throw VulkanRuntimeError(fmt::format(
@@ -7653,9 +9557,16 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             "vkCreateComputePipelines(compute): VkResult {}", static_cast<int>(pr)));
     }
     if (archive_verdict->has_value()) {
+        RuntimeMetalArchivePipelineAudit& audit = **archive_verdict;
+        audit.api_version = features_.api_version;
+        audit.driver_version = features_.driver_version;
+        audit.vendor_id = features_.vendor_id;
+        audit.device_id = features_.device_id;
+        audit.pipeline_cache_uuid = features_.pipeline_cache_uuid;
+        audit.pipeline_create_ns = entry.pipeline_create_ns;
         entry.metal_archive_receipt.reset(
             new RuntimeMetalArchivePipelineReceipt(
-                std::move(**archive_verdict)));
+                std::move(audit)));
     }
 
     phase_b_pipelines_.push_back(std::move(entry));
@@ -8060,26 +9971,19 @@ struct PhaseCAnchorSortKeyPlan {
     std::uint64_t target_len,
     std::uint64_t target_position_offset) noexcept
 {
-    constexpr std::uint64_t kFirstUncompactCoordinate = std::uint64_t{1} << 63;
-    if (target_len == 0u) return PhaseCAnchorSortKeyPlan{};
-
-    const std::uint64_t last_local_coordinate = target_len - 1u;
-    if (last_local_coordinate > std::numeric_limits<std::uint64_t>::max()
-        - target_position_offset) {
+    const auto pass_count = runtime_shape_v5_radix_pass_count(
+        target_position_offset, target_len);
+    if (!pass_count.has_value()) {
         return PhaseCAnchorSortKeyPlan{};
     }
 
     const std::uint64_t max_target_coordinate =
-        target_position_offset + last_local_coordinate;
-    if (max_target_coordinate >= kFirstUncompactCoordinate) {
-        return PhaseCAnchorSortKeyPlan{};
-    }
-
+        target_position_offset + target_len - 1u;
     const std::uint32_t target_ref_bits = std::max<std::uint32_t>(
         1u, static_cast<std::uint32_t>(std::bit_width(max_target_coordinate)));
     return PhaseCAnchorSortKeyPlan{
         .target_ref_bits = target_ref_bits,
-        .pass_count = std::clamp<std::uint32_t>((target_ref_bits + 8u) / 8u, 1u, 8u),
+        .pass_count = *pass_count,
     };
 }
 
@@ -8433,7 +10337,9 @@ void Runtime::bind_descriptors_offsets_locked(
 void Runtime::record_phase_c_dispatch_locked(
     VkCommandBuffer cmd, const PhaseBPipeline& pipe,
     std::span<const VkDescriptorBufferInfo> infos,
-    const void* push, std::uint32_t push_size, std::uint32_t group_count)
+    const void* push, std::uint32_t push_size, std::uint32_t group_count,
+    RuntimePipelineUseCollector* collector,
+    std::size_t collector_job_index)
 {
     if (group_count == 0) return;
     VkDescriptorSet set = alloc_phase_c_set_locked(pipe.set_layout);
@@ -8456,6 +10362,13 @@ void Runtime::record_phase_c_dispatch_locked(
         vkCmdPushConstants(cmd, pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, push_size, push);
     }
+    if (collector != nullptr) {
+        collector->use(
+            cmd, collector_job_index,
+            make_shader_key(
+                pipe.kind, 384u, pipe.local_size, pipe.max_span),
+            pipe.metal_archive_receipt, group_count);
+    }
     vkCmdDispatch(cmd, group_count, 1, 1);
 }
 
@@ -8465,7 +10378,10 @@ void Runtime::record_radix_sort_locked(
     const GpuArenaSlice& keys_scratch, const GpuArenaSlice& values_scratch,
     const GpuArenaSlice& histogram,
     const GpuSortPlan& plan, std::uint32_t num_workgroups,
-    std::uint32_t elems_per_wg, std::uint32_t value_words, bool& result_in_scratch)
+    std::uint32_t elems_per_wg, std::uint32_t value_words,
+    bool& result_in_scratch,
+    RuntimePipelineUseCollector* collector,
+    std::size_t collector_job_index)
 {
     const PhaseBPipeline hist_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_sort_radix_histogram, 1, 1);
@@ -8473,6 +10389,17 @@ void Runtime::record_radix_sort_locked(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_sort_radix_scan, 1, 1);
     const PhaseBPipeline scatter_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_sort_radix_scatter, 1, 1);
+    if (collector != nullptr) {
+        const auto prepare = [collector](const PhaseBPipeline& pipe) {
+            collector->prepare(
+                make_shader_key(
+                    pipe.kind, 384u, pipe.local_size, pipe.max_span),
+                pipe.metal_archive_receipt);
+        };
+        prepare(hist_pipe);
+        prepare(scan_pipe);
+        prepare(scatter_pipe);
+    }
 
     bool in_scratch = false;
     for (std::uint32_t pass = 0; pass < plan.pass_count; ++pass) {
@@ -8492,11 +10419,17 @@ void Runtime::record_radix_sort_locked(
             {out_vals.buffer->buffer, out_vals.offset, out_vals.size},
             {histogram.buffer->buffer, histogram.offset, histogram.size},
         }};
-        record_phase_c_dispatch_locked(cmd, hist_pipe, infos, &push, sizeof(push), num_workgroups);
+        record_phase_c_dispatch_locked(
+            cmd, hist_pipe, infos, &push, sizeof(push), num_workgroups,
+            collector, collector_job_index);
         record_compute_barrier(cmd);
-        record_phase_c_dispatch_locked(cmd, scan_pipe, infos, &push, sizeof(push), 1);
+        record_phase_c_dispatch_locked(
+            cmd, scan_pipe, infos, &push, sizeof(push), 1,
+            collector, collector_job_index);
         record_compute_barrier(cmd);
-        record_phase_c_dispatch_locked(cmd, scatter_pipe, infos, &push, sizeof(push), num_workgroups);
+        record_phase_c_dispatch_locked(
+            cmd, scatter_pipe, infos, &push, sizeof(push), num_workgroups,
+            collector, collector_job_index);
         record_compute_barrier(cmd);
         in_scratch = !in_scratch;
     }
@@ -8950,6 +10883,13 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             0,
             static_cast<std::size_t>(host_materialized_out_words.bytes));
     }
+    std::unique_ptr<RuntimePipelineUseCollector> query_pipeline_collector;
+    if (materialization == VulkanSketchHostMaterialization::device_only) {
+        query_pipeline_collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch,
+            1u,
+            next_operation_proof_identity_locked());
+    }
     const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(
         ShaderKind::phase_c_sketch_tile,
         kPhaseCSketchLocal,
@@ -8962,6 +10902,18 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         ShaderKind::phase_c_prefix_scan_add,
         128u,
         1u);
+    if (query_pipeline_collector != nullptr) {
+        const auto prepare = [&query_pipeline_collector](
+            const PhaseBPipeline& pipe) {
+            query_pipeline_collector->prepare(
+                make_shader_key(
+                    pipe.kind, 384u, pipe.local_size, pipe.max_span),
+                pipe.metal_archive_receipt);
+        };
+        prepare(sketch_pipe);
+        prepare(scan_block_pipe);
+        prepare(scan_add_pipe);
+    }
     reset_phase_c_pool_locked();
 
     // Device-only count mode never dereferences binding 4, so it can use the
@@ -9026,23 +10978,28 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     check_vk(
         vkBeginCommandBuffer(command_buffer_, &begin),
         "vkBeginCommandBuffer(pc_sketch_batch_count_scan)");
+    if (query_pipeline_collector != nullptr) {
+        query_pipeline_collector->begin(command_buffer_);
+    }
     record_host_to_shader(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, sketch_pipe, count_sketch_infos, &push, sizeof(push),
-        sketch_groups);
+        sketch_groups, query_pipeline_collector.get(), 0u);
     ++dispatch_proof.count_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
-        command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0), num_blocks);
+        command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0),
+        num_blocks, query_pipeline_collector.get(), 0u);
     ++dispatch_proof.prefix_scan_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
-        command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u);
+        command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u,
+        query_pipeline_collector.get(), 0u);
     ++dispatch_proof.prefix_scan_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, scan_add_pipe, scan_infos, &scan1, sizeof(scan1),
-        ceil_div_u32(tile_count, 128u));
+        ceil_div_u32(tile_count, 128u), query_pipeline_collector.get(), 0u);
     ++dispatch_proof.prefix_scan_dispatches_;
     ++dispatch_proof.prefix_scan_sequences_;
     if (materialization
@@ -9073,6 +11030,9 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     check_vk(
         vkResetFences(device_, 1, &fence_),
         "vkResetFences(pc_sketch_batch_count_scan)");
+    if (query_pipeline_collector != nullptr) {
+        query_pipeline_collector->commit(command_buffer_);
+    }
     ++dispatch_proof.completed_roundtrips_;
     result.dispatch_proof = dispatch_proof;
 
@@ -9147,12 +11107,18 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         // The first queue submission is complete, so its descriptor sets may
         // be recycled.  The arena mark and all resident slices remain live.
         reset_phase_c_pool_locked();
+        if (query_pipeline_collector != nullptr) {
+            query_pipeline_collector->burn_before_reset(command_buffer_);
+        }
         check_vk(
             vkResetCommandBuffer(command_buffer_, 0),
             "vkResetCommandBuffer(pc_sketch_batch_emit)");
         check_vk(
             vkBeginCommandBuffer(command_buffer_, &begin),
             "vkBeginCommandBuffer(pc_sketch_batch_emit)");
+        if (query_pipeline_collector != nullptr) {
+            query_pipeline_collector->begin(command_buffer_);
+        }
         // Covers the packed-u16 zero-fill; the compute barrier carries the
         // prior submission's count/offset shader writes into this emit read.
         record_host_to_shader(command_buffer_);
@@ -9160,7 +11126,7 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         push.emit_mode = 1u;
         record_phase_c_dispatch_locked(
             command_buffer_, sketch_pipe, emit_sketch_infos, &push,
-            sizeof(push), sketch_groups);
+            sizeof(push), sketch_groups, query_pipeline_collector.get(), 0u);
         ++dispatch_proof.emit_dispatches_;
         record_shader_to_host(command_buffer_);
         check_vk(
@@ -9177,6 +11143,9 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         check_vk(
             vkResetFences(device_, 1, &fence_),
             "vkResetFences(pc_sketch_batch_emit)");
+        if (query_pipeline_collector != nullptr) {
+            query_pipeline_collector->commit(command_buffer_);
+        }
         ++dispatch_proof.completed_roundtrips_;
         result.dispatch_proof = dispatch_proof;
 
@@ -9187,6 +11156,8 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         && materialization == VulkanSketchHostMaterialization::device_only
         && result.minimizer_words.valid()
         && dispatch_proof.accepted()) {
+        result.query_authority.pipeline_proof_ =
+            query_pipeline_collector->seal();
         result.query_authority.identity_ =
             next_operation_proof_identity_locked();
         result.query_authority.runtime_ = this;
@@ -9247,6 +11218,9 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         }
     }
     arena.rewind(mark);
+    if (query_pipeline_collector != nullptr) {
+        query_pipeline_collector->burn_before_reset(command_buffer_);
+    }
     check_vk(
         vkResetCommandBuffer(command_buffer_, 0),
         "vkResetCommandBuffer(pc_sketch_batch-post)");
@@ -9259,7 +11233,8 @@ namespace {
 /// Submit the currently-recorded command buffer and wait. Centralises the
 /// begin/end/submit/wait/reset boilerplate for the Phase C multi-submit ops.
 void submit_and_wait(VkDevice device, VkQueue queue, VkCommandBuffer cmd, VkFence fence,
-                     const char* what) {
+                     const char* what,
+                     RuntimePipelineUseCollector* collector = nullptr) {
     check_vk(vkEndCommandBuffer(cmd), what);
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -9269,6 +11244,7 @@ void submit_and_wait(VkDevice device, VkQueue queue, VkCommandBuffer cmd, VkFenc
     check_vk(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), what);
     require_immutable_metal_policy_live(what);
     check_vk(vkResetFences(device, 1, &fence), what);
+    if (collector != nullptr) collector->commit(cmd);
 }
 
 }  // namespace
@@ -11459,6 +13435,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         throw VulkanRuntimeError(
             "phase_c Shape Format-5 direct route requires an unambiguous GPU-resident query sketch");
     }
+    std::unique_ptr<RuntimePipelineUseCollector> shape_pipeline_collector;
     if (shape_v5_selected) {
         bool authority_records_match =
             query_authority.query_records_.size()
@@ -11512,7 +13489,11 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         }
         run.operation_proof.operation_identity_ =
             next_operation_proof_identity_locked();
-        run.operation_proof.records_.resize(jobs.size());
+        run.operation_proof.admit_records(jobs.size());
+        shape_pipeline_collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::shape_v5_coordinate,
+            jobs.size(),
+            run.operation_proof.operation_identity_);
     } else if (query_authority.accepted()) {
         throw VulkanRuntimeError(
             "phase_c query authority cannot be consumed by a legacy index route");
@@ -11546,12 +13527,33 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_chain_range_build, 1u, 1u);
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
-    const PhaseBPipeline vote_coord_pipe =
-        get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_vote_reduce, 128u, 1u);
-    const PhaseBPipeline vote_coord_batch_pipe =
-        get_phase_b_pipeline_locked(
+    PhaseBPipeline vote_coord_pipe{};
+    PhaseBPipeline vote_coord_batch_pipe{};
+    if (coordinate_vote_selected) {
+        vote_coord_pipe = get_phase_b_pipeline_locked(
+            ShaderKind::phase_c_coordinate_vote_reduce, 128u, 1u);
+        vote_coord_batch_pipe = get_phase_b_pipeline_locked(
             ShaderKind::phase_c_coordinate_vote_reduce_batch, 128u, 1u);
-    const VkPipeline chain_pipeline = create_pipeline_locked(chain_key);
+    }
+    const ChainingPipeline chain_pipeline = create_pipeline_locked(chain_key);
+    if (shape_pipeline_collector != nullptr) {
+        const auto prepare = [&shape_pipeline_collector](
+            const PhaseBPipeline& pipe) {
+            shape_pipeline_collector->prepare(
+                make_shader_key(
+                    pipe.kind, 384u, pipe.local_size, pipe.max_span),
+                pipe.metal_archive_receipt);
+        };
+        prepare(count_pipe);
+        prepare(emit_pipe);
+        prepare(scanb);
+        prepare(scana);
+        prepare(range_pipe);
+        prepare(coord_pipe);
+        shape_pipeline_collector->prepare(
+            chain_pipeline.shader_key,
+            chain_pipeline.metal_archive_receipt);
+    }
 
     constexpr std::uint64_t qrec_stride = kPhaseCSlotOffsetAlign;
     const std::uint64_t query_record_bytes = std::max<std::uint64_t>(
@@ -11702,6 +13704,13 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 }
                 state.minimizer_count = state.query_record.minimizer_count;
                 state.query_len = state.query_record.query_len;
+                if (shape_pipeline_collector != nullptr) {
+                    shape_pipeline_collector->set_shape_input(
+                        state.result_index,
+                        state.minimizer_count,
+                        state.job.target_len,
+                        state.job.target_position_offset);
+                }
                 state.num_blocks = std::max<std::uint32_t>(
                     ceil_div_u32(state.minimizer_count, kPhaseCScanBlock), 1u);
                 state.seed_groups = std::max<std::uint32_t>(
@@ -12153,11 +14162,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
 
             reset_phase_c_pool_locked();
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+            }
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch1)");
             VkCommandBufferBeginInfo begin{};
             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_batch1)");
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             record_host_to_shader(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (state.skip_seed) {
@@ -12192,7 +14207,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         command_buffer_, count_pipe, seed_infos,
                         &state.shape_v5_seed_push,
                         sizeof(state.shape_v5_seed_push),
-                        1u);
+                        1u, shape_pipeline_collector.get(),
+                        state.result_index);
                     run.shape_v5_direct.count_dispatches += 1u;
                     state.operation_audit.direct_count_dispatches += 1u;
                 } else {
@@ -12237,7 +14253,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 ScanPushC scan{
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
-                    command_buffer_, scanb, scan_infos, &scan, sizeof(scan), state.num_blocks);
+                    command_buffer_, scanb, scan_infos, &scan, sizeof(scan),
+                    state.num_blocks, shape_pipeline_collector.get(),
+                    state.result_index);
                 if (shape_v5_selected) {
                     state.operation_audit.direct_scan_dispatches += 1u;
                 }
@@ -12255,7 +14273,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 ScanPushC scan{
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
-                    command_buffer_, scana, scan_infos, &scan, sizeof(scan), 1u);
+                    command_buffer_, scana, scan_infos, &scan, sizeof(scan),
+                    1u, shape_pipeline_collector.get(), state.result_index);
                 if (shape_v5_selected) {
                     state.operation_audit.direct_scan_dispatches += 1u;
                 }
@@ -12274,14 +14293,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 1u};
                 record_phase_c_dispatch_locked(
                     command_buffer_, scana, scan_infos, &scan, sizeof(scan),
-                    ceil_div_u32(state.minimizer_count, 128u));
+                    ceil_div_u32(state.minimizer_count, 128u),
+                    shape_pipeline_collector.get(), state.result_index);
                 if (shape_v5_selected) {
                     state.operation_audit.direct_scan_dispatches += 1u;
                 }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
-                device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch1)");
+                device_, queue_, command_buffer_, fence_,
+                "submit(pc_seed_coord_batch1)",
+                shape_pipeline_collector.get());
             if (shape_v5_selected) {
                 const std::uint64_t receipt_identity =
                     next_operation_proof_identity_locked();
@@ -12333,6 +14355,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 if (shape_v5_selected) {
                     state.operation_audit.anchor_count =
                         state.total_anchors;
+                    shape_pipeline_collector->set_shape_outcome(
+                        state.result_index, state.total_anchors, 0u);
                 }
                 if (state.total_anchors == 0u) {
                     if (shape_v5_selected) {
@@ -12418,11 +14442,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
 
             reset_phase_c_pool_locked();
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+            }
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch2)");
             begin = VkCommandBufferBeginInfo{};
             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_batch2)");
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             record_host_to_shader(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (!state.has_anchors) {
@@ -12460,7 +14490,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     }};
                     record_phase_c_dispatch_locked(
                         command_buffer_, emit_pipe, seed_infos,
-                        &emit_push, sizeof(emit_push), 1u);
+                        &emit_push, sizeof(emit_push), 1u,
+                        shape_pipeline_collector.get(), state.result_index);
                     run.shape_v5_direct.emit_dispatches += 1u;
                     state.operation_audit.direct_emit_dispatches += 1u;
                 } else {
@@ -12498,7 +14529,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 record_shader_to_host(command_buffer_);
                 submit_and_wait(
                     device_, queue_, command_buffer_, fence_,
-                    "submit(pc_shape_v5_seed_coord_emit)");
+                    "submit(pc_shape_v5_seed_coord_emit)",
+                    shape_pipeline_collector.get());
                 const std::uint64_t receipt_identity =
                     next_operation_proof_identity_locked();
                 for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -12527,6 +14559,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 }
 
                 reset_phase_c_pool_locked();
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
                 check_vk(
                     vkResetCommandBuffer(command_buffer_, 0),
                     "reset(pc_shape_v5_seed_coord_post_emit)");
@@ -12536,6 +14569,7 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 check_vk(
                     vkBeginCommandBuffer(command_buffer_, &begin),
                     "begin(pc_shape_v5_seed_coord_post_emit)");
+                shape_pipeline_collector->begin(command_buffer_);
             }
             if (coordinate_vote_selected) {
                 for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -12614,7 +14648,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     state.anchor_wg.num_workgroups,
                     state.anchor_wg.elems_per_wg,
                     3u,
-                    state.sorted_in_scratch);
+                    state.sorted_in_scratch,
+                    shape_pipeline_collector.get(), state.result_index);
                 run.stats.sort_dispatches += 1u;
                 if (shape_v5_selected) {
                     state.operation_audit.sort_operations += 1u;
@@ -12638,7 +14673,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 };
                 record_phase_c_dispatch_locked(
                     command_buffer_, range_pipe, range_infos,
-                    &range_push, sizeof(range_push), 1u);
+                    &range_push, sizeof(range_push), 1u,
+                    shape_pipeline_collector.get(), state.result_index);
                 run.stats.range_build_dispatches += 1u;
                 if (shape_v5_selected) {
                     state.operation_audit.range_build_dispatches += 1u;
@@ -12646,7 +14682,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
-                device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch2)");
+                device_, queue_, command_buffer_, fence_,
+                "submit(pc_seed_coord_batch2)",
+                shape_pipeline_collector.get());
             if (shape_v5_selected) {
                 const std::uint64_t receipt_identity =
                     next_operation_proof_identity_locked();
@@ -12670,6 +14708,10 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     4u);
                 if (shape_v5_selected) {
                     state.operation_audit.range_count = state.range_count;
+                    shape_pipeline_collector->set_shape_outcome(
+                        state.result_index,
+                        state.total_anchors,
+                        state.range_count);
                 }
                 if (state.range_count == 0u) {
                     if (shape_v5_selected) {
@@ -12723,11 +14765,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
 
             reset_phase_c_pool_locked();
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+            }
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch3)");
             begin = VkCommandBufferBeginInfo{};
             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_batch3)");
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (!state.chain_active) {
                     continue;
@@ -12791,13 +14839,22 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 chain_push.max_chain_skip = max_chain_skip;
                 const std::uint32_t chain_groups =
                     std::min(state.range_count, features_.max_workgroup_count_x);
-                vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, chain_pipeline);
+                vkCmdBindPipeline(
+                    command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    chain_pipeline.pipeline);
                 vkCmdBindDescriptorSets(
                     command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
                     pipeline_layout_, 0, 1, &chain_set, 0, nullptr);
                 vkCmdPushConstants(
                     command_buffer_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                     0, sizeof(chain_push), &chain_push);
+                if (shape_pipeline_collector != nullptr) {
+                    shape_pipeline_collector->use(
+                        command_buffer_, state.result_index,
+                        chain_pipeline.shader_key,
+                        chain_pipeline.metal_archive_receipt,
+                        chain_groups);
+                }
                 vkCmdDispatch(command_buffer_, chain_groups, 1, 1);
                 run.stats.chain_dispatches += 1u;
                 if (shape_v5_selected) {
@@ -12837,7 +14894,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 };
                 record_phase_c_dispatch_locked(
                     command_buffer_, coord_pipe, coord_infos,
-                    &coord_push, sizeof(coord_push), 1u);
+                    &coord_push, sizeof(coord_push), 1u,
+                    shape_pipeline_collector.get(), state.result_index);
                 run.stats.chain_backtrack_dispatches += 1u;
                 if (shape_v5_selected) {
                     state.operation_audit.chain_backtrack_dispatches += 1u;
@@ -12846,7 +14904,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
-                device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch3)");
+                device_, queue_, command_buffer_, fence_,
+                "submit(pc_seed_coord_batch3)",
+                shape_pipeline_collector.get());
             if (shape_v5_selected) {
                 const std::uint64_t receipt_identity =
                     next_operation_proof_identity_locked();
@@ -12885,23 +14945,195 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         }
     }
 
+    if (shape_pipeline_collector != nullptr) {
+        shape_pipeline_collector->burn_before_reset(command_buffer_);
+    }
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch_post)");
     if (submitted_waves != 0u) {
         chaining_dispatch_count_.fetch_add(submitted_waves, std::memory_order_relaxed);
     }
     if (shape_v5_selected) {
         run.shape_v5_direct.direct_count_scan_emit_completed = true;
+        run.operation_proof.query_pipeline_proof_ =
+            std::move(query_authority.pipeline_proof_);
+        run.operation_proof.shape_pipeline_proof_ =
+            shape_pipeline_collector->seal();
         run.operation_proof.sealed_ =
             run.operation_proof.records_.size() == jobs.size()
             && !run.operation_proof.records_.empty()
+            && run.operation_proof.causal_proofs_accepted()
             && std::all_of(
                 run.operation_proof.records_.begin(),
                 run.operation_proof.records_.end(),
                 [](const auto& record) {
-                    return !record.consumed && record.audit.accepted();
+                    return record.state ==
+                            PersistedShapeV5CoordinateOperationProof::
+                                RecordState::fresh
+                        && record.audit.accepted();
                 });
     }
     return run;
+}
+
+PersistedShapeV5CoordinateAcceptedOperation
+Runtime::finalize_persisted_shape_v5_coordinate_operation(
+    PersistedShapeV5CoordinateOperationProof&& proof) {
+    std::scoped_lock lock(mu_);
+    if (!proof.all_jobs_accepted()) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 operation proof is not wholly accepted");
+    }
+    const RuntimeGpuExecutionEnvironmentBinding environment_preview =
+        proof.environment_preview();
+    const RuntimeGpuCacheMetricsAudit cache_metrics_maximum =
+        proof.cache_metrics_preview();
+    if (!environment_preview.accepted()
+        || !cache_metrics_maximum.accepted()) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 operation preview is invalid");
+    }
+    const RuntimePipelineOperationAudit& query =
+        proof.query_pipeline_proof_.audit();
+    const RuntimePipelineOperationAudit& shape =
+        proof.shape_pipeline_proof_.audit();
+    const bool environment_equal = query.device_uuid == shape.device_uuid
+        && query.api_version == shape.api_version
+        && query.driver_version == shape.driver_version
+        && query.vendor_id == shape.vendor_id
+        && query.device_id == shape.device_id
+        && query.pipeline_cache_uuid == shape.pipeline_cache_uuid
+        && query.seed_sha256 == shape.seed_sha256
+        && query.seed_size == shape.seed_size
+        && query.manifest_checksum == shape.manifest_checksum
+        && query.seed_receipt_identity == shape.seed_receipt_identity
+        && query.archive_set == shape.archive_set
+        && query.device_uuid == features_.device_uuid
+        && query.api_version == features_.api_version
+        && query.driver_version == features_.driver_version
+        && query.vendor_id == features_.vendor_id
+        && query.device_id == features_.device_id
+        && query.pipeline_cache_uuid == features_.pipeline_cache_uuid;
+    if (!environment_equal) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 pipeline receipts disagree on immutable environment");
+    }
+
+    std::array<ShaderVariantKey, k_runtime_pipeline_prepared_slots> union_keys{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> union_receipts{};
+    std::size_t union_count = 0u;
+    const auto merge = [&union_keys, &union_receipts, &union_count](
+        const RuntimePipelineOperationProof& operation) {
+        for (std::size_t i = 0u;
+             i < operation.audit_.prepared_count; ++i) {
+            std::size_t slot = union_count;
+            for (std::size_t existing = 0u;
+                 existing < union_count; ++existing) {
+                if (union_keys[existing]
+                        == operation.audit_.prepared[i].shader_key) {
+                    slot = existing;
+                    break;
+                }
+            }
+            if (slot == union_count) {
+                if (union_count == union_keys.size()) return false;
+                union_keys[union_count] =
+                    operation.audit_.prepared[i].shader_key;
+                union_receipts[union_count] = operation.receipts_[i];
+                ++union_count;
+            } else if (union_receipts[slot] != operation.receipts_[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!merge(proof.query_pipeline_proof_)
+        || !merge(proof.shape_pipeline_proof_)
+        || union_count > k_runtime_pipeline_prepared_slots
+        || union_count != shape.prepared_count + 1u) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 pipeline receipt union is inconsistent");
+    }
+
+    // Prepare observes canonical report-once bits but mutates none. If the
+    // immutable live gate below throws, plan destruction is a no-op and the
+    // next accepted operation can still report every counter.
+    auto cache_claim_plan = runtime_detail::
+        RuntimeGpuCacheMetricsClaimPlan::prepare(
+            proof.operation_identity_, cache_metrics_maximum,
+            seed_metrics_claimed_,
+            std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+                union_receipts.data(), union_count});
+    if (!cache_claim_plan.accepted()) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 cache metrics token is invalid");
+    }
+    const RuntimeGpuCacheMetricsAudit cache_metrics =
+        cache_claim_plan.audit();
+    VulkanFeatureSet identity_features{};
+    identity_features.api_version = query.api_version;
+    identity_features.driver_version = query.driver_version;
+    identity_features.vendor_id = query.vendor_id;
+    identity_features.device_id = query.device_id;
+    identity_features.pipeline_cache_uuid = query.pipeline_cache_uuid;
+    RuntimeGpuExecutionEnvironmentBinding environment{
+        .gpu_environment_present = true,
+        .gpu_device_uuid = query.device_uuid,
+        .gpu_driver_identity =
+            canonical_vulkan_driver_identity(identity_features),
+        .cache_policy = RuntimePipelineCachePolicyEvidence::
+            immutable_preseed_all_hit,
+        .seed_sha256 = query.seed_sha256,
+        .seed_size = query.seed_size,
+        .manifest_checksum = query.manifest_checksum,
+        .pipeline_cache_all_hit = true,
+    };
+    if (shape.committed_submissions
+        > (std::numeric_limits<std::uint64_t>::max)()
+            - query.committed_submissions) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 committed submission count overflow");
+    }
+    PersistedShapeV5CoordinateOperationAcceptanceAudit acceptance{
+        .operation_identity = proof.operation_identity_,
+        .expected_job_count =
+            static_cast<std::uint64_t>(proof.records_.size()),
+        .consumed_count =
+            static_cast<std::uint64_t>(proof.consumed_count()),
+        .accepted_count =
+            static_cast<std::uint64_t>(proof.accepted_count()),
+        .burned_count =
+            static_cast<std::uint64_t>(proof.burned_count()),
+        .query_pipeline_receipt_count =
+            static_cast<std::uint64_t>(query.prepared_count),
+        .shape_pipeline_receipt_count =
+            static_cast<std::uint64_t>(shape.prepared_count),
+        .committed_submission_count = query.committed_submissions
+            + shape.committed_submissions,
+        .seed_receipt_identity = query.seed_receipt_identity,
+    };
+    if (!environment.accepted() || environment != environment_preview
+        || !acceptance.accepted()) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 accepted authority payload is invalid");
+    }
+
+    // This is deliberately the last external-state check. Everything after it
+    // is fixed-field move/copy construction and cannot dispatch or allocate.
+    require_immutable_metal_policy_live(
+        "persisted Shape-V5 operation final publication");
+
+    // No failing work follows this mutation. The queue/cache mutex makes the
+    // seed and receipt claims one transaction with authority minting.
+    cache_claim_plan.commit(seed_metrics_claimed_);
+    PersistedShapeV5CoordinateAcceptedOperation accepted{};
+    accepted.audit_ = acceptance;
+    accepted.environment_ = environment;
+    accepted.cache_metrics_.audit_ = cache_metrics;
+    accepted.cache_metrics_.issued_ = true;
+    accepted.issued_ = true;
+    proof = PersistedShapeV5CoordinateOperationProof{};
+    return accepted;
 }
 
 std::vector<GpuCoordinateOnlyResultWire>
@@ -13055,7 +15287,8 @@ GpuCoordinateOnlyResultWire Runtime::run_phase_c_seed_to_coordinate_roundtrip(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_chain_range_build, 1u, 1u);
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
-    const VkPipeline chain_pipeline = create_pipeline_locked(chain_key);
+    const VkPipeline chain_pipeline =
+        create_pipeline_locked(chain_key).pipeline;
 
     const std::uint32_t target_offset_lo =
         static_cast<std::uint32_t>(inputs.target_position_offset & 0xffffffffull);
