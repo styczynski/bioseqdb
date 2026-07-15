@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page.title }}</title>
+<meta name="description" content="{{ page.description }}">
+<link rel="canonical" href="{{ page.canonical }}">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="{{ page.title }}">
+<meta property="og:description" content="{{ page.description }}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ page.canonical }}">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="{{ site.favicon_url }}">
+<link rel="stylesheet" href="{{ site.css_url }}">
+<script type="application/ld+json">{{ page.jsonld }}</script>
+{% block head_extra %}{% endblock %}
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header">
+  <nav class="site-nav" aria-label="Primary">
+    <a class="brand" href="{{ site.base_path }}">{{ site.title }}</a>
+    <ul class="nav-links">
+      <li><a href="{{ nav.documentation }}">{{ site.nav.documentation }}</a></li>
+      <li><a href="{{ nav.tutorials }}">{{ site.nav.tutorials }}</a></li>
+      <li><a href="{{ nav.reference }}">{{ site.nav.reference }}</a></li>
+    </ul>
+    <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+  </nav>
+</header>
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+<footer class="site-footer">
+  <p>&#169; {{ site.copyright_year }} {{ site.copyright_holder }}{% if site.status_label %} &#183; {{ site.status_label }}{% endif %} &#183; {{ site.version }}</p>
+</footer>
+<script type="module" src="{{ site.js_url }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

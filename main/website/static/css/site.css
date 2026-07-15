@@ -1,0 +1,106 @@
+/* Bioseq documentation site — shared frame (§15.1). Palette/type-scale tokens
+   reverse-engineered from the audited landing design (deep navy surfaces,
+   cyan/orange accents, Space Grotesk / IBM Plex families). Self-hosted only;
+   no external fonts or CDNs (§15.5). */
+
+:root {
+  --bg: #071320;
+  --surface: rgba(255, 255, 255, 0.022);
+  --surface-border: rgba(255, 255, 255, 0.10);
+  --text: #e9f1f8;
+  --text-muted: #9db1c2;
+  --eyebrow: #5f93ab;
+  --accent-cyan: #46b8de;
+  --accent-orange: #f26522;
+  --accent-bioseq: #74c8a8;
+  --content-width: 1160px;
+  --gutter: 32px;
+  --radius: 14px;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-head: "Space Grotesk", var(--font-body);
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.6;
+}
+
+code, pre { font-family: var(--font-mono); }
+
+a { color: var(--accent-cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  background: var(--accent-orange);
+  color: #071320;
+  padding: 10px 16px;
+  z-index: 100;
+}
+.skip-link:focus { left: 8px; top: 8px; }
+
+.site-header { border-bottom: 1px solid var(--surface-border); }
+.site-nav {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 16px var(--gutter);
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.brand { font-family: var(--font-head); font-weight: 600; font-size: 19px; color: var(--text); }
+.nav-links { list-style: none; display: flex; gap: 20px; margin: 0; padding: 0; flex: 1; }
+.repo-link { font-family: var(--font-mono); font-size: 13px; }
+
+main { max-width: var(--content-width); margin: 0 auto; padding: 48px var(--gutter); }
+
+h1 { font-family: var(--font-head); font-weight: 600; font-size: clamp(28px, 4vw, 44px); letter-spacing: -0.02em; }
+h2 { font-family: var(--font-head); font-weight: 600; font-size: clamp(22px, 3vw, 30px); }
+.eyebrow { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.18em; font-size: 12px; color: var(--eyebrow); }
+.lede { font-size: 19px; color: var(--text-muted); }
+
+.button {
+  display: inline-block;
+  min-height: 44px;
+  padding: 11px 20px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  color: var(--text);
+}
+.button.primary { background: var(--accent-orange); color: #071320; border-color: transparent; }
+
+.card-grid { list-style: none; padding: 0; margin: 24px 0; display: grid; gap: 16px; grid-template-columns: 1fr; }
+.card { background: var(--surface); border: 1px solid var(--surface-border); border-radius: var(--radius); padding: 20px; }
+
+.entity-list, .tutorial-list, .missing-list, .version-list { padding-left: 20px; }
+.entity-list .kind, .tutorial-list .desc { color: var(--text-muted); }
+.signature { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 10px; padding: 14px; overflow-x: auto; }
+
+.install code { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 8px; padding: 8px 12px; display: inline-block; }
+
+.site-footer { border-top: 1px solid var(--surface-border); }
+.site-footer p { max-width: var(--content-width); margin: 0 auto; padding: 24px var(--gutter); color: var(--text-muted); font-family: var(--font-mono); font-size: 13px; }
+
+img, video { max-width: 100%; height: auto; }
+
+@media (min-width: 768px) {
+  .card-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 1024px) {
+  .card-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; scroll-behavior: auto !important; transition-duration: 0.001ms !important; }
+}

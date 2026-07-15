@@ -166,6 +166,10 @@ CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET_DEBUG")
 EXTERNAL_API_BUILD_PRESET = os.environ.get(
     "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
+WEBSITE_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_WEBSITE_BUILD_PRESET", "website-aws-x64-linux")
+WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET", "website-aws-x64-linux-debug")
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
@@ -231,6 +235,8 @@ def preset_for(mode: str, debug: bool) -> str:
                     else CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE)
         return override or _default_cache_preset(
             production, combined=True)
+    if family == "website":
+        return WEBSITE_DEBUG_BUILD_PRESET if debug else WEBSITE_BUILD_PRESET
     raise RuntimeError(
         f"mode {mode!r} has unsupported preset family {family!r}")
 
@@ -557,7 +563,7 @@ class ModeDefinition:
 
     def __post_init__(self) -> None:
         if self.preset_family not in {
-                "core", "test", "cache", "cache-bioseq"}:
+                "core", "test", "cache", "cache-bioseq", "website"}:
             raise ValueError(
                 f"unsupported preset family {self.preset_family!r}")
         if self.uses_private_cluster and self.install_extension:
@@ -594,6 +600,23 @@ MODES: Dict[str, ModeDefinition] = {
         ],
         preset_override=EXTERNAL_API_BUILD_PRESET,
         required_cache_variables={"BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON"},
+    ),
+    "website": ModeDefinition(
+        lock_group="website",
+        expected_duration_min=15.0,
+        build_only_expected_duration_min=8.0,
+        label="Static documentation website",
+        docs=(
+            "Build the isolated website code generator (GCC 16.1 ExternalProject) "
+            "against the Clang-22 core tree. Later phases extend this mode with "
+            "postgresql_bioseq staging, the private-cluster runner test, and the "
+            "bioseq_website render/publish target."),
+        is_verb_plular=False,
+        targets=["bioseq_codegen_project"],
+        commands=[],
+        preset_family="website",
+        binary_subdir="website",
+        required_cache_variables={"BIOSEQ_BUILD_WEBSITE": "ON"},
     ),
     "unit+integration": ModeDefinition(
         lock_group="tests",

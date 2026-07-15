@@ -1,0 +1,9 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="versions">
+  <h1>Versions</h1>
+  <ul class="version-list">
+  {% for v in versions %}<li><a href="{{ v.route }}">{{ v.label }}</a></li>{% endfor %}
+  </ul>
+</article>
+{% endblock %}

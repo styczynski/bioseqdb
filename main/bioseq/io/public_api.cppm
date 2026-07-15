@@ -167,8 +167,9 @@ private:
 /// call (the consumer must copy out before returning). For all non-final
 /// chunks of a record `bp_count == words.size() * letters_per_unit`; the final
 /// chunk (`end_of_record == true`) may carry fewer valid bases, with the
-/// trailing padding implied by `bp_count` (i.e. `words.size()*letters_per_unit
-/// - bp_count`). This is the surface that lets a 6 Gbp FASTA record be loaded
+/// trailing padding implied by `bp_count`
+/// (i.e. `words.size()*letters_per_unit - bp_count`). This is the surface that
+/// lets a 6 Gbp FASTA record be loaded
 /// without ever materialising a whole-record `sequence_batch`.
 template <typename storage_unit_t>
 struct packed_sequence_chunk {
@@ -1646,7 +1647,7 @@ read_decompressed_prefix(const char* path, std::size_t max_bytes,
 }
 
 /// DOC0295 §9.5 — sample up to `max_headers` header strings (no leading
-/// '>' / '@', '\r' stripped) from the decompressed prefix of `path`. The FASTQ
+/// '>' / '@', carriage returns stripped) from the decompressed prefix of `path`. The FASTQ
 /// path mirrors the loader's logical record rule (sequence lines end at the `+`
 /// line; quality lines end after the same non-newline byte count) so multiline
 /// FASTQ never mistakes a `@` inside a quality line for a header (HIGH-03). Line

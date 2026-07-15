@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Bioseq">
+  <rect width="32" height="32" rx="7" fill="#071320"/>
+  <path d="M9 22c4-2 4-10 0-12M23 10c-4 2-4 10 0 12" fill="none" stroke="#46b8de" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M12 11h8M12 16h8M12 21h8" stroke="#f26522" stroke-width="2.2" stroke-linecap="round"/>
+</svg>

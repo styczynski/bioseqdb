@@ -1,4 +1,8 @@
-include(ExternalProject)
+# The isolated code generator is provisioned once at the repository root via
+# bioseq_add_codegen (main/cmake/BioseqCodegen.cmake). This directory only
+# consumes the imported bioseq_codegen executable and the bioseq_codegen_project
+# build target; it never creates another ExternalProject or discovers the GCC/
+# Clang toolchain itself.
 
 get_filename_component(BIOSEQ_REPOSITORY_ROOT
   "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
@@ -14,126 +18,15 @@ if(NOT DEFINED BIOSEQ_EXTERNAL_TEST_RUNTIME_OUTPUT_DIRECTORY)
     "${CMAKE_CURRENT_BINARY_DIR}/..")
 endif()
 
-set(BIOSEQ_EXTERNAL_CODEGEN_CXX_COMPILER "" CACHE FILEPATH
-  "GCC 16 C++ compiler used by the isolated external-client generator")
-if(NOT BIOSEQ_EXTERNAL_CODEGEN_CXX_COMPILER)
-  if(EXISTS "/opt/gcc-16.1.0/bin/g++-16")
-    set(BIOSEQ_EXTERNAL_CODEGEN_CXX_COMPILER
-      "/opt/gcc-16.1.0/bin/g++-16")
-  elseif(EXISTS "/usr/bin/g++-16")
-    set(BIOSEQ_EXTERNAL_CODEGEN_CXX_COMPILER "/usr/bin/g++-16")
-  endif()
-endif()
-
-set(BIOSEQ_EXTERNAL_CODEGEN_C_COMPILER "" CACHE FILEPATH
-  "GCC 16 C compiler used by the isolated external-client generator")
-if(NOT BIOSEQ_EXTERNAL_CODEGEN_C_COMPILER)
-  if(EXISTS "/opt/gcc-16.1.0/bin/gcc-16")
-    set(BIOSEQ_EXTERNAL_CODEGEN_C_COMPILER
-      "/opt/gcc-16.1.0/bin/gcc-16")
-  elseif(EXISTS "/usr/bin/gcc-16")
-    set(BIOSEQ_EXTERNAL_CODEGEN_C_COMPILER "/usr/bin/gcc-16")
-  endif()
-endif()
-
-set(BIOSEQ_EXTERNAL_LLVM_CONFIG "/usr/bin/llvm-config-22" CACHE FILEPATH
-  "llvm-config used by cppast to locate libclang")
-set(BIOSEQ_EXTERNAL_CLANG_BINARY "/usr/bin/clang++-22" CACHE FILEPATH
-  "Clang parser executable passed to external-client generation")
-
-foreach(_bioseq_required_tool IN ITEMS
-    BIOSEQ_EXTERNAL_CODEGEN_CXX_COMPILER
-    BIOSEQ_EXTERNAL_CODEGEN_C_COMPILER
-    BIOSEQ_EXTERNAL_LLVM_CONFIG
-    BIOSEQ_EXTERNAL_CLANG_BINARY)
-  if(NOT EXISTS "${${_bioseq_required_tool}}")
-    message(FATAL_ERROR
-      "${_bioseq_required_tool} does not name an installed executable: "
-      "'${${_bioseq_required_tool}}'")
-  endif()
-endforeach()
-
-execute_process(
-  COMMAND "${BIOSEQ_EXTERNAL_LLVM_CONFIG}" --version
-  OUTPUT_VARIABLE _bioseq_external_llvm_version
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  COMMAND_ERROR_IS_FATAL ANY)
-execute_process(
-  COMMAND "${BIOSEQ_EXTERNAL_LLVM_CONFIG}" --includedir
-  OUTPUT_VARIABLE _bioseq_external_llvm_include_dir
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  COMMAND_ERROR_IS_FATAL ANY)
-execute_process(
-  COMMAND "${BIOSEQ_EXTERNAL_LLVM_CONFIG}" --libdir
-  OUTPUT_VARIABLE _bioseq_external_llvm_library_dir
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  COMMAND_ERROR_IS_FATAL ANY)
-find_library(_bioseq_external_libclang
-  NAMES clang libclang
-  PATHS "${_bioseq_external_llvm_library_dir}"
-  NO_DEFAULT_PATH
-  NO_CACHE
-  REQUIRED)
-
-set(BIOSEQ_EXTERNAL_CODEGEN_STDLIB_MODULES_JSON "" CACHE FILEPATH
-  "libstdc++ module metadata used by the isolated GCC 16 generator")
-if(NOT BIOSEQ_EXTERNAL_CODEGEN_STDLIB_MODULES_JSON)
-  foreach(_bioseq_modules_json IN ITEMS
-      "/opt/gcc-16.1.0/lib64/libstdc++.modules.json"
-      "/opt/gcc-16.1.0/lib/gcc/x86_64-pc-linux-gnu/16.1.0/libstdc++.modules.json"
-      "/opt/gcc-16.1.0/lib/gcc/x86_64-linux-gnu/16.1.0/libstdc++.modules.json"
-      "/usr/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json")
-    if(EXISTS "${_bioseq_modules_json}")
-      set(BIOSEQ_EXTERNAL_CODEGEN_STDLIB_MODULES_JSON
-        "${_bioseq_modules_json}")
-      break()
-    endif()
-  endforeach()
-endif()
-if(NOT EXISTS "${BIOSEQ_EXTERNAL_CODEGEN_STDLIB_MODULES_JSON}")
+if(NOT TARGET bioseq_codegen)
   message(FATAL_ERROR
-    "GCC 16 libstdc++.modules.json was not found; set "
-    "BIOSEQ_EXTERNAL_CODEGEN_STDLIB_MODULES_JSON explicitly")
+    "bioseq/external requires the root-provisioned bioseq_codegen target; "
+    "ensure BIOSEQ_BUILD_EXTERNAL_API_CLIENTS is set at the repository root "
+    "before add_subdirectory(bioseq)")
 endif()
 
-set(_bioseq_codegen_binary_dir
-  "${CMAKE_CURRENT_BINARY_DIR}/generator-build")
-set(_bioseq_codegen_runtime_dir
-  "${CMAKE_CURRENT_BINARY_DIR}/generator-bin")
-set(_bioseq_codegen_executable
-  "${_bioseq_codegen_runtime_dir}/bioseq_external_codegen")
-
-ExternalProject_Add(bioseq_external_codegen_project
-  PREFIX "${CMAKE_CURRENT_BINARY_DIR}/generator-project"
-  SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/codegen"
-  BINARY_DIR "${_bioseq_codegen_binary_dir}"
-  EXCLUDE_FROM_ALL TRUE
-  CMAKE_ARGS
-    "-DCMAKE_BUILD_TYPE:STRING=Release"
-    "-DCMAKE_C_COMPILER:FILEPATH=${BIOSEQ_EXTERNAL_CODEGEN_C_COMPILER}"
-    "-DCMAKE_CXX_COMPILER:FILEPATH=${BIOSEQ_EXTERNAL_CODEGEN_CXX_COMPILER}"
-    "-DCMAKE_POLICY_VERSION_MINIMUM:STRING=3.5"
-    "-DCMAKE_CXX_STDLIB_MODULES_JSON:FILEPATH=${BIOSEQ_EXTERNAL_CODEGEN_STDLIB_MODULES_JSON}"
-    "-DBIOSEQ_REPOSITORY_ROOT:PATH=${BIOSEQ_REPOSITORY_ROOT}"
-    "-DBIOSEQ_CODEGEN_RUNTIME_OUTPUT_DIRECTORY:PATH=${_bioseq_codegen_runtime_dir}"
-    "-DCLANG_BINARY:FILEPATH=${BIOSEQ_EXTERNAL_CLANG_BINARY}"
-    "-DLLVM_CONFIG_BINARY:FILEPATH=${BIOSEQ_EXTERNAL_LLVM_CONFIG}"
-    "-DLLVM_VERSION_EXPLICIT:STRING=${_bioseq_external_llvm_version}"
-    "-DLIBCLANG_INCLUDE_DIR:PATH=${_bioseq_external_llvm_include_dir}"
-    "-DLIBCLANG_LIBRARY:FILEPATH=${_bioseq_external_libclang}"
-  BUILD_COMMAND
-    "${CMAKE_COMMAND}" --build <BINARY_DIR>
-      --target bioseq_external_codegen
-  INSTALL_COMMAND ""
-  TEST_COMMAND ""
-  BUILD_ALWAYS TRUE
-  BUILD_BYPRODUCTS "${_bioseq_codegen_executable}"
-  USES_TERMINAL_CONFIGURE TRUE
-  USES_TERMINAL_BUILD TRUE)
-
-# cppast remains authoritative for parsing. This output-aware registry only
 # gives CMake stable target names and byproduct contracts before generation.
-include("${CMAKE_CURRENT_SOURCE_DIR}/codegen/annotation_registry.cmake")
+include("${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/annotation_registry.cmake")
 file(GLOB_RECURSE _bioseq_external_scan_inputs CONFIGURE_DEPENDS
   "${_bioseq_external_source_root}/*.cppm")
 list(SORT _bioseq_external_scan_inputs)
@@ -224,10 +117,10 @@ add_custom_command(
     "-DDEPFILE:FILEPATH=${_bioseq_external_scan_depfile}"
     "-DSOURCE_LIST_FILE:FILEPATH=${_bioseq_external_source_list_file}"
     "-DANNOTATION_HANDLERS:STRING=${_bioseq_external_annotation_handlers}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/codegen/scan_annotations.cmake"
+    -P "${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/scan_annotations.cmake"
   DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/codegen/annotation_registry.cmake"
-    "${CMAKE_CURRENT_SOURCE_DIR}/codegen/scan_annotations.cmake"
+    "${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/annotation_registry.cmake"
+    "${BIOSEQ_REPOSITORY_ROOT}/main/codegen/external/cmake/scan_annotations.cmake"
     "${_bioseq_external_source_list_file}"
   DEPFILE "${_bioseq_external_scan_depfile}"
   COMMENT "Scanning Bioseq annotation graph"
@@ -269,16 +162,17 @@ add_custom_command(
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
     "${CMAKE_CURRENT_SOURCE_DIR}/generated_client.cmake"
     "${BIOSEQ_EXTERNAL_GENERATED_ROOT}/generated_client.cmake"
-  COMMAND "${_bioseq_codegen_executable}" --self-test
-  COMMAND "${_bioseq_codegen_executable}"
+  COMMAND "${BIOSEQ_CODEGEN_EXECUTABLE}" self_test external
+  COMMAND "${BIOSEQ_CODEGEN_EXECUTABLE}"
+    external generate
     --source-root "${_bioseq_external_source_root}"
     --output-root "${BIOSEQ_EXTERNAL_GENERATED_ROOT}"
-    --clang-binary "${BIOSEQ_EXTERNAL_CLANG_BINARY}"
+    --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
     --compiler-id "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
     --stamp "${_bioseq_generation_stamp}"
   DEPENDS
-    bioseq_external_codegen_project
-    "${_bioseq_codegen_executable}"
+    bioseq_codegen_project
+    "${BIOSEQ_CODEGEN_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/generated_client.cmake"
     "${_bioseq_external_inventory_file}"
     ${_bioseq_external_descriptors}

@@ -1,0 +1,15 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="entity-index">
+  <h1>{{ page.title }}</h1>
+  {% if entities %}
+  <ul class="entity-list">
+  {% for e in entities %}
+    <li><a href="{{ e.route_path }}"><code>{{ e.qualified_name }}</code></a> <span class="kind">{{ e.kind }}</span>{% if e.summary %} — {{ e.summary }}{% endif %}</li>
+  {% endfor %}
+  </ul>
+  {% else %}
+  <p>No entities are documented for this domain yet.</p>
+  {% endif %}
+</article>
+{% endblock %}

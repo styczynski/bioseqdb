@@ -815,8 +815,8 @@ include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_e2e.cmake")
 # outside BIOSEQ_NOPG_MODULES so changing an OpenAPI schema does not rebuild the
 # shared Domain-N module library. The dedicated build mode enables this option;
 # normal configurations must not require the host's code-generation toolchain.
-option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
-  "Configure generated external API clients and their integration tests" OFF)
+# BIOSEQ_BUILD_EXTERNAL_API_CLIENTS is declared at the repository root so the
+# isolated generator can be provisioned once before add_subdirectory(bioseq).
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   set(BIOSEQ_EXTERNAL_GENERATED_ROOT
     "${CMAKE_CURRENT_BINARY_DIR}/generated/external")
