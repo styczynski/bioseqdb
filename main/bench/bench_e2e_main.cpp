@@ -2405,15 +2405,8 @@ void capture_persisted_gpu_operation_evidence(
         qualification_manifest_checksum = required_json_hex_identity(
             qualification, "manifest_checksum", 16);
 
-        const bool helper_build_valid = !helper_build_identity.empty()
-            && helper_build_identity.size() <= 128u
-            && std::all_of(
-                helper_build_identity.begin(), helper_build_identity.end(),
-                [](const unsigned char value) {
-                    return value >= 0x20u && value <= 0x7eu
-                        && value != static_cast<unsigned char>('"')
-                        && value != static_cast<unsigned char>('\\');
-                });
+        const bool helper_build_valid = helper_build_identity
+            == "bioseq_gpu_archive_builder_v2";
         const bool numeric_driver_identity_valid =
             qualification_api_version > 0
             && qualification_driver_version > 0

@@ -2279,6 +2279,8 @@ struct PersistedGpuCacheQualificationEvidence {
             && helper_protocol_version == 2u
             && safe_text(
                 helper_build_identity, helper_build_identity_size)
+            && helper_build_identity_text()
+                == "bioseq_gpu_archive_builder_v2"
             && safe_text(helper_source, helper_source_size)
             && helper_source_text() == "installed-sibling"
             && helper_executable_size != 0u

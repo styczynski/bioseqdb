@@ -673,7 +673,7 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
         qualification.private_files_unlinked = 2u;
         qualification.helper_protocol_version = 2u;
         constexpr std::string_view helper_build =
-            "bioseq-metal-archive-builder-v2";
+            "bioseq_gpu_archive_builder_v2";
         std::copy(
             helper_build.begin(), helper_build.end(),
             qualification.helper_build_identity.begin());
@@ -845,6 +845,9 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
     });
     require_qualification_rejection([](auto& qualification) {
         qualification.helper_source[0] = 'x';
+    });
+    require_qualification_rejection([](auto& qualification) {
+        qualification.helper_build_identity[0] = 'x';
     });
     require_qualification_rejection([](auto& qualification) {
         qualification.helper_executable_sha256 = {};
