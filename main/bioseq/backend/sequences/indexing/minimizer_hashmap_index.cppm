@@ -2608,7 +2608,9 @@ public:
     decode_admitted(
             std::span<const std::byte> bytes,
             const MinimizerGenerationPayloadProfile& profile,
-            bioseq::parallelism::MemoryPermit& permit) {
+            bioseq::parallelism::MemoryPermit& permit,
+            bioseq::parallelism::MemoryAdmissionFailure*
+                admission_failure = nullptr) {
         if (!validate_minimizer_generation_payload_profile(profile)) {
             return std::unexpected(
                 MinimizerGenerationWireError::compatibility_mismatch);
@@ -2643,14 +2645,21 @@ public:
                     bioseq::parallelism::
                         kVectorPreallocationHeadroomFactor));
         if (allocation_headroom
-                == (std::numeric_limits<std::uint64_t>::max)()
-            || !permit.grow_to(allocation_headroom)) {
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        if (!permit.grow_to(allocation_headroom, admission_failure)) {
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         DirView view;
         view.profile_ = profile;
-        view.encoded_.reserve(bytes.size());
-        view.entries_.reserve(count);
+        try {
+            view.encoded_.reserve(bytes.size());
+            view.entries_.reserve(count);
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
         const std::uint64_t actual_bytes = view.owned_capacity_bytes();
         if (actual_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
             return std::unexpected(
@@ -3938,6 +3947,162 @@ struct MinimizerGenerationRowView {
     std::uint64_t row_checksum = 0;
 };
 
+/// Exact failure site retained alongside the stable wire error
+/// `MinimizerGenerationWireError::admission`.  The numeric wire-error ABI does
+/// not change; this evidence explains which owner or allocation was refused.
+enum class PreparedShapeV5QueryAdmissionSubstage : std::uint8_t {
+    none,
+    identity_and_directory_reservation,
+    query_hash_reservation,
+    query_hash_allocation,
+    query_hash_reconcile,
+    query_route_reservation,
+    query_route_allocation,
+    query_route_reconcile,
+    control_payload_reservation,
+    control_payload_allocation,
+    control_payload_reconcile,
+    control_decode_reservation,
+    control_decode_allocation,
+    control_decode_reconcile,
+    position_image_reservation,
+    position_image_resize,
+    position_image_reconcile,
+};
+
+[[nodiscard]] constexpr std::string_view
+prepared_shape_v5_query_admission_substage_name(
+        PreparedShapeV5QueryAdmissionSubstage substage) noexcept {
+    switch (substage) {
+        case PreparedShapeV5QueryAdmissionSubstage::none:
+            return "none";
+        case PreparedShapeV5QueryAdmissionSubstage::
+                identity_and_directory_reservation:
+            return "identity_and_directory_reservation";
+        case PreparedShapeV5QueryAdmissionSubstage::query_hash_reservation:
+            return "query_hash_reservation";
+        case PreparedShapeV5QueryAdmissionSubstage::query_hash_allocation:
+            return "query_hash_allocation";
+        case PreparedShapeV5QueryAdmissionSubstage::query_hash_reconcile:
+            return "query_hash_reconcile";
+        case PreparedShapeV5QueryAdmissionSubstage::query_route_reservation:
+            return "query_route_reservation";
+        case PreparedShapeV5QueryAdmissionSubstage::query_route_allocation:
+            return "query_route_allocation";
+        case PreparedShapeV5QueryAdmissionSubstage::query_route_reconcile:
+            return "query_route_reconcile";
+        case PreparedShapeV5QueryAdmissionSubstage::control_payload_reservation:
+            return "control_payload_reservation";
+        case PreparedShapeV5QueryAdmissionSubstage::control_payload_allocation:
+            return "control_payload_allocation";
+        case PreparedShapeV5QueryAdmissionSubstage::control_payload_reconcile:
+            return "control_payload_reconcile";
+        case PreparedShapeV5QueryAdmissionSubstage::control_decode_reservation:
+            return "control_decode_reservation";
+        case PreparedShapeV5QueryAdmissionSubstage::control_decode_allocation:
+            return "control_decode_allocation";
+        case PreparedShapeV5QueryAdmissionSubstage::control_decode_reconcile:
+            return "control_decode_reconcile";
+        case PreparedShapeV5QueryAdmissionSubstage::position_image_reservation:
+            return "position_image_reservation";
+        case PreparedShapeV5QueryAdmissionSubstage::position_image_resize:
+            return "position_image_resize";
+        case PreparedShapeV5QueryAdmissionSubstage::position_image_reconcile:
+            return "position_image_reconcile";
+    }
+    return "unknown";
+}
+
+/// Frozen evidence copied out before a failed reader releases its admitted
+/// storage.  Capacity fields describe actual live owners at the failure site;
+/// the controller fields come from the exact rejection snapshot when one
+/// exists, otherwise from a read-only post-failure diagnostic snapshot.
+struct PreparedShapeV5QueryAdmissionEvidence {
+    PreparedShapeV5QueryAdmissionSubstage substage =
+        PreparedShapeV5QueryAdmissionSubstage::none;
+    bioseq::parallelism::MemoryAdmissionFailureReason controller_reason =
+        bioseq::parallelism::MemoryAdmissionFailureReason::none;
+    std::uint64_t retained_position_count = 0;
+    std::uint64_t retained_position_bytes = 0;
+    std::uint64_t vector_headroom_bytes = 0;
+    std::uint64_t projected_bytes = 0;
+    std::uint64_t requested_growth_bytes = 0;
+    std::uint64_t owned_capacity_bytes = 0;
+    std::uint64_t permit_bytes = 0;
+    std::uint64_t controller_reserved_bytes = 0;
+    std::uint64_t controller_budget_ceiling_bytes =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t controller_allocatable_after_reservations_bytes =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t process_footprint_bytes = 0;
+    std::uint64_t system_available_bytes = 0;
+    std::uint64_t system_total_bytes = 0;
+    std::uint64_t process_soft_cap_bytes = 0;
+    std::uint64_t query_record_count = 0;
+    std::uint64_t query_record_capacity = 0;
+    std::uint64_t query_hash_count = 0;
+    std::uint64_t query_hash_capacity = 0;
+    std::uint64_t selected_extent_count = 0;
+    std::uint64_t selected_extent_capacity = 0;
+    std::uint64_t selected_control_capacity_bytes = 0;
+    std::uint64_t control_payload_capacity_bytes = 0;
+    std::uint64_t releasable_protocol_query_hash_bytes = 0;
+    bool controller_failure_snapshot_present = false;
+    bool injected_failure = false;
+};
+
+/// Deterministic portable allocation-failure hook.  Production callers leave
+/// this at `none`; tests select one exact substage without attempting a huge
+/// allocation or depending on an operating-system overcommit policy.
+struct PreparedShapeV5QueryReaderTestOptions {
+    PreparedShapeV5QueryAdmissionSubstage fail_admission_substage =
+        PreparedShapeV5QueryAdmissionSubstage::none;
+};
+
+struct PreparedShapeV5PositionImagePlan {
+    std::uint64_t retained_position_count = 0;
+    std::uint64_t retained_position_bytes = 0;
+    std::uint64_t vector_headroom_bytes = 0;
+    std::uint64_t owned_capacity_bytes = 0;
+    std::uint64_t projected_bytes = 0;
+};
+
+/// Pure checked byte plan used before any position-image reservation or
+/// allocation.  Tests can exercise adversarial counts without relying on
+/// virtual-memory overcommit or constructing a correspondingly huge payload.
+[[nodiscard]] inline std::expected<PreparedShapeV5PositionImagePlan,
+    MinimizerGenerationWireError>
+plan_prepared_shape_v5_position_image(
+        std::uint64_t retained_position_count,
+        std::uint64_t owned_capacity_bytes) noexcept {
+    const std::uint64_t retained_position_bytes =
+        bioseq::parallelism::saturating_mul(
+            retained_position_count, sizeof(std::uint64_t));
+    const std::uint64_t vector_headroom_bytes =
+        bioseq::parallelism::saturating_mul(
+            retained_position_bytes,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    const std::uint64_t projected_bytes =
+        bioseq::parallelism::saturating_add(
+            owned_capacity_bytes, vector_headroom_bytes);
+    if (retained_position_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()
+        || vector_headroom_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()
+        || projected_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+        return std::unexpected(
+            MinimizerGenerationWireError::arithmetic_overflow);
+    }
+    return PreparedShapeV5PositionImagePlan{
+        .retained_position_count = retained_position_count,
+        .retained_position_bytes = retained_position_bytes,
+        .vector_headroom_bytes = vector_headroom_bytes,
+        .owned_capacity_bytes = owned_capacity_bytes,
+        .projected_bytes = projected_bytes,
+    };
+}
+
 namespace minimizer_prepared_reader_detail {
 template <class Traits>
 class TraitDrivenPreparedQueryCore;
@@ -4176,7 +4341,9 @@ protected:
             const ExpectedMinimizerCompatibility& expected,
             const MinimizerGenerationPayloadProfile& profile,
             std::span<const std::byte> encoded_directory,
-            std::uint64_t additional_logical_bytes = 0) {
+            std::uint64_t additional_logical_bytes = 0,
+            bioseq::parallelism::MemoryAdmissionFailure*
+                admission_failure = nullptr) {
         const bool destination_is_fresh = !destination.permit_
             && destination.directory_.owned_capacity_bytes() == 0u
             && destination.head_.wire_format
@@ -4220,12 +4387,13 @@ protected:
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
-        auto permit = admission.try_reserve(logical_bytes);
+        auto permit = admission.try_reserve(
+            logical_bytes, admission_failure);
         if (!permit) {
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         auto directory = DirView::decode_admitted(
-            encoded_directory, profile, *permit);
+            encoded_directory, profile, *permit, admission_failure);
         if (!directory) return std::unexpected(directory.error());
         if (auto valid = validate_minimizer_generation_metadata(
                 head, manifest, *directory); !valid) {
@@ -4660,6 +4828,11 @@ protected:
     bool protocol_failed_ = false;
     MinimizerGenerationWireError protocol_failure_ =
         MinimizerGenerationWireError::row_order;
+    bioseq::parallelism::MemoryAdmissionController* protocol_admission_ =
+        nullptr;
+    PreparedShapeV5QueryReaderTestOptions protocol_test_options_{};
+    PreparedShapeV5QueryAdmissionEvidence
+        protocol_admission_failure_evidence_{};
 
     struct ProtocolMemoryEvidence {
         std::uint64_t capacity_accounting_passes = 0;
@@ -4736,10 +4909,13 @@ protected:
                 owner_->protocol_release_noexcept();
             }
         }
-        [[nodiscard]] bool grow(std::uint64_t projected) noexcept {
+        [[nodiscard]] bool grow(
+                std::uint64_t projected,
+                bioseq::parallelism::MemoryAdmissionFailure*
+                    failure = nullptr) noexcept {
             return projected
                     != (std::numeric_limits<std::uint64_t>::max)()
-                && owner_->permit_.grow_to(projected);
+                && owner_->permit_.grow_to(projected, failure);
         }
         [[nodiscard]] bool reconcile() noexcept {
             const std::uint64_t actual =
@@ -4793,6 +4969,125 @@ protected:
         }
     }
 
+    [[nodiscard]] bool inject_admission_failure_(
+            PreparedShapeV5QueryAdmissionSubstage substage) noexcept {
+        if constexpr (!Traits::global_controls_then_positions) {
+            return false;
+        }
+        if (protocol_test_options_.fail_admission_substage != substage) {
+            return false;
+        }
+        protocol_test_options_.fail_admission_substage =
+            PreparedShapeV5QueryAdmissionSubstage::none;
+        return true;
+    }
+
+    void capture_admission_failure_(
+            PreparedShapeV5QueryAdmissionSubstage substage,
+            std::uint64_t projected_bytes,
+            std::uint64_t retained_position_count = 0u,
+            std::uint64_t retained_position_bytes = 0u,
+            std::uint64_t vector_headroom_bytes = 0u,
+            const bioseq::parallelism::MemoryAdmissionFailure*
+                controller_failure = nullptr,
+            bool injected = false) noexcept {
+        if constexpr (!Traits::global_controls_then_positions) {
+            return;
+        }
+        if (protocol_admission_failure_evidence_.substage
+                != PreparedShapeV5QueryAdmissionSubstage::none) {
+            return;
+        }
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t selected_control_capacity_bytes = 0u;
+        for (const SelectedExtent& extent : protocol_selected_extents_) {
+            selected_control_capacity_bytes = saturating_add(
+                selected_control_capacity_bytes,
+                saturating_mul(
+                    static_cast<std::uint64_t>(extent.controls.capacity()),
+                    sizeof(SelectedControl)));
+        }
+        const std::uint64_t owned_capacity_bytes =
+            protocol_owned_capacity_bytes();
+        const std::uint64_t permit_bytes = this->permit_.bytes();
+        PreparedShapeV5QueryAdmissionEvidence evidence{
+            .substage = substage,
+            .retained_position_count = retained_position_count,
+            .retained_position_bytes = retained_position_bytes,
+            .vector_headroom_bytes = vector_headroom_bytes,
+            .projected_bytes = projected_bytes,
+            .requested_growth_bytes = projected_bytes > permit_bytes
+                ? projected_bytes - permit_bytes : 0u,
+            .owned_capacity_bytes = owned_capacity_bytes,
+            .permit_bytes = permit_bytes,
+            .query_record_count = static_cast<std::uint64_t>(
+                protocol_query_records_.size()),
+            .query_record_capacity = static_cast<std::uint64_t>(
+                protocol_query_records_.capacity()),
+            .query_hash_count = static_cast<std::uint64_t>(
+                protocol_query_hashes_.size()),
+            .query_hash_capacity = static_cast<std::uint64_t>(
+                protocol_query_hashes_.capacity()),
+            .selected_extent_count = static_cast<std::uint64_t>(
+                protocol_selected_extents_.size()),
+            .selected_extent_capacity = static_cast<std::uint64_t>(
+                protocol_selected_extents_.capacity()),
+            .selected_control_capacity_bytes =
+                selected_control_capacity_bytes,
+            .control_payload_capacity_bytes = protocol_session_
+                ? static_cast<std::uint64_t>(
+                    protocol_session_->control_bytes.capacity()) : 0u,
+            .releasable_protocol_query_hash_bytes =
+                protocol_initialized_
+                    && protocol_query_records_.size()
+                        == protocol_query_hashes_.size()
+                ? saturating_mul(
+                    static_cast<std::uint64_t>(
+                        protocol_query_hashes_.capacity()),
+                    sizeof(hash_type))
+                : 0u,
+            .injected_failure = injected,
+        };
+        if (controller_failure != nullptr
+            && controller_failure->failed()) {
+            evidence.controller_reason = controller_failure->reason;
+            evidence.requested_growth_bytes =
+                controller_failure->requested_bytes;
+            evidence.controller_reserved_bytes =
+                controller_failure->reserved_bytes;
+            evidence.controller_budget_ceiling_bytes =
+                controller_failure->budget_ceiling_bytes;
+            evidence.controller_allocatable_after_reservations_bytes =
+                controller_failure->allocatable_after_reservations_bytes;
+            evidence.process_footprint_bytes =
+                controller_failure->process_footprint_bytes;
+            evidence.system_available_bytes =
+                controller_failure->system_available_bytes;
+            evidence.system_total_bytes =
+                controller_failure->system_total_bytes;
+            evidence.process_soft_cap_bytes =
+                controller_failure->process_soft_cap_bytes;
+            evidence.controller_failure_snapshot_present = true;
+        } else if (protocol_admission_ != nullptr) {
+            const auto snapshot =
+                protocol_admission_->diagnostic_snapshot();
+            evidence.controller_reserved_bytes = snapshot.reserved_bytes;
+            evidence.controller_budget_ceiling_bytes =
+                snapshot.budget_ceiling_bytes;
+            evidence.controller_allocatable_after_reservations_bytes =
+                snapshot.allocatable_after_reservations_bytes;
+            evidence.process_footprint_bytes =
+                snapshot.process_footprint_bytes;
+            evidence.system_available_bytes =
+                snapshot.system_available_bytes;
+            evidence.system_total_bytes = snapshot.system_total_bytes;
+            evidence.process_soft_cap_bytes =
+                snapshot.process_soft_cap_bytes;
+        }
+        protocol_admission_failure_evidence_ = evidence;
+    }
+
     /// Format 5 persists all controls before all positions.  At the phase
     /// boundary every selected hash's target-global occurrence count is final,
     /// so admit and allocate the complete retained-position image once.  This
@@ -4834,32 +5129,68 @@ protected:
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
-        const std::uint64_t retained_bytes =
-            bioseq::parallelism::saturating_mul(
-                retained_count, sizeof(std::uint64_t));
-        if (retained_bytes
-                == (std::numeric_limits<std::uint64_t>::max)()) {
-            return std::unexpected(
-                MinimizerGenerationWireError::arithmetic_overflow);
-        }
         PermitGrowthGuard guard{*this};
-        const std::uint64_t projected =
-            bioseq::parallelism::saturating_add(
-                protocol_owned_capacity_bytes(),
-                bioseq::parallelism::saturating_mul(
-                    retained_bytes,
-                    bioseq::parallelism::
-                        kVectorPreallocationHeadroomFactor));
-        if (!guard.grow(projected)) {
+        const auto planned = plan_prepared_shape_v5_position_image(
+            retained_count, protocol_owned_capacity_bytes());
+        if (!planned) return std::unexpected(planned.error());
+        const std::uint64_t retained_bytes =
+            planned->retained_position_bytes;
+        const std::uint64_t headroom = planned->vector_headroom_bytes;
+        const std::uint64_t projected = planned->projected_bytes;
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_reservation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_reservation,
+                projected, retained_count, retained_bytes, headroom,
+                nullptr, true);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        bioseq::parallelism::MemoryAdmissionFailure position_failure;
+        if (!guard.grow(projected, &position_failure)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_reservation,
+                projected, retained_count, retained_bytes, headroom,
+                &position_failure);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_resize)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_resize,
+                projected, retained_count, retained_bytes, headroom,
+                nullptr, true);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         try {
             protocol_global_positions_.resize(
                 static_cast<std::size_t>(retained_count));
         } catch (const std::bad_alloc&) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_resize,
+                projected, retained_count, retained_bytes, headroom);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_reconcile)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_reconcile,
+                projected, retained_count, retained_bytes, headroom,
+                nullptr, true);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         if (!guard.reconcile()) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    position_image_reconcile,
+                projected, retained_count, retained_bytes, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         if (retained_count != 0u) {
@@ -4972,7 +5303,12 @@ protected:
             const MinimizerGenerationPayloadProfile& profile,
             std::span<const std::byte> encoded_directory,
             std::span<const std::uint64_t> query_hashes,
-            std::uint64_t max_occ) {
+            std::uint64_t max_occ,
+            PreparedShapeV5QueryReaderTestOptions test_options = {}) {
+        protocol_admission_ = &admission;
+        if constexpr (Traits::global_controls_then_positions) {
+            protocol_test_options_ = test_options;
+        }
         if (query_hashes.size()
                 > (std::numeric_limits<std::size_t>::max)()
                     / sizeof(hash_type)) {
@@ -4992,6 +5328,17 @@ protected:
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    identity_and_directory_reservation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    identity_and_directory_reservation,
+                0u, 0u, 0u, 0u, nullptr, true);
+            return std::unexpected(
+                MinimizerGenerationWireError::admission);
+        }
+        bioseq::parallelism::MemoryAdmissionFailure core_failure;
         if (auto admitted = IdentityCore::begin_admitted_core(
                 static_cast<IdentityCore&>(*this),
                 admission,
@@ -5000,7 +5347,16 @@ protected:
                 expected,
                 profile,
                 encoded_directory,
-                query_bytes); !admitted) {
+                query_bytes,
+                &core_failure); !admitted) {
+            if (admitted.error()
+                    == MinimizerGenerationWireError::admission) {
+                capture_admission_failure_(
+                    PreparedShapeV5QueryAdmissionSubstage::
+                        identity_and_directory_reservation,
+                    core_failure.requested_bytes,
+                    0u, 0u, 0u, &core_failure);
+            }
             return std::unexpected(admitted.error());
         }
         protocol_max_occ_ = max_occ;
@@ -5011,7 +5367,35 @@ protected:
             bioseq::parallelism::saturating_mul(
                 query_bytes,
                 bioseq::parallelism::kVectorPreallocationHeadroomFactor));
-        if (!guard.grow(projected)) {
+        if (projected == (std::numeric_limits<std::uint64_t>::max)()) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_hash_reservation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_hash_reservation,
+                projected, 0u, 0u, query_bytes, nullptr, true);
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::admission);
+        }
+        bioseq::parallelism::MemoryAdmissionFailure query_hash_failure;
+        if (!guard.grow(projected, &query_hash_failure)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_hash_reservation,
+                projected, 0u, 0u, query_bytes, &query_hash_failure);
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_hash_allocation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_hash_allocation,
+                projected, 0u, 0u, query_bytes, nullptr, true);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
@@ -5027,10 +5411,25 @@ protected:
                     protocol_query_hashes_.end()),
                 protocol_query_hashes_.end());
         } catch (const std::bad_alloc&) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_hash_allocation,
+                projected, 0u, 0u, query_bytes);
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_hash_reconcile)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_hash_reconcile,
+                projected, 0u, 0u, query_bytes, nullptr, true);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
         if (!guard.reconcile()) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_hash_reconcile,
+                projected, 0u, 0u, query_bytes);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
@@ -5059,7 +5458,36 @@ protected:
             bioseq::parallelism::saturating_mul(
                 route_bytes,
                 bioseq::parallelism::kVectorPreallocationHeadroomFactor));
-        if (!route_guard.grow(projected)) {
+        if (route_bytes == (std::numeric_limits<std::uint64_t>::max)()
+            || projected == (std::numeric_limits<std::uint64_t>::max)()) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_route_reservation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_route_reservation,
+                projected, 0u, 0u, route_bytes, nullptr, true);
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::admission);
+        }
+        bioseq::parallelism::MemoryAdmissionFailure route_failure;
+        if (!route_guard.grow(projected, &route_failure)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_route_reservation,
+                projected, 0u, 0u, route_bytes, &route_failure);
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_route_allocation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_route_allocation,
+                projected, 0u, 0u, route_bytes, nullptr, true);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
@@ -5077,10 +5505,25 @@ protected:
                 protocol_selected_extents_.push_back(SelectedExtent{});
             }
         } catch (const std::bad_alloc&) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_route_allocation,
+                projected, 0u, 0u, route_bytes);
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    query_route_reconcile)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_route_reconcile,
+                projected, 0u, 0u, route_bytes, nullptr, true);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
         if (!route_guard.reconcile()) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::query_route_reconcile,
+                projected, 0u, 0u, route_bytes);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
@@ -5102,13 +5545,44 @@ protected:
         std::uint64_t retained = selected_index == no_route ? 0u
             : bioseq::parallelism::saturating_mul(
                 entry.control_element_count, sizeof(SelectedControl));
+        const std::uint64_t additional =
+            bioseq::parallelism::saturating_add(transient, retained);
+        const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
+            additional,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
         PermitGrowthGuard guard{*this};
         const std::uint64_t projected = bioseq::parallelism::saturating_add(
-            protocol_owned_capacity_bytes(),
-            bioseq::parallelism::saturating_mul(
-                bioseq::parallelism::saturating_add(transient, retained),
-                bioseq::parallelism::kVectorPreallocationHeadroomFactor));
-        if (!guard.grow(projected)) {
+            protocol_owned_capacity_bytes(), headroom);
+        if (additional == (std::numeric_limits<std::uint64_t>::max)()
+            || headroom == (std::numeric_limits<std::uint64_t>::max)()
+            || projected == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_reservation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_reservation,
+                projected, 0u, 0u, headroom, nullptr, true);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        bioseq::parallelism::MemoryAdmissionFailure control_failure;
+        if (!guard.grow(projected, &control_failure)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_reservation,
+                projected, 0u, 0u, headroom, &control_failure);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_allocation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_allocation,
+                projected, 0u, 0u, headroom, nullptr, true);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         const auto decoded_result = [&]()
@@ -5159,6 +5633,10 @@ protected:
                 selected.controls_complete = true;
                 return {};
             } catch (const std::bad_alloc&) {
+                capture_admission_failure_(
+                    PreparedShapeV5QueryAdmissionSubstage::
+                        control_decode_allocation,
+                    projected, 0u, 0u, headroom);
                 return std::unexpected(
                     MinimizerGenerationWireError::admission);
             }
@@ -5166,7 +5644,20 @@ protected:
         if (!decoded_result) {
             return std::unexpected(decoded_result.error());
         }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_reconcile)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_reconcile,
+                projected, 0u, 0u, headroom, nullptr, true);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
         if (!guard.reconcile()) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_decode_reconcile,
+                projected, 0u, 0u, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
         return {};
@@ -5353,14 +5844,50 @@ protected:
                         MinimizerGenerationWireError::arithmetic_overflow);
                 }
                 PermitGrowthGuard guard{*this};
+                const std::uint64_t headroom =
+                    bioseq::parallelism::saturating_mul(
+                        encoded_bytes,
+                        bioseq::parallelism::
+                            kVectorPreallocationHeadroomFactor);
                 const std::uint64_t projected =
                     bioseq::parallelism::saturating_add(
-                        protocol_owned_capacity_bytes(),
-                        bioseq::parallelism::saturating_mul(
-                            encoded_bytes,
-                            bioseq::parallelism::
-                                kVectorPreallocationHeadroomFactor));
-                if (!guard.grow(projected)) {
+                        protocol_owned_capacity_bytes(), headroom);
+                if (headroom
+                            == (std::numeric_limits<std::uint64_t>::max)()
+                    || projected
+                            == (std::numeric_limits<std::uint64_t>::max)()) {
+                    protocol_session_.reset();
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::arithmetic_overflow);
+                }
+                if (inject_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_reservation)) {
+                    capture_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_reservation,
+                        projected, 0u, 0u, headroom, nullptr, true);
+                    protocol_session_.reset();
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::admission);
+                }
+                bioseq::parallelism::MemoryAdmissionFailure payload_failure;
+                if (!guard.grow(projected, &payload_failure)) {
+                    capture_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_reservation,
+                        projected, 0u, 0u, headroom, &payload_failure);
+                    protocol_session_.reset();
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::admission);
+                }
+                if (inject_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_allocation)) {
+                    capture_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_allocation,
+                        projected, 0u, 0u, headroom, nullptr, true);
                     protocol_session_.reset();
                     return protocol_poison<void>(
                         MinimizerGenerationWireError::admission);
@@ -5369,11 +5896,30 @@ protected:
                     protocol_session_->control_bytes.reserve(
                         static_cast<std::size_t>(encoded_bytes));
                 } catch (const std::bad_alloc&) {
+                    capture_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_allocation,
+                        projected, 0u, 0u, headroom);
+                    protocol_session_.reset();
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::admission);
+                }
+                if (inject_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_reconcile)) {
+                    capture_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_reconcile,
+                        projected, 0u, 0u, headroom, nullptr, true);
                     protocol_session_.reset();
                     return protocol_poison<void>(
                         MinimizerGenerationWireError::admission);
                 }
                 if (!guard.reconcile()) {
+                    capture_admission_failure_(
+                        PreparedShapeV5QueryAdmissionSubstage::
+                            control_payload_reconcile,
+                        projected, 0u, 0u, headroom);
                     protocol_session_.reset();
                     return protocol_poison<void>(
                         MinimizerGenerationWireError::admission);
@@ -5436,6 +5982,10 @@ protected:
                     session.control_bytes.end(),
                     row.bytes.begin(), row.bytes.end());
             } catch (const std::bad_alloc&) {
+                capture_admission_failure_(
+                    PreparedShapeV5QueryAdmissionSubstage::
+                        control_payload_allocation,
+                    this->permit_.bytes());
                 return protocol_poison<void>(
                     MinimizerGenerationWireError::admission);
             }
@@ -5604,6 +6154,11 @@ protected:
         }
         return count;
     }
+
+    [[nodiscard]] const PreparedShapeV5QueryAdmissionEvidence&
+    protocol_admission_failure_evidence() const noexcept {
+        return protocol_admission_failure_evidence_;
+    }
 };
 
 } // namespace minimizer_prepared_reader_detail
@@ -5667,7 +6222,13 @@ public:
             const ExpectedMinimizerCompatibility& expected,
             std::span<const std::byte> encoded_directory,
             std::span<const std::uint64_t> query_hashes,
-            std::uint64_t max_occ) {
+            std::uint64_t max_occ,
+            PreparedShapeV5QueryAdmissionEvidence*
+                admission_failure_evidence = nullptr,
+            PreparedShapeV5QueryReaderTestOptions test_options = {}) {
+        if (admission_failure_evidence != nullptr) {
+            *admission_failure_evidence = {};
+        }
         if (manifest.wire_format
                 != MinimizerGenerationWireFormat::
                     grouped_shape_soa_segment_local
@@ -5694,7 +6255,12 @@ public:
                 *profile,
                 encoded_directory,
                 query_hashes,
-                max_occ); !initialized) {
+                max_occ,
+                test_options); !initialized) {
+            if (admission_failure_evidence != nullptr) {
+                *admission_failure_evidence =
+                    reader.protocol_admission_failure_evidence();
+            }
             return std::unexpected(initialized.error());
         }
         return reader;
@@ -5723,6 +6289,11 @@ public:
             .positions_complete = found.positions_complete,
             .positions = found.positions,
         };
+    }
+
+    [[nodiscard]] const PreparedShapeV5QueryAdmissionEvidence&
+    admission_failure_evidence() const noexcept {
+        return this->protocol_admission_failure_evidence();
     }
 
     /// Direct seed-consumer surface.  As with the Format-4 reader, a hash that

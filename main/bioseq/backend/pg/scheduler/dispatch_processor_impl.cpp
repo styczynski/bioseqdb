@@ -1269,6 +1269,68 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	for (const MinimapSketchData& minimizer : group.query_hash_union) {
 		query_hashes.push_back(minimizer.kmer());
 	}
+	const auto format_shape_v5_failure =
+		[&query_hash_permit](
+				const std::string_view phase,
+				const MinimizerGenerationWireError error,
+				const bioseq::indexing::
+					PreparedShapeV5QueryAdmissionEvidence& evidence) {
+		if (error != MinimizerGenerationWireError::admission) {
+			return fmt::format("{} wire_error={}", phase,
+				static_cast<unsigned>(error));
+		}
+		return fmt::format(
+			"{} wire_error={} admission_substage={} controller_reason={} "
+			"retained_position_count={} retained_position_bytes={} "
+			"vector_headroom_bytes={} projected_bytes={} "
+			"requested_growth_bytes={} owned_capacity_bytes={} "
+			"permit_bytes={} controller_reserved_bytes={} "
+			"controller_budget_ceiling_bytes={} "
+			"controller_allocatable_after_reservations_bytes={} "
+			"process_footprint_bytes={} system_available_bytes={} "
+			"system_total_bytes={} process_soft_cap_bytes={} "
+			"query_record_count={} query_record_capacity={} "
+			"query_hash_count={} query_hash_capacity={} "
+			"selected_extent_count={} selected_extent_capacity={} "
+			"selected_control_capacity_bytes={} "
+			"control_payload_capacity_bytes={} "
+			"releasable_protocol_query_hash_bytes={} "
+			"releasable_external_query_hash_bytes={} "
+			"controller_failure_snapshot_present={} injected_failure={}",
+			phase,
+			static_cast<unsigned>(error),
+			bioseq::indexing::
+				prepared_shape_v5_query_admission_substage_name(
+					evidence.substage),
+			bioseq::parallelism::memory_admission_failure_reason_name(
+				evidence.controller_reason),
+			evidence.retained_position_count,
+			evidence.retained_position_bytes,
+			evidence.vector_headroom_bytes,
+			evidence.projected_bytes,
+			evidence.requested_growth_bytes,
+			evidence.owned_capacity_bytes,
+			evidence.permit_bytes,
+			evidence.controller_reserved_bytes,
+			evidence.controller_budget_ceiling_bytes,
+			evidence.controller_allocatable_after_reservations_bytes,
+			evidence.process_footprint_bytes,
+			evidence.system_available_bytes,
+			evidence.system_total_bytes,
+			evidence.process_soft_cap_bytes,
+			evidence.query_record_count,
+			evidence.query_record_capacity,
+			evidence.query_hash_count,
+			evidence.query_hash_capacity,
+			evidence.selected_extent_count,
+			evidence.selected_extent_capacity,
+			evidence.selected_control_capacity_bytes,
+			evidence.control_payload_capacity_bytes,
+			evidence.releasable_protocol_query_hash_bytes,
+			query_hash_permit->bytes(),
+			evidence.controller_failure_snapshot_present,
+			evidence.injected_failure);
+	};
 
 	// Format 5 is stored in the S1 primary-key order: every control extent,
 	// then every position extent.  The trait-driven reader retains only hashes
@@ -1279,15 +1341,18 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 			== MinimizerGenerationWireFormat::
 				grouped_shape_soa_segment_local) {
 		using ShapeReader = bioseq::indexing::PreparedShapeV5QueryReader;
+		bioseq::indexing::PreparedShapeV5QueryAdmissionEvidence
+			begin_admission_evidence;
 		auto made = ShapeReader::begin(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected,
 			metadata.directory.encoded_bytes(), query_hashes,
-			static_cast<std::uint64_t>(group.max_occ));
+			static_cast<std::uint64_t>(group.max_occ),
+			&begin_admission_evidence);
 		if (!made) {
-			fail(fmt::format(
-				"Format-5 reader begin rejected wire_error={}",
-				static_cast<unsigned>(made.error())));
+			fail(format_shape_v5_failure(
+				"Format-5 reader begin rejected",
+				made.error(), begin_admission_evidence));
 			return;
 		}
 		std::optional<ShapeReader> shape_reader{
@@ -1309,9 +1374,10 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 			std::rethrow_exception(callback_exception);
 		}
 		if (callback_error) {
-			fail(fmt::format(
-				"Format-5 payload ingest rejected wire_error={}",
-				static_cast<unsigned>(*callback_error)));
+			fail(format_shape_v5_failure(
+				"Format-5 payload ingest rejected",
+				*callback_error,
+				shape_reader->admission_failure_evidence()));
 			return;
 		}
 		if (auto finished = shape_reader->finish(); !finished) {

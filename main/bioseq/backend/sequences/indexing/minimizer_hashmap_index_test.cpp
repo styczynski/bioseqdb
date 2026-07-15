@@ -8770,6 +8770,174 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         <= aggregate_extents / 2u);
 }
 
+TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
+          "[indexing][minimizer-hashmap][wire][v5][reader][admission]"
+          "[diagnostics][failpoint]") {
+    using namespace bioseq::indexing;
+    STATIC_REQUIRE(static_cast<std::uint8_t>(
+        MinimizerGenerationWireError::admission) == 28u);
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
+        {1u, 2u},
+        {2u, 4u},
+    };
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink, test_shape_v5_generation_options(100u, 10u));
+    REQUIRE(generation.has_value());
+    const std::array<std::uint64_t, 2> queries{1u, 2u};
+    std::vector<const CollectedMinimizerRow*> payload;
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) payload.push_back(&row);
+    }
+    REQUIRE(payload.size() == 2u);
+
+    using Substage = PreparedShapeV5QueryAdmissionSubstage;
+    constexpr std::array begin_substages{
+        Substage::identity_and_directory_reservation,
+        Substage::query_hash_reservation,
+        Substage::query_hash_allocation,
+        Substage::query_hash_reconcile,
+        Substage::query_route_reservation,
+        Substage::query_route_allocation,
+        Substage::query_route_reconcile,
+    };
+    constexpr std::array payload_substages{
+        Substage::control_payload_reservation,
+        Substage::control_payload_allocation,
+        Substage::control_payload_reconcile,
+        Substage::control_decode_reservation,
+        Substage::control_decode_allocation,
+        Substage::control_decode_reconcile,
+        Substage::position_image_reservation,
+        Substage::position_image_resize,
+        Substage::position_image_reconcile,
+    };
+
+    for (const Substage wanted : begin_substages) {
+        INFO("begin admission substage "
+            << prepared_shape_v5_query_admission_substage_name(wanted));
+        bioseq::parallelism::MemoryAdmissionController admission;
+        PreparedShapeV5QueryAdmissionEvidence evidence;
+        const auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &evidence,
+            PreparedShapeV5QueryReaderTestOptions{
+                .fail_admission_substage = wanted,
+            });
+        require_wire_error(
+            made, MinimizerGenerationWireError::admission);
+        REQUIRE(evidence.substage == wanted);
+        REQUIRE(evidence.injected_failure);
+        REQUIRE(prepared_shape_v5_query_admission_substage_name(wanted)
+            != std::string_view{"unknown"});
+        if (wanted != Substage::identity_and_directory_reservation) {
+            REQUIRE(evidence.projected_bytes > 0u);
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    for (const Substage wanted : payload_substages) {
+        INFO("payload admission substage "
+            << prepared_shape_v5_query_admission_substage_name(wanted));
+        bioseq::parallelism::MemoryAdmissionController admission;
+        PreparedShapeV5QueryAdmissionEvidence begin_evidence;
+        auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &begin_evidence,
+            PreparedShapeV5QueryReaderTestOptions{
+                .fail_admission_substage = wanted,
+            });
+        REQUIRE(made.has_value());
+        REQUIRE(begin_evidence.substage == Substage::none);
+        bool rejected = false;
+        for (const CollectedMinimizerRow* row : payload) {
+            const auto accepted = made->accept(row_view(*row));
+            if (!accepted) {
+                REQUIRE(accepted.error()
+                    == MinimizerGenerationWireError::admission);
+                rejected = true;
+                break;
+            }
+        }
+        REQUIRE(rejected);
+        const auto evidence = made->admission_failure_evidence();
+        REQUIRE(evidence.substage == wanted);
+        REQUIRE(evidence.injected_failure);
+        REQUIRE(evidence.projected_bytes > 0u);
+        REQUIRE(evidence.query_record_count == queries.size());
+        REQUIRE(evidence.query_record_capacity >= queries.size());
+        REQUIRE(evidence.releasable_protocol_query_hash_bytes
+            >= queries.size() * sizeof(std::uint64_t));
+        if (wanted == Substage::position_image_reservation
+            || wanted == Substage::position_image_resize
+            || wanted == Substage::position_image_reconcile) {
+            REQUIRE(evidence.retained_position_count == queries.size());
+            REQUIRE(evidence.retained_position_bytes
+                == queries.size() * sizeof(std::uint64_t));
+            REQUIRE(evidence.vector_headroom_bytes
+                == 2u * evidence.retained_position_bytes);
+        }
+        REQUIRE(made->failed());
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("real low budget retains the controller predicate snapshot") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        admission.set_index_memory_cap_bytes(1u);
+        PreparedShapeV5QueryAdmissionEvidence evidence;
+        const auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &evidence);
+        require_wire_error(
+            made, MinimizerGenerationWireError::admission);
+        REQUIRE(evidence.substage
+            == Substage::identity_and_directory_reservation);
+        REQUIRE_FALSE(evidence.injected_failure);
+        REQUIRE(evidence.controller_failure_snapshot_present);
+        REQUIRE(evidence.controller_reason
+            != bioseq::parallelism::MemoryAdmissionFailureReason::none);
+        REQUIRE(evidence.requested_growth_bytes > 1u);
+        REQUIRE(evidence.controller_budget_ceiling_bytes <= 1u);
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("arithmetic overflow is not relabelled as admission") {
+        const auto ordinary = plan_prepared_shape_v5_position_image(3u, 5u);
+        REQUIRE(ordinary.has_value());
+        REQUIRE(ordinary->retained_position_bytes == 24u);
+        REQUIRE(ordinary->vector_headroom_bytes == 48u);
+        REQUIRE(ordinary->projected_bytes == 53u);
+        require_wire_error(
+            plan_prepared_shape_v5_position_image(
+                (std::numeric_limits<std::uint64_t>::max)(), 0u),
+            MinimizerGenerationWireError::arithmetic_overflow);
+        require_wire_error(
+            plan_prepared_shape_v5_position_image(
+                1u,
+                (std::numeric_limits<std::uint64_t>::max)() - 1u),
+            MinimizerGenerationWireError::arithmetic_overflow);
+    }
+}
+
 TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
           "[indexing][minimizer-hashmap][wire][v5][chunk-equation]") {
     using namespace bioseq::indexing;
