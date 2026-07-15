@@ -795,7 +795,7 @@ TEST_CASE("DOC0371 SQL-bound proof values reject max plus one without clamping",
     REQUIRE_FALSE(validate_job_execution_stats(query_ordinal_overflow));
 }
 
-TEST_CASE("DOC0371 GPU environment requires canonical UTF-8 and policy-valid seed size",
+TEST_CASE("DOC0371 GPU environment requires canonical identity and policy-hit pairs",
           "[pipe][pipeline-stats][attestation][environment]") {
     using namespace bioseq::pipeline_stats;
     constexpr auto constexpr_valid_four_byte = [] {
@@ -890,8 +890,77 @@ TEST_CASE("DOC0371 GPU environment requires canonical UTF-8 and policy-valid see
 
     auto immutable_without_seed = make_gpu_environment();
     immutable_without_seed.gpu_pipeline_cache_seed_size = 0;
-    REQUIRE_FALSE(environment_is_valid_for_backend(
-        immutable_without_seed, ExecutedBackend::vulkan_gpu));
+
+    auto immutable_miss = make_gpu_environment();
+    immutable_miss.gpu_pipeline_cache_hit = OptionalProofBool::false_value;
+
+    auto isolated_hit = make_gpu_environment();
+    isolated_hit.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::isolated_miss_diagnostic;
+
+    auto zero_manifest = make_gpu_environment();
+    zero_manifest.gpu_pipeline_cache_manifest_checksum = 0;
+
+    auto zero_uuid = make_gpu_environment();
+    zero_uuid.gpu_device_uuid = {};
+
+    auto zero_seed_sha = make_gpu_environment();
+    zero_seed_sha.gpu_pipeline_cache_seed_sha256 = {};
+
+    auto not_applicable_policy = make_gpu_environment();
+    not_applicable_policy.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::not_applicable;
+
+    auto mixed_policy = make_gpu_environment();
+    mixed_policy.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::mixed_invalid;
+
+    auto immutable_unset_hit = make_gpu_environment();
+    immutable_unset_hit.gpu_pipeline_cache_hit =
+        OptionalProofBool::not_applicable;
+
+    auto immutable_mixed_hit = make_gpu_environment();
+    immutable_mixed_hit.gpu_pipeline_cache_hit =
+        OptionalProofBool::mixed_invalid;
+
+    auto isolated_unset_hit = make_gpu_environment();
+    isolated_unset_hit.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::isolated_miss_diagnostic;
+    isolated_unset_hit.gpu_pipeline_cache_hit =
+        OptionalProofBool::not_applicable;
+
+    auto isolated_mixed_hit = make_gpu_environment();
+    isolated_mixed_hit.gpu_pipeline_cache_policy =
+        PipelineCachePolicy::isolated_miss_diagnostic;
+    isolated_mixed_hit.gpu_pipeline_cache_hit =
+        OptionalProofBool::mixed_invalid;
+
+    struct InvalidEnvironmentCase {
+        std::string_view name;
+        ExecutionEnvironmentProof environment;
+    };
+    const auto invalid_environments = std::to_array<InvalidEnvironmentCase>({
+        {"immutable without seed bytes", immutable_without_seed},
+        {"immutable cache miss", immutable_miss},
+        {"isolated diagnostic cache hit", isolated_hit},
+        {"zero manifest checksum", zero_manifest},
+        {"zero device UUID", zero_uuid},
+        {"zero seed SHA", zero_seed_sha},
+        {"not-applicable policy", not_applicable_policy},
+        {"mixed policy", mixed_policy},
+        {"immutable unset hit", immutable_unset_hit},
+        {"immutable mixed hit", immutable_mixed_hit},
+        {"isolated unset hit", isolated_unset_hit},
+        {"isolated mixed hit", isolated_mixed_hit},
+    });
+    for (const auto& test : invalid_environments) {
+        CAPTURE(test.name);
+        REQUIRE_FALSE(environment_is_valid_for_backend(
+            test.environment, ExecutedBackend::vulkan_gpu));
+    }
+
+    REQUIRE(environment_is_valid_for_backend(
+        make_gpu_environment(), ExecutedBackend::vulkan_gpu));
 
     auto isolated_empty_seed = immutable_without_seed;
     isolated_empty_seed.gpu_pipeline_cache_policy =

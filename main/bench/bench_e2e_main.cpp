@@ -1505,7 +1505,7 @@ inline constexpr std::array<std::string_view,
 	"simd_execution_evidence",
 };
 
-[[nodiscard]] bool fixed_lower_hex(
+[[nodiscard]] constexpr bool fixed_lower_hex(
         std::string_view value,
         const std::size_t expected_size) noexcept {
     if (value.size() != expected_size) return false;
@@ -1516,6 +1516,195 @@ inline constexpr std::array<std::string_view,
     }
     return true;
 }
+
+[[nodiscard]] constexpr bool nonzero_fixed_lower_hex(
+        std::string_view value,
+        const std::size_t expected_size) noexcept {
+    return fixed_lower_hex(value, expected_size)
+        && value.find_first_not_of('0') != std::string_view::npos;
+}
+
+struct GpuCacheIdentityGateEvidence {
+    std::string_view device_uuid;
+    std::string_view driver;
+    std::string_view policy;
+    std::string_view seed_sha256;
+    std::int64_t seed_size = -1;
+    std::string_view manifest_checksum;
+    std::int64_t hit = -1;
+};
+
+[[nodiscard]] constexpr bool gpu_cache_identity_evidence_valid(
+        const GpuCacheIdentityGateEvidence& evidence) noexcept {
+    return nonzero_fixed_lower_hex(evidence.device_uuid, 32)
+        && !evidence.driver.empty()
+        && evidence.policy == "immutable_preseed_all_hit"
+        && nonzero_fixed_lower_hex(evidence.seed_sha256, 64)
+        && evidence.seed_size > 0
+        && nonzero_fixed_lower_hex(evidence.manifest_checksum, 16)
+        && evidence.hit == 1;
+}
+
+struct GpuCacheRuntimeGateEvidence {
+    std::int64_t declared_seed_size = -1;
+    std::int64_t loads = -1;
+    std::int64_t seed_bytes = -1;
+    std::int64_t load_ns = -1;
+    std::int64_t creation_ns = -1;
+    std::int64_t timestamp_failures = -1;
+    std::int64_t pipeline_creates = -1;
+    std::int64_t backend_declines = -1;
+    std::int64_t backend_fallbacks = -1;
+};
+
+[[nodiscard]] constexpr bool gpu_cache_runtime_evidence_valid(
+        const GpuCacheRuntimeGateEvidence& evidence) noexcept {
+    return evidence.declared_seed_size > 0
+        && evidence.loads == 1
+        && evidence.seed_bytes == evidence.declared_seed_size
+        && evidence.load_ns > 0
+        && evidence.creation_ns > 0
+        && evidence.timestamp_failures == 0
+        && evidence.pipeline_creates > 0
+        && evidence.backend_declines == 0
+        && evidence.backend_fallbacks == 0;
+}
+
+consteval bool gpu_cache_gate_contract_self_test() {
+    constexpr GpuCacheIdentityGateEvidence valid_identity{
+        .device_uuid = "11111111111111111111111111111111",
+        .driver = "vk",
+        .policy = "immutable_preseed_all_hit",
+        .seed_sha256 =
+            "11111111111111111111111111111111"
+            "11111111111111111111111111111111",
+        .seed_size = 64,
+        .manifest_checksum = "0000000000001234",
+        .hit = 1,
+    };
+    constexpr auto changed_identity = []<typename T>(
+            GpuCacheIdentityGateEvidence evidence,
+            T GpuCacheIdentityGateEvidence::* member,
+            T value) constexpr {
+        evidence.*member = value;
+        return evidence;
+    };
+    struct IdentityCase {
+        std::string_view name;
+        GpuCacheIdentityGateEvidence evidence;
+        bool expected;
+    };
+    constexpr auto identity_cases = std::to_array<IdentityCase>({
+        {"valid immutable hit", valid_identity, true},
+        {"isolated policy rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::policy,
+            std::string_view{"isolated_miss_diagnostic"}), false},
+        {"not-applicable policy rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::policy,
+            std::string_view{"not_applicable"}), false},
+        {"mixed policy rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::policy,
+            std::string_view{"mixed_invalid"}), false},
+        {"cache miss rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::hit, std::int64_t{0}), false},
+        {"unset hit rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::hit, std::int64_t{-1}), false},
+        {"mixed hit rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::hit, std::int64_t{2}), false},
+        {"zero UUID rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::device_uuid,
+            std::string_view{"00000000000000000000000000000000"}), false},
+        {"malformed UUID rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::device_uuid,
+            std::string_view{"A1111111111111111111111111111111"}), false},
+        {"empty driver rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::driver,
+            std::string_view{}), false},
+        {"zero SHA rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::seed_sha256,
+            std::string_view{
+                "00000000000000000000000000000000"
+                "00000000000000000000000000000000"}), false},
+        {"malformed SHA rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::seed_sha256,
+            std::string_view{"1"}), false},
+        {"zero seed size rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::seed_size,
+            std::int64_t{0}), false},
+        {"zero manifest rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::manifest_checksum,
+            std::string_view{"0000000000000000"}), false},
+        {"malformed manifest rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::manifest_checksum,
+            std::string_view{"000000000000123G"}), false},
+    });
+    for (const auto& test : identity_cases) {
+        (void)test.name;
+        if (gpu_cache_identity_evidence_valid(test.evidence)
+                != test.expected) {
+            return false;
+        }
+    }
+
+    constexpr GpuCacheRuntimeGateEvidence valid_runtime{
+        .declared_seed_size = 64,
+        .loads = 1,
+        .seed_bytes = 64,
+        .load_ns = 1,
+        .creation_ns = 1,
+        .timestamp_failures = 0,
+        .pipeline_creates = 1,
+        .backend_declines = 0,
+        .backend_fallbacks = 0,
+    };
+    constexpr auto changed_runtime = [](
+            GpuCacheRuntimeGateEvidence evidence,
+            std::int64_t GpuCacheRuntimeGateEvidence::* member,
+            const std::int64_t value) constexpr {
+        evidence.*member = value;
+        return evidence;
+    };
+    struct RuntimeCase {
+        std::string_view name;
+        GpuCacheRuntimeGateEvidence evidence;
+        bool expected;
+    };
+    constexpr auto runtime_cases = std::to_array<RuntimeCase>({
+        {"valid runtime proof", valid_runtime, true},
+        {"zero declared bytes rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::declared_seed_size, 0), false},
+        {"zero loads rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::loads, 0), false},
+        {"multiple loads rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::loads, 2), false},
+        {"zero seed bytes rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::seed_bytes, 0), false},
+        {"mismatched seed bytes rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::seed_bytes, 63), false},
+        {"zero load timing rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::load_ns, 0), false},
+        {"zero creation timing rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::creation_ns, 0), false},
+        {"timestamp failure rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::timestamp_failures, 1), false},
+        {"zero pipeline creates rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::pipeline_creates, 0), false},
+        {"backend decline rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::backend_declines, 1), false},
+        {"backend fallback rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::backend_fallbacks, 1), false},
+    });
+    for (const auto& test : runtime_cases) {
+        (void)test.name;
+        if (gpu_cache_runtime_evidence_valid(test.evidence)
+                != test.expected) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(gpu_cache_gate_contract_self_test());
 
 inline constexpr auto kColdIndexEvidenceKeys =
     std::to_array<std::string_view>({
@@ -2771,8 +2960,32 @@ inline void require_pipeline_execution_proof(
                 out.alignment_snapshot_numeric_columns.begin() + 103,
                 out.alignment_snapshot_numeric_columns.begin() + 139,
                 [](const std::int64_t value) noexcept { return value == 0; }));
+    const bool gpu_cache_identity_gate = !expect_gpu
+        || gpu_cache_identity_evidence_valid({
+            .device_uuid = out.gpu_device_uuid,
+            .driver = out.gpu_driver,
+            .policy = out.gpu_pipeline_cache_policy,
+            .seed_sha256 = out.gpu_pipeline_cache_seed_sha256,
+            .seed_size = out.gpu_pipeline_cache_seed_size,
+            .manifest_checksum = out.gpu_pipeline_cache_manifest_checksum,
+            .hit = out.gpu_pipeline_cache_hit,
+        });
+    const bool gpu_cache_runtime_gate = !expect_gpu
+        || gpu_cache_runtime_evidence_valid({
+            .declared_seed_size = out.gpu_pipeline_cache_seed_size,
+            .loads = counter(124),
+            .seed_bytes = counter(125),
+            .load_ns = counter(126),
+            .creation_ns = counter(127),
+            .timestamp_failures = counter(133),
+            .pipeline_creates = counter(138),
+            .backend_declines = out.backend_declines,
+            .backend_fallbacks = out.backend_fallbacks,
+        });
     const bool gpu_operational_gate = !expect_gpu
         || (no_simd_policy_evidence
+            && gpu_cache_identity_gate
+            && gpu_cache_runtime_gate
             && counter(82) == 0
             && counter(84) == 0
             && counter(85) == 0
@@ -2788,11 +3001,7 @@ inline void require_pipeline_execution_proof(
                 out.alignment_snapshot_numeric_columns.begin() + 94,
                 out.alignment_snapshot_numeric_columns.begin() + 103,
                 [](const std::int64_t value) noexcept { return value == 0; })
-            && counter(112) == 0
-            && counter(124) == 1
-            && counter(125) == out.gpu_pipeline_cache_seed_size
-            && out.gpu_pipeline_cache_hit == 1
-            && counter(133) == 0);
+            && counter(112) == 0);
     const bool cold_restart_gate = !expect_persisted
         || (out.just_index_restart_performed == 1
             && out.cold_restart_identity_changed == 1
@@ -2930,6 +3139,7 @@ inline void require_pipeline_execution_proof(
         "persisted_read=%d format5_reader_memory=%d cpu_prepared=%d "
         "gpu_residency=%d "
         "simd_operational=%d scalar_operational=%d gpu_operational=%d "
+        "gpu_cache_identity=%d gpu_cache_runtime=%d "
         "cold_restart=%d cold_no_index=%d persisted_policy=%d "
         "backend_specific=%d manifest_size=%d cold_payload_equations=%d "
         "one_cold_route=%d selective_read=%d full_read=%d "
@@ -2947,6 +3157,8 @@ inline void require_pipeline_execution_proof(
         static_cast<int>(simd_operational_gate),
         static_cast<int>(scalar_operational_gate),
         static_cast<int>(gpu_operational_gate),
+        static_cast<int>(gpu_cache_identity_gate),
+        static_cast<int>(gpu_cache_runtime_gate),
         static_cast<int>(cold_restart_gate),
         static_cast<int>(cold_no_index_gate),
         static_cast<int>(persisted_policy_gate),
@@ -2958,6 +3170,33 @@ inline void require_pipeline_execution_proof(
         static_cast<int>(full_read_gate),
         out.cpu_prepared_key_set_checksum.c_str(),
         out.cpu_prepared_build_set_checksum.c_str());
+    if (expect_gpu) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] PIPELINE-PROOF-FAIL-GPU-CACHE "
+            "identity=%d runtime=%d uuid=%s driver=%s policy=%s "
+            "seed_sha256=%s seed_size=%lld manifest=%s hit=%lld "
+            "loads=%lld seed_bytes=%lld load_ns=%lld creation_ns=%lld "
+            "timestamp_failures=%lld pipeline_creates=%lld "
+            "declines=%lld fallbacks=%lld\n",
+            static_cast<int>(gpu_cache_identity_gate),
+            static_cast<int>(gpu_cache_runtime_gate),
+            out.gpu_device_uuid.c_str(),
+            out.gpu_driver.c_str(),
+            out.gpu_pipeline_cache_policy.c_str(),
+            out.gpu_pipeline_cache_seed_sha256.c_str(),
+            static_cast<long long>(out.gpu_pipeline_cache_seed_size),
+            out.gpu_pipeline_cache_manifest_checksum.c_str(),
+            static_cast<long long>(out.gpu_pipeline_cache_hit),
+            static_cast<long long>(counter(124)),
+            static_cast<long long>(counter(125)),
+            static_cast<long long>(counter(126)),
+            static_cast<long long>(counter(127)),
+            static_cast<long long>(counter(133)),
+            static_cast<long long>(counter(138)),
+            static_cast<long long>(out.backend_declines),
+            static_cast<long long>(out.backend_fallbacks));
+    }
     if (expect_persisted) {
         std::fprintf(
             stderr,

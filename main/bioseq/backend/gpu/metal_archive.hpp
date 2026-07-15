@@ -7,7 +7,9 @@
 namespace bioseq::gpu::metal_archive {
 
 // Create a Metal binary archive (.metalar) for the compute shader in metallib_path.
-// The archive is written atomically to archive_path.
+// The qualified archive is written to archive_path. Production callers pass a
+// private temporary path and publish it with an fsync+rename only after the
+// exact success sentinel is observed.
 // Runs purely in the calling process; caller must be an exec-clean child (no inherited
 // Metal/dispatch/XPC state) to avoid MTLCompilerService XPC invalidation (DOC0344).
 // Returns a line-per-step status transcript; "RESULT: ok" is the success sentinel.

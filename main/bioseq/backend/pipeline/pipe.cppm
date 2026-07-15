@@ -1356,22 +1356,25 @@ merge_simd_alignment_algorithm_identity(
             && environment.gpu_pipeline_cache_hit == OptionalProofBool::not_applicable;
     }
     if (backend != ExecutedBackend::vulkan_gpu) return false;
-    const bool explicit_policy =
-        environment.gpu_pipeline_cache_policy == PipelineCachePolicy::immutable_preseed_all_hit
-        || environment.gpu_pipeline_cache_policy == PipelineCachePolicy::isolated_miss_diagnostic;
-    const bool seed_size_valid =
-        environment.gpu_pipeline_cache_policy == PipelineCachePolicy::isolated_miss_diagnostic
-        || environment.gpu_pipeline_cache_seed_size > 0;
-    const bool explicit_hit =
-        environment.gpu_pipeline_cache_hit == OptionalProofBool::false_value
-        || environment.gpu_pipeline_cache_hit == OptionalProofBool::true_value;
-    return environment.gpu_environment_present
+    const bool common_gpu_identity_valid =
+        environment.gpu_environment_present
         && !all_zero(environment.gpu_device_uuid)
         && canonical_nonempty_driver_identity(environment.gpu_driver_identity)
-        && explicit_policy
-        && seed_size_valid
         && !all_zero(environment.gpu_pipeline_cache_seed_sha256)
-        && explicit_hit;
+        && environment.gpu_pipeline_cache_manifest_checksum != 0;
+    if (!common_gpu_identity_valid) return false;
+    if (environment.gpu_pipeline_cache_policy
+            == PipelineCachePolicy::immutable_preseed_all_hit) {
+        return environment.gpu_pipeline_cache_seed_size > 0
+            && environment.gpu_pipeline_cache_hit
+                == OptionalProofBool::true_value;
+    }
+    if (environment.gpu_pipeline_cache_policy
+            == PipelineCachePolicy::isolated_miss_diagnostic) {
+        return environment.gpu_pipeline_cache_hit
+            == OptionalProofBool::false_value;
+    }
+    return false;
 }
 
 /// Return the sole permitted engine for a stage/mode. ExecutionEngine::count

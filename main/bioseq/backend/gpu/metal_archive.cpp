@@ -3,10 +3,13 @@
 #include <dispatch/dispatch.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <fstream>
+#include <iomanip>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -123,6 +126,38 @@ struct ObjcRuntime {
     return result;
 }
 
+struct NSErrorFingerprint {
+    std::string domain;
+    std::int64_t code = 0;
+};
+
+[[nodiscard]] std::optional<NSErrorFingerprint> ns_error_fingerprint(
+    ObjcRuntime& objc,
+    Obj ns_error)
+{
+    if (ns_error == nullptr) return std::nullopt;
+    auto get_obj = objc.msg<Obj (*)(Obj, Sel)>();
+    auto get_code = objc.msg<long (*)(Obj, Sel)>();
+    const std::string domain = ns_string_utf8(
+        objc, get_obj(ns_error, objc.sel("domain")));
+    if (domain.empty()) return std::nullopt;
+    return NSErrorFingerprint{
+        .domain = domain,
+        .code = static_cast<std::int64_t>(
+            get_code(ns_error, objc.sel("code"))),
+    };
+}
+
+[[nodiscard]] std::string hex_encode(std::string_view bytes)
+{
+    std::ostringstream encoded;
+    encoded << std::hex << std::setfill('0');
+    for (const unsigned char byte : bytes) {
+        encoded << std::setw(2) << static_cast<unsigned>(byte);
+    }
+    return encoded.str();
+}
+
 [[nodiscard]] Obj make_ns_string(ObjcRuntime& objc, std::string_view value) {
     Class ns_string = objc.cls("NSString");
     if (ns_string == nullptr) {
@@ -167,6 +202,45 @@ struct ObjcRuntime {
         return nullptr;
     }
     out << "newBinaryArchiveWithDescriptor: ok\n";
+    return archive;
+}
+
+// Reopen the bytes that will be published.  Qualification must exercise the
+// serialized file, not the still-live archive object that populated it.
+[[nodiscard]] Obj reopen_archive(
+    ObjcRuntime& objc,
+    Obj device,
+    std::string_view archive_path,
+    std::ostringstream& out)
+{
+    Class desc_cls = objc.cls("MTLBinaryArchiveDescriptor");
+    if (desc_cls == nullptr) {
+        out << "archive reopen descriptor: class missing\n";
+        return nullptr;
+    }
+    auto msg_new = objc.msg<Obj (*)(Class, Sel)>();
+    Obj desc = msg_new(desc_cls, objc.sel("new"));
+    Obj url = make_file_url(objc, archive_path);
+    if (desc == nullptr || url == nullptr) {
+        out << "archive reopen descriptor: allocation/URL failed path="
+            << archive_path << '\n';
+        return nullptr;
+    }
+    auto set_obj = objc.msg<void (*)(Obj, Sel, Obj)>();
+    // MTLBinaryArchiveDescriptor declares the property as `url` (not `URL`),
+    // so the Objective-C setter selector is exactly `setUrl:`.
+    set_obj(desc, objc.sel("setUrl:"), url);
+
+    Obj err = nullptr;
+    auto new_archive = objc.msg<Obj (*)(Obj, Sel, Obj, Obj*)>();
+    Obj archive = new_archive(
+        device, objc.sel("newBinaryArchiveWithDescriptor:error:"), desc, &err);
+    if (archive == nullptr) {
+        out << "archive reopen: failed path=" << archive_path
+            << " error=" << ns_error_description(objc, err) << '\n';
+        return nullptr;
+    }
+    out << "archive reopen: ok path=" << archive_path << '\n';
     return archive;
 }
 
@@ -309,8 +383,17 @@ struct ObjcRuntime {
     return true;
 }
 
-[[nodiscard]] bool create_compute_pipeline(ObjcRuntime& objc, Obj device, Obj desc,
-                                           std::ostringstream& out) {
+[[nodiscard]] bool require_compute_pipeline_archive_hit(
+    ObjcRuntime& objc,
+    Obj device,
+    Obj desc,
+    std::string_view label,
+    bool expect_hit,
+    std::ostringstream& out)
+{
+    // MTLPipelineOptionFailOnBinaryArchiveMiss.  Keep the numeric ABI here so
+    // this exec-clean helper remains independent of Objective-C Metal headers.
+    constexpr unsigned long fail_on_binary_archive_miss = 1UL << 2u;
     Obj err = nullptr;
     Obj reflection = nullptr;
     auto new_pipeline = objc.msg<Obj (*)(Obj, Sel, Obj, unsigned long, Obj*, Obj*)>();
@@ -318,15 +401,34 @@ struct ObjcRuntime {
         device,
         objc.sel("newComputePipelineStateWithDescriptor:options:reflection:error:"),
         desc,
-        0UL,
+        fail_on_binary_archive_miss,
         &reflection,
         &err);
-    if (pipeline == nullptr) {
-        out << "newComputePipelineStateWithDescriptor: failed error="
+    if (expect_hit && pipeline == nullptr) {
+        out << label << ": failed (archive miss) error="
             << ns_error_description(objc, err) << '\n';
         return false;
     }
-    out << "newComputePipelineStateWithDescriptor: ok\n";
+    if (!expect_hit && pipeline != nullptr) {
+        out << label
+            << ": failed (empty archive unexpectedly satisfied descriptor)\n";
+        return false;
+    }
+    if (expect_hit) {
+        out << label << ": ok (FailOnBinaryArchiveMiss hit)\n";
+    } else {
+        const auto fingerprint = ns_error_fingerprint(objc, err);
+        if (!fingerprint) {
+            out << label
+                << ": failed (empty-archive rejection has no NSError domain/code)\n";
+            return false;
+        }
+        out << label << ": ok (FailOnBinaryArchiveMiss rejected empty archive)"
+            << " error=" << ns_error_description(objc, err) << '\n';
+        out << "NEGATIVE_CONTROL_NSError domain_hex="
+            << hex_encode(fingerprint->domain)
+            << " code=" << fingerprint->code << '\n';
+    }
     return true;
 }
 
@@ -385,7 +487,48 @@ std::string build_binary_archive(
     if (!archive_serialize(objc, archive, archive_path, out)) {
         return out.str();
     }
-    if (!create_compute_pipeline(objc, device, desc, out)) {
+    Obj reopened_archive = reopen_archive(objc, device, archive_path, out);
+    if (reopened_archive == nullptr) {
+        return out.str();
+    }
+
+    Obj qualified_desc = make_pipeline_descriptor(
+        objc,
+        function,
+        reopened_archive,
+        max_total_threads_per_threadgroup,
+        threadgroup_size_is_multiple_of_thread_execution_width,
+        out);
+    if (qualified_desc == nullptr
+        || !require_compute_pipeline_archive_hit(
+            objc,
+            device,
+            qualified_desc,
+            "qualified archive positive control",
+            true,
+            out)) {
+        return out.str();
+    }
+
+    Obj empty_control_archive = make_empty_archive(objc, device, out);
+    if (empty_control_archive == nullptr) {
+        return out.str();
+    }
+    Obj empty_control_desc = make_pipeline_descriptor(
+        objc,
+        function,
+        empty_control_archive,
+        max_total_threads_per_threadgroup,
+        threadgroup_size_is_multiple_of_thread_execution_width,
+        out);
+    if (empty_control_desc == nullptr
+        || !require_compute_pipeline_archive_hit(
+            objc,
+            device,
+            empty_control_desc,
+            "same-descriptor empty-archive negative control",
+            false,
+            out)) {
         return out.str();
     }
     out << "RESULT: ok\n";
