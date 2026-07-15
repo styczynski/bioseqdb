@@ -1153,6 +1153,7 @@ TEST_CASE("resource estimator is evaluated once per selected group and its exact
     std::atomic<std::size_t> estimator_calls{0};
     std::atomic<std::size_t> input_calls{0};
     std::atomic<std::size_t> mismatched_constraints{0};
+    std::atomic<std::size_t> mismatched_execution_tuples{0};
     std::array<std::atomic<std::size_t>, selected_group_count>
         input_seen_for_estimate{};
 
@@ -1179,12 +1180,23 @@ TEST_CASE("resource estimator is evaluated once per selected group and its exact
     InputFn input = [
             &input_calls,
             &mismatched_constraints,
+            &mismatched_execution_tuples,
             &input_seen_for_estimate
         ](std::string_view data_dir,
           std::string_view test_case_name,
           simdjson::dom::element data,
           const RunConstraints& constraints) {
         input_calls.fetch_add(1, std::memory_order_relaxed);
+        const bool tuple_shape_matches =
+            constraints.execution_tuples.size() == 2
+            && constraints.execution_tuples[0].algorithm_name == "algo_a"
+            && constraints.execution_tuples[1].algorithm_name == "algo_b"
+            && constraints.execution_tuples[0].params.at("unused") == 0
+            && constraints.execution_tuples[1].params.at("unused") == 0;
+        if (!tuple_shape_matches) {
+            mismatched_execution_tuples.fetch_add(
+                1, std::memory_order_relaxed);
+        }
         if (constraints.base_memory < base_first
             || (constraints.base_memory - base_first) % base_stride != 0) {
             mismatched_constraints.fetch_add(1, std::memory_order_relaxed);
@@ -1237,6 +1249,7 @@ TEST_CASE("resource estimator is evaluated once per selected group and its exact
     REQUIRE(input_calls.load(std::memory_order_relaxed)
             == selected_group_count);
     REQUIRE(mismatched_constraints.load(std::memory_order_relaxed) == 0);
+    REQUIRE(mismatched_execution_tuples.load(std::memory_order_relaxed) == 0);
     for (const auto& seen : input_seen_for_estimate) {
         REQUIRE(seen.load(std::memory_order_relaxed) == 1);
     }
@@ -3748,7 +3761,7 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
                           .at("matrix").at("for").contains("XXL_HIFI"));
 }
 
-TEST_CASE("default and signoff E2E matrices are exact eight-cell cold MPF comparisons",
+TEST_CASE("default and signoff E2E matrices are exact six-cell cold MPF comparisons",
           "[bench_framework][e2e][configuration][signoff]") {
     const auto source_path = std::filesystem::path{__FILE__};
     auto config_path = source_path.parent_path().parent_path()
@@ -3770,8 +3783,6 @@ TEST_CASE("default and signoff E2E matrices are exact eight-cell cold MPF compar
         "E2E_4GBP_DNA5",
     };
     const std::set<std::string> expected_algorithms{
-        "bioseq_ksw2_scalar_dp_scalar_mm_no_index",
-        "bioseq_ksw2_scalar_dp_scalar_mm_just_index",
         "bioseq_block_simd_dp_two_stack_nthash_no_index",
         "bioseq_block_simd_dp_two_stack_nthash_just_index",
         "bioseq_block_gpu_dp_gpu_seed_no_index",
@@ -3779,9 +3790,7 @@ TEST_CASE("default and signoff E2E matrices are exact eight-cell cold MPF compar
         "minimap2_no_index",
         "minimap2_just_index",
     };
-    static constexpr std::array<std::string_view, 6> bioseq_algorithms{
-        "bioseq_ksw2_scalar_dp_scalar_mm_no_index",
-        "bioseq_ksw2_scalar_dp_scalar_mm_just_index",
+    static constexpr std::array<std::string_view, 4> bioseq_algorithms{
         "bioseq_block_simd_dp_two_stack_nthash_no_index",
         "bioseq_block_simd_dp_two_stack_nthash_just_index",
         "bioseq_block_gpu_dp_gpu_seed_no_index",
@@ -3823,6 +3832,8 @@ TEST_CASE("default and signoff E2E matrices are exact eight-cell cold MPF compar
         REQUIRE(block.at("tags") == expected_tags);
 
         const auto& matrix = block.at("matrix");
+        REQUIRE(matrix.at("metrics").contains(
+            "persisted_policy_audit_accepted"));
         REQUIRE(matrix.at("for").size() == expected_cases.size());
         std::set<std::string> configured_cases;
         for (const auto& [test_case, count] : matrix.at("for").items()) {

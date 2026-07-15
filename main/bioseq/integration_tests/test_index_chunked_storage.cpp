@@ -218,7 +218,7 @@ TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
         "UPDATE bioseq_internal.{0} SET blob=set_byte(blob,0,"
         "get_byte(blob,0) # 1) WHERE ctid=(SELECT ctid FROM "
         "bioseq_internal.{0} WHERE generation_id={1} "
-        "AND position_segment>=0 ORDER BY position_segment,sub_key,chunk_no "
+        "AND position_segment>=0 ORDER BY sub_key,position_segment,chunk_no "
         "LIMIT 1);",
         built[0].value(), built[2].value()));
     connection_test_context reader;

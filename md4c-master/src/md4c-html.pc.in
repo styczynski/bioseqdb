@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=@PKGCONFIG_LIBDIR@
+includedir=@PKGCONFIG_INCLUDEDIR@
+
+Name: @PROJECT_NAME@ HTML renderer
+Description: Markdown to HTML converter library.
+Version: @PROJECT_VERSION@
+URL: @PROJECT_HOMEPAGE_URL@
+Requires: md4c = @PROJECT_VERSION@
+Libs: -L${libdir} -lmd4c-html
+Cflags: -I${includedir}

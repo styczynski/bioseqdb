@@ -897,9 +897,10 @@ public:
 };
 }  // namespace mps_evidence_detail
 
-/// Operation-owned proof for one inactive format-4 MPS generation.  Native
-/// collection is performed exactly once into PostgreSQL-owned spill runs;
-/// planning and emission then replay those same runs.  The two phases therefore
+/// Operation-owned proof for one persisted MPS generation. Native collection
+/// is performed exactly once into PostgreSQL-owned spill runs; planning and
+/// emission then replay those same runs. Format-5 performs one planning replay
+/// plus separate control and position emission replays. The phases therefore
 /// have deliberately separate route and replay evidence.
 class MpsGenerationExecutionEvidence {
 public:
@@ -931,6 +932,8 @@ public:
     PackedPaperNthashIndexExecutionProof packed_paper_proof{};
     bool packed_paper_proof_present = false;
     bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof vulkan_proof{};
+    MinimizerGenerationWireFormat generation_wire_format =
+        MinimizerGenerationWireFormat::invalid;
     std::uint64_t replay_scan_count = 0;
     std::uint64_t replay_merge_pass_count = 0;
     std::uint64_t replay_reroute_pass_count = 0;
@@ -952,6 +955,19 @@ public:
     bool backend_bound = false;
     bool manifest_bound = false;
     bool saturated = false;
+
+    [[nodiscard]] std::uint64_t
+    required_successful_replay_count() const noexcept {
+        if (generation_wire_format
+                == MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
+            return 3u;
+        }
+        return generation_wire_format == MinimizerGenerationWireFormat::invalid
+                || is_supported_minimizer_generation_wire_format(
+                    generation_wire_format)
+            ? 2u : 0u;
+    }
 
     static void add(
             std::uint64_t& destination,
@@ -1043,20 +1059,25 @@ public:
     }
 
     [[nodiscard]] bool accepted() const noexcept {
+        const std::uint64_t required_replays =
+            required_successful_replay_count();
         if (!spill_accepted() || !replay_snapshot_matches_()
             || !manifest_bound
             || !manifest_authority_bound_
             || !publication_binding_present_
             || !publication_binding_.valid()
+            || generation_wire_format
+                != publication_binding_.wire_format
+            || required_replays == 0u
             || manifest_position_count != spilled_event_count
             || replay_illegal_span_transition_count != 0) {
             return false;
         }
         if (target_length == 0) {
-            return replay_scan_count == 2
+            return replay_scan_count == required_replays
                 && replay_merge_pass_count == 0
                 && replay_reroute_pass_count == 0
-                && replay_completed_scan_count == 2
+                && replay_completed_scan_count == required_replays
                 && replay_failed_scan_count == 0
                 && replay_binding_checked_failed_scan_count == 0
                 && replay_first_completed_event_count == 0
@@ -1070,10 +1091,12 @@ public:
                 && manifest_position_segment_span_bp == 0;
         }
         return replay_reroute_pass_count
-                    <= (std::numeric_limits<std::uint64_t>::max)() - 2u
-            && replay_scan_count == replay_reroute_pass_count + 2u
+                    <= (std::numeric_limits<std::uint64_t>::max)()
+                        - required_replays
+            && replay_scan_count
+                == replay_reroute_pass_count + required_replays
             && replay_merge_pass_count == replay_scan_count
-            && replay_completed_scan_count == 2
+            && replay_completed_scan_count == required_replays
             && replay_failed_scan_count == replay_reroute_pass_count
             && replay_binding_checked_failed_scan_count
                 == replay_failed_scan_count
@@ -1168,6 +1191,8 @@ private:
     bool route_snapshot_present_ = false;
 
     struct ReplaySnapshot {
+        MinimizerGenerationWireFormat generation_wire_format =
+            MinimizerGenerationWireFormat::invalid;
         std::uint64_t replay_scan_count = 0;
         std::uint64_t replay_merge_pass_count = 0;
         std::uint64_t replay_reroute_pass_count = 0;
@@ -1278,6 +1303,7 @@ private:
 
     void capture_replay_snapshot_() noexcept {
         replay_snapshot_ = ReplaySnapshot{
+            .generation_wire_format = generation_wire_format,
             .replay_scan_count = replay_scan_count,
             .replay_merge_pass_count = replay_merge_pass_count,
             .replay_reroute_pass_count = replay_reroute_pass_count,
@@ -1313,6 +1339,7 @@ private:
     [[nodiscard]] bool replay_snapshot_matches_() const noexcept {
         const ReplaySnapshot& value = replay_snapshot_;
         return replay_snapshot_present_
+            && generation_wire_format == value.generation_wire_format
             && replay_scan_count == value.replay_scan_count
             && replay_merge_pass_count == value.replay_merge_pass_count
             && replay_reroute_pass_count == value.replay_reroute_pass_count
@@ -1483,6 +1510,8 @@ private:
     MinimizerSchemeIdentity minimizer_scheme_{};
     std::uint64_t target_length_ = 0;
     std::uint64_t qualified_span_ = 0;
+    MinimizerGenerationWireFormat generation_wire_format_ =
+        MinimizerGenerationWireFormat::invalid;
     std::uint64_t scan_count_ = 0;
     std::uint64_t merge_pass_count_ = 0;
     std::uint64_t reroute_pass_count_ = 0;
@@ -1512,6 +1541,20 @@ private:
             std::uint64_t increment = 1u) noexcept {
         MpsGenerationExecutionEvidence::add(
             destination, increment, saturated_);
+    }
+
+    [[nodiscard]] std::uint64_t
+    required_successful_replay_count_() const noexcept {
+        if (generation_wire_format_
+                == MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
+            return 3u;
+        }
+        return generation_wire_format_
+                    == MinimizerGenerationWireFormat::invalid
+                || is_supported_minimizer_generation_wire_format(
+                    generation_wire_format_)
+            ? 2u : 0u;
     }
 
     void record_completed_scan_(
@@ -1574,6 +1617,20 @@ public:
     MpsExternalSpillGenerationReplayProducer& operator=(
         MpsExternalSpillGenerationReplayProducer&&) = delete;
 
+    void bind_generation_wire_format(
+            MinimizerGenerationWireFormat wire_format) noexcept {
+        if (!is_supported_minimizer_generation_wire_format(wire_format)
+            || scan_count_ != 0u
+            || (generation_wire_format_
+                    != MinimizerGenerationWireFormat::invalid
+                && generation_wire_format_ != wire_format)) {
+            saturated_ = true;
+            terminal_ = true;
+            return;
+        }
+        generation_wire_format_ = wire_format;
+    }
+
     [[nodiscard]] MinimizerSchemeIdentity
     minimizer_scheme_identity() const noexcept {
         return minimizer_scheme_;
@@ -1635,7 +1692,8 @@ public:
                 return fail_scan_(MinimizerGenerationWireError::replay_mismatch);
             }
             record_completed_scan_(0, empty_digest, persisted_span);
-            if (completed_scan_count_ == 2u) {
+            if (completed_scan_count_
+                    == required_successful_replay_count_()) {
                 terminal_ = true;
             }
             return {};
@@ -1796,7 +1854,8 @@ public:
             return fail_scan_(*receiver_error);
         }
         record_completed_scan_(scan_event_count, content_digest, persisted_span);
-        if (completed_scan_count_ == 2u) {
+        if (completed_scan_count_
+                == required_successful_replay_count_()) {
             terminal_ = true;
         }
         return {};
@@ -1830,6 +1889,7 @@ public:
     [[nodiscard]] MpsGenerationExecutionEvidence
     execution_evidence() const noexcept {
         MpsGenerationExecutionEvidence evidence = spill_evidence_;
+        evidence.generation_wire_format = generation_wire_format_;
         evidence.replay_scan_count = scan_count_;
         evidence.replay_merge_pass_count = merge_pass_count_;
         evidence.replay_reroute_pass_count = reroute_pass_count_;
@@ -1900,6 +1960,11 @@ public:
         MpsUnboundExternalSpillReplayProducer&&) = delete;
     MpsUnboundExternalSpillReplayProducer& operator=(
         MpsUnboundExternalSpillReplayProducer&&) = delete;
+
+    void bind_generation_wire_format(
+            MinimizerGenerationWireFormat wire_format) noexcept {
+        producer_.bind_generation_wire_format(wire_format);
+    }
 
     [[nodiscard]] MinimizerSchemeIdentity
     minimizer_scheme_identity() const noexcept {
@@ -2708,8 +2773,9 @@ struct MinimizerSequenceMergedIndex {
             evidence.spill_storage_binding};
     }
 
-    /// Concrete external-spill construction seam. The current revision-2
-    /// writer/reader remains live and fail-closed for ordinal 2.
+    /// Concrete external-spill construction seam. Both the frozen Format-4
+    /// layout and the canonical Format-5 shape layout consume the same sealed
+    /// MPS spill. Other wire formats are not an implicit compatibility route.
     template <MinimizerGenerationRowSink Sink>
     [[nodiscard]] static std::expected<
         EncodedMinimizerGeneration,
@@ -2724,8 +2790,12 @@ struct MinimizerSequenceMergedIndex {
         if (execution_evidence_out != nullptr) {
             *execution_evidence_out = {};
         }
-        if (options.wire_format != MinimizerGenerationWireFormat::
+        const bool supported_mps_wire_format =
+            options.wire_format == MinimizerGenerationWireFormat::
                 grouped_hash32_segment_local32
+            || options.wire_format == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local;
+        if (!supported_mps_wire_format
             || options.window_size != 10 || options.kmer_size != 15
             || spill.position_segment_span_bp_
                 != kMinimizerPreferredSegmentSpanBp
@@ -2752,9 +2822,9 @@ struct MinimizerSequenceMergedIndex {
             evidence.manifest_position_segment_span_bp =
                 encoded->manifest.position_segment_span_bp;
             evidence.manifest_bound =
-                encoded->manifest.wire_format
-                    == MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32
+                encoded->manifest.wire_format == options.wire_format
+                && encoded->manifest.wire_format
+                    == evidence.generation_wire_format
                 && encoded->manifest.target_length == evidence.target_length
                 && encoded->manifest.position_count
                     == evidence.spilled_event_count

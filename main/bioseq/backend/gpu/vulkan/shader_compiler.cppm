@@ -102,6 +102,11 @@ enum class ShaderKind : std::uint8_t {
     phase_c_grouped32_stream_authorize,
     phase_c_grouped32_stream_position,
     phase_c_grouped32_stream_seal,
+    // Direct persisted Format-5/ABI3 seed lookup.  These kernels consume the
+    // variable-width SoA control and segment-local position byte streams; no
+    // host-side control decode or target-index rebuild is part of this path.
+    phase_c_shape_v5_seed_count,
+    phase_c_shape_v5_seed_emit,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -134,6 +139,10 @@ enum class DescriptorLayoutKind : std::uint8_t {
     // Nine-buffer raw format-4 streaming layout.  It deliberately has no
     // aggregate control+position resident-set binding.
     phase_c_grouped32_stream,
+    // Nine-buffer direct Format-5 seed layout: query minimizer words,
+    // resident partition descriptors, raw control words, raw position words,
+    // query records, counts, prefix, anchors, and anchor keys.
+    phase_c_shape_v5_seed,
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -160,6 +169,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::phase_c_grouped32_abi2: return 13;
         case DescriptorLayoutKind::phase_c_grouped32_adapter_abi2: return 9;
         case DescriptorLayoutKind::phase_c_grouped32_stream: return 9;
+        case DescriptorLayoutKind::phase_c_shape_v5_seed: return 9;
     }
     return 0;
 }
@@ -200,6 +210,9 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_grouped32_stream_position:
         case ShaderKind::phase_c_grouped32_stream_seal:
             return DescriptorLayoutKind::phase_c_grouped32_stream;
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            return DescriptorLayoutKind::phase_c_shape_v5_seed;
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return DescriptorLayoutKind::phase_c_sort;
@@ -267,6 +280,9 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_grouped32_stream_position:
         case ShaderKind::phase_c_grouped32_stream_seal:
             return 80;  // GpuGrouped32StreamPush
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            return 72;  // GpuShapeV5SeedPush
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return 20;  // SortPushC (5 × u32)
@@ -1474,6 +1490,573 @@ void main() {
             anchors[dst + j].is_reverse = rev;
             anchors[dst + j].span_flags_segment = span_flags_segment;
             anchor_keys[dst + j] = anchor_sort_key(rev, ref_position);
+        }
+    }
+}
+)GLSL";
+
+/// Direct persisted Format-5/ABI3 seed count/emit.  One workgroup owns one
+/// query record and its lanes stride over query minimizers.  Each minimizer is
+/// matched against the selected resident partition descriptors, binary-searches
+/// the raw variable-width SoA hash arrays, and sums occurrences across every
+/// position segment before applying `max_occ`.  Emit rereads the authenticated
+/// prefix ranges and variable-width segment-local positions directly; it never
+/// constructs a CPU-decoded slot table or a widened/globalized position array.
+constexpr std::string_view kPhaseCShapeV5SeedBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+const uint SHAPE_V5_ABI_VERSION = 3u;
+const uint SHAPE_V5_REQUIRED_FLAGS = 7u;
+const uint SHAPE_V5_STATUS_CONTRACT = 1u;
+const uint SHAPE_V5_STATUS_QUERY = 2u;
+const uint SHAPE_V5_STATUS_CONTROL = 4u;
+const uint SHAPE_V5_STATUS_POSITION = 8u;
+const uint SHAPE_V5_STATUS_EMISSION = 16u;
+
+struct ShapeV5Partition {
+    uint partition_id;
+    uint directory_ordinal;
+    uint position_segment;
+    uint flags;
+    uint64_t hash_byte_offset;
+    uint64_t prefix_byte_offset;
+    uint64_t count_byte_offset;
+    uint64_t position_byte_offset;
+    uint control_count;
+    uint position_count;
+    uint hash_width;
+    uint offset_width;
+    uint count_width;
+    uint position_width;
+    uint64_t low_hash;
+    uint64_t high_hash;
+    uint64_t segment_base_bp;
+    uint64_t segment_end_bp;
+};
+struct ShapeV5QueryRecord {
+    uint minimizer_offset;
+    uint minimizer_count;
+    uint query_len;
+    uint flags;
+};
+struct AnchorWire {
+    uint64_t ref_position;
+    uint64_t query_position;
+    uint is_reverse;
+    uint span_flags_segment;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer MinWords {
+    uint min_words[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer Partitions {
+    ShapeV5Partition partitions[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer RawControls {
+    uint control_words[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer RawPositions {
+    uint position_words[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer QueryRecords {
+    ShapeV5QueryRecord query_records[];
+};
+layout(std430, set = 0, binding = 5) buffer Counts {
+    uint counts[];
+};
+layout(std430, set = 0, binding = 6) readonly buffer PrefixCounts {
+    uint prefix[];
+};
+layout(std430, set = 0, binding = 7) buffer Anchors {
+    AnchorWire anchors[];
+};
+layout(std430, set = 0, binding = 8) buffer AnchorKeys {
+    uint64_t anchor_keys[];
+};
+
+layout(push_constant) uniform Params {
+    uint abi_version;
+    uint words32_per_minimizer;
+    uint word_kind;
+    uint hash_shift;
+    uint pos_bits;
+    uint kmer_size;
+    uint partition_count;
+    uint max_occ;
+    uint emit_mode;
+    uint record_count;
+    uint target_ref_bits;
+    uint query_minimizer_count;
+    uint control_word_count;
+    uint position_word_count;
+    uint anchor_capacity;
+    uint max_occ_cap_lo;
+    uint max_occ_cap_hi;
+    uint status_index;
+} pc;
+
+void shape_signal_status(uint status_bit) {
+    if (pc.status_index < uint(counts.length())) {
+        atomicOr(counts[pc.status_index], status_bit);
+    }
+}
+
+bool shape_width_valid(uint width) {
+    return width == 2u || width == 4u || width == 8u;
+}
+
+bool shape_aligned(uint64_t byte_offset, uint width) {
+    return shape_width_valid(width)
+        && (byte_offset & uint64_t(width - 1u)) == uint64_t(0);
+}
+
+bool shape_byte_range_valid(
+    uint64_t byte_offset,
+    uint width,
+    uint word_count)
+{
+    if (!shape_aligned(byte_offset, width)) return false;
+    uint64_t byte_limit = uint64_t(word_count) * uint64_t(4u);
+    return byte_offset <= byte_limit
+        && uint64_t(width) <= byte_limit - byte_offset;
+}
+
+bool shape_scalar_address(
+    uint64_t base,
+    uint index,
+    uint width,
+    out uint64_t byte_offset)
+{
+    uint64_t relative = uint64_t(index) * uint64_t(width);
+    byte_offset = base + relative;
+    return byte_offset >= base;
+}
+
+bool shape_read_control_scalar(
+    uint64_t byte_offset,
+    uint width,
+    out uint64_t value)
+{
+    value = uint64_t(0);
+    if (!shape_byte_range_valid(
+            byte_offset, width, pc.control_word_count)) {
+        return false;
+    }
+    uint word_index = uint(byte_offset >> 2u);
+    uint shift = uint(byte_offset & uint64_t(3u)) * 8u;
+    if (width == 2u) {
+        value = uint64_t((control_words[word_index] >> shift) & 0xffffu);
+        return true;
+    }
+    if (width == 4u) {
+        value = uint64_t(control_words[word_index]);
+        return true;
+    }
+    value = uint64_t(control_words[word_index])
+        | (uint64_t(control_words[word_index + 1u]) << 32u);
+    return true;
+}
+
+bool shape_read_position_scalar(
+    uint64_t byte_offset,
+    uint width,
+    out uint64_t value)
+{
+    value = uint64_t(0);
+    if (!shape_byte_range_valid(
+            byte_offset, width, pc.position_word_count)) {
+        return false;
+    }
+    uint word_index = uint(byte_offset >> 2u);
+    uint shift = uint(byte_offset & uint64_t(3u)) * 8u;
+    if (width == 2u) {
+        value = uint64_t((position_words[word_index] >> shift) & 0xffffu);
+        return true;
+    }
+    if (width == 4u) {
+        value = uint64_t(position_words[word_index]);
+        return true;
+    }
+    value = uint64_t(position_words[word_index])
+        | (uint64_t(position_words[word_index + 1u]) << 32u);
+    return true;
+}
+
+uint64_t shape_max_occ_cap() {
+    return uint64_t(pc.max_occ_cap_lo)
+        | (uint64_t(pc.max_occ_cap_hi) << 32u);
+}
+
+bool shape_partition_valid(ShapeV5Partition descriptor) {
+    if (descriptor.flags != SHAPE_V5_REQUIRED_FLAGS
+        || descriptor.control_count == 0u
+        || descriptor.position_count == 0u
+        || descriptor.low_hash > descriptor.high_hash
+        || descriptor.segment_base_bp >= descriptor.segment_end_bp
+        || !shape_width_valid(descriptor.hash_width)
+        || !shape_width_valid(descriptor.offset_width)
+        || !shape_width_valid(descriptor.count_width)
+        || !shape_width_valid(descriptor.position_width)
+        || !shape_aligned(
+            descriptor.hash_byte_offset, descriptor.hash_width)
+        || !shape_aligned(
+            descriptor.prefix_byte_offset, descriptor.offset_width)
+        || !shape_aligned(
+            descriptor.count_byte_offset, descriptor.count_width)
+        || !shape_aligned(
+            descriptor.position_byte_offset, descriptor.position_width)) {
+        return false;
+    }
+    uint position_bits = descriptor.position_width * 8u;
+    uint64_t maximum_segment_span = uint64_t(1)
+        << (position_bits - 1u);
+    return descriptor.segment_end_bp - descriptor.segment_base_bp
+        <= maximum_segment_span;
+}
+
+uint64_t shape_read_min_hash(uint index) {
+    if (pc.word_kind == 0u) {
+        uint packed = min_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+        return uint64_t(raw) >> pc.hash_shift;
+    }
+    uint base = index * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) {
+        return uint64_t(min_words[base]) >> pc.hash_shift;
+    }
+    if (pc.word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base])
+            | (uint64_t(min_words[base + 1u]) << 32u);
+        return raw >> pc.hash_shift;
+    }
+    uint64_t high = uint64_t(min_words[base + 2u])
+        | (uint64_t(min_words[base + 3u]) << 32u);
+    return high >> 8u;
+}
+
+uint64_t shape_read_min_position(uint index) {
+    if (pc.word_kind == 0u) {
+        uint packed = min_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+        uint mask = pc.pos_bits >= 15u
+            ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        return uint64_t(raw & mask);
+    }
+    uint base = index * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) {
+        uint mask = pc.pos_bits >= 31u
+            ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        return uint64_t(min_words[base] & mask);
+    }
+    if (pc.word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base])
+            | (uint64_t(min_words[base + 1u]) << 32u);
+        uint64_t mask = pc.pos_bits >= 63u
+            ? ~uint64_t(0)
+            : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
+        return raw & mask;
+    }
+    return uint64_t(min_words[base])
+        | (uint64_t(min_words[base + 1u]) << 32u);
+}
+
+bool shape_query_words_valid(uint index) {
+    if (pc.word_kind > 3u || pc.words32_per_minimizer == 0u) return false;
+    if (pc.word_kind == 0u) {
+        return uint64_t(index >> 1u) < uint64_t(min_words.length());
+    }
+    uint required_words = pc.word_kind == 1u
+        ? 1u : pc.word_kind == 2u ? 2u : 4u;
+    if (pc.words32_per_minimizer < required_words) return false;
+    uint64_t end = (uint64_t(index) + uint64_t(1u))
+        * uint64_t(pc.words32_per_minimizer);
+    return end <= uint64_t(min_words.length());
+}
+
+// Returns 0 for no hash in this partition, 1 for an admitted range, and 2 for
+// malformed bytes.  The terminal prefix is authoritative; the saturated count
+// is checked against it and the persisted generation cap before use.
+uint shape_find_control(
+    ShapeV5Partition descriptor,
+    uint64_t wanted_hash,
+    out uint64_t position_begin,
+    out uint64_t position_end,
+    out uint64_t saturated_count)
+{
+    position_begin = uint64_t(0);
+    position_end = uint64_t(0);
+    saturated_count = uint64_t(0);
+    if (!shape_partition_valid(descriptor)) return 2u;
+    if (wanted_hash < descriptor.low_hash
+        || wanted_hash > descriptor.high_hash) {
+        return 0u;
+    }
+    uint lo = 0u;
+    uint hi = descriptor.control_count;
+    while (lo < hi) {
+        uint mid = lo + ((hi - lo) >> 1u);
+        uint64_t address;
+        uint64_t stored_hash;
+        if (!shape_scalar_address(
+                descriptor.hash_byte_offset,
+                mid,
+                descriptor.hash_width,
+                address)
+            || !shape_read_control_scalar(
+                address, descriptor.hash_width, stored_hash)) {
+            return 2u;
+        }
+        if (stored_hash < wanted_hash) lo = mid + 1u; else hi = mid;
+    }
+    if (lo >= descriptor.control_count) return 0u;
+    uint64_t hash_address;
+    uint64_t stored_hash;
+    if (!shape_scalar_address(
+            descriptor.hash_byte_offset,
+            lo,
+            descriptor.hash_width,
+            hash_address)
+        || !shape_read_control_scalar(
+            hash_address, descriptor.hash_width, stored_hash)) {
+        return 2u;
+    }
+    if (stored_hash != wanted_hash) return 0u;
+
+    uint64_t begin_address;
+    uint64_t end_address;
+    uint64_t count_address;
+    if (!shape_scalar_address(
+            descriptor.prefix_byte_offset,
+            lo,
+            descriptor.offset_width,
+            begin_address)
+        || !shape_scalar_address(
+            descriptor.prefix_byte_offset,
+            lo + 1u,
+            descriptor.offset_width,
+            end_address)
+        || !shape_scalar_address(
+            descriptor.count_byte_offset,
+            lo,
+            descriptor.count_width,
+            count_address)
+        || !shape_read_control_scalar(
+            begin_address, descriptor.offset_width, position_begin)
+        || !shape_read_control_scalar(
+            end_address, descriptor.offset_width, position_end)
+        || !shape_read_control_scalar(
+            count_address, descriptor.count_width, saturated_count)
+        || position_begin >= position_end
+        || position_end > uint64_t(descriptor.position_count)) {
+        return 2u;
+    }
+    uint64_t exact_count = position_end - position_begin;
+    uint64_t cap = shape_max_occ_cap();
+    if (cap == ~uint64_t(0)) return 2u;
+    uint64_t expected_saturated = exact_count > cap
+        ? cap + uint64_t(1u) : exact_count;
+    return saturated_count == expected_saturated ? 1u : 2u;
+}
+
+bool shape_count_hash(uint64_t hash, out uint accepted_count) {
+    accepted_count = 0u;
+    uint64_t total = uint64_t(0);
+    uint64_t threshold = uint64_t(pc.max_occ);
+    for (uint partition_index = 0u;
+         partition_index < pc.partition_count;
+         ++partition_index) {
+        uint64_t position_begin;
+        uint64_t position_end;
+        uint64_t saturated_count;
+        uint status = shape_find_control(
+            partitions[partition_index],
+            hash,
+            position_begin,
+            position_end,
+            saturated_count);
+        if (status == 2u) return false;
+        if (status == 0u) continue;
+        if (saturated_count > threshold) {
+            accepted_count = 0u;
+            return true;
+        }
+        uint64_t exact_count = position_end - position_begin;
+        if (total > threshold || exact_count > threshold - total) {
+            accepted_count = 0u;
+            return true;
+        }
+        total += exact_count;
+    }
+    accepted_count = uint(total);
+    return true;
+}
+
+uint64_t shape_anchor_sort_key(uint reverse, uint64_t ref_position) {
+    if (pc.target_ref_bits >= 63u) {
+        return (uint64_t(reverse) << 63u) | ref_position;
+    }
+    return (uint64_t(reverse) << pc.target_ref_bits) | ref_position;
+}
+
+bool shape_global_contract_valid() {
+    uint64_t cap = shape_max_occ_cap();
+    return pc.abi_version == SHAPE_V5_ABI_VERSION
+        && pc.emit_mode <= 1u
+        && pc.kmer_size != 0u
+        && pc.kmer_size <= 255u
+        && pc.hash_shift < 64u
+        && pc.pos_bits < 64u
+        && pc.target_ref_bits <= 63u
+        && cap != ~uint64_t(0)
+        && uint64_t(pc.max_occ) <= cap
+        && pc.partition_count != 0u
+        && pc.partition_count <= uint(partitions.length())
+        && pc.record_count == 1u
+        && uint(query_records.length()) >= 1u
+        && pc.query_minimizer_count != 0u
+        && pc.status_index != 0u
+        && pc.status_index < uint(counts.length())
+        && pc.status_index == uint(prefix.length())
+        && pc.control_word_count <= uint(control_words.length())
+        && pc.position_word_count <= uint(position_words.length())
+        && pc.anchor_capacity <= uint(anchors.length())
+        && pc.anchor_capacity <= uint(anchor_keys.length());
+}
+
+void main() {
+    uint record_index = gl_WorkGroupID.x;
+    bool contract_valid = shape_global_contract_valid();
+    if (!contract_valid || record_index != 0u) {
+        shape_signal_status(SHAPE_V5_STATUS_CONTRACT);
+        return;
+    }
+    ShapeV5QueryRecord record = query_records[record_index];
+    uint64_t query_end = uint64_t(record.minimizer_offset)
+        + uint64_t(record.minimizer_count);
+    bool record_valid = query_end <= uint64_t(pc.query_minimizer_count)
+        && record.minimizer_count == pc.status_index
+        && record.query_len >= pc.kmer_size
+        && record.flags == 0u;
+    if (!record_valid) {
+        shape_signal_status(SHAPE_V5_STATUS_QUERY);
+        return;
+    }
+
+    for (uint local_index = gl_LocalInvocationID.x;
+         local_index < record.minimizer_count;
+         local_index += gl_WorkGroupSize.x) {
+        uint minimizer_index = record.minimizer_offset + local_index;
+        if (pc.emit_mode == 0u) counts[local_index] = 0u;
+        if (minimizer_index >= pc.query_minimizer_count
+            || !shape_query_words_valid(minimizer_index)) {
+            shape_signal_status(SHAPE_V5_STATUS_QUERY);
+            continue;
+        }
+
+        uint64_t hash = shape_read_min_hash(minimizer_index);
+        uint accepted_count = 0u;
+        if (!shape_count_hash(hash, accepted_count)) {
+            shape_signal_status(SHAPE_V5_STATUS_CONTROL);
+            continue;
+        }
+        if (pc.emit_mode == 0u) {
+            counts[local_index] = accepted_count;
+            continue;
+        }
+        if (counts[local_index] != accepted_count) {
+            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            continue;
+        }
+        if (accepted_count == 0u) continue;
+
+        uint64_t destination = uint64_t(prefix[local_index]);
+        if (destination > uint64_t(pc.anchor_capacity)
+            || uint64_t(accepted_count)
+                > uint64_t(pc.anchor_capacity) - destination) {
+            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            continue;
+        }
+        uint64_t query_encoded = shape_read_min_position(minimizer_index);
+        uint64_t query_bp = query_encoded >> 1u;
+        uint query_strand = uint(query_encoded & uint64_t(1u));
+        if (query_bp >= uint64_t(record.query_len)
+            || query_bp + uint64_t(1u) < uint64_t(pc.kmer_size)) {
+            shape_signal_status(SHAPE_V5_STATUS_QUERY);
+            continue;
+        }
+        uint64_t reverse_base = uint64_t(record.query_len)
+            + uint64_t(pc.kmer_size) - uint64_t(2u);
+        uint emitted = 0u;
+        bool emission_valid = true;
+        for (uint partition_index = 0u;
+             emission_valid && partition_index < pc.partition_count;
+             ++partition_index) {
+            ShapeV5Partition descriptor = partitions[partition_index];
+            uint64_t position_begin;
+            uint64_t position_end;
+            uint64_t saturated_count;
+            uint status = shape_find_control(
+                descriptor,
+                hash,
+                position_begin,
+                position_end,
+                saturated_count);
+            if (status == 2u) {
+                shape_signal_status(SHAPE_V5_STATUS_CONTROL);
+                emission_valid = false;
+                break;
+            }
+            if (status == 0u) continue;
+            for (uint64_t position_index = position_begin;
+                 position_index < position_end;
+                 ++position_index) {
+                uint64_t position_address;
+                uint64_t target_encoded;
+                if (!shape_scalar_address(
+                        descriptor.position_byte_offset,
+                        uint(position_index),
+                        descriptor.position_width,
+                        position_address)
+                    || !shape_read_position_scalar(
+                        position_address,
+                        descriptor.position_width,
+                        target_encoded)) {
+                    shape_signal_status(SHAPE_V5_STATUS_POSITION);
+                    emission_valid = false;
+                    break;
+                }
+                uint64_t local_bp = target_encoded >> 1u;
+                uint64_t segment_span = descriptor.segment_end_bp
+                    - descriptor.segment_base_bp;
+                if (local_bp >= segment_span || emitted >= accepted_count) {
+                    shape_signal_status(
+                        local_bp >= segment_span
+                            ? SHAPE_V5_STATUS_POSITION
+                            : SHAPE_V5_STATUS_EMISSION);
+                    emission_valid = false;
+                    break;
+                }
+                uint target_strand = uint(target_encoded & uint64_t(1u));
+                uint reverse = target_strand ^ query_strand;
+                uint64_t ref_position = descriptor.segment_base_bp + local_bp;
+                uint64_t query_position = reverse != 0u
+                    ? reverse_base - query_bp : query_bp;
+                uint64_t output_index = destination + uint64_t(emitted);
+                anchors[uint(output_index)].ref_position = ref_position;
+                anchors[uint(output_index)].query_position = query_position;
+                anchors[uint(output_index)].is_reverse = reverse;
+                anchors[uint(output_index)].span_flags_segment =
+                    pc.kmer_size & 0xffu;
+                anchor_keys[uint(output_index)] =
+                    shape_anchor_sort_key(reverse, ref_position);
+                ++emitted;
+            }
+        }
+        // A validated immutable resident generation makes this equality
+        // deterministic between count and emit.  No CPU/SIMD repair path is
+        // provided if the resident bytes change or fail validation.
+        if (!emission_valid || emitted != accepted_count) {
+            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
         }
     }
 }
@@ -6540,6 +7123,9 @@ enum class SeqSortStage : std::uint8_t {
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:
             return std::string{kPhaseCSeedBody};
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            return std::string{kPhaseCShapeV5SeedBody};
         case ShaderKind::phase_c_persisted_directory_select:
             return std::string{kPhaseCPersistedDirectorySelectBody};
         case ShaderKind::phase_c_grouped32_validate:

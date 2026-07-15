@@ -65,6 +65,9 @@ public:
 
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
+    void bind_persisted_gpu_operation_evidence_sink(
+        bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink);
+
     void configure_mmsearch(
         AttrNumber seq_attno,
         std::string column_name,

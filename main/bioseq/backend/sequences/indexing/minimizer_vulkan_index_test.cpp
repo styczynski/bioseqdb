@@ -22,6 +22,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -564,6 +565,228 @@ make_grouped32_gpu_stream_fixture() {
         idx_ns::encode_minimizer_generation_manifest(fixture.manifest);
     if (!encoded_manifest) {
         throw std::runtime_error("failed to encode grouped32 manifest");
+    }
+    fixture.head = idx_ns::MinimizerGenerationHead{
+        .wire_format = fixture.manifest.wire_format,
+        .generation_id = fixture.manifest.generation_id,
+        .source_identity = fixture.manifest.source_identity,
+        .compatibility_checksum =
+            idx_ns::minimizer_generation_compatibility_checksum(
+                fixture.manifest),
+        .manifest_checksum = idx_ns::crc64_ecma182(
+            std::span<const std::byte>{*encoded_manifest}),
+        .source_content_checksum = fixture.manifest.source_content_checksum,
+    };
+    return fixture;
+}
+
+template <class UInt>
+requires (std::is_unsigned_v<UInt>)
+static void store_test_le(
+    std::span<std::byte> bytes,
+    std::size_t offset,
+    UInt value)
+{
+    if (offset > bytes.size() || sizeof(UInt) > bytes.size() - offset) {
+        throw std::runtime_error("Format-5 fixture scalar write overflow");
+    }
+    for (std::size_t index = 0u; index < sizeof(UInt); ++index) {
+        bytes[offset + index] = static_cast<std::byte>(
+            (value >> (index * 8u)) & static_cast<UInt>(0xffu));
+    }
+}
+
+struct ShapeV5GpuResidentFixture {
+    std::array<std::vector<std::byte>, 2> control_bytes;
+    std::array<std::vector<std::byte>, 2> position_bytes;
+    std::array<idx_ns::MinimizerBucketDirEntry, 2> entries;
+    idx_ns::MinimizerGenerationHead head;
+    idx_ns::MinimizerGenerationManifest manifest;
+    idx_ns::DirView directory;
+};
+
+[[nodiscard]] constexpr idx_ns::ExpectedMinimizerCompatibility
+shape_v5_gpu_expected_compatibility() noexcept {
+    return {
+        .wire_format = idx_ns::MinimizerGenerationWireFormat::
+            grouped_shape_soa_segment_local,
+        .alphabet_code = idx_ns::kMinimizerPersistedDna4AlphabetCode,
+        .storage_unit_byte_width = 8u,
+        .kmer_size = 15u,
+        .window_size = 10u,
+        .gpu_abi_version = idx_ns::kMinimizerShapeV5GpuAbiVersion,
+        .minimizer_scheme_id = idx_ns::kLegacyMinimapV1SchemeId,
+        .minimizer_scheme_version = idx_ns::kLegacyMinimapV1SchemeVersion,
+        .producer_backend_id = idx_ns::MinimizerProducerBackendId::exact_simd,
+        .producer_backend_identity_version =
+            idx_ns::kMinimizerProducerBackendIdentityVersion,
+        .max_occ_cap = 10u,
+    };
+}
+
+[[nodiscard]] static ShapeV5GpuResidentFixture
+make_shape_v5_gpu_resident_fixture() {
+    ShapeV5GpuResidentFixture fixture;
+    constexpr std::uint64_t generation_id = 505u;
+    const auto profile = idx_ns::minimizer_generation_payload_profile(
+        idx_ns::MinimizerGenerationWireFormat::
+            grouped_shape_soa_segment_local,
+        idx_ns::kLegacyMinimapV1SchemeIdentity,
+        idx_ns::kMinimizerPersistedDna4AlphabetCode,
+        15u, 32u, 10u);
+    if (!profile || !profile->shape_v5) {
+        throw std::runtime_error("failed to derive Format-5 GPU profile");
+    }
+
+    const std::array<std::vector<std::uint32_t>, 2> hashes{{
+        {1u, 2u}, {3u},
+    }};
+    const std::array<std::vector<std::uint16_t>, 2> prefixes{{
+        {0u, 2u, 3u}, {0u, 1u},
+    }};
+    const std::array<std::vector<std::uint16_t>, 2> counts{{
+        {2u, 1u}, {1u},
+    }};
+    const std::array<std::vector<std::uint16_t>, 2> positions{{
+        {7u, 18u, 23u}, {10u},
+    }};
+
+    std::uint64_t control_count = 0u;
+    std::uint64_t position_count = 0u;
+    std::uint64_t payload_bytes = 0u;
+    for (std::size_t ordinal = 0u; ordinal < fixture.entries.size(); ++ordinal) {
+        const auto layout = idx_ns::minimizer_shape_v5_control_layout(
+            hashes[ordinal].size(),
+            idx_ns::MinimizerScalarWidth::u32,
+            idx_ns::MinimizerScalarWidth::u16,
+            idx_ns::MinimizerScalarWidth::u16);
+        if (!layout) {
+            throw std::runtime_error("failed to derive Format-5 control layout");
+        }
+        auto& controls = fixture.control_bytes[ordinal];
+        controls.resize(static_cast<std::size_t>(layout->encoded_bytes));
+        for (std::size_t index = 0u; index < hashes[ordinal].size(); ++index) {
+            store_test_le<std::uint32_t>(
+                controls, index * sizeof(std::uint32_t),
+                hashes[ordinal][index]);
+        }
+        for (std::size_t index = 0u; index < prefixes[ordinal].size(); ++index) {
+            store_test_le<std::uint16_t>(
+                controls,
+                static_cast<std::size_t>(layout->prefix_offset)
+                    + index * sizeof(std::uint16_t),
+                prefixes[ordinal][index]);
+        }
+        for (std::size_t index = 0u; index < counts[ordinal].size(); ++index) {
+            store_test_le<std::uint16_t>(
+                controls,
+                static_cast<std::size_t>(layout->count_offset)
+                    + index * sizeof(std::uint16_t),
+                counts[ordinal][index]);
+        }
+        auto& encoded_positions = fixture.position_bytes[ordinal];
+        encoded_positions.resize(
+            positions[ordinal].size() * sizeof(std::uint16_t));
+        for (std::size_t index = 0u; index < positions[ordinal].size(); ++index) {
+            store_test_le<std::uint16_t>(
+                encoded_positions, index * sizeof(std::uint16_t),
+                positions[ordinal][index]);
+        }
+        fixture.entries[ordinal] = idx_ns::MinimizerBucketDirEntry{
+            .partition_id = static_cast<std::uint32_t>(ordinal),
+            .position_segment = static_cast<std::int32_t>(ordinal),
+            .lo_hash = hashes[ordinal].front(),
+            .hi_hash = hashes[ordinal].back(),
+            .sub_key = static_cast<idx_ns::index_sub_key_t>(ordinal),
+            .control_first_chunk = 0u,
+            .control_chunk_count = 1u,
+            .position_first_chunk = 0u,
+            .position_chunk_count = 1u,
+            .control_element_count = hashes[ordinal].size(),
+            .position_element_count = positions[ordinal].size(),
+            .control_encoded_bytes = controls.size(),
+            .position_encoded_bytes = encoded_positions.size(),
+            .control_checksum = idx_ns::crc64_ecma182(controls),
+            .position_checksum = idx_ns::crc64_ecma182(encoded_positions),
+            .shape_offset_width = idx_ns::MinimizerScalarWidth::u16,
+        };
+        control_count += hashes[ordinal].size();
+        position_count += positions[ordinal].size();
+        payload_bytes += controls.size() + encoded_positions.size();
+    }
+
+    const auto encoded_directory = idx_ns::encode_minimizer_bucket_directory(
+        std::span<const idx_ns::MinimizerBucketDirEntry>{fixture.entries},
+        *profile);
+    if (!encoded_directory) {
+        throw std::runtime_error("failed to encode Format-5 GPU directory");
+    }
+    auto directory = idx_ns::DirView::decode(*encoded_directory, *profile);
+    if (!directory) {
+        throw std::runtime_error("failed to decode Format-5 GPU directory");
+    }
+    fixture.directory = std::move(*directory);
+
+    idx_ns::Crc64Ecma182 payload_row_checksums{};
+    for (std::size_t ordinal = 0u; ordinal < fixture.entries.size(); ++ordinal) {
+        const auto& entry = fixture.entries[ordinal];
+        payload_row_checksums.update_little_endian(
+            idx_ns::crc64_index_chunk_row(
+                generation_id, entry.position_segment, entry.sub_key, 0u,
+                static_cast<std::uint32_t>(
+                    fixture.control_bytes[ordinal].size()),
+                fixture.control_bytes[ordinal]));
+    }
+    for (std::size_t ordinal = 0u; ordinal < fixture.entries.size(); ++ordinal) {
+        const auto& entry = fixture.entries[ordinal];
+        const auto position_sub_key =
+            idx_ns::derive_minimizer_position_extent_sub_key(entry.sub_key);
+        if (!position_sub_key) {
+            throw std::runtime_error("failed to derive Format-5 position key");
+        }
+        payload_row_checksums.update_little_endian(
+            idx_ns::crc64_index_chunk_row(
+                generation_id, entry.position_segment, *position_sub_key, 0u,
+                static_cast<std::uint32_t>(
+                    fixture.position_bytes[ordinal].size()),
+                fixture.position_bytes[ordinal]));
+    }
+
+    fixture.manifest = idx_ns::MinimizerGenerationManifest{
+        .wire_format = idx_ns::MinimizerGenerationWireFormat::
+            grouped_shape_soa_segment_local,
+        .generation_id = generation_id,
+        .source_identity = 0x6162636465666768ULL,
+        .source_content_checksum = 0x7172737475767778ULL,
+        .target_length = 64u,
+        .control_count = control_count,
+        .position_count = position_count,
+        .payload_bytes = payload_bytes,
+        .payload_checksum = payload_row_checksums.checksum(),
+        .directory_bytes = fixture.directory.encoded_bytes().size(),
+        .directory_checksum = idx_ns::crc64_ecma182(
+            fixture.directory.encoded_bytes()),
+        .position_segment_count = 2u,
+        .extent_count = 4u,
+        .directory_chunk_count = 1u,
+        .alphabet_code = idx_ns::kMinimizerPersistedDna4AlphabetCode,
+        .storage_unit_byte_width = 8u,
+        .kmer_size = 15u,
+        .window_size = 10u,
+        .gpu_abi_version = idx_ns::kMinimizerShapeV5GpuAbiVersion,
+        .position_segment_span_bp = 32u,
+        .segment_geometry_version = idx_ns::kMinimizerSegmentGeometryVersion,
+        .minimizer_scheme_id = idx_ns::kLegacyMinimapV1SchemeId,
+        .minimizer_scheme_version = idx_ns::kLegacyMinimapV1SchemeVersion,
+        .producer_backend_id = idx_ns::MinimizerProducerBackendId::exact_simd,
+        .producer_backend_identity_version =
+            idx_ns::kMinimizerProducerBackendIdentityVersion,
+        .shape_v5 = profile->shape_v5,
+    };
+    const auto encoded_manifest =
+        idx_ns::encode_minimizer_generation_manifest_v5(fixture.manifest);
+    if (!encoded_manifest) {
+        throw std::runtime_error("failed to encode Format-5 GPU manifest");
     }
     fixture.head = idx_ns::MinimizerGenerationHead{
         .wire_format = fixture.manifest.wire_format,
@@ -1801,6 +2024,193 @@ TEST_CASE("DOC0371 streams selected partitions into one exact resident set",
 
     REQUIRE(proof.forbidden_host_anchor_concatenations == 0u);
     REQUIRE_FALSE(proof.has_forbidden_work());
+}
+
+TEST_CASE("Format-5 ABI3 cold resident preserves raw SoA and local positions",
+          "[vulkan][index][persisted][shape-v5][abi3][cold-load]") {
+    STATIC_REQUIRE_FALSE(
+        idx_ns::GpuResidentShapeV5Target::permits_host_decode_or_rebuild());
+    STATIC_REQUIRE_FALSE(
+        idx_ns::GpuResidentShapeV5Target::qualifies_as_all_gpu_execution());
+    const auto fixture = make_shape_v5_gpu_resident_fixture();
+    auto& runtime = ::bioseq::gpu::vulkan::Runtime::instance();
+    if (!::bioseq::gpu::vulkan::hardware_device_available(runtime)) return;
+
+    constexpr std::uint64_t cold_load_identity = 0xC01DCAC4EULL;
+    auto ingest = idx_ns::GpuShapeV5FullGenerationIngest::begin(
+        runtime, fixture.head, fixture.manifest,
+        shape_v5_gpu_expected_compatibility(), fixture.directory,
+        cold_load_identity);
+    REQUIRE(ingest.has_value());
+    const auto requests = ingest->requests();
+    REQUIRE(requests.size() == 4u);
+    REQUIRE(requests[0].sub_key == fixture.entries[0].sub_key);
+    REQUIRE(requests[1].sub_key == fixture.entries[1].sub_key);
+    REQUIRE(requests[2].sub_key
+        == *idx_ns::derive_minimizer_position_extent_sub_key(
+            fixture.entries[0].sub_key));
+    REQUIRE(requests[3].sub_key
+        == *idx_ns::derive_minimizer_position_extent_sub_key(
+            fixture.entries[1].sub_key));
+
+    for (std::size_t index = 0u; index < requests.size(); ++index) {
+        const bool position = index >= fixture.entries.size();
+        const std::size_t ordinal = position
+            ? index - fixture.entries.size() : index;
+        const auto& bytes = position
+            ? fixture.position_bytes[ordinal]
+            : fixture.control_bytes[ordinal];
+        const idx_ns::IndexChunkAddress address{
+                .generation_id = requests[index].generation_id,
+                .position_segment = requests[index].position_segment,
+                .sub_key = requests[index].sub_key,
+                .chunk_no = requests[index].first_chunk_no,
+            };
+        auto receipt = idx_ns::validate_minimizer_generation_row_receipt(
+            idx_ns::MinimizerGenerationRowView{
+                .address = address,
+                .bytes = bytes,
+                .row_checksum = idx_ns::crc64_index_chunk_row(
+                    address.generation_id, address.position_segment,
+                    address.sub_key, address.chunk_no,
+                    static_cast<std::uint32_t>(bytes.size()), bytes),
+            });
+        REQUIRE(receipt.has_value());
+        REQUIRE(ingest->accept_validated_row(*receipt).has_value());
+    }
+    const auto finished = ingest->finish();
+    REQUIRE(finished.has_value());
+    const auto& resident = **finished;
+    REQUIRE(resident.validated());
+    REQUIRE(resident.identity().generation_id
+        == fixture.manifest.generation_id);
+    REQUIRE(resident.identity().source_identity
+        == fixture.manifest.source_identity);
+    REQUIRE(resident.identity().source_content_checksum
+        == fixture.manifest.source_content_checksum);
+    REQUIRE(resident.identity().device_uuid
+        == runtime.features().device_uuid);
+    REQUIRE(resident.identity().cold_load_identity == cold_load_identity);
+    REQUIRE(resident.identity().gpu_abi_version
+        == idx_ns::kMinimizerShapeV5GpuAbiVersion);
+    REQUIRE(resident.control_count() == fixture.manifest.control_count);
+    REQUIRE(resident.position_count() == fixture.manifest.position_count);
+    REQUIRE(resident.descriptor_count() == fixture.entries.size());
+    REQUIRE(resident.directory_bytes()
+        == fixture.entries.size()
+            * idx_ns::MinimizerBucketDirEntry::format5_encoded_bytes);
+
+    std::vector<std::byte> expected_controls;
+    std::vector<std::byte> expected_positions;
+    for (const auto& bytes : fixture.control_bytes) {
+        expected_controls.insert(
+            expected_controls.end(), bytes.begin(), bytes.end());
+    }
+    for (const auto& bytes : fixture.position_bytes) {
+        expected_positions.insert(
+            expected_positions.end(), bytes.begin(), bytes.end());
+    }
+    const std::span<const std::byte> resident_controls{
+        static_cast<const std::byte*>(resident.controls().mapped),
+        expected_controls.size()};
+    const std::span<const std::byte> resident_positions{
+        static_cast<const std::byte*>(resident.positions().mapped),
+        expected_positions.size()};
+    REQUIRE(std::ranges::equal(resident_controls, expected_controls));
+    REQUIRE(std::ranges::equal(resident_positions, expected_positions));
+
+    const auto* descriptors = static_cast<const
+        bioseq::gpu::vulkan::GpuShapeV5ResidentPartitionDescriptor*>(
+            resident.descriptors().mapped);
+    REQUIRE(descriptors != nullptr);
+    REQUIRE(descriptors[0].flags
+        == bioseq::gpu::vulkan::k_gpu_shape_v5_partition_required_flags);
+    REQUIRE(descriptors[0].hash_byte_offset == 0u);
+    REQUIRE(descriptors[0].prefix_byte_offset == 8u);
+    REQUIRE(descriptors[0].count_byte_offset == 16u);
+    REQUIRE(descriptors[0].position_byte_offset == 0u);
+    REQUIRE(descriptors[0].control_count == 2u);
+    REQUIRE(descriptors[0].position_count == 3u);
+    REQUIRE(descriptors[0].hash_width == 4u);
+    REQUIRE(descriptors[0].offset_width == 2u);
+    REQUIRE(descriptors[0].count_width == 2u);
+    REQUIRE(descriptors[0].position_width == 2u);
+    REQUIRE(descriptors[0].segment_base_bp == 0u);
+    REQUIRE(descriptors[0].segment_end_bp == 32u);
+    REQUIRE(descriptors[1].hash_byte_offset
+        == fixture.control_bytes[0].size());
+    REQUIRE(descriptors[1].position_byte_offset
+        == fixture.position_bytes[0].size());
+    REQUIRE(descriptors[1].segment_base_bp == 32u);
+    REQUIRE(descriptors[1].segment_end_bp == 64u);
+
+    const std::uint64_t actual_allocations =
+        resident.controls().allocation_bytes
+        + resident.positions().allocation_bytes
+        + resident.descriptors().allocation_bytes;
+    REQUIRE(resident.admitted_device_bytes() == actual_allocations);
+    const auto& proof = resident.cold_load_proof();
+    REQUIRE(proof.cold_cache_misses == 1u);
+    REQUIRE(proof.full_generations_ingested == 1u);
+    REQUIRE(proof.control_bytes_copied == expected_controls.size());
+    REQUIRE(proof.position_bytes_copied == expected_positions.size());
+    REQUIRE(proof.descriptor_bytes_copied
+        == fixture.entries.size()
+            * sizeof(bioseq::gpu::vulkan::
+                GpuShapeV5ResidentPartitionDescriptor));
+    REQUIRE(proof.device_allocation_bytes == actual_allocations);
+    REQUIRE(proof.admitted_device_bytes == actual_allocations);
+    REQUIRE(proof.validated_receipt_rows == requests.size());
+    REQUIRE(proof.raw_rehashed_rows == 0u);
+    REQUIRE(proof.payload_hash_byte_visits == 0u);
+    REQUIRE_FALSE(proof.has_forbidden_work());
+}
+
+TEST_CASE("Format-5 ABI3 cold resident fails closed before publication",
+          "[vulkan][index][persisted][shape-v5][abi3][cold-load][fail-closed]") {
+    const auto fixture = make_shape_v5_gpu_resident_fixture();
+    auto& runtime = ::bioseq::gpu::vulkan::Runtime::instance();
+    if (!::bioseq::gpu::vulkan::hardware_device_available(runtime)) return;
+
+    const auto missing_cold_identity =
+        idx_ns::GpuShapeV5FullGenerationIngest::begin(
+            runtime, fixture.head, fixture.manifest,
+            shape_v5_gpu_expected_compatibility(), fixture.directory, 0u);
+    REQUIRE_FALSE(missing_cold_identity.has_value());
+    REQUIRE(missing_cold_identity.error()
+        == idx_ns::GpuPersistedIndexFoundationError::invalid_identity);
+
+    auto wrong_cap = shape_v5_gpu_expected_compatibility();
+    wrong_cap.max_occ_cap = 11u;
+    const auto relabelled = idx_ns::GpuShapeV5FullGenerationIngest::begin(
+        runtime, fixture.head, fixture.manifest, wrong_cap,
+        fixture.directory, 1u);
+    REQUIRE_FALSE(relabelled.has_value());
+    REQUIRE(relabelled.error()
+        == idx_ns::GpuPersistedIndexFoundationError::metadata_mismatch);
+
+    auto ingest = idx_ns::GpuShapeV5FullGenerationIngest::begin(
+        runtime, fixture.head, fixture.manifest,
+        shape_v5_gpu_expected_compatibility(), fixture.directory, 2u);
+    REQUIRE(ingest.has_value());
+    auto corrupt = fixture.control_bytes[0];
+    corrupt.front() ^= std::byte{1};
+    const auto& request = ingest->requests().front();
+    const auto accepted = ingest->accept_raw_chunk_for_test(
+        idx_ns::IndexChunkAddress{
+            .generation_id = request.generation_id,
+            .position_segment = request.position_segment,
+            .sub_key = request.sub_key,
+            .chunk_no = request.first_chunk_no,
+        },
+        corrupt);
+    REQUIRE_FALSE(accepted.has_value());
+    REQUIRE(accepted.error()
+        == idx_ns::GpuPersistedIndexFoundationError::checksum);
+    const auto unpublished = ingest->finish();
+    REQUIRE_FALSE(unpublished.has_value());
+    REQUIRE(unpublished.error()
+        == idx_ns::GpuPersistedIndexFoundationError::checksum);
 }
 
 TEST_CASE("format-4 GPU stream uses bounded raw slots and remains foundation-only",

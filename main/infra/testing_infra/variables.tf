@@ -43,7 +43,7 @@ variable "branch" {
 variable "secret_arn" {
   description = "ARN of the Secrets Manager secret holding gh_ssh_private + gh_access_token. Only the ARN (an identifier) is referenced here; the secret VALUE is fetched at runtime by the instance role and never touches Terraform state or any file."
   type        = string
-  default     = "arn:aws:secretsmanager:eu-north-1:778900739727:secret:github_secrets-DCYSun"
+  default     = "arn:aws:secretsmanager:eu-north-1:948169713470:secret:github_secrets-hCDfLw"
 }
 
 variable "secret_name" {

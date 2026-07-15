@@ -171,3 +171,70 @@ TEST_CASE("E2E smoke: dna4 load + index + mmsearch == minimap2", "[e2e-smoke][do
 TEST_CASE("E2E smoke: dna5 (with N) load + index + mmsearch == minimap2", "[e2e-smoke][doc0286]") {
     run_smoke<seq::dna5>("dna5", "bioseq.seq('dna5', 64)", "e2e_smoke_dna5");
 }
+
+TEST_CASE(
+        "E2E just_index READY proof uses the loaded table-AM row identity",
+        "[e2e-smoke][just-index][row-identity][doc0371]") {
+    constexpr std::string_view table = "e2e_just_index_row_identity";
+    const std::string target_fa =
+        "/tmp/e2e_just_index_row_identity_target.fasta";
+    std::string target(65'565, 'A');
+    constexpr std::string_view bases = "ACGT";
+    std::uint64_t state = 0x0371e2e5a17ULL;
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        state ^= state << 13U;
+        state ^= state >> 7U;
+        state ^= state << 17U;
+        target[i] = bases[state & 3U];
+    }
+    write_fasta(target_fa, "ref", target);
+
+    it::connection_test_context ctx;
+    it::reset_extension(ctx, {table});
+    it::exec_sqlf(
+        ctx,
+        "CREATE TABLE {} (header text, seq bioseq.seq('dna4', 64)) "
+        "USING bioseq;",
+        table);
+    it::exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+    it::exec_sql(
+        ctx,
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+    it::exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+    it::exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+    it::exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
+    it::exec_sql(ctx, "SET bioseq.aligner.kmer_size = 15;");
+    it::exec_sql(ctx, "SET bioseq.aligner.window_size = 10;");
+
+    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.load('{}'::regclass, '{}');",
+        table,
+        target_fa)) == 1);
+    const auto source_rows = it::query_rows(ctx, fmt::format(
+        "SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+        "FROM {} ORDER BY ctid;",
+        table,
+        table));
+    REQUIRE(source_rows.size() == 1);
+    REQUIRE(source_rows.front().size() == 1);
+    REQUIRE(source_rows.front().front().has_value());
+    const long long source_rowno =
+        std::stoll(source_rows.front().front().value());
+    REQUIRE(source_rowno > 0);
+
+    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');",
+        table)) == 1);
+    const auto inspected = it::query_one(ctx, fmt::format(
+        "SELECT sequence_rowno::text, gpu_abi_version::text, "
+        "total_bp_size::text "
+        "FROM bioseq.inspect_ready_minimizer_generation("
+        "'{}'::regclass, 'minimizers_per_fragment', {});",
+        table,
+        source_rowno));
+    REQUIRE(inspected.size() == 3);
+    REQUIRE(inspected[0].value() == std::to_string(source_rowno));
+    REQUIRE(inspected[1].value() == "3");
+    REQUIRE(inspected[2].value() == std::to_string(target.size()));
+}

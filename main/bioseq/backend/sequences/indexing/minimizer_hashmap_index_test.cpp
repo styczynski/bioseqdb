@@ -351,6 +351,8 @@ test_shape_v5_generation_options(
     auto options = test_generation_options(target_length);
     options.wire_format = bioseq::indexing::MinimizerGenerationWireFormat::
         grouped_shape_soa_segment_local;
+    options.alphabet_code =
+        bioseq::indexing::kMinimizerPersistedDna4AlphabetCode;
     options.max_occ_cap = max_occ_cap;
     return options;
 }
@@ -405,6 +407,8 @@ test_shape_v5_expected_compatibility(
     auto expected = test_expected_compatibility();
     expected.wire_format = bioseq::indexing::MinimizerGenerationWireFormat::
         grouped_shape_soa_segment_local;
+    expected.alphabet_code =
+        bioseq::indexing::kMinimizerPersistedDna4AlphabetCode;
     expected.gpu_abi_version =
         bioseq::indexing::kMinimizerShapeV5GpuAbiVersion;
     expected.max_occ_cap = max_occ_cap;
@@ -420,6 +424,8 @@ struct CollectedMinimizerRow {
 struct CollectingMinimizerRowSink {
     std::vector<CollectedMinimizerRow> rows;
     std::size_t max_callback_bytes = 0;
+    std::uint64_t format5_payload_write_calls = 0;
+    std::uint64_t format5_row_crc_bytes = 0;
 
     [[nodiscard]] std::expected<void, bioseq::indexing::MinimizerGenerationWireError>
     write(const bioseq::indexing::MinimizerGenerationRowView& row) {
@@ -430,6 +436,35 @@ struct CollectingMinimizerRowSink {
             .row_checksum = row.row_checksum,
         });
         return {};
+    }
+
+    [[nodiscard]] std::expected<
+        bioseq::indexing::MinimizerGenerationRowWriteReceipt,
+        bioseq::indexing::MinimizerGenerationWireError>
+    write_format5_payload(
+            const bioseq::indexing::
+                UnchecksummedMinimizerGenerationRowView& row) {
+        const std::uint64_t row_checksum =
+            bioseq::indexing::crc64_index_chunk_row(
+                row.address.generation_id,
+                row.address.position_segment,
+                row.address.sub_key,
+                row.address.chunk_no,
+                static_cast<std::uint32_t>(row.bytes.size()),
+                row.bytes);
+        if (auto written = write(
+                bioseq::indexing::MinimizerGenerationRowView{
+                    .address = row.address,
+                    .bytes = row.bytes,
+                    .row_checksum = row_checksum,
+                }); !written) {
+            return std::unexpected(written.error());
+        }
+        ++format5_payload_write_calls;
+        format5_row_crc_bytes += row.bytes.size();
+        return bioseq::indexing::MinimizerGenerationRowWriteReceipt{
+            .row_checksum = row_checksum,
+        };
     }
 };
 
@@ -1317,6 +1352,95 @@ TEST_CASE("DOC0371 CRC-64/ECMA-182 is exact and incrementally composable",
     };
     STATIC_REQUIRE(crc64_ecma182(std::span<const std::byte>{bytes})
         == 0x6C40DF5F0B497347ULL);
+}
+
+TEST_CASE("DOC0373 validated row CRC algebra reconstructs raw extent CRC",
+          "[indexing][minimizer-hashmap][wire][crc][cold-load][extent-crc]") {
+    using namespace bioseq::indexing;
+
+    REQUIRE(crc64_ecma182_advance_zero_bytes(0, 0) == 0);
+    REQUIRE(crc64_ecma182_concatenate(
+        crc64_ecma182("control"), crc64_ecma182("position"), 8u)
+        == crc64_ecma182("controlposition"));
+
+    const IndexChunkAddress signed_address{
+        .generation_id = 0xFEDCBA9876543210ULL,
+        .position_segment = (std::numeric_limits<std::int32_t>::min)() + 17,
+        .sub_key = (std::numeric_limits<index_sub_key_t>::min)() + 29,
+        .chunk_no = 0x89ABCDEFu,
+    };
+    constexpr std::uint32_t signed_length = 0x10203040u;
+    Crc64Ecma182 independently_encoded_prefix;
+    independently_encoded_prefix.update_little_endian(
+        signed_address.generation_id);
+    independently_encoded_prefix.update_little_endian(
+        std::bit_cast<std::uint32_t>(signed_address.position_segment));
+    independently_encoded_prefix.update_little_endian(
+        std::bit_cast<std::uint64_t>(signed_address.sub_key));
+    independently_encoded_prefix.update_little_endian(signed_address.chunk_no);
+    independently_encoded_prefix.update_little_endian(signed_length);
+    REQUIRE(crc64_index_chunk_row_prefix(
+        signed_address.generation_id,
+        signed_address.position_segment,
+        signed_address.sub_key,
+        signed_address.chunk_no,
+        signed_length) == independently_encoded_prefix.checksum());
+
+    std::uint64_t algebraic_extent = 0;
+    Crc64Ecma182 direct_extent;
+    std::uint64_t random_state = 0xD1B54A32D192ED03ULL;
+    const auto next_random = [&random_state]() noexcept {
+        random_state ^= random_state >> 12u;
+        random_state ^= random_state << 25u;
+        random_state ^= random_state >> 27u;
+        return random_state * 0x2545F4914F6CDD1DULL;
+    };
+    const auto append_case = [&](std::size_t length, std::uint32_t ordinal) {
+        INFO("payload length=" << length << " ordinal=" << ordinal);
+        std::vector<std::byte> payload(length);
+        for (std::byte& byte : payload) {
+            byte = static_cast<std::byte>(next_random() & 0xffu);
+        }
+        const IndexChunkAddress address{
+            .generation_id = 0x8000000000000000ULL + ordinal,
+            .position_segment = ordinal % 2u == 0
+                ? (std::numeric_limits<std::int32_t>::min)()
+                    + static_cast<std::int32_t>(ordinal)
+                : (std::numeric_limits<std::int32_t>::max)()
+                    - static_cast<std::int32_t>(ordinal),
+            .sub_key = ordinal % 2u == 0
+                ? (std::numeric_limits<index_sub_key_t>::min)()
+                    + static_cast<index_sub_key_t>(ordinal)
+                : (std::numeric_limits<index_sub_key_t>::max)()
+                    - static_cast<index_sub_key_t>(ordinal),
+            .chunk_no = 0xF0000000u + ordinal,
+        };
+        const auto bytes = std::span<const std::byte>{payload};
+        const auto chunk_bytes = static_cast<std::uint32_t>(bytes.size());
+        const std::uint64_t row_checksum = crc64_index_chunk_row(
+            address.generation_id,
+            address.position_segment,
+            address.sub_key,
+            address.chunk_no,
+            chunk_bytes,
+            bytes);
+        direct_extent.update(bytes);
+        algebraic_extent = crc64_append_validated_index_chunk_payload(
+            algebraic_extent, address, chunk_bytes, row_checksum);
+        REQUIRE(algebraic_extent == direct_extent.checksum());
+    };
+
+    const std::array<std::size_t, 6> boundary_lengths{
+        0u, 1u, 17u, 8063u, 8064u, 31u};
+    std::uint32_t ordinal = 0;
+    for (const std::size_t length : boundary_lengths) {
+        append_case(length, ordinal++);
+    }
+    for (std::size_t iteration = 0; iteration < 128u; ++iteration) {
+        append_case(static_cast<std::size_t>(next_random() % 8065u), ordinal++);
+    }
+
+    REQUIRE(algebraic_extent == direct_extent.checksum());
 }
 
 TEST_CASE("DOC0371 generation head has a fixed little-endian 64-byte wire image",
@@ -3178,6 +3302,134 @@ TEST_CASE("inactive format-4 MPS evidence binds Scalar and Exact spill replay",
     }
 }
 
+TEST_CASE("Format-5 MPS exact SIMD binds the canonical shape profile",
+          "[indexing][minimizer-hashmap][wire][encoder][mps][v5]"
+          "[exact-simd][fail-closed]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_units = 128;
+    constexpr std::uint64_t fragment_bp = fragment_units * 32u;
+    using chunked = sequence_scanner_test_chunked<
+        std::uint64_t, fragment_units>;
+    using MpsIndex = MinimizerSequenceMergedIndex<FakeFragmentStorage<>>;
+    auto data = make_dna4(18013, 0x4D5053464D543556ULL);
+    range_t range(data);
+
+    const auto spill_exact = [&](FakeFragmentStorage<>& storage) {
+        lazy_compact_sequence<dna4_u64, chunked> lazy{
+            chunked::from_range(range)};
+        return MpsIndex::spill_generation_replay_runs_serial(
+            storage,
+            lazy,
+            MinimizerSketchBackend::ExactSimd,
+            fragment_bp,
+            kMinimizerPreferredSegmentSpanBp);
+    };
+
+    SECTION("canonical Format-5 profile is published with native SIMD proof") {
+        FakeFragmentStorage<> storage;
+        auto spill = spill_exact(storage);
+        REQUIRE(spill.has_value());
+        REQUIRE(spill->execution_evidence().spill_accepted());
+
+        const auto options =
+            test_shape_v5_generation_options(range.bp_size());
+        CollectingMinimizerRowSink sink;
+        MpsGenerationExecutionEvidence execution;
+        const auto encoded = MpsIndex::encode_persisted_generation(
+            storage,
+            sink,
+            std::move(*spill),
+            options,
+            {},
+            &execution);
+        REQUIRE(encoded.has_value());
+        REQUIRE(encoded->manifest.wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+        REQUIRE(encoded->manifest.alphabet_code
+            == kMinimizerPersistedDna4AlphabetCode);
+        REQUIRE(encoded->manifest.gpu_abi_version
+            == kMinimizerShapeV5GpuAbiVersion);
+        REQUIRE(encoded->manifest.shape_v5.has_value());
+        REQUIRE(encoded->manifest.shape_v5->max_occ_cap
+            == options.max_occ_cap);
+
+        const auto canonical_profile = minimizer_generation_payload_profile(
+            options.wire_format,
+            kLegacyMinimapV1SchemeIdentity,
+            options.alphabet_code,
+            options.kmer_size,
+            encoded->manifest.position_segment_span_bp,
+            options.max_occ_cap);
+        REQUIRE(canonical_profile.has_value());
+        REQUIRE(encoded->directory.profile() == *canonical_profile);
+        REQUIRE(encoded->manifest.shape_v5
+            == canonical_profile->shape_v5);
+
+        REQUIRE(execution.accepted());
+        REQUIRE(execution.generation_wire_format
+            == options.wire_format);
+        REQUIRE(execution.selected_backend
+            == MinimizerSketchBackend::ExactSimd);
+        REQUIRE(execution.scalar_core_runs == 0u);
+        REQUIRE(execution.exact_simd_core_runs > 0u);
+        REQUIRE(execution.exact_simd_proof_present);
+        REQUIRE(execution.exact_simd_proof.accepted(true));
+        REQUIRE(execution.paper_nthash_core_runs == 0u);
+        REQUIRE(execution.vulkan_core_runs == 0u);
+        REQUIRE(execution.replay_scan_count == 3u);
+        REQUIRE(execution.replay_merge_pass_count == 3u);
+        REQUIRE(execution.replay_completed_scan_count == 3u);
+        REQUIRE(execution.replay_failed_scan_count == 0u);
+        REQUIRE(execution.replay_visited_event_count
+            == 3u * execution.spilled_event_count);
+        REQUIRE(sink.format5_payload_write_calls > 0u);
+        REQUIRE(sink.format5_row_crc_bytes
+            == encoded->manifest.payload_bytes);
+        require_complete_generation_rows(*encoded, sink.rows);
+    }
+
+    const auto require_profile_rejection = [
+            &](MinimizerGenerationEncodeOptions options) {
+        FakeFragmentStorage<> storage;
+        auto spill = spill_exact(storage);
+        REQUIRE(spill.has_value());
+        CollectingMinimizerRowSink sink;
+        MpsGenerationExecutionEvidence execution;
+        require_wire_error(
+            MpsIndex::encode_persisted_generation(
+                storage,
+                sink,
+                std::move(*spill),
+                options,
+                {},
+                &execution),
+            MinimizerGenerationWireError::compatibility_mismatch);
+        REQUIRE(sink.rows.empty());
+        REQUIRE_FALSE(execution.accepted());
+    };
+
+    SECTION("noncanonical DNA4 cardinality cannot masquerade as pack code") {
+        auto options = test_shape_v5_generation_options(range.bp_size());
+        options.alphabet_code = 4u;
+        require_profile_rejection(options);
+    }
+
+    SECTION("invalid Format-5 count profile has no legacy fallback") {
+        auto options = test_shape_v5_generation_options(range.bp_size());
+        options.max_occ_cap =
+            (std::numeric_limits<std::uint64_t>::max)();
+        require_profile_rejection(options);
+    }
+
+    SECTION("unapproved MPS wire formats remain rejected") {
+        auto options = test_shape_v5_generation_options(range.bp_size());
+        options.wire_format =
+            MinimizerGenerationWireFormat::sorted_dense_global64;
+        require_profile_rejection(options);
+    }
+}
+
 TEST_CASE("MPS SHA-256 binding matches standard known vectors and split updates",
           "[indexing][minimizer-hashmap][wire][encoder][mps][sha256]") {
     using namespace bioseq::indexing;
@@ -3362,6 +3614,46 @@ TEST_CASE("format-4 MPF execution evidence is sealed to one publication identity
     spliced = binding;
     spliced.source_identity ^= 1u;
     REQUIRE_FALSE(execution.publication_accepted(spliced));
+
+    auto mutated = execution;
+    mutated.selected_backend = MinimizerSketchBackend::ExactSimd;
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    /* Scalar and Vulkan intentionally share the legacy minimizer scheme, so
+     * forge every public route field into a structurally accepted Vulkan
+     * claim.  The private operation snapshot must still reject publication. */
+    mutated = execution;
+    mutated.selected_backend = MinimizerSketchBackend::VulkanSegment;
+    mutated.scalar_core_runs = 0u;
+    mutated.vulkan_core_runs = 1u;
+    mutated.vulkan_proof.completed_roundtrips = 1u;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.scalar_core_runs;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.geometry_retry_count;
+    ++mutated.producer_scan_count;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.target_length;
+    REQUIRE(mutated.accepted());
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    ++mutated.vulkan_proof.completed_roundtrips;
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
+
+    mutated = execution;
+    mutated.generation_wire_format =
+        MinimizerGenerationWireFormat::sorted_dense_global64;
+    REQUIRE_FALSE(mutated.publication_accepted(binding));
     require_complete_generation_rows(*encoded, sink.rows);
 }
 
@@ -3413,6 +3705,9 @@ TEST_CASE("inactive format-4 MPS accepts real empty and shorter-than-window spil
             test_grouped32_generation_options(length),
             {},
             &execution);
+        INFO("MPS encode wire_error="
+            << (encoded.has_value()
+                ? 0u : static_cast<unsigned>(encoded.error())));
         REQUIRE(encoded.has_value());
         REQUIRE(execution.accepted());
         REQUIRE(execution.replay_scan_count == 2);
@@ -7486,9 +7781,16 @@ TEST_CASE("DOC0371 prepared callbacks reject control and position corruption",
             std::move(controls), original_positions,
             MinimizerGenerationWireError::control_range);
     }
-    SECTION("non-contiguous local offset") {
+    SECTION("overlapping local offset") {
         auto controls = original_controls;
         test_write_le<std::uint32_t>(controls, 16u + 8u, 1u);
+        expect_finish_error(
+            std::move(controls), original_positions,
+            MinimizerGenerationWireError::control_range);
+    }
+    SECTION("gapped local offset") {
+        auto controls = original_controls;
+        test_write_le<std::uint32_t>(controls, 16u + 8u, 3u);
         expect_finish_error(
             std::move(controls), original_positions,
             MinimizerGenerationWireError::control_range);
@@ -7700,11 +8002,17 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
     constexpr auto shape = [](std::uint16_t k, std::uint64_t span,
                               std::uint64_t cap) {
         return minimizer_shape_profile_v5(
-            kLegacyMinimapV1SchemeIdentity, 4u, k, span, cap);
+            kLegacyMinimapV1SchemeIdentity,
+            kMinimizerPersistedDna4AlphabetCode,
+            k,
+            span,
+            cap);
     };
     STATIC_REQUIRE(shape(8u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u16);
     STATIC_REQUIRE(shape(9u, 32'768u, 65'534u)->hash_width
+        == MinimizerScalarWidth::u32);
+    STATIC_REQUIRE(shape(15u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u32);
     STATIC_REQUIRE(shape(16u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u32);
@@ -7713,18 +8021,45 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
     STATIC_REQUIRE(shape(28u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE_FALSE(shape(29u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
-        kLegacyMinimapV1SchemeIdentity, 5u, 15u, 32'768u, 65'534u)
+        kLegacyMinimapV1SchemeIdentity, 1u, 15u, 32'768u, 65'534u)
+        .has_value());
+    STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
+        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 32'768u, 65'534u)
         .has_value());
     STATIC_REQUIRE(minimizer_shape_profile_v5(
         kPaperNtHashU32R7SumV1SchemeIdentity,
-        4u, 15u, 32'768u, 65'534u)->hash_width
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 32'768u, 65'534u)->hash_width
         == MinimizerScalarWidth::u32);
     STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
         kPaperNtHashU32R7SumV1SchemeIdentity,
-        4u, 14u, 32'768u, 65'534u).has_value());
+        kMinimizerPersistedDna4AlphabetCode,
+        14u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE_FALSE(minimizer_shape_profile_v5(
         kPaperNtHashU32R7SumV1SchemeIdentity,
-        4u, 16u, 32'768u, 65'534u).has_value());
+        kMinimizerPersistedDna4AlphabetCode,
+        16u, 32'768u, 65'534u).has_value());
+
+    constexpr auto scalar_expected =
+        expected_minimizer_compatibility_for_backend(
+            MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
+            MinimizerSketchBackend::Scalar,
+            kMinimizerPersistedDna4AlphabetCode,
+            8u,
+            15u,
+            10u,
+            65'534u);
+    STATIC_REQUIRE(scalar_expected.has_value());
+    constexpr auto exact_simd_expected =
+        expected_minimizer_compatibility_for_backend(
+            MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
+            MinimizerSketchBackend::ExactSimd,
+            kMinimizerPersistedDna4AlphabetCode,
+            8u,
+            15u,
+            10u,
+            65'534u);
+    STATIC_REQUIRE(exact_simd_expected.has_value());
     STATIC_REQUIRE(shape(15u, 32'768u, 65'534u)->position_width
         == MinimizerScalarWidth::u16);
     STATIC_REQUIRE(shape(15u, 32'769u, 65'534u)->position_width
@@ -7779,12 +8114,18 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
 
     constexpr auto profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 65'534u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 65'534u);
     STATIC_REQUIRE(profile.has_value());
     constexpr auto chunks = [](std::uint64_t bytes) {
+        constexpr std::uint32_t extent_payload_bytes =
+            minimizer_extent_payload_bytes(
+                MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local);
         return static_cast<std::uint32_t>(
-            bytes / kMinimizerExtentPayloadBytes
-            + (bytes % kMinimizerExtentPayloadBytes != 0u ? 1u : 0u));
+            bytes / extent_payload_bytes
+            + (bytes % extent_payload_bytes != 0u ? 1u : 0u));
     };
     constexpr auto make_wide_entry = [chunks](std::uint64_t positions) {
         const auto control_layout = minimizer_shape_v5_control_layout(
@@ -7825,7 +8166,8 @@ TEST_CASE("DOC0373 Format-5 derives exact H P C O boundaries and SoA offsets",
     constexpr auto o64_profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
         kLegacyMinimapV1SchemeIdentity,
-        4u, 15u, o64_span, 65'534u);
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, o64_span, 65'534u);
     STATIC_REQUIRE(o64_profile.has_value());
     STATIC_REQUIRE(o64_profile->shape_v5->position_width
         == MinimizerScalarWidth::u64);
@@ -7905,17 +8247,21 @@ TEST_CASE("DOC0373 Format-5 fixed records use exact 160 and 128 byte ABIs",
         return static_cast<std::byte>(value);
     };
     constexpr auto shape = minimizer_shape_profile_v5(
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     STATIC_REQUIRE(shape.has_value());
     constexpr auto profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     STATIC_REQUIRE(profile.has_value());
     constexpr auto manifest = [shape] {
         auto value = golden_generation_manifest();
         value.wire_format = MinimizerGenerationWireFormat::
             grouped_shape_soa_segment_local;
-        value.alphabet_code = 4u;
+        value.alphabet_code = kMinimizerPersistedDna4AlphabetCode;
         value.kmer_size = 15u;
         value.gpu_abi_version = kMinimizerShapeV5GpuAbiVersion;
         value.shape_v5 = *shape;
@@ -7938,7 +8284,7 @@ TEST_CASE("DOC0373 Format-5 fixed records use exact 160 and 128 byte ABIs",
         b(0x78), b(0x77), b(0x76), b(0x75), b(0x74), b(0x73), b(0x72), b(0x71),
         b(0x10), b(0x0f), b(0x0e), b(0x0d), b(0x0c), b(0x0b), b(0x0a), b(0x09),
         b(0x03), b(0x00), b(0x00), b(0x00), b(0x44), b(0x33), b(0x22), b(0x11),
-        b(0x88), b(0x77), b(0x66), b(0x55), b(0x04), b(0x00), b(0x44), b(0x33),
+        b(0x88), b(0x77), b(0x66), b(0x55), b(0x00), b(0x00), b(0x44), b(0x33),
         b(0x0f), b(0x00), b(0x88), b(0x77), b(0x03), b(0x00), b(0x00), b(0x00),
         b(0x08), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
         b(0x02), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x01), b(0x01),
@@ -8028,16 +8374,20 @@ TEST_CASE("DOC0373 Format-5 fixed records reject every extension corruption clas
           "[indexing][minimizer-hashmap][wire][v5][corruption]") {
     using namespace bioseq::indexing;
     const auto shape = minimizer_shape_profile_v5(
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     REQUIRE(shape.has_value());
     const auto profile = minimizer_generation_payload_profile(
         MinimizerGenerationWireFormat::grouped_shape_soa_segment_local,
-        kLegacyMinimapV1SchemeIdentity, 4u, 15u, 8u, 10u);
+        kLegacyMinimapV1SchemeIdentity,
+        kMinimizerPersistedDna4AlphabetCode,
+        15u, 8u, 10u);
     REQUIRE(profile.has_value());
     auto manifest = golden_generation_manifest();
     manifest.wire_format = MinimizerGenerationWireFormat::
         grouped_shape_soa_segment_local;
-    manifest.alphabet_code = 4u;
+    manifest.alphabet_code = kMinimizerPersistedDna4AlphabetCode;
     manifest.kmer_size = 15u;
     manifest.gpu_abi_version = kMinimizerShapeV5GpuAbiVersion;
     manifest.shape_v5 = *shape;
@@ -8067,11 +8417,49 @@ TEST_CASE("DOC0373 Format-5 fixed records reject every extension corruption clas
             decode_minimizer_generation_manifest(corrupt),
             MinimizerGenerationWireError::reserved_nonzero);
     }
-    for (const std::size_t offset : {144u, 152u}) {
-        INFO("Format-5 derived bound offset " << offset);
+    {
+        INFO("Format-5 derived hash bound offset 144");
         auto corrupt = good_manifest;
-        corrupt[offset] ^= std::byte{1};
+        corrupt[144] ^= std::byte{1};
         REQUIRE_FALSE(decode_minimizer_generation_manifest(corrupt));
+    }
+    {
+        /* max_occ_cap is a caller-selected compatibility parameter, not a
+         * bound derivable from K/span.  A same-width value remains a valid
+         * standalone manifest but must fail the reader's expected identity. */
+        const auto expected = expected_minimizer_compatibility_for_backend(
+            MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local,
+            MinimizerSketchBackend::Scalar,
+            manifest.alphabet_code,
+            manifest.storage_unit_byte_width,
+            manifest.kmer_size,
+            manifest.window_size,
+            shape->max_occ_cap);
+        REQUIRE(expected.has_value());
+        REQUIRE(validate_minimizer_generation_compatibility(
+            manifest, *expected).has_value());
+        auto changed_cap = good_manifest;
+        changed_cap[152] ^= std::byte{1};
+        const auto decoded = decode_minimizer_generation_manifest(changed_cap);
+        REQUIRE(decoded.has_value());
+        REQUIRE(decoded->shape_v5.has_value());
+        REQUIRE(decoded->shape_v5->max_occ_cap
+            == (shape->max_occ_cap ^ 1u));
+        require_wire_error(
+            validate_minimizer_generation_compatibility(
+                *decoded, *expected),
+            MinimizerGenerationWireError::compatibility_mismatch);
+    }
+    {
+        /* Crossing the u16/u32 count-width boundary while retaining the
+         * encoded u16 shape is intrinsically inconsistent and fails decode. */
+        auto incompatible_cap_width = good_manifest;
+        test_write_le<std::uint64_t>(
+            incompatible_cap_width, 152u, 65'535u);
+        require_wire_error(
+            decode_minimizer_generation_manifest(incompatible_cap_width),
+            MinimizerGenerationWireError::compatibility_mismatch);
     }
 
     constexpr MinimizerBucketDirEntry entry{
@@ -8146,7 +8534,9 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
         {1u, (3u << 1u) | 1u},
         {1u, (9u << 1u)},
-        {2u, (11u << 1u) | 1u},
+        // A new hash may restart below the previous hash's last coordinate.
+        // This proves the reader's strict-order state resets per control.
+        {2u, (1u << 1u) | 1u},
     };
     VectorReplayMinimizerProducer producer{minimizers};
     CollectingMinimizerRowSink sink;
@@ -8204,6 +8594,7 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     REQUIRE((std::vector<std::uint64_t>{
         hash1.positions.begin(), hash1.positions.end()}
         == std::vector<std::uint64_t>{7u, 18u}));
+    REQUIRE(reader->lookup(2u).positions.front() == 3u);
     REQUIRE(reader->lookup(999u).positions.empty());
 
     SECTION("padding byte") {
@@ -8218,6 +8609,14 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     SECTION("terminal prefix") {
         auto corrupt = control_bytes;
         test_write_le<std::uint16_t>(corrupt, 12u, 2u);
+        require_wire_error(
+            decode_minimizer_shape_v5_controls(
+                corrupt, entry, generation->directory.profile()),
+            MinimizerGenerationWireError::control_range);
+    }
+    SECTION("interior prefix cannot overlap") {
+        auto corrupt = control_bytes;
+        test_write_le<std::uint16_t>(corrupt, 10u, 0u);
         require_wire_error(
             decode_minimizer_shape_v5_controls(
                 corrupt, entry, generation->directory.profile()),
@@ -8255,6 +8654,33 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
                 *minimizer_position_segment_core(
                     generation->manifest, 0u),
                 generation->directory.profile()),
+            MinimizerGenerationWireError::position_range);
+    }
+    SECTION("prepared reader retains strict order state") {
+        auto corrupt = sink.rows[entry.control_chunk_count];
+        test_write_le<std::uint16_t>(
+            corrupt.bytes, 2u,
+            test_read_le<std::uint16_t>(corrupt.bytes, 0u));
+        recompute_row_checksum(corrupt);
+        // Hash 1 is deliberately absent from the query union: every control
+        // boundary must still enforce strict order without retaining the old
+        // 16-byte route-and-boundary record beside it.
+        const std::array<std::uint64_t, 1> unqueried_hash{2u};
+        auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            unqueried_hash,
+            10u);
+        REQUIRE(made.has_value());
+        for (std::size_t index = 0;
+             index < entry.control_chunk_count; ++index) {
+            REQUIRE(made->accept(row_view(sink.rows[index])).has_value());
+        }
+        require_wire_error(
+            made->accept(row_view(corrupt)),
             MinimizerGenerationWireError::position_range);
     }
     SECTION("positions cannot escape their persisted segment") {
@@ -8358,6 +8784,586 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
                 10u),
             MinimizerGenerationWireError::compatibility_mismatch);
     }
+}
+
+TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
+          "[indexing][minimizer-hashmap][wire][v5][reader][admission]"
+          "[cold-load][memory-evidence]") {
+    using namespace bioseq::indexing;
+    // Model the report_83 shape: a wide query union whose mostly-unique hashes
+    // each retain one target position.  The former per-QueryRecord vectors
+    // performed two complete ownership walks and fresh OS memory probes for
+    // each first append, making this shape quadratic in query-union size.
+    constexpr std::uint64_t query_count = 2048u;
+    constexpr std::uint64_t segment_span = 8u * 1024u * 1024u;
+    constexpr std::uint64_t segment_count = 3u;
+    constexpr auto retained_bp = [](std::uint64_t index) {
+        return (index % segment_count) * segment_span
+            + index / segment_count;
+    };
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
+    std::vector<std::uint64_t> queries;
+    minimizers.reserve(query_count);
+    queries.reserve(query_count);
+    for (std::uint64_t index = 0; index < query_count; ++index) {
+        // Odd multiplication is a permutation modulo 2^30 and spreads this
+        // mostly-unique fixture across the same 30-bit domain as production
+        // ntHash keys. This exercises actual high-bit radix occupancy rather
+        // than putting every synthetic key in bucket zero.
+        const std::uint64_t hash =
+            ((index + 1u) * 2'654'435'761ULL) & ((1ULL << 30u) - 1u);
+        minimizers.emplace_back(hash, retained_bp(index) << 1u);
+        queries.push_back(hash);
+    }
+
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink,
+        test_shape_v5_generation_options(
+            segment_count * segment_span, 10u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->directory.entries().size() == segment_count);
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    auto reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        queries,
+        10u);
+    REQUIRE(reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(reader->finish().has_value());
+
+    const auto evidence = reader->memory_evidence();
+    REQUIRE(evidence.global_position_storage_preparations == 1u);
+    REQUIRE(evidence.global_position_storage_allocations == 1u);
+    REQUIRE(evidence.position_append_growth_reservations == 0u);
+    REQUIRE(evidence.retained_position_count == query_count);
+    REQUIRE(evidence.retained_position_capacity == query_count);
+    REQUIRE(evidence.query_record_size_bytes == 32u);
+    REQUIRE(evidence.query_record_count == query_count);
+    REQUIRE(evidence.query_record_capacity >= query_count);
+    REQUIRE(evidence.query_record_capacity_bytes
+        == evidence.query_record_capacity * evidence.query_record_size_bytes);
+    REQUIRE(evidence.query_route_radix_bits == 8u);
+    REQUIRE(evidence.query_route_radix_bucket_count == 256u);
+    REQUIRE(evidence.query_route_radix_nonempty_bucket_count == 256u);
+    REQUIRE(evidence.query_route_radix_max_bucket_size == 11u);
+    REQUIRE(evidence.query_hash_capacity_bytes
+        >= query_count * sizeof(std::uint64_t)
+            + (evidence.query_route_radix_bucket_count + 1u)
+                * sizeof(std::uint32_t));
+    REQUIRE(evidence.released_query_hash_capacity_bytes == 0u);
+    REQUIRE(evidence.decoded_control_records == query_count);
+    REQUIRE(evidence.query_route_control_lookups
+        == evidence.decoded_control_records);
+    REQUIRE(evidence.query_route_matches == query_count);
+    const std::uint64_t global_lower_bound_probe_ceiling =
+        evidence.query_route_control_lookups
+        * (std::bit_width(query_count - 1u) + 1u);
+    REQUIRE(evidence.query_route_hash_probes * 2u
+        < global_lower_bound_probe_ceiling);
+    REQUIRE(evidence.query_route_hash_probes
+        <= evidence.query_route_control_lookups * 5u);
+    REQUIRE(evidence.retained_selected_control_records == query_count);
+    REQUIRE(evidence.selected_control_size_bytes == 8u);
+    REQUIRE(evidence.retained_selected_control_capacity_bytes
+        == query_count * (sizeof(std::uint64_t) + sizeof(std::uint32_t)));
+    REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
+    REQUIRE(evidence.global_position_capacity_bytes
+        == evidence.retained_position_capacity * sizeof(std::uint64_t));
+    REQUIRE(evidence.control_payload_capacity_bytes == 0u);
+    REQUIRE(evidence.retained_layout_equation_holds());
+    REQUIRE(evidence.owned_capacity_bytes == reader->admitted_bytes());
+    const std::uint64_t extent_count =
+        generation->directory.entries().size() * 2u;
+    const std::uint64_t fixed_passes = 7u + extent_count;
+    REQUIRE(evidence.capacity_accounting_passes >= fixed_passes);
+    REQUIRE(evidence.capacity_accounting_passes <= 7u + 3u * extent_count);
+    REQUIRE((evidence.capacity_accounting_passes - fixed_passes) % 4u == 0u);
+    REQUIRE((evidence.capacity_accounting_passes - fixed_passes) / 4u
+        <= extent_count / 2u);
+    REQUIRE(evidence.capacity_accounting_passes == 7u + 3u * extent_count);
+    REQUIRE_FALSE(evidence.saturated);
+    REQUIRE(reader->lookup(queries.front()).positions.front()
+        == retained_bp(0u) << 1u);
+    REQUIRE(reader->lookup(queries.back()).positions.front()
+        == retained_bp(query_count - 1u) << 1u);
+
+    // Exercise the statement-level aggregate equation with a second reader
+    // that selects only the first of the three control extents. Production
+    // merges these per-reader counters, so the aggregate must retain the same
+    // 7R + E + 4S shape even when readers select different extent counts.
+    const std::array<std::uint64_t, 1> sparse_queries{queries.front()};
+    const std::uint64_t sparse_selected_extent_count =
+        static_cast<std::uint64_t>(std::ranges::count_if(
+            generation->directory.entries(),
+            [&](const MinimizerBucketDirEntry& entry) {
+                return entry.lo_hash <= sparse_queries.front()
+                    && sparse_queries.front() <= entry.hi_hash;
+            }));
+    REQUIRE(sparse_selected_extent_count > 0u);
+    auto sparse_reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        sparse_queries,
+        10u);
+    REQUIRE(sparse_reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(sparse_reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(sparse_reader->finish().has_value());
+    const auto sparse_evidence = sparse_reader->memory_evidence();
+    REQUIRE(sparse_evidence.global_position_storage_preparations == 1u);
+    REQUIRE(sparse_evidence.global_position_storage_allocations == 1u);
+    REQUIRE(sparse_evidence.position_append_growth_reservations == 0u);
+    REQUIRE(sparse_evidence.retained_position_count == 1u);
+    REQUIRE(sparse_evidence.retained_position_capacity == 1u);
+    REQUIRE(sparse_evidence.query_record_size_bytes == 32u);
+    REQUIRE(sparse_evidence.query_record_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_bits == 0u);
+    REQUIRE(sparse_evidence.query_route_radix_bucket_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_nonempty_bucket_count == 1u);
+    REQUIRE(sparse_evidence.query_route_radix_max_bucket_size == 1u);
+    REQUIRE(sparse_evidence.query_hash_capacity_bytes
+        >= sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
+    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes == 0u);
+    REQUIRE(sparse_evidence.decoded_control_records > 1u);
+    REQUIRE(sparse_evidence.query_route_control_lookups > 0u);
+    REQUIRE(sparse_evidence.query_route_control_lookups
+        <= sparse_evidence.decoded_control_records);
+    REQUIRE(sparse_evidence.query_route_matches == 1u);
+    REQUIRE(sparse_evidence.query_route_hash_probes
+        <= sparse_evidence.query_route_control_lookups * 2u);
+    REQUIRE(sparse_evidence.retained_selected_control_records
+        == sparse_evidence.decoded_control_records);
+    REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
+        == sparse_evidence.decoded_control_records * sizeof(std::uint64_t)
+            + sizeof(std::uint32_t) * 2u);
+    REQUIRE(sparse_evidence.current_selected_control_capacity_bytes == 0u);
+    REQUIRE(sparse_evidence.retained_layout_equation_holds());
+    REQUIRE(sparse_evidence.owned_capacity_bytes
+        == sparse_reader->admitted_bytes());
+    REQUIRE(sparse_evidence.capacity_accounting_passes
+        == 7u + extent_count + 4u * sparse_selected_extent_count);
+    REQUIRE_FALSE(sparse_evidence.saturated);
+
+    // A selected query absent from the target still crosses the same global
+    // controls/positions boundary, but exact P=0 must remain allocation-free.
+    const std::array<std::uint64_t, 1> absent_queries{
+        queries.front() ^ 1u};
+    REQUIRE(std::ranges::find(queries, absent_queries.front())
+        == queries.end());
+    auto empty_reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(10u),
+        generation->directory.encoded_bytes(),
+        absent_queries,
+        10u);
+    REQUIRE(empty_reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(empty_reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(empty_reader->finish().has_value());
+    const auto empty_evidence = empty_reader->memory_evidence();
+    REQUIRE(empty_evidence.global_position_storage_preparations == 1u);
+    REQUIRE(empty_evidence.global_position_storage_allocations == 0u);
+    REQUIRE(empty_evidence.retained_position_count == 0u);
+    REQUIRE(empty_evidence.retained_position_capacity == 0u);
+    REQUIRE(empty_evidence.global_position_capacity_bytes == 0u);
+    REQUIRE(empty_evidence.retained_layout_equation_holds());
+    REQUIRE(empty_evidence.owned_capacity_bytes
+        == empty_reader->admitted_bytes());
+    REQUIRE(empty_reader->lookup(absent_queries.front()).positions.empty());
+
+    constexpr std::uint64_t aggregate_sessions = 2u;
+    const std::uint64_t aggregate_extents = aggregate_sessions * extent_count;
+    const std::uint64_t aggregate_passes =
+        evidence.capacity_accounting_passes
+        + sparse_evidence.capacity_accounting_passes;
+    const std::uint64_t aggregate_fixed_passes =
+        7u * aggregate_sessions + aggregate_extents;
+    REQUIRE(aggregate_extents >= 2u * aggregate_sessions);
+    REQUIRE(aggregate_extents % 2u == 0u);
+    REQUIRE(aggregate_passes >= aggregate_fixed_passes);
+    REQUIRE((aggregate_passes - aggregate_fixed_passes) % 4u == 0u);
+    REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
+        == segment_count + sparse_selected_extent_count);
+    REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
+        <= aggregate_extents / 2u);
+}
+
+TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
+          "[indexing][minimizer-hashmap][wire][v5][reader][admission]"
+          "[diagnostics][failpoint]") {
+    using namespace bioseq::indexing;
+    STATIC_REQUIRE(static_cast<std::uint8_t>(
+        MinimizerGenerationWireError::admission) == 28u);
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
+        {1u, 2u},
+        {2u, 4u},
+    };
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink, test_shape_v5_generation_options(100u, 10u));
+    REQUIRE(generation.has_value());
+    const std::array<std::uint64_t, 2> queries{1u, 2u};
+    std::vector<const CollectedMinimizerRow*> payload;
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) payload.push_back(&row);
+    }
+    REQUIRE(payload.size() == 2u);
+
+    using Substage = PreparedShapeV5QueryAdmissionSubstage;
+    constexpr std::array begin_substages{
+        Substage::identity_and_directory_reservation,
+        Substage::query_hash_reservation,
+        Substage::query_hash_allocation,
+        Substage::query_hash_reconcile,
+        Substage::query_route_reservation,
+        Substage::query_route_allocation,
+        Substage::query_route_reconcile,
+    };
+    constexpr std::array payload_substages{
+        Substage::control_payload_reservation,
+        Substage::control_payload_allocation,
+        Substage::control_payload_reconcile,
+        Substage::control_decode_reservation,
+        Substage::control_decode_allocation,
+        Substage::control_decode_reconcile,
+        Substage::position_image_reservation,
+        Substage::position_image_allocation,
+        Substage::position_image_reconcile,
+    };
+
+    for (const Substage wanted : begin_substages) {
+        INFO("begin admission substage "
+            << prepared_shape_v5_query_admission_substage_name(wanted));
+        bioseq::parallelism::MemoryAdmissionController admission;
+        PreparedShapeV5QueryAdmissionEvidence evidence;
+        const auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &evidence,
+            PreparedShapeV5QueryReaderTestOptions{
+                .fail_admission_substage = wanted,
+            });
+        require_wire_error(
+            made, MinimizerGenerationWireError::admission);
+        REQUIRE(evidence.substage == wanted);
+        REQUIRE(evidence.injected_failure);
+        REQUIRE(prepared_shape_v5_query_admission_substage_name(wanted)
+            != std::string_view{"unknown"});
+        if (wanted != Substage::identity_and_directory_reservation) {
+            REQUIRE(evidence.projected_bytes > 0u);
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    for (const Substage wanted : payload_substages) {
+        INFO("payload admission substage "
+            << prepared_shape_v5_query_admission_substage_name(wanted));
+        bioseq::parallelism::MemoryAdmissionController admission;
+        PreparedShapeV5QueryAdmissionEvidence begin_evidence;
+        auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &begin_evidence,
+            PreparedShapeV5QueryReaderTestOptions{
+                .fail_admission_substage = wanted,
+            });
+        REQUIRE(made.has_value());
+        REQUIRE(begin_evidence.substage == Substage::none);
+        bool rejected = false;
+        for (const CollectedMinimizerRow* row : payload) {
+            const auto accepted = made->accept(row_view(*row));
+            if (!accepted) {
+                REQUIRE(accepted.error()
+                    == MinimizerGenerationWireError::admission);
+                rejected = true;
+                break;
+            }
+        }
+        REQUIRE(rejected);
+        const auto evidence = made->admission_failure_evidence();
+        REQUIRE(evidence.substage == wanted);
+        REQUIRE(evidence.injected_failure);
+        REQUIRE(evidence.projected_bytes > 0u);
+        REQUIRE(evidence.query_record_count == queries.size());
+        REQUIRE(evidence.query_record_capacity >= queries.size());
+        REQUIRE(evidence.releasable_protocol_query_hash_bytes == 0u);
+        if (wanted == Substage::position_image_reservation
+            || wanted == Substage::position_image_allocation
+            || wanted == Substage::position_image_reconcile) {
+            REQUIRE(evidence.retained_position_count == queries.size());
+            REQUIRE(evidence.retained_position_bytes
+                == queries.size() * sizeof(std::uint64_t));
+            REQUIRE(evidence.allocation_headroom_bytes == 0u);
+            if (wanted == Substage::position_image_reconcile) {
+                REQUIRE(evidence.projected_bytes
+                    == evidence.owned_capacity_bytes);
+            } else {
+                REQUIRE(evidence.projected_bytes
+                    == evidence.owned_capacity_bytes
+                        + evidence.retained_position_bytes);
+            }
+        }
+        REQUIRE(made->failed());
+        REQUIRE(made->admitted_bytes() == 0u);
+        const auto released = made->memory_evidence();
+        REQUIRE(released.retained_position_count == 0u);
+        REQUIRE(released.retained_position_capacity == 0u);
+        REQUIRE(released.global_position_capacity_bytes == 0u);
+        REQUIRE(released.retained_layout_equation_holds());
+        REQUIRE(released.global_position_storage_allocations
+            == (wanted == Substage::position_image_reconcile ? 1u : 0u));
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("real low budget retains the controller predicate snapshot") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        admission.set_index_memory_cap_bytes(1u);
+        PreparedShapeV5QueryAdmissionEvidence evidence;
+        const auto made = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            queries,
+            10u,
+            &evidence);
+        require_wire_error(
+            made, MinimizerGenerationWireError::admission);
+        REQUIRE(evidence.substage
+            == Substage::identity_and_directory_reservation);
+        REQUIRE_FALSE(evidence.injected_failure);
+        REQUIRE(evidence.controller_failure_snapshot_present);
+        REQUIRE(evidence.controller_reason
+            != bioseq::parallelism::MemoryAdmissionFailureReason::none);
+        REQUIRE(evidence.requested_growth_bytes > 1u);
+        REQUIRE(evidence.controller_budget_ceiling_bytes <= 1u);
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    SECTION("arithmetic overflow is not relabelled as admission") {
+        const auto ordinary = plan_prepared_shape_v5_position_image(3u, 5u);
+        REQUIRE(ordinary.has_value());
+        REQUIRE(ordinary->retained_position_bytes == 24u);
+        REQUIRE(ordinary->allocation_headroom_bytes == 0u);
+        REQUIRE(ordinary->projected_bytes == 29u);
+        constexpr std::uint64_t adversarial_count = 100'000'000u;
+        const auto adversarial = plan_prepared_shape_v5_position_image(
+            adversarial_count, 17u);
+        REQUIRE(adversarial.has_value());
+        REQUIRE(adversarial->retained_position_bytes == 800'000'000u);
+        REQUIRE(adversarial->allocation_headroom_bytes == 0u);
+        REQUIRE(adversarial->projected_bytes == 800'000'017u);
+        REQUIRE(adversarial->projected_bytes - 17u
+            < adversarial->retained_position_bytes
+                * bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        constexpr std::uint64_t adversarial_query_count = 100'000'000u;
+        constexpr std::uint64_t prior_query_owned_bytes =
+            adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));
+        constexpr std::uint64_t exact_query_state_and_hash_bytes =
+            adversarial_query_count * 40u;
+        // ceil(Q / 8) needs 24 high radix bits for this adversarial Q.
+        constexpr std::uint64_t exact_query_radix_bytes =
+            ((1ULL << 24u) + 1u) * sizeof(std::uint32_t);
+        constexpr std::uint64_t exact_query_owned_bytes =
+            exact_query_state_and_hash_bytes + exact_query_radix_bytes;
+        STATIC_REQUIRE(prior_query_owned_bytes == 8'000'000'000u);
+        STATIC_REQUIRE(exact_query_state_and_hash_bytes == 4'000'000'000u);
+        STATIC_REQUIRE(exact_query_radix_bytes == 67'108'868u);
+        STATIC_REQUIRE(exact_query_owned_bytes == 4'067'108'868u);
+        STATIC_REQUIRE(prior_query_owned_bytes - exact_query_owned_bytes
+            == 3'932'891'132u);
+        require_wire_error(
+            plan_prepared_shape_v5_position_image(
+                (std::numeric_limits<std::uint64_t>::max)(), 0u),
+            MinimizerGenerationWireError::arithmetic_overflow);
+        require_wire_error(
+            plan_prepared_shape_v5_position_image(
+                1u,
+                (std::numeric_limits<std::uint64_t>::max)() - 1u),
+            MinimizerGenerationWireError::arithmetic_overflow);
+    }
+}
+
+TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
+          "[indexing][minimizer-hashmap][wire][v5][chunk-equation]") {
+    using namespace bioseq::indexing;
+    STATIC_REQUIRE(minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat::sorted_dense_global64) == 6144u);
+    STATIC_REQUIRE(minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat::grouped_hash32_segment_local32)
+        == 6144u);
+    STATIC_REQUIRE(minimizer_extent_payload_bytes(
+        MinimizerGenerationWireFormat::grouped_shape_soa_segment_local)
+        == 8064u);
+
+    constexpr std::uint64_t position_count = 5000u;
+    constexpr std::uint64_t first_control_count = 8064u / 4u;
+    constexpr std::uint64_t queried_control_count =
+        position_count - first_control_count - 1u;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
+    minimizers.reserve(position_count);
+    for (std::uint64_t position = 0; position < position_count; ++position) {
+        const std::uint64_t hash = position < first_control_count ? 6u
+            : position < first_control_count + queried_control_count ? 7u
+            : 8u;
+        minimizers.emplace_back(hash, position << 1u);
+    }
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink,
+        test_shape_v5_generation_options(position_count + 1u, 65'534u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest_row.byte_count == 160u);
+    REQUIRE(generation->manifest.position_segment_span_bp
+        == kMinimizerPreferredSegmentSpanBp);
+    REQUIRE(generation->manifest.shape_v5.has_value());
+    REQUIRE(generation->manifest.shape_v5->position_width
+        == MinimizerScalarWidth::u32);
+    REQUIRE(generation->directory.entries().size() == 1u);
+    const MinimizerBucketDirEntry& entry =
+        generation->directory.entries().front();
+    REQUIRE(entry.position_encoded_bytes == position_count * 4u);
+    REQUIRE(entry.position_chunk_count == 3u);
+    REQUIRE(sink.format5_payload_write_calls
+            == static_cast<std::uint64_t>(entry.control_chunk_count)
+                + entry.position_chunk_count);
+    REQUIRE(sink.format5_row_crc_bytes
+            == generation->manifest.payload_bytes);
+    const auto position_sub_key =
+        derive_minimizer_position_extent_sub_key(entry.sub_key);
+    REQUIRE(position_sub_key.has_value());
+    const auto first_position = std::ranges::find_if(
+        sink.rows, [position_sub_key](const CollectedMinimizerRow& row) {
+            return row.address.sub_key == *position_sub_key
+                && row.address.chunk_no == 0u;
+        });
+    REQUIRE(first_position != sink.rows.end());
+    REQUIRE(first_position->bytes.size() == 8064u);
+    REQUIRE(sink.max_callback_bytes == 8064u);
+    require_complete_generation_rows(*generation, sink.rows);
+
+    // The first unqueried control ends exactly at the first position-row
+    // boundary. Querying only the middle of three controls forces the sparse
+    // route image and exercises its late ordinal on the following row.
+    bioseq::parallelism::MemoryAdmissionController admission;
+    const std::array<std::uint64_t, 1> query{7u};
+    auto reader = PreparedShapeV5QueryReader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        test_shape_v5_expected_compatibility(65'534u),
+        generation->directory.encoded_bytes(),
+        query,
+        65'534u);
+    REQUIRE(reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(reader->finish().has_value());
+    const auto lookup = reader->lookup(7u);
+    REQUIRE(lookup.positions.size() == queried_control_count);
+    REQUIRE(lookup.positions.front() == first_control_count << 1u);
+    REQUIRE(lookup.positions.back()
+        == (first_control_count + queried_control_count - 1u) << 1u);
+    const auto evidence = reader->memory_evidence();
+    REQUIRE(evidence.decoded_control_records == 3u);
+    REQUIRE(evidence.retained_selected_control_capacity_bytes
+        == 3u * sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
+}
+
+TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",
+          "[indexing][minimizer-hashmap][wire][v5][position-width]"
+          "[geometry][overflow-retry]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t narrow_span = std::uint64_t{1} << 15u;
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
+        {7u, 0u},
+        {8u, narrow_span << 1u},
+    };
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    MinimizerGenerationFixedWidthLimits one_control_per_segment;
+    one_control_per_segment.max_segment_control_count = 1u;
+
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(narrow_span + 1u, 65'534u),
+        one_control_per_segment);
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.position_segment_span_bp == narrow_span);
+    REQUIRE(generation->manifest.position_segment_count == 2u);
+    REQUIRE(generation->manifest.gpu_abi_version
+        == kMinimizerShapeV5GpuAbiVersion);
+    REQUIRE(generation->manifest.shape_v5.has_value());
+    REQUIRE(generation->manifest.shape_v5->position_width
+        == MinimizerScalarWidth::u16);
+
+    const auto canonical_profile = minimizer_generation_payload_profile(
+        generation->manifest.wire_format,
+        kLegacyMinimapV1SchemeIdentity,
+        generation->manifest.alphabet_code,
+        generation->manifest.kmer_size,
+        generation->manifest.position_segment_span_bp,
+        generation->manifest.shape_v5->max_occ_cap);
+    REQUIRE(canonical_profile.has_value());
+    REQUIRE(generation->directory.profile() == *canonical_profile);
+    REQUIRE(generation->manifest.shape_v5
+        == canonical_profile->shape_v5);
+
+    REQUIRE(generation->directory.entries().size() == 2u);
+    std::uint64_t position_count = 0u;
+    std::uint64_t position_bytes = 0u;
+    for (const MinimizerBucketDirEntry& entry :
+         generation->directory.entries()) {
+        REQUIRE(entry.position_element_count == 1u);
+        REQUIRE(entry.position_encoded_bytes == 2u);
+        REQUIRE(entry.position_chunk_count == 1u);
+        position_count += entry.position_element_count;
+        position_bytes += entry.position_encoded_bytes;
+    }
+    REQUIRE(position_count == generation->manifest.position_count);
+    REQUIRE(position_bytes == generation->manifest.position_count * 2u);
+    REQUIRE(sink.format5_row_crc_bytes
+        == generation->manifest.payload_bytes);
+    require_complete_generation_rows(*generation, sink.rows);
 }
 
 TEST_CASE("DOC0373 Format-5 authenticates global controls then global positions",
@@ -8606,6 +9612,41 @@ TEST_CASE("DOC0373 Format-5 reader releases admission on every terminal path",
         REQUIRE(admission.reserved_bytes() == 0u);
     }
 
+    SECTION("move after exact position allocation transfers array ownership") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        {
+            auto made = begin(admission);
+            REQUIRE(made.has_value());
+            REQUIRE(made->accept(row_view(*payload.front())).has_value());
+            const auto before_move = made->memory_evidence();
+            REQUIRE(before_move.global_position_storage_preparations == 1u);
+            REQUIRE(before_move.global_position_storage_allocations == 1u);
+            REQUIRE(before_move.retained_position_count == 2u);
+            REQUIRE(before_move.retained_position_capacity == 2u);
+            REQUIRE(before_move.global_position_capacity_bytes
+                == 2u * sizeof(std::uint64_t));
+            REQUIRE(before_move.owned_capacity_bytes
+                == made->admitted_bytes());
+            const std::uint64_t reserved = admission.reserved_bytes();
+
+            PreparedShapeV5QueryReader destination{std::move(*made)};
+            REQUIRE(made->failed());
+            REQUIRE(made->admitted_bytes() == 0u);
+            REQUIRE(made->memory_evidence().retained_position_count == 0u);
+            REQUIRE(made->memory_evidence().retained_position_capacity == 0u);
+            REQUIRE(admission.reserved_bytes() == reserved);
+            REQUIRE(destination.memory_evidence().retained_position_count
+                == 2u);
+            REQUIRE(destination.accept(row_view(*payload.back())).has_value());
+            REQUIRE(destination.finish().has_value());
+            const auto found = destination.lookup(1u);
+            REQUIRE(found.positions.size() == 2u);
+            REQUIRE(found.positions[0] == 2u);
+            REQUIRE(found.positions[1] == 4u);
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
     SECTION("incomplete finish poisons and releases immediately") {
         bioseq::parallelism::MemoryAdmissionController admission;
         auto made = begin(admission);
@@ -8667,6 +9708,17 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         REQUIRE(mpf_generation.has_value());
         REQUIRE(mpf_producer.scan_count() == 3u);
         const auto mpf_execution = mpf_producer.execution_evidence();
+        INFO("Format-5 MPF evidence scans="
+            << mpf_execution.producer_scan_count
+            << " required_successful="
+            << mpf_execution.required_successful_scan_count()
+            << " geometry_retries="
+            << mpf_execution.geometry_retry_count
+            << " saturated=" << mpf_execution.saturated);
+        REQUIRE(mpf_execution.generation_wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+        REQUIRE(mpf_execution.required_successful_scan_count() == 3u);
         REQUIRE(mpf_execution.accepted());
         REQUIRE(mpf_execution.selected_backend
             == MinimizerSketchBackend::ExactSimd);
@@ -8707,6 +9759,19 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         REQUIRE(mps_generation.has_value());
         REQUIRE(mps_producer.scan_count() == 3u);
         REQUIRE(mps_producer.merge_pass_count() == 3u);
+        const auto mps_replay_evidence =
+            mps_producer.execution_evidence();
+        REQUIRE(mps_replay_evidence.generation_wire_format
+            == MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local);
+        REQUIRE(mps_replay_evidence.required_successful_replay_count()
+            == 3u);
+        REQUIRE(mps_replay_evidence.replay_scan_count == 3u);
+        REQUIRE(mps_replay_evidence.replay_completed_scan_count == 3u);
+        REQUIRE(mps_replay_evidence.replay_failed_scan_count == 0u);
+        REQUIRE(mps_replay_evidence.replay_reroute_pass_count == 0u);
+        REQUIRE(mps_replay_evidence.replay_visited_event_count
+            == 3u * mps_replay_evidence.spilled_event_count);
         require_encoded_generations_equal_normalized(
             *mpf_generation,
             mpf_sink.rows,
@@ -8729,6 +9794,24 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
                         == MinimizerScalarWidth::u32;
                 }));
         }
+
+        const auto fourth_replay = mps_producer.scan_sorted_events(
+            mps_generation->manifest.position_segment_span_bp,
+            CanonicalMinimizerEventReceiver{
+                .context = nullptr,
+                .emit_fn = [](
+                        void*, const CanonicalMinimizerEvent&)
+                        -> std::expected<
+                            void, MinimizerGenerationWireError> {
+                    return {};
+                },
+            });
+        require_wire_error(
+            fourth_replay, MinimizerGenerationWireError::segment_span);
+        const auto terminal_evidence = mps_producer.execution_evidence();
+        REQUIRE(terminal_evidence.replay_scan_count == 4u);
+        REQUIRE(terminal_evidence.replay_completed_scan_count == 3u);
+        REQUIRE(terminal_evidence.replay_failed_scan_count == 1u);
     };
 
     SECTION("random fragmented sequence") {

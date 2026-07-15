@@ -188,6 +188,13 @@ struct ConfigValue {
 /// Per-algorithm parameter map: param_name -> value (with defaults filled in).
 using ParamMap = std::map<std::string, ConfigValue>;
 
+/// Framework-resolved execution tuple exposed read-only to `on_input` through
+/// RunConstraints after matrix expansion and `cases=` pruning.
+struct ResolvedExecutionTuple {
+    std::string algorithm_name{};
+    ParamMap params{};
+};
+
 /**
  * @brief Resource budget hints returned by the user's resource estimator.
  *
@@ -216,6 +223,13 @@ struct RunConstraints {
     /// flight on this batch. Released as soon as the loop exits.
     /// Default 0 = no reservation.
     std::size_t extra_memory = 0;
+    /// Framework-owned, stable-order execution tuples that will actually run
+    /// against this batch's cached Input. The framework fills this after
+    /// matrix expansion and `cases=` pruning, replacing any estimator-provided
+    /// contents before `on_input` observes the value. Input builders may use
+    /// it to avoid preparing algorithm/policy-specific untimed fixtures for
+    /// rows that cannot run in this batch.
+    std::vector<ResolvedExecutionTuple> execution_tuples{};
 };
 
 /**
@@ -10845,8 +10859,18 @@ inline void run_typed_benchmark(
 
     for (auto& batch : *batches_ptr) {
         const auto& spec = state.test_cases[batch.test_case_index];
-        const auto constraints = on_estimate_resources(
+        auto constraints = on_estimate_resources(
             data_dir, spec.name, spec.data);
+        constraints.execution_tuples.clear();
+        constraints.execution_tuples.reserve(batch.items.size());
+        for (const auto& item : batch.items) {
+            DEBUG_ASSERT(item.tuple != nullptr,
+                "work-batch item must retain its expanded execution tuple");
+            constraints.execution_tuples.push_back(ResolvedExecutionTuple{
+                .algorithm_name = item.tuple->algorithm_name,
+                .params = item.tuple->params,
+            });
+        }
         auto& slot = (*group_slots)[batch.batch_index];
         slot.constraints = constraints;
         const bool total_overflow = constraints.extra_memory

@@ -1,0 +1,173 @@
+{
+  "params": {
+    "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Production all-SIMD cold persisted Format-5 index load plus mapping"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_fragment",
+        "enum": ["minimizers_per_fragment"],
+        "description": "Canonical MPF persisted-index policy"
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": ["task_parallel"],
+        "description": "Canonical production task-parallel scheduler"
+      }
+    },
+    "minimap2_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "minimap2 map-only baseline over an untimed prebuilt .mmi"
+      },
+      "threads": {
+        "type": "integer",
+        "default": 0,
+        "enum": [0],
+        "description": "Resolve to exact parity with the live bioseq scheduler max_threads"
+      }
+    }
+  },
+  "test_cases": {
+    "E2E_2GBP_DNA4": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "2gbp_dna4_format5_simd_focus",
+        "reference_length": 2000000000,
+        "fragment_count": 16,
+        "fragment_length_mean": 5000000,
+        "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "cigar_projection": true,
+        "just_index_setup_only": "minimizers_per_fragment",
+        "minimap2_split_bp": 2000000352,
+        "seed": 3219876
+      },
+      "description": "One-repeat canonical 2-Gbp dna4 cold just_index comparison with full CIGAR work"
+    }
+  },
+  "bench_e2e": {
+    "tags": ["e2e", "diagnostic", "cold-index", "format5", "simd-minimap2"],
+    "description": "Focused production Format-5 all-SIMD cold just_index versus minimap2 map-only. The exact two-row acceptance contract permits an all-row cases filter without weakening the default six-row signoff contract.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 370
+    },
+    "matrix": {
+      "for": {
+        "E2E_2GBP_DNA4": 1
+      },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+          "minimizer_index": ["minimizers_per_fragment"],
+          "pipeline_mode": ["task_parallel"]
+        },
+        "minimap2_just_index": {
+          "threads": [0]
+        }
+      },
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "bioseq_block_simd_dp_two_stack_nthash_just_index",
+          "minimap2_just_index"
+        ],
+        "exact_test_case_iterations": {
+          "E2E_2GBP_DNA4": 1
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "rules": []},
+        "region_visits": {"type": "region", "rules": []},
+        "measured_region_ns_manual": {"type": "evaluation", "rules": []},
+        "match_count": {"type": "evaluation", "rules": []},
+        "expected_match_count": {"type": "evaluation", "rules": []},
+        "correct_match_count": {"type": "evaluation", "rules": []},
+        "cigar_result_count": {"type": "evaluation", "rules": []},
+        "correct_cigar_count": {"type": "evaluation", "rules": []},
+        "max_position_offset_bp": {"type": "evaluation", "rules": []},
+        "pipeline_proof_present": {"type": "evaluation", "rules": []},
+        "pipeline_proof_attached_to_measurement": {"type": "evaluation", "rules": []},
+        "pipeline_proof_accepted": {"type": "evaluation", "rules": []},
+        "stage_engine_matrix_valid": {"type": "evaluation", "rules": []},
+        "effective_cpu_workers": {"type": "evaluation", "rules": []},
+        "comparison_cpu_workers": {"type": "evaluation", "rules": []},
+        "worker_parity": {"type": "evaluation", "rules": []},
+        "alignment_completed": {"type": "evaluation", "rules": []},
+        "alignment_partial": {"type": "evaluation", "rules": []},
+        "alignment_fully_drained": {"type": "evaluation", "rules": []},
+        "persisted_generation_id": {"type": "evaluation", "rules": []},
+        "persisted_source_identity_present": {"type": "evaluation", "rules": []},
+        "pre_restart_persisted_gpu_abi_version": {"type": "evaluation", "rules": []},
+        "persisted_manifest_rows_read": {"type": "evaluation", "rules": []},
+        "persisted_manifest_bytes_read": {"type": "evaluation", "rules": []},
+        "persisted_format5_manifest_contract_valid": {"type": "evaluation", "rules": []},
+        "persisted_generation_read_sessions": {"type": "evaluation", "rules": []},
+        "persisted_relation_opens": {"type": "evaluation", "rules": []},
+        "persisted_index_scans": {"type": "evaluation", "rules": []},
+        "format5_reader_capacity_accounting_passes": {"type": "evaluation", "rules": []},
+        "format5_reader_global_position_storage_preparations": {"type": "evaluation", "rules": []},
+        "format5_reader_global_position_storage_allocations": {"type": "evaluation", "rules": []},
+        "format5_reader_position_append_growth_reservations": {"type": "evaluation", "rules": []},
+        "format5_reader_retained_position_count": {"type": "evaluation", "rules": []},
+        "format5_reader_retained_position_capacity": {"type": "evaluation", "rules": []},
+        "format5_reader_directory_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_query_hash_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_query_record_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_ordinal_route_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_selected_extent_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_current_selected_control_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_global_position_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_control_payload_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_owned_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_admitted_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_exact_position_image_checks": {"type": "evaluation", "rules": []},
+        "format5_reader_exact_position_image_failures": {"type": "evaluation", "rules": []},
+        "format5_reader_retained_layout_checks": {"type": "evaluation", "rules": []},
+        "format5_reader_retained_layout_failures": {"type": "evaluation", "rules": []},
+        "format5_reader_memory_evidence_saturated": {"type": "evaluation", "rules": []},
+        "requested_backend_simd_cpu": {"type": "evaluation", "rules": []},
+        "actual_backend_simd_cpu": {"type": "evaluation", "rules": []},
+        "requested_target_index_source_persisted": {"type": "evaluation", "rules": []},
+        "actual_target_index_source_persisted": {"type": "evaluation", "rules": []},
+        "simd_evidence_schema_valid": {"type": "evaluation", "rules": []},
+        "nthash_vector_batches": {"type": "evaluation", "rules": []},
+        "nthash_resident_vector_stream_kernel_calls": {"type": "evaluation", "rules": []},
+        "simd_chaining_bounded_policy_calls": {"type": "evaluation", "rules": []},
+        "simd_chaining_bounded_score_batches": {"type": "evaluation", "rules": []},
+        "attempted_alignment_jobs": {"type": "evaluation", "rules": []},
+        "fully_attested_alignment_jobs": {"type": "evaluation", "rules": []},
+        "unattested_alignment_jobs": {"type": "evaluation", "rules": []},
+        "backend_declines": {"type": "evaluation", "rules": []},
+        "backend_fallbacks": {"type": "evaluation", "rules": []},
+        "just_index_restart_performed": {"type": "evaluation", "rules": []},
+        "just_index_restart_identity_changed": {"type": "evaluation", "rules": []},
+        "peak_postgres_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_minimap2_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_bench_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_swap_used_mb": {"type": "evaluation", "rules": []}
+      }
+    }
+  }
+}

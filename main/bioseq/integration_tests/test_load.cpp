@@ -356,7 +356,7 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     }
 }
 
-TEST_CASE("bioseq.load: grouped32 uses the post-load locator rebuild path",
+TEST_CASE("bioseq.load: Format-5 uses the post-load locator rebuild path",
           "[load][integration][doc0371][rev4][guc]") {
     constexpr std::string_view table = "load_grouped32_ready";
     constexpr std::string_view rollback_table = "load_grouped32_rollback";
@@ -372,6 +372,8 @@ TEST_CASE("bioseq.load: grouped32 uses the post-load locator rebuild path",
         "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
         table);
     it::exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
+    // The compatibility GUC retains its historical grouped32 name, but the
+    // production persisted generation it enables is Format-5 / GPU ABI3.
     it::exec_sql(ctx,
         "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
     it::exec_sql(ctx, "SET bioseq.index_async_persist = off;");
@@ -402,7 +404,7 @@ TEST_CASE("bioseq.load: grouped32 uses the post-load locator rebuild path",
         rowno));
     REQUIRE(inspected.size() == 5);
     REQUIRE(std::stoll(inspected[0].value()) > 0);
-    REQUIRE(inspected[1].value() == "2");
+    REQUIRE(inspected[1].value() == "3");
     REQUIRE(inspected[2].value() == "15");
     REQUIRE(inspected[3].value() == "10");
     REQUIRE(inspected[4].value() == "65565");

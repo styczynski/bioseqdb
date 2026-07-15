@@ -22,6 +22,7 @@ module;
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
@@ -34,10 +35,12 @@ module;
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -45,6 +48,9 @@ module;
 #include <dlfcn.h>
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
@@ -79,6 +85,10 @@ struct VulkanFeatureSet {
     bool timeline_semaphore = false;
     bool software_device = false;
     std::uint32_t device_type = 0;
+    std::uint32_t api_version = 0;
+    std::uint32_t driver_version = 0;
+    std::uint32_t vendor_id = 0;
+    std::uint32_t device_id = 0;
     std::uint32_t max_workgroup_invocations = 0;
     std::uint32_t max_workgroup_size_x = 0;
     std::uint32_t max_workgroup_size_y = 0;
@@ -89,8 +99,48 @@ struct VulkanFeatureSet {
     std::uint64_t min_storage_buffer_offset_alignment = 1;
     std::uint64_t device_local_bytes = 0;
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
     std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
+
+/// Canonical allocation-free Vulkan driver identity used by SQL/report proof.
+/// Numeric fields avoid unstable marketing strings and preserve the exact
+/// pipeline-cache compatibility UUID byte order reported by Vulkan.
+[[nodiscard]] inline std::array<char, 128>
+canonical_vulkan_driver_identity(const VulkanFeatureSet& features) noexcept {
+    std::array<char, 128> result{};
+    constexpr char hex[] = "0123456789abcdef";
+    std::size_t cursor = 0u;
+    const auto append_literal = [&result, &cursor](std::string_view value) {
+        if (cursor > result.size() - value.size() - 1u) return false;
+        for (const char ch : value) result[cursor++] = ch;
+        return true;
+    };
+    const auto append_u32 = [&result, &cursor](std::uint32_t value) {
+        constexpr char digits[] = "0123456789abcdef";
+        if (cursor > result.size() - 9u) return false;
+        for (std::uint32_t shift = 28u;; shift -= 4u) {
+            result[cursor++] = digits[(value >> shift) & 0x0fu];
+            if (shift == 0u) break;
+        }
+        return true;
+    };
+    if (!append_literal("api=") || !append_u32(features.api_version)
+        || !append_literal(";driver=")
+        || !append_u32(features.driver_version)
+        || !append_literal(";vendor=") || !append_u32(features.vendor_id)
+        || !append_literal(";device=") || !append_u32(features.device_id)
+        || !append_literal(";pcuuid=")) {
+        return {};
+    }
+    for (const std::uint8_t byte : features.pipeline_cache_uuid) {
+        if (cursor > result.size() - 3u) return {};
+        result[cursor++] = hex[byte >> 4u];
+        result[cursor++] = hex[byte & 0x0fu];
+    }
+    result[cursor] = '\0';
+    return result;
+}
 
 /// RAII owner for one (VkBuffer, VkDeviceMemory) pair. Move-only; destruction
 /// routes through `Runtime::destroy_buffer` (the single cleanup path).
@@ -157,6 +207,48 @@ private:
     }
 };
 
+template <class Handle>
+[[nodiscard]] inline std::uint64_t vulkan_handle_identity(
+    const Handle handle) noexcept {
+    static_assert(sizeof(Handle) <= sizeof(std::uint64_t));
+    std::uint64_t identity = 0u;
+    std::memcpy(&identity, &handle, sizeof(handle));
+    return identity;
+}
+
+/// Immutable snapshot of one Runtime-owned allocation.  The object address is
+/// insufficient because Buffer is move-assignable; operation proof therefore
+/// binds its owner, Vulkan allocation handles, and physical/logical sizes too.
+struct RuntimeBufferIdentity {
+    const Buffer* object = nullptr;
+    const Runtime* owner = nullptr;
+    std::uint64_t buffer_handle = 0u;
+    std::uint64_t memory_handle = 0u;
+    std::uint64_t bytes = 0u;
+    std::uint64_t allocation_bytes = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return object != nullptr && owner != nullptr
+            && buffer_handle != 0u && memory_handle != 0u
+            && bytes != 0u && allocation_bytes >= bytes;
+    }
+    constexpr bool operator==(const RuntimeBufferIdentity&) const noexcept =
+        default;
+};
+
+[[nodiscard]] inline RuntimeBufferIdentity runtime_buffer_identity(
+    const Buffer* buffer) noexcept {
+    if (buffer == nullptr) return {};
+    return RuntimeBufferIdentity{
+        .object = buffer,
+        .owner = buffer->owner,
+        .buffer_handle = vulkan_handle_identity(buffer->buffer),
+        .memory_handle = vulkan_handle_identity(buffer->memory),
+        .bytes = buffer->bytes,
+        .allocation_bytes = buffer->allocation_bytes,
+    };
+}
+
 /// One independent hard chaining range = one dispatched workgroup.
 struct GpuChainRange {
     std::uint32_t begin = 0;
@@ -189,6 +281,2157 @@ RuntimeShaderProvider*& runtime_shader_provider_slot() noexcept {
 void install_runtime_shader_provider(RuntimeShaderProvider* provider) noexcept {
     runtime_shader_provider_slot() = provider;
 }
+
+[[nodiscard]] inline bool accepted_runtime_cache_digest(
+    std::string_view digest) noexcept {
+    return digest.size() == 16u
+        && std::all_of(digest.begin(), digest.end(), [](char value) {
+               return (value >= '0' && value <= '9')
+                   || (value >= 'a' && value <= 'f');
+           })
+        && std::any_of(digest.begin(), digest.end(), [](char value) {
+               return value != '0';
+           });
+}
+
+/// One exact Metal binary archive inside the process-owned sealed seed image.
+/// The ordinal binds runtime staging to retained bytes rather than a cache
+/// pathname that could be replaced after supervisor validation.
+struct RuntimeMetalArchiveSpec {
+    std::uint32_t artifact_ordinal =
+        (std::numeric_limits<std::uint32_t>::max)();
+    std::string artifact_filename;
+    std::uint64_t size = 0u;
+    std::array<std::uint8_t, 32> sha256{};
+    std::string negative_error_domain;
+    std::int64_t negative_error_code = 0;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return artifact_ordinal
+                != (std::numeric_limits<std::uint32_t>::max)()
+            && !artifact_filename.empty() && size != 0u
+            && !negative_error_domain.empty()
+            && negative_error_domain.size() <= 1024u
+            && negative_error_domain.find('\0') == std::string::npos
+            && std::any_of(sha256.begin(), sha256.end(), [](std::uint8_t byte) {
+                   return byte != 0u;
+               });
+    }
+    [[nodiscard]] bool operator==(const RuntimeMetalArchiveSpec&) const noexcept = default;
+};
+
+/// Immutable input installed by the PostgreSQL cache owner before Runtime is
+/// constructed.  It intentionally contains no directory: an unlisted archive
+/// can never become eligible merely by appearing beside a listed one.
+struct RuntimeMetalArchiveConfiguration {
+    std::shared_ptr<const SealedShaderCacheSeedImage> seed_image;
+    /// Optional external expectations.  Zero means Runtime must seal the
+    /// selected Vulkan/Metal identities before vkCreateDevice; a nonzero value
+    /// is an additional equality constraint, never a value to trust blindly.
+    std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid{};
+    std::uint64_t metal_device_registry_id = 0u;
+    std::uint32_t qualification_version = 0u;
+    std::uint64_t qualification_receipt_count = 0u;
+    std::uint32_t helper_protocol_version = 0u;
+    std::string helper_build_identity;
+    std::string helper_source;
+    std::uint64_t helper_executable_size = 0u;
+    std::array<std::uint8_t, 32> helper_executable_sha256{};
+    std::uint64_t helper_metal_registry_id = 0u;
+    std::vector<RuntimeMetalArchiveSpec> archives;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        if (!seed_image || !seed_image->accepted() || archives.empty()
+            || qualification_version != 2u
+            || qualification_receipt_count != archives.size()
+            || helper_protocol_version != 2u
+            || helper_build_identity != "bioseq_gpu_archive_builder_v2"
+            || helper_source != "installed-sibling"
+            || helper_executable_size == 0u
+            || helper_metal_registry_id == 0u
+            || std::all_of(
+                helper_executable_sha256.begin(),
+                helper_executable_sha256.end(),
+                [](std::uint8_t value) { return value == 0u; })
+            || (metal_device_registry_id != 0u
+                && metal_device_registry_id != helper_metal_registry_id)
+            || !accepted_runtime_cache_digest(
+                seed_image->manifest().cache_digest)) {
+            return false;
+        }
+        try {
+        for (std::size_t i = 0u; i < archives.size(); ++i) {
+            const RuntimeMetalArchiveSpec& archive = archives[i];
+            const SealedShaderCacheArtifactImage* image =
+                seed_image->artifact(archive.artifact_ordinal);
+            if (!archive.accepted() || image == nullptr
+                || image->descriptor.kind
+                    != SealedShaderCacheArtifactKind::metal_binary_archive
+                || image->descriptor.filename != archive.artifact_filename
+                || image->descriptor.size != archive.size
+                || image->descriptor.sha256 != archive.sha256
+                || (i != 0u
+                    && archives[i - 1u].artifact_ordinal
+                        >= archive.artifact_ordinal)
+                || (i != 0u
+                    && (archive.negative_error_domain
+                            != archives[0].negative_error_domain
+                        || archive.negative_error_code
+                            != archives[0].negative_error_code))) {
+                return false;
+            }
+            const auto* receipt_image =
+                sealed_shader_cache_detail::find_artifact_image(
+                    seed_image->artifacts(),
+                    SealedShaderCacheArtifactKind::
+                        metal_binary_archive_qualification,
+                    image->descriptor.key_index,
+                    image->descriptor.filename + ".qualification");
+            if (receipt_image == nullptr) return false;
+            const auto receipt = sealed_shader_cache_detail::
+                parse_metal_archive_qualification_receipt(
+                    receipt_image->bytes);
+            if (!receipt || !receipt->production_accepted()
+                || receipt->archive_size != archive.size
+                || receipt->archive_sha256 != archive.sha256
+                || receipt->negative_error.domain
+                    != archive.negative_error_domain
+                || receipt->negative_error.code != archive.negative_error_code
+                || receipt->wire_version != qualification_version
+                || receipt->helper_protocol_version
+                    != helper_protocol_version
+                || receipt->helper_build_identity != helper_build_identity
+                || receipt->helper_source != helper_source
+                || receipt->helper_executable_size != helper_executable_size
+                || receipt->helper_executable_sha256
+                    != helper_executable_sha256
+                || receipt->helper_metal_registry_id
+                    != helper_metal_registry_id) {
+                return false;
+            }
+        }
+        } catch (...) {
+            return false;
+        }
+        return true;
+    }
+    [[nodiscard]] bool operator==(
+        const RuntimeMetalArchiveConfiguration&) const noexcept = default;
+};
+
+/// Single admitted process owner for installed archive configuration metadata.
+/// The public configuration is a transient installation candidate; its vector
+/// and strings are moved into this image without a second allocation or copy.
+class RuntimeMetalArchiveConfigurationImage {
+public:
+    RuntimeMetalArchiveConfigurationImage(
+        const RuntimeMetalArchiveConfigurationImage&) = delete;
+    RuntimeMetalArchiveConfigurationImage& operator=(
+        const RuntimeMetalArchiveConfigurationImage&) = delete;
+    RuntimeMetalArchiveConfigurationImage(
+        RuntimeMetalArchiveConfigurationImage&&) noexcept = default;
+    RuntimeMetalArchiveConfigurationImage& operator=(
+        RuntimeMetalArchiveConfigurationImage&&) noexcept = delete;
+
+    [[nodiscard]] const RuntimeMetalArchiveConfiguration& configuration()
+        const noexcept {
+        return configuration_;
+    }
+    [[nodiscard]] std::uint64_t retained_capacity_bytes() const noexcept {
+        return retained_capacity_bytes_;
+    }
+    [[nodiscard]] std::uint64_t peak_admitted_bytes() const noexcept {
+        return peak_admitted_bytes_;
+    }
+    [[nodiscard]] bool accepted() const noexcept {
+        return configuration_.accepted() && permit_
+            && retained_capacity_bytes_ != 0u
+            && retained_capacity_bytes_ <= peak_admitted_bytes_
+            && permit_.bytes() == retained_capacity_bytes_;
+    }
+
+private:
+    RuntimeMetalArchiveConfigurationImage(
+        RuntimeMetalArchiveConfiguration configuration,
+        std::uint64_t peak_admitted_bytes,
+        bioseq::parallelism::MemoryPermit permit) noexcept
+        : permit_(std::move(permit)),
+          configuration_(std::move(configuration)),
+          peak_admitted_bytes_(peak_admitted_bytes) {}
+
+    [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t owned = sizeof(RuntimeMetalArchiveConfigurationImage);
+        owned = saturating_add(
+            owned,
+            saturating_mul(
+                static_cast<std::uint64_t>(configuration_.archives.capacity()),
+                sizeof(RuntimeMetalArchiveSpec)));
+        for (const RuntimeMetalArchiveSpec& archive : configuration_.archives) {
+            owned = saturating_add(
+                owned,
+                static_cast<std::uint64_t>(
+                    archive.artifact_filename.capacity()));
+            owned = saturating_add(
+                owned,
+                static_cast<std::uint64_t>(
+                    archive.negative_error_domain.capacity()));
+        }
+        owned = saturating_add(
+            owned,
+            static_cast<std::uint64_t>(
+                configuration_.helper_build_identity.capacity()));
+        owned = saturating_add(
+            owned,
+            static_cast<std::uint64_t>(
+                configuration_.helper_source.capacity()));
+        return owned;
+    }
+
+    [[nodiscard]] bool reconcile() noexcept {
+        const std::uint64_t retained = owned_capacity_bytes();
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || !permit_ || retained > permit_.bytes()) {
+            return false;
+        }
+        permit_.shrink_to(retained);
+        retained_capacity_bytes_ = retained;
+        return true;
+    }
+
+    // Reverse destruction releases strings/vector before their permit.
+    bioseq::parallelism::MemoryPermit permit_;
+    RuntimeMetalArchiveConfiguration configuration_;
+    std::uint64_t peak_admitted_bytes_ = 0u;
+    std::uint64_t retained_capacity_bytes_ = 0u;
+
+    friend std::expected<void, std::string>
+    install_runtime_metal_archive_configuration(
+        std::shared_ptr<const RuntimeMetalArchiveConfigurationImage>);
+    friend std::expected<std::shared_ptr<
+        const RuntimeMetalArchiveConfigurationImage>, std::string>
+    make_runtime_metal_archive_configuration_image(
+        std::shared_ptr<const SealedShaderCacheSeedImage>,
+        std::array<std::uint8_t, VK_UUID_SIZE>,
+        std::uint64_t);
+};
+
+struct RuntimeMetalArchiveLiveGateEvidence {
+    std::uint64_t install_validation_count = 0u;
+    std::uint64_t live_gate_calls = 0u;
+    std::uint64_t live_configuration_scan_count = 0u;
+    bool installed_accepted = false;
+};
+
+struct RuntimePrivateArchiveSnapshotTestEvidence {
+    std::filesystem::path snapshot_path;
+    std::uint64_t streamed_bytes = 0u;
+    std::uint64_t scratch_capacity_bytes = 0u;
+    bool exact_seed_compared = false;
+    bool tamper_rejected = false;
+};
+
+[[nodiscard]] RuntimeMetalArchiveLiveGateEvidence
+runtime_metal_archive_live_gate_evidence() noexcept;
+
+void probe_immutable_metal_policy_live_for_test();
+
+[[nodiscard]] std::expected<RuntimePrivateArchiveSnapshotTestEvidence, std::string>
+verify_runtime_private_archive_snapshot_for_test(
+    std::string_view artifact_filename,
+    std::span<const std::byte> bytes,
+    const std::filesystem::path& temp_parent);
+
+struct RuntimeMetalArchiveSetIdentity {
+    std::uint64_t archive_count = 0u;
+    std::uint64_t total_size = 0u;
+    std::uint64_t ordered_checksum = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return archive_count != 0u && total_size != 0u
+            && ordered_checksum != 0u;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const RuntimeMetalArchiveSetIdentity&) const noexcept = default;
+};
+
+struct RuntimeVulkanDeviceIdentity {
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return api_version != 0u && driver_version != 0u
+            && std::any_of(
+                device_uuid.begin(), device_uuid.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](std::uint8_t value) { return value != 0u; });
+    }
+    [[nodiscard]] bool operator==(
+        const RuntimeVulkanDeviceIdentity&) const noexcept = default;
+};
+
+struct RuntimeMetalArchiveProcessQualification;
+[[nodiscard]] std::uint64_t
+runtime_metal_archive_process_qualification_identity(
+    const RuntimeMetalArchiveProcessQualification&) noexcept;
+
+/// Immutable process qualification created once while exact seed bytes are
+/// installed into live Metal archive objects. Pipeline scopes borrow this
+/// record; they never reopen or hash an archive pathname.
+struct RuntimeMetalArchiveProcessQualification {
+    std::uint32_t version = 0u;
+    std::uint64_t identity = 0u;
+    RuntimeMetalArchiveSetIdentity archive_set{};
+    std::uint64_t receipt_count = 0u;
+    std::uint64_t hash_passes = 0u;
+    std::uint64_t hashed_bytes = 0u;
+    std::uint64_t private_files_created = 0u;
+    std::uint64_t private_files_unlinked = 0u;
+    std::uint64_t live_private_paths = 0u;
+    std::uint64_t pipeline_filesystem_hash_passes = 0u;
+    std::uint64_t pipeline_filesystem_hashed_bytes = 0u;
+    std::uint32_t helper_protocol_version = 0u;
+    std::string_view helper_build_identity;
+    std::string_view helper_source;
+    std::uint64_t helper_executable_size = 0u;
+    std::array<std::uint8_t, 32> helper_executable_sha256{};
+    std::uint64_t helper_metal_registry_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::uint64_t seed_receipt_identity = 0u;
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    bool saturated = true;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return version == 2u && identity != 0u
+            && identity
+                == runtime_metal_archive_process_qualification_identity(*this)
+            && archive_set.accepted()
+            && receipt_count == archive_set.archive_count
+            && hash_passes == 1u && hashed_bytes == archive_set.total_size
+            && private_files_created == archive_set.archive_count
+            && private_files_unlinked == private_files_created
+            && live_private_paths == 0u
+            && pipeline_filesystem_hash_passes == 0u
+            && pipeline_filesystem_hashed_bytes == 0u
+            && helper_protocol_version == 2u
+            && helper_build_identity == "bioseq_gpu_archive_builder_v2"
+            && helper_source == "installed-sibling"
+            && helper_executable_size != 0u
+            && std::any_of(
+                helper_executable_sha256.begin(),
+                helper_executable_sha256.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && helper_metal_registry_id != 0u
+            && RuntimeVulkanDeviceIdentity{
+                .device_uuid = vulkan_device_uuid,
+                .api_version = api_version,
+                .driver_version = driver_version,
+                .vendor_id = vendor_id,
+                .device_id = device_id,
+                .pipeline_cache_uuid = pipeline_cache_uuid,
+            }.accepted()
+            && seed_receipt_identity != 0u && seed_size != 0u
+            && manifest_checksum != 0u
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && !saturated;
+    }
+    [[nodiscard]] bool operator==(
+        const RuntimeMetalArchiveProcessQualification&) const noexcept = default;
+};
+
+[[nodiscard]] inline std::uint64_t
+runtime_metal_archive_process_qualification_identity(
+    const RuntimeMetalArchiveProcessQualification& value) noexcept
+{
+    constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
+    constexpr std::uint64_t fnv_prime = 1099511628211ull;
+    std::uint64_t identity = fnv_offset;
+    const auto append_byte = [&identity](std::uint8_t byte) {
+        identity ^= byte;
+        identity *= fnv_prime;
+    };
+    const auto append_u64 = [&append_byte](std::uint64_t number) {
+        for (std::uint32_t shift = 0u; shift != 64u; shift += 8u) {
+            append_byte(static_cast<std::uint8_t>(number >> shift));
+        }
+    };
+    const auto append_text = [&append_byte](std::string_view text) {
+        for (const unsigned char byte : text) append_byte(byte);
+        append_byte(0u);
+    };
+    append_u64(value.version);
+    append_u64(value.archive_set.archive_count);
+    append_u64(value.archive_set.total_size);
+    append_u64(value.archive_set.ordered_checksum);
+    append_u64(value.receipt_count);
+    append_u64(value.hash_passes);
+    append_u64(value.hashed_bytes);
+    append_u64(value.private_files_created);
+    append_u64(value.private_files_unlinked);
+    append_u64(value.live_private_paths);
+    append_u64(value.pipeline_filesystem_hash_passes);
+    append_u64(value.pipeline_filesystem_hashed_bytes);
+    append_u64(value.helper_protocol_version);
+    append_text(value.helper_build_identity);
+    append_text(value.helper_source);
+    append_u64(value.helper_executable_size);
+    for (const std::uint8_t byte : value.helper_executable_sha256) {
+        append_byte(byte);
+    }
+    append_u64(value.helper_metal_registry_id);
+    for (const std::uint8_t byte : value.vulkan_device_uuid) append_byte(byte);
+    append_u64(value.api_version);
+    append_u64(value.driver_version);
+    append_u64(value.vendor_id);
+    append_u64(value.device_id);
+    for (const std::uint8_t byte : value.pipeline_cache_uuid) append_byte(byte);
+    append_u64(value.seed_receipt_identity);
+    for (const std::uint8_t byte : value.seed_sha256) append_byte(byte);
+    append_u64(value.seed_size);
+    append_u64(value.manifest_checksum);
+    append_u64(value.saturated ? 1u : 0u);
+    return identity == 0u ? fnv_offset : identity;
+}
+
+[[nodiscard]] inline RuntimeMetalArchiveSetIdentity
+runtime_metal_archive_set_identity(
+    std::span<const RuntimeMetalArchiveSpec> archives) noexcept {
+    constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
+    constexpr std::uint64_t fnv_prime = 1099511628211ull;
+    std::uint64_t checksum = fnv_offset;
+    std::uint64_t total_size = 0u;
+    const auto append_byte = [&checksum](const std::uint8_t byte) {
+        checksum ^= byte;
+        checksum *= fnv_prime;
+    };
+    for (const RuntimeMetalArchiveSpec& archive : archives) {
+        for (std::uint32_t shift = 0u; shift != 32u; shift += 8u) {
+            append_byte(static_cast<std::uint8_t>(
+                archive.artifact_ordinal >> shift));
+        }
+        for (const unsigned char byte : archive.artifact_filename) {
+            append_byte(byte);
+        }
+        append_byte(0u);
+        for (std::uint32_t shift = 0u; shift != 64u; shift += 8u) {
+            append_byte(static_cast<std::uint8_t>(archive.size >> shift));
+        }
+        for (const std::uint8_t byte : archive.sha256) append_byte(byte);
+        for (const unsigned char byte : archive.negative_error_domain) {
+            append_byte(byte);
+        }
+        append_byte(0u);
+        const std::uint64_t error_code_bits =
+            std::bit_cast<std::uint64_t>(archive.negative_error_code);
+        for (std::uint32_t shift = 0u; shift != 64u; shift += 8u) {
+            append_byte(static_cast<std::uint8_t>(error_code_bits >> shift));
+        }
+        if (total_size > (std::numeric_limits<std::uint64_t>::max)()
+                - archive.size) {
+            total_size = (std::numeric_limits<std::uint64_t>::max)();
+        } else {
+            total_size += archive.size;
+        }
+    }
+    return RuntimeMetalArchiveSetIdentity{
+        .archive_count = static_cast<std::uint64_t>(archives.size()),
+        .total_size = total_size,
+        .ordered_checksum = checksum,
+    };
+}
+
+/// Exact facts captured for one vkCreateComputePipelines call.  A receipt is
+/// accepted only when every Metal pipeline call made under its explicit scope
+/// replaced the descriptor archive set, forced fail-on-miss, and first proved
+/// that the same descriptor misses against a fresh empty archive.
+struct RuntimeMetalArchivePipelineAudit {
+    std::uint64_t receipt_identity = 0u;
+    std::uint64_t scope_identity = 0u;
+    std::string cache_digest;
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    std::uint64_t seed_receipt_identity = 0u;
+    std::uint64_t seed_load_count = 0u;
+    std::uint64_t seed_manifest_read_count = 0u;
+    std::uint64_t seed_artifact_read_count = 0u;
+    std::uint64_t seed_manifest_bytes = 0u;
+    std::uint64_t seed_artifact_bytes = 0u;
+    std::uint64_t seed_load_ns = 0u;
+    std::uint64_t seed_admission_count = 0u;
+    std::uint64_t seed_peak_admitted_bytes = 0u;
+    std::uint64_t seed_retained_capacity_bytes = 0u;
+    bool seed_admission_saturated = true;
+    RuntimeMetalArchiveProcessQualification cache_qualification{};
+    ShaderVariantKey shader_key{};
+    std::string expected_entry_name;
+    std::string observed_entry_name;
+    std::uint64_t matched_descriptor_functions = 0u;
+    RuntimeMetalArchiveSetIdentity expected_archives{};
+    RuntimeMetalArchiveSetIdentity loaded_archives{};
+    std::uint64_t archive_pre_post_identity_checks = 0u;
+    std::uint64_t pipeline_pre_identity_checks = 0u;
+    std::uint64_t pipeline_post_identity_checks = 0u;
+    std::uint64_t unsealed_metal_source_requests = 0u;
+    std::uint64_t metal_source_fallback_calls = 0u;
+    bool command_interpose_installed = false;
+    bool command_interpose_immutable_fail_closed = false;
+    std::uint64_t command_loader_metal_registry_id = 0u;
+    std::uint64_t command_source_methods_present = 0u;
+    std::uint64_t command_source_wrapper_methods = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> configured_vulkan_device_uuid{};
+    std::array<std::uint8_t, VK_UUID_SIZE> runtime_vulkan_device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::uint64_t pipeline_create_ns = 0u;
+    std::uint64_t expected_metal_registry_id = 0u;
+    std::uint64_t loader_metal_registry_id = 0u;
+    std::uint64_t intercepted_metal_registry_id = 0u;
+    std::uint64_t scoped_interceptions = 0u;
+    std::uint64_t descriptor_replacements = 0u;
+    std::uint64_t fail_on_miss_enforcements = 0u;
+    std::uint64_t same_descriptor_negative_controls = 0u;
+    std::uint64_t negative_control_misses = 0u;
+    std::string expected_negative_error_domain;
+    std::int64_t expected_negative_error_code = 0;
+    std::string observed_negative_error_domain;
+    std::int64_t observed_negative_error_code = 0;
+    std::uint64_t original_sync_negative_calls = 0u;
+    std::uint64_t actual_sync_calls = 0u;
+    std::uint64_t actual_async_calls = 0u;
+    std::uint64_t outside_scope_interceptions = 0u;
+    bool nested_scope = false;
+    bool sticky_failure = false;
+    bool outer_vulkan_pipeline_succeeded = false;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        const std::uint64_t actual_calls = actual_sync_calls + actual_async_calls;
+        return receipt_identity != 0u && scope_identity != 0u
+            && accepted_runtime_cache_digest(cache_digest)
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](std::uint8_t byte) { return byte != 0u; })
+            && seed_size != 0u && manifest_checksum != 0u
+            && seed_receipt_identity != 0u && seed_load_count == 1u
+            && seed_manifest_read_count == 1u
+            && seed_artifact_read_count != 0u
+            && seed_manifest_bytes != 0u
+            && seed_artifact_bytes == seed_size && seed_load_ns != 0u
+            && seed_admission_count == 1u
+            && seed_peak_admitted_bytes != 0u
+            && seed_retained_capacity_bytes != 0u
+            && seed_retained_capacity_bytes <= seed_peak_admitted_bytes
+            && !seed_admission_saturated
+            && cache_qualification.accepted()
+            && cache_qualification.archive_set == expected_archives
+            && cache_qualification.seed_receipt_identity
+                == seed_receipt_identity
+            && cache_qualification.seed_sha256 == seed_sha256
+            && cache_qualification.seed_size == seed_size
+            && cache_qualification.manifest_checksum == manifest_checksum
+            && valid_shader_variant_key(shader_key)
+            && !expected_entry_name.empty()
+            && observed_entry_name == expected_entry_name
+            && matched_descriptor_functions == 1u
+            && expected_archives.accepted()
+            && expected_archives == loaded_archives
+            && archive_pre_post_identity_checks
+                == expected_archives.archive_count
+            && pipeline_pre_identity_checks == 0u
+            && pipeline_post_identity_checks == 0u
+            && unsealed_metal_source_requests == 0u
+            && metal_source_fallback_calls == 0u
+            && command_interpose_installed
+            && command_interpose_immutable_fail_closed
+            && configured_vulkan_device_uuid == runtime_vulkan_device_uuid
+            && std::any_of(
+                runtime_vulkan_device_uuid.begin(),
+                runtime_vulkan_device_uuid.end(),
+                [](std::uint8_t byte) { return byte != 0u; })
+            && api_version != 0u && driver_version != 0u
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](std::uint8_t byte) { return byte != 0u; })
+            && pipeline_create_ns != 0u
+            && cache_qualification.helper_metal_registry_id
+                == expected_metal_registry_id
+            && cache_qualification.vulkan_device_uuid
+                == runtime_vulkan_device_uuid
+            && cache_qualification.api_version == api_version
+            && cache_qualification.driver_version == driver_version
+            && cache_qualification.vendor_id == vendor_id
+            && cache_qualification.device_id == device_id
+            && cache_qualification.pipeline_cache_uuid
+                == pipeline_cache_uuid
+            && expected_metal_registry_id != 0u
+            && command_loader_metal_registry_id
+                == expected_metal_registry_id
+            && command_source_methods_present == 2u
+            && command_source_wrapper_methods
+                == command_source_methods_present
+            && loader_metal_registry_id == expected_metal_registry_id
+            && intercepted_metal_registry_id == expected_metal_registry_id
+            && scoped_interceptions == 1u
+            && actual_calls == scoped_interceptions
+            && descriptor_replacements == scoped_interceptions
+            && fail_on_miss_enforcements == scoped_interceptions
+            && same_descriptor_negative_controls == scoped_interceptions
+            && negative_control_misses == scoped_interceptions
+            && !expected_negative_error_domain.empty()
+            && observed_negative_error_domain
+                == expected_negative_error_domain
+            && observed_negative_error_code == expected_negative_error_code
+            && original_sync_negative_calls == scoped_interceptions
+            && outside_scope_interceptions == 0u
+            && !nested_scope && !sticky_failure
+            && outer_vulkan_pipeline_succeeded;
+    }
+};
+
+namespace runtime_detail {
+class RuntimeGpuCacheMetricsClaimPlan;
+}
+
+/// Move-only immutable proof retained by the canonical Vulkan pipeline cache
+/// entry.  Cache views share that same object; they cannot mint another proof.
+class RuntimeMetalArchivePipelineReceipt {
+public:
+    RuntimeMetalArchivePipelineReceipt() = default;
+    RuntimeMetalArchivePipelineReceipt(
+        const RuntimeMetalArchivePipelineReceipt&) = delete;
+    RuntimeMetalArchivePipelineReceipt& operator=(
+        const RuntimeMetalArchivePipelineReceipt&) = delete;
+    RuntimeMetalArchivePipelineReceipt(
+        RuntimeMetalArchivePipelineReceipt&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          metrics_claimed_(std::exchange(
+              other.metrics_claimed_, false)) {}
+    RuntimeMetalArchivePipelineReceipt& operator=(
+        RuntimeMetalArchivePipelineReceipt&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            metrics_claimed_ = std::exchange(
+                other.metrics_claimed_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept { return audit_.accepted(); }
+    [[nodiscard]] const RuntimeMetalArchivePipelineAudit& audit() const noexcept {
+        return audit_;
+    }
+
+    [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        std::uint64_t owned = sizeof(RuntimeMetalArchivePipelineReceipt);
+        owned = saturating_add(owned, audit_.cache_digest.capacity());
+        owned = saturating_add(owned, audit_.expected_entry_name.capacity());
+        owned = saturating_add(owned, audit_.observed_entry_name.capacity());
+        owned = saturating_add(
+            owned, audit_.expected_negative_error_domain.capacity());
+        owned = saturating_add(
+            owned, audit_.observed_negative_error_domain.capacity());
+        return owned;
+    }
+
+    /// Pure contract hook: proves move invalidation and that multiple cache
+    /// views retain one accepted receipt object rather than cloning evidence.
+    [[nodiscard]] static bool self_test_move_and_reuse_contract(
+        RuntimeMetalArchivePipelineAudit audit) {
+        RuntimeMetalArchivePipelineReceipt issued{std::move(audit)};
+        if (!issued.accepted()) return false;
+        RuntimeMetalArchivePipelineReceipt moved{std::move(issued)};
+        if (issued.accepted() || !moved.accepted()) return false;
+        auto retained = std::make_shared<const RuntimeMetalArchivePipelineReceipt>(
+            std::move(moved));
+        const auto normal_cache_view = retained;
+        const auto phase_b_cache_view = retained;
+        return retained->accepted() && normal_cache_view->accepted()
+            && phase_b_cache_view->accepted()
+            && retained.get() == normal_cache_view.get()
+            && retained.get() == phase_b_cache_view.get();
+    }
+
+private:
+    explicit RuntimeMetalArchivePipelineReceipt(
+        RuntimeMetalArchivePipelineAudit audit) noexcept
+        : audit_(std::move(audit)) {}
+
+    RuntimeMetalArchivePipelineAudit audit_{};
+    mutable bool metrics_claimed_ = false;
+    friend class Runtime;
+    friend class RuntimePipelineOperationProof;
+    friend class runtime_detail::RuntimeGpuCacheMetricsClaimPlan;
+};
+
+static_assert(!std::is_copy_constructible_v<RuntimeMetalArchivePipelineReceipt>);
+static_assert(std::is_nothrow_move_constructible_v<
+              RuntimeMetalArchivePipelineReceipt>);
+
+inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
+inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 11u;
+
+/// Exact 8-bit radix pass count for the persisted Shape-V5 target coordinate
+/// domain.  Kept public and allocation-free so portable contract tests can pin
+/// every byte-width boundary used by causal dispatch validation.
+[[nodiscard]] inline std::optional<std::uint32_t>
+runtime_shape_v5_radix_pass_count(
+    std::uint64_t target_position_offset,
+    std::uint64_t target_len) noexcept {
+    if (target_len == 0u
+        || target_position_offset
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - (target_len - 1u)) {
+        return std::nullopt;
+    }
+    const std::uint64_t target_end =
+        target_position_offset + target_len - 1u;
+    if (target_end >= (std::uint64_t{1} << 63u)) {
+        return std::nullopt;
+    }
+    const std::uint32_t bits = target_end == 0u
+        ? 1u
+        : 64u - static_cast<std::uint32_t>(
+            std::countl_zero(target_end));
+    return std::clamp<std::uint32_t>((bits + 7u) / 8u, 1u, 8u);
+}
+
+enum class RuntimePipelineOperationKind : std::uint8_t {
+    invalid,
+    query_sketch,
+    shape_v5_coordinate,
+};
+
+struct RuntimeGpuCacheMetricsAudit {
+    std::uint64_t token_identity = 0u;
+    std::uint64_t gpu_pipeline_cache_loads = 0u;
+    std::uint64_t gpu_pipeline_cache_seed_bytes = 0u;
+    std::uint64_t gpu_pipeline_cache_load_ns = 0u;
+    std::uint64_t gpu_pipeline_creates = 0u;
+    std::uint64_t gpu_pipeline_creation_ns = 0u;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool seed_shape = gpu_pipeline_cache_loads == 0u
+            ? gpu_pipeline_cache_seed_bytes == 0u
+                && gpu_pipeline_cache_load_ns == 0u
+            : gpu_pipeline_cache_loads == 1u
+                && gpu_pipeline_cache_seed_bytes != 0u
+                && gpu_pipeline_cache_load_ns != 0u;
+        const bool create_shape = gpu_pipeline_creates == 0u
+            ? gpu_pipeline_creation_ns == 0u
+            : gpu_pipeline_creation_ns != 0u;
+        return token_identity != 0u && !saturated
+            && seed_shape && create_shape;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const RuntimeGpuCacheMetricsAudit&) const noexcept = default;
+    [[nodiscard]] constexpr bool componentwise_bounded_by(
+        const RuntimeGpuCacheMetricsAudit& maximum) const noexcept {
+        return accepted() && maximum.accepted()
+            && token_identity == maximum.token_identity
+            && gpu_pipeline_cache_loads
+                <= maximum.gpu_pipeline_cache_loads
+            && gpu_pipeline_cache_seed_bytes
+                <= maximum.gpu_pipeline_cache_seed_bytes
+            && gpu_pipeline_cache_load_ns
+                <= maximum.gpu_pipeline_cache_load_ns
+            && gpu_pipeline_creates <= maximum.gpu_pipeline_creates
+            && gpu_pipeline_creation_ns
+                <= maximum.gpu_pipeline_creation_ns;
+    }
+};
+
+namespace runtime_detail {
+
+/// Fixed, nonallocating transaction prepared before the final immutable live
+/// gate. Construction only observes report-once state. Destruction without
+/// commit is a no-op, so a gate failure cannot consume seed/pipeline metrics.
+/// Runtime holds its queue/cache mutex across prepare, gate and commit.
+class RuntimeGpuCacheMetricsClaimPlan {
+public:
+    RuntimeGpuCacheMetricsClaimPlan() = default;
+    RuntimeGpuCacheMetricsClaimPlan(
+        const RuntimeGpuCacheMetricsClaimPlan&) = delete;
+    RuntimeGpuCacheMetricsClaimPlan& operator=(
+        const RuntimeGpuCacheMetricsClaimPlan&) = delete;
+    RuntimeGpuCacheMetricsClaimPlan(
+        RuntimeGpuCacheMetricsClaimPlan&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          claims_(std::exchange(other.claims_, {})),
+          claim_count_(std::exchange(other.claim_count_, 0u)),
+          claim_seed_(std::exchange(other.claim_seed_, false)),
+          valid_(std::exchange(other.valid_, false)),
+          committed_(std::exchange(other.committed_, false)) {}
+    RuntimeGpuCacheMetricsClaimPlan& operator=(
+        RuntimeGpuCacheMetricsClaimPlan&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            claims_ = std::exchange(other.claims_, {});
+            claim_count_ = std::exchange(other.claim_count_, 0u);
+            claim_seed_ = std::exchange(other.claim_seed_, false);
+            valid_ = std::exchange(other.valid_, false);
+            committed_ = std::exchange(other.committed_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] static RuntimeGpuCacheMetricsClaimPlan prepare(
+        std::uint64_t token_identity,
+        const RuntimeGpuCacheMetricsAudit& maximum,
+        bool seed_already_claimed,
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>
+            receipts) noexcept {
+        RuntimeGpuCacheMetricsClaimPlan plan{};
+        plan.audit_.token_identity = token_identity;
+        if (token_identity == 0u || !maximum.accepted()
+            || maximum.token_identity != token_identity
+            || receipts.empty() || receipts.size() > plan.claims_.size()) {
+            return plan;
+        }
+        const RuntimeMetalArchivePipelineReceipt* first = receipts.front();
+        if (first == nullptr || !first->accepted()) return plan;
+        plan.claim_seed_ = !seed_already_claimed;
+        if (plan.claim_seed_) {
+            plan.audit_.gpu_pipeline_cache_loads = 1u;
+            plan.audit_.gpu_pipeline_cache_seed_bytes =
+                first->audit().seed_size;
+            plan.audit_.gpu_pipeline_cache_load_ns =
+                first->audit().seed_load_ns;
+        }
+        for (std::size_t i = 0u; i < receipts.size(); ++i) {
+            const RuntimeMetalArchivePipelineReceipt* receipt = receipts[i];
+            if (receipt == nullptr || !receipt->accepted()
+                || receipt->audit().seed_size != first->audit().seed_size
+                || receipt->audit().seed_load_ns
+                    != first->audit().seed_load_ns) {
+                return RuntimeGpuCacheMetricsClaimPlan{};
+            }
+            for (std::size_t prior = 0u; prior < i; ++prior) {
+                if (receipts[prior] == receipt) {
+                    return RuntimeGpuCacheMetricsClaimPlan{};
+                }
+            }
+            if (receipt->metrics_claimed_) continue;
+            if (plan.claim_count_ == plan.claims_.size()
+                || plan.audit_.gpu_pipeline_creates
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || receipt->audit().pipeline_create_ns
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - plan.audit_.gpu_pipeline_creation_ns) {
+                return RuntimeGpuCacheMetricsClaimPlan{};
+            }
+            plan.claims_[plan.claim_count_++] = receipt;
+            ++plan.audit_.gpu_pipeline_creates;
+            plan.audit_.gpu_pipeline_creation_ns +=
+                receipt->audit().pipeline_create_ns;
+        }
+        plan.valid_ = plan.audit_.componentwise_bounded_by(maximum);
+        return plan;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return valid_ && audit_.accepted();
+    }
+    [[nodiscard]] bool committed() const noexcept { return committed_; }
+    [[nodiscard]] const RuntimeGpuCacheMetricsAudit& audit()
+        const noexcept { return audit_; }
+
+    void commit(bool& seed_claimed) noexcept {
+        if (!accepted() || committed_) return;
+        if (claim_seed_) seed_claimed = true;
+        for (std::size_t i = 0u; i < claim_count_; ++i) {
+            claims_[i]->metrics_claimed_ = true;
+        }
+        committed_ = true;
+    }
+
+private:
+    RuntimeGpuCacheMetricsAudit audit_{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> claims_{};
+    std::size_t claim_count_ = 0u;
+    bool claim_seed_ = false;
+    bool valid_ = false;
+    bool committed_ = false;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    RuntimeGpuCacheMetricsClaimPlan>);
+static_assert(std::is_nothrow_move_constructible_v<
+    RuntimeGpuCacheMetricsClaimPlan>);
+
+}  // namespace runtime_detail
+
+class RuntimeGpuCacheMetricsDelta {
+public:
+    RuntimeGpuCacheMetricsDelta() = default;
+    RuntimeGpuCacheMetricsDelta(const RuntimeGpuCacheMetricsDelta&) = delete;
+    RuntimeGpuCacheMetricsDelta& operator=(
+        const RuntimeGpuCacheMetricsDelta&) = delete;
+    RuntimeGpuCacheMetricsDelta(
+        RuntimeGpuCacheMetricsDelta&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          issued_(std::exchange(other.issued_, false)) {}
+    RuntimeGpuCacheMetricsDelta& operator=(
+        RuntimeGpuCacheMetricsDelta&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            issued_ = std::exchange(other.issued_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return issued_ && audit_.accepted();
+    }
+    [[nodiscard]] const RuntimeGpuCacheMetricsAudit& audit() const noexcept {
+        return audit_;
+    }
+    void consume() noexcept {
+        DEBUG_ASSERT(accepted(),
+            "persisted GPU cache metrics token was not prevalidated");
+        audit_ = {};
+        issued_ = false;
+    }
+
+private:
+    RuntimeGpuCacheMetricsAudit audit_{};
+    bool issued_ = false;
+    friend class Runtime;
+};
+
+static_assert(!std::is_copy_constructible_v<RuntimeGpuCacheMetricsDelta>);
+static_assert(std::is_nothrow_move_constructible_v<
+    RuntimeGpuCacheMetricsDelta>);
+
+enum class RuntimePipelineCachePolicyEvidence : std::uint8_t {
+    invalid,
+    immutable_preseed_all_hit,
+};
+
+struct RuntimeGpuExecutionEnvironmentBinding {
+    bool gpu_environment_present = false;
+    std::array<std::uint8_t, VK_UUID_SIZE> gpu_device_uuid{};
+    std::array<char, 128> gpu_driver_identity{};
+    RuntimePipelineCachePolicyEvidence cache_policy =
+        RuntimePipelineCachePolicyEvidence::invalid;
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    bool pipeline_cache_all_hit = false;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return gpu_environment_present
+            && std::any_of(
+                gpu_device_uuid.begin(), gpu_device_uuid.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                gpu_driver_identity.begin(), gpu_driver_identity.end(),
+                [](char value) { return value != '\0'; })
+            && cache_policy
+                == RuntimePipelineCachePolicyEvidence::
+                    immutable_preseed_all_hit
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](std::uint8_t value) { return value != 0u; })
+            && seed_size != 0u && manifest_checksum != 0u
+            && pipeline_cache_all_hit;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const RuntimeGpuExecutionEnvironmentBinding&) const noexcept = default;
+};
+
+struct RuntimePipelinePreparedAudit {
+    ShaderVariantKey shader_key{};
+    std::uint64_t receipt_identity = 0u;
+    std::uint64_t prepared_calls = 0u;
+};
+
+struct RuntimePipelineJobUseAudit {
+    std::array<std::uint64_t, k_runtime_pipeline_kind_slots> dispatches{};
+    std::array<std::uint64_t, k_runtime_pipeline_kind_slots> workgroups{};
+    std::uint64_t submission_operation_identity = 0u;
+    std::array<std::uint64_t, 4> submission_ordinals{};
+    std::uint64_t committed_submissions = 0u;
+    std::uint64_t minimizer_count = 0u;
+    std::uint64_t target_len = 0u;
+    std::uint64_t target_position_offset = 0u;
+    std::uint64_t anchor_count = 0u;
+    std::uint64_t range_count = 0u;
+    bool shape_contract_set = false;
+    bool saturated = false;
+
+    [[nodiscard]] std::uint64_t count(ShaderKind kind) const noexcept {
+        const std::size_t slot = static_cast<std::size_t>(kind);
+        return slot < dispatches.size() ? dispatches[slot] : 0u;
+    }
+};
+
+struct RuntimePipelineOperationAudit {
+    RuntimePipelineOperationKind kind = RuntimePipelineOperationKind::invalid;
+    std::uint64_t operation_identity = 0u;
+    std::array<RuntimePipelinePreparedAudit,
+               k_runtime_pipeline_prepared_slots> prepared{};
+    std::size_t prepared_count = 0u;
+    std::vector<RuntimePipelineJobUseAudit> jobs{};
+    std::uint64_t committed_submissions = 0u;
+    std::uint64_t begun_command_generations = 0u;
+    std::uint64_t committed_command_generations = 0u;
+    std::uint64_t burned_pending_uses = 0u;
+    bool pending = false;
+    bool invalid = false;
+    bool saturated = false;
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    std::uint64_t seed_receipt_identity = 0u;
+    RuntimeMetalArchiveSetIdentity archive_set{};
+    RuntimeMetalArchiveProcessQualification cache_qualification{};
+    RuntimeGpuCacheMetricsAudit cache_metrics{};
+};
+
+class RuntimePipelineUseCollector;
+class PersistedShapeV5CoordinateOperationProof;
+
+/// Move-only causal proof that binds PREPARED cache receipts to dispatches
+/// committed only after submit, fence wait, immutable live gate, and reset.
+class RuntimePipelineOperationProof {
+public:
+    RuntimePipelineOperationProof() = default;
+    RuntimePipelineOperationProof(const RuntimePipelineOperationProof&) =
+        delete;
+    RuntimePipelineOperationProof& operator=(
+        const RuntimePipelineOperationProof&) = delete;
+    RuntimePipelineOperationProof(
+        RuntimePipelineOperationProof&& other) noexcept
+        : capacity_permit_(std::move(other.capacity_permit_)),
+          audit_(std::move(other.audit_)),
+          receipts_(std::exchange(other.receipts_, {})),
+          issued_(std::exchange(other.issued_, false)) {
+        other.audit_ = {};
+    }
+    RuntimePipelineOperationProof& operator=(
+        RuntimePipelineOperationProof&& other) noexcept {
+        if (this != &other) {
+            // Vector move-assignment releases the old admitted allocation
+            // while its permit is still live.  Only then may the old permit
+            // be replaced by the source permit.
+            audit_ = std::move(other.audit_);
+            capacity_permit_ = std::move(other.capacity_permit_);
+            receipts_ = std::exchange(other.receipts_, {});
+            issued_ = std::exchange(other.issued_, false);
+            other.audit_ = {};
+        }
+        return *this;
+    }
+
+    [[nodiscard]] const RuntimePipelineOperationAudit& audit()
+        const noexcept { return audit_; }
+    [[nodiscard]] bool accepted_query_sketch() const noexcept;
+    [[nodiscard]] bool accepted_shape_v5_coordinate() const noexcept;
+    [[nodiscard]] static bool self_test_causal_collector_contract(
+        RuntimeMetalArchivePipelineAudit base_audit);
+
+private:
+    [[nodiscard]] bool accepted_common() const noexcept;
+    [[nodiscard]] std::uint64_t prepared_calls(
+        ShaderKind kind) const noexcept;
+    [[nodiscard]] bool prepared_exactly(
+        std::span<const ShaderKind> required,
+        std::uint64_t radix_prepared_calls = 0u) const noexcept;
+
+    // Declared before the vector owner so destruction deallocates jobs before
+    // releasing their reservation (members are destroyed in reverse order).
+    bioseq::parallelism::MemoryPermit capacity_permit_{};
+    RuntimePipelineOperationAudit audit_{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> receipts_{};
+    bool issued_ = false;
+    friend class Runtime;
+    friend class RuntimePipelineUseCollector;
+    friend class PersistedShapeV5CoordinateOperationProof;
+};
+
+static_assert(!std::is_copy_constructible_v<RuntimePipelineOperationProof>);
+static_assert(std::is_nothrow_move_constructible_v<
+    RuntimePipelineOperationProof>);
+
+inline bool RuntimePipelineOperationProof::accepted_common() const noexcept {
+    if (!issued_ || audit_.operation_identity == 0u
+        || audit_.kind == RuntimePipelineOperationKind::invalid
+        || audit_.jobs.empty() || audit_.prepared_count == 0u
+        || audit_.prepared_count > audit_.prepared.size()
+        || audit_.committed_submissions == 0u
+        || audit_.committed_command_generations
+            != audit_.committed_submissions
+        || audit_.begun_command_generations
+            != audit_.committed_command_generations
+        || audit_.burned_pending_uses != 0u || audit_.pending
+        || audit_.invalid || audit_.saturated
+        || !audit_.cache_metrics.accepted()
+        || audit_.cache_metrics.token_identity != audit_.operation_identity
+        || audit_.api_version == 0u || audit_.driver_version == 0u
+        || audit_.seed_size == 0u || audit_.manifest_checksum == 0u
+        || audit_.seed_receipt_identity == 0u
+        || !audit_.archive_set.accepted()
+        || !audit_.cache_qualification.accepted()
+        || audit_.cache_qualification.archive_set != audit_.archive_set
+        || std::all_of(
+            audit_.device_uuid.begin(), audit_.device_uuid.end(),
+            [](std::uint8_t value) { return value == 0u; })
+        || std::all_of(
+            audit_.pipeline_cache_uuid.begin(),
+            audit_.pipeline_cache_uuid.end(),
+            [](std::uint8_t value) { return value == 0u; })
+        || std::all_of(
+            audit_.seed_sha256.begin(), audit_.seed_sha256.end(),
+            [](std::uint8_t value) { return value == 0u; })) {
+        return false;
+    }
+    for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+        const RuntimePipelinePreparedAudit& prepared = audit_.prepared[i];
+        const RuntimeMetalArchivePipelineReceipt* receipt = receipts_[i];
+        if (receipt == nullptr || !receipt->accepted()
+            || prepared.prepared_calls == 0u
+            || prepared.receipt_identity == 0u
+            || !valid_shader_variant_key(prepared.shader_key)) {
+            return false;
+        }
+        const RuntimeMetalArchivePipelineAudit& pipeline = receipt->audit();
+        if (pipeline.receipt_identity != prepared.receipt_identity
+            || pipeline.shader_key != prepared.shader_key
+            || pipeline.runtime_vulkan_device_uuid != audit_.device_uuid
+            || pipeline.api_version != audit_.api_version
+            || pipeline.driver_version != audit_.driver_version
+            || pipeline.vendor_id != audit_.vendor_id
+            || pipeline.device_id != audit_.device_id
+            || pipeline.pipeline_cache_uuid != audit_.pipeline_cache_uuid
+            || pipeline.seed_sha256 != audit_.seed_sha256
+            || pipeline.seed_size != audit_.seed_size
+            || pipeline.manifest_checksum != audit_.manifest_checksum
+            || pipeline.seed_receipt_identity
+                != audit_.seed_receipt_identity
+            || pipeline.expected_archives != audit_.archive_set
+            || pipeline.cache_qualification
+                != audit_.cache_qualification) {
+            return false;
+        }
+    }
+    for (const RuntimePipelineJobUseAudit& job : audit_.jobs) {
+        if (job.saturated || job.committed_submissions == 0u) return false;
+        if (job.submission_operation_identity != audit_.operation_identity
+            || job.committed_submissions > job.submission_ordinals.size()) {
+            return false;
+        }
+        for (std::size_t i = 0u;
+             i < job.submission_ordinals.size(); ++i) {
+            if (i < job.committed_submissions) {
+                if (job.submission_ordinals[i] == 0u) return false;
+                for (std::size_t prior = 0u; prior < i; ++prior) {
+                    if (job.submission_ordinals[prior]
+                        == job.submission_ordinals[i]) return false;
+                }
+            } else if (job.submission_ordinals[i] != 0u) {
+                return false;
+            }
+        }
+        for (std::size_t kind = 0u;
+             kind < job.dispatches.size(); ++kind) {
+            if ((job.dispatches[kind] == 0u)
+                    != (job.workgroups[kind] == 0u)
+                || (job.dispatches[kind] != 0u
+                    && job.workgroups[kind] < job.dispatches[kind])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+inline std::uint64_t RuntimePipelineOperationProof::prepared_calls(
+    ShaderKind kind) const noexcept {
+    const std::uint32_t raw = static_cast<std::uint32_t>(kind);
+    for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+        if (audit_.prepared[i].shader_key.kind == raw) {
+            return audit_.prepared[i].prepared_calls;
+        }
+    }
+    return 0u;
+}
+
+inline bool RuntimePipelineOperationProof::prepared_exactly(
+    std::span<const ShaderKind> required,
+    std::uint64_t radix_prepared_calls) const noexcept {
+    const std::size_t expected_count = required.size()
+        + (radix_prepared_calls == 0u ? 0u : 3u);
+    if (audit_.prepared_count != expected_count) return false;
+    for (const ShaderKind kind : required) {
+        if (prepared_calls(kind) != 1u) return false;
+    }
+    const std::array radix{
+        ShaderKind::phase_c_sort_radix_histogram,
+        ShaderKind::phase_c_sort_radix_scan,
+        ShaderKind::phase_c_sort_radix_scatter,
+    };
+    for (const ShaderKind kind : radix) {
+        if (prepared_calls(kind) != radix_prepared_calls) return false;
+    }
+    for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+        const ShaderKind actual = static_cast<ShaderKind>(
+            audit_.prepared[i].shader_key.kind);
+        const bool base = std::find(required.begin(), required.end(), actual)
+            != required.end();
+        const bool sort = std::find(radix.begin(), radix.end(), actual)
+            != radix.end();
+        if (!base && !(radix_prepared_calls != 0u && sort)) return false;
+    }
+    return true;
+}
+
+inline bool RuntimePipelineOperationProof::accepted_query_sketch()
+    const noexcept {
+    constexpr std::array required{
+        ShaderKind::phase_c_sketch_tile,
+        ShaderKind::phase_c_prefix_scan_block,
+        ShaderKind::phase_c_prefix_scan_add,
+    };
+    if (!accepted_common()
+        || audit_.kind != RuntimePipelineOperationKind::query_sketch
+        || audit_.jobs.size() != 1u || audit_.committed_submissions != 2u
+        || !prepared_exactly(required)) {
+        return false;
+    }
+    const RuntimePipelineJobUseAudit& job = audit_.jobs.front();
+    if (job.committed_submissions != 2u
+        || job.count(ShaderKind::phase_c_sketch_tile) != 2u
+        || job.count(ShaderKind::phase_c_prefix_scan_block) != 1u
+        || job.count(ShaderKind::phase_c_prefix_scan_add) != 2u) {
+        return false;
+    }
+    std::uint64_t total = 0u;
+    for (const std::uint64_t count : job.dispatches) {
+        if (count > (std::numeric_limits<std::uint64_t>::max)() - total) {
+            return false;
+        }
+        total += count;
+    }
+    return total == 5u;
+}
+
+inline bool RuntimePipelineOperationProof::accepted_shape_v5_coordinate()
+    const noexcept {
+    constexpr std::array required{
+        ShaderKind::phase_c_shape_v5_seed_count,
+        ShaderKind::phase_c_shape_v5_seed_emit,
+        ShaderKind::phase_c_prefix_scan_block,
+        ShaderKind::phase_c_prefix_scan_add,
+        ShaderKind::phase_c_chain_range_build,
+        ShaderKind::phase_c_coordinate_reduce,
+        ShaderKind::chain_tiled_dp_u64,
+    };
+    if (!accepted_common()
+        || audit_.kind
+            != RuntimePipelineOperationKind::shape_v5_coordinate) {
+        return false;
+    }
+    std::uint64_t anchored_jobs = 0u;
+    for (const RuntimePipelineJobUseAudit& job : audit_.jobs) {
+        if (!job.shape_contract_set || job.minimizer_count == 0u
+            || job.target_len == 0u
+            || job.target_position_offset
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - (job.target_len - 1u)) {
+            return false;
+        }
+        const auto pass_count = runtime_shape_v5_radix_pass_count(
+            job.target_position_offset, job.target_len);
+        if (!pass_count.has_value()) return false;
+        const std::uint64_t passes = *pass_count;
+        const bool front =
+            job.count(ShaderKind::phase_c_shape_v5_seed_count) == 1u
+            && job.count(ShaderKind::phase_c_prefix_scan_block) == 1u
+            && job.count(ShaderKind::phase_c_prefix_scan_add) == 2u;
+        if (!front) return false;
+        std::uint64_t expected_total = 4u;
+        std::uint64_t expected_submissions = 1u;
+        if (job.anchor_count == 0u) {
+            if (job.range_count != 0u) return false;
+        } else {
+            ++anchored_jobs;
+            expected_total = 6u + 3u * passes;
+            expected_submissions = 3u;
+            if (job.count(ShaderKind::phase_c_shape_v5_seed_emit) != 1u
+                || job.count(ShaderKind::phase_c_sort_radix_histogram)
+                    != passes
+                || job.count(ShaderKind::phase_c_sort_radix_scan) != passes
+                || job.count(ShaderKind::phase_c_sort_radix_scatter)
+                    != passes
+                || job.count(ShaderKind::phase_c_chain_range_build) != 1u) {
+                return false;
+            }
+            if (job.range_count != 0u) {
+                expected_total += 2u;
+                expected_submissions = 4u;
+                if (job.count(ShaderKind::chain_tiled_dp_u64) != 1u
+                    || job.count(ShaderKind::phase_c_coordinate_reduce)
+                        != 1u) {
+                    return false;
+                }
+            }
+        }
+        std::uint64_t actual_total = 0u;
+        for (const std::uint64_t count : job.dispatches) {
+            if (count > (std::numeric_limits<std::uint64_t>::max)()
+                    - actual_total) {
+                return false;
+            }
+            actual_total += count;
+        }
+        if (actual_total != expected_total
+            || job.committed_submissions != expected_submissions
+            || job.count(ShaderKind::phase_c_coordinate_vote_reduce) != 0u
+            || job.count(
+                ShaderKind::phase_c_coordinate_vote_reduce_batch) != 0u
+            || job.count(ShaderKind::phase_c_sketch_tile) != 0u) {
+            return false;
+        }
+    }
+    return prepared_exactly(required, anchored_jobs);
+}
+
+class RuntimePipelineUseCollector {
+public:
+    RuntimePipelineUseCollector(const RuntimePipelineUseCollector&) = delete;
+    RuntimePipelineUseCollector& operator=(
+        const RuntimePipelineUseCollector&) = delete;
+    RuntimePipelineUseCollector(RuntimePipelineUseCollector&&) = delete;
+    RuntimePipelineUseCollector& operator=(
+        RuntimePipelineUseCollector&&) = delete;
+    ~RuntimePipelineUseCollector() { burn_pending(); }
+
+private:
+    struct PendingJob {
+        std::array<std::uint64_t,
+                   k_runtime_pipeline_kind_slots> dispatches{};
+        std::array<std::uint64_t,
+                   k_runtime_pipeline_kind_slots> workgroups{};
+    };
+
+    [[nodiscard]] static std::unique_ptr<RuntimePipelineUseCollector> create(
+        RuntimePipelineOperationKind kind,
+        std::size_t job_count,
+        std::uint64_t operation_identity) {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        if (kind == RuntimePipelineOperationKind::invalid
+            || job_count == 0u || operation_identity == 0u
+            || job_count
+                > std::vector<RuntimePipelineJobUseAudit>{}.max_size()
+            || job_count > std::vector<PendingJob>{}.max_size()) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector shape is invalid");
+        }
+        std::uint64_t retained = sizeof(RuntimePipelineUseCollector);
+        retained = saturating_add(retained, 2u * 1024u);
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(job_count),
+                sizeof(RuntimePipelineJobUseAudit)));
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(job_count),
+                sizeof(PendingJob)));
+        const std::uint64_t peak = saturating_mul(
+            retained,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector admission saturated");
+        }
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(shader_cache_message(
+                "runtime pipeline receipt collector admission denied: reason=",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                " requested=", failure.requested_bytes));
+        }
+        std::unique_ptr<RuntimePipelineUseCollector> result;
+        try {
+            result.reset(new RuntimePipelineUseCollector(
+                kind, job_count, operation_identity, std::move(*permit)));
+        } catch (const std::bad_alloc&) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector allocation failed after admission");
+        }
+        result->reconcile_capacity_permit();
+        return result;
+    }
+
+    RuntimePipelineUseCollector(
+        RuntimePipelineOperationKind kind,
+        std::size_t job_count,
+        std::uint64_t operation_identity,
+        bioseq::parallelism::MemoryPermit capacity_permit)
+        : capacity_permit_(std::move(capacity_permit)),
+          pending_(job_count) {
+        audit_.kind = kind;
+        audit_.operation_identity = operation_identity;
+        audit_.jobs.resize(job_count);
+        audit_.cache_metrics.token_identity = operation_identity;
+        submission_ordinal_cursor_ = 0u;
+    }
+
+    [[nodiscard]] std::uint64_t retained_capacity_bytes() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t retained = sizeof(RuntimePipelineUseCollector);
+        retained = saturating_add(retained, 2u * 1024u);
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(audit_.jobs.capacity()),
+                sizeof(RuntimePipelineJobUseAudit)));
+        retained = saturating_add(
+            retained,
+            saturating_mul(
+                static_cast<std::uint64_t>(pending_.capacity()),
+                sizeof(PendingJob)));
+        return retained;
+    }
+
+    void reconcile_capacity_permit() {
+        const std::uint64_t retained = retained_capacity_bytes();
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || !capacity_permit_
+            || retained > capacity_permit_.bytes()) {
+            throw VulkanRuntimeError(
+                "runtime pipeline receipt collector exceeded admitted capacity");
+        }
+        capacity_permit_.shrink_to(retained);
+    }
+
+    static bool add_counter(
+        std::uint64_t& destination, std::uint64_t value) noexcept {
+        if (value > (std::numeric_limits<std::uint64_t>::max)()
+                - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            return false;
+        }
+        destination += value;
+        return true;
+    }
+
+    void invalidate() noexcept { audit_.invalid = true; }
+
+    void prepare(
+        const ShaderVariantKey& key,
+        const RuntimeMetalArchivePipelineReceipt* receipt) noexcept {
+        if (audit_.invalid || receipt == nullptr || !receipt->accepted()
+            || receipt->audit().shader_key != key
+            || receipt->audit().pipeline_create_ns == 0u) {
+            invalidate();
+            return;
+        }
+        std::size_t slot = audit_.prepared_count;
+        for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+            if (audit_.prepared[i].shader_key == key) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == audit_.prepared_count) {
+            if (slot == audit_.prepared.size()) {
+                invalidate();
+                return;
+            }
+            audit_.prepared[slot] = RuntimePipelinePreparedAudit{
+                .shader_key = key,
+                .receipt_identity = receipt->audit().receipt_identity,
+                .prepared_calls = 0u,
+            };
+            receipts_[slot] = receipt;
+            ++audit_.prepared_count;
+        } else if (receipts_[slot] != receipt
+                   || audit_.prepared[slot].receipt_identity
+                       != receipt->audit().receipt_identity) {
+            invalidate();
+            return;
+        }
+        if (!add_counter(audit_.prepared[slot].prepared_calls, 1u)) {
+            audit_.saturated = true;
+            return;
+        }
+
+        const RuntimeMetalArchivePipelineAudit& source = receipt->audit();
+        if (!environment_sealed_) {
+            audit_.device_uuid = source.runtime_vulkan_device_uuid;
+            audit_.api_version = source.api_version;
+            audit_.driver_version = source.driver_version;
+            audit_.vendor_id = source.vendor_id;
+            audit_.device_id = source.device_id;
+            audit_.pipeline_cache_uuid = source.pipeline_cache_uuid;
+            audit_.seed_sha256 = source.seed_sha256;
+            audit_.seed_size = source.seed_size;
+            audit_.manifest_checksum = source.manifest_checksum;
+            audit_.seed_receipt_identity = source.seed_receipt_identity;
+            audit_.archive_set = source.expected_archives;
+            audit_.cache_qualification = source.cache_qualification;
+            environment_sealed_ = true;
+        } else if (source.runtime_vulkan_device_uuid != audit_.device_uuid
+                   || source.api_version != audit_.api_version
+                   || source.driver_version != audit_.driver_version
+                   || source.vendor_id != audit_.vendor_id
+                   || source.device_id != audit_.device_id
+                   || source.pipeline_cache_uuid
+                       != audit_.pipeline_cache_uuid
+                   || source.seed_sha256 != audit_.seed_sha256
+                   || source.seed_size != audit_.seed_size
+                   || source.manifest_checksum != audit_.manifest_checksum
+                   || source.seed_receipt_identity
+                       != audit_.seed_receipt_identity
+                   || source.expected_archives != audit_.archive_set
+                   || source.cache_qualification
+                       != audit_.cache_qualification) {
+            invalidate();
+            return;
+        }
+        // Report-once counters are deliberately not claimed during PREPARE.
+        // A command that later resets, burns, or fails causal validation must
+        // not steal metrics from the next wholly accepted operation. The
+        // finalizer claims the canonical seed/receipt bits transactionally
+        // under Runtime::mu_ after the immutable live gate succeeds.
+    }
+
+    void set_shape_input(
+        std::size_t job_index,
+        std::uint64_t minimizer_count,
+        std::uint64_t target_len,
+        std::uint64_t target_position_offset) noexcept {
+        if (job_index >= audit_.jobs.size()) {
+            invalidate();
+            return;
+        }
+        RuntimePipelineJobUseAudit& job = audit_.jobs[job_index];
+        job.minimizer_count = minimizer_count;
+        job.target_len = target_len;
+        job.target_position_offset = target_position_offset;
+        job.shape_contract_set = true;
+    }
+
+    void set_shape_outcome(
+        std::size_t job_index,
+        std::uint64_t anchor_count,
+        std::uint64_t range_count) noexcept {
+        if (job_index >= audit_.jobs.size()
+            || !audit_.jobs[job_index].shape_contract_set) {
+            invalidate();
+            return;
+        }
+        audit_.jobs[job_index].anchor_count = anchor_count;
+        audit_.jobs[job_index].range_count = range_count;
+    }
+
+    void begin(VkCommandBuffer command_buffer) noexcept {
+        if (active_) {
+            burn_pending();
+            invalidate();
+        }
+        if (command_buffer == VK_NULL_HANDLE || audit_.invalid) {
+            invalidate();
+            return;
+        }
+        active_ = true;
+        command_identity_ = vulkan_handle_identity(command_buffer);
+        if (command_identity_ == 0u
+            || !add_counter(audit_.begun_command_generations, 1u)) {
+            audit_.saturated = true;
+            invalidate();
+            return;
+        }
+        active_generation_ = audit_.begun_command_generations;
+    }
+
+    void use(
+        VkCommandBuffer command_buffer,
+        std::size_t job_index,
+        const ShaderVariantKey& key,
+        const RuntimeMetalArchivePipelineReceipt* receipt,
+        std::uint32_t group_count,
+        std::uint64_t observed_generation = 0u) noexcept {
+        if (!active_ || audit_.invalid || job_index >= pending_.size()
+            || vulkan_handle_identity(command_buffer) != command_identity_
+            || group_count == 0u
+            || (observed_generation != 0u
+                && observed_generation != active_generation_)
+            || receipt == nullptr || !receipt->accepted()) {
+            invalidate();
+            return;
+        }
+        bool prepared = false;
+        for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
+            if (audit_.prepared[i].shader_key == key
+                && receipts_[i] == receipt
+                && audit_.prepared[i].receipt_identity
+                    == receipt->audit().receipt_identity) {
+                prepared = true;
+                break;
+            }
+        }
+        const std::size_t kind = key.kind;
+        if (!prepared || kind >= k_runtime_pipeline_kind_slots
+            || !add_counter(pending_[job_index].dispatches[kind], 1u)
+            || !add_counter(
+                pending_[job_index].workgroups[kind], group_count)) {
+            audit_.jobs[job_index].saturated = true;
+            audit_.saturated = true;
+            invalidate();
+            return;
+        }
+        audit_.pending = true;
+    }
+
+public:
+    void commit(VkCommandBuffer command_buffer) noexcept {
+        if (!active_
+            || vulkan_handle_identity(command_buffer) != command_identity_) {
+            burn_pending();
+            invalidate();
+            return;
+        }
+        bool any = false;
+        if (submission_ordinal_cursor_
+            == (std::numeric_limits<std::uint64_t>::max)()) {
+            burn_pending();
+            audit_.saturated = true;
+            invalidate();
+            return;
+        }
+        const std::uint64_t submission_ordinal =
+            ++submission_ordinal_cursor_;
+        for (std::size_t job_index = 0u;
+             job_index < pending_.size(); ++job_index) {
+            bool touched = false;
+            for (std::size_t kind = 0u;
+                 kind < k_runtime_pipeline_kind_slots; ++kind) {
+                const std::uint64_t count =
+                    pending_[job_index].dispatches[kind];
+                if (count == 0u) continue;
+                touched = true;
+                any = true;
+                if (!add_counter(
+                        audit_.jobs[job_index].dispatches[kind], count)) {
+                    audit_.jobs[job_index].saturated = true;
+                    audit_.saturated = true;
+                }
+                if (!add_counter(
+                        audit_.jobs[job_index].workgroups[kind],
+                        pending_[job_index].workgroups[kind])) {
+                    audit_.jobs[job_index].saturated = true;
+                    audit_.saturated = true;
+                }
+                pending_[job_index].dispatches[kind] = 0u;
+                pending_[job_index].workgroups[kind] = 0u;
+            }
+            if (touched) {
+                RuntimePipelineJobUseAudit& job = audit_.jobs[job_index];
+                if (job.committed_submissions
+                        >= job.submission_ordinals.size()
+                    || submission_ordinal == 0u
+                    || (job.submission_operation_identity != 0u
+                        && job.submission_operation_identity
+                            != audit_.operation_identity)) {
+                    job.saturated = true;
+                    audit_.saturated = true;
+                    invalidate();
+                } else {
+                    job.submission_operation_identity =
+                        audit_.operation_identity;
+                    job.submission_ordinals[
+                        job.committed_submissions] = submission_ordinal;
+                    if (!add_counter(job.committed_submissions, 1u)) {
+                        job.saturated = true;
+                        audit_.saturated = true;
+                    }
+                }
+            }
+        }
+        if (!any || !add_counter(audit_.committed_submissions, 1u)
+            || !add_counter(audit_.committed_command_generations, 1u)) {
+            invalidate();
+        }
+        active_ = false;
+        command_identity_ = 0u;
+        active_generation_ = 0u;
+        audit_.pending = false;
+    }
+
+    void burn_pending() noexcept {
+        if (!active_) return;
+        for (auto& job : pending_) {
+            for (std::size_t kind = 0u;
+                 kind < job.dispatches.size(); ++kind) {
+                std::uint64_t& count = job.dispatches[kind];
+                if (count != 0u
+                    && !add_counter(audit_.burned_pending_uses, count)) {
+                    audit_.saturated = true;
+                }
+                count = 0u;
+                job.workgroups[kind] = 0u;
+            }
+        }
+        active_ = false;
+        command_identity_ = 0u;
+        active_generation_ = 0u;
+        audit_.pending = false;
+    }
+
+    void burn_before_reset(VkCommandBuffer command_buffer) noexcept {
+        if (!active_) return;
+        if (vulkan_handle_identity(command_buffer) != command_identity_) {
+            invalidate();
+        }
+        burn_pending();
+        // A begun generation that reaches reset without a causal commit is
+        // never an accepted empty command.  This also rejects the no-use case
+        // where burned_pending_uses alone would remain zero.
+        invalidate();
+    }
+
+private:
+    [[nodiscard]] RuntimePipelineOperationProof seal() noexcept {
+        if (active_) {
+            audit_.pending = true;
+            burn_pending();
+            invalidate();
+        }
+        RuntimePipelineOperationProof proof{};
+        proof.audit_ = std::move(audit_);
+        proof.receipts_ = receipts_;
+        proof.issued_ = true;
+        // Pending storage no longer contributes to the sealed proof. Destroy
+        // it before shrinking/transferring the permit. Keep the collector
+        // object itself covered until its unique_ptr owner destroys it; the
+        // resulting small over-reservation then travels with the jobs vector
+        // for the complete lifetime of the move-only proof.
+        {
+            std::vector<PendingJob> empty;
+            pending_.swap(empty);
+        }
+        {
+            // The standard allocator transfers this capacity, but explicitly
+            // clear any valid moved-from residue before the permit leaves the
+            // collector so the ownership proof is allocator-independent.
+            std::vector<RuntimePipelineJobUseAudit> empty;
+            audit_.jobs.swap(empty);
+        }
+        const std::uint64_t retained_jobs =
+            bioseq::parallelism::saturating_add(
+                sizeof(RuntimePipelineUseCollector),
+                bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(proof.audit_.jobs.capacity()),
+                sizeof(RuntimePipelineJobUseAudit)));
+        if (retained_jobs
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || retained_jobs > capacity_permit_.bytes()) {
+            proof.audit_.invalid = true;
+        } else {
+            capacity_permit_.shrink_to(retained_jobs);
+        }
+        proof.capacity_permit_ = std::move(capacity_permit_);
+        receipts_.fill(nullptr);
+        audit_ = {};
+        return proof;
+    }
+
+    // Kept before both vector owners: they release capacity before the permit.
+    bioseq::parallelism::MemoryPermit capacity_permit_{};
+    RuntimePipelineOperationAudit audit_{};
+    std::array<const RuntimeMetalArchivePipelineReceipt*,
+               k_runtime_pipeline_prepared_slots> receipts_{};
+    std::vector<PendingJob> pending_{};
+    std::uint64_t command_identity_ = 0u;
+    std::uint64_t active_generation_ = 0u;
+    std::uint64_t submission_ordinal_cursor_ = 0u;
+    bool environment_sealed_ = false;
+    bool active_ = false;
+
+    friend class Runtime;
+    friend class RuntimePipelineOperationProof;
+};
+
+inline bool RuntimePipelineOperationProof::
+self_test_causal_collector_contract(
+    RuntimeMetalArchivePipelineAudit base_audit) {
+    if (!base_audit.accepted() || base_audit.pipeline_create_ns == 0u) {
+        return false;
+    }
+    const std::array<ShaderVariantKey, 11> keys{
+        make_shader_key(
+            ShaderKind::phase_c_sketch_tile, 384u, 64u, 10u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_block, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_shape_v5_seed_count, 384u, 128u, 3u),
+        make_shader_key(
+            ShaderKind::phase_c_shape_v5_seed_emit, 384u, 128u, 3u),
+        make_shader_key(
+            ShaderKind::phase_c_chain_range_build, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_coordinate_reduce, 384u, 128u, 1u),
+        make_shader_key(
+            ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_scan, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_scatter, 384u, 1u, 1u),
+    };
+    if (!std::all_of(
+            keys.begin(), keys.end(),
+            [](const ShaderVariantKey& key) {
+                return valid_shader_variant_key(key);
+            })) {
+        return false;
+    }
+    std::array<RuntimeMetalArchivePipelineReceipt, 11> receipts{};
+    bool seed_claimed = false;
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        RuntimeMetalArchivePipelineAudit audit = base_audit;
+        audit.receipt_identity = 1000u + i;
+        audit.scope_identity = 2000u + i;
+        audit.shader_key = keys[i];
+        receipts[i] = RuntimeMetalArchivePipelineReceipt{
+            std::move(audit)};
+        if (!receipts[i].accepted()) return false;
+    }
+    const auto command = [](std::uintptr_t identity) {
+        return reinterpret_cast<VkCommandBuffer>(identity);
+    };
+    const auto prepare_query = [&keys, &receipts](
+        RuntimePipelineUseCollector& collector) {
+        for (std::size_t i = 0u; i < 3u; ++i) {
+            collector.prepare(keys[i], &receipts[i]);
+        }
+    };
+    const auto query_golden = [&]() {
+        auto collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch, 1u, 101u);
+        prepare_query(*collector);
+        collector->begin(command(1u));
+        collector->use(command(1u), 0u, keys[0], &receipts[0], 3u);
+        collector->use(command(1u), 0u, keys[1], &receipts[1], 2u);
+        collector->use(command(1u), 0u, keys[2], &receipts[2], 2u);
+        collector->commit(command(1u));
+        collector->begin(command(2u));
+        collector->use(command(2u), 0u, keys[0], &receipts[0], 3u);
+        collector->use(command(2u), 0u, keys[2], &receipts[2], 1u);
+        collector->commit(command(2u));
+        return collector->seal();
+    };
+
+    RuntimePipelineOperationProof query{};
+    try {
+        query = query_golden();
+    } catch (...) {
+        return false;
+    }
+    if (!query.accepted_query_sketch()
+        || query.audit_.begun_command_generations != 2u
+        || query.audit_.committed_command_generations != 2u
+        || query.audit_.jobs[0].submission_operation_identity != 101u
+        || query.audit_.jobs[0].submission_ordinals[0] != 1u
+        || query.audit_.jobs[0].submission_ordinals[1] != 2u
+        || query.audit_.jobs[0].count(
+            ShaderKind::phase_c_sketch_tile) != 2u
+        || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
+            ShaderKind::phase_c_sketch_tile)] != 6u
+        || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
+            ShaderKind::phase_c_prefix_scan_block)] != 2u
+        || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
+            ShaderKind::phase_c_prefix_scan_add)] != 3u
+        || !query.capacity_permit_) {
+        return false;
+    }
+    RuntimePipelineOperationProof moved_query{std::move(query)};
+    if (query.accepted_query_sketch() || query.capacity_permit_
+        || !moved_query.accepted_query_sketch()
+        || !moved_query.capacity_permit_) {
+        return false;
+    }
+    query = std::move(moved_query);
+    if (moved_query.accepted_query_sketch()
+        || moved_query.capacity_permit_
+        || !query.accepted_query_sketch()) {
+        return false;
+    }
+
+    const auto rejected_query = [&](std::uint64_t identity, int mode) {
+        auto collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch, 1u, identity);
+        prepare_query(*collector);
+        const VkCommandBuffer begun =
+            command(static_cast<std::uintptr_t>(identity));
+        collector->begin(begun);
+        if (mode != 1) {
+            collector->use(
+                mode == 4 ? command(
+                    static_cast<std::uintptr_t>(identity + 1000u)) : begun,
+                0u, keys[0], mode == 5 ? &receipts[1] : &receipts[0],
+                mode == 6 ? 0u : 1u,
+                mode == 2 ? 2u : 0u);
+        }
+        if (mode <= 2 || mode >= 4) {
+            collector->burn_before_reset(begun);
+        }
+        return collector->seal();
+    };
+    try {
+        const RuntimePipelineOperationProof reset = rejected_query(102u, 0);
+        const RuntimePipelineOperationProof empty = rejected_query(103u, 1);
+        const RuntimePipelineOperationProof stale = rejected_query(104u, 2);
+        const RuntimePipelineOperationProof uncommitted =
+            rejected_query(105u, 3);
+        const RuntimePipelineOperationProof wrong_command =
+            rejected_query(106u, 4);
+        const RuntimePipelineOperationProof wrong_receipt =
+            rejected_query(107u, 5);
+        const RuntimePipelineOperationProof zero_groups =
+            rejected_query(108u, 6);
+        if (reset.accepted_query_sketch()
+            || reset.audit_.burned_pending_uses != 1u
+            || empty.accepted_query_sketch()
+            || empty.audit_.begun_command_generations != 1u
+            || stale.accepted_query_sketch()
+            || uncommitted.accepted_query_sketch()
+            || wrong_command.accepted_query_sketch()
+            || wrong_receipt.accepted_query_sketch()
+            || zero_groups.accepted_query_sketch()) {
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+
+    RuntimePipelineOperationProof shape{};
+    try {
+        auto collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::shape_v5_coordinate, 3u, 202u);
+        constexpr std::array<std::size_t, 7> base_slots{
+            3u, 4u, 1u, 2u, 5u, 6u, 7u};
+        for (const std::size_t slot : base_slots) {
+            collector->prepare(keys[slot], &receipts[slot]);
+        }
+        // One radix pipeline retrieval per anchored job, independent of the
+        // number of byte passes recorded in that job's command.
+        for (std::size_t repeat = 0u; repeat < 2u; ++repeat) {
+            for (std::size_t slot = 8u; slot < 11u; ++slot) {
+                collector->prepare(keys[slot], &receipts[slot]);
+            }
+        }
+        collector->set_shape_input(0u, 1u, 1u, 0u);
+        collector->set_shape_input(1u, 1u, 255u, 0u);
+        collector->set_shape_input(2u, 1u, 65536u, 0u);
+        collector->set_shape_outcome(0u, 0u, 0u);
+        collector->set_shape_outcome(1u, 1u, 0u);
+        collector->set_shape_outcome(2u, 1u, 1u);
+
+        collector->begin(command(11u));
+        for (std::size_t job = 0u; job < 3u; ++job) {
+            collector->use(command(11u), job, keys[3], &receipts[3], 1u);
+            collector->use(command(11u), job, keys[1], &receipts[1], 1u);
+            collector->use(command(11u), job, keys[2], &receipts[2], 1u);
+            collector->use(command(11u), job, keys[2], &receipts[2], 1u);
+        }
+        collector->commit(command(11u));
+
+        collector->begin(command(12u));
+        for (std::size_t job = 1u; job < 3u; ++job) {
+            collector->use(command(12u), job, keys[4], &receipts[4], 1u);
+        }
+        collector->commit(command(12u));
+
+        collector->begin(command(13u));
+        for (std::size_t slot = 8u; slot < 11u; ++slot) {
+            collector->use(command(13u), 1u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
+        }
+        collector->use(command(13u), 1u, keys[5], &receipts[5], 1u);
+        collector->use(command(13u), 2u, keys[5], &receipts[5], 1u);
+        collector->commit(command(13u));
+
+        collector->begin(command(14u));
+        collector->use(command(14u), 2u, keys[7], &receipts[7], 1u);
+        collector->use(command(14u), 2u, keys[6], &receipts[6], 1u);
+        collector->commit(command(14u));
+        shape = collector->seal();
+    } catch (...) {
+        return false;
+    }
+    if (!shape.accepted_shape_v5_coordinate()
+        || shape.audit_.begun_command_generations != 4u
+        || shape.audit_.committed_command_generations != 4u
+        || !shape.capacity_permit_) {
+        return false;
+    }
+    constexpr std::array<std::uint64_t, 3> expected_submissions{1u, 3u, 4u};
+    for (std::size_t job = 0u; job < shape.audit_.jobs.size(); ++job) {
+        const RuntimePipelineJobUseAudit& audit = shape.audit_.jobs[job];
+        if (audit.submission_operation_identity != 202u
+            || audit.committed_submissions != expected_submissions[job]
+            || audit.count(
+                ShaderKind::phase_c_coordinate_vote_reduce) != 0u
+            || audit.count(
+                ShaderKind::phase_c_coordinate_vote_reduce_batch) != 0u) {
+            return false;
+        }
+        for (std::size_t ordinal = 0u;
+             ordinal < audit.committed_submissions; ++ordinal) {
+            if (audit.submission_ordinals[ordinal] != ordinal + 1u) {
+                return false;
+            }
+        }
+        for (std::size_t kind = 0u; kind < audit.dispatches.size(); ++kind) {
+            if (audit.dispatches[kind] != audit.workgroups[kind]) {
+                return false;
+            }
+        }
+    }
+    if (query.audit_.jobs[0].submission_ordinals[0]
+            != shape.audit_.jobs[0].submission_ordinals[0]
+        || query.audit_.jobs[0].submission_operation_identity
+            == shape.audit_.jobs[0].submission_operation_identity) {
+        return false;
+    }
+
+    // PREPARE, reset/burn and sealing are descriptive only. Exercise the exact
+    // fixed transaction used by the production finalizer: abandoning a plan
+    // models a live-gate failure; the following accepted commit reports all
+    // counters, and the next accepted operation reports zero.
+    if (std::any_of(
+            receipts.begin(), receipts.end(),
+            [](const auto& receipt) { return receipt.metrics_claimed_; })
+        || seed_claimed) {
+        return false;
+    }
+    RuntimeGpuCacheMetricsAudit maximum{
+        .token_identity = 303u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = receipts[0].audit().seed_size,
+        .gpu_pipeline_cache_load_ns = receipts[0].audit().seed_load_ns,
+        .gpu_pipeline_creates =
+            static_cast<std::uint64_t>(receipts.size()),
+    };
+    for (const RuntimeMetalArchivePipelineReceipt& receipt : receipts) {
+        if (receipt.audit().pipeline_create_ns
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - maximum.gpu_pipeline_creation_ns) {
+            return false;
+        }
+        maximum.gpu_pipeline_creation_ns +=
+            receipt.audit().pipeline_create_ns;
+    }
+    std::array<const RuntimeMetalArchivePipelineReceipt*, 11>
+        receipt_pointers{};
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        receipt_pointers[i] = &receipts[i];
+    }
+    const auto pointers =
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+            receipt_pointers.data(), receipt_pointers.size()};
+    {
+        auto abandoned = runtime_detail::
+            RuntimeGpuCacheMetricsClaimPlan::prepare(
+                maximum.token_identity, maximum, seed_claimed, pointers);
+        if (!abandoned.accepted()
+            || abandoned.audit() != maximum
+            || abandoned.committed()) {
+            return false;
+        }
+    }
+    if (seed_claimed
+        || std::any_of(
+            receipts.begin(), receipts.end(),
+            [](const auto& receipt) { return receipt.metrics_claimed_; })) {
+        return false;
+    }
+    auto first = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        maximum.token_identity, maximum, seed_claimed, pointers);
+    if (!first.accepted() || first.audit() != maximum) return false;
+    first.commit(seed_claimed);
+    if (!first.committed() || !seed_claimed
+        || std::any_of(
+            receipts.begin(), receipts.end(),
+            [](const auto& receipt) { return !receipt.metrics_claimed_; })) {
+        return false;
+    }
+    RuntimeGpuCacheMetricsAudit later_maximum = maximum;
+    later_maximum.token_identity = 304u;
+    auto later = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        later_maximum.token_identity, later_maximum,
+        seed_claimed, pointers);
+    if (!later.accepted()
+        || later.audit().token_identity != later_maximum.token_identity
+        || later.audit().gpu_pipeline_cache_loads != 0u
+        || later.audit().gpu_pipeline_cache_seed_bytes != 0u
+        || later.audit().gpu_pipeline_cache_load_ns != 0u
+        || later.audit().gpu_pipeline_creates != 0u
+        || later.audit().gpu_pipeline_creation_ns != 0u) {
+        return false;
+    }
+    later.commit(seed_claimed);
+    return later.committed() && seed_claimed;
+}
+
+/// Install-once production seam.  The supervisor calls this from its runtime
+/// prepare hook, before the first Runtime singleton construction.
+[[nodiscard]] std::expected<void, std::string>
+install_runtime_metal_archive_configuration(
+    std::shared_ptr<const RuntimeMetalArchiveConfigurationImage> configuration);
+
+[[nodiscard]] std::expected<std::shared_ptr<
+    const RuntimeMetalArchiveConfigurationImage>, std::string>
+make_runtime_metal_archive_configuration_image(
+    std::shared_ptr<const SealedShaderCacheSeedImage> seed_image,
+    std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid = {},
+    std::uint64_t metal_device_registry_id = 0u);
+
+[[nodiscard]] bool runtime_metal_archive_configuration_installed() noexcept;
 
 /// The 36-byte push-constant block consumed by the tiled-DP shader. Layout is
 /// pinned to the GLSL `Params` block.
@@ -314,12 +2557,191 @@ private:
 
 static_assert(!RuntimeSketchBatchDispatchProof{}.accepted());
 
+/// Exact per-query partition of one batched query-minimizer image.
+struct PhaseCSeedQueryRecordWire {
+    std::uint32_t minimizer_offset = 0;
+    std::uint32_t minimizer_count = 0;
+    std::uint32_t query_len = 0;
+    std::uint32_t flags = 0;
+};
+static_assert(sizeof(PhaseCSeedQueryRecordWire) == 16);
+static_assert(alignof(PhaseCSeedQueryRecordWire) == alignof(std::uint32_t));
+
+/// Query-to-tile grouping supplied with the exact sketch submission. Runtime
+/// derives and seals the final query records from this layout plus the device
+/// count/scan output; coordinate callers cannot repartition the resident image.
+struct PhaseCSketchQueryLayoutWire {
+    std::uint32_t begin = 0;
+    std::uint32_t count = 0;
+    std::uint32_t query_len = 0;
+};
+
+/// Move-only authority for one device-only query sketch.  Only Runtime can
+/// issue it, after the exact count/scan/emit submissions have completed.  The
+/// authority is consumed by the persisted Shape-V5 coordinate operation; a
+/// copied dispatch counter can therefore never stand in for the resident
+/// query buffer that produced the operation.
+class DeviceQuerySketchAuthority {
+public:
+    DeviceQuerySketchAuthority() = default;
+    DeviceQuerySketchAuthority(const DeviceQuerySketchAuthority&) = delete;
+    DeviceQuerySketchAuthority& operator=(
+        const DeviceQuerySketchAuthority&) = delete;
+    DeviceQuerySketchAuthority(DeviceQuerySketchAuthority&& other) noexcept {
+        move_from(other);
+    }
+    DeviceQuerySketchAuthority& operator=(
+        DeviceQuerySketchAuthority&& other) noexcept {
+        if (this != &other) {
+            clear();
+            move_from(other);
+        }
+        return *this;
+    }
+
+    /// Structural, device-output coverage. This deliberately does not claim
+    /// the immutable pipeline provenance required by persisted Shape-V5.
+    [[nodiscard]] bool covers_device_output() const noexcept {
+        const bool shape_valid = identity_ != 0u
+            && runtime_ != nullptr
+            && buffer_ != VK_NULL_HANDLE
+            && memory_identity_ != 0u
+            && buffer_bytes_ != 0u
+            && allocation_bytes_ >= buffer_bytes_
+            && materialization_
+                == VulkanSketchHostMaterialization::device_only
+            && dispatch_proof_.accepted()
+            && window_size_ != 0u
+            && kmer_size_ != 0u
+            && minimizer_word_kind_ <= 3u
+            && minimizer_words32_per_record_ != 0u
+            && hash_shift_ < 64u
+            && pos_bits_ < 64u
+            && !query_records_.empty()
+            && query_tile_counts_.size() == query_records_.size();
+        if (!shape_valid) return false;
+        std::uint64_t cursor = 0u;
+        for (const auto& record : query_records_) {
+            if (record.flags != 0u || record.query_len == 0u
+                || record.minimizer_offset != cursor
+                || record.minimizer_count
+                    > (std::numeric_limits<std::uint64_t>::max)() - cursor) {
+                return false;
+            }
+            cursor += record.minimizer_count;
+        }
+        return cursor == minimizer_count_;
+    }
+    /// Strong one-shot authority accepted by the persisted Shape-V5 consumer.
+    [[nodiscard]] bool accepted() const noexcept {
+        return covers_device_output()
+            && pipeline_proof_.accepted_query_sketch();
+    }
+    [[nodiscard]] std::uint64_t identity() const noexcept {
+        return identity_;
+    }
+    [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
+        constexpr std::uint64_t maximum =
+            (std::numeric_limits<std::uint64_t>::max)();
+        if (query_records_.capacity()
+                > maximum / sizeof(PhaseCSeedQueryRecordWire)
+            || query_tile_counts_.capacity()
+                > maximum / sizeof(std::uint32_t)) {
+            return (std::numeric_limits<std::uint64_t>::max)();
+        }
+        const std::uint64_t record_bytes =
+            static_cast<std::uint64_t>(query_records_.capacity())
+            * sizeof(PhaseCSeedQueryRecordWire);
+        const std::uint64_t tile_count_bytes =
+            static_cast<std::uint64_t>(query_tile_counts_.capacity())
+            * sizeof(std::uint32_t);
+        return tile_count_bytes > maximum - record_bytes
+            ? maximum
+            : record_bytes + tile_count_bytes;
+    }
+
+private:
+    friend class Runtime;
+
+    void clear() noexcept {
+        identity_ = 0u;
+        runtime_ = nullptr;
+        buffer_ = VK_NULL_HANDLE;
+        memory_identity_ = 0u;
+        buffer_bytes_ = 0u;
+        allocation_bytes_ = 0u;
+        minimizer_count_ = 0u;
+        window_size_ = 0u;
+        kmer_size_ = 0u;
+        minimizer_word_kind_ = 0u;
+        minimizer_words32_per_record_ = 0u;
+        hash_shift_ = 0u;
+        pos_bits_ = 0u;
+        materialization_ =
+            VulkanSketchHostMaterialization::host_and_device;
+        dispatch_proof_ = RuntimeSketchBatchDispatchProof{};
+        pipeline_proof_ = RuntimePipelineOperationProof{};
+        device_uuid_.fill(0u);
+        query_records_.clear();
+        query_tile_counts_.clear();
+    }
+    void move_from(DeviceQuerySketchAuthority& other) noexcept {
+        identity_ = other.identity_;
+        runtime_ = other.runtime_;
+        buffer_ = other.buffer_;
+        memory_identity_ = other.memory_identity_;
+        buffer_bytes_ = other.buffer_bytes_;
+        allocation_bytes_ = other.allocation_bytes_;
+        minimizer_count_ = other.minimizer_count_;
+        window_size_ = other.window_size_;
+        kmer_size_ = other.kmer_size_;
+        minimizer_word_kind_ = other.minimizer_word_kind_;
+        minimizer_words32_per_record_ =
+            other.minimizer_words32_per_record_;
+        hash_shift_ = other.hash_shift_;
+        pos_bits_ = other.pos_bits_;
+        materialization_ = other.materialization_;
+        dispatch_proof_ = other.dispatch_proof_;
+        pipeline_proof_ = std::move(other.pipeline_proof_);
+        device_uuid_ = other.device_uuid_;
+        query_records_ = std::move(other.query_records_);
+        query_tile_counts_ = std::move(other.query_tile_counts_);
+        other.clear();
+    }
+
+    std::uint64_t identity_ = 0u;
+    Runtime* runtime_ = nullptr;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    std::uint64_t memory_identity_ = 0u;
+    std::uint64_t buffer_bytes_ = 0u;
+    std::uint64_t allocation_bytes_ = 0u;
+    std::uint64_t minimizer_count_ = 0u;
+    std::uint32_t window_size_ = 0u;
+    std::uint32_t kmer_size_ = 0u;
+    std::uint32_t minimizer_word_kind_ = 0u;
+    std::uint32_t minimizer_words32_per_record_ = 0u;
+    std::uint32_t hash_shift_ = 0u;
+    std::uint32_t pos_bits_ = 0u;
+    VulkanSketchHostMaterialization materialization_ =
+        VulkanSketchHostMaterialization::host_and_device;
+    RuntimeSketchBatchDispatchProof dispatch_proof_{};
+    RuntimePipelineOperationProof pipeline_proof_{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid_{};
+    std::vector<PhaseCSeedQueryRecordWire> query_records_{};
+    std::vector<std::uint32_t> query_tile_counts_{};
+};
+
+static_assert(!std::is_copy_constructible_v<DeviceQuerySketchAuthority>);
+static_assert(std::is_nothrow_move_constructible_v<
+    DeviceQuerySketchAuthority>);
+
 struct RuntimeSketchBatchResult {
     Buffer minimizer_words;
     std::vector<std::byte> host_minimizer_bytes;
     std::vector<std::uint32_t> tile_counts;
     std::vector<std::uint32_t> tile_offsets;
     RuntimeSketchBatchDispatchProof dispatch_proof{};
+    DeviceQuerySketchAuthority query_authority{};
     std::uint64_t count = 0;
     bool overflow = false;
 };
@@ -969,17 +3391,9 @@ private:
 };
 
 /// Common query-side inputs for a batched resident seed→chain→coordinate run.
-/// The query minimizer words are shared by every job in the batch; each job
-/// supplies its own resident target index.
-struct PhaseCSeedQueryRecordWire {
-    std::uint32_t minimizer_offset = 0;
-    std::uint32_t minimizer_count = 0;
-    std::uint32_t query_len = 0;
-    std::uint32_t flags = 0;
-};
-static_assert(sizeof(PhaseCSeedQueryRecordWire) == 16);
-static_assert(alignof(PhaseCSeedQueryRecordWire) == alignof(std::uint32_t));
-
+/// The query minimizer words are shared by every job in the batch. Legacy jobs
+/// may supply distinct slot-table targets; an authenticated Shape-V5 direct
+/// operation is intentionally restricted to one resident generation/view.
 struct PhaseCSeedQueryInputs {
     std::span<const std::byte> host_minimizer_bytes{};
     const Buffer* device_minimizer_words = nullptr;
@@ -988,13 +3402,42 @@ struct PhaseCSeedQueryInputs {
     std::uint32_t minimizer_words32_per_record = 0;
     std::uint32_t hash_shift = 0;
     std::uint32_t pos_bits = 0;
+    std::uint32_t window_size = 0;
     std::span<const PhaseCSeedQueryRecordWire> host_query_records{};
     const Buffer* device_query_records = nullptr;
 };
 
-/// One resident target-index job in a batched seed→coordinate run. `slots` is
-/// either the open-addressed slot table (`slot_mask != 0`) or the sorted dense
-/// bucket table (`bucket_count != 0`) produced by the GPU target-index builder.
+/// Neutral resident view of one authenticated persisted Format-5 generation.
+/// The owner keeps all three buffers alive for the complete batch.  Byte sizes
+/// are logical admitted sizes; the backing raw control/position buffers may be
+/// padded to whole uint32 words for GLSL access, but their representation is
+/// never decoded or rebuilt by this runtime.
+struct PhaseCShapeV5ResidentView {
+    const Buffer* descriptors = nullptr;
+    const Buffer* controls = nullptr;
+    const Buffer* positions = nullptr;
+    std::uint64_t descriptor_bytes = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t position_bytes = 0;
+    std::uint64_t position_count = 0;
+    std::uint64_t max_occ_cap = 0;
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t cold_load_identity = 0;
+    std::uint32_t partition_count = 0;
+    std::uint32_t abi_version = 0;
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+};
+
+enum class PhaseCSeedIndexRepresentation : std::uint8_t {
+    invalid = 0,
+    legacy_slot_table = 1,
+    shape_v5 = 2,
+};
+
+/// One resident target-index job in a batched seed→coordinate run. Legacy
+/// slot-table fields and `shape_v5` are an XOR: selecting both (or neither) is
+/// invalid rather than permission to fall back to another implementation.
 struct PhaseCSeedCoordinateJob {
     const Buffer* slots = nullptr;
     const Buffer* positions = nullptr;
@@ -1004,7 +3447,31 @@ struct PhaseCSeedCoordinateJob {
     std::uint32_t bucket_count = 0;
     std::uint64_t target_position_offset = 0;
     std::uint32_t query_index = 0;
+    std::uint64_t logical_target_row = 0;
+    std::uint64_t logical_query_ordinal = 0;
+    const PhaseCShapeV5ResidentView* shape_v5 = nullptr;
 };
+
+[[nodiscard]] inline constexpr PhaseCSeedIndexRepresentation
+phase_c_seed_index_representation(
+    const PhaseCSeedCoordinateJob& job) noexcept
+{
+    const bool shape_only = job.shape_v5 != nullptr
+        && job.slots == nullptr
+        && job.positions == nullptr
+        && job.slot_mask == 0u
+        && job.position_count == 0u
+        && job.bucket_count == 0u
+        && job.target_position_offset == 0u;
+    if (shape_only) return PhaseCSeedIndexRepresentation::shape_v5;
+
+    const bool legacy_only = job.shape_v5 == nullptr
+        && job.slots != nullptr
+        && job.positions != nullptr;
+    return legacy_only
+        ? PhaseCSeedIndexRepresentation::legacy_slot_table
+        : PhaseCSeedIndexRepresentation::invalid;
+}
 
 /// Explicit algorithm identity for the seed-to-coordinate backend.  A caller
 /// selecting Vulkan tiled-DP must pass `vulkan_tiled_dp`; the approximate
@@ -1014,6 +3481,75 @@ enum class PhaseCSeedCoordinateAlgorithm : std::uint8_t {
     vulkan_tiled_dp = 0,
     coordinate_vote = 1,
 };
+
+/// Exact algorithm inputs bound into a persisted Shape-V5 coordinate proof.
+/// Floating-point penalties are carried by bit pattern so NaNs, signed zero,
+/// and every other dispatch-affecting value compare without normalization.
+struct PersistedShapeV5CoordinateConfigIdentity {
+    std::uint32_t kmer_size = 0u;
+    std::int32_t max_occ = -1;
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm =
+        PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp;
+    ChainingPipelineKey chain_key{};
+    std::int32_t max_dist_x = 0;
+    std::int32_t max_dist_y = 0;
+    std::int32_t bandwidth = 0;
+    std::int32_t max_iter = 0;
+    std::uint32_t gap_penalty_bits = 0u;
+    std::uint32_t skip_penalty_bits = 0u;
+    std::int32_t max_chain_skip = 0;
+    std::int32_t min_chain_score = 0;
+    std::int32_t min_seed_count = 0;
+    std::uint32_t probe_limit = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return kmer_size != 0u && kmer_size <= 255u
+            && max_occ >= 0
+            && coordinate_algorithm
+                == PhaseCSeedCoordinateAlgorithm::vulkan_tiled_dp
+            && chain_key.tile_size != 0u
+            && chain_key.local_size != 0u
+            && probe_limit != 0u;
+    }
+    [[nodiscard]] bool operator==(
+        const PersistedShapeV5CoordinateConfigIdentity&) const = default;
+};
+
+[[nodiscard]] inline PersistedShapeV5CoordinateConfigIdentity
+persisted_shape_v5_coordinate_config_identity(
+    std::uint32_t kmer_size,
+    std::int32_t max_occ,
+    PhaseCSeedCoordinateAlgorithm coordinate_algorithm,
+    const ChainingPipelineKey& chain_key,
+    std::int32_t max_dist_x,
+    std::int32_t max_dist_y,
+    std::int32_t bandwidth,
+    std::int32_t max_iter,
+    float gap_penalty,
+    float skip_penalty,
+    std::int32_t max_chain_skip,
+    std::int32_t min_chain_score,
+    std::int32_t min_seed_count,
+    std::uint32_t probe_limit) noexcept {
+    return PersistedShapeV5CoordinateConfigIdentity{
+        .kmer_size = kmer_size,
+        .max_occ = max_occ,
+        .coordinate_algorithm = coordinate_algorithm,
+        .chain_key = chain_key,
+        .max_dist_x = max_dist_x,
+        .max_dist_y = max_dist_y,
+        .bandwidth = bandwidth,
+        .max_iter = max_iter,
+        .gap_penalty_bits = std::bit_cast<std::uint32_t>(gap_penalty),
+        .skip_penalty_bits = std::bit_cast<std::uint32_t>(skip_penalty),
+        .max_chain_skip = max_chain_skip,
+        .min_chain_score = min_chain_score,
+        .min_seed_count = min_seed_count,
+        .probe_limit = probe_limit,
+    };
+}
+
+static_assert(!PersistedShapeV5CoordinateConfigIdentity{}.accepted());
 
 struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t problem_count = 0;
@@ -1027,9 +3563,1058 @@ struct PhaseCSeedCoordinateBatchStats {
     std::uint64_t coordinate_vote_dispatches = 0;
 };
 
+[[nodiscard]] inline constexpr bool coordinate_result_wire_equal(
+    const GpuCoordinateOnlyResultWire& lhs,
+    const GpuCoordinateOnlyResultWire& rhs) noexcept {
+    return lhs.query_start == rhs.query_start
+        && lhs.query_end == rhs.query_end
+        && lhs.target_start == rhs.target_start
+        && lhs.target_end == rhs.target_end
+        && lhs.match_length == rhs.match_length
+        && lhs.block_length == rhs.block_length
+        && lhs.chain_score == rhs.chain_score
+        && lhs.seed_count == rhs.seed_count
+        && lhs.is_reverse == rhs.is_reverse
+        && lhs.valid == rhs.valid;
+}
+
+[[nodiscard]] inline constexpr bool coordinate_result_wire_well_formed(
+    const GpuCoordinateOnlyResultWire& result,
+    const std::uint64_t query_len,
+    const std::uint64_t target_len) noexcept {
+    if (result.valid == 0u) {
+        return coordinate_result_wire_equal(
+            result, GpuCoordinateOnlyResultWire{});
+    }
+    if (result.valid != 1u || result.is_reverse > 1u
+        || result.seed_count <= 0
+        || result.query_start >= result.query_end
+        || result.query_end > query_len
+        || result.target_start >= result.target_end
+        || result.target_end > target_len
+        || result.match_length > result.block_length) {
+        return false;
+    }
+    const std::uint64_t query_span = result.query_end - result.query_start;
+    const std::uint64_t target_span = result.target_end - result.target_start;
+    return result.match_length <= query_span
+        && result.match_length <= target_span
+        && result.block_length <= query_span + target_span;
+}
+
+/// Exact caller-side identities checked while consuming one sealed operation
+/// record.  These are expectations, not proof: changing any value makes the
+/// one-shot consume fail.
+struct PersistedShapeV5CoordinateJobExpectation {
+    std::size_t problem_index = 0;
+    std::uint64_t query_authority_identity = 0;
+    RuntimeBufferIdentity resident_descriptors{};
+    RuntimeBufferIdentity resident_controls{};
+    RuntimeBufferIdentity resident_positions{};
+    RuntimeBufferIdentity query_minimizer_buffer{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint64_t descriptor_bytes = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t position_bytes = 0;
+    std::uint64_t position_count = 0;
+    std::uint64_t max_occ_cap = 0;
+    std::uint32_t partition_count = 0;
+    std::uint32_t abi_version = 0;
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t cold_load_identity = 0;
+    std::uint64_t target_len = 0;
+    std::uint32_t query_index = 0;
+    std::uint64_t logical_target_row = 0;
+    std::uint64_t logical_query_ordinal = 0;
+    PhaseCSeedQueryRecordWire query_record{};
+    GpuCoordinateOnlyResultWire result{};
+    PersistedShapeV5CoordinateConfigIdentity configuration{};
+};
+
+/// Operation-local audit payload.  Runtime fills this from successful Vulkan
+/// calls; it is public only so the contract can be golden/tamper tested.  It
+/// cannot be converted into an operation proof by callers.
+struct PersistedShapeV5CoordinateJobAudit {
+    std::uint64_t operation_identity = 0;
+    std::uint64_t query_authority_identity = 0;
+    RuntimeBufferIdentity resident_descriptors{};
+    RuntimeBufferIdentity resident_controls{};
+    RuntimeBufferIdentity resident_positions{};
+    RuntimeBufferIdentity query_minimizer_buffer{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint64_t descriptor_bytes = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t position_bytes = 0;
+    std::uint64_t position_count = 0;
+    std::uint64_t max_occ_cap = 0;
+    std::uint32_t partition_count = 0;
+    std::uint32_t abi_version = 0;
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t cold_load_identity = 0;
+    std::uint64_t target_len = 0;
+    std::size_t problem_index = 0;
+    std::uint32_t query_index = 0;
+    std::uint64_t logical_target_row = 0;
+    std::uint64_t logical_query_ordinal = 0;
+    PhaseCSeedQueryRecordWire query_record{};
+    GpuCoordinateOnlyResultWire result{};
+    PersistedShapeV5CoordinateConfigIdentity configuration{};
+    std::uint32_t query_tile_count = 0u;
+    std::uint64_t query_count_dispatches = 0;
+    std::uint64_t query_scan_dispatches = 0;
+    std::uint64_t query_emit_dispatches = 0;
+    std::uint64_t query_completed_roundtrips = 0;
+    std::uint64_t direct_count_dispatches = 0;
+    std::uint64_t direct_scan_dispatches = 0;
+    std::uint64_t direct_emit_dispatches = 0;
+    std::uint64_t anchor_count = 0;
+    std::uint64_t sort_operations = 0;
+    std::uint64_t range_build_dispatches = 0;
+    std::uint64_t range_count = 0;
+    std::uint64_t chain_dispatches = 0;
+    std::uint64_t chain_backtrack_dispatches = 0;
+    std::uint64_t coordinate_dispatches = 0;
+    std::uint64_t count_submit_wait_identity = 0;
+    std::uint64_t emit_submit_wait_identity = 0;
+    std::uint64_t sort_range_submit_wait_identity = 0;
+    std::uint64_t chain_coordinate_submit_wait_identity = 0;
+    std::uint64_t count_status_checks = 0;
+    std::uint64_t emit_status_checks = 0;
+    std::uint64_t result_readbacks = 0;
+    std::uint32_t status_or = 0;
+    std::uint64_t coordinate_vote_dispatches = 0;
+    std::uint64_t cpu_or_simd_biological_calls = 0;
+    std::uint64_t recompute_calls = 0;
+    std::uint64_t fallback_calls = 0;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        const bool identity_and_query = operation_identity != 0u
+            && query_authority_identity != 0u
+            && resident_descriptors.accepted()
+            && resident_controls.accepted()
+            && resident_positions.accepted()
+            && query_minimizer_buffer.accepted()
+            && resident_descriptors.object != resident_controls.object
+            && resident_descriptors.object != resident_positions.object
+            && resident_controls.object != resident_positions.object
+            && query_minimizer_buffer.object
+                != resident_descriptors.object
+            && query_minimizer_buffer.object != resident_controls.object
+            && query_minimizer_buffer.object != resident_positions.object
+            && resident_descriptors.buffer_handle
+                != resident_controls.buffer_handle
+            && resident_descriptors.buffer_handle
+                != resident_positions.buffer_handle
+            && resident_controls.buffer_handle
+                != resident_positions.buffer_handle
+            && query_minimizer_buffer.buffer_handle
+                != resident_descriptors.buffer_handle
+            && query_minimizer_buffer.buffer_handle
+                != resident_controls.buffer_handle
+            && query_minimizer_buffer.buffer_handle
+                != resident_positions.buffer_handle
+            && resident_descriptors.memory_handle
+                != resident_controls.memory_handle
+            && resident_descriptors.memory_handle
+                != resident_positions.memory_handle
+            && resident_controls.memory_handle
+                != resident_positions.memory_handle
+            && query_minimizer_buffer.memory_handle
+                != resident_descriptors.memory_handle
+            && query_minimizer_buffer.memory_handle
+                != resident_controls.memory_handle
+            && query_minimizer_buffer.memory_handle
+                != resident_positions.memory_handle
+            && device_uuid
+                != std::array<std::uint8_t, VK_UUID_SIZE>{}
+            && descriptor_bytes != 0u
+            && descriptor_bytes <= resident_descriptors.bytes
+            && control_bytes != 0u
+            && control_bytes <= resident_controls.bytes
+            && position_bytes != 0u
+            && position_bytes <= resident_positions.bytes
+            && position_count != 0u
+            && max_occ_cap
+                != (std::numeric_limits<std::uint64_t>::max)()
+            && partition_count != 0u
+            && descriptor_bytes
+                == static_cast<std::uint64_t>(partition_count)
+                    * sizeof(GpuShapeV5ResidentPartitionDescriptor)
+            && abi_version == k_gpu_shape_v5_abi_version
+            && generation_id != 0u
+            && source_identity != 0u
+            && cold_load_identity != 0u
+            && target_len != 0u
+            && query_record.flags == 0u
+            && configuration.accepted()
+            && static_cast<std::uint64_t>(configuration.max_occ)
+                <= max_occ_cap
+            && query_tile_count != 0u
+            && query_count_dispatches == 1u
+            && query_scan_dispatches == 3u
+            && query_emit_dispatches == 1u
+            && query_completed_roundtrips == 2u
+            && status_or == 0u
+            && coordinate_vote_dispatches == 0u
+            && cpu_or_simd_biological_calls == 0u
+            && recompute_calls == 0u
+            && fallback_calls == 0u;
+        if (!identity_and_query) return false;
+        if (query_record.minimizer_count == 0u) {
+            // The canonical persisted-GPU contract requires a genuine
+            // per-job partition-selection/seed-lookup dispatch. A query that
+            // produced no minimizers cannot supply that operation evidence,
+            // so it remains explicitly unsupported rather than being
+            // relabelled from batch-level sketch work.
+            return false;
+        }
+        const bool direct_front_end = direct_count_dispatches == 1u
+            && direct_scan_dispatches == 3u
+            && count_submit_wait_identity != 0u
+            && count_status_checks == 1u;
+        if (!direct_front_end) return false;
+        if (anchor_count == 0u) {
+            return direct_emit_dispatches == 0u
+                && sort_operations == 0u
+                && range_build_dispatches == 0u
+                && range_count == 0u
+                && chain_dispatches == 0u
+                && chain_backtrack_dispatches == 0u
+                && coordinate_dispatches == 0u
+                && emit_submit_wait_identity == 0u
+                && sort_range_submit_wait_identity == 0u
+                && chain_coordinate_submit_wait_identity == 0u
+                && emit_status_checks == 0u
+                && result_readbacks == 0u
+                && coordinate_result_wire_equal(
+                    result, GpuCoordinateOnlyResultWire{});
+        }
+        const bool emitted_and_ranged = direct_emit_dispatches == 1u
+            && sort_operations == 1u
+            && range_build_dispatches == 1u
+            && emit_submit_wait_identity != 0u
+            && sort_range_submit_wait_identity != 0u
+            && count_submit_wait_identity != emit_submit_wait_identity
+            && count_submit_wait_identity
+                != sort_range_submit_wait_identity
+            && emit_submit_wait_identity
+                != sort_range_submit_wait_identity
+            && emit_status_checks == 1u;
+        if (!emitted_and_ranged) return false;
+        if (range_count == 0u) {
+            return chain_dispatches == 0u
+                && chain_backtrack_dispatches == 0u
+                && coordinate_dispatches == 0u
+                && chain_coordinate_submit_wait_identity == 0u
+                && result_readbacks == 0u
+                && coordinate_result_wire_equal(
+                    result, GpuCoordinateOnlyResultWire{});
+        }
+        return chain_dispatches == 1u
+            && chain_backtrack_dispatches == 1u
+            && coordinate_dispatches == 1u
+            && chain_coordinate_submit_wait_identity != 0u
+            && chain_coordinate_submit_wait_identity
+                != sort_range_submit_wait_identity
+            && chain_coordinate_submit_wait_identity
+                != emit_submit_wait_identity
+            && chain_coordinate_submit_wait_identity
+                != count_submit_wait_identity
+            && result_readbacks == 1u
+            && coordinate_result_wire_well_formed(
+                result, query_record.query_len, target_len);
+    }
+};
+
+/// Unforgeable consumed view of one accepted audit record.
+class PersistedShapeV5CoordinateJobEvidence {
+public:
+    PersistedShapeV5CoordinateJobEvidence() = default;
+    PersistedShapeV5CoordinateJobEvidence(
+        const PersistedShapeV5CoordinateJobEvidence&) = delete;
+    PersistedShapeV5CoordinateJobEvidence& operator=(
+        const PersistedShapeV5CoordinateJobEvidence&) = delete;
+    PersistedShapeV5CoordinateJobEvidence(
+        PersistedShapeV5CoordinateJobEvidence&& other) noexcept {
+        move_from(other);
+    }
+    PersistedShapeV5CoordinateJobEvidence& operator=(
+        PersistedShapeV5CoordinateJobEvidence&& other) noexcept {
+        if (this != &other) {
+            audit_ = {};
+            pipeline_operation_identity_ = 0u;
+            issued_ = false;
+            move_from(other);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return issued_ && pipeline_operation_identity_ != 0u
+            && audit_.accepted();
+    }
+    [[nodiscard]] const PersistedShapeV5CoordinateJobAudit& audit()
+        const noexcept {
+        return audit_;
+    }
+
+private:
+    friend class PersistedShapeV5CoordinateOperationProof;
+
+    void move_from(PersistedShapeV5CoordinateJobEvidence& other) noexcept {
+        audit_ = other.audit_;
+        issued_ = other.issued_;
+        pipeline_operation_identity_ = other.pipeline_operation_identity_;
+        other.audit_ = {};
+        other.issued_ = false;
+        other.pipeline_operation_identity_ = 0u;
+    }
+
+    PersistedShapeV5CoordinateJobAudit audit_{};
+    std::uint64_t pipeline_operation_identity_ = 0u;
+    bool issued_ = false;
+};
+
+struct PersistedShapeV5CoordinateOperationAcceptanceAudit {
+    std::uint64_t operation_identity = 0u;
+    std::uint64_t expected_job_count = 0u;
+    std::uint64_t consumed_count = 0u;
+    std::uint64_t accepted_count = 0u;
+    std::uint64_t burned_count = 0u;
+    std::uint64_t query_pipeline_receipt_count = 0u;
+    std::uint64_t shape_pipeline_receipt_count = 0u;
+    std::uint64_t committed_submission_count = 0u;
+    std::uint64_t seed_receipt_identity = 0u;
+
+    [[nodiscard]] constexpr bool accepted() const noexcept {
+        return operation_identity != 0u && expected_job_count != 0u
+            && consumed_count == expected_job_count
+            && accepted_count == expected_job_count
+            && burned_count == 0u
+            && query_pipeline_receipt_count == 3u
+            && shape_pipeline_receipt_count >= 7u
+            && shape_pipeline_receipt_count <= 10u
+            && committed_submission_count >= 3u
+            && seed_receipt_identity != 0u;
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedShapeV5CoordinateOperationAcceptanceAudit&)
+        const noexcept = default;
+};
+
+/// Allocation-free pre-finalizer view of the exact operation authority fields
+/// later copied into the SQL evidence ledger.
+struct PersistedShapeV5CoordinateOperationEvidencePreview {
+    PersistedShapeV5CoordinateOperationAcceptanceAudit acceptance{};
+    std::uint64_t query_pipeline_operation_identity = 0u;
+    std::uint64_t shape_pipeline_operation_identity = 0u;
+    std::array<std::uint64_t, 2> query_submission_ordinals{};
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+    std::array<std::uint8_t, 32> seed_sha256{};
+    std::uint64_t seed_size = 0u;
+    std::uint64_t manifest_checksum = 0u;
+    RuntimeMetalArchiveProcessQualification cache_qualification{};
+    RuntimeGpuCacheMetricsAudit maximum_cache_metrics{};
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return acceptance.accepted()
+            && query_pipeline_operation_identity != 0u
+            && shape_pipeline_operation_identity
+                == acceptance.operation_identity
+            && query_pipeline_operation_identity
+                != shape_pipeline_operation_identity
+            && query_submission_ordinals[0] != 0u
+            && query_submission_ordinals[1] != 0u
+            && query_submission_ordinals[0]
+                != query_submission_ordinals[1]
+            && api_version != 0u && driver_version != 0u
+            && seed_size != 0u && manifest_checksum != 0u
+            && cache_qualification.accepted()
+            && cache_qualification.vulkan_device_uuid == device_uuid
+            && cache_qualification.api_version == api_version
+            && cache_qualification.driver_version == driver_version
+            && cache_qualification.vendor_id == vendor_id
+            && cache_qualification.device_id == device_id
+            && cache_qualification.pipeline_cache_uuid
+                == pipeline_cache_uuid
+            && cache_qualification.seed_sha256 == seed_sha256
+            && cache_qualification.seed_size == seed_size
+            && cache_qualification.manifest_checksum == manifest_checksum
+            && maximum_cache_metrics.accepted()
+            && maximum_cache_metrics.token_identity
+                == acceptance.operation_identity
+            && std::any_of(
+                device_uuid.begin(), device_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                [](const std::uint8_t value) { return value != 0u; })
+            && std::any_of(
+                seed_sha256.begin(), seed_sha256.end(),
+                [](const std::uint8_t value) { return value != 0u; });
+    }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedShapeV5CoordinateOperationEvidencePreview&)
+        const noexcept = default;
+};
+
+/// Exact full-stage job payload plus its structured Shape submission receipts.
+struct PersistedShapeV5CoordinateJobEvidencePreview {
+    PersistedShapeV5CoordinateJobAudit audit{};
+    std::uint64_t shape_pipeline_operation_identity = 0u;
+    std::array<std::uint64_t, 4> shape_submission_ordinals{};
+
+    [[nodiscard]] bool accepted() const noexcept {
+        if (!audit.accepted() || audit.anchor_count == 0u
+            || audit.range_count == 0u || audit.result.valid != 1u
+            || shape_pipeline_operation_identity == 0u) {
+            return false;
+        }
+        for (std::size_t i = 0u;
+             i < shape_submission_ordinals.size(); ++i) {
+            if (shape_submission_ordinals[i] == 0u) return false;
+            for (std::size_t prior = 0u; prior < i; ++prior) {
+                if (shape_submission_ordinals[prior]
+                        == shape_submission_ordinals[i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
+class PersistedShapeV5CoordinateAcceptedOperation {
+public:
+    PersistedShapeV5CoordinateAcceptedOperation() = default;
+    PersistedShapeV5CoordinateAcceptedOperation(
+        const PersistedShapeV5CoordinateAcceptedOperation&) = delete;
+    PersistedShapeV5CoordinateAcceptedOperation& operator=(
+        const PersistedShapeV5CoordinateAcceptedOperation&) = delete;
+    PersistedShapeV5CoordinateAcceptedOperation(
+        PersistedShapeV5CoordinateAcceptedOperation&& other) noexcept
+        : audit_(std::exchange(other.audit_, {})),
+          environment_(std::exchange(other.environment_, {})),
+          cache_metrics_(std::move(other.cache_metrics_)),
+          issued_(std::exchange(other.issued_, false)) {}
+    PersistedShapeV5CoordinateAcceptedOperation& operator=(
+        PersistedShapeV5CoordinateAcceptedOperation&& other) noexcept {
+        if (this != &other) {
+            audit_ = std::exchange(other.audit_, {});
+            environment_ = std::exchange(other.environment_, {});
+            cache_metrics_ = std::move(other.cache_metrics_);
+            issued_ = std::exchange(other.issued_, false);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return issued_ && audit_.accepted() && environment_.accepted()
+            && cache_metrics_.accepted();
+    }
+    [[nodiscard]] const PersistedShapeV5CoordinateOperationAcceptanceAudit&
+    audit() const noexcept { return audit_; }
+    [[nodiscard]] const RuntimeGpuExecutionEnvironmentBinding&
+    environment_binding() const noexcept { return environment_; }
+    [[nodiscard]] const RuntimeGpuCacheMetricsAudit&
+    cache_metrics_audit() const noexcept { return cache_metrics_.audit(); }
+    [[nodiscard]] RuntimeGpuCacheMetricsDelta
+    take_cache_metrics_delta() noexcept {
+        return std::move(cache_metrics_);
+    }
+
+private:
+    PersistedShapeV5CoordinateOperationAcceptanceAudit audit_{};
+    RuntimeGpuExecutionEnvironmentBinding environment_{};
+    RuntimeGpuCacheMetricsDelta cache_metrics_{};
+    bool issued_ = false;
+    friend class Runtime;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedShapeV5CoordinateAcceptedOperation>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedShapeV5CoordinateAcceptedOperation>);
+
+/// Runtime-sealed, move-only proof for one Shape-V5 coordinate batch.  Each
+/// logical job can be consumed exactly once and only with matching resident,
+/// query-record and result identities.
+class PersistedShapeV5CoordinateOperationProof {
+public:
+    PersistedShapeV5CoordinateOperationProof() = default;
+    PersistedShapeV5CoordinateOperationProof(
+        const PersistedShapeV5CoordinateOperationProof&) = delete;
+    PersistedShapeV5CoordinateOperationProof& operator=(
+        const PersistedShapeV5CoordinateOperationProof&) = delete;
+    PersistedShapeV5CoordinateOperationProof(
+        PersistedShapeV5CoordinateOperationProof&& other) noexcept {
+        move_from(other);
+    }
+    PersistedShapeV5CoordinateOperationProof& operator=(
+        PersistedShapeV5CoordinateOperationProof&& other) noexcept {
+        if (this != &other) {
+            release_records();
+            query_pipeline_proof_ = {};
+            shape_pipeline_proof_ = {};
+            move_from(other);
+        }
+        return *this;
+    }
+
+    [[nodiscard]] bool sealed() const noexcept {
+        return sealed_ && operation_identity_ != 0u;
+    }
+    [[nodiscard]] std::size_t job_count() const noexcept {
+        return sealed() ? records_.size() : 0u;
+    }
+    [[nodiscard]] std::size_t consumed_count() const noexcept {
+        return sealed() ? accepted_count_ + burned_count_ : 0u;
+    }
+    [[nodiscard]] std::size_t accepted_count() const noexcept {
+        return sealed() ? accepted_count_ : 0u;
+    }
+    [[nodiscard]] std::size_t burned_count() const noexcept {
+        return sealed() ? burned_count_ : 0u;
+    }
+    [[nodiscard]] bool fully_consumed() const noexcept {
+        return sealed()
+            && !records_.empty()
+            && std::all_of(
+                records_.begin(),
+                records_.end(), [](const auto& record) {
+                    return record.state != RecordState::fresh;
+                });
+    }
+    [[nodiscard]] bool all_jobs_accepted() const noexcept {
+        return sealed() && fully_consumed()
+            && accepted_count_ == records_.size()
+            && burned_count_ == 0u && causal_proofs_accepted();
+    }
+    [[nodiscard]] RuntimeGpuExecutionEnvironmentBinding
+    environment_preview() const noexcept {
+        return preview_environment();
+    }
+    [[nodiscard]] RuntimeGpuCacheMetricsAudit
+    cache_metrics_preview() const noexcept {
+        return maximum_cache_metrics();
+    }
+    [[nodiscard]] PersistedShapeV5CoordinateOperationEvidencePreview
+    operation_evidence_preview() const noexcept {
+        PersistedShapeV5CoordinateOperationEvidencePreview result{};
+        if (!all_jobs_accepted()
+            || !query_pipeline_proof_.accepted_query_sketch()
+            || !shape_pipeline_proof_.accepted_shape_v5_coordinate()) {
+            return result;
+        }
+        const RuntimePipelineOperationAudit& query =
+            query_pipeline_proof_.audit();
+        const RuntimePipelineOperationAudit& shape =
+            shape_pipeline_proof_.audit();
+        if (query.jobs.size() != 1u
+            || query.jobs.front().committed_submissions != 2u
+            || shape.committed_submissions
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - query.committed_submissions) {
+            return result;
+        }
+        result.acceptance =
+            PersistedShapeV5CoordinateOperationAcceptanceAudit{
+                .operation_identity = operation_identity_,
+                .expected_job_count = static_cast<std::uint64_t>(
+                    records_.size()),
+                .consumed_count = static_cast<std::uint64_t>(
+                    consumed_count()),
+                .accepted_count = static_cast<std::uint64_t>(
+                    accepted_count()),
+                .burned_count = static_cast<std::uint64_t>(
+                    burned_count()),
+                .query_pipeline_receipt_count =
+                    static_cast<std::uint64_t>(query.prepared_count),
+                .shape_pipeline_receipt_count =
+                    static_cast<std::uint64_t>(shape.prepared_count),
+                .committed_submission_count = query.committed_submissions
+                    + shape.committed_submissions,
+                .seed_receipt_identity = query.seed_receipt_identity,
+            };
+        result.query_pipeline_operation_identity =
+            query.operation_identity;
+        result.shape_pipeline_operation_identity =
+            shape.operation_identity;
+        result.query_submission_ordinals[0] =
+            query.jobs.front().submission_ordinals[0];
+        result.query_submission_ordinals[1] =
+            query.jobs.front().submission_ordinals[1];
+        result.device_uuid = query.device_uuid;
+        result.api_version = query.api_version;
+        result.driver_version = query.driver_version;
+        result.vendor_id = query.vendor_id;
+        result.device_id = query.device_id;
+        result.pipeline_cache_uuid = query.pipeline_cache_uuid;
+        result.seed_sha256 = query.seed_sha256;
+        result.seed_size = query.seed_size;
+        result.manifest_checksum = query.manifest_checksum;
+        if (query.cache_qualification != shape.cache_qualification) {
+            return {};
+        }
+        result.cache_qualification = query.cache_qualification;
+        result.maximum_cache_metrics = maximum_cache_metrics();
+        return result.accepted()
+            ? result
+            : PersistedShapeV5CoordinateOperationEvidencePreview{};
+    }
+    [[nodiscard]] std::optional<
+        PersistedShapeV5CoordinateJobEvidencePreview>
+    job_evidence_preview(const std::size_t problem_index) const noexcept {
+        if (!all_jobs_accepted() || problem_index >= records_.size()
+            || !shape_pipeline_proof_.accepted_shape_v5_coordinate()) {
+            return std::nullopt;
+        }
+        const RuntimePipelineOperationAudit& shape =
+            shape_pipeline_proof_.audit();
+        if (problem_index >= shape.jobs.size()) return std::nullopt;
+        const RuntimePipelineJobUseAudit& use = shape.jobs[problem_index];
+        if (use.committed_submissions != 4u
+            || use.submission_operation_identity
+                != shape.operation_identity) {
+            return std::nullopt;
+        }
+        PersistedShapeV5CoordinateJobEvidencePreview result{
+            .audit = records_[problem_index].audit,
+            .shape_pipeline_operation_identity =
+                use.submission_operation_identity,
+            .shape_submission_ordinals = use.submission_ordinals,
+        };
+        return result.accepted()
+            ? std::optional<
+                PersistedShapeV5CoordinateJobEvidencePreview>{result}
+            : std::nullopt;
+    }
+
+    /// Contract-only test hook.  It returns no proof or evidence and therefore
+    /// grants no runtime authority; it only lets the portable suite exercise
+    /// private sealing, move invalidation, tamper burning, and one-shot consume.
+    [[nodiscard]] static bool self_test_one_shot_contract(
+        const std::array<PersistedShapeV5CoordinateJobAudit, 2>& audits,
+        const std::array<PersistedShapeV5CoordinateJobExpectation, 2>&
+            expectations) {
+        if (audits[0].operation_identity == 0u
+            || audits[0].operation_identity != audits[1].operation_identity
+            || audits[0].problem_index != 0u
+            || audits[1].problem_index != 1u
+            || !audits[0].accepted()
+            || !audits[1].accepted()) {
+            return false;
+        }
+        PersistedShapeV5CoordinateOperationProof issued{};
+        issued.operation_identity_ = audits[0].operation_identity;
+        try {
+            issued.admit_records(2u);
+        } catch (...) {
+            return false;
+        }
+        issued.records_[0].audit = audits[0];
+        issued.records_[1].audit = audits[1];
+        issued.test_causal_accepted_ = true;
+        issued.sealed_ = true;
+
+        PersistedShapeV5CoordinateOperationProof proof{std::move(issued)};
+        if (issued.sealed() || issued.job_count() != 0u
+            || issued.records_capacity_permit_
+            || !proof.records_capacity_permit_
+            || !proof.sealed() || proof.job_count() != 2u) {
+            return false;
+        }
+        auto first = proof.consume(expectations[0]);
+        if (!first.has_value() || !first->accepted()) return false;
+        if (proof.fully_consumed()) return false;
+        PersistedShapeV5CoordinateJobEvidence moved_first{
+            std::move(*first)};
+        if (first->accepted() || !moved_first.accepted()) return false;
+        if (proof.consume(expectations[0]).has_value()) return false;
+
+        auto tampered_second = expectations[1];
+        tampered_second.source_identity ^= 1u;
+        if (proof.consume(tampered_second).has_value()) return false;
+        if (proof.consume(expectations[1]).has_value()) return false;
+        if (!proof.fully_consumed() || proof.accepted_count() != 1u
+            || proof.burned_count() != 1u
+            || proof.all_jobs_accepted()) return false;
+
+        PersistedShapeV5CoordinateOperationProof all_valid{};
+        all_valid.operation_identity_ = audits[0].operation_identity;
+        try {
+            all_valid.admit_records(2u);
+        } catch (...) {
+            return false;
+        }
+        all_valid.records_[0].audit = audits[0];
+        all_valid.records_[1].audit = audits[1];
+        all_valid.test_causal_accepted_ = true;
+        all_valid.sealed_ = true;
+        auto valid_first = all_valid.consume(expectations[0]);
+        auto valid_second = all_valid.consume(expectations[1]);
+        return valid_first.has_value() && valid_first->accepted()
+            && valid_second.has_value() && valid_second->accepted()
+            && !all_valid.consume(expectations[0]).has_value()
+            && !all_valid.consume(expectations[1]).has_value()
+            && all_valid.fully_consumed()
+            && all_valid.accepted_count() == 2u
+            && all_valid.burned_count() == 0u
+            && all_valid.records_capacity_permit_
+            && all_valid.all_jobs_accepted();
+    }
+
+    [[nodiscard]] std::optional<PersistedShapeV5CoordinateJobEvidence>
+    consume(const PersistedShapeV5CoordinateJobExpectation& expected) noexcept {
+        if (!sealed() || expected.problem_index >= records_.size()) {
+            return std::nullopt;
+        }
+        Record& record = records_[expected.problem_index];
+        if (record.state != RecordState::fresh) return std::nullopt;
+        const auto& audit = record.audit;
+        const auto& query = expected.query_record;
+        const bool identities_match = audit.problem_index
+                == expected.problem_index
+            && audit.operation_identity == operation_identity_
+            && audit.query_authority_identity
+                == expected.query_authority_identity
+            && audit.resident_descriptors == expected.resident_descriptors
+            && audit.resident_controls == expected.resident_controls
+            && audit.resident_positions == expected.resident_positions
+            && audit.query_minimizer_buffer
+                == expected.query_minimizer_buffer
+            && audit.device_uuid == expected.device_uuid
+            && audit.descriptor_bytes == expected.descriptor_bytes
+            && audit.control_bytes == expected.control_bytes
+            && audit.position_bytes == expected.position_bytes
+            && audit.position_count == expected.position_count
+            && audit.max_occ_cap == expected.max_occ_cap
+            && audit.partition_count == expected.partition_count
+            && audit.abi_version == expected.abi_version
+            && audit.generation_id == expected.generation_id
+            && audit.source_identity == expected.source_identity
+            && audit.cold_load_identity == expected.cold_load_identity
+            && audit.target_len == expected.target_len
+            && audit.query_index == expected.query_index
+            && audit.logical_target_row == expected.logical_target_row
+            && audit.logical_query_ordinal
+                == expected.logical_query_ordinal
+            && audit.query_record.minimizer_offset
+                == query.minimizer_offset
+            && audit.query_record.minimizer_count
+                == query.minimizer_count
+            && audit.query_record.query_len == query.query_len
+            && audit.query_record.flags == query.flags
+            && coordinate_result_wire_equal(audit.result, expected.result)
+            && audit.configuration == expected.configuration;
+        if (!identities_match || !audit.accepted()
+            || !causal_proofs_accepted()) {
+            record.state = RecordState::burned;
+            ++burned_count_;
+            return std::nullopt;
+        }
+        record.state = RecordState::accepted;
+        ++accepted_count_;
+        PersistedShapeV5CoordinateJobEvidence evidence{};
+        evidence.audit_ = audit;
+        evidence.pipeline_operation_identity_ = operation_identity_;
+        evidence.issued_ = true;
+        return evidence;
+    }
+
+private:
+    friend class Runtime;
+
+    enum class RecordState : std::uint8_t {
+        fresh,
+        accepted,
+        burned,
+    };
+
+    struct Record {
+        PersistedShapeV5CoordinateJobAudit audit{};
+        RecordState state = RecordState::fresh;
+    };
+
+    struct PipelineReceiptUnion {
+        std::array<ShaderVariantKey,
+                   k_runtime_pipeline_prepared_slots> keys{};
+        std::array<const RuntimeMetalArchivePipelineReceipt*,
+                   k_runtime_pipeline_prepared_slots> receipts{};
+        std::size_t count = 0u;
+        bool valid = false;
+    };
+
+    [[nodiscard]] PipelineReceiptUnion receipt_union() const noexcept {
+        PipelineReceiptUnion result{};
+        if (!sealed_ || test_causal_accepted_
+            || !query_pipeline_proof_.accepted_query_sketch()
+            || !shape_pipeline_proof_.accepted_shape_v5_coordinate()) {
+            return result;
+        }
+        const auto merge = [&result](
+            const RuntimePipelineOperationProof& operation) {
+            for (std::size_t i = 0u;
+                 i < operation.audit_.prepared_count; ++i) {
+                std::size_t slot = result.count;
+                for (std::size_t existing = 0u;
+                     existing < result.count; ++existing) {
+                    if (result.keys[existing]
+                            == operation.audit_.prepared[i].shader_key) {
+                        slot = existing;
+                        break;
+                    }
+                }
+                if (slot == result.count) {
+                    if (result.count == result.keys.size()) return false;
+                    result.keys[result.count] =
+                        operation.audit_.prepared[i].shader_key;
+                    result.receipts[result.count] =
+                        operation.receipts_[i];
+                    ++result.count;
+                } else if (result.receipts[slot]
+                           != operation.receipts_[i]) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!merge(query_pipeline_proof_)
+            || !merge(shape_pipeline_proof_)
+            || result.count == 0u
+            || result.count
+                != shape_pipeline_proof_.audit_.prepared_count + 1u) {
+            return {};
+        }
+        result.valid = true;
+        return result;
+    }
+
+    [[nodiscard]] RuntimeGpuExecutionEnvironmentBinding
+    preview_environment() const noexcept {
+        const PipelineReceiptUnion union_receipts = receipt_union();
+        if (!union_receipts.valid) return {};
+        const RuntimePipelineOperationAudit& query =
+            query_pipeline_proof_.audit_;
+        const RuntimePipelineOperationAudit& shape =
+            shape_pipeline_proof_.audit_;
+        if (query.device_uuid != shape.device_uuid
+            || query.api_version != shape.api_version
+            || query.driver_version != shape.driver_version
+            || query.vendor_id != shape.vendor_id
+            || query.device_id != shape.device_id
+            || query.pipeline_cache_uuid != shape.pipeline_cache_uuid
+            || query.seed_sha256 != shape.seed_sha256
+            || query.seed_size != shape.seed_size
+            || query.manifest_checksum != shape.manifest_checksum
+            || query.seed_receipt_identity
+                != shape.seed_receipt_identity
+            || query.archive_set != shape.archive_set
+            || query.cache_qualification != shape.cache_qualification) {
+            return {};
+        }
+        VulkanFeatureSet identity{};
+        identity.api_version = query.api_version;
+        identity.driver_version = query.driver_version;
+        identity.vendor_id = query.vendor_id;
+        identity.device_id = query.device_id;
+        identity.pipeline_cache_uuid = query.pipeline_cache_uuid;
+        RuntimeGpuExecutionEnvironmentBinding result{
+            .gpu_environment_present = true,
+            .gpu_device_uuid = query.device_uuid,
+            .gpu_driver_identity =
+                canonical_vulkan_driver_identity(identity),
+            .cache_policy = RuntimePipelineCachePolicyEvidence::
+                immutable_preseed_all_hit,
+            .seed_sha256 = query.seed_sha256,
+            .seed_size = query.seed_size,
+            .manifest_checksum = query.manifest_checksum,
+            .pipeline_cache_all_hit = true,
+        };
+        return result.accepted() ? result
+                                 : RuntimeGpuExecutionEnvironmentBinding{};
+    }
+
+    [[nodiscard]] RuntimeGpuCacheMetricsAudit
+    maximum_cache_metrics() const noexcept {
+        const PipelineReceiptUnion union_receipts = receipt_union();
+        if (!union_receipts.valid) return {};
+        RuntimeGpuCacheMetricsAudit result{
+            .token_identity = operation_identity_,
+            .gpu_pipeline_cache_loads = 1u,
+            .gpu_pipeline_cache_seed_bytes =
+                query_pipeline_proof_.audit_.seed_size,
+        };
+        const RuntimeMetalArchivePipelineReceipt* first =
+            union_receipts.receipts[0];
+        if (first == nullptr || !first->accepted()) return {};
+        result.gpu_pipeline_cache_load_ns = first->audit().seed_load_ns;
+        for (std::size_t i = 0u; i < union_receipts.count; ++i) {
+            const RuntimeMetalArchivePipelineReceipt* receipt =
+                union_receipts.receipts[i];
+            if (receipt == nullptr || !receipt->accepted()
+                || receipt->audit().seed_load_ns
+                    != result.gpu_pipeline_cache_load_ns
+                || result.gpu_pipeline_creates
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || receipt->audit().pipeline_create_ns
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - result.gpu_pipeline_creation_ns) {
+                return {};
+            }
+            ++result.gpu_pipeline_creates;
+            result.gpu_pipeline_creation_ns +=
+                receipt->audit().pipeline_create_ns;
+        }
+        return result.accepted() ? result : RuntimeGpuCacheMetricsAudit{};
+    }
+
+    void admit_records(std::size_t record_count) {
+        using bioseq::parallelism::saturating_mul;
+        if (record_count == 0u || !records_.empty()
+            || records_capacity_permit_
+            || record_count > records_.max_size()) {
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation record shape is invalid");
+        }
+        const std::uint64_t logical = saturating_mul(
+            static_cast<std::uint64_t>(record_count), sizeof(Record));
+        const std::uint64_t peak = saturating_mul(
+            logical,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        if (logical == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation record admission saturated");
+        }
+        bioseq::parallelism::MemoryAdmissionFailure failure{};
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(shader_cache_message(
+                "persisted Shape-V5 operation record admission denied: reason=",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                " requested=", failure.requested_bytes));
+        }
+        try {
+            records_.resize(record_count);
+        } catch (const std::bad_alloc&) {
+            std::vector<Record> empty;
+            records_.swap(empty);
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation record allocation failed after admission");
+        }
+        const std::uint64_t retained = saturating_mul(
+            static_cast<std::uint64_t>(records_.capacity()),
+            sizeof(Record));
+        if (retained == (std::numeric_limits<std::uint64_t>::max)()
+            || retained > permit->bytes()) {
+            std::vector<Record> empty;
+            records_.swap(empty);
+            throw VulkanRuntimeError(
+                "persisted Shape-V5 operation records exceeded admitted capacity");
+        }
+        permit->shrink_to(retained);
+        records_capacity_permit_ = std::move(*permit);
+    }
+
+    void release_records() noexcept {
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            records_, records_capacity_permit_);
+    }
+
+    [[nodiscard]] bool causal_proofs_accepted() const noexcept {
+        return test_causal_accepted_
+            || (query_pipeline_proof_.accepted_query_sketch()
+                && shape_pipeline_proof_.accepted_shape_v5_coordinate());
+    }
+
+    void move_from(PersistedShapeV5CoordinateOperationProof& other) noexcept {
+        operation_identity_ = other.operation_identity_;
+        records_ = std::move(other.records_);
+        records_capacity_permit_ = std::move(
+            other.records_capacity_permit_);
+        query_pipeline_proof_ = std::move(other.query_pipeline_proof_);
+        shape_pipeline_proof_ = std::move(other.shape_pipeline_proof_);
+        accepted_count_ = other.accepted_count_;
+        burned_count_ = other.burned_count_;
+        test_causal_accepted_ = other.test_causal_accepted_;
+        sealed_ = other.sealed_;
+        other.operation_identity_ = 0u;
+        other.records_.clear();
+        other.accepted_count_ = 0u;
+        other.burned_count_ = 0u;
+        other.test_causal_accepted_ = false;
+        other.sealed_ = false;
+    }
+
+    std::uint64_t operation_identity_ = 0u;
+    // Declared before records_: record capacity is destroyed before release.
+    bioseq::parallelism::MemoryPermit records_capacity_permit_{};
+    std::vector<Record> records_{};
+    RuntimePipelineOperationProof query_pipeline_proof_{};
+    RuntimePipelineOperationProof shape_pipeline_proof_{};
+    std::size_t accepted_count_ = 0u;
+    std::size_t burned_count_ = 0u;
+    bool test_causal_accepted_ = false;
+    bool sealed_ = false;
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedShapeV5CoordinateOperationProof>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedShapeV5CoordinateOperationProof>);
+static_assert(!PersistedShapeV5CoordinateJobAudit{}.accepted());
+
+namespace runtime_detail {
+
+/// Fixed final-publication payload prepared before the immutable live gate.
+/// Dropping this object without committing its claim plan has no side effects.
+struct PersistedShapeV5CoordinateFinalizationPlan {
+    RuntimeGpuCacheMetricsClaimPlan cache_claim_plan{};
+    RuntimeGpuExecutionEnvironmentBinding environment{};
+    PersistedShapeV5CoordinateOperationAcceptanceAudit acceptance{};
+    bool valid = false;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return valid && cache_claim_plan.accepted()
+            && environment.accepted() && acceptance.accepted();
+    }
+};
+
+static_assert(!std::is_copy_constructible_v<
+    PersistedShapeV5CoordinateFinalizationPlan>);
+static_assert(std::is_nothrow_move_constructible_v<
+    PersistedShapeV5CoordinateFinalizationPlan>);
+
+}  // namespace runtime_detail
+
 struct PhaseCSeedCoordinateBatchRun {
     std::vector<GpuCoordinateOnlyResultWire> results{};
     PhaseCSeedCoordinateBatchStats stats{};
+    PersistedShapeV5CoordinateOperationProof operation_proof{};
+    struct ShapeV5DirectRouteEvidence {
+        bool selected = false;
+        bool direct_count_scan_emit_completed = false;
+        std::uint64_t problem_count = 0;
+        std::uint64_t generation_id = 0;
+        std::uint64_t source_identity = 0;
+        std::uint64_t cold_load_identity = 0;
+        std::uint64_t count_dispatches = 0;
+        std::uint64_t emit_dispatches = 0;
+        std::uint64_t count_status_checks = 0;
+        std::uint64_t emit_status_checks = 0;
+        std::uint32_t status_or = 0;
+        std::uint64_t cpu_or_simd_fallbacks = 0;
+    } shape_v5_direct{};
 };
 
 /// The Phase A chaining runtime. One process-wide instance (`Runtime::instance`)
@@ -1053,6 +4638,20 @@ public:
     [[nodiscard]] std::uint64_t generate_units_dispatch_count() const noexcept {
         return generate_units_dispatch_count_.load(std::memory_order_relaxed);
     }
+    [[nodiscard]] std::uint64_t pipeline_cache_metadata_reserved_bytes() {
+        std::lock_guard<std::mutex> guard(mu_);
+        return pipeline_cache_metadata_permit_.bytes();
+    }
+    [[nodiscard]] PersistedShapeV5CoordinateAcceptedOperation
+    finalize_persisted_shape_v5_coordinate_operation(
+        PersistedShapeV5CoordinateOperationProof&& proof,
+        const PersistedShapeV5CoordinateOperationEvidencePreview&
+            expected_preview);
+    [[nodiscard]] static bool
+    self_test_persisted_shape_v5_finalizer_preclaim_contract(
+        RuntimeMetalArchivePipelineAudit base_audit);
+    [[nodiscard]] static bool self_test_gpu_cache_partial_delta_contract(
+        RuntimeMetalArchivePipelineAudit base_audit);
 
     [[nodiscard]] Buffer create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     [[nodiscard]] Buffer create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
@@ -1159,6 +4758,7 @@ public:
         const VulkanRankLut& rank_lut,
         const VulkanSketchParams& params,
         std::span<const PhaseCSketchTileWire> tiles,
+        std::span<const PhaseCSketchQueryLayoutWire> query_layouts,
         std::uint64_t max_minimizers,
         VulkanSketchHostMaterialization materialization);
 
@@ -1312,7 +4912,8 @@ public:
         std::int32_t max_chain_skip,
         std::int32_t min_chain_score,
         std::int32_t min_seed_count,
-        std::uint32_t probe_limit);
+        std::uint32_t probe_limit,
+        DeviceQuerySketchAuthority query_authority = {});
 
     std::vector<GpuCoordinateOnlyResultWire> run_phase_c_seed_to_coordinate_batch_roundtrip(
         const PhaseCSeedQueryInputs& query_inputs,
@@ -1341,12 +4942,94 @@ public:
     }
 
 private:
+    [[nodiscard]] static runtime_detail::
+        PersistedShapeV5CoordinateFinalizationPlan
+    prepare_persisted_shape_v5_coordinate_finalization(
+        const PersistedShapeV5CoordinateOperationProof& proof,
+        const PersistedShapeV5CoordinateOperationEvidencePreview&
+            expected_preview,
+        const VulkanFeatureSet& live_features,
+        bool seed_metrics_claimed) noexcept;
+
+    struct PipelineCacheAdmissionScope {
+        Runtime* owner = nullptr;
+        explicit PipelineCacheAdmissionScope(Runtime& runtime) noexcept
+            : owner(&runtime) {}
+        PipelineCacheAdmissionScope(const PipelineCacheAdmissionScope&) =
+            delete;
+        PipelineCacheAdmissionScope& operator=(
+            const PipelineCacheAdmissionScope&) = delete;
+        ~PipelineCacheAdmissionScope() {
+            if (owner != nullptr) {
+                owner->reconcile_pipeline_cache_metadata_locked();
+            }
+        }
+    };
+
+    struct OwnedPipelineHandles {
+        VkDevice device = VK_NULL_HANDLE;
+        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+        VkShaderModule module = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+
+        OwnedPipelineHandles() = default;
+        explicit OwnedPipelineHandles(VkDevice owner) noexcept
+            : device(owner) {}
+        OwnedPipelineHandles(const OwnedPipelineHandles&) = delete;
+        OwnedPipelineHandles& operator=(const OwnedPipelineHandles&) = delete;
+        OwnedPipelineHandles(OwnedPipelineHandles&& other) noexcept
+            : device(std::exchange(other.device, VK_NULL_HANDLE)),
+              set_layout(std::exchange(
+                  other.set_layout, VK_NULL_HANDLE)),
+              pipeline_layout(std::exchange(
+                  other.pipeline_layout, VK_NULL_HANDLE)),
+              descriptor_pool(std::exchange(
+                  other.descriptor_pool, VK_NULL_HANDLE)),
+              module(std::exchange(other.module, VK_NULL_HANDLE)),
+              pipeline(std::exchange(other.pipeline, VK_NULL_HANDLE)) {}
+        OwnedPipelineHandles& operator=(OwnedPipelineHandles&& other) noexcept {
+            if (this != &other) {
+                reset();
+                device = std::exchange(other.device, VK_NULL_HANDLE);
+                set_layout = std::exchange(
+                    other.set_layout, VK_NULL_HANDLE);
+                pipeline_layout = std::exchange(
+                    other.pipeline_layout, VK_NULL_HANDLE);
+                descriptor_pool = std::exchange(
+                    other.descriptor_pool, VK_NULL_HANDLE);
+                module = std::exchange(other.module, VK_NULL_HANDLE);
+                pipeline = std::exchange(other.pipeline, VK_NULL_HANDLE);
+            }
+            return *this;
+        }
+        ~OwnedPipelineHandles() { reset(); }
+
+        void reset() noexcept;
+    };
+
     /// One cached compute pipeline plus its shader module, keyed by tile/local.
     struct PipelineEntry {
         ChainingPipelineKey key{};
-        VkShaderModule module = VK_NULL_HANDLE;
-        VkPipeline pipeline = VK_NULL_HANDLE;
+        OwnedPipelineHandles handles{};
         std::string entry_name = "main";
+        std::unique_ptr<const RuntimeMetalArchivePipelineReceipt>
+            metal_archive_receipt{};
+        std::uint64_t pipeline_create_ns = 0u;
+
+        PipelineEntry() = default;
+        PipelineEntry(const PipelineEntry&) = delete;
+        PipelineEntry& operator=(const PipelineEntry&) = delete;
+        PipelineEntry(PipelineEntry&&) noexcept = default;
+        PipelineEntry& operator=(PipelineEntry&&) noexcept = default;
+    };
+
+    struct ChainingPipeline {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        ShaderVariantKey shader_key{};
+        const RuntimeMetalArchivePipelineReceipt* metal_archive_receipt =
+            nullptr;
     };
 
     /// DOC0307 §4.5 — one cached Phase B compute pipeline with its own
@@ -1366,13 +5049,50 @@ private:
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
-        std::string entry_name = "main";
+        const RuntimeMetalArchivePipelineReceipt* metal_archive_receipt =
+            nullptr;
     };
 
-    // Returns by value: the cached entry is trivially copyable (handles only)
-    // and the canonical entry lives in `phase_b_pipelines_`. Returning a
-    // reference would dangle the moment a later `get_*` push_back reallocates
-    // the vector (the descriptor set / pipeline are still owned by the vector).
+    struct PhaseBPipelineOwner {
+        ShaderKind kind{};
+        std::uint32_t local_size = 0;
+        std::uint32_t max_span = 0;
+        std::uint32_t binding_count = 0;
+        std::uint32_t push_size = 0;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        OwnedPipelineHandles handles{};
+        std::string entry_name = "main";
+        std::unique_ptr<const RuntimeMetalArchivePipelineReceipt>
+            metal_archive_receipt{};
+        std::uint64_t pipeline_create_ns = 0u;
+
+        PhaseBPipelineOwner() = default;
+        PhaseBPipelineOwner(const PhaseBPipelineOwner&) = delete;
+        PhaseBPipelineOwner& operator=(const PhaseBPipelineOwner&) = delete;
+        PhaseBPipelineOwner(PhaseBPipelineOwner&&) noexcept = default;
+        PhaseBPipelineOwner& operator=(PhaseBPipelineOwner&&) noexcept =
+            default;
+
+        [[nodiscard]] PhaseBPipeline view() const noexcept {
+            return PhaseBPipeline{
+                .kind = kind,
+                .local_size = local_size,
+                .max_span = max_span,
+                .binding_count = binding_count,
+                .push_size = push_size,
+                .set_layout = handles.set_layout,
+                .pipeline_layout = handles.pipeline_layout,
+                .descriptor_pool = handles.descriptor_pool,
+                .descriptor_set = descriptor_set,
+                .module = handles.module,
+                .pipeline = handles.pipeline,
+                .metal_archive_receipt = metal_archive_receipt.get(),
+            };
+        }
+    };
+
+    // Returns a POD non-owning view. Canonical move-only owners remain in the
+    // cache and transfer Vulkan handles exactly once across reallocation.
     PhaseBPipeline get_phase_b_pipeline_locked(
         ShaderKind kind, std::uint32_t local_size, std::uint32_t max_span);
     void bind_phase_b_descriptors_locked(
@@ -1394,7 +5114,9 @@ private:
     void record_phase_c_dispatch_locked(
         VkCommandBuffer cmd, const PhaseBPipeline& pipe,
         std::span<const VkDescriptorBufferInfo> infos,
-        const void* push, std::uint32_t push_size, std::uint32_t group_count);
+        const void* push, std::uint32_t push_size, std::uint32_t group_count,
+        RuntimePipelineUseCollector* collector = nullptr,
+        std::size_t collector_job_index = 0u);
     // Record one full device radix sort (all passes) into an open command
     // buffer. Sorts the key/value arena slices in place via ping-pong scratch.
     void record_radix_sort_locked(
@@ -1404,7 +5126,9 @@ private:
         const GpuArenaSlice& histogram,
         const GpuSortPlan& plan, std::uint32_t num_workgroups,
         std::uint32_t elems_per_wg, std::uint32_t value_words,
-        bool& result_in_scratch);
+        bool& result_in_scratch,
+        RuntimePipelineUseCollector* collector = nullptr,
+        std::size_t collector_job_index = 0u);
     // DOC0345 Patch B — two-key stable sort: radix by value (encoded_pos) then
     // radix by key (kmer). Because the second sort is stable the result is
     // (kmer, encoded_pos) ordered.
@@ -1424,10 +5148,33 @@ private:
     std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags flags) const;
     [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(
         std::uint64_t bytes, VkBufferUsageFlags usage) const;
-    VkPipeline create_pipeline_locked(const ChainingPipelineKey& key);
+    [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked()
+        const noexcept;
+    void admit_pipeline_cache_growth_locked(
+        std::size_t normal_capacity,
+        std::size_t phase_b_capacity);
+    void reconcile_pipeline_cache_metadata_locked() noexcept;
+    ChainingPipeline create_pipeline_locked(const ChainingPipelineKey& key);
     void upload_locked(Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
                        VkAccessFlags dst_access);
     void download_locked(Buffer& transfer_scratch, const Buffer& src, std::span<std::byte> bytes);
+    [[nodiscard]] std::uint64_t next_operation_proof_identity_locked() {
+        constexpr std::uint64_t exhausted =
+            (std::numeric_limits<std::uint64_t>::max)();
+        std::uint64_t identity =
+            operation_proof_identity_.load(std::memory_order_relaxed);
+        while (identity != exhausted) {
+            if (operation_proof_identity_.compare_exchange_weak(
+                    identity,
+                    identity + 1u,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                return identity;
+            }
+        }
+        throw VulkanRuntimeError(
+            "Vulkan operation proof identity space exhausted");
+    }
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
@@ -1441,8 +5188,12 @@ private:
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
+    // Declared before both caches so cache-owned strings/receipts/entries are
+    // destroyed before their aggregate metadata reservation is returned.
+    bioseq::parallelism::MemoryPermit pipeline_cache_metadata_permit_;
     std::vector<PipelineEntry> pipeline_cache_;
-    std::vector<PhaseBPipeline> phase_b_pipelines_;
+    std::vector<PhaseBPipelineOwner> phase_b_pipelines_;
+    bool seed_metrics_claimed_ = false;
     std::uint32_t gpu_anchor_sort_capacity_ = 0;
     std::optional<GpuArena> phase_c_arena_;  // DOC0310 §7 — lazily created.
     VkDescriptorPool phase_c_pool_ = VK_NULL_HANDLE;  // DOC0310 — fresh-set pool.
@@ -1461,6 +5212,7 @@ private:
     std::atomic<std::uint64_t> seq_sort_uploaded_bytes_{0};  // DOC0360 full-payload proof
     std::atomic<std::uint64_t> alignment_extension_dispatch_count_{0};
     std::atomic<std::uint64_t> grouped32_stream_identity_{1};
+    std::atomic<std::uint64_t> operation_proof_identity_{1};
     std::mutex mu_;
 };
 
@@ -1660,6 +5412,267 @@ void ensure_homebrew_moltenvk_icd_visible() {
 #endif
 }
 
+struct RuntimeMetalArchiveConfigurationSlot {
+    std::mutex mu;
+    std::shared_ptr<const RuntimeMetalArchiveConfigurationImage> configuration;
+    bool sealed = false;
+    std::atomic<bool> installed_accepted{false};
+    std::atomic<std::uint64_t> install_validation_count{0u};
+    std::atomic<std::uint64_t> live_gate_calls{0u};
+    std::atomic<std::uint64_t> live_configuration_scan_count{0u};
+};
+
+RuntimeMetalArchiveConfigurationSlot&
+runtime_metal_archive_configuration_slot() noexcept {
+    static RuntimeMetalArchiveConfigurationSlot slot;
+    return slot;
+}
+
+[[nodiscard]] std::shared_ptr<const RuntimeMetalArchiveConfigurationImage>
+runtime_metal_archive_configuration_snapshot() {
+    auto& slot = runtime_metal_archive_configuration_slot();
+    std::lock_guard<std::mutex> guard(slot.mu);
+    return slot.configuration;
+}
+
+}  // namespace
+
+void Runtime::OwnedPipelineHandles::reset() noexcept {
+    if (device != VK_NULL_HANDLE) {
+        if (pipeline != VK_NULL_HANDLE && vkDestroyPipeline != nullptr) {
+            vkDestroyPipeline(device, pipeline, nullptr);
+        }
+        if (module != VK_NULL_HANDLE && vkDestroyShaderModule != nullptr) {
+            vkDestroyShaderModule(device, module, nullptr);
+        }
+        if (descriptor_pool != VK_NULL_HANDLE
+            && vkDestroyDescriptorPool != nullptr) {
+            vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
+        }
+        if (pipeline_layout != VK_NULL_HANDLE
+            && vkDestroyPipelineLayout != nullptr) {
+            vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+        }
+        if (set_layout != VK_NULL_HANDLE
+            && vkDestroyDescriptorSetLayout != nullptr) {
+            vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
+        }
+    }
+    device = VK_NULL_HANDLE;
+    set_layout = VK_NULL_HANDLE;
+    pipeline_layout = VK_NULL_HANDLE;
+    descriptor_pool = VK_NULL_HANDLE;
+    module = VK_NULL_HANDLE;
+    pipeline = VK_NULL_HANDLE;
+}
+
+std::expected<std::shared_ptr<const RuntimeMetalArchiveConfigurationImage>,
+              std::string>
+make_runtime_metal_archive_configuration_image(
+    std::shared_ptr<const SealedShaderCacheSeedImage> seed_image,
+    std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid,
+    std::uint64_t metal_device_registry_id) {
+    if (!seed_image || !seed_image->accepted()) {
+        return std::unexpected(
+            "runtime Metal archive configuration has no accepted seed image");
+    }
+    std::uint64_t archive_count = 0u;
+    for (const SealedShaderCacheArtifactImage& artifact :
+         seed_image->artifacts()) {
+        archive_count += artifact.descriptor.kind
+                == SealedShaderCacheArtifactKind::metal_binary_archive
+            ? 1u : 0u;
+    }
+    if (archive_count == 0u
+        || archive_count
+            > sealed_shader_cache_detail::maximum_seed_image_artifacts) {
+        return std::unexpected(
+            "runtime Metal archive configuration archive count is invalid");
+    }
+    using bioseq::parallelism::saturating_add;
+    using bioseq::parallelism::saturating_mul;
+    std::uint64_t retained = sizeof(RuntimeMetalArchiveConfigurationImage);
+    retained = saturating_add(
+        saturating_add(
+            retained,
+            saturating_mul(
+                archive_count,
+                sizeof(RuntimeMetalArchiveSpec)
+                    + 2u * (sealed_shader_cache_detail::
+                                maximum_manifest_filename_bytes
+                            + 1024u))),
+        2u * 1024u);
+    const std::uint64_t peak = saturating_mul(
+        retained, bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    if (retained == (std::numeric_limits<std::uint64_t>::max)()
+        || peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        return std::unexpected(
+            "runtime Metal archive configuration admission saturated");
+    }
+    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
+    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+        .try_reserve(peak, &admission_failure);
+    if (!permit) {
+        return std::unexpected(shader_cache_message(
+            "runtime Metal archive configuration admission denied before allocation: reason=",
+            bioseq::parallelism::memory_admission_failure_reason_name(
+                admission_failure.reason),
+            " requested=", admission_failure.requested_bytes));
+    }
+    try {
+        RuntimeMetalArchiveConfiguration configuration{};
+        configuration.seed_image = std::move(seed_image);
+        configuration.vulkan_device_uuid = vulkan_device_uuid;
+        configuration.metal_device_registry_id = metal_device_registry_id;
+        configuration.archives.reserve(
+            static_cast<std::size_t>(archive_count));
+        std::optional<MetalArchiveNegativeErrorFingerprint> common_error;
+        for (std::size_t ordinal = 0u;
+             ordinal < configuration.seed_image->artifacts().size();
+             ++ordinal) {
+            const SealedShaderCacheArtifactImage& artifact =
+                configuration.seed_image->artifacts()[ordinal];
+            if (artifact.descriptor.kind
+                != SealedShaderCacheArtifactKind::metal_binary_archive) {
+                continue;
+            }
+            const std::string qualification_filename =
+                artifact.descriptor.filename + ".qualification";
+            const auto* qualification_image =
+                sealed_shader_cache_detail::find_artifact_image(
+                    configuration.seed_image->artifacts(),
+                    SealedShaderCacheArtifactKind::
+                        metal_binary_archive_qualification,
+                    artifact.descriptor.key_index, qualification_filename);
+            if (qualification_image == nullptr) {
+                return std::unexpected(shader_cache_message(
+                    "runtime Metal archive qualification missing for ",
+                    artifact.descriptor.filename));
+            }
+            auto qualification = sealed_shader_cache_detail::
+                parse_metal_archive_qualification_receipt(
+                    qualification_image->bytes);
+            if (!qualification
+                || !qualification->production_accepted()
+                || qualification->archive_size != artifact.descriptor.size
+                || qualification->archive_sha256
+                    != artifact.descriptor.sha256) {
+                return std::unexpected(shader_cache_message(
+                    "runtime Metal archive qualification mismatch for ",
+                    artifact.descriptor.filename));
+            }
+            if (common_error
+                && *common_error != qualification->negative_error) {
+                return std::unexpected(
+                    "runtime Metal archive qualifications disagree on NSError fingerprint");
+            }
+            common_error = qualification->negative_error;
+            if (configuration.qualification_receipt_count == 0u) {
+                configuration.qualification_version =
+                    qualification->wire_version;
+                configuration.helper_protocol_version =
+                    qualification->helper_protocol_version;
+                configuration.helper_build_identity =
+                    qualification->helper_build_identity;
+                configuration.helper_source = qualification->helper_source;
+                configuration.helper_executable_size =
+                    qualification->helper_executable_size;
+                configuration.helper_executable_sha256 =
+                    qualification->helper_executable_sha256;
+                configuration.helper_metal_registry_id =
+                    qualification->helper_metal_registry_id;
+            } else if (configuration.qualification_version
+                           != qualification->wire_version
+                || configuration.helper_protocol_version
+                    != qualification->helper_protocol_version
+                || configuration.helper_build_identity
+                    != qualification->helper_build_identity
+                || configuration.helper_source != qualification->helper_source
+                || configuration.helper_executable_size
+                    != qualification->helper_executable_size
+                || configuration.helper_executable_sha256
+                    != qualification->helper_executable_sha256
+                || configuration.helper_metal_registry_id
+                    != qualification->helper_metal_registry_id) {
+                return std::unexpected(
+                    "runtime Metal archive qualifications disagree on helper provenance");
+            }
+            ++configuration.qualification_receipt_count;
+            configuration.archives.push_back(RuntimeMetalArchiveSpec{
+                .artifact_ordinal = static_cast<std::uint32_t>(ordinal),
+                .artifact_filename = artifact.descriptor.filename,
+                .size = artifact.descriptor.size,
+                .sha256 = artifact.descriptor.sha256,
+                .negative_error_domain =
+                    std::move(qualification->negative_error.domain),
+                .negative_error_code = qualification->negative_error.code,
+            });
+        }
+        if (!configuration.accepted()) {
+            return std::unexpected(
+                "runtime Metal archive configuration factory produced invalid evidence");
+        }
+        auto installed = std::shared_ptr<RuntimeMetalArchiveConfigurationImage>(
+            new RuntimeMetalArchiveConfigurationImage(
+                std::move(configuration), peak, std::move(*permit)));
+        if (!installed->reconcile() || !installed->accepted()) {
+            return std::unexpected(
+                "runtime Metal archive configuration admission reconciliation failed");
+        }
+        return installed;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            "runtime Metal archive configuration allocation failed");
+    }
+}
+
+std::expected<void, std::string> install_runtime_metal_archive_configuration(
+    std::shared_ptr<const RuntimeMetalArchiveConfigurationImage> configuration) {
+    if (!configuration || !configuration->accepted()) {
+        return std::unexpected(
+            "runtime Metal archive configuration is incomplete or non-canonical");
+    }
+    auto& slot = runtime_metal_archive_configuration_slot();
+    slot.install_validation_count.fetch_add(1u, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> guard(slot.mu);
+    if (slot.sealed) {
+        if (slot.configuration
+            && slot.configuration->configuration()
+                == configuration->configuration()) {
+            return {};
+        }
+        return std::unexpected(
+            "runtime Metal archive configuration is already sealed to different evidence");
+    }
+    slot.configuration = std::move(configuration);
+    slot.sealed = true;
+    slot.installed_accepted.store(true, std::memory_order_release);
+    return {};
+}
+
+bool runtime_metal_archive_configuration_installed() noexcept {
+    auto& slot = runtime_metal_archive_configuration_slot();
+    return slot.installed_accepted.load(std::memory_order_acquire);
+}
+
+[[nodiscard]] RuntimeMetalArchiveLiveGateEvidence
+runtime_metal_archive_live_gate_evidence() noexcept {
+    auto& slot = runtime_metal_archive_configuration_slot();
+    return RuntimeMetalArchiveLiveGateEvidence{
+        .install_validation_count = slot.install_validation_count.load(
+            std::memory_order_relaxed),
+        .live_gate_calls = slot.live_gate_calls.load(
+            std::memory_order_relaxed),
+        .live_configuration_scan_count =
+            slot.live_configuration_scan_count.load(
+                std::memory_order_relaxed),
+        .installed_accepted = slot.installed_accepted.load(
+            std::memory_order_acquire),
+    };
+}
+
+namespace {
+
 #if defined(__APPLE__)
 struct ObjcRuntimeFns {
     void* msg_send = nullptr;
@@ -1668,6 +5681,7 @@ struct ObjcRuntimeFns {
     void* (*object_get_class)(void*) = nullptr;
     void* (*class_get_superclass)(void*) = nullptr;
     void* (*class_get_instance_method)(void*, void*) = nullptr;
+    void* (*method_get_implementation)(void*) = nullptr;
     void* (*method_set_implementation)(void*, void*) = nullptr;
 };
 
@@ -1678,7 +5692,17 @@ struct MoltenVkCommandLibraryInterpose {
     void* original_new_library_with_source_async = nullptr;
     void* sel_utf8_string = nullptr;
     void* sel_new_library_with_data_error = nullptr;
+    void* sel_new_library_with_source = nullptr;
+    void* sel_new_library_with_source_async = nullptr;
+    std::uint64_t loader_registry_id = 0u;
+    std::uint64_t cached_methods_present = 0u;
+    std::uint64_t cached_wrapper_methods = 0u;
+    bool cached_binding_validated = false;
     bool installed = false;
+    bool immutable_fail_closed = false;
+    std::atomic<bool> sticky_failure{false};
+    std::atomic<std::uint64_t> recognized_source_requests{0u};
+    std::atomic<std::uint64_t> source_fallback_calls{0u};
 };
 
 MoltenVkCommandLibraryInterpose& moltenvk_command_interpose_state() noexcept {
@@ -1690,6 +5714,41 @@ template <class Fn>
 [[nodiscard]] Fn objc_msg_cast(void* fn) noexcept {
     return reinterpret_cast<Fn>(fn);
 }
+
+class ScopedObjcRelease {
+public:
+    ScopedObjcRelease() = default;
+    ScopedObjcRelease(ObjcRuntimeFns* objc, void* release_selector,
+                      void* object) noexcept
+        : objc_(objc), release_selector_(release_selector), object_(object) {}
+    ScopedObjcRelease(const ScopedObjcRelease&) = delete;
+    ScopedObjcRelease& operator=(const ScopedObjcRelease&) = delete;
+    ScopedObjcRelease(ScopedObjcRelease&& other) noexcept
+        : objc_(std::exchange(other.objc_, nullptr)),
+          release_selector_(std::exchange(other.release_selector_, nullptr)),
+          object_(std::exchange(other.object_, nullptr)) {}
+    ScopedObjcRelease& operator=(ScopedObjcRelease&&) = delete;
+    ~ScopedObjcRelease() { reset(); }
+
+    [[nodiscard]] void* get() const noexcept { return object_; }
+    [[nodiscard]] void* release() noexcept {
+        return std::exchange(object_, nullptr);
+    }
+    void reset() noexcept {
+        if (objc_ != nullptr && objc_->msg_send != nullptr
+            && release_selector_ != nullptr && object_ != nullptr) {
+            using ReleaseFn = void (*)(void*, void*);
+            objc_msg_cast<ReleaseFn>(objc_->msg_send)(
+                object_, release_selector_);
+        }
+        object_ = nullptr;
+    }
+
+private:
+    ObjcRuntimeFns* objc_ = nullptr;
+    void* release_selector_ = nullptr;
+    void* object_ = nullptr;
+};
 
 extern "C" void* bioseq_moltenvk_new_library_with_source(
     void* self, void* cmd, void* source, void* options, void** error)
@@ -1710,6 +5769,15 @@ extern "C" void* bioseq_moltenvk_new_library_with_source(
                  text != nullptr ? std::strlen(text) : 0u,
                  is_moltenvk_command_source ? 1 : 0,
                  state.metallib.empty() ? 1 : 0);
+    if (state.immutable_fail_closed) {
+        state.recognized_source_requests.fetch_add(
+            1u, std::memory_order_relaxed);
+        state.sticky_failure.store(true, std::memory_order_release);
+        std::fprintf(
+            stderr,
+            "[bioseq-gpu-diag] cmd-interpose: immutable mode rejects every unsealed Metal source-library request\n");
+        return nullptr;
+    }
     if (is_moltenvk_command_source && !state.metallib.empty()) {
         using LibraryDataFn = void* (*)(void*, void*, void*, void**);
         dispatch_data_t mtl_data = dispatch_data_create(
@@ -1734,6 +5802,9 @@ extern "C" void* bioseq_moltenvk_new_library_with_source(
     }
 
     std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: FALL-THROUGH to real newLibraryWithSource (XPC compile)\n");
+    if (is_moltenvk_command_source) {
+        state.source_fallback_calls.fetch_add(1u, std::memory_order_relaxed);
+    }
     using SourceFn = void* (*)(void*, void*, void*, void*, void**);
     return objc_msg_cast<SourceFn>(state.original_new_library_with_source)(
         self, cmd, source, options, error);
@@ -1759,6 +5830,19 @@ void invoke_metal_library_completion(void* completion, void* library, void* erro
     objc_msg_cast<InvokeFn>(block->invoke)(completion, library, error);
 }
 
+void invoke_metal_pipeline_completion(
+    void* completion,
+    void* pipeline,
+    void* reflection,
+    void* error) noexcept {
+    if (completion == nullptr) return;
+    auto* block = static_cast<ObjcBlockLiteral*>(completion);
+    if (block->invoke == nullptr) return;
+    using InvokeFn = void (*)(void*, void*, void*, void*);
+    objc_msg_cast<InvokeFn>(block->invoke)(
+        completion, pipeline, reflection, error);
+}
+
 extern "C" void bioseq_moltenvk_new_library_with_source_async(
     void* self, void* cmd, void* source, void* options, void* completion)
 {
@@ -1778,6 +5862,16 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
                  text != nullptr ? std::strlen(text) : 0u,
                  is_moltenvk_command_source ? 1 : 0,
                  state.metallib.empty() ? 1 : 0);
+    if (state.immutable_fail_closed) {
+        state.recognized_source_requests.fetch_add(
+            1u, std::memory_order_relaxed);
+        state.sticky_failure.store(true, std::memory_order_release);
+        std::fprintf(
+            stderr,
+            "[bioseq-gpu-diag] cmd-interpose: immutable mode rejects every unsealed Metal source-library request async\n");
+        invoke_metal_library_completion(completion, nullptr, nullptr);
+        return;
+    }
     if (is_moltenvk_command_source && !state.metallib.empty()) {
         using LibraryDataFn = void* (*)(void*, void*, void*, void**);
         dispatch_data_t mtl_data = dispatch_data_create(
@@ -1803,6 +5897,9 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
     }
 
     std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async FALL-THROUGH to real newLibraryWithSource (XPC compile)\n");
+    if (is_moltenvk_command_source) {
+        state.source_fallback_calls.fetch_add(1u, std::memory_order_relaxed);
+    }
     if (state.original_new_library_with_source_async == nullptr) {
         std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: async original IMP missing; completing with null library\n");
         invoke_metal_library_completion(completion, nullptr, nullptr);
@@ -1833,29 +5930,83 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
 
 void install_moltenvk_command_library_interpose() noexcept {
     auto& state = moltenvk_command_interpose_state();
+    void* installed_method = nullptr;
+    void* installed_method_async = nullptr;
+    const auto rollback_swizzles = [&state, &installed_method,
+                                     &installed_method_async]() noexcept {
+        if (state.objc.method_set_implementation != nullptr) {
+            if (installed_method != nullptr
+                && state.original_new_library_with_source != nullptr) {
+                (void)state.objc.method_set_implementation(
+                    installed_method,
+                    state.original_new_library_with_source);
+            }
+            if (installed_method_async != nullptr
+                && state.original_new_library_with_source_async != nullptr) {
+                (void)state.objc.method_set_implementation(
+                    installed_method_async,
+                    state.original_new_library_with_source_async);
+            }
+        }
+        state.installed = false;
+        state.cached_binding_validated = false;
+        state.cached_methods_present = 0u;
+        state.cached_wrapper_methods = 0u;
+        state.loader_registry_id = 0u;
+        state.original_new_library_with_source = nullptr;
+        state.original_new_library_with_source_async = nullptr;
+        state.sel_utf8_string = nullptr;
+        state.sel_new_library_with_data_error = nullptr;
+        state.sel_new_library_with_source = nullptr;
+        state.sel_new_library_with_source_async = nullptr;
+        std::vector<std::byte>{}.swap(state.metallib);
+        state.objc = {};
+    };
+    try {
+    const bool immutable_fail_closed =
+        runtime_metal_archive_configuration_installed();
+    const bool previously_immutable_fail_closed =
+        state.immutable_fail_closed;
+    const auto reject_immutable_install = [
+        &state, immutable_fail_closed]() noexcept {
+        if (immutable_fail_closed) {
+            state.sticky_failure.store(true, std::memory_order_release);
+        }
+    };
     if (state.installed) {
         std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: already installed\n");
+        if (immutable_fail_closed && !previously_immutable_fail_closed) {
+            state.sticky_failure.store(true, std::memory_order_release);
+        }
         return;
     }
+    state.immutable_fail_closed = immutable_fail_closed;
     const char* path = std::getenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB");
     std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: BIOSEQ_MOLTENVK_COMMAND_METALLIB=%s\n",
                  path != nullptr ? path : "(null)");
-    if (path == nullptr || *path == '\0') {
+    if (!immutable_fail_closed && (path == nullptr || *path == '\0')) {
         return;
     }
     std::vector<std::byte> metallib;
-    if (!read_file_bytes(path, &metallib)) {
+    if (!immutable_fail_closed && !read_file_bytes(path, &metallib)) {
         std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: read_file_bytes FAILED for %s\n", path);
         bioseq_log<DBG>("[vulkan_runtime] MoltenVK command metallib unavailable at {}", path);
         return;
     }
-    std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: read command metallib ok bytes=%zu\n",
-                 metallib.size());
+    if (immutable_fail_closed) {
+        std::fprintf(
+            stderr,
+            "[bioseq-gpu-diag] cmd-interpose: immutable mode ignores unsealed placeholder command metallib and fails closed on recognized source\n");
+    } else {
+        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: read command metallib ok bytes=%zu\n",
+                     metallib.size());
+    }
 
     void* objc_handle = ::dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
     void* metal_handle =
         ::dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW | RTLD_LOCAL);
     if (objc_handle == nullptr || metal_handle == nullptr) {
+        reject_immutable_install();
         return;
     }
 
@@ -1871,12 +6022,16 @@ void install_moltenvk_command_library_interpose() noexcept {
         ::dlsym(objc_handle, "class_getSuperclass"));
     objc.class_get_instance_method = reinterpret_cast<decltype(objc.class_get_instance_method)>(
         ::dlsym(objc_handle, "class_getInstanceMethod"));
+    objc.method_get_implementation = reinterpret_cast<decltype(objc.method_get_implementation)>(
+        ::dlsym(objc_handle, "method_getImplementation"));
     objc.method_set_implementation = reinterpret_cast<decltype(objc.method_set_implementation)>(
         ::dlsym(objc_handle, "method_setImplementation"));
     if (objc.msg_send == nullptr || objc.get_class == nullptr
         || objc.sel_register_name == nullptr || objc.object_get_class == nullptr
         || objc.class_get_superclass == nullptr || objc.class_get_instance_method == nullptr
+        || objc.method_get_implementation == nullptr
         || objc.method_set_implementation == nullptr) {
+        reject_immutable_install();
         return;
     }
 
@@ -1884,87 +6039,324 @@ void install_moltenvk_command_library_interpose() noexcept {
     auto create_device = reinterpret_cast<CreateDeviceFn>(
         ::dlsym(metal_handle, "MTLCreateSystemDefaultDevice"));
     if (create_device == nullptr) {
+        reject_immutable_install();
         return;
     }
     void* device = create_device();
     if (device == nullptr) {
         std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: MTLCreateSystemDefaultDevice returned NULL\n");
+        reject_immutable_install();
         return;
     }
+    void* release_selector = objc.sel_register_name("release");
+    ScopedObjcRelease device_owner{
+        &objc, release_selector, device};
 
     void* sel_source = objc.sel_register_name("newLibraryWithSource:options:error:");
     void* sel_source_async =
         objc.sel_register_name("newLibraryWithSource:options:completionHandler:");
+    state.sel_new_library_with_source = sel_source;
+    state.sel_new_library_with_source_async = sel_source_async;
     state.sel_utf8_string = objc.sel_register_name("UTF8String");
     state.sel_new_library_with_data_error = objc.sel_register_name("newLibraryWithData:error:");
+    using RegistryFn = unsigned long long (*)(void*, void*);
+    state.loader_registry_id = static_cast<std::uint64_t>(
+        objc_msg_cast<RegistryFn>(objc.msg_send)(
+            device, objc.sel_register_name("registryID")));
+    if (immutable_fail_closed && state.loader_registry_id == 0u) {
+        rollback_swizzles();
+        reject_immutable_install();
+        return;
+    }
     void* cls = objc.object_get_class(device);
-    void* method = nullptr;
-    void* method_async = nullptr;
-    while (cls != nullptr && (method == nullptr || method_async == nullptr)) {
-        if (method == nullptr) {
-            method = objc.class_get_instance_method(cls, sel_source);
+    while (cls != nullptr
+           && (installed_method == nullptr
+               || installed_method_async == nullptr)) {
+        if (installed_method == nullptr) {
+            installed_method = objc.class_get_instance_method(cls, sel_source);
         }
-        if (method_async == nullptr) {
-            method_async = objc.class_get_instance_method(cls, sel_source_async);
+        if (installed_method_async == nullptr) {
+            installed_method_async =
+                objc.class_get_instance_method(cls, sel_source_async);
         }
         cls = objc.class_get_superclass(cls);
     }
-    if (method == nullptr && method_async == nullptr) {
-        std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: newLibraryWithSource methods NOT FOUND on device class\n");
+    if (installed_method == nullptr && installed_method_async == nullptr) {
+            std::fprintf(stderr, "[bioseq-gpu-diag] cmd-interpose: newLibraryWithSource methods NOT FOUND on device class\n");
+        rollback_swizzles();
+        reject_immutable_install();
+        return;
+    }
+    if (immutable_fail_closed
+        && (installed_method == nullptr || installed_method_async == nullptr)) {
+        rollback_swizzles();
+        reject_immutable_install();
         return;
     }
 
     state.objc = objc;
     state.metallib = std::move(metallib);
-    if (method != nullptr) {
+    if (installed_method != nullptr) {
         state.original_new_library_with_source =
             objc.method_set_implementation(
-                method,
+                installed_method,
                 reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source));
     }
-    if (method_async != nullptr) {
+    if (installed_method_async != nullptr) {
         state.original_new_library_with_source_async =
             objc.method_set_implementation(
-                method_async,
+                installed_method_async,
                 reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source_async));
     }
-    state.installed = state.original_new_library_with_source != nullptr
+    const bool any_installed =
+        state.original_new_library_with_source != nullptr
         || state.original_new_library_with_source_async != nullptr;
+    const bool every_present_method_installed =
+        (installed_method == nullptr
+         || state.original_new_library_with_source != nullptr)
+        && (installed_method_async == nullptr
+            || state.original_new_library_with_source_async != nullptr);
+    state.installed = any_installed
+        && (!immutable_fail_closed
+            || (every_present_method_installed
+                && state.original_new_library_with_source != nullptr
+                && state.original_new_library_with_source_async != nullptr));
+    state.cached_methods_present =
+        static_cast<std::uint64_t>(installed_method != nullptr)
+        + static_cast<std::uint64_t>(installed_method_async != nullptr);
+    state.cached_wrapper_methods = 0u;
+    if (installed_method != nullptr
+        && objc.method_get_implementation(installed_method)
+            == reinterpret_cast<void*>(
+                &bioseq_moltenvk_new_library_with_source)) {
+        ++state.cached_wrapper_methods;
+    }
+    if (installed_method_async != nullptr
+        && objc.method_get_implementation(installed_method_async)
+            == reinterpret_cast<void*>(
+                &bioseq_moltenvk_new_library_with_source_async)) {
+        ++state.cached_wrapper_methods;
+    }
+    state.cached_binding_validated = state.installed
+        && state.loader_registry_id != 0u
+        && state.cached_methods_present == 2u
+        && state.cached_wrapper_methods == state.cached_methods_present;
+    if (immutable_fail_closed && !state.cached_binding_validated) {
+        rollback_swizzles();
+        reject_immutable_install();
+        return;
+    }
+    if (!state.installed) {
+        rollback_swizzles();
+        reject_immutable_install();
+        return;
+    }
     std::fprintf(stderr,
                  "[bioseq-gpu-diag] cmd-interpose: swizzle installed=%d sync_original=%p async_original=%p\n",
                  state.installed ? 1 : 0,
                  state.original_new_library_with_source,
                  state.original_new_library_with_source_async);
     if (state.installed) {
-        bioseq_log<DBG>(
-            "[vulkan_runtime] installed MoltenVK command shader metallib interpose {}",
-            path);
+        try {
+            bioseq_log<DBG>(
+                "[vulkan_runtime] installed MoltenVK command-source interpose immutable_fail_closed={} path={}",
+                immutable_fail_closed,
+                path != nullptr ? path : "(none)");
+        } catch (...) {
+        }
+    }
+    } catch (...) {
+        rollback_swizzles();
+        state.sticky_failure.store(true, std::memory_order_release);
     }
 }
 
+struct CommandInterposeDeviceBinding {
+    std::uint64_t registry_id = 0u;
+    std::uint64_t methods_present = 0u;
+    std::uint64_t wrapper_methods = 0u;
+};
+
+/// Rare PSO-creation proof: bind the receipt to the exact intercepted device
+/// and its live method table. Submit/wait gates consume cached scalar evidence;
+/// this two-selector reflection runs only while creating a pipeline receipt.
+[[nodiscard]] CommandInterposeDeviceBinding
+command_interpose_device_binding(void* device) noexcept {
+    auto& state = moltenvk_command_interpose_state();
+    CommandInterposeDeviceBinding result{};
+    if (device == nullptr || !state.installed
+        || state.objc.msg_send == nullptr
+        || state.objc.object_get_class == nullptr
+        || state.objc.class_get_instance_method == nullptr
+        || state.objc.class_get_superclass == nullptr
+        || state.objc.method_get_implementation == nullptr) {
+        return result;
+    }
+    using RegistryFn = unsigned long long (*)(void*, void*);
+    result.registry_id = static_cast<std::uint64_t>(
+        objc_msg_cast<RegistryFn>(state.objc.msg_send)(
+            device, state.objc.sel_register_name("registryID")));
+    const std::array selectors{
+        std::pair{
+            state.sel_new_library_with_source,
+            reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source)},
+        std::pair{
+            state.sel_new_library_with_source_async,
+            reinterpret_cast<void*>(
+                &bioseq_moltenvk_new_library_with_source_async)},
+    };
+    void* root = state.objc.object_get_class(device);
+    for (const auto& [selector, expected_imp] : selectors) {
+        void* method = nullptr;
+        for (void* cursor = root; cursor != nullptr && method == nullptr;
+             cursor = state.objc.class_get_superclass(cursor)) {
+            method = state.objc.class_get_instance_method(cursor, selector);
+        }
+        if (method == nullptr) continue;
+        ++result.methods_present;
+        if (state.objc.method_get_implementation(method) == expected_imp) {
+            ++result.wrapper_methods;
+        }
+    }
+    return result;
+}
+
+struct ActiveMetalArchivePipelineScope;
+
 struct MetalPipelineArchiveInterpose {
     ObjcRuntimeFns objc{};
-    std::string archive_dir;
-    void* device = nullptr;
+    std::shared_ptr<const RuntimeMetalArchiveConfigurationImage>
+        configuration_image;
+    std::array<std::uint8_t, VK_UUID_SIZE> runtime_vulkan_device_uuid{};
+    RuntimeVulkanDeviceIdentity runtime_vulkan_device_identity{};
+    std::uint64_t runtime_metal_registry_id = 0u;
+    RuntimeMetalArchiveSetIdentity configured_identity{};
+    RuntimeMetalArchiveSetIdentity loaded_identity{};
+    // Declared before retained Objective-C archive ownership so teardown
+    // releases the NSArray/archives before returning their residency budget.
+    bioseq::parallelism::MemoryPermit archive_residency_permit;
+    std::uint64_t archive_residency_peak_bytes = 0u;
+    std::uint64_t archive_residency_retained_bytes = 0u;
+    void* loader_device = nullptr;
     void* archive_array = nullptr;
+    RuntimeMetalArchiveProcessQualification process_qualification{};
+    void* interposed_new_pipeline_async_method = nullptr;
+    void* interposed_new_pipeline_sync_method = nullptr;
     void* original_new_pipeline_async = nullptr;
     void* original_new_pipeline_sync = nullptr;
-    void* sel_binary_archives = nullptr;
+    void* sel_new_pipeline_sync = nullptr;
     void* sel_set_binary_archives = nullptr;
     void* sel_compute_function = nullptr;
     void* sel_name = nullptr;
     void* sel_utf8_string = nullptr;
+    void* sel_error_domain = nullptr;
+    void* sel_error_code = nullptr;
     void* sel_count = nullptr;
+    void* sel_registry_id = nullptr;
+    void* sel_release = nullptr;
     void* sel_max_total_threads = nullptr;
     void* sel_threadgroup_multiple = nullptr;
-    std::size_t loaded_archive_file_count = 0;
+    std::uint64_t loader_registry_id = 0u;
+    std::uint64_t loaded_pre_post_identity_checks = 0u;
+    bool configuration_validated = false;
     bool installed = false;
-    std::mutex mu;
+    std::atomic<bool> sticky_failure{false};
+    std::mutex failure_mu;
+    std::string failure_reason;
+    std::atomic<std::uint64_t> next_scope_identity{1u};
+    std::atomic<std::uint64_t> next_receipt_identity{1u};
+    std::mutex active_scope_mu;
+    std::shared_ptr<ActiveMetalArchivePipelineScope> active_scope;
+    std::atomic<std::uint64_t> outside_scope_interceptions{0u};
+
+    ~MetalPipelineArchiveInterpose() {
+        if (sel_release != nullptr && objc.msg_send != nullptr) {
+            using ReleaseFn = void (*)(void*, void*);
+            if (archive_array != nullptr) {
+                objc_msg_cast<ReleaseFn>(objc.msg_send)(
+                    archive_array, sel_release);
+                archive_array = nullptr;
+            }
+            if (loader_device != nullptr) {
+                objc_msg_cast<ReleaseFn>(objc.msg_send)(
+                    loader_device, sel_release);
+                loader_device = nullptr;
+            }
+        }
+    }
 };
 
 MetalPipelineArchiveInterpose& metal_pipeline_archive_interpose_state() noexcept {
     static MetalPipelineArchiveInterpose state;
     return state;
+}
+
+void rollback_metal_archive_loaded_state(
+    MetalPipelineArchiveInterpose& state) noexcept {
+    if (state.archive_array != nullptr && state.sel_release != nullptr
+        && state.objc.msg_send != nullptr) {
+        using ReleaseFn = void (*)(void*, void*);
+        objc_msg_cast<ReleaseFn>(state.objc.msg_send)(
+            state.archive_array, state.sel_release);
+        state.archive_array = nullptr;
+    }
+    state.archive_residency_permit.release();
+    state.archive_residency_peak_bytes = 0u;
+    state.archive_residency_retained_bytes = 0u;
+    state.loaded_identity = {};
+    state.loaded_pre_post_identity_checks = 0u;
+    state.process_qualification = {};
+}
+
+void rollback_metal_pipeline_archive_interpose_install(
+    MetalPipelineArchiveInterpose& state) noexcept {
+    if (state.objc.method_set_implementation != nullptr) {
+        if (state.interposed_new_pipeline_async_method != nullptr
+            && state.original_new_pipeline_async != nullptr) {
+            (void)state.objc.method_set_implementation(
+                state.interposed_new_pipeline_async_method,
+                state.original_new_pipeline_async);
+        }
+        if (state.interposed_new_pipeline_sync_method != nullptr
+            && state.original_new_pipeline_sync != nullptr) {
+            (void)state.objc.method_set_implementation(
+                state.interposed_new_pipeline_sync_method,
+                state.original_new_pipeline_sync);
+        }
+    }
+    state.installed = false;
+    state.interposed_new_pipeline_async_method = nullptr;
+    state.interposed_new_pipeline_sync_method = nullptr;
+    state.original_new_pipeline_async = nullptr;
+    state.original_new_pipeline_sync = nullptr;
+    rollback_metal_archive_loaded_state(state);
+    if (state.loader_device != nullptr && state.sel_release != nullptr
+        && state.objc.msg_send != nullptr) {
+        using ReleaseFn = void (*)(void*, void*);
+        objc_msg_cast<ReleaseFn>(state.objc.msg_send)(
+            state.loader_device, state.sel_release);
+    }
+    state.loader_device = nullptr;
+    state.configuration_image.reset();
+    state.configured_identity = {};
+    state.configuration_validated = false;
+    state.runtime_vulkan_device_uuid = {};
+    state.runtime_vulkan_device_identity = {};
+    state.runtime_metal_registry_id = 0u;
+    state.loader_registry_id = 0u;
+    state.sel_new_pipeline_sync = nullptr;
+    state.sel_set_binary_archives = nullptr;
+    state.sel_compute_function = nullptr;
+    state.sel_name = nullptr;
+    state.sel_utf8_string = nullptr;
+    state.sel_error_domain = nullptr;
+    state.sel_error_code = nullptr;
+    state.sel_count = nullptr;
+    state.sel_registry_id = nullptr;
+    state.sel_release = nullptr;
+    state.sel_max_total_threads = nullptr;
+    state.sel_threadgroup_multiple = nullptr;
+    state.objc = {};
 }
 
 [[nodiscard]] std::string bioseq_ns_string_utf8(
@@ -2020,43 +6412,612 @@ MetalPipelineArchiveInterpose& metal_pipeline_archive_interpose_state() noexcept
     return bioseq_ns_string_utf8(objc, desc, objc.sel_register_name("UTF8String"));
 }
 
-[[nodiscard]] std::vector<std::filesystem::path> metal_archive_files(std::string_view dir)
-{
-    std::vector<std::filesystem::path> paths;
-    if (dir.empty()) {
-        return paths;
+void mark_metal_archive_sticky_failure(
+    MetalPipelineArchiveInterpose& state,
+    std::string reason) noexcept {
+    state.sticky_failure.store(true, std::memory_order_release);
+    try {
+        std::lock_guard<std::mutex> guard(state.failure_mu);
+        if (state.failure_reason.empty()) state.failure_reason = std::move(reason);
+    } catch (...) {
+        // The atomic verdict is authoritative even if diagnostics cannot be
+        // allocated on this already-failing path.
     }
+}
+
+void mark_metal_archive_sticky_failure_literal(
+    MetalPipelineArchiveInterpose& state,
+    const char* reason) noexcept {
+    state.sticky_failure.store(true, std::memory_order_release);
+    try {
+        std::lock_guard<std::mutex> guard(state.failure_mu);
+        if (state.failure_reason.empty()) state.failure_reason.assign(reason);
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] std::string metal_archive_failure_reason(
+    MetalPipelineArchiveInterpose& state) {
+    std::lock_guard<std::mutex> guard(state.failure_mu);
+    return state.failure_reason.empty()
+        ? std::string{"immutable Metal archive proof failed"}
+        : state.failure_reason;
+}
+
+struct MetalArchiveFileSnapshot {
+    RuntimeMetalArchiveSpec actual{};
+    std::uint64_t device = 0u;
+    std::uint64_t inode = 0u;
+    std::int64_t modified_seconds = 0;
+    std::int64_t modified_nanoseconds = 0;
+    std::int64_t changed_seconds = 0;
+    std::int64_t changed_nanoseconds = 0;
+    std::uint64_t streamed_bytes = 0u;
+    std::uint64_t scratch_capacity_bytes = 0u;
+    bool exact_seed_compared = false;
+
+    [[nodiscard]] bool operator==(
+        const MetalArchiveFileSnapshot&) const noexcept = default;
+};
+
+[[nodiscard]] std::expected<MetalArchiveFileSnapshot, std::string>
+capture_metal_archive_file_snapshot(
+    const std::filesystem::path& physical_path,
+    const RuntimeMetalArchiveSpec& expected,
+    std::span<const std::byte> exact_seed_bytes = {}) {
+    const std::filesystem::path path = physical_path;
     std::error_code ec;
-    for (const std::filesystem::directory_entry& entry :
-         std::filesystem::directory_iterator(std::filesystem::path(dir), ec)) {
-        if (ec) {
-            break;
+    const std::filesystem::path canonical = std::filesystem::canonical(path, ec);
+    if (ec || canonical != path) {
+        return std::unexpected(fmt::format(
+            "private Metal archive snapshot path is not canonical for {}",
+            expected.artifact_filename));
+    }
+
+    struct stat before{};
+    if (::lstat(path.c_str(), &before) != 0
+        || !S_ISREG(before.st_mode)) {
+        return std::unexpected(fmt::format(
+            "sealed Metal archive is missing, non-regular, or a symlink: {}",
+            path.string()));
+    }
+    if (before.st_size <= 0) {
+        return std::unexpected(fmt::format(
+            "sealed Metal archive is empty: {}", path.string()));
+    }
+    if (static_cast<std::uint64_t>(before.st_size) != expected.size
+        || (!exact_seed_bytes.empty()
+            && exact_seed_bytes.size() != expected.size)) {
+        return std::unexpected(fmt::format(
+            "private Metal archive size differs from retained seed for {}",
+            expected.artifact_filename));
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return std::unexpected(fmt::format(
+            "cannot open private Metal archive {}", path.string()));
+    }
+    constexpr std::size_t scratch_bytes = 64u * 1024u;
+    std::array<std::byte, scratch_bytes> scratch{};
+    sealed_shader_cache_detail::Sha256 hasher;
+    std::uint64_t streamed_bytes = 0u;
+    bool seed_matches = true;
+    for (;;) {
+        input.read(
+            reinterpret_cast<char*>(scratch.data()),
+            static_cast<std::streamsize>(scratch.size()));
+        const std::streamsize count = input.gcount();
+        if (count < 0) {
+            return std::unexpected(fmt::format(
+                "cannot stream private Metal archive {}", path.string()));
         }
-        if (!entry.is_regular_file(ec) || ec) {
-            ec.clear();
-            continue;
+        if (count == 0) break;
+        const std::size_t chunk_bytes = static_cast<std::size_t>(count);
+        const std::span<const std::byte> chunk{
+            scratch.data(), chunk_bytes};
+        hasher.update(chunk);
+        if (!exact_seed_bytes.empty()) {
+            const std::size_t offset = static_cast<std::size_t>(streamed_bytes);
+            if (offset > exact_seed_bytes.size()
+                || chunk_bytes > exact_seed_bytes.size() - offset
+                || !std::equal(
+                    chunk.begin(), chunk.end(),
+                    exact_seed_bytes.begin()
+                        + static_cast<std::ptrdiff_t>(offset))) {
+                seed_matches = false;
+            }
         }
-        const std::filesystem::path path = entry.path();
-        if (path.extension() == ".metalar") {
-            paths.push_back(path);
+        streamed_bytes += static_cast<std::uint64_t>(chunk_bytes);
+        if (!input && !input.eof()) {
+            return std::unexpected(fmt::format(
+                "cannot stream private Metal archive {}", path.string()));
         }
     }
-    std::sort(paths.begin(), paths.end());
-    return paths;
+    if (streamed_bytes != expected.size || !seed_matches) {
+        return std::unexpected(fmt::format(
+            "private Metal archive bytes differ from retained seed for {}",
+            expected.artifact_filename));
+    }
+    struct stat after{};
+    if (::lstat(path.c_str(), &after) != 0
+        || !S_ISREG(after.st_mode)
+        || before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_size != after.st_size
+        || before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec
+        || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec
+        || before.st_ctimespec.tv_sec != after.st_ctimespec.tv_sec
+        || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec) {
+        return std::unexpected(fmt::format(
+            "sealed Metal archive changed while hashing: {}",
+            path.string()));
+    }
+    RuntimeMetalArchiveSpec actual{
+        .artifact_ordinal = expected.artifact_ordinal,
+        .artifact_filename = expected.artifact_filename,
+        .size = static_cast<std::uint64_t>(after.st_size),
+        .sha256 = hasher.finalize(),
+        .negative_error_domain = expected.negative_error_domain,
+        .negative_error_code = expected.negative_error_code,
+    };
+    if (actual != expected) {
+        return std::unexpected(fmt::format(
+            "private Metal archive size or SHA-256 mismatch for {}",
+            expected.artifact_filename));
+    }
+    return MetalArchiveFileSnapshot{
+        .actual = std::move(actual),
+        .device = static_cast<std::uint64_t>(after.st_dev),
+        .inode = static_cast<std::uint64_t>(after.st_ino),
+        .modified_seconds = after.st_mtimespec.tv_sec,
+        .modified_nanoseconds = after.st_mtimespec.tv_nsec,
+        .changed_seconds = after.st_ctimespec.tv_sec,
+        .changed_nanoseconds = after.st_ctimespec.tv_nsec,
+        .streamed_bytes = streamed_bytes,
+        .scratch_capacity_bytes = scratch.size(),
+        .exact_seed_compared = !exact_seed_bytes.empty(),
+    };
+}
+
+class PrivateMetalArchiveSnapshot {
+public:
+    PrivateMetalArchiveSnapshot() = default;
+    explicit PrivateMetalArchiveSnapshot(std::filesystem::path path)
+        : path_(std::move(path)) {}
+    PrivateMetalArchiveSnapshot(const PrivateMetalArchiveSnapshot&) = delete;
+    PrivateMetalArchiveSnapshot& operator=(
+        const PrivateMetalArchiveSnapshot&) = delete;
+    PrivateMetalArchiveSnapshot(
+        PrivateMetalArchiveSnapshot&& other) noexcept
+        : path_(std::exchange(other.path_, {})) {}
+    PrivateMetalArchiveSnapshot& operator=(
+        PrivateMetalArchiveSnapshot&& other) noexcept {
+        if (this != &other) {
+            cleanup();
+            path_ = std::exchange(other.path_, {});
+        }
+        return *this;
+    }
+    ~PrivateMetalArchiveSnapshot() { cleanup(); }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+    [[nodiscard]] std::filesystem::path release_path() noexcept {
+        return std::exchange(path_, {});
+    }
+
+private:
+    void cleanup() noexcept {
+        if (!path_.empty()) {
+            (void)::unlink(path_.c_str());
+            path_.clear();
+        }
+    }
+
+    std::filesystem::path path_;
+};
+static_assert(std::is_nothrow_move_constructible_v<PrivateMetalArchiveSnapshot>);
+
+class PrivateSnapshotFileDescriptor {
+public:
+    explicit PrivateSnapshotFileDescriptor(int fd) noexcept : fd_(fd) {}
+    PrivateSnapshotFileDescriptor(const PrivateSnapshotFileDescriptor&) = delete;
+    PrivateSnapshotFileDescriptor& operator=(
+        const PrivateSnapshotFileDescriptor&) = delete;
+    ~PrivateSnapshotFileDescriptor() noexcept {
+        if (fd_ >= 0) (void)::close(fd_);
+    }
+
+    [[nodiscard]] int get() const noexcept { return fd_; }
+
+    [[nodiscard]] int release() noexcept {
+        return std::exchange(fd_, -1);
+    }
+
+    [[nodiscard]] int close_now() noexcept {
+        const int fd = std::exchange(fd_, -1);
+        if (fd < 0 || ::close(fd) == 0) return 0;
+        return errno;
+    }
+
+private:
+    int fd_ = -1;
+};
+
+class PrivateSnapshotUnlinkGuard {
+public:
+    explicit PrivateSnapshotUnlinkGuard(const char* path) noexcept
+        : path_(path) {}
+    PrivateSnapshotUnlinkGuard(const PrivateSnapshotUnlinkGuard&) = delete;
+    PrivateSnapshotUnlinkGuard& operator=(
+        const PrivateSnapshotUnlinkGuard&) = delete;
+    ~PrivateSnapshotUnlinkGuard() noexcept {
+        if (path_ != nullptr) (void)::unlink(path_);
+    }
+
+    void release() noexcept { path_ = nullptr; }
+
+private:
+    const char* path_ = nullptr;
+};
+
+[[nodiscard]] std::expected<PrivateMetalArchiveSnapshot, std::string>
+write_private_metal_archive_snapshot(
+    std::string_view artifact_filename,
+    std::span<const std::byte> bytes,
+    const std::filesystem::path& temp_parent_override = {}) {
+    std::error_code temp_error;
+    const std::filesystem::path temp_dir = temp_parent_override.empty()
+        ? std::filesystem::temp_directory_path(temp_error)
+        : temp_parent_override;
+    if (temp_error || !temp_dir.is_absolute()) {
+        return std::unexpected(fmt::format(
+            "cannot resolve private Metal archive snapshot directory for {}: {}",
+            artifact_filename,
+            temp_error ? temp_error.message() : "path is not absolute"));
+    }
+    std::error_code canonical_error;
+    const std::filesystem::path canonical_temp_dir =
+        std::filesystem::canonical(temp_dir, canonical_error);
+    if (canonical_error || !canonical_temp_dir.is_absolute()) {
+        return std::unexpected(fmt::format(
+            "cannot canonicalize private Metal archive snapshot directory for {}: {}",
+            artifact_filename,
+            canonical_error
+                ? canonical_error.message() : "path is not absolute"));
+    }
+    std::filesystem::path pattern = canonical_temp_dir
+        / (".bioseq-metalar-snapshot-" + std::string(artifact_filename)
+           + "-XXXXXX");
+    std::string owned_pattern = pattern.string();
+    std::vector<char> writable(
+        owned_pattern.begin(), owned_pattern.end());
+    writable.push_back('\0');
+    const int fd = ::mkstemp(writable.data());
+    if (fd < 0) {
+        return std::unexpected(fmt::format(
+            "cannot create private Metal archive snapshot for {}: {}",
+            artifact_filename,
+            std::strerror(errno)));
+    }
+    PrivateSnapshotFileDescriptor fd_owner{fd};
+    PrivateSnapshotUnlinkGuard unlink_owner{writable.data()};
+    std::filesystem::path snapshot_path(writable.data());
+    if (::fchmod(fd_owner.get(), S_IRUSR | S_IWUSR) != 0) {
+        return std::unexpected(fmt::format(
+            "cannot restrict private Metal archive snapshot {}: {}",
+            snapshot_path.string(),
+            std::strerror(errno)));
+    }
+    std::size_t offset = 0u;
+    while (offset < bytes.size()) {
+        const ssize_t written = ::write(
+            fd_owner.get(),
+            bytes.data() + offset,
+            bytes.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            return std::unexpected(fmt::format(
+                "cannot write private Metal archive snapshot {}: {}",
+                snapshot_path.string(),
+                std::strerror(errno)));
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    if (::fsync(fd_owner.get()) != 0) {
+        return std::unexpected(fmt::format(
+            "cannot fsync private Metal archive snapshot {}: {}",
+            snapshot_path.string(),
+            std::strerror(errno)));
+    }
+    const int close_error = fd_owner.close_now();
+    if (close_error != 0) {
+        return std::unexpected(fmt::format(
+            "cannot close private Metal archive snapshot {}: {}",
+            snapshot_path.string(),
+            std::strerror(close_error)));
+    }
+    PrivateMetalArchiveSnapshot result{std::move(snapshot_path)};
+    unlink_owner.release();
+    return std::expected<PrivateMetalArchiveSnapshot, std::string>{
+        std::in_place, std::move(result)};
+}
+
+class PrivateMetalArchiveProcessDirectory {
+public:
+    PrivateMetalArchiveProcessDirectory() = default;
+    explicit PrivateMetalArchiveProcessDirectory(std::filesystem::path path)
+        : path_(std::move(path)) {}
+    PrivateMetalArchiveProcessDirectory(
+        const PrivateMetalArchiveProcessDirectory&) = delete;
+    PrivateMetalArchiveProcessDirectory& operator=(
+        const PrivateMetalArchiveProcessDirectory&) = delete;
+    PrivateMetalArchiveProcessDirectory(
+        PrivateMetalArchiveProcessDirectory&& other) noexcept
+        : path_(std::exchange(other.path_, {})) {}
+    ~PrivateMetalArchiveProcessDirectory() noexcept {
+        if (!path_.empty()) (void)::rmdir(path_.c_str());
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+    [[nodiscard]] int remove_now() noexcept {
+        if (path_.empty()) return 0;
+        if (::rmdir(path_.c_str()) == 0) {
+            path_.clear();
+            return 0;
+        }
+        return errno;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+[[nodiscard]] std::expected<PrivateMetalArchiveProcessDirectory, std::string>
+make_private_metal_archive_process_directory()
+{
+    std::error_code temp_error;
+    const std::filesystem::path temp_parent =
+        std::filesystem::temp_directory_path(temp_error);
+    std::error_code canonical_error;
+    const std::filesystem::path canonical_parent = temp_error
+        ? std::filesystem::path{}
+        : std::filesystem::canonical(temp_parent, canonical_error);
+    if (temp_error || canonical_error || !canonical_parent.is_absolute()) {
+        return std::unexpected(
+            "cannot resolve private Metal archive process directory");
+    }
+    std::string pattern =
+        (canonical_parent / ".bioseq-metalar-process-XXXXXX").string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+    char* created = ::mkdtemp(writable.data());
+    if (created == nullptr) {
+        return std::unexpected(fmt::format(
+            "cannot create private Metal archive process directory: {}",
+            std::strerror(errno)));
+    }
+    PrivateMetalArchiveProcessDirectory owner{
+        std::filesystem::path(created)};
+    if (::chmod(owner.path().c_str(), S_IRWXU) != 0) {
+        return std::unexpected(fmt::format(
+            "cannot restrict private Metal archive process directory: {}",
+            std::strerror(errno)));
+    }
+    struct stat status {};
+    if (::lstat(owner.path().c_str(), &status) != 0
+        || !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode)
+        || status.st_uid != ::geteuid()
+        || (status.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+        return std::unexpected(
+            "private Metal archive process directory identity is invalid");
+    }
+    return owner;
+}
+
+class OpenPrivateMetalArchive {
+public:
+    OpenPrivateMetalArchive() = default;
+    OpenPrivateMetalArchive(
+        int fd,
+        std::filesystem::path path,
+        sealed_shader_cache_detail::RegularFileIdentity identity) noexcept
+        : fd_(fd), path_(std::move(path)), identity_(identity) {}
+    OpenPrivateMetalArchive(const OpenPrivateMetalArchive&) = delete;
+    OpenPrivateMetalArchive& operator=(const OpenPrivateMetalArchive&) = delete;
+    OpenPrivateMetalArchive(OpenPrivateMetalArchive&& other) noexcept
+        : fd_(std::exchange(other.fd_, -1)),
+          path_(std::exchange(other.path_, {})),
+          identity_(other.identity_),
+          linked_(std::exchange(other.linked_, false)) {}
+    ~OpenPrivateMetalArchive() noexcept {
+        if (linked_ && !path_.empty()) (void)::unlink(path_.c_str());
+        if (fd_ >= 0) (void)::close(fd_);
+    }
+
+    [[nodiscard]] int fd() const noexcept { return fd_; }
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+    [[nodiscard]] const sealed_shader_cache_detail::RegularFileIdentity&
+    identity() const noexcept { return identity_; }
+
+    [[nodiscard]] bool path_and_fd_identity_match() const noexcept {
+        if (fd_ < 0 || path_.empty() || !linked_) return false;
+        struct stat fd_status {};
+        struct stat path_status {};
+        return ::fstat(fd_, &fd_status) == 0
+            && ::lstat(path_.c_str(), &path_status) == 0
+            && S_ISREG(fd_status.st_mode) && S_ISREG(path_status.st_mode)
+            && !S_ISLNK(path_status.st_mode)
+            && sealed_shader_cache_detail::regular_file_identity(fd_status)
+                == identity_
+            && sealed_shader_cache_detail::regular_file_identity(path_status)
+                == identity_;
+    }
+
+    [[nodiscard]] std::expected<void, std::string>
+    unlink_close_and_require_absent()
+    {
+        if (!path_and_fd_identity_match()) {
+            return std::unexpected(
+                "private Metal archive identity changed before unlink");
+        }
+        if (::unlink(path_.c_str()) != 0) {
+            return std::unexpected(fmt::format(
+                "cannot unlink private Metal archive immediately: {}",
+                std::strerror(errno)));
+        }
+        linked_ = false;
+        struct stat recreated {};
+        errno = 0;
+        if (::lstat(path_.c_str(), &recreated) == 0 || errno != ENOENT) {
+            return std::unexpected(
+                "private Metal archive name remained or was recreated after unlink");
+        }
+        struct stat fd_status {};
+        if (::fstat(fd_, &fd_status) != 0
+            || sealed_shader_cache_detail::regular_file_identity(fd_status)
+                != identity_) {
+            return std::unexpected(
+                "unlinked private Metal archive descriptor identity changed");
+        }
+        const int fd = std::exchange(fd_, -1);
+        if (::close(fd) != 0) {
+            return std::unexpected(fmt::format(
+                "cannot close unlinked private Metal archive descriptor: {}",
+                std::strerror(errno)));
+        }
+        path_.clear();
+        return {};
+    }
+
+private:
+    int fd_ = -1;
+    std::filesystem::path path_;
+    sealed_shader_cache_detail::RegularFileIdentity identity_{};
+    bool linked_ = true;
+};
+
+[[nodiscard]] std::expected<OpenPrivateMetalArchive, std::string>
+write_open_private_metal_archive(
+    const std::filesystem::path& directory,
+    std::size_t ordinal,
+    std::span<const std::byte> bytes)
+{
+    const std::filesystem::path path = directory
+        / ("archive-" + std::to_string(ordinal) + ".metalar");
+    const int fd = ::open(
+        path.c_str(),
+        O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+        S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        return std::unexpected(fmt::format(
+            "cannot create open private Metal archive: {}",
+            std::strerror(errno)));
+    }
+    PrivateSnapshotFileDescriptor fd_owner{fd};
+    PrivateSnapshotUnlinkGuard unlink_owner{path.c_str()};
+    if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+        return std::unexpected(
+            "cannot restrict open private Metal archive");
+    }
+    std::size_t offset = 0u;
+    while (offset < bytes.size()) {
+        const ssize_t written = ::write(
+            fd, bytes.data() + offset, bytes.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            return std::unexpected(
+                "cannot write open private Metal archive");
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    if (::fsync(fd) != 0) {
+        return std::unexpected("cannot fsync open private Metal archive");
+    }
+    struct stat status {};
+    if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode)
+        || status.st_uid != ::geteuid()
+        || (status.st_mode & (S_IRWXG | S_IRWXO)) != 0
+        || status.st_size < 0
+        || static_cast<std::uint64_t>(status.st_size) != bytes.size()) {
+        return std::unexpected(
+            "open private Metal archive identity is invalid");
+    }
+    OpenPrivateMetalArchive result{
+        fd_owner.get(), path,
+        sealed_shader_cache_detail::regular_file_identity(status)};
+    (void)fd_owner.release();
+    unlink_owner.release();
+    return result;
+}
+
+[[nodiscard]] std::expected<std::uint64_t, std::string>
+hash_open_private_metal_archive_once(
+    OpenPrivateMetalArchive& image,
+    const RuntimeMetalArchiveSpec& expected,
+    std::span<const std::byte> exact_seed_bytes)
+{
+    if (!image.path_and_fd_identity_match()
+        || exact_seed_bytes.size() != expected.size
+        || ::lseek(image.fd(), 0, SEEK_SET) < 0) {
+        return std::unexpected(
+            "private Metal archive is not stable before qualification hash");
+    }
+    sealed_shader_cache_detail::Sha256 hasher;
+    std::array<std::byte, 64u << 10u> scratch{};
+    std::uint64_t streamed = 0u;
+    for (;;) {
+        const ssize_t count = ::read(
+            image.fd(), scratch.data(), scratch.size());
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            return std::unexpected(
+                "private Metal archive qualification hash read failed");
+        }
+        if (count == 0) break;
+        const std::size_t chunk = static_cast<std::size_t>(count);
+        if (streamed > exact_seed_bytes.size()
+            || chunk > exact_seed_bytes.size() - streamed
+            || !std::equal(
+                scratch.begin(),
+                scratch.begin() + static_cast<std::ptrdiff_t>(chunk),
+                exact_seed_bytes.begin()
+                    + static_cast<std::ptrdiff_t>(streamed))) {
+            return std::unexpected(
+                "private Metal archive differs from retained seed bytes");
+        }
+        hasher.update(std::span<const std::byte>{scratch.data(), chunk});
+        streamed += chunk;
+    }
+    if (streamed != expected.size || hasher.finalize() != expected.sha256
+        || !image.path_and_fd_identity_match()) {
+        return std::unexpected(
+            "private Metal archive qualification hash mismatch");
+    }
+    return streamed;
 }
 
 [[nodiscard]] void* load_metal_binary_archive(
     MetalPipelineArchiveInterpose& state,
+    void* loader_device,
     const std::filesystem::path& path)
 {
     void* desc_cls = state.objc.get_class("MTLBinaryArchiveDescriptor");
-    if (desc_cls == nullptr || state.device == nullptr) {
+    if (desc_cls == nullptr || loader_device == nullptr) {
         return nullptr;
     }
     using NewFn = void* (*)(void*, void*);
     void* desc = objc_msg_cast<NewFn>(state.objc.msg_send)(
         desc_cls,
         state.objc.sel_register_name("new"));
+    ScopedObjcRelease desc_owner{
+        &state.objc, state.sel_release, desc};
     void* url = bioseq_make_file_url(state.objc, path);
     if (desc == nullptr || url == nullptr) {
         return nullptr;
@@ -2069,7 +7030,7 @@ MetalPipelineArchiveInterpose& metal_pipeline_archive_interpose_state() noexcept
     void* error = nullptr;
     using NewArchiveFn = void* (*)(void*, void*, void*, void**);
     void* archive = objc_msg_cast<NewArchiveFn>(state.objc.msg_send)(
-        state.device,
+        loader_device,
         state.objc.sel_register_name("newBinaryArchiveWithDescriptor:error:"),
         desc,
         &error);
@@ -2082,16 +7043,56 @@ MetalPipelineArchiveInterpose& metal_pipeline_archive_interpose_state() noexcept
     return archive;
 }
 
-void refresh_metal_binary_archives_locked(MetalPipelineArchiveInterpose& state)
-{
-    const std::vector<std::filesystem::path> paths = metal_archive_files(state.archive_dir);
-    if (state.archive_array != nullptr
-        && state.loaded_archive_file_count == paths.size()) {
-        return;
+[[nodiscard]] bool load_exact_metal_binary_archives(
+    MetalPipelineArchiveInterpose& state,
+    void* loader_device) {
+    state.loaded_pre_post_identity_checks = 0u;
+    if (!state.configuration_image
+        || !state.configuration_image->accepted()) {
+        mark_metal_archive_sticky_failure(
+            state, "immutable Metal archive configuration image is absent");
+        return false;
+    }
+    const RuntimeMetalArchiveConfiguration& configuration =
+        state.configuration_image->configuration();
+    const RuntimeMetalArchiveSetIdentity expected_identity =
+        runtime_metal_archive_set_identity(configuration.archives);
+    const std::uint64_t residency_metadata =
+        bioseq::parallelism::saturating_add(
+            bioseq::parallelism::saturating_mul(
+                expected_identity.archive_count,
+                sizeof(RuntimeMetalArchiveSpec) + 2u * sizeof(void*)),
+            2u * 1024u);
+    const std::uint64_t residency_peak =
+        bioseq::parallelism::saturating_mul(
+            bioseq::parallelism::saturating_add(
+                expected_identity.total_size, residency_metadata),
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    if (!expected_identity.accepted()
+        || residency_peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        mark_metal_archive_sticky_failure(
+            state, "immutable Metal archive residency admission saturated");
+        return false;
+    }
+    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
+    auto residency_permit =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(residency_peak, &admission_failure);
+    if (!residency_permit) {
+        mark_metal_archive_sticky_failure(
+            state,
+            shader_cache_message(
+                "immutable Metal archive residency admission denied before load: reason=",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    admission_failure.reason),
+                " requested=", admission_failure.requested_bytes));
+        return false;
     }
     void* array_cls = state.objc.get_class("NSMutableArray");
     if (array_cls == nullptr) {
-        return;
+        mark_metal_archive_sticky_failure(
+            state, "NSMutableArray is unavailable for immutable Metal archives");
+        return false;
     }
     using AllocFn = void* (*)(void*, void*);
     using InitCapacityFn = void* (*)(void*, void*, unsigned long);
@@ -2101,30 +7102,233 @@ void refresh_metal_binary_archives_locked(MetalPipelineArchiveInterpose& state)
     void* array = objc_msg_cast<InitCapacityFn>(state.objc.msg_send)(
         allocated,
         state.objc.sel_register_name("initWithCapacity:"),
-        static_cast<unsigned long>(paths.size()));
+        static_cast<unsigned long>(configuration.archives.size()));
+    ScopedObjcRelease array_owner{
+        &state.objc, state.sel_release, array};
     if (array == nullptr) {
-        return;
+        mark_metal_archive_sticky_failure(
+            state, "cannot allocate exact immutable Metal archive array");
+        return false;
     }
 
-    std::size_t loaded = 0;
+    auto private_directory = make_private_metal_archive_process_directory();
+    if (!private_directory) {
+        mark_metal_archive_sticky_failure(
+            state, std::move(private_directory.error()));
+        return false;
+    }
     using AddObjectFn = void (*)(void*, void*, void*);
-    for (const std::filesystem::path& path : paths) {
-        if (void* archive = load_metal_binary_archive(state, path); archive != nullptr) {
+    std::uint64_t hashed_bytes = 0u;
+    std::uint64_t private_files_created = 0u;
+    std::uint64_t private_files_unlinked = 0u;
+    for (std::size_t archive_index = 0u;
+         archive_index < configuration.archives.size(); ++archive_index) {
+        const RuntimeMetalArchiveSpec& expected =
+            configuration.archives[archive_index];
+        const SealedShaderCacheArtifactImage* seed_artifact =
+            configuration.seed_image->artifact(
+                expected.artifact_ordinal);
+        if (seed_artifact == nullptr
+            || seed_artifact->descriptor.kind
+                != SealedShaderCacheArtifactKind::metal_binary_archive
+            || seed_artifact->descriptor.filename
+                != expected.artifact_filename
+            || seed_artifact->descriptor.size != expected.size
+            || seed_artifact->descriptor.sha256 != expected.sha256) {
+            mark_metal_archive_sticky_failure(
+                state,
+                fmt::format(
+                    "runtime Metal archive spec no longer matches retained seed bytes for {}",
+                    expected.artifact_filename));
+            return false;
+        }
+        auto private_image = write_open_private_metal_archive(
+            private_directory->path(), archive_index, seed_artifact->bytes);
+        if (!private_image) {
+            mark_metal_archive_sticky_failure(
+                state, std::move(private_image.error()));
+            return false;
+        }
+        ++private_files_created;
+        auto hashed = hash_open_private_metal_archive_once(
+            *private_image, expected, seed_artifact->bytes);
+        if (!hashed
+            || hashed_bytes
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - (hashed ? *hashed : 0u)) {
+            mark_metal_archive_sticky_failure(
+                state,
+                hashed ? "private Metal archive hashed byte count overflow"
+                       : std::move(hashed.error()));
+            return false;
+        }
+        hashed_bytes += *hashed;
+        if (!private_image->path_and_fd_identity_match()) {
+            mark_metal_archive_sticky_failure(
+                state,
+                "private Metal archive path/descriptor identity changed before synchronous load");
+            return false;
+        }
+        if (void* archive = load_metal_binary_archive(
+                state, loader_device, private_image->path());
+            archive != nullptr) {
+            ScopedObjcRelease archive_owner{
+                &state.objc, state.sel_release, archive};
+            if (!private_image->path_and_fd_identity_match()) {
+                mark_metal_archive_sticky_failure(
+                    state,
+                    fmt::format(
+                        "private Metal archive identity changed across synchronous load: {}",
+                        expected.artifact_filename));
+                return false;
+            }
             objc_msg_cast<AddObjectFn>(state.objc.msg_send)(
                 array,
                 state.objc.sel_register_name("addObject:"),
                 archive);
-            ++loaded;
+            auto unlinked =
+                private_image->unlink_close_and_require_absent();
+            if (!unlinked) {
+                mark_metal_archive_sticky_failure(
+                    state, std::move(unlinked.error()));
+                return false;
+            }
+            ++private_files_unlinked;
+            ++state.loaded_pre_post_identity_checks;
+        } else {
+            mark_metal_archive_sticky_failure(
+                state,
+                fmt::format(
+                    "Metal rejected private exact-byte archive snapshot for {}",
+                    expected.artifact_filename));
+            return false;
         }
     }
-    state.archive_array = array;
-    state.loaded_archive_file_count = paths.size();
-    std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: loaded %zu/%zu .metalar archives from %s\n",
-                 loaded, paths.size(), state.archive_dir.c_str());
+    if (const int remove_error = private_directory->remove_now();
+        remove_error != 0) {
+        mark_metal_archive_sticky_failure(
+            state,
+            fmt::format(
+                "private Metal archive process directory did not disappear: {}",
+                std::strerror(remove_error)));
+        return false;
+    }
+    state.loaded_identity = expected_identity;
+    if (state.loaded_pre_post_identity_checks
+        != expected_identity.archive_count) {
+        mark_metal_archive_sticky_failure(
+            state, "loaded Metal archive count differs from sealed expected set");
+        return false;
+    }
+    using CopyFn = void* (*)(void*, void*);
+    void* immutable_array = objc_msg_cast<CopyFn>(state.objc.msg_send)(
+        array, state.objc.sel_register_name("copy"));
+    ScopedObjcRelease immutable_array_owner{
+        &state.objc, state.sel_release, immutable_array};
+    using CountFn = unsigned long (*)(void*, void*);
+    const std::uint64_t immutable_count = immutable_array == nullptr
+        ? 0u
+        : static_cast<std::uint64_t>(
+            objc_msg_cast<CountFn>(state.objc.msg_send)(
+                immutable_array, state.sel_count));
+    if (immutable_array == nullptr
+        || immutable_count != expected_identity.archive_count) {
+        mark_metal_archive_sticky_failure(
+            state, "cannot retain immutable Metal archive NSArray");
+        return false;
+    }
+    const SealedShaderCacheManifest& manifest =
+        configuration.seed_image->manifest();
+    const SealedShaderCacheSeedReceipt& seed_receipt =
+        configuration.seed_image->receipt();
+    RuntimeMetalArchiveProcessQualification qualification{
+        .version = 2u,
+        .archive_set = expected_identity,
+        .receipt_count = configuration.qualification_receipt_count,
+        .hash_passes = 1u,
+        .hashed_bytes = hashed_bytes,
+        .private_files_created = private_files_created,
+        .private_files_unlinked = private_files_unlinked,
+        .live_private_paths = 0u,
+        .pipeline_filesystem_hash_passes = 0u,
+        .pipeline_filesystem_hashed_bytes = 0u,
+        .helper_protocol_version = configuration.helper_protocol_version,
+        .helper_build_identity = configuration.helper_build_identity,
+        .helper_source = configuration.helper_source,
+        .helper_executable_size = configuration.helper_executable_size,
+        .helper_executable_sha256 = configuration.helper_executable_sha256,
+        .helper_metal_registry_id = configuration.helper_metal_registry_id,
+        .vulkan_device_uuid =
+            state.runtime_vulkan_device_identity.device_uuid,
+        .api_version = state.runtime_vulkan_device_identity.api_version,
+        .driver_version = state.runtime_vulkan_device_identity.driver_version,
+        .vendor_id = state.runtime_vulkan_device_identity.vendor_id,
+        .device_id = state.runtime_vulkan_device_identity.device_id,
+        .pipeline_cache_uuid =
+            state.runtime_vulkan_device_identity.pipeline_cache_uuid,
+        .seed_receipt_identity = seed_receipt.identity(),
+        .seed_sha256 = manifest.seed_sha256,
+        .seed_size = manifest.seed_size,
+        .manifest_checksum = manifest.manifest_checksum,
+        .saturated = false,
+    };
+    qualification.identity = runtime_metal_archive_process_qualification_identity(
+        qualification);
+    if (!qualification.accepted()) {
+        mark_metal_archive_sticky_failure(
+            state, "process Metal archive qualification is incomplete");
+        return false;
+    }
+    state.archive_residency_peak_bytes = residency_peak;
+    state.archive_residency_retained_bytes =
+        bioseq::parallelism::saturating_add(
+            expected_identity.total_size, residency_metadata);
+    if (state.archive_residency_retained_bytes
+            == (std::numeric_limits<std::uint64_t>::max)()
+        || state.archive_residency_retained_bytes
+            > residency_permit->bytes()) {
+        mark_metal_archive_sticky_failure(
+            state, "Metal archive residency reconciliation saturated");
+        state.archive_residency_retained_bytes = 0u;
+        return false;
+    }
+    residency_permit->shrink_to(state.archive_residency_retained_bytes);
+    state.archive_residency_permit = std::move(*residency_permit);
+    state.archive_array = immutable_array_owner.release();
+    state.process_qualification = std::move(qualification);
+    std::fprintf(
+        stderr,
+        "[bioseq-gpu-diag] pso-interpose: loaded exact sealed archive set count=%llu bytes=%llu checksum=%llu\n",
+        static_cast<unsigned long long>(state.loaded_identity.archive_count),
+        static_cast<unsigned long long>(state.loaded_identity.total_size),
+        static_cast<unsigned long long>(state.loaded_identity.ordered_checksum));
     bioseq_log<DBG>(
-        "[vulkan_runtime] loaded {} Metal binary archives from {}",
-        loaded,
-        state.archive_dir);
+        "[vulkan_runtime] loaded exact sealed Metal archive set count={} bytes={} checksum={}",
+        state.loaded_identity.archive_count,
+        state.loaded_identity.total_size,
+        state.loaded_identity.ordered_checksum);
+    return true;
+}
+
+[[nodiscard]] std::expected<std::uint64_t, std::string>
+verify_resident_metal_archive_snapshots(
+    MetalPipelineArchiveInterpose& state,
+    std::string_view phase) {
+    if (!state.configuration_image || state.archive_array == nullptr
+        || !state.process_qualification.accepted()) {
+        return std::unexpected(
+            fmt::format(
+                "{} process Metal archive qualification is absent", phase));
+    }
+    if (state.loaded_identity != state.process_qualification.archive_set
+        || state.process_qualification.live_private_paths != 0u
+        || state.process_qualification.pipeline_filesystem_hash_passes != 0u
+        || state.process_qualification.pipeline_filesystem_hashed_bytes != 0u) {
+        return std::unexpected(fmt::format(
+            "{} process Metal archive qualification identity mismatch",
+            phase));
+    }
+    return 0u;
 }
 
 [[nodiscard]] std::string descriptor_function_name(MetalPipelineArchiveInterpose& state, void* desc)
@@ -2142,72 +7346,363 @@ void refresh_metal_binary_archives_locked(MetalPipelineArchiveInterpose& state)
     return bioseq_ns_string_utf8(state.objc, name, state.sel_utf8_string);
 }
 
-void attach_metal_binary_archives_to_descriptor(void* desc)
-{
-    if (desc == nullptr) {
-        return;
-    }
-    auto& state = metal_pipeline_archive_interpose_state();
-    if (!state.installed) {
-        return;
-    }
+struct MetalErrorIdentity {
+    std::string domain;
+    std::int64_t code = 0;
+};
 
-    std::lock_guard<std::mutex> guard(state.mu);
-    refresh_metal_binary_archives_locked(state);
-    if (state.archive_array == nullptr) {
-        std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: attach skipped (archive_array==null) function=%s\n",
-                     descriptor_function_name(state, desc).c_str());
-        return;
+[[nodiscard]] MetalErrorIdentity metal_error_identity(
+    MetalPipelineArchiveInterpose& state,
+    void* error) {
+    if (error == nullptr || state.sel_error_domain == nullptr
+        || state.sel_error_code == nullptr) {
+        return {};
     }
-
     using GetObjFn = void* (*)(void*, void*);
-    using CountFn = unsigned long (*)(void*, void*);
-    void* existing = objc_msg_cast<GetObjFn>(state.objc.msg_send)(
-        desc,
-        state.sel_binary_archives);
-    if (existing != nullptr) {
-        const unsigned long existing_count =
-            objc_msg_cast<CountFn>(state.objc.msg_send)(existing, state.sel_count);
-        if (existing_count > 0) {
-            return;
+    using CodeFn = std::intptr_t (*)(void*, void*);
+    void* domain = objc_msg_cast<GetObjFn>(state.objc.msg_send)(
+        error, state.sel_error_domain);
+    return MetalErrorIdentity{
+        .domain = bioseq_ns_string_utf8(
+            state.objc, domain, state.sel_utf8_string),
+        .code = static_cast<std::int64_t>(
+            objc_msg_cast<CodeFn>(state.objc.msg_send)(
+                error, state.sel_error_code)),
+    };
+}
+
+constexpr unsigned long kMetalPipelineFailOnBinaryArchiveMiss = 1ul << 2u;
+
+struct ActiveMetalArchivePipelineScope {
+    std::mutex mu;
+    RuntimeMetalArchivePipelineAudit audit{};
+    bool required = false;
+    bool active = false;
+    bool finished = false;
+    std::string failure;
+    std::uint64_t outside_scope_interceptions_at_begin = 0u;
+};
+
+[[nodiscard]] std::uint64_t next_nonzero_identity(
+    std::atomic<std::uint64_t>& counter) noexcept {
+    constexpr std::uint64_t exhausted =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t value = counter.load(std::memory_order_relaxed);
+    while (value != 0u && value != exhausted) {
+        if (counter.compare_exchange_weak(
+                value, value + 1u,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            return value;
         }
     }
+    return 0u;
+}
 
-    const unsigned long archive_count =
-        objc_msg_cast<CountFn>(state.objc.msg_send)(state.archive_array, state.sel_count);
-    if (archive_count == 0) {
-        return;
-    }
+[[nodiscard]] std::uint64_t metal_device_registry_id(
+    MetalPipelineArchiveInterpose& state,
+    void* device) noexcept {
+    if (device == nullptr || state.sel_registry_id == nullptr) return 0u;
+    using RegistryFn = unsigned long long (*)(void*, void*);
+    return static_cast<std::uint64_t>(
+        objc_msg_cast<RegistryFn>(state.objc.msg_send)(
+            device, state.sel_registry_id));
+}
 
-    unsigned long max_threads = 0;
-    signed char threadgroup_multiple = 0;
-    if (state.sel_max_total_threads != nullptr) {
-        using GetULongFn = unsigned long (*)(void*, void*);
-        max_threads = objc_msg_cast<GetULongFn>(state.objc.msg_send)(
-            desc,
-            state.sel_max_total_threads);
-    }
-    if (state.sel_threadgroup_multiple != nullptr) {
-        using GetBoolFn = signed char (*)(void*, void*);
-        threadgroup_multiple = objc_msg_cast<GetBoolFn>(state.objc.msg_send)(
-            desc,
-            state.sel_threadgroup_multiple);
-    }
+void release_objc_object(
+    MetalPipelineArchiveInterpose& state,
+    void* object) noexcept {
+    if (object == nullptr || state.sel_release == nullptr) return;
+    using ReleaseFn = void (*)(void*, void*);
+    objc_msg_cast<ReleaseFn>(state.objc.msg_send)(object, state.sel_release);
+}
 
-    using SetObjFn = void (*)(void*, void*, void*);
-    objc_msg_cast<SetObjFn>(state.objc.msg_send)(
+[[nodiscard]] void* make_empty_metal_archive_array(
+    MetalPipelineArchiveInterpose& state,
+    void* device) noexcept {
+    void* desc_cls = state.objc.get_class("MTLBinaryArchiveDescriptor");
+    void* array_cls = state.objc.get_class("NSMutableArray");
+    if (desc_cls == nullptr || array_cls == nullptr || device == nullptr) {
+        return nullptr;
+    }
+    using NewFn = void* (*)(void*, void*);
+    void* desc = objc_msg_cast<NewFn>(state.objc.msg_send)(
+        desc_cls, state.objc.sel_register_name("new"));
+    if (desc == nullptr) return nullptr;
+    void* error = nullptr;
+    using NewArchiveFn = void* (*)(void*, void*, void*, void**);
+    void* archive = objc_msg_cast<NewArchiveFn>(state.objc.msg_send)(
+        device,
+        state.objc.sel_register_name("newBinaryArchiveWithDescriptor:error:"),
         desc,
-        state.sel_set_binary_archives,
-        state.archive_array);
-    std::fprintf(stderr,
-                 "[bioseq-gpu-diag] pso-interpose: ATTACHED %lu archives to descriptor function=%s max_threads=%lu\n",
-                 archive_count, descriptor_function_name(state, desc).c_str(), max_threads);
-    bioseq_log<DBG>(
-        "[vulkan_runtime] attached {} Metal binary archives to compute descriptor function={} max_threads={} full_subgroups={}",
-        archive_count,
-        descriptor_function_name(state, desc),
-        max_threads,
-        threadgroup_multiple != 0);
+        &error);
+    release_objc_object(state, desc);
+    if (archive == nullptr) return nullptr;
+
+    using AllocFn = void* (*)(void*, void*);
+    using InitCapacityFn = void* (*)(void*, void*, unsigned long);
+    void* allocated = objc_msg_cast<AllocFn>(state.objc.msg_send)(
+        array_cls, state.objc.sel_register_name("alloc"));
+    void* array = objc_msg_cast<InitCapacityFn>(state.objc.msg_send)(
+        allocated,
+        state.objc.sel_register_name("initWithCapacity:"),
+        1ul);
+    if (array == nullptr) {
+        release_objc_object(state, archive);
+        return nullptr;
+    }
+    using AddObjectFn = void (*)(void*, void*, void*);
+    objc_msg_cast<AddObjectFn>(state.objc.msg_send)(
+        array, state.objc.sel_register_name("addObject:"), archive);
+    release_objc_object(state, archive);
+    return array;
+}
+
+void fail_active_metal_archive_scope(
+    MetalPipelineArchiveInterpose& state,
+    ActiveMetalArchivePipelineScope& scope,
+    std::string reason) noexcept {
+    scope.audit.sticky_failure = true;
+    try {
+        if (scope.failure.empty()) scope.failure = reason;
+    } catch (...) {
+    }
+    mark_metal_archive_sticky_failure(state, std::move(reason));
+}
+
+enum class MetalPipelineInterceptVerdict : std::uint8_t {
+    outside_scope,
+    enforced,
+    rejected,
+};
+
+[[nodiscard]] MetalPipelineInterceptVerdict prepare_scoped_metal_pipeline_call(
+    void* self,
+    void* desc,
+    unsigned long options,
+    bool asynchronous) noexcept {
+    auto& state = metal_pipeline_archive_interpose_state();
+    try {
+    std::unique_lock<std::mutex> active_guard(state.active_scope_mu);
+    const std::shared_ptr<ActiveMetalArchivePipelineScope> scope =
+        state.active_scope;
+    if (scope == nullptr) {
+        state.outside_scope_interceptions.fetch_add(
+            1u, std::memory_order_relaxed);
+        active_guard.unlock();
+        if (state.installed) {
+            mark_metal_archive_sticky_failure(
+                state,
+                "immutable Metal runtime intercepted an unscoped pipeline creation");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        return MetalPipelineInterceptVerdict::outside_scope;
+    }
+    std::unique_lock<std::mutex> scope_guard(scope->mu);
+    active_guard.unlock();
+    if (!scope->active || scope->finished) {
+        state.outside_scope_interceptions.fetch_add(
+            1u, std::memory_order_relaxed);
+        scope_guard.unlock();
+        if (state.installed) {
+            mark_metal_archive_sticky_failure(
+                state,
+                "immutable Metal runtime intercepted a pipeline outside the live receipt scope");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        return MetalPipelineInterceptVerdict::outside_scope;
+    }
+    try {
+        ++scope->audit.scoped_interceptions;
+        if (scope->audit.scoped_interceptions != 1u) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "one Vulkan createInfo unexpectedly produced more than one Metal PSO interception");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        const std::string observed_entry =
+            descriptor_function_name(state, desc);
+        if (observed_entry.empty()
+            || observed_entry != scope->audit.expected_entry_name) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                fmt::format(
+                    "intercepted Metal function '{}' differs from expected '{}'",
+                    observed_entry,
+                    scope->audit.expected_entry_name));
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        scope->audit.observed_entry_name = observed_entry;
+        ++scope->audit.matched_descriptor_functions;
+        if (state.sticky_failure.load(std::memory_order_acquire)) {
+            fail_active_metal_archive_scope(
+                state, *scope, metal_archive_failure_reason(state));
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        if (self == nullptr || desc == nullptr
+            || state.archive_array == nullptr
+            || state.original_new_pipeline_sync == nullptr) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "Metal archive interpose lacks descriptor, archive set, or original sync IMP");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        const std::uint64_t intercepted_registry =
+            metal_device_registry_id(state, self);
+        if (intercepted_registry == 0u
+            || intercepted_registry
+                != state.runtime_metal_registry_id) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                fmt::format(
+                    "intercepted Metal registry id {} differs from sealed {}",
+                    intercepted_registry,
+                    state.runtime_metal_registry_id));
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        if (scope->audit.intercepted_metal_registry_id != 0u
+            && scope->audit.intercepted_metal_registry_id
+                != intercepted_registry) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "one pipeline scope intercepted more than one Metal device");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        scope->audit.intercepted_metal_registry_id = intercepted_registry;
+        auto& command_state = moltenvk_command_interpose_state();
+        const CommandInterposeDeviceBinding command_binding =
+            command_interpose_device_binding(self);
+        scope->audit.command_source_methods_present =
+            command_binding.methods_present;
+        scope->audit.command_source_wrapper_methods =
+            command_binding.wrapper_methods;
+        if (!command_state.cached_binding_validated
+            || command_state.loader_registry_id
+                != scope->audit.command_loader_metal_registry_id
+            || command_binding.registry_id != intercepted_registry
+            || command_binding.registry_id
+                != command_state.loader_registry_id
+            || command_binding.methods_present != 2u
+            || command_binding.wrapper_methods
+                != command_binding.methods_present) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "intercepted Metal device does not retain both immutable command-source wrappers");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+
+        using CountFn = unsigned long (*)(void*, void*);
+        const unsigned long exact_count =
+            objc_msg_cast<CountFn>(state.objc.msg_send)(
+                state.archive_array, state.sel_count);
+        const std::size_t configured_archive_count =
+            state.configuration_image
+                ? state.configuration_image->configuration().archives.size()
+                : 0u;
+        if (exact_count != configured_archive_count) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "resident Metal archive object count differs from sealed set");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+
+        void* empty_array = make_empty_metal_archive_array(state, self);
+        if (empty_array == nullptr) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "cannot construct same-device empty archive negative control");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        using SetObjFn = void (*)(void*, void*, void*);
+        objc_msg_cast<SetObjFn>(state.objc.msg_send)(
+            desc, state.sel_set_binary_archives, empty_array);
+        ++scope->audit.same_descriptor_negative_controls;
+
+        void* negative_reflection = nullptr;
+        void* negative_error = nullptr;
+        using SyncFn = void* (*)(
+            void*, void*, void*, unsigned long, void**, void**);
+        ++scope->audit.original_sync_negative_calls;
+        void* unexpected_pipeline = objc_msg_cast<SyncFn>(
+            state.original_new_pipeline_sync)(
+                self,
+                state.sel_new_pipeline_sync,
+                desc,
+                options | kMetalPipelineFailOnBinaryArchiveMiss,
+                &negative_reflection,
+                &negative_error);
+        if (unexpected_pipeline != nullptr || negative_error == nullptr) {
+            release_objc_object(state, unexpected_pipeline);
+            release_objc_object(state, empty_array);
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "empty archive negative control did not produce a binary-archive miss");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        const MetalErrorIdentity negative_identity =
+            metal_error_identity(state, negative_error);
+        scope->audit.observed_negative_error_domain =
+            negative_identity.domain;
+        scope->audit.observed_negative_error_code = negative_identity.code;
+        if (negative_identity.domain
+                != scope->audit.expected_negative_error_domain
+            || negative_identity.code
+                != scope->audit.expected_negative_error_code) {
+            release_objc_object(state, empty_array);
+            fail_active_metal_archive_scope(
+                state, *scope,
+                fmt::format(
+                    "empty archive negative control returned NSError ({}, {}) instead of sealed ({}, {})",
+                    negative_identity.domain,
+                    negative_identity.code,
+                    scope->audit.expected_negative_error_domain,
+                    scope->audit.expected_negative_error_code));
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        ++scope->audit.negative_control_misses;
+
+        // This replacement is unconditional: a descriptor-provided array can
+        // neither augment nor override the exact manifest-owned set.
+        objc_msg_cast<SetObjFn>(state.objc.msg_send)(
+            desc, state.sel_set_binary_archives, state.archive_array);
+        release_objc_object(state, empty_array);
+        if (!state.process_qualification.accepted()
+            || state.process_qualification
+                != scope->audit.cache_qualification) {
+            fail_active_metal_archive_scope(
+                state, *scope,
+                "process Metal archive qualification changed before pipeline");
+            return MetalPipelineInterceptVerdict::rejected;
+        }
+        scope->audit.pipeline_pre_identity_checks = 0u;
+        ++scope->audit.descriptor_replacements;
+        ++scope->audit.fail_on_miss_enforcements;
+        if (asynchronous) {
+            ++scope->audit.actual_async_calls;
+        } else {
+            ++scope->audit.actual_sync_calls;
+        }
+        std::fprintf(
+            stderr,
+            "[bioseq-gpu-diag] pso-interpose: enforced immutable archives count=%lu function=%s registry=%llu\n",
+            exact_count,
+            descriptor_function_name(state, desc).c_str(),
+            static_cast<unsigned long long>(intercepted_registry));
+        return MetalPipelineInterceptVerdict::enforced;
+    } catch (const std::exception& error) {
+        fail_active_metal_archive_scope(state, *scope, error.what());
+        return MetalPipelineInterceptVerdict::rejected;
+    } catch (...) {
+        fail_active_metal_archive_scope(
+            state, *scope, "unknown immutable Metal archive interpose failure");
+        return MetalPipelineInterceptVerdict::rejected;
+    }
+    } catch (...) {
+        mark_metal_archive_sticky_failure_literal(
+            state,
+            "immutable Metal archive interpose failed before scoped handling");
+        return MetalPipelineInterceptVerdict::rejected;
+    }
 }
 
 extern "C" void bioseq_metal_new_compute_pipeline_state_async(
@@ -2217,15 +7712,26 @@ extern "C" void bioseq_metal_new_compute_pipeline_state_async(
     unsigned long options,
     void* completion_handler)
 {
-    std::fprintf(stderr, "[bioseq-gpu-diag] newComputePipelineStateWithDescriptor ASYNC intercepted\n");
-    attach_metal_binary_archives_to_descriptor(desc);
     auto& state = metal_pipeline_archive_interpose_state();
     using AsyncFn = void (*)(void*, void*, void*, unsigned long, void*);
+    const MetalPipelineInterceptVerdict verdict =
+        prepare_scoped_metal_pipeline_call(
+            self, desc, options, true);
+    if (verdict == MetalPipelineInterceptVerdict::outside_scope) {
+        objc_msg_cast<AsyncFn>(state.original_new_pipeline_async)(
+            self, cmd, desc, options, completion_handler);
+        return;
+    }
+    if (verdict == MetalPipelineInterceptVerdict::rejected) {
+        invoke_metal_pipeline_completion(
+            completion_handler, nullptr, nullptr, nullptr);
+        return;
+    }
     objc_msg_cast<AsyncFn>(state.original_new_pipeline_async)(
         self,
         cmd,
         desc,
-        options,
+        options | kMetalPipelineFailOnBinaryArchiveMiss,
         completion_handler);
 }
 
@@ -2237,28 +7743,52 @@ extern "C" void* bioseq_metal_new_compute_pipeline_state_sync(
     void** reflection,
     void** error)
 {
-    std::fprintf(stderr, "[bioseq-gpu-diag] newComputePipelineStateWithDescriptor SYNC intercepted\n");
-    attach_metal_binary_archives_to_descriptor(desc);
     auto& state = metal_pipeline_archive_interpose_state();
     using SyncFn = void* (*)(void*, void*, void*, unsigned long, void**, void**);
+    const MetalPipelineInterceptVerdict verdict =
+        prepare_scoped_metal_pipeline_call(
+            self, desc, options, false);
+    if (verdict == MetalPipelineInterceptVerdict::outside_scope) {
+        return objc_msg_cast<SyncFn>(state.original_new_pipeline_sync)(
+            self, cmd, desc, options, reflection, error);
+    }
+    if (verdict == MetalPipelineInterceptVerdict::rejected) {
+        return nullptr;
+    }
     return objc_msg_cast<SyncFn>(state.original_new_pipeline_sync)(
         self,
         cmd,
         desc,
-        options,
+        options | kMetalPipelineFailOnBinaryArchiveMiss,
         reflection,
         error);
 }
 
-void install_metal_pipeline_archive_interpose() noexcept {
+void install_metal_pipeline_archive_interpose(
+    RuntimeVulkanDeviceIdentity selected_vulkan_device) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();
+    void* async_method = nullptr;
+    void* sync_method = nullptr;
+    const auto rollback_install = [&state]() noexcept {
+        rollback_metal_pipeline_archive_interpose_install(state);
+    };
+    try {
+    if (state.sticky_failure.load(std::memory_order_acquire)) {
+        return;
+    }
     if (state.installed) {
         return;
     }
-    const char* archive_dir = std::getenv("BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR");
-    std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR=%s\n",
-                 archive_dir != nullptr ? archive_dir : "(null)");
-    if (archive_dir == nullptr || *archive_dir == '\0') {
+    const auto configuration = runtime_metal_archive_configuration_snapshot();
+    if (!configuration) {
+        std::fprintf(
+            stderr,
+            "[bioseq-gpu-diag] pso-interpose: no sealed runtime archive configuration; interpose inactive\n");
+        return;
+    }
+    if (!configuration->accepted()) {
+        mark_metal_archive_sticky_failure(
+            state, "installed runtime Metal archive configuration is invalid");
         return;
     }
 
@@ -2266,6 +7796,8 @@ void install_metal_pipeline_archive_interpose() noexcept {
     void* metal_handle =
         ::dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW | RTLD_LOCAL);
     if (objc_handle == nullptr || metal_handle == nullptr) {
+        mark_metal_archive_sticky_failure(
+            state, "Objective-C or Metal runtime cannot be loaded");
         return;
     }
 
@@ -2281,12 +7813,17 @@ void install_metal_pipeline_archive_interpose() noexcept {
         ::dlsym(objc_handle, "class_getSuperclass"));
     objc.class_get_instance_method = reinterpret_cast<decltype(objc.class_get_instance_method)>(
         ::dlsym(objc_handle, "class_getInstanceMethod"));
+    objc.method_get_implementation = reinterpret_cast<decltype(objc.method_get_implementation)>(
+        ::dlsym(objc_handle, "method_getImplementation"));
     objc.method_set_implementation = reinterpret_cast<decltype(objc.method_set_implementation)>(
         ::dlsym(objc_handle, "method_setImplementation"));
     if (objc.msg_send == nullptr || objc.get_class == nullptr
         || objc.sel_register_name == nullptr || objc.object_get_class == nullptr
         || objc.class_get_superclass == nullptr || objc.class_get_instance_method == nullptr
+        || objc.method_get_implementation == nullptr
         || objc.method_set_implementation == nullptr) {
+        mark_metal_archive_sticky_failure(
+            state, "Objective-C runtime lacks required interpose symbols");
         return;
     }
 
@@ -2294,21 +7831,25 @@ void install_metal_pipeline_archive_interpose() noexcept {
     auto create_device = reinterpret_cast<CreateDeviceFn>(
         ::dlsym(metal_handle, "MTLCreateSystemDefaultDevice"));
     if (create_device == nullptr) {
+        mark_metal_archive_sticky_failure(
+            state, "MTLCreateSystemDefaultDevice is unavailable");
         return;
     }
     void* device = create_device();
     if (device == nullptr) {
-        std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: MTLCreateSystemDefaultDevice returned NULL\n");
+        mark_metal_archive_sticky_failure(
+            state, "MTLCreateSystemDefaultDevice returned null");
         return;
     }
+    void* release_selector = objc.sel_register_name("release");
+    ScopedObjcRelease device_owner{
+        &objc, release_selector, device};
 
     void* cls = objc.object_get_class(device);
     void* sel_async =
         objc.sel_register_name("newComputePipelineStateWithDescriptor:options:completionHandler:");
     void* sel_sync =
         objc.sel_register_name("newComputePipelineStateWithDescriptor:options:reflection:error:");
-    void* async_method = nullptr;
-    void* sync_method = nullptr;
     for (void* cursor = cls; cursor != nullptr && (async_method == nullptr || sync_method == nullptr);
          cursor = objc.class_get_superclass(cursor)) {
         if (async_method == nullptr) {
@@ -2318,26 +7859,88 @@ void install_metal_pipeline_archive_interpose() noexcept {
             sync_method = objc.class_get_instance_method(cursor, sel_sync);
         }
     }
-    if (async_method == nullptr && sync_method == nullptr) {
-        std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: newComputePipelineStateWithDescriptor methods NOT FOUND\n");
+    if (sync_method == nullptr) {
+        mark_metal_archive_sticky_failure(
+            state,
+            "original synchronous Metal pipeline IMP is required for negative control");
         return;
     }
     std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: methods found async=%d sync=%d\n",
                  async_method != nullptr ? 1 : 0, sync_method != nullptr ? 1 : 0);
 
     state.objc = objc;
-    state.archive_dir = archive_dir;
-    state.device = device;
-    state.sel_binary_archives = objc.sel_register_name("binaryArchives");
+    state.configuration_image = configuration;
+    const RuntimeMetalArchiveConfiguration& installed_configuration =
+        state.configuration_image->configuration();
+    state.configured_identity = runtime_metal_archive_set_identity(
+        installed_configuration.archives);
+    state.configuration_validated = state.configured_identity.accepted();
+    if (!state.configuration_validated) {
+        rollback_install();
+        mark_metal_archive_sticky_failure(
+            state, "runtime Metal archive configuration lost install-time validation");
+        return;
+    }
+    state.sel_new_pipeline_sync = sel_sync;
     state.sel_set_binary_archives = objc.sel_register_name("setBinaryArchives:");
     state.sel_compute_function = objc.sel_register_name("computeFunction");
     state.sel_name = objc.sel_register_name("name");
     state.sel_utf8_string = objc.sel_register_name("UTF8String");
+    state.sel_error_domain = objc.sel_register_name("domain");
+    state.sel_error_code = objc.sel_register_name("code");
     state.sel_count = objc.sel_register_name("count");
+    state.sel_registry_id = objc.sel_register_name("registryID");
+    state.sel_release = release_selector;
     state.sel_max_total_threads = objc.sel_register_name("maxTotalThreadsPerThreadgroup");
     state.sel_threadgroup_multiple =
         objc.sel_register_name("threadGroupSizeIsMultipleOfThreadExecutionWidth");
 
+    const bool selected_uuid_missing = std::all_of(
+        selected_vulkan_device.device_uuid.begin(),
+        selected_vulkan_device.device_uuid.end(),
+        [](std::uint8_t byte) { return byte == 0u; });
+    const bool configured_uuid_present = std::any_of(
+        installed_configuration.vulkan_device_uuid.begin(),
+        installed_configuration.vulkan_device_uuid.end(),
+        [](std::uint8_t byte) { return byte != 0u; });
+    if (!selected_vulkan_device.accepted() || selected_uuid_missing
+        || (configured_uuid_present
+            && installed_configuration.vulkan_device_uuid
+                != selected_vulkan_device.device_uuid)) {
+        rollback_install();
+        mark_metal_archive_sticky_failure(
+            state,
+            "selected Vulkan device UUID differs from optional sealed expectation");
+        return;
+    }
+    state.runtime_vulkan_device_uuid = selected_vulkan_device.device_uuid;
+    state.runtime_vulkan_device_identity = selected_vulkan_device;
+
+    state.loader_registry_id = metal_device_registry_id(state, device);
+    if (state.loader_registry_id == 0u
+        || state.loader_registry_id
+            != installed_configuration.helper_metal_registry_id
+        || (installed_configuration.metal_device_registry_id != 0u
+            && state.loader_registry_id
+                != installed_configuration.metal_device_registry_id)) {
+        rollback_install();
+        mark_metal_archive_sticky_failure(
+            state,
+            fmt::format(
+                "Metal archive loader registry id {} differs from helper-qualified {} or optional sealed {}",
+                state.loader_registry_id,
+                installed_configuration.helper_metal_registry_id,
+                installed_configuration.metal_device_registry_id));
+        return;
+    }
+    state.runtime_metal_registry_id = state.loader_registry_id;
+    if (!load_exact_metal_binary_archives(state, device)) {
+        rollback_install();
+        return;
+    }
+
+    state.interposed_new_pipeline_async_method = async_method;
+    state.interposed_new_pipeline_sync_method = sync_method;
     if (async_method != nullptr) {
         state.original_new_pipeline_async =
             objc.method_set_implementation(
@@ -2350,26 +7953,387 @@ void install_metal_pipeline_archive_interpose() noexcept {
                 sync_method,
                 reinterpret_cast<void*>(&bioseq_metal_new_compute_pipeline_state_sync));
     }
-    state.installed = state.original_new_pipeline_async != nullptr
-        || state.original_new_pipeline_sync != nullptr;
+    state.installed = state.original_new_pipeline_sync != nullptr
+        && (async_method == nullptr
+            || state.original_new_pipeline_async != nullptr);
     std::fprintf(stderr, "[bioseq-gpu-diag] pso-interpose: installed=%d\n", state.installed ? 1 : 0);
     if (!state.installed) {
+        rollback_install();
+        mark_metal_archive_sticky_failure(
+            state, "Metal pipeline method interposition did not install exactly");
         return;
     }
-    {
-        std::lock_guard<std::mutex> guard(state.mu);
-        refresh_metal_binary_archives_locked(state);
+    state.loader_device = device_owner.release();
+    try {
+        bioseq_log<DBG>(
+            "[vulkan_runtime] installed immutable Metal archive interpose manifest={} registry={} archives={} async={} sync={}",
+            installed_configuration.seed_image->manifest().manifest_checksum,
+            state.loader_registry_id,
+            state.loaded_identity.archive_count,
+            state.original_new_pipeline_async != nullptr,
+            state.original_new_pipeline_sync != nullptr);
+    } catch (...) {
+        // Diagnostics cannot invalidate a fully committed interpose.
     }
-    bioseq_log<DBG>(
-        "[vulkan_runtime] installed Metal compute pipeline archive interpose dir={} async={} sync={}",
-        state.archive_dir,
-        state.original_new_pipeline_async != nullptr,
-        state.original_new_pipeline_sync != nullptr);
+    } catch (const std::bad_alloc&) {
+        rollback_install();
+        mark_metal_archive_sticky_failure_literal(
+            state, "immutable Metal archive install allocation failed");
+    } catch (...) {
+        rollback_install();
+        mark_metal_archive_sticky_failure_literal(
+            state, "immutable Metal archive install threw unexpectedly");
+    }
 }
+
+class MetalArchivePipelineCreateScope {
+public:
+    MetalArchivePipelineCreateScope(
+        bool required,
+        std::array<std::uint8_t, VK_UUID_SIZE> runtime_device_uuid,
+        ShaderVariantKey shader_key,
+        std::string expected_entry_name)
+        : required_(required) {
+        auto& state = metal_pipeline_archive_interpose_state();
+        if (!runtime_metal_archive_configuration_installed()
+            || !state.configuration_image) {
+            if (required_) {
+                failure_ =
+                    "provider-backed Vulkan pipeline has no sealed Metal archive configuration";
+            }
+            return;
+        }
+        const RuntimeMetalArchiveConfiguration& configuration =
+            state.configuration_image->configuration();
+        const SealedShaderCacheManifest& manifest =
+            configuration.seed_image->manifest();
+        const SealedShaderCacheSeedReceipt& seed_receipt =
+            configuration.seed_image->receipt();
+        audit_.cache_digest = manifest.cache_digest;
+        audit_.seed_sha256 = manifest.seed_sha256;
+        audit_.seed_size = manifest.seed_size;
+        audit_.manifest_checksum = manifest.manifest_checksum;
+        audit_.seed_receipt_identity = seed_receipt.identity();
+        audit_.seed_load_count = seed_receipt.load_count();
+        audit_.seed_manifest_read_count =
+            seed_receipt.manifest_read_count();
+        audit_.seed_artifact_read_count =
+            seed_receipt.artifact_read_count();
+        audit_.seed_manifest_bytes = seed_receipt.manifest_bytes();
+        audit_.seed_artifact_bytes = seed_receipt.artifact_bytes();
+        audit_.seed_load_ns = seed_receipt.load_ns();
+        audit_.seed_admission_count = seed_receipt.admission_count();
+        audit_.seed_peak_admitted_bytes =
+            seed_receipt.peak_admitted_bytes();
+        audit_.seed_retained_capacity_bytes =
+            seed_receipt.retained_capacity_bytes();
+        audit_.seed_admission_saturated =
+            seed_receipt.admission_saturated();
+        audit_.cache_qualification = state.process_qualification;
+        audit_.shader_key = shader_key;
+        audit_.expected_entry_name = std::move(expected_entry_name);
+        audit_.expected_archives =
+            runtime_metal_archive_set_identity(configuration.archives);
+        audit_.loaded_archives = state.loaded_identity;
+        audit_.expected_negative_error_domain =
+            configuration.archives.front().negative_error_domain;
+        audit_.expected_negative_error_code =
+            configuration.archives.front().negative_error_code;
+        audit_.archive_pre_post_identity_checks =
+            state.loaded_pre_post_identity_checks;
+        auto& command_state = moltenvk_command_interpose_state();
+        audit_.command_interpose_installed = command_state.installed;
+        audit_.command_interpose_immutable_fail_closed =
+            command_state.immutable_fail_closed;
+        audit_.command_loader_metal_registry_id =
+            command_state.loader_registry_id;
+        audit_.unsealed_metal_source_requests =
+            command_state.recognized_source_requests.load(
+                std::memory_order_relaxed);
+        audit_.metal_source_fallback_calls =
+            command_state.source_fallback_calls.load(
+                std::memory_order_relaxed);
+        audit_.configured_vulkan_device_uuid =
+            state.runtime_vulkan_device_uuid;
+        audit_.runtime_vulkan_device_uuid = runtime_device_uuid;
+        audit_.expected_metal_registry_id =
+            state.runtime_metal_registry_id;
+        audit_.loader_metal_registry_id = state.loader_registry_id;
+        audit_.scope_identity = next_nonzero_identity(
+            state.next_scope_identity);
+        if (audit_.scope_identity == 0u) {
+            failure_ = "Metal archive pipeline scope identity space exhausted";
+            return;
+        }
+        if (!state.installed || state.archive_array == nullptr
+            || !audit_.cache_qualification.accepted()) {
+            failure_ = "sealed Metal archive interpose is not installed";
+            return;
+        }
+        if (state.sticky_failure.load(std::memory_order_acquire)) {
+            audit_.sticky_failure = true;
+            failure_ = metal_archive_failure_reason(state);
+            return;
+        }
+        if (!audit_.command_interpose_installed
+            || !audit_.command_interpose_immutable_fail_closed) {
+            failure_ =
+                "immutable MoltenVK command-source interpose is not installed fail-closed";
+            mark_metal_archive_sticky_failure(state, failure_);
+            return;
+        }
+        if (command_state.sticky_failure.load(std::memory_order_acquire)
+            || audit_.unsealed_metal_source_requests != 0u
+            || audit_.metal_source_fallback_calls != 0u) {
+            failure_ =
+                "immutable GPU runtime observed an unsealed Metal source-library request";
+            mark_metal_archive_sticky_failure(state, failure_);
+            return;
+        }
+        if (audit_.configured_vulkan_device_uuid
+            != audit_.runtime_vulkan_device_uuid) {
+            failure_ = "runtime Vulkan UUID differs from sealed archive UUID";
+            mark_metal_archive_sticky_failure(state, failure_);
+            return;
+        }
+        active_ = std::make_shared<ActiveMetalArchivePipelineScope>();
+        active_->audit = audit_;
+        active_->required = required_;
+        active_->active = true;
+        {
+            std::lock_guard<std::mutex> guard(state.active_scope_mu);
+            if (state.active_scope != nullptr) {
+                audit_.nested_scope = true;
+                failure_ = "nested Metal archive pipeline-create scope rejected";
+                mark_metal_archive_sticky_failure(state, failure_);
+                active_.reset();
+                return;
+            }
+            active_->outside_scope_interceptions_at_begin =
+                state.outside_scope_interceptions.load(
+                    std::memory_order_relaxed);
+            state.active_scope = active_;
+        }
+        active_scope_ = true;
+    }
+
+    MetalArchivePipelineCreateScope(
+        const MetalArchivePipelineCreateScope&) = delete;
+    MetalArchivePipelineCreateScope& operator=(
+        const MetalArchivePipelineCreateScope&) = delete;
+
+    ~MetalArchivePipelineCreateScope() noexcept {
+        if (!active_scope_ || active_ == nullptr) return;
+        auto& state = metal_pipeline_archive_interpose_state();
+        try {
+            std::unique_lock<std::mutex> active_guard(state.active_scope_mu);
+            try {
+                std::unique_lock<std::mutex> scope_guard(active_->mu);
+                if (state.active_scope == active_) state.active_scope.reset();
+                active_->active = false;
+                active_->finished = true;
+                if (!finished_) {
+                    mark_metal_archive_sticky_failure_literal(
+                        state,
+                        "Metal archive pipeline-create scope abandoned before verdict");
+                }
+            } catch (...) {
+                if (state.active_scope == active_) state.active_scope.reset();
+                mark_metal_archive_sticky_failure_literal(
+                    state,
+                    "Metal archive pipeline-create scope cleanup failed");
+            }
+        } catch (...) {
+            mark_metal_archive_sticky_failure_literal(
+                state,
+                "Metal archive pipeline-create scope cleanup failed");
+        }
+    }
+
+    [[nodiscard]] bool ready_for_pipeline_call() const noexcept {
+        return failure_.empty() && (active_scope_ || !required_);
+    }
+
+    [[nodiscard]] std::expected<
+        std::optional<RuntimeMetalArchivePipelineAudit>, std::string>
+    finish(VkResult outer_result) {
+        if (finished_) {
+            return std::unexpected(
+                "Metal archive pipeline-create scope verdict consumed twice");
+        }
+        finished_ = true;
+        if (!failure_.empty()) return std::unexpected(failure_);
+        if (!active_scope_) {
+            if (required_) {
+                return std::unexpected(
+                    "provider-backed Vulkan pipeline did not enter immutable Metal archive scope");
+            }
+            return std::optional<RuntimeMetalArchivePipelineAudit>{};
+        }
+        auto& state = metal_pipeline_archive_interpose_state();
+        {
+            std::unique_lock<std::mutex> active_guard(state.active_scope_mu);
+            std::unique_lock<std::mutex> scope_guard(active_->mu);
+            if (state.active_scope != active_) {
+                return std::unexpected(
+                    "Metal archive pipeline-create scope ownership changed before verdict");
+            }
+            const std::uint64_t outside_end =
+                state.outside_scope_interceptions.load(
+                    std::memory_order_relaxed);
+            if (outside_end < active_->outside_scope_interceptions_at_begin) {
+                active_->audit.outside_scope_interceptions =
+                    (std::numeric_limits<std::uint64_t>::max)();
+            } else {
+                active_->audit.outside_scope_interceptions =
+                    outside_end
+                    - active_->outside_scope_interceptions_at_begin;
+            }
+            active_->active = false;
+            active_->finished = true;
+            state.active_scope.reset();
+            audit_ = std::move(active_->audit);
+            if (!active_->failure.empty()) failure_ = active_->failure;
+        }
+        if (!failure_.empty()) return std::unexpected(failure_);
+        if (!state.process_qualification.accepted()
+            || state.process_qualification != audit_.cache_qualification) {
+            failure_ =
+                "process Metal archive qualification changed after pipeline";
+            mark_metal_archive_sticky_failure(state, failure_);
+            return std::unexpected(failure_);
+        }
+        audit_.pipeline_post_identity_checks = 0u;
+        auto& command_state = moltenvk_command_interpose_state();
+        audit_.unsealed_metal_source_requests =
+            command_state.recognized_source_requests.load(
+                std::memory_order_relaxed);
+        audit_.metal_source_fallback_calls =
+            command_state.source_fallback_calls.load(
+                std::memory_order_relaxed);
+        audit_.command_interpose_installed = command_state.installed;
+        audit_.command_interpose_immutable_fail_closed =
+            command_state.immutable_fail_closed;
+        audit_.sticky_failure =
+            audit_.sticky_failure
+            || state.sticky_failure.load(std::memory_order_acquire);
+        audit_.sticky_failure = audit_.sticky_failure
+            || command_state.sticky_failure.load(
+                std::memory_order_acquire);
+        audit_.outer_vulkan_pipeline_succeeded = outer_result == VK_SUCCESS;
+        audit_.receipt_identity = next_nonzero_identity(
+            state.next_receipt_identity);
+        if (!audit_.accepted()) {
+            return std::unexpected(fmt::format(
+                "immutable Metal archive receipt rejected: vk={} calls={} replace={} enforce={} negative={}/{} sticky={}",
+                static_cast<int>(outer_result),
+                audit_.scoped_interceptions,
+                audit_.descriptor_replacements,
+                audit_.fail_on_miss_enforcements,
+                audit_.negative_control_misses,
+                audit_.same_descriptor_negative_controls,
+                audit_.sticky_failure));
+        }
+        return std::optional<RuntimeMetalArchivePipelineAudit>{
+            std::move(audit_)};
+    }
+
+private:
+    bool required_ = false;
+    bool active_scope_ = false;
+    bool finished_ = false;
+    std::string failure_;
+    RuntimeMetalArchivePipelineAudit audit_{};
+    std::shared_ptr<ActiveMetalArchivePipelineScope> active_{};
+};
 #else
 void install_moltenvk_command_library_interpose() noexcept {}
-void install_metal_pipeline_archive_interpose() noexcept {}
+void install_metal_pipeline_archive_interpose(
+    RuntimeVulkanDeviceIdentity) noexcept {}
+
+class MetalArchivePipelineCreateScope {
+public:
+    MetalArchivePipelineCreateScope(
+        bool required,
+        std::array<std::uint8_t, VK_UUID_SIZE>,
+        ShaderVariantKey,
+        std::string) noexcept
+        : required_(required || runtime_metal_archive_configuration_installed()) {}
+
+    [[nodiscard]] bool ready_for_pipeline_call() const noexcept {
+        return !required_;
+    }
+
+    [[nodiscard]] std::expected<
+        std::optional<RuntimeMetalArchivePipelineAudit>, std::string>
+    finish(VkResult) const {
+        if (required_) {
+            return std::unexpected(
+                "immutable Metal archive receipt requested on a non-Apple runtime");
+        }
+        return std::optional<RuntimeMetalArchivePipelineAudit>{};
+    }
+
+private:
+    bool required_ = false;
+};
 #endif
+
+void require_immutable_metal_policy_live(std::string_view phase) {
+#if defined(__APPLE__)
+    runtime_metal_archive_configuration_slot().live_gate_calls.fetch_add(
+        1u, std::memory_order_relaxed);
+    if (!runtime_metal_archive_configuration_installed()) return;
+    auto& archive_state = metal_pipeline_archive_interpose_state();
+    auto& command_state = moltenvk_command_interpose_state();
+    const bool clean = archive_state.configuration_validated
+        && archive_state.configured_identity.accepted()
+        && archive_state.configured_identity == archive_state.loaded_identity
+        && archive_state.installed
+        && archive_state.archive_array != nullptr
+        && archive_state.process_qualification.accepted()
+        && archive_state.process_qualification.archive_set
+            == archive_state.loaded_identity
+        && !archive_state.sticky_failure.load(std::memory_order_acquire)
+        && archive_state.outside_scope_interceptions.load(
+               std::memory_order_relaxed) == 0u
+        && command_state.installed
+        && command_state.immutable_fail_closed
+        && command_state.cached_binding_validated
+        && !command_state.sticky_failure.load(std::memory_order_acquire)
+        && command_state.recognized_source_requests.load(
+               std::memory_order_relaxed) == 0u
+        && command_state.source_fallback_calls.load(
+               std::memory_order_relaxed) == 0u
+        && archive_state.loader_registry_id
+            == archive_state.runtime_metal_registry_id
+        && archive_state.loader_registry_id
+            == archive_state.process_qualification.helper_metal_registry_id
+        && archive_state.runtime_vulkan_device_identity.device_uuid
+            == archive_state.process_qualification.vulkan_device_uuid
+        && archive_state.runtime_vulkan_device_identity.api_version
+            == archive_state.process_qualification.api_version
+        && archive_state.runtime_vulkan_device_identity.driver_version
+            == archive_state.process_qualification.driver_version
+        && archive_state.runtime_vulkan_device_identity.vendor_id
+            == archive_state.process_qualification.vendor_id
+        && archive_state.runtime_vulkan_device_identity.device_id
+            == archive_state.process_qualification.device_id
+        && archive_state.runtime_vulkan_device_identity.pipeline_cache_uuid
+            == archive_state.process_qualification.pipeline_cache_uuid
+        && command_state.loader_registry_id == archive_state.loader_registry_id
+        && command_state.cached_methods_present == 2u
+        && command_state.cached_wrapper_methods
+            == command_state.cached_methods_present;
+    if (!clean) {
+        throw VulkanRuntimeError(fmt::format(
+            "{} observed stale or poisoned immutable Metal policy state",
+            phase));
+    }
+#else
+    (void)phase;
+#endif
+}
 
 void load_vulkan_runtime_functions() {
     std::string missing;
@@ -2445,6 +8409,63 @@ void ensure_vulkan_loader_loaded_for_runtime() {
 }
 
 }  // namespace
+
+void probe_immutable_metal_policy_live_for_test() {
+    require_immutable_metal_policy_live("unit-test live gate");
+}
+
+[[nodiscard]] std::expected<RuntimePrivateArchiveSnapshotTestEvidence, std::string>
+verify_runtime_private_archive_snapshot_for_test(
+    std::string_view artifact_filename,
+    std::span<const std::byte> bytes,
+    const std::filesystem::path& temp_parent)
+{
+#if defined(__APPLE__)
+    if (artifact_filename.empty() || bytes.empty()) {
+        return std::unexpected("private archive snapshot test input is empty");
+    }
+    RuntimeMetalArchiveSpec expected{
+        .artifact_ordinal = 0u,
+        .artifact_filename = std::string(artifact_filename),
+        .size = static_cast<std::uint64_t>(bytes.size()),
+        .sha256 = sealed_shader_cache_detail::sha256(bytes),
+        .negative_error_domain = "MTLLibraryErrorDomain",
+        .negative_error_code = 6,
+    };
+    auto private_image = write_private_metal_archive_snapshot(
+        artifact_filename, bytes, temp_parent);
+    if (!private_image) return std::unexpected(private_image.error());
+    auto snapshot = capture_metal_archive_file_snapshot(
+        private_image->path(), expected, bytes);
+    if (!snapshot) return std::unexpected(snapshot.error());
+    const int fd = ::open(private_image->path().c_str(), O_WRONLY);
+    if (fd < 0) {
+        return std::unexpected("cannot open private snapshot for tamper test");
+    }
+    const std::byte changed = bytes.front() ^ std::byte{0x01};
+    const bool wrote = ::pwrite(fd, &changed, sizeof(changed), 0) == 1
+        && ::fsync(fd) == 0;
+    (void)::close(fd);
+    if (!wrote) {
+        return std::unexpected("cannot mutate private snapshot for tamper test");
+    }
+    const auto rejected = capture_metal_archive_file_snapshot(
+        private_image->path(), expected, bytes);
+    return RuntimePrivateArchiveSnapshotTestEvidence{
+        .snapshot_path = private_image->path(),
+        .streamed_bytes = snapshot->streamed_bytes,
+        .scratch_capacity_bytes = snapshot->scratch_capacity_bytes,
+        .exact_seed_compared = snapshot->exact_seed_compared,
+        .tamper_rejected = !rejected,
+    };
+#else
+    (void)artifact_filename;
+    (void)bytes;
+    (void)temp_parent;
+    return std::unexpected(
+        "private Metal archive snapshots are Apple-only");
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Buffer cleanup
@@ -2550,6 +8571,14 @@ void Runtime::init() {
     // cached command-library interpose before the first Vulkan loader query that
     // may enter MoltenVK device setup.
     install_moltenvk_command_library_interpose();
+    if (runtime_metal_archive_configuration_installed()) {
+        auto& command_state = moltenvk_command_interpose_state();
+        if (!command_state.installed
+            || !command_state.immutable_fail_closed) {
+            throw VulkanRuntimeError(
+                "immutable GPU mode could not install fail-closed MoltenVK command-source interpose");
+        }
+    }
 #endif
     const auto inst_exts = instance_extensions();
     std::vector<const char*> enabled_inst_exts;
@@ -2603,6 +8632,17 @@ void Runtime::init() {
 #endif
 
     check_vk(vkCreateInstance(&inst_info, nullptr, &instance_), "vkCreateInstance");
+#if defined(__APPLE__)
+    if (runtime_metal_archive_configuration_installed()) {
+        auto& command_state = moltenvk_command_interpose_state();
+        if (command_state.sticky_failure.load(std::memory_order_acquire)
+            || command_state.source_fallback_calls.load(
+                std::memory_order_relaxed) != 0u) {
+            throw VulkanRuntimeError(
+                "immutable GPU mode required an unsealed MoltenVK command source");
+        }
+    }
+#endif
     resolve_moltenvk_private_api();
 
     // --- Physical device selection (compute queue + shaderInt64) ---
@@ -2677,8 +8717,134 @@ void Runtime::init() {
         enabled_dev_exts.empty() ? nullptr : enabled_dev_exts.data();
     device_info.pEnabledFeatures = &enabled_features;
 
-    install_metal_pipeline_archive_interpose();
-    check_vk(vkCreateDevice(physical_, &device_info, nullptr, &device_), "vkCreateDevice");
+    // Seal the selected physical-device UUID before vkCreateDevice: MoltenVK
+    // may create Metal compute pipelines during logical-device construction,
+    // so the process-wide interpose must already be bound to this identity.
+    VkPhysicalDeviceIDProperties selected_id_properties{};
+    selected_id_properties.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 selected_properties2{};
+    selected_properties2.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    selected_properties2.pNext = &selected_id_properties;
+    vkGetPhysicalDeviceProperties2(physical_, &selected_properties2);
+    RuntimeVulkanDeviceIdentity selected_device_identity{
+        .api_version = selected_properties2.properties.apiVersion,
+        .driver_version = selected_properties2.properties.driverVersion,
+        .vendor_id = selected_properties2.properties.vendorID,
+        .device_id = selected_properties2.properties.deviceID,
+    };
+    std::copy(
+        std::begin(selected_id_properties.deviceUUID),
+        std::end(selected_id_properties.deviceUUID),
+        selected_device_identity.device_uuid.begin());
+    std::copy(
+        std::begin(selected_properties2.properties.pipelineCacheUUID),
+        std::end(selected_properties2.properties.pipelineCacheUUID),
+        selected_device_identity.pipeline_cache_uuid.begin());
+    features_.device_uuid = selected_device_identity.device_uuid;
+    features_.api_version = selected_device_identity.api_version;
+    features_.driver_version = selected_device_identity.driver_version;
+    features_.vendor_id = selected_device_identity.vendor_id;
+    features_.device_id = selected_device_identity.device_id;
+    features_.pipeline_cache_uuid = selected_device_identity.pipeline_cache_uuid;
+    install_metal_pipeline_archive_interpose(selected_device_identity);
+    const VkResult create_device_result =
+        vkCreateDevice(physical_, &device_info, nullptr, &device_);
+#if defined(__APPLE__)
+    if (create_device_result != VK_SUCCESS
+        && runtime_metal_archive_configuration_installed()) {
+        auto& archive_state = metal_pipeline_archive_interpose_state();
+        mark_metal_archive_sticky_failure(
+            archive_state,
+            fmt::format(
+                "vkCreateDevice failed after immutable Metal archive install ({})",
+                static_cast<std::int32_t>(create_device_result)));
+        rollback_metal_pipeline_archive_interpose_install(archive_state);
+    }
+    if (runtime_metal_archive_configuration_installed()) {
+        auto& archive_state = metal_pipeline_archive_interpose_state();
+        if (archive_state.sticky_failure.load(std::memory_order_acquire)
+            || archive_state.outside_scope_interceptions.load(
+                   std::memory_order_relaxed) != 0u) {
+            if (!archive_state.sticky_failure.load(
+                    std::memory_order_acquire)) {
+                mark_metal_archive_sticky_failure_literal(
+                    archive_state,
+                    "Metal pipeline interception escaped its scope during vkCreateDevice");
+            }
+            const std::string failure = metal_archive_failure_reason(
+                archive_state);
+            if (create_device_result == VK_SUCCESS
+                && device_ != VK_NULL_HANDLE) {
+                vkDestroyDevice(device_, nullptr);
+                device_ = VK_NULL_HANDLE;
+            }
+            rollback_metal_pipeline_archive_interpose_install(archive_state);
+            throw VulkanRuntimeError(fmt::format(
+                "immutable Metal archive policy failed during vkCreateDevice: {}",
+                failure));
+        }
+    }
+#endif
+    check_vk(create_device_result, "vkCreateDevice");
+    VkPhysicalDeviceIDProperties verified_id_properties{};
+    verified_id_properties.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    VkPhysicalDeviceProperties2 verified_properties2{};
+    verified_properties2.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    verified_properties2.pNext = &verified_id_properties;
+    vkGetPhysicalDeviceProperties2(physical_, &verified_properties2);
+    RuntimeVulkanDeviceIdentity verified_device_identity{
+        .api_version = verified_properties2.properties.apiVersion,
+        .driver_version = verified_properties2.properties.driverVersion,
+        .vendor_id = verified_properties2.properties.vendorID,
+        .device_id = verified_properties2.properties.deviceID,
+    };
+    std::copy(
+        std::begin(verified_id_properties.deviceUUID),
+        std::end(verified_id_properties.deviceUUID),
+        verified_device_identity.device_uuid.begin());
+    std::copy(
+        std::begin(verified_properties2.properties.pipelineCacheUUID),
+        std::end(verified_properties2.properties.pipelineCacheUUID),
+        verified_device_identity.pipeline_cache_uuid.begin());
+    if (verified_device_identity != selected_device_identity) {
+#if defined(__APPLE__)
+        mark_metal_archive_sticky_failure(
+            metal_pipeline_archive_interpose_state(),
+            "Vulkan physical device identity changed across vkCreateDevice");
+#endif
+        if (device_ != VK_NULL_HANDLE) {
+            vkDestroyDevice(device_, nullptr);
+            device_ = VK_NULL_HANDLE;
+        }
+#if defined(__APPLE__)
+        rollback_metal_pipeline_archive_interpose_install(
+            metal_pipeline_archive_interpose_state());
+#endif
+        throw VulkanRuntimeError(
+            "Vulkan physical device identity changed across vkCreateDevice");
+    }
+    try {
+        require_immutable_metal_policy_live("vkCreateDevice completion");
+    } catch (...) {
+        if (device_ != VK_NULL_HANDLE) {
+            vkDestroyDevice(device_, nullptr);
+            device_ = VK_NULL_HANDLE;
+        }
+#if defined(__APPLE__)
+        if (runtime_metal_archive_configuration_installed()) {
+            auto& archive_state = metal_pipeline_archive_interpose_state();
+            mark_metal_archive_sticky_failure_literal(
+                archive_state,
+                "immutable Metal policy final live gate failed after vkCreateDevice");
+            rollback_metal_pipeline_archive_interpose_install(archive_state);
+        }
+#endif
+        throw;
+    }
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     metallib_provider_capable_ = set_workgroup_size_mvk_ != nullptr;
 
@@ -2706,6 +8872,14 @@ void Runtime::init() {
         std::end(id_properties.deviceUUID),
         features_.device_uuid.begin());
     features_.device_type = static_cast<std::uint32_t>(props.deviceType);
+    features_.api_version = props.apiVersion;
+    features_.driver_version = props.driverVersion;
+    features_.vendor_id = props.vendorID;
+    features_.device_id = props.deviceID;
+    std::copy(
+        std::begin(props.pipelineCacheUUID),
+        std::end(props.pipelineCacheUUID),
+        features_.pipeline_cache_uuid.begin());
     features_.software_device = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     features_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
     features_.max_workgroup_size_x = props.limits.maxComputeWorkGroupSize[0];
@@ -2837,19 +9011,9 @@ void Runtime::shutdown() noexcept {
             vkDestroyDescriptorPool(device_, phase_c_pool_, nullptr);
             phase_c_pool_ = VK_NULL_HANDLE;
         }
-        for (auto& entry : pipeline_cache_) {
-            if (entry.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device_, entry.pipeline, nullptr);
-            if (entry.module != VK_NULL_HANDLE) vkDestroyShaderModule(device_, entry.module, nullptr);
-        }
-        pipeline_cache_.clear();
-        for (auto& entry : phase_b_pipelines_) {
-            if (entry.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device_, entry.pipeline, nullptr);
-            if (entry.module != VK_NULL_HANDLE) vkDestroyShaderModule(device_, entry.module, nullptr);
-            if (entry.descriptor_pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            if (entry.pipeline_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            if (entry.set_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-        }
-        phase_b_pipelines_.clear();
+        std::vector<PipelineEntry>{}.swap(pipeline_cache_);
+        std::vector<PhaseBPipelineOwner>{}.swap(phase_b_pipelines_);
+        pipeline_cache_metadata_permit_.release();
         if (descriptor_pool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         if (pipeline_layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
         if (descriptor_set_layout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
@@ -2873,6 +9037,13 @@ void Runtime::shutdown() noexcept {
     instance_ = VK_NULL_HANDLE;
     set_workgroup_size_mvk_ = nullptr;
     metallib_provider_capable_ = false;
+#if defined(__APPLE__)
+    // Runtime initialization can still fail after vkCreateDevice.  Never
+    // leave process-wide Metal IMPs or resident archive authority behind when
+    // the owning Vulkan runtime is unavailable or being destroyed.
+    rollback_metal_pipeline_archive_interpose_install(
+        metal_pipeline_archive_interpose_state());
+#endif
 }
 
 std::uint32_t Runtime::find_memory_type(
@@ -3102,10 +9273,141 @@ void Runtime::destroy_buffer(Buffer& buffer) noexcept {
 // Pipeline creation / cache
 // ---------------------------------------------------------------------------
 
-VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
+std::uint64_t Runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
+    using bioseq::parallelism::saturating_add;
+    using bioseq::parallelism::saturating_mul;
+    std::uint64_t owned = saturating_mul(
+        static_cast<std::uint64_t>(pipeline_cache_.capacity()),
+        sizeof(PipelineEntry));
+    owned = saturating_add(
+        owned,
+        saturating_mul(
+            static_cast<std::uint64_t>(phase_b_pipelines_.capacity()),
+            sizeof(PhaseBPipelineOwner)));
+    for (const PipelineEntry& entry : pipeline_cache_) {
+        owned = saturating_add(owned, entry.entry_name.capacity());
+        if (entry.metal_archive_receipt) {
+            owned = saturating_add(
+                owned,
+                entry.metal_archive_receipt->owned_capacity_bytes());
+        }
+    }
+    for (const PhaseBPipelineOwner& entry : phase_b_pipelines_) {
+        owned = saturating_add(owned, entry.entry_name.capacity());
+        if (entry.metal_archive_receipt) {
+            owned = saturating_add(
+                owned,
+                entry.metal_archive_receipt->owned_capacity_bytes());
+        }
+    }
+    return owned;
+}
+
+void Runtime::admit_pipeline_cache_growth_locked(
+    std::size_t normal_capacity,
+    std::size_t phase_b_capacity) {
+    using bioseq::parallelism::saturating_add;
+    using bioseq::parallelism::saturating_mul;
+    std::uint64_t projected = pipeline_cache_metadata_bytes_locked();
+    if (normal_capacity > pipeline_cache_.capacity()) {
+        projected = saturating_add(
+            projected,
+            saturating_mul(
+                static_cast<std::uint64_t>(
+                    normal_capacity - pipeline_cache_.capacity()),
+                sizeof(PipelineEntry)));
+    }
+    if (phase_b_capacity > phase_b_pipelines_.capacity()) {
+        projected = saturating_add(
+            projected,
+            saturating_mul(
+                static_cast<std::uint64_t>(
+                    phase_b_capacity - phase_b_pipelines_.capacity()),
+                sizeof(PhaseBPipelineOwner)));
+    }
+    // Covers one pending entry, receipt allocation/control metadata, all five
+    // bounded audit strings, and vector/string allocator headroom.
+    projected = saturating_add(
+        projected,
+        sizeof(RuntimeMetalArchivePipelineReceipt)
+            + sizeof(RuntimeMetalArchivePipelineAudit) + 16u * 1024u);
+    const std::uint64_t peak = saturating_mul(
+        projected, bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+    if (peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        throw VulkanRuntimeError(
+            "pipeline cache metadata admission estimate saturated");
+    }
+    bioseq::parallelism::MemoryAdmissionFailure failure{};
+    if (!pipeline_cache_metadata_permit_) {
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(shader_cache_message(
+                "pipeline cache metadata admission denied before Vulkan creation: reason=",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                " requested=", failure.requested_bytes));
+        }
+        pipeline_cache_metadata_permit_ = std::move(*permit);
+    } else if (!pipeline_cache_metadata_permit_.grow_to(peak, &failure)) {
+        throw VulkanRuntimeError(shader_cache_message(
+            "pipeline cache metadata growth denied before Vulkan creation: reason=",
+            bioseq::parallelism::memory_admission_failure_reason_name(
+                failure.reason),
+            " requested=", failure.requested_bytes));
+    }
+    try {
+        pipeline_cache_.reserve(normal_capacity);
+        phase_b_pipelines_.reserve(phase_b_capacity);
+    } catch (...) {
+        reconcile_pipeline_cache_metadata_locked();
+        throw;
+    }
+}
+
+void Runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
+    if (!pipeline_cache_metadata_permit_) return;
+    const std::uint64_t retained = pipeline_cache_metadata_bytes_locked();
+    if (retained == (std::numeric_limits<std::uint64_t>::max)()
+        || retained > pipeline_cache_metadata_permit_.bytes()) {
+        // The conservative preallocation must make this unreachable. Retain
+        // the larger permit and fail closed at the next live policy gate.
+#if defined(__APPLE__)
+        mark_metal_archive_sticky_failure_literal(
+            metal_pipeline_archive_interpose_state(),
+            "pipeline cache metadata exceeded admitted ownership");
+#endif
+        return;
+    }
+    pipeline_cache_metadata_permit_.shrink_to(retained);
+    if (retained == 0u) pipeline_cache_metadata_permit_.release();
+}
+
+Runtime::ChainingPipeline Runtime::create_pipeline_locked(
+    const ChainingPipelineKey& key) {
+    const bool provider_used = use_shader_provider_locked();
+    const bool archive_receipt_required = provider_used
+        || runtime_metal_archive_configuration_installed();
     for (const auto& entry : pipeline_cache_) {
         if (entry.key == key) {
-            return entry.pipeline;
+            if (archive_receipt_required) {
+                require_immutable_metal_policy_live(
+                    "cached chaining pipeline retrieval");
+            }
+            if (archive_receipt_required
+                && (entry.metal_archive_receipt == nullptr
+                    || !entry.metal_archive_receipt->accepted())) {
+                throw VulkanRuntimeError(
+                    "cached chaining pipeline lacks its accepted immutable Metal archive receipt");
+            }
+            return ChainingPipeline{
+                .pipeline = entry.handles.pipeline,
+                .shader_key = make_shader_key(
+                    ShaderKind::chain_tiled_dp_u64,
+                    key.tile_size, key.local_size, 0u),
+                .metal_archive_receipt =
+                    entry.metal_archive_receipt.get(),
+            };
         }
     }
 
@@ -3115,9 +9417,22 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
             key.local_size, features_.max_workgroup_invocations));
     }
 
-    VkShaderModule module = VK_NULL_HANDLE;
-    std::string entry_name = "main";
-    bool provider_used = false;
+    const std::size_t next_capacity = pipeline_cache_.size()
+            < pipeline_cache_.capacity()
+        ? pipeline_cache_.capacity()
+        : std::max<std::size_t>(
+            pipeline_cache_.size() + 1u,
+            pipeline_cache_.capacity() == 0u
+                ? 1u : pipeline_cache_.capacity() * 2u);
+    admit_pipeline_cache_growth_locked(
+        next_capacity, phase_b_pipelines_.capacity());
+    PipelineCacheAdmissionScope metadata_scope{*this};
+
+    PipelineEntry candidate{};
+    candidate.key = key;
+    candidate.handles = OwnedPipelineHandles{device_};
+    VkShaderModule& module = candidate.handles.module;
+    std::string& entry_name = candidate.entry_name;
     std::uint32_t provider_wg_x = 0;
     std::uint32_t provider_wg_y = 0;
     std::uint32_t provider_wg_z = 0;
@@ -3138,7 +9453,6 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
         }
         module = loaded->module;
         entry_name = loaded->entry_name.empty() ? std::string{"main"} : loaded->entry_name;
-        provider_used = true;
         provider_wg_x = loaded->wg_x;
         provider_wg_y = loaded->wg_y;
         provider_wg_z = loaded->wg_z;
@@ -3182,11 +9496,34 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
     pipeline_info.stage = stage;
     pipeline_info.layout = pipeline_layout_;
 
-    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipeline& pipeline = candidate.handles.pipeline;
+    MetalArchivePipelineCreateScope archive_scope{
+        archive_receipt_required,
+        features_.device_uuid,
+        shader_key,
+        entry_name};
+    if (!archive_scope.ready_for_pipeline_call()) {
+        auto rejected = archive_scope.finish(VK_ERROR_INITIALIZATION_FAILED);
+        throw VulkanRuntimeError(fmt::format(
+            "immutable Metal archive scope rejected chaining pipeline before creation: {}",
+            rejected ? "missing required receipt" : rejected.error()));
+    }
+    const auto create_begin = std::chrono::steady_clock::now();
     const VkResult pr = vkCreateComputePipelines(
         device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline);
+    const auto create_elapsed = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - create_begin).count();
+    candidate.pipeline_create_ns = std::max<std::uint64_t>(
+        1u, create_elapsed > 0
+            ? static_cast<std::uint64_t>(create_elapsed) : 1u);
+    auto archive_verdict = archive_scope.finish(pr);
+    if (!archive_verdict) {
+        throw VulkanRuntimeError(fmt::format(
+            "immutable Metal archive receipt failed for chaining pipeline: {}",
+            archive_verdict.error()));
+    }
     if (pr != VK_SUCCESS) {
-        vkDestroyShaderModule(device_, module, nullptr);
         throw VulkanRuntimeError(
             fmt::format(
                 "vkCreateComputePipelines: VkResult {} provider={} entry={} wg={},{},{} vk={} mvk={}",
@@ -3200,10 +9537,31 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
                 symbol_image(reinterpret_cast<const void*>(set_workgroup_size_mvk_))));
     }
 
-    pipeline_cache_.push_back(PipelineEntry{key, module, pipeline, entry_name});
-    bioseq_log<DBG>("[vulkan_runtime] built chaining pipeline tile={} local={}",
-                    key.tile_size, key.local_size);
-    return pipeline;
+    if (archive_verdict->has_value()) {
+        RuntimeMetalArchivePipelineAudit& audit = **archive_verdict;
+        audit.api_version = features_.api_version;
+        audit.driver_version = features_.driver_version;
+        audit.vendor_id = features_.vendor_id;
+        audit.device_id = features_.device_id;
+        audit.pipeline_cache_uuid = features_.pipeline_cache_uuid;
+        audit.pipeline_create_ns = candidate.pipeline_create_ns;
+        candidate.metal_archive_receipt.reset(
+            new RuntimeMetalArchivePipelineReceipt(
+                std::move(audit)));
+    }
+    pipeline_cache_.push_back(std::move(candidate));
+    try {
+        bioseq_log<DBG>(
+            "[vulkan_runtime] built chaining pipeline tile={} local={}",
+            key.tile_size, key.local_size);
+    } catch (...) {
+    }
+    const PipelineEntry& retained = pipeline_cache_.back();
+    return ChainingPipeline{
+        .pipeline = retained.handles.pipeline,
+        .shader_key = shader_key,
+        .metal_archive_receipt = retained.metal_archive_receipt.get(),
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -3275,7 +9633,7 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
     // workgroups — range_count is just data, no workgroup-count throw.
     const std::uint32_t chain_groups =
         std::min(range_count, features_.max_workgroup_count_x);
-    const VkPipeline pipeline = create_pipeline_locked(key);
+    const VkPipeline pipeline = create_pipeline_locked(key).pipeline;
 
     // H2D: write the anchors/ranges and the caller-initialised best-scores /
     // predecessors straight into the host-visible device buffers.
@@ -3354,6 +9712,7 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
     check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    require_immutable_metal_policy_live("chaining operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences");
 
     // D2H: read the propagated scores / predecessors back.
@@ -3398,7 +9757,7 @@ GpuCoordinateChainTraceResult Runtime::run_chaining_coordinate_trace_roundtrip(
 
     const std::uint32_t chain_groups =
         std::min(range_count, features_.max_workgroup_count_x);
-    const VkPipeline pipeline = create_pipeline_locked(key);
+    const VkPipeline pipeline = create_pipeline_locked(key).pipeline;
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
 
@@ -3548,6 +9907,8 @@ GpuCoordinateChainTraceResult Runtime::run_chaining_coordinate_trace_roundtrip(
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "submit(chain_coord)");
     check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
              "wait(chain_coord)");
+    require_immutable_metal_policy_live(
+        "chaining coordinate operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "reset_fence(chain_coord)");
 
     std::memcpy(&out.result, result_buf.mapped, sizeof(out.result));
@@ -3928,10 +10289,23 @@ void validate_alignment_cigar_inputs(
 Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     ShaderKind kind, std::uint32_t local_size, std::uint32_t max_span)
 {
+    const bool provider_used = use_shader_provider_locked();
+    const bool archive_receipt_required = provider_used
+        || runtime_metal_archive_configuration_installed();
     for (auto& entry : phase_b_pipelines_) {
         if (entry.kind == kind && entry.local_size == local_size
             && entry.max_span == max_span) {
-            return entry;
+            if (archive_receipt_required) {
+                require_immutable_metal_policy_live(
+                    "cached compute pipeline retrieval");
+            }
+            if (archive_receipt_required
+                && (entry.metal_archive_receipt == nullptr
+                    || !entry.metal_archive_receipt->accepted())) {
+                throw VulkanRuntimeError(
+                    "cached compute pipeline lacks its accepted immutable Metal archive receipt");
+            }
+            return entry.view();
         }
     }
     const ShaderVariantKey shader_key = make_shader_key(kind, 384u, local_size, max_span);
@@ -3965,7 +10339,19 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     const std::uint32_t binding_count = descriptor_binding_count(layout_kind);
     const std::uint32_t push_size = push_constant_size(kind);
 
-    PhaseBPipeline entry;
+    const std::size_t next_capacity = phase_b_pipelines_.size()
+            < phase_b_pipelines_.capacity()
+        ? phase_b_pipelines_.capacity()
+        : std::max<std::size_t>(
+            phase_b_pipelines_.size() + 1u,
+            phase_b_pipelines_.capacity() == 0u
+                ? 1u : phase_b_pipelines_.capacity() * 2u);
+    admit_pipeline_cache_growth_locked(
+        pipeline_cache_.capacity(), next_capacity);
+    PipelineCacheAdmissionScope metadata_scope{*this};
+
+    PhaseBPipelineOwner entry;
+    entry.handles = OwnedPipelineHandles{device_};
     entry.kind = kind;
     entry.local_size = local_size;
     entry.max_span = max_span;
@@ -3983,7 +10369,9 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     set_layout_info.bindingCount = binding_count;
     set_layout_info.pBindings = bindings.data();
-    check_vk(vkCreateDescriptorSetLayout(device_, &set_layout_info, nullptr, &entry.set_layout),
+    check_vk(vkCreateDescriptorSetLayout(
+                 device_, &set_layout_info, nullptr,
+                 &entry.handles.set_layout),
              "vkCreateDescriptorSetLayout(phase_b)");
 
     VkPushConstantRange push_range{};
@@ -3993,10 +10381,12 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     VkPipelineLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
-    layout_info.pSetLayouts = &entry.set_layout;
+    layout_info.pSetLayouts = &entry.handles.set_layout;
     layout_info.pushConstantRangeCount = push_size > 0 ? 1u : 0u;
     layout_info.pPushConstantRanges = push_size > 0 ? &push_range : nullptr;
-    check_vk(vkCreatePipelineLayout(device_, &layout_info, nullptr, &entry.pipeline_layout),
+    check_vk(vkCreatePipelineLayout(
+                 device_, &layout_info, nullptr,
+                 &entry.handles.pipeline_layout),
              "vkCreatePipelineLayout(phase_b)");
 
     VkDescriptorPoolSize pool_size{};
@@ -4008,22 +10398,21 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     pool_info.maxSets = 1;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
-    check_vk(vkCreateDescriptorPool(device_, &pool_info, nullptr, &entry.descriptor_pool),
+    check_vk(vkCreateDescriptorPool(
+                 device_, &pool_info, nullptr,
+                 &entry.handles.descriptor_pool),
              "vkCreateDescriptorPool(phase_b)");
 
     VkDescriptorSetAllocateInfo set_alloc{};
     set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    set_alloc.descriptorPool = entry.descriptor_pool;
+    set_alloc.descriptorPool = entry.handles.descriptor_pool;
     set_alloc.descriptorSetCount = 1;
-    set_alloc.pSetLayouts = &entry.set_layout;
+    set_alloc.pSetLayouts = &entry.handles.set_layout;
     check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &entry.descriptor_set),
              "vkAllocateDescriptorSets(phase_b)");
 
-    if (use_shader_provider_locked()) {
+    if (provider_used) {
         if (!metallib_provider_capable_) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError(
                 "runtime shader provider installed but vkSetWorkgroupSizeMVK is unavailable");
         }
@@ -4031,18 +10420,16 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
         auto loaded = provider->load_module(
             device_, shader_key, vkCreateShaderModule);
         if (!loaded) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError(fmt::format(
                 "shader provider failed for {}: {}",
                 cache_file_stem(shader_key), loaded.error()));
         }
-        entry.module = loaded->module;
+        entry.handles.module = loaded->module;
         entry.entry_name =
             loaded->entry_name.empty() ? std::string{"main"} : loaded->entry_name;
         set_workgroup_size_mvk_(
-            entry.module, loaded->wg_x, loaded->wg_y, loaded->wg_z);
+            entry.handles.module,
+            loaded->wg_x, loaded->wg_y, loaded->wg_z);
     } else {
         std::vector<std::uint32_t> spirv;
         try {
@@ -4053,9 +10440,6 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             request.max_span = max_span;
             spirv = compile_shader_spirv(request);
         } catch (const std::exception& compile_error) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError(fmt::format("phase B shader compile failed: {}",
                                                  compile_error.what()));
         }
@@ -4069,23 +10453,14 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
                 || !scan.has_binding(4) || !scan.has_binding(5)
                 || !scan.has_array_stride(24) || !scan.has_array_stride(8)
                 || !scan.has_struct_offsets({0u, 8u, 16u, 20u}))) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError("SPIR-V seed lookup anchor/key ABI mismatch");
         }
         if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError("SPIR-V SortRange array stride != 8");
         }
         if (kind == ShaderKind::generate_units &&
-            (!scan.has_binding(0) || !scan.has_binding(1) ||
+             (!scan.has_binding(0) || !scan.has_binding(1) ||
              !scan.has_array_stride(max_span / 8u))) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError("SPIR-V generate_units layout mismatch");
         }
         if (kind == ShaderKind::align_extend_banded_affine &&
@@ -4093,9 +10468,6 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
              !scan.has_binding(2) || !scan.has_binding(3) ||
              !scan.has_array_stride(4) || !scan.has_array_stride(16) ||
              !scan.has_array_stride(32))) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError("SPIR-V alignment extension layout mismatch");
         }
         if (kind == ShaderKind::align_extend_simple_cigar &&
@@ -4104,9 +10476,6 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
              !scan.has_binding(4) || !scan.has_binding(5) ||
              !scan.has_array_stride(4) ||
              !scan.has_array_stride(40) || !scan.has_array_stride(48))) {
-            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
             throw VulkanRuntimeError("SPIR-V alignment CIGAR extension layout mismatch");
         }
 
@@ -4114,34 +10483,73 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
         module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         module_info.codeSize = spirv.size() * sizeof(std::uint32_t);
         module_info.pCode = spirv.data();
-        check_vk(vkCreateShaderModule(device_, &module_info, nullptr, &entry.module),
+        check_vk(vkCreateShaderModule(
+                     device_, &module_info, nullptr,
+                     &entry.handles.module),
                  "vkCreateShaderModule(phase_b)");
     }
 
     VkPipelineShaderStageCreateInfo stage{};
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = entry.module;
+    stage.module = entry.handles.module;
     stage.pName = entry.entry_name.c_str();
     VkComputePipelineCreateInfo pipeline_info{};
     pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipeline_info.stage = stage;
-    pipeline_info.layout = entry.pipeline_layout;
+    pipeline_info.layout = entry.handles.pipeline_layout;
+    MetalArchivePipelineCreateScope archive_scope{
+        archive_receipt_required,
+        features_.device_uuid,
+        shader_key,
+        entry.entry_name};
+    if (!archive_scope.ready_for_pipeline_call()) {
+        auto rejected = archive_scope.finish(VK_ERROR_INITIALIZATION_FAILED);
+        throw VulkanRuntimeError(fmt::format(
+            "immutable Metal archive scope rejected compute pipeline before creation: {}",
+            rejected ? "missing required receipt" : rejected.error()));
+    }
+    const auto create_begin = std::chrono::steady_clock::now();
     const VkResult pr = vkCreateComputePipelines(
-        device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &entry.pipeline);
+        device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
+        &entry.handles.pipeline);
+    const auto create_elapsed = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - create_begin).count();
+    entry.pipeline_create_ns = std::max<std::uint64_t>(
+        1u, create_elapsed > 0
+            ? static_cast<std::uint64_t>(create_elapsed) : 1u);
+    auto archive_verdict = archive_scope.finish(pr);
+    if (!archive_verdict) {
+        throw VulkanRuntimeError(fmt::format(
+            "immutable Metal archive receipt failed for compute pipeline: {}",
+            archive_verdict.error()));
+    }
     if (pr != VK_SUCCESS) {
-        vkDestroyShaderModule(device_, entry.module, nullptr);
-        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
         throw VulkanRuntimeError(fmt::format(
             "vkCreateComputePipelines(compute): VkResult {}", static_cast<int>(pr)));
     }
+    if (archive_verdict->has_value()) {
+        RuntimeMetalArchivePipelineAudit& audit = **archive_verdict;
+        audit.api_version = features_.api_version;
+        audit.driver_version = features_.driver_version;
+        audit.vendor_id = features_.vendor_id;
+        audit.device_id = features_.device_id;
+        audit.pipeline_cache_uuid = features_.pipeline_cache_uuid;
+        audit.pipeline_create_ns = entry.pipeline_create_ns;
+        entry.metal_archive_receipt.reset(
+            new RuntimeMetalArchivePipelineReceipt(
+                std::move(audit)));
+    }
 
-    bioseq_log<DBG>("[vulkan_runtime] built compute pipeline kind={} local={} max_span={}",
-                    static_cast<int>(kind), local_size, max_span);
-    phase_b_pipelines_.push_back(entry);
-    return phase_b_pipelines_.back();
+    phase_b_pipelines_.push_back(std::move(entry));
+    try {
+        bioseq_log<DBG>(
+            "[vulkan_runtime] built compute pipeline kind={} local={} max_span={}",
+            static_cast<int>(kind), local_size, max_span);
+    } catch (...) {
+    }
+    return phase_b_pipelines_.back().view();
 }
 
 void Runtime::bind_phase_b_descriptors_locked(
@@ -4386,6 +10794,7 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(seed)");
     check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(seed)");
+    require_immutable_metal_policy_live("seed operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(seed)");
 
     SeedLookupResult result;
@@ -4535,26 +10944,19 @@ struct PhaseCAnchorSortKeyPlan {
     std::uint64_t target_len,
     std::uint64_t target_position_offset) noexcept
 {
-    constexpr std::uint64_t kFirstUncompactCoordinate = std::uint64_t{1} << 63;
-    if (target_len == 0u) return PhaseCAnchorSortKeyPlan{};
-
-    const std::uint64_t last_local_coordinate = target_len - 1u;
-    if (last_local_coordinate > std::numeric_limits<std::uint64_t>::max()
-        - target_position_offset) {
+    const auto pass_count = runtime_shape_v5_radix_pass_count(
+        target_position_offset, target_len);
+    if (!pass_count.has_value()) {
         return PhaseCAnchorSortKeyPlan{};
     }
 
     const std::uint64_t max_target_coordinate =
-        target_position_offset + last_local_coordinate;
-    if (max_target_coordinate >= kFirstUncompactCoordinate) {
-        return PhaseCAnchorSortKeyPlan{};
-    }
-
+        target_position_offset + target_len - 1u;
     const std::uint32_t target_ref_bits = std::max<std::uint32_t>(
         1u, static_cast<std::uint32_t>(std::bit_width(max_target_coordinate)));
     return PhaseCAnchorSortKeyPlan{
         .target_ref_bits = target_ref_bits,
-        .pass_count = std::clamp<std::uint32_t>((target_ref_bits + 8u) / 8u, 1u, 8u),
+        .pass_count = *pass_count,
     };
 }
 
@@ -4721,6 +11123,7 @@ Buffer Runtime::run_generate_units_roundtrip(
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(gen)");
     check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(gen)");
+    require_immutable_metal_policy_live("generate operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(gen)");
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(gen-post)");
     if (push.total_chunks != 0) {
@@ -4907,7 +11310,9 @@ void Runtime::bind_descriptors_offsets_locked(
 void Runtime::record_phase_c_dispatch_locked(
     VkCommandBuffer cmd, const PhaseBPipeline& pipe,
     std::span<const VkDescriptorBufferInfo> infos,
-    const void* push, std::uint32_t push_size, std::uint32_t group_count)
+    const void* push, std::uint32_t push_size, std::uint32_t group_count,
+    RuntimePipelineUseCollector* collector,
+    std::size_t collector_job_index)
 {
     if (group_count == 0) return;
     VkDescriptorSet set = alloc_phase_c_set_locked(pipe.set_layout);
@@ -4930,6 +11335,13 @@ void Runtime::record_phase_c_dispatch_locked(
         vkCmdPushConstants(cmd, pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, push_size, push);
     }
+    if (collector != nullptr) {
+        collector->use(
+            cmd, collector_job_index,
+            make_shader_key(
+                pipe.kind, 384u, pipe.local_size, pipe.max_span),
+            pipe.metal_archive_receipt, group_count);
+    }
     vkCmdDispatch(cmd, group_count, 1, 1);
 }
 
@@ -4939,7 +11351,10 @@ void Runtime::record_radix_sort_locked(
     const GpuArenaSlice& keys_scratch, const GpuArenaSlice& values_scratch,
     const GpuArenaSlice& histogram,
     const GpuSortPlan& plan, std::uint32_t num_workgroups,
-    std::uint32_t elems_per_wg, std::uint32_t value_words, bool& result_in_scratch)
+    std::uint32_t elems_per_wg, std::uint32_t value_words,
+    bool& result_in_scratch,
+    RuntimePipelineUseCollector* collector,
+    std::size_t collector_job_index)
 {
     const PhaseBPipeline hist_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_sort_radix_histogram, 1, 1);
@@ -4947,6 +11362,17 @@ void Runtime::record_radix_sort_locked(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_sort_radix_scan, 1, 1);
     const PhaseBPipeline scatter_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_sort_radix_scatter, 1, 1);
+    if (collector != nullptr) {
+        const auto prepare = [collector](const PhaseBPipeline& pipe) {
+            collector->prepare(
+                make_shader_key(
+                    pipe.kind, 384u, pipe.local_size, pipe.max_span),
+                pipe.metal_archive_receipt);
+        };
+        prepare(hist_pipe);
+        prepare(scan_pipe);
+        prepare(scatter_pipe);
+    }
 
     bool in_scratch = false;
     for (std::uint32_t pass = 0; pass < plan.pass_count; ++pass) {
@@ -4966,11 +11392,17 @@ void Runtime::record_radix_sort_locked(
             {out_vals.buffer->buffer, out_vals.offset, out_vals.size},
             {histogram.buffer->buffer, histogram.offset, histogram.size},
         }};
-        record_phase_c_dispatch_locked(cmd, hist_pipe, infos, &push, sizeof(push), num_workgroups);
+        record_phase_c_dispatch_locked(
+            cmd, hist_pipe, infos, &push, sizeof(push), num_workgroups,
+            collector, collector_job_index);
         record_compute_barrier(cmd);
-        record_phase_c_dispatch_locked(cmd, scan_pipe, infos, &push, sizeof(push), 1);
+        record_phase_c_dispatch_locked(
+            cmd, scan_pipe, infos, &push, sizeof(push), 1,
+            collector, collector_job_index);
         record_compute_barrier(cmd);
-        record_phase_c_dispatch_locked(cmd, scatter_pipe, infos, &push, sizeof(push), num_workgroups);
+        record_phase_c_dispatch_locked(
+            cmd, scatter_pipe, infos, &push, sizeof(push), num_workgroups,
+            collector, collector_job_index);
         record_compute_barrier(cmd);
         in_scratch = !in_scratch;
     }
@@ -5255,6 +11687,7 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch)");
     check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(pc_sketch)");
+    require_immutable_metal_policy_live("sketch operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch)");
 
     std::uint32_t last_off = 0, last_cnt = 0;
@@ -5279,6 +11712,7 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     const VulkanRankLut& rank_lut,
     const VulkanSketchParams& params,
     std::span<const PhaseCSketchTileWire> tiles,
+    std::span<const PhaseCSketchQueryLayoutWire> query_layouts,
     std::uint64_t max_minimizers,
     VulkanSketchHostMaterialization materialization)
 {
@@ -5296,7 +11730,8 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     result.dispatch_proof.materialization_ = materialization;
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
-    if (tiles.empty() || w == 0u || k == 0u || max_minimizers == 0u) {
+    if (tiles.empty() || query_layouts.empty()
+        || w == 0u || k == 0u || max_minimizers == 0u) {
         return result;
     }
     if (tiles.size()
@@ -5306,6 +11741,21 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     if (max_minimizers
         > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c sketch tile batch capacity exceeds ABI");
+    }
+    std::uint64_t layout_tile_cursor = 0u;
+    for (const PhaseCSketchQueryLayoutWire& layout : query_layouts) {
+        if (layout.begin != layout_tile_cursor
+            || layout.count
+                > static_cast<std::uint64_t>(tiles.size())
+                    - layout_tile_cursor) {
+            throw VulkanRuntimeError(
+                "phase_c sketch query layout does not densely partition tiles");
+        }
+        layout_tile_cursor += layout.count;
+    }
+    if (layout_tile_cursor != tiles.size()) {
+        throw VulkanRuntimeError(
+            "phase_c sketch query layout does not cover all tiles");
     }
 
     const std::uint32_t tile_count = static_cast<std::uint32_t>(tiles.size());
@@ -5356,6 +11806,13 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             arena_bytes));
     }
     const GpuArenaMark mark = arena.mark();
+    struct ArenaRewindOnExit {
+        GpuArena* arena = nullptr;
+        GpuArenaMark mark{};
+        ~ArenaRewindOnExit() {
+            if (arena != nullptr) arena->rewind(mark);
+        }
+    } arena_rewind_on_exit{&arena, mark};
 
     const GpuArenaSlice seq_s = arena.allocate_device(
         std::max<std::uint64_t>(packed_sequence.size(), 4u), 16u);
@@ -5375,7 +11832,6 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid()
         || !counts_s.valid() || !offsets_s.valid() || !blocks_s.valid()
         || !counters_s.valid() || !pairvals_s.valid()) {
-        arena.rewind(mark);
         throw VulkanRuntimeError(fmt::format(
             "phase_c sketch tile batch arena oversub (tiles={} arena_bytes={})",
             tile_count,
@@ -5406,6 +11862,17 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             0,
             static_cast<std::size_t>(host_materialized_out_words.bytes));
     }
+    std::unique_ptr<RuntimePipelineUseCollector> query_pipeline_collector;
+    const bool causal_pipeline_proof_required =
+        materialization == VulkanSketchHostMaterialization::device_only
+        && (use_shader_provider_locked()
+            || runtime_metal_archive_configuration_installed());
+    if (causal_pipeline_proof_required) {
+        query_pipeline_collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch,
+            1u,
+            next_operation_proof_identity_locked());
+    }
     const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(
         ShaderKind::phase_c_sketch_tile,
         kPhaseCSketchLocal,
@@ -5418,6 +11885,18 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         ShaderKind::phase_c_prefix_scan_add,
         128u,
         1u);
+    if (query_pipeline_collector != nullptr) {
+        const auto prepare = [&query_pipeline_collector](
+            const PhaseBPipeline& pipe) {
+            query_pipeline_collector->prepare(
+                make_shader_key(
+                    pipe.kind, 384u, pipe.local_size, pipe.max_span),
+                pipe.metal_archive_receipt);
+        };
+        prepare(sketch_pipe);
+        prepare(scan_block_pipe);
+        prepare(scan_add_pipe);
+    }
     reset_phase_c_pool_locked();
 
     // Device-only count mode never dereferences binding 4, so it can use the
@@ -5482,23 +11961,28 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     check_vk(
         vkBeginCommandBuffer(command_buffer_, &begin),
         "vkBeginCommandBuffer(pc_sketch_batch_count_scan)");
+    if (query_pipeline_collector != nullptr) {
+        query_pipeline_collector->begin(command_buffer_);
+    }
     record_host_to_shader(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, sketch_pipe, count_sketch_infos, &push, sizeof(push),
-        sketch_groups);
+        sketch_groups, query_pipeline_collector.get(), 0u);
     ++dispatch_proof.count_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
-        command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0), num_blocks);
+        command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0),
+        num_blocks, query_pipeline_collector.get(), 0u);
     ++dispatch_proof.prefix_scan_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
-        command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u);
+        command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u,
+        query_pipeline_collector.get(), 0u);
     ++dispatch_proof.prefix_scan_dispatches_;
     record_compute_barrier(command_buffer_);
     record_phase_c_dispatch_locked(
         command_buffer_, scan_add_pipe, scan_infos, &scan1, sizeof(scan1),
-        ceil_div_u32(tile_count, 128u));
+        ceil_div_u32(tile_count, 128u), query_pipeline_collector.get(), 0u);
     ++dispatch_proof.prefix_scan_dispatches_;
     ++dispatch_proof.prefix_scan_sequences_;
     if (materialization
@@ -5524,9 +12008,14 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     check_vk(
         vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
         "vkWaitForFences(pc_sketch_batch_count_scan)");
+    require_immutable_metal_policy_live(
+        "batched sketch count operation completion");
     check_vk(
         vkResetFences(device_, 1, &fence_),
         "vkResetFences(pc_sketch_batch_count_scan)");
+    if (query_pipeline_collector != nullptr) {
+        query_pipeline_collector->commit(command_buffer_);
+    }
     ++dispatch_proof.completed_roundtrips_;
     result.dispatch_proof = dispatch_proof;
 
@@ -5575,7 +12064,6 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             exact_device_bytes,
             kPhaseBBufferUsage);
         if (out_words.mapped == nullptr) {
-            arena.rewind(mark);
             throw VulkanRuntimeError(
                 "phase_c sketch tile batch non-unified exact output memory");
         }
@@ -5601,12 +12089,18 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         // The first queue submission is complete, so its descriptor sets may
         // be recycled.  The arena mark and all resident slices remain live.
         reset_phase_c_pool_locked();
+        if (query_pipeline_collector != nullptr) {
+            query_pipeline_collector->burn_before_reset(command_buffer_);
+        }
         check_vk(
             vkResetCommandBuffer(command_buffer_, 0),
             "vkResetCommandBuffer(pc_sketch_batch_emit)");
         check_vk(
             vkBeginCommandBuffer(command_buffer_, &begin),
             "vkBeginCommandBuffer(pc_sketch_batch_emit)");
+        if (query_pipeline_collector != nullptr) {
+            query_pipeline_collector->begin(command_buffer_);
+        }
         // Covers the packed-u16 zero-fill; the compute barrier carries the
         // prior submission's count/offset shader writes into this emit read.
         record_host_to_shader(command_buffer_);
@@ -5614,7 +12108,7 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         push.emit_mode = 1u;
         record_phase_c_dispatch_locked(
             command_buffer_, sketch_pipe, emit_sketch_infos, &push,
-            sizeof(push), sketch_groups);
+            sizeof(push), sketch_groups, query_pipeline_collector.get(), 0u);
         ++dispatch_proof.emit_dispatches_;
         record_shader_to_host(command_buffer_);
         check_vk(
@@ -5626,16 +12120,90 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         check_vk(
             vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
             "vkWaitForFences(pc_sketch_batch_emit)");
+        require_immutable_metal_policy_live(
+            "batched sketch emit operation completion");
         check_vk(
             vkResetFences(device_, 1, &fence_),
             "vkResetFences(pc_sketch_batch_emit)");
+        if (query_pipeline_collector != nullptr) {
+            query_pipeline_collector->commit(command_buffer_);
+        }
         ++dispatch_proof.completed_roundtrips_;
         result.dispatch_proof = dispatch_proof;
 
         result.count = total;
         result.minimizer_words = std::move(out_words);
     }
-    arena.rewind(mark);
+    if (!result.overflow
+        && materialization == VulkanSketchHostMaterialization::device_only
+        && result.minimizer_words.valid()
+        && dispatch_proof.accepted()) {
+        if (query_pipeline_collector != nullptr) {
+            result.query_authority.pipeline_proof_ =
+                query_pipeline_collector->seal();
+        }
+        result.query_authority.identity_ =
+            next_operation_proof_identity_locked();
+        result.query_authority.runtime_ = this;
+        result.query_authority.buffer_ = result.minimizer_words.buffer;
+        result.query_authority.memory_identity_ = vulkan_handle_identity(
+            result.minimizer_words.memory);
+        result.query_authority.buffer_bytes_ = result.minimizer_words.bytes;
+        result.query_authority.allocation_bytes_ =
+            result.minimizer_words.allocation_bytes;
+        result.query_authority.minimizer_count_ = result.count;
+        result.query_authority.window_size_ = params.window_size;
+        result.query_authority.kmer_size_ = params.kmer_size;
+        result.query_authority.minimizer_word_kind_ =
+            params.minimizer_word_kind;
+        result.query_authority.minimizer_words32_per_record_ =
+            params.minimizer_words32;
+        result.query_authority.hash_shift_ = params.hash_shift;
+        result.query_authority.pos_bits_ = params.pos_bits;
+        result.query_authority.materialization_ = materialization;
+        result.query_authority.dispatch_proof_ = dispatch_proof;
+        result.query_authority.device_uuid_ = features_.device_uuid;
+        result.query_authority.query_records_.reserve(query_layouts.size());
+        result.query_authority.query_tile_counts_.reserve(
+            query_layouts.size());
+        std::uint64_t query_minimizer_cursor = 0u;
+        for (const PhaseCSketchQueryLayoutWire& layout : query_layouts) {
+            std::uint64_t query_minimizer_count = 0u;
+            for (std::uint32_t tile = 0u; tile < layout.count; ++tile) {
+                query_minimizer_count +=
+                    result.tile_counts[layout.begin + tile];
+            }
+            const std::uint64_t query_minimizer_offset = layout.count == 0u
+                ? query_minimizer_cursor
+                : result.tile_offsets[layout.begin];
+            if (query_minimizer_offset != query_minimizer_cursor
+                || query_minimizer_count
+                    > (std::numeric_limits<std::uint32_t>::max)()) {
+                throw VulkanRuntimeError(
+                    "phase_c sketch query authority partition is invalid");
+            }
+            result.query_authority.query_records_.push_back(
+                PhaseCSeedQueryRecordWire{
+                    .minimizer_offset = static_cast<std::uint32_t>(
+                        query_minimizer_offset),
+                    .minimizer_count = static_cast<std::uint32_t>(
+                        query_minimizer_count),
+                    .query_len = layout.query_len,
+                    .flags = 0u,
+                });
+            result.query_authority.query_tile_counts_.push_back(
+                layout.count);
+            query_minimizer_cursor += query_minimizer_count;
+        }
+        if (query_minimizer_cursor != result.count
+            || !result.query_authority.covers_device_output()) {
+            throw VulkanRuntimeError(
+                "phase_c sketch query authority does not cover device output");
+        }
+    }
+    if (query_pipeline_collector != nullptr) {
+        query_pipeline_collector->burn_before_reset(command_buffer_);
+    }
     check_vk(
         vkResetCommandBuffer(command_buffer_, 0),
         "vkResetCommandBuffer(pc_sketch_batch-post)");
@@ -5648,7 +12216,8 @@ namespace {
 /// Submit the currently-recorded command buffer and wait. Centralises the
 /// begin/end/submit/wait/reset boilerplate for the Phase C multi-submit ops.
 void submit_and_wait(VkDevice device, VkQueue queue, VkCommandBuffer cmd, VkFence fence,
-                     const char* what) {
+                     const char* what,
+                     RuntimePipelineUseCollector* collector = nullptr) {
     check_vk(vkEndCommandBuffer(cmd), what);
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -5656,7 +12225,9 @@ void submit_and_wait(VkDevice device, VkQueue queue, VkCommandBuffer cmd, VkFenc
     submit.pCommandBuffers = &cmd;
     check_vk(vkQueueSubmit(queue, 1, &submit, fence), what);
     check_vk(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), what);
+    require_immutable_metal_policy_live(what);
     check_vk(vkResetFences(device, 1, &fence), what);
+    if (collector != nullptr) collector->commit(cmd);
 }
 
 }  // namespace
@@ -7455,6 +14026,7 @@ struct PhaseCSeedCoordinateWaveState {
     std::size_t result_index = 0;
     PhaseCSeedCoordinateJob job{};
     PhaseCSeedQueryRecordWire query_record{};
+    PersistedShapeV5CoordinateJobAudit operation_audit{};
     std::uint32_t minimizer_count = 0;
     std::uint32_t num_blocks = 0;
     std::uint32_t seed_groups = 0;
@@ -7463,6 +14035,7 @@ struct PhaseCSeedCoordinateWaveState {
     GpuArenaSlice prefix_s{};
     GpuArenaSlice blocks_s{};
     SeedPushC seed_push{};
+    GpuShapeV5SeedPush shape_v5_seed_push{};
     std::uint64_t total_anchors = 0;
     std::uint32_t total_anchors_u32 = 0;
     std::uint32_t anchor_offset = 0;
@@ -7515,7 +14088,8 @@ struct PhaseCSeedCoordinateWaveState {
     const PhaseCSeedCoordinateJob& lhs,
     const PhaseCSeedCoordinateJob& rhs) noexcept
 {
-    return lhs.slots == rhs.slots
+    return lhs.shape_v5 == rhs.shape_v5
+        && lhs.slots == rhs.slots
         && lhs.positions == rhs.positions
         && lhs.target_len == rhs.target_len
         && lhs.slot_mask == rhs.slot_mask
@@ -7543,7 +14117,8 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     std::int32_t max_chain_skip,
     std::int32_t min_chain_score,
     std::int32_t min_seed_count,
-    std::uint32_t probe_limit)
+    std::uint32_t probe_limit,
+    DeviceQuerySketchAuthority query_authority)
 {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -7565,58 +14140,368 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
     if (query_inputs.device_query_records != nullptr) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate device query records are not implemented");
     }
+
+    const PhaseCSeedIndexRepresentation representation = jobs.empty()
+        ? PhaseCSeedIndexRepresentation::invalid
+        : phase_c_seed_index_representation(jobs.front());
+    const bool shape_v5_selected =
+        representation == PhaseCSeedIndexRepresentation::shape_v5;
+    if (shape_v5_selected && coordinate_vote_selected) {
+        throw VulkanRuntimeError(
+            "phase_c Shape Format-5 direct route requires Vulkan tiled-DP coordinate output");
+    }
+    if (shape_v5_selected && features_.software_device) {
+        throw VulkanRuntimeError(
+            "phase_c Shape Format-5 direct route rejects software Vulkan devices");
+    }
+    const auto shape_operation_configuration =
+        persisted_shape_v5_coordinate_config_identity(
+            kmer_size,
+            max_occ,
+            coordinate_algorithm,
+            chain_key,
+            max_dist_x,
+            max_dist_y,
+            bandwidth,
+            max_iter,
+            gap_penalty,
+            skip_penalty,
+            max_chain_skip,
+            min_chain_score,
+            min_seed_count,
+            probe_limit);
+    if (shape_v5_selected && !shape_operation_configuration.accepted()) {
+        throw VulkanRuntimeError(
+            "phase_c Shape Format-5 coordinate configuration identity is invalid");
+    }
+
+    const PhaseCShapeV5ResidentView* common_shape_view = nullptr;
+    std::uint64_t common_shape_target_len = 0u;
     for (const PhaseCSeedCoordinateJob& job : jobs) {
-        if (job.slots == nullptr || job.positions == nullptr) {
+        const PhaseCSeedIndexRepresentation job_representation =
+            phase_c_seed_index_representation(job);
+        if (job_representation == PhaseCSeedIndexRepresentation::invalid
+            || job_representation != representation) {
             throw VulkanRuntimeError(
-                "phase_c seed-to-coordinate batch missing resident index buffers");
+                "phase_c seed-to-coordinate resident index representation must be strict XOR and uniform");
         }
         if (job.query_index >= query_inputs.host_query_records.size()) {
             throw VulkanRuntimeError("phase_c seed-to-coordinate job query_index out of range");
+        }
+        if (job.target_len == 0u) {
+            throw VulkanRuntimeError(
+                "phase_c seed-to-coordinate target length must be nonzero");
+        }
+        if (shape_v5_selected) {
+            if (job.target_len > (std::uint64_t{1} << 63u)) {
+                throw VulkanRuntimeError(
+                    "phase_c Shape Format-5 target length exceeds anchor-key ABI");
+            }
+            if (common_shape_view == nullptr) {
+                common_shape_view = job.shape_v5;
+                common_shape_target_len = job.target_len;
+            } else if (job.shape_v5 != common_shape_view) {
+                throw VulkanRuntimeError(
+                    "phase_c Shape Format-5 batch must bind one resident generation");
+            } else if (job.target_len != common_shape_target_len) {
+                throw VulkanRuntimeError(
+                    "phase_c Shape Format-5 batch target identity is inconsistent");
+            }
         }
     }
 
     PhaseCSeedCoordinateBatchRun run{};
     run.results.resize(jobs.size());
     run.stats.problem_count = static_cast<std::uint64_t>(jobs.size());
+    run.shape_v5_direct.selected = shape_v5_selected;
+    run.shape_v5_direct.problem_count = static_cast<std::uint64_t>(jobs.size());
+
+    std::uint32_t shape_control_word_count = 0u;
+    std::uint32_t shape_position_word_count = 0u;
+    std::uint64_t shape_control_padded_bytes = 0u;
+    std::uint64_t shape_position_padded_bytes = 0u;
+    if (shape_v5_selected) {
+        if (common_shape_view == nullptr) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 route has no resident generation");
+        }
+        if (kmer_size == 0u || kmer_size > 255u
+            || query_inputs.hash_shift >= 64u
+            || query_inputs.pos_bits >= 64u) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 query sketch traits exceed ABI3");
+        }
+        const auto valid_resident_buffer = [this](const Buffer* buffer) {
+            return buffer != nullptr
+                && buffer->owner == this
+                && buffer->valid()
+                && buffer->host_visible_coherent()
+                && buffer->mapped != nullptr;
+        };
+        if (!valid_resident_buffer(common_shape_view->descriptors)
+            || !valid_resident_buffer(common_shape_view->controls)
+            || !valid_resident_buffer(common_shape_view->positions)) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 resident buffers are invalid, foreign, or not coherent");
+        }
+        if (common_shape_view->descriptors->buffer
+                == common_shape_view->controls->buffer
+            || common_shape_view->descriptors->buffer
+                == common_shape_view->positions->buffer
+            || common_shape_view->controls->buffer
+                == common_shape_view->positions->buffer) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 resident buffers must not alias");
+        }
+        if (common_shape_view->abi_version != k_gpu_shape_v5_abi_version
+            || common_shape_view->partition_count == 0u
+            || common_shape_view->control_bytes == 0u
+            || common_shape_view->position_bytes == 0u
+            || common_shape_view->position_count == 0u
+            || common_shape_view->max_occ_cap
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || common_shape_view->generation_id == 0u
+            || common_shape_view->source_identity == 0u
+            || common_shape_view->cold_load_identity == 0u) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 resident identity or generation contract is invalid");
+        }
+        const std::uint64_t expected_descriptor_bytes =
+            static_cast<std::uint64_t>(common_shape_view->partition_count)
+            * sizeof(GpuShapeV5ResidentPartitionDescriptor);
+        if (common_shape_view->descriptor_bytes != expected_descriptor_bytes
+            || common_shape_view->descriptor_bytes
+                > common_shape_view->descriptors->bytes) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 descriptor byte extent is invalid");
+        }
+        const auto checked_word_count = [](std::uint64_t bytes,
+                                           const char* label) {
+            constexpr std::uint64_t maximum_word_bytes =
+                static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::uint32_t>::max)()) * 4u;
+            if (bytes == 0u || bytes > maximum_word_bytes) {
+                throw VulkanRuntimeError(fmt::format(
+                    "phase_c Shape Format-5 {} byte extent exceeds GLSL word ABI",
+                    label));
+            }
+            return static_cast<std::uint32_t>((bytes + 3u) / 4u);
+        };
+        shape_control_word_count = checked_word_count(
+            common_shape_view->control_bytes, "control");
+        shape_position_word_count = checked_word_count(
+            common_shape_view->position_bytes, "position");
+        shape_control_padded_bytes =
+            static_cast<std::uint64_t>(shape_control_word_count) * 4u;
+        shape_position_padded_bytes =
+            static_cast<std::uint64_t>(shape_position_word_count) * 4u;
+        if (shape_control_padded_bytes > common_shape_view->controls->bytes
+            || shape_position_padded_bytes
+                > common_shape_view->positions->bytes
+            || common_shape_view->descriptor_bytes
+                > features_.max_storage_buffer_range
+            || shape_control_padded_bytes > features_.max_storage_buffer_range
+            || shape_position_padded_bytes
+                > features_.max_storage_buffer_range) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 resident byte extent exceeds its buffer or Vulkan range");
+        }
+        const bool nil_view_uuid = std::all_of(
+            common_shape_view->device_uuid.begin(),
+            common_shape_view->device_uuid.end(),
+            [](std::uint8_t byte) { return byte == 0u; });
+        if (nil_view_uuid
+            || common_shape_view->device_uuid != features_.device_uuid) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 resident generation belongs to a different Vulkan device");
+        }
+        const auto* descriptor_bytes = static_cast<const std::byte*>(
+            common_shape_view->descriptors->mapped);
+        for (std::uint32_t ordinal = 0u;
+             ordinal < common_shape_view->partition_count;
+             ++ordinal) {
+            GpuShapeV5ResidentPartitionDescriptor descriptor{};
+            std::memcpy(
+                &descriptor,
+                descriptor_bytes
+                    + static_cast<std::uint64_t>(ordinal)
+                        * sizeof(GpuShapeV5ResidentPartitionDescriptor),
+                sizeof(descriptor));
+            if (!gpu_shape_v5_partition_descriptor_valid(
+                    descriptor,
+                    common_shape_view->control_bytes,
+                    common_shape_view->position_bytes)
+                || descriptor.segment_end_bp > common_shape_target_len) {
+                throw VulkanRuntimeError(
+                    "phase_c Shape Format-5 resident descriptor validation failed");
+            }
+        }
+        if (max_occ >= 0
+            && static_cast<std::uint64_t>(max_occ)
+                > common_shape_view->max_occ_cap) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 query max_occ exceeds persisted generation cap");
+        }
+        run.shape_v5_direct.generation_id = common_shape_view->generation_id;
+        run.shape_v5_direct.source_identity = common_shape_view->source_identity;
+        run.shape_v5_direct.cold_load_identity =
+            common_shape_view->cold_load_identity;
+    }
     const std::uint32_t total_mc = query_inputs.minimizer_count;
-    if (jobs.empty() || total_mc == 0u || max_occ < 0) {
+    if (jobs.empty() || max_occ < 0
+        || (total_mc == 0u && !shape_v5_selected)) {
+        run.shape_v5_direct.direct_count_scan_emit_completed =
+            shape_v5_selected;
         return run;
     }
     if (query_inputs.host_query_records.empty()) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate batch missing query records");
     }
     for (const PhaseCSeedQueryRecordWire& qrec : query_inputs.host_query_records) {
-        if (qrec.query_len > std::numeric_limits<std::uint32_t>::max()) {
-            throw VulkanRuntimeError("phase_c seed-to-coordinate query length exceeds ABI");
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(qrec.minimizer_offset)
+            + qrec.minimizer_count;
+        if (qrec.flags != 0u || qrec.minimizer_offset > total_mc
+            || end > total_mc) {
+            throw VulkanRuntimeError(
+                "phase_c seed-to-coordinate query minimizer slice or flags are invalid");
         }
         if (qrec.minimizer_count == 0u) {
             continue;
         }
-        const std::uint64_t end =
-            static_cast<std::uint64_t>(qrec.minimizer_offset) + qrec.minimizer_count;
-        if (end > total_mc) {
-            throw VulkanRuntimeError("phase_c seed-to-coordinate query minimizer slice exceeds buffer");
+        if (shape_v5_selected
+            && (qrec.query_len < kmer_size
+                || qrec.minimizer_count
+                    == (std::numeric_limits<std::uint32_t>::max)()
+                || (static_cast<std::uint64_t>(qrec.minimizer_count) + 1u)
+                        * sizeof(std::uint32_t)
+                    > features_.max_storage_buffer_range)) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 query record violates local count/status ABI");
         }
     }
 
-    const std::uint64_t min_words_bytes = query_inputs.device_minimizer_words == nullptr
-        ? std::max<std::uint64_t>(
-              minimizer_device_bytes(
-                  query_inputs.minimizer_word_kind,
-                  query_inputs.minimizer_words32_per_record,
-                  total_mc),
-              4u)
-        : 0u;
+    const std::uint32_t required_words_per_minimizer =
+        query_inputs.minimizer_word_kind == 0u
+        || query_inputs.minimizer_word_kind == 1u
+        ? 1u
+        : query_inputs.minimizer_word_kind == 2u ? 2u : 4u;
+    if (query_inputs.minimizer_word_kind > 3u
+        || query_inputs.minimizer_words32_per_record
+            < required_words_per_minimizer
+        || (query_inputs.minimizer_word_kind != 0u
+            && static_cast<std::uint64_t>(total_mc)
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    / (static_cast<std::uint64_t>(
+                           query_inputs.minimizer_words32_per_record)
+                       * sizeof(std::uint32_t)))) {
+        throw VulkanRuntimeError(
+            "phase_c seed-to-coordinate minimizer word shape is invalid or overflows");
+    }
+    const std::uint64_t required_min_words_bytes = std::max<std::uint64_t>(
+        minimizer_device_bytes(
+            query_inputs.minimizer_word_kind,
+            query_inputs.minimizer_words32_per_record,
+            total_mc),
+        4u);
+    if (query_inputs.device_minimizer_words != nullptr
+        && (!query_inputs.device_minimizer_words->valid()
+            || query_inputs.device_minimizer_words->owner != this
+            || required_min_words_bytes
+                > query_inputs.device_minimizer_words->bytes)) {
+        throw VulkanRuntimeError(
+            "phase_c seed-to-coordinate device minimizer buffer is invalid or undersized");
+    }
+    if (shape_v5_selected
+        && (query_inputs.device_minimizer_words == nullptr
+            || !query_inputs.host_minimizer_bytes.empty())) {
+        throw VulkanRuntimeError(
+            "phase_c Shape Format-5 direct route requires an unambiguous GPU-resident query sketch");
+    }
+    std::unique_ptr<RuntimePipelineUseCollector> shape_pipeline_collector;
+    if (shape_v5_selected) {
+        bool authority_records_match =
+            query_authority.query_records_.size()
+            == query_inputs.host_query_records.size();
+        for (std::size_t record_index = 0u;
+             authority_records_match
+                 && record_index < query_authority.query_records_.size();
+             ++record_index) {
+            const auto& sealed = query_authority.query_records_[record_index];
+            const auto& supplied =
+                query_inputs.host_query_records[record_index];
+            authority_records_match = sealed.minimizer_offset
+                    == supplied.minimizer_offset
+                && sealed.minimizer_count == supplied.minimizer_count
+                && sealed.query_len == supplied.query_len
+                && sealed.flags == supplied.flags;
+        }
+        if (!query_authority.accepted()
+            || query_authority.runtime_ != this
+            || query_authority.buffer_
+                != query_inputs.device_minimizer_words->buffer
+            || query_authority.memory_identity_
+                != vulkan_handle_identity(
+                    query_inputs.device_minimizer_words->memory)
+            || query_authority.buffer_bytes_
+                != query_inputs.device_minimizer_words->bytes
+            || query_authority.allocation_bytes_
+                != query_inputs.device_minimizer_words->allocation_bytes
+            || query_authority.minimizer_count_ != total_mc
+            || query_authority.kmer_size_ != kmer_size
+            || query_authority.window_size_ != query_inputs.window_size
+            || query_authority.minimizer_word_kind_
+                != query_inputs.minimizer_word_kind
+            || query_authority.minimizer_words32_per_record_
+                != query_inputs.minimizer_words32_per_record
+            || query_authority.hash_shift_ != query_inputs.hash_shift
+            || query_authority.pos_bits_ != query_inputs.pos_bits
+            || !authority_records_match
+            || query_authority.device_uuid_ != features_.device_uuid) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 direct route lacks matching one-shot query authority");
+        }
+        if (query_authority.buffer_
+                == common_shape_view->descriptors->buffer
+            || query_authority.buffer_
+                == common_shape_view->controls->buffer
+            || query_authority.buffer_
+                == common_shape_view->positions->buffer) {
+            throw VulkanRuntimeError(
+                "phase_c Shape Format-5 query image aliases resident target storage");
+        }
+        run.operation_proof.operation_identity_ =
+            next_operation_proof_identity_locked();
+        run.operation_proof.admit_records(jobs.size());
+        shape_pipeline_collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::shape_v5_coordinate,
+            jobs.size(),
+            run.operation_proof.operation_identity_);
+    } else if (query_authority.accepted()) {
+        throw VulkanRuntimeError(
+            "phase_c query authority cannot be consumed by a legacy index route");
+    }
+    const std::uint64_t min_words_bytes =
+        query_inputs.device_minimizer_words == nullptr
+        ? required_min_words_bytes : 0u;
     if (query_inputs.device_minimizer_words == nullptr
         && query_inputs.host_minimizer_bytes.size()
             > static_cast<std::size_t>(min_words_bytes)) {
         throw VulkanRuntimeError("phase_c seed-to-coordinate minimizer upload exceeds buffer");
     }
 
-    const PhaseBPipeline count_pipe =
-        get_phase_b_pipeline_locked(ShaderKind::phase_c_seed_count, 128u, 1u);
-    const PhaseBPipeline emit_pipe =
-        get_phase_b_pipeline_locked(ShaderKind::phase_c_seed_emit, 128u, 1u);
+    const PhaseBPipeline count_pipe = get_phase_b_pipeline_locked(
+        shape_v5_selected
+            ? ShaderKind::phase_c_shape_v5_seed_count
+            : ShaderKind::phase_c_seed_count,
+        128u,
+        shape_v5_selected ? 3u : 1u);
+    const PhaseBPipeline emit_pipe = get_phase_b_pipeline_locked(
+        shape_v5_selected
+            ? ShaderKind::phase_c_shape_v5_seed_emit
+            : ShaderKind::phase_c_seed_emit,
+        128u,
+        shape_v5_selected ? 3u : 1u);
     const PhaseBPipeline scanb =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
     const PhaseBPipeline scana =
@@ -7625,12 +14510,33 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_chain_range_build, 1u, 1u);
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
-    const PhaseBPipeline vote_coord_pipe =
-        get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_vote_reduce, 128u, 1u);
-    const PhaseBPipeline vote_coord_batch_pipe =
-        get_phase_b_pipeline_locked(
+    PhaseBPipeline vote_coord_pipe{};
+    PhaseBPipeline vote_coord_batch_pipe{};
+    if (coordinate_vote_selected) {
+        vote_coord_pipe = get_phase_b_pipeline_locked(
+            ShaderKind::phase_c_coordinate_vote_reduce, 128u, 1u);
+        vote_coord_batch_pipe = get_phase_b_pipeline_locked(
             ShaderKind::phase_c_coordinate_vote_reduce_batch, 128u, 1u);
-    const VkPipeline chain_pipeline = create_pipeline_locked(chain_key);
+    }
+    const ChainingPipeline chain_pipeline = create_pipeline_locked(chain_key);
+    if (shape_pipeline_collector != nullptr) {
+        const auto prepare = [&shape_pipeline_collector](
+            const PhaseBPipeline& pipe) {
+            shape_pipeline_collector->prepare(
+                make_shader_key(
+                    pipe.kind, 384u, pipe.local_size, pipe.max_span),
+                pipe.metal_archive_receipt);
+        };
+        prepare(count_pipe);
+        prepare(emit_pipe);
+        prepare(scanb);
+        prepare(scana);
+        prepare(range_pipe);
+        prepare(coord_pipe);
+        shape_pipeline_collector->prepare(
+            chain_pipeline.shader_key,
+            chain_pipeline.metal_archive_receipt);
+    }
 
     constexpr std::uint64_t qrec_stride = kPhaseCSlotOffsetAlign;
     const std::uint64_t query_record_bytes = std::max<std::uint64_t>(
@@ -7666,7 +14572,9 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             per_wave_problem_bytes = sat_add(
                 per_wave_problem_bytes,
                 sat_add(
-                    std::uint64_t{qrec.minimizer_count} * 8u,
+                    sat_add(
+                        std::uint64_t{qrec.minimizer_count} * 8u,
+                        shape_v5_selected ? 4u : 0u),
                     std::uint64_t{qblocks} * 4u));
         }
         const std::uint64_t arena_bytes = sat_add(
@@ -7728,19 +14636,84 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 state.job = jobs[job_index];
                 state.query_record =
                     query_inputs.host_query_records[state.job.query_index];
+                if (shape_v5_selected) {
+                    auto& audit = state.operation_audit;
+                    audit.operation_identity =
+                        run.operation_proof.operation_identity_;
+                    audit.query_authority_identity =
+                        query_authority.identity_;
+                    audit.resident_descriptors = runtime_buffer_identity(
+                        common_shape_view->descriptors);
+                    audit.resident_controls = runtime_buffer_identity(
+                        common_shape_view->controls);
+                    audit.resident_positions = runtime_buffer_identity(
+                        common_shape_view->positions);
+                    audit.query_minimizer_buffer = runtime_buffer_identity(
+                        query_inputs.device_minimizer_words);
+                    audit.device_uuid = common_shape_view->device_uuid;
+                    audit.descriptor_bytes =
+                        common_shape_view->descriptor_bytes;
+                    audit.control_bytes = common_shape_view->control_bytes;
+                    audit.position_bytes = common_shape_view->position_bytes;
+                    audit.position_count = common_shape_view->position_count;
+                    audit.max_occ_cap = common_shape_view->max_occ_cap;
+                    audit.partition_count =
+                        common_shape_view->partition_count;
+                    audit.abi_version = common_shape_view->abi_version;
+                    audit.generation_id = common_shape_view->generation_id;
+                    audit.source_identity = common_shape_view->source_identity;
+                    audit.cold_load_identity =
+                        common_shape_view->cold_load_identity;
+                    audit.target_len = state.job.target_len;
+                    audit.problem_index = state.result_index;
+                    audit.query_index = state.job.query_index;
+                    audit.logical_target_row =
+                        state.job.logical_target_row;
+                    audit.logical_query_ordinal =
+                        state.job.logical_query_ordinal;
+                    audit.query_record = state.query_record;
+                    audit.configuration = shape_operation_configuration;
+                    audit.query_tile_count =
+                        query_authority.query_tile_counts_[
+                            state.job.query_index];
+                    audit.query_count_dispatches =
+                        query_authority.dispatch_proof_.count_dispatches();
+                    audit.query_scan_dispatches =
+                        query_authority.dispatch_proof_.prefix_scan_dispatches();
+                    audit.query_emit_dispatches =
+                        query_authority.dispatch_proof_.emit_dispatches();
+                    audit.query_completed_roundtrips =
+                        query_authority.dispatch_proof_.completed_roundtrips();
+                }
                 state.minimizer_count = state.query_record.minimizer_count;
                 state.query_len = state.query_record.query_len;
+                if (shape_pipeline_collector != nullptr) {
+                    shape_pipeline_collector->set_shape_input(
+                        state.result_index,
+                        state.minimizer_count,
+                        state.job.target_len,
+                        state.job.target_position_offset);
+                }
                 state.num_blocks = std::max<std::uint32_t>(
                     ceil_div_u32(state.minimizer_count, kPhaseCScanBlock), 1u);
                 state.seed_groups = std::max<std::uint32_t>(
                     1u,
-                    std::min(
-                        ceil_div_u32(state.minimizer_count, 128u),
-                        features_.max_workgroup_count_x));
-                state.skip_seed =
-                    state.job.position_count == 0u || state.minimizer_count == 0u;
+                    shape_v5_selected
+                        ? 1u
+                        : std::min(
+                              ceil_div_u32(state.minimizer_count, 128u),
+                              features_.max_workgroup_count_x));
+                state.skip_seed = state.minimizer_count == 0u
+                    || (!shape_v5_selected && state.job.position_count == 0u);
+                if (shape_v5_selected && state.minimizer_count == 0u) {
+                    run.operation_proof.records_[state.result_index].audit =
+                        state.operation_audit;
+                }
+                const std::uint64_t count_word_count = shape_v5_selected
+                    ? static_cast<std::uint64_t>(state.minimizer_count) + 1u
+                    : std::max<std::uint64_t>(state.minimizer_count, 1u);
                 state.counts_s = arena.allocate_device(
-                    std::max<std::uint64_t>(state.minimizer_count, 1u) * 4u, 16u);
+                    count_word_count * 4u, 16u);
                 state.prefix_s = arena.allocate_device(
                     std::max<std::uint64_t>(state.minimizer_count, 1u) * 4u, 16u);
                 state.blocks_s = arena.allocate_device(
@@ -7749,6 +14722,15 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     || !state.blocks_s.valid()) {
                     throw VulkanRuntimeError(
                         "phase_c seed-to-coordinate batch arena oversubscribed");
+                }
+                if (shape_v5_selected) {
+                    const std::uint32_t zero_status = 0u;
+                    std::memcpy(
+                        base + state.counts_s.offset
+                            + static_cast<std::uint64_t>(state.minimizer_count)
+                                * sizeof(std::uint32_t),
+                        &zero_status,
+                        sizeof(zero_status));
                 }
                 const std::uint32_t target_offset_lo = static_cast<std::uint32_t>(
                     state.job.target_position_offset & 0xffffffffull);
@@ -7772,6 +14754,33 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     target_offset_lo,
                     target_offset_hi,
                     anchor_sort_plan.target_ref_bits};
+                if (shape_v5_selected) {
+                    const PhaseCShapeV5ResidentView& view =
+                        *state.job.shape_v5;
+                    state.shape_v5_seed_push = GpuShapeV5SeedPush{
+                        .abi_version = k_gpu_shape_v5_abi_version,
+                        .words32_per_minimizer =
+                            query_inputs.minimizer_words32_per_record,
+                        .word_kind = query_inputs.minimizer_word_kind,
+                        .hash_shift = query_inputs.hash_shift,
+                        .pos_bits = query_inputs.pos_bits,
+                        .kmer_size = kmer_size,
+                        .partition_count = view.partition_count,
+                        .max_occ = static_cast<std::uint32_t>(max_occ),
+                        .emit_mode = 0u,
+                        .record_count = 1u,
+                        .target_ref_bits = anchor_sort_plan.target_ref_bits,
+                        .query_minimizer_count = total_mc,
+                        .control_word_count = shape_control_word_count,
+                        .position_word_count = shape_position_word_count,
+                        .anchor_capacity = 0u,
+                        .max_occ_cap_lo = static_cast<std::uint32_t>(
+                            view.max_occ_cap & 0xffffffffull),
+                        .max_occ_cap_hi = static_cast<std::uint32_t>(
+                            view.max_occ_cap >> 32u),
+                        .status_index = state.minimizer_count,
+                    };
+                }
                 if (!state.skip_seed) {
                     seed_active_count += 1u;
                 }
@@ -8136,32 +15145,82 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
 
             reset_phase_c_pool_locked();
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+            }
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch1)");
             VkCommandBufferBeginInfo begin{};
             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_batch1)");
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             record_host_to_shader(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (state.skip_seed) {
                     continue;
                 }
-                const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
-                    {min_words_buffer, min_words_offset, min_words_range},
-                    {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
-                    {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
-                    {qrec_s.buffer->buffer,
-                     qrec_s.offset + std::uint64_t{state.job.query_index}
-                         * qrec_stride,
-                     sizeof(PhaseCSeedQueryRecordWire)},
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                    {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                }};
-                record_phase_c_dispatch_locked(
-                    command_buffer_, count_pipe, seed_infos,
-                    &state.seed_push, sizeof(state.seed_push), state.seed_groups);
+                if (shape_v5_selected) {
+                    const PhaseCShapeV5ResidentView& view =
+                        *state.job.shape_v5;
+                    const std::array<VkDescriptorBufferInfo, 9> seed_infos{{
+                        {min_words_buffer, min_words_offset, min_words_range},
+                        {view.descriptors->buffer, 0, view.descriptor_bytes},
+                        {view.controls->buffer, 0, shape_control_padded_bytes},
+                        {view.positions->buffer, 0, shape_position_padded_bytes},
+                        {qrec_s.buffer->buffer,
+                         qrec_s.offset + std::uint64_t{state.job.query_index}
+                             * qrec_stride,
+                         sizeof(PhaseCSeedQueryRecordWire)},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                        {state.prefix_s.buffer->buffer,
+                         state.prefix_s.offset,
+                         state.prefix_s.size},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                    }};
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, count_pipe, seed_infos,
+                        &state.shape_v5_seed_push,
+                        sizeof(state.shape_v5_seed_push),
+                        1u, shape_pipeline_collector.get(),
+                        state.result_index);
+                    run.shape_v5_direct.count_dispatches += 1u;
+                    state.operation_audit.direct_count_dispatches += 1u;
+                } else {
+                    const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
+                        {min_words_buffer, min_words_offset, min_words_range},
+                        {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
+                        {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
+                        {qrec_s.buffer->buffer,
+                         qrec_s.offset + std::uint64_t{state.job.query_index}
+                             * qrec_stride,
+                         sizeof(PhaseCSeedQueryRecordWire)},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                        {state.prefix_s.buffer->buffer,
+                         state.prefix_s.offset,
+                         state.prefix_s.size},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                    }};
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, count_pipe, seed_infos,
+                        &state.seed_push, sizeof(state.seed_push),
+                        state.seed_groups);
+                }
                 run.stats.seed_count_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
@@ -8177,7 +15236,12 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 ScanPushC scan{
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
-                    command_buffer_, scanb, scan_infos, &scan, sizeof(scan), state.num_blocks);
+                    command_buffer_, scanb, scan_infos, &scan, sizeof(scan),
+                    state.num_blocks, shape_pipeline_collector.get(),
+                    state.result_index);
+                if (shape_v5_selected) {
+                    state.operation_audit.direct_scan_dispatches += 1u;
+                }
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8192,7 +15256,11 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 ScanPushC scan{
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 0u};
                 record_phase_c_dispatch_locked(
-                    command_buffer_, scana, scan_infos, &scan, sizeof(scan), 1u);
+                    command_buffer_, scana, scan_infos, &scan, sizeof(scan),
+                    1u, shape_pipeline_collector.get(), state.result_index);
+                if (shape_v5_selected) {
+                    state.operation_audit.direct_scan_dispatches += 1u;
+                }
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8208,16 +15276,51 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     state.minimizer_count, kPhaseCScanBlock, state.num_blocks, 1u};
                 record_phase_c_dispatch_locked(
                     command_buffer_, scana, scan_infos, &scan, sizeof(scan),
-                    ceil_div_u32(state.minimizer_count, 128u));
+                    ceil_div_u32(state.minimizer_count, 128u),
+                    shape_pipeline_collector.get(), state.result_index);
+                if (shape_v5_selected) {
+                    state.operation_audit.direct_scan_dispatches += 1u;
+                }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
-                device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch1)");
+                device_, queue_, command_buffer_, fence_,
+                "submit(pc_seed_coord_batch1)",
+                shape_pipeline_collector.get());
+            if (shape_v5_selected) {
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (!state.skip_seed) {
+                        state.operation_audit.count_submit_wait_identity =
+                            receipt_identity;
+                    }
+                }
+            }
 
             std::uint32_t anchor_active_count = 0;
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (state.skip_seed) {
                     continue;
+                }
+                if (shape_v5_selected) {
+                    std::uint32_t status = 0u;
+                    std::memcpy(
+                        &status,
+                        base + state.counts_s.offset
+                            + static_cast<std::uint64_t>(state.minimizer_count)
+                                * sizeof(std::uint32_t),
+                        sizeof(status));
+                    run.shape_v5_direct.count_status_checks += 1u;
+                    run.shape_v5_direct.status_or |= status;
+                    state.operation_audit.count_status_checks += 1u;
+                    state.operation_audit.status_or |= status;
+                    if (status != 0u) {
+                        throw VulkanRuntimeError(fmt::format(
+                            "phase_c Shape Format-5 count rejected job {} with status 0x{:08x}",
+                            state.result_index,
+                            status));
+                    }
                 }
                 std::uint32_t plast = 0;
                 std::uint32_t clast = 0;
@@ -8232,7 +15335,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         + std::uint64_t{state.minimizer_count - 1u} * 4u,
                     4u);
                 state.total_anchors = static_cast<std::uint64_t>(plast) + clast;
+                if (shape_v5_selected) {
+                    state.operation_audit.anchor_count =
+                        state.total_anchors;
+                    shape_pipeline_collector->set_shape_outcome(
+                        state.result_index, state.total_anchors, 0u);
+                }
                 if (state.total_anchors == 0u) {
+                    if (shape_v5_selected) {
+                        run.operation_proof.records_[state.result_index].audit =
+                            state.operation_audit;
+                    }
                     continue;
                 }
                 if (state.total_anchors > std::numeric_limits<std::uint32_t>::max()) {
@@ -8312,39 +15425,135 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
 
             reset_phase_c_pool_locked();
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+            }
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch2)");
             begin = VkCommandBufferBeginInfo{};
             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_batch2)");
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             record_host_to_shader(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (!state.has_anchors) {
                     continue;
                 }
-                SeedPushC emit_push = state.seed_push;
-                emit_push.emit_mode = 1u;
                 GpuArenaSlice anchors_s = state.anchors_slice();
                 GpuArenaSlice anchor_keys_s = state.anchor_keys_slice();
-                const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
-                    {min_words_buffer, min_words_offset, min_words_range},
-                    {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
-                    {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
-                    {qrec_s.buffer->buffer,
-                     qrec_s.offset + std::uint64_t{state.job.query_index}
-                         * qrec_stride,
-                     sizeof(PhaseCSeedQueryRecordWire)},
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                    {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
-                    {anchors_s.buffer->buffer, anchors_s.offset, anchors_s.size},
-                    {anchor_keys_s.buffer->buffer, anchor_keys_s.offset, anchor_keys_s.size},
-                }};
-                record_phase_c_dispatch_locked(
-                    command_buffer_, emit_pipe, seed_infos,
-                    &emit_push, sizeof(emit_push), state.seed_groups);
+                if (shape_v5_selected) {
+                    GpuShapeV5SeedPush emit_push = state.shape_v5_seed_push;
+                    emit_push.emit_mode = 1u;
+                    emit_push.anchor_capacity = state.total_anchors_u32;
+                    const PhaseCShapeV5ResidentView& view =
+                        *state.job.shape_v5;
+                    const std::array<VkDescriptorBufferInfo, 9> seed_infos{{
+                        {min_words_buffer, min_words_offset, min_words_range},
+                        {view.descriptors->buffer, 0, view.descriptor_bytes},
+                        {view.controls->buffer, 0, shape_control_padded_bytes},
+                        {view.positions->buffer, 0, shape_position_padded_bytes},
+                        {qrec_s.buffer->buffer,
+                         qrec_s.offset + std::uint64_t{state.job.query_index}
+                             * qrec_stride,
+                         sizeof(PhaseCSeedQueryRecordWire)},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                        {state.prefix_s.buffer->buffer,
+                         state.prefix_s.offset,
+                         state.prefix_s.size},
+                        {anchors_s.buffer->buffer,
+                         anchors_s.offset,
+                         anchors_s.size},
+                        {anchor_keys_s.buffer->buffer,
+                         anchor_keys_s.offset,
+                         anchor_keys_s.size},
+                    }};
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, emit_pipe, seed_infos,
+                        &emit_push, sizeof(emit_push), 1u,
+                        shape_pipeline_collector.get(), state.result_index);
+                    run.shape_v5_direct.emit_dispatches += 1u;
+                    state.operation_audit.direct_emit_dispatches += 1u;
+                } else {
+                    SeedPushC emit_push = state.seed_push;
+                    emit_push.emit_mode = 1u;
+                    const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
+                        {min_words_buffer, min_words_offset, min_words_range},
+                        {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
+                        {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
+                        {qrec_s.buffer->buffer,
+                         qrec_s.offset + std::uint64_t{state.job.query_index}
+                             * qrec_stride,
+                         sizeof(PhaseCSeedQueryRecordWire)},
+                        {state.counts_s.buffer->buffer,
+                         state.counts_s.offset,
+                         state.counts_s.size},
+                        {state.prefix_s.buffer->buffer,
+                         state.prefix_s.offset,
+                         state.prefix_s.size},
+                        {anchors_s.buffer->buffer,
+                         anchors_s.offset,
+                         anchors_s.size},
+                        {anchor_keys_s.buffer->buffer,
+                         anchor_keys_s.offset,
+                         anchor_keys_s.size},
+                    }};
+                    record_phase_c_dispatch_locked(
+                        command_buffer_, emit_pipe, seed_infos,
+                        &emit_push, sizeof(emit_push), state.seed_groups);
+                }
                 run.stats.seed_emit_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
+            if (shape_v5_selected) {
+                record_shader_to_host(command_buffer_);
+                submit_and_wait(
+                    device_, queue_, command_buffer_, fence_,
+                    "submit(pc_shape_v5_seed_coord_emit)",
+                    shape_pipeline_collector.get());
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (!state.has_anchors) {
+                        continue;
+                    }
+                    state.operation_audit.emit_submit_wait_identity =
+                        receipt_identity;
+                    std::uint32_t status = 0u;
+                    std::memcpy(
+                        &status,
+                        base + state.counts_s.offset
+                            + static_cast<std::uint64_t>(state.minimizer_count)
+                                * sizeof(std::uint32_t),
+                        sizeof(status));
+                    run.shape_v5_direct.emit_status_checks += 1u;
+                    run.shape_v5_direct.status_or |= status;
+                    state.operation_audit.emit_status_checks += 1u;
+                    state.operation_audit.status_or |= status;
+                    if (status != 0u) {
+                        throw VulkanRuntimeError(fmt::format(
+                            "phase_c Shape Format-5 emit rejected job {} with status 0x{:08x}",
+                            state.result_index,
+                            status));
+                    }
+                }
+
+                reset_phase_c_pool_locked();
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+                check_vk(
+                    vkResetCommandBuffer(command_buffer_, 0),
+                    "reset(pc_shape_v5_seed_coord_post_emit)");
+                begin = VkCommandBufferBeginInfo{};
+                begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                check_vk(
+                    vkBeginCommandBuffer(command_buffer_, &begin),
+                    "begin(pc_shape_v5_seed_coord_post_emit)");
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             if (coordinate_vote_selected) {
                 for (PhaseCSeedCoordinateWaveState& state : states) {
                     if (!state.has_anchors) {
@@ -8422,8 +15631,12 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     state.anchor_wg.num_workgroups,
                     state.anchor_wg.elems_per_wg,
                     3u,
-                    state.sorted_in_scratch);
+                    state.sorted_in_scratch,
+                    shape_pipeline_collector.get(), state.result_index);
                 run.stats.sort_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.sort_operations += 1u;
+                }
                 const GpuArenaSlice sorted_anchors =
                     state.sorted_in_scratch ? anchors_scratch_s : anchors_s;
                 const GpuArenaSlice compacted_anchors_s = state.compacted_anchors_slice();
@@ -8443,12 +15656,28 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 };
                 record_phase_c_dispatch_locked(
                     command_buffer_, range_pipe, range_infos,
-                    &range_push, sizeof(range_push), 1u);
+                    &range_push, sizeof(range_push), 1u,
+                    shape_pipeline_collector.get(), state.result_index);
                 run.stats.range_build_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.range_build_dispatches += 1u;
+                }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
-                device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch2)");
+                device_, queue_, command_buffer_, fence_,
+                "submit(pc_seed_coord_batch2)",
+                shape_pipeline_collector.get());
+            if (shape_v5_selected) {
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (state.has_anchors) {
+                        state.operation_audit.sort_range_submit_wait_identity =
+                            receipt_identity;
+                    }
+                }
+            }
 
             std::uint32_t chain_active_count = 0;
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8460,7 +15689,18 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                     &state.compacted_anchor_count,
                     static_cast<std::byte*>(state.range_count_buf.mapped) + 4u,
                     4u);
+                if (shape_v5_selected) {
+                    state.operation_audit.range_count = state.range_count;
+                    shape_pipeline_collector->set_shape_outcome(
+                        state.result_index,
+                        state.total_anchors,
+                        state.range_count);
+                }
                 if (state.range_count == 0u) {
+                    if (shape_v5_selected) {
+                        run.operation_proof.records_[state.result_index].audit =
+                            state.operation_audit;
+                    }
                     continue;
                 }
                 if (state.compacted_anchor_count > state.total_anchors_u32) {
@@ -8508,11 +15748,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
             }
 
             reset_phase_c_pool_locked();
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->burn_before_reset(command_buffer_);
+            }
             check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch3)");
             begin = VkCommandBufferBeginInfo{};
             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_batch3)");
+            if (shape_pipeline_collector != nullptr) {
+                shape_pipeline_collector->begin(command_buffer_);
+            }
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (!state.chain_active) {
                     continue;
@@ -8576,15 +15822,27 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 chain_push.max_chain_skip = max_chain_skip;
                 const std::uint32_t chain_groups =
                     std::min(state.range_count, features_.max_workgroup_count_x);
-                vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, chain_pipeline);
+                vkCmdBindPipeline(
+                    command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    chain_pipeline.pipeline);
                 vkCmdBindDescriptorSets(
                     command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
                     pipeline_layout_, 0, 1, &chain_set, 0, nullptr);
                 vkCmdPushConstants(
                     command_buffer_, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                     0, sizeof(chain_push), &chain_push);
+                if (shape_pipeline_collector != nullptr) {
+                    shape_pipeline_collector->use(
+                        command_buffer_, state.result_index,
+                        chain_pipeline.shader_key,
+                        chain_pipeline.metal_archive_receipt,
+                        chain_groups);
+                }
                 vkCmdDispatch(command_buffer_, chain_groups, 1, 1);
                 run.stats.chain_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.chain_dispatches += 1u;
+                }
             }
             record_compute_barrier(command_buffer_);
             for (PhaseCSeedCoordinateWaveState& state : states) {
@@ -8619,12 +15877,30 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                 };
                 record_phase_c_dispatch_locked(
                     command_buffer_, coord_pipe, coord_infos,
-                    &coord_push, sizeof(coord_push), 1u);
+                    &coord_push, sizeof(coord_push), 1u,
+                    shape_pipeline_collector.get(), state.result_index);
                 run.stats.chain_backtrack_dispatches += 1u;
+                if (shape_v5_selected) {
+                    state.operation_audit.chain_backtrack_dispatches += 1u;
+                    state.operation_audit.coordinate_dispatches += 1u;
+                }
             }
             record_shader_to_host(command_buffer_);
             submit_and_wait(
-                device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_batch3)");
+                device_, queue_, command_buffer_, fence_,
+                "submit(pc_seed_coord_batch3)",
+                shape_pipeline_collector.get());
+            if (shape_v5_selected) {
+                const std::uint64_t receipt_identity =
+                    next_operation_proof_identity_locked();
+                for (PhaseCSeedCoordinateWaveState& state : states) {
+                    if (state.chain_active) {
+                        state.operation_audit
+                            .chain_coordinate_submit_wait_identity =
+                            receipt_identity;
+                    }
+                }
+            }
 
             for (PhaseCSeedCoordinateWaveState& state : states) {
                 if (state.chain_active) {
@@ -8632,6 +15908,13 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
                         &run.results[state.result_index],
                         state.result_buf.mapped,
                         sizeof(GpuCoordinateOnlyResultWire));
+                    if (shape_v5_selected) {
+                        state.operation_audit.result =
+                            run.results[state.result_index];
+                        state.operation_audit.result_readbacks += 1u;
+                        run.operation_proof.records_[state.result_index].audit =
+                            state.operation_audit;
+                    }
                 }
             }
 
@@ -8645,11 +15928,706 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
         }
     }
 
+    if (shape_pipeline_collector != nullptr) {
+        shape_pipeline_collector->burn_before_reset(command_buffer_);
+    }
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord_batch_post)");
     if (submitted_waves != 0u) {
         chaining_dispatch_count_.fetch_add(submitted_waves, std::memory_order_relaxed);
     }
+    if (shape_v5_selected) {
+        run.shape_v5_direct.direct_count_scan_emit_completed = true;
+        run.operation_proof.query_pipeline_proof_ =
+            std::move(query_authority.pipeline_proof_);
+        run.operation_proof.shape_pipeline_proof_ =
+            shape_pipeline_collector->seal();
+        run.operation_proof.sealed_ =
+            run.operation_proof.records_.size() == jobs.size()
+            && !run.operation_proof.records_.empty()
+            && run.operation_proof.causal_proofs_accepted()
+            && std::all_of(
+                run.operation_proof.records_.begin(),
+                run.operation_proof.records_.end(),
+                [](const auto& record) {
+                    return record.state ==
+                            PersistedShapeV5CoordinateOperationProof::
+                                RecordState::fresh
+                        && record.audit.accepted();
+                });
+    }
     return run;
+}
+
+runtime_detail::PersistedShapeV5CoordinateFinalizationPlan
+Runtime::prepare_persisted_shape_v5_coordinate_finalization(
+    const PersistedShapeV5CoordinateOperationProof& proof,
+    const PersistedShapeV5CoordinateOperationEvidencePreview&
+        expected_preview,
+    const VulkanFeatureSet& live_features,
+    const bool seed_metrics_claimed) noexcept {
+    runtime_detail::PersistedShapeV5CoordinateFinalizationPlan result{};
+    const PersistedShapeV5CoordinateOperationEvidencePreview proof_preview =
+        proof.operation_evidence_preview();
+    if (!proof.all_jobs_accepted() || !expected_preview.accepted()
+        || !proof_preview.accepted()
+        || proof_preview != expected_preview) {
+        return result;
+    }
+    const RuntimeGpuExecutionEnvironmentBinding environment_preview =
+        proof.environment_preview();
+    const RuntimeGpuCacheMetricsAudit cache_metrics_maximum =
+        proof.cache_metrics_preview();
+    if (!environment_preview.accepted()
+        || !cache_metrics_maximum.accepted()) {
+        return result;
+    }
+    const RuntimePipelineOperationAudit& query =
+        proof.query_pipeline_proof_.audit();
+    const RuntimePipelineOperationAudit& shape =
+        proof.shape_pipeline_proof_.audit();
+    const bool environment_equal = query.device_uuid == shape.device_uuid
+        && query.api_version == shape.api_version
+        && query.driver_version == shape.driver_version
+        && query.vendor_id == shape.vendor_id
+        && query.device_id == shape.device_id
+        && query.pipeline_cache_uuid == shape.pipeline_cache_uuid
+        && query.seed_sha256 == shape.seed_sha256
+        && query.seed_size == shape.seed_size
+        && query.manifest_checksum == shape.manifest_checksum
+        && query.seed_receipt_identity == shape.seed_receipt_identity
+        && query.archive_set == shape.archive_set
+        && query.device_uuid == live_features.device_uuid
+        && query.api_version == live_features.api_version
+        && query.driver_version == live_features.driver_version
+        && query.vendor_id == live_features.vendor_id
+        && query.device_id == live_features.device_id
+        && query.pipeline_cache_uuid
+            == live_features.pipeline_cache_uuid;
+    if (!environment_equal) return result;
+
+    const auto union_receipts = proof.receipt_union();
+    if (!union_receipts.valid) return result;
+    result.cache_claim_plan = runtime_detail::
+        RuntimeGpuCacheMetricsClaimPlan::prepare(
+            proof.operation_identity_, cache_metrics_maximum,
+            seed_metrics_claimed,
+            std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+                union_receipts.receipts.data(), union_receipts.count});
+    if (!result.cache_claim_plan.accepted()) return {};
+
+    VulkanFeatureSet identity_features{};
+    identity_features.api_version = query.api_version;
+    identity_features.driver_version = query.driver_version;
+    identity_features.vendor_id = query.vendor_id;
+    identity_features.device_id = query.device_id;
+    identity_features.pipeline_cache_uuid = query.pipeline_cache_uuid;
+    result.environment = RuntimeGpuExecutionEnvironmentBinding{
+        .gpu_environment_present = true,
+        .gpu_device_uuid = query.device_uuid,
+        .gpu_driver_identity =
+            canonical_vulkan_driver_identity(identity_features),
+        .cache_policy = RuntimePipelineCachePolicyEvidence::
+            immutable_preseed_all_hit,
+        .seed_sha256 = query.seed_sha256,
+        .seed_size = query.seed_size,
+        .manifest_checksum = query.manifest_checksum,
+        .pipeline_cache_all_hit = true,
+    };
+    if (shape.committed_submissions
+        > (std::numeric_limits<std::uint64_t>::max)()
+            - query.committed_submissions) {
+        return {};
+    }
+    result.acceptance =
+        PersistedShapeV5CoordinateOperationAcceptanceAudit{
+            .operation_identity = proof.operation_identity_,
+            .expected_job_count =
+                static_cast<std::uint64_t>(proof.records_.size()),
+            .consumed_count =
+                static_cast<std::uint64_t>(proof.consumed_count()),
+            .accepted_count =
+                static_cast<std::uint64_t>(proof.accepted_count()),
+            .burned_count =
+                static_cast<std::uint64_t>(proof.burned_count()),
+            .query_pipeline_receipt_count =
+                static_cast<std::uint64_t>(query.prepared_count),
+            .shape_pipeline_receipt_count =
+                static_cast<std::uint64_t>(shape.prepared_count),
+            .committed_submission_count = query.committed_submissions
+                + shape.committed_submissions,
+            .seed_receipt_identity = query.seed_receipt_identity,
+        };
+    if (!result.environment.accepted()
+        || result.environment != environment_preview
+        || !result.acceptance.accepted()
+        || result.acceptance != expected_preview.acceptance) {
+        return {};
+    }
+    result.valid = true;
+    return result;
+}
+
+bool Runtime::self_test_persisted_shape_v5_finalizer_preclaim_contract(
+    RuntimeMetalArchivePipelineAudit base_audit) {
+    if (!base_audit.accepted() || base_audit.pipeline_create_ns == 0u) {
+        return false;
+    }
+    const std::array<ShaderVariantKey, 11> keys{
+        make_shader_key(
+            ShaderKind::phase_c_sketch_tile, 384u, 64u, 10u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_block, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_shape_v5_seed_count, 384u, 128u, 3u),
+        make_shader_key(
+            ShaderKind::phase_c_shape_v5_seed_emit, 384u, 128u, 3u),
+        make_shader_key(
+            ShaderKind::phase_c_chain_range_build, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_coordinate_reduce, 384u, 128u, 1u),
+        make_shader_key(
+            ShaderKind::chain_tiled_dp_u64, 32u, 32u, 0u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_scan, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_sort_radix_scatter, 384u, 1u, 1u),
+    };
+    if (!std::all_of(
+            keys.begin(), keys.end(), [](const ShaderVariantKey& key) {
+                return valid_shader_variant_key(key);
+            })) {
+        return false;
+    }
+    std::array<RuntimeMetalArchivePipelineReceipt, 11> receipts{};
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        RuntimeMetalArchivePipelineAudit audit = base_audit;
+        audit.receipt_identity = 8000u + i;
+        audit.scope_identity = 8100u + i;
+        audit.shader_key = keys[i];
+        receipts[i] = RuntimeMetalArchivePipelineReceipt{
+            std::move(audit)};
+        if (!receipts[i].accepted()) return false;
+    }
+    const auto command = [](const std::uintptr_t identity) {
+        return reinterpret_cast<VkCommandBuffer>(identity);
+    };
+
+    RuntimePipelineOperationProof query{};
+    RuntimePipelineOperationProof shape{};
+    try {
+        auto query_collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::query_sketch, 1u, 101u);
+        for (std::size_t i = 0u; i < 3u; ++i) {
+            query_collector->prepare(keys[i], &receipts[i]);
+        }
+        query_collector->begin(command(1u));
+        query_collector->use(
+            command(1u), 0u, keys[0], &receipts[0], 3u);
+        query_collector->use(
+            command(1u), 0u, keys[1], &receipts[1], 2u);
+        query_collector->use(
+            command(1u), 0u, keys[2], &receipts[2], 2u);
+        query_collector->commit(command(1u));
+        query_collector->begin(command(2u));
+        query_collector->use(
+            command(2u), 0u, keys[0], &receipts[0], 3u);
+        query_collector->use(
+            command(2u), 0u, keys[2], &receipts[2], 1u);
+        query_collector->commit(command(2u));
+        query = query_collector->seal();
+
+        auto shape_collector = RuntimePipelineUseCollector::create(
+            RuntimePipelineOperationKind::shape_v5_coordinate, 1u, 202u);
+        constexpr std::array<std::size_t, 7> shape_base_slots{
+            3u, 4u, 1u, 2u, 5u, 6u, 7u};
+        for (const std::size_t slot : shape_base_slots) {
+            shape_collector->prepare(keys[slot], &receipts[slot]);
+        }
+        for (std::size_t slot = 8u; slot < 11u; ++slot) {
+            shape_collector->prepare(keys[slot], &receipts[slot]);
+        }
+        shape_collector->set_shape_input(0u, 1u, 255u, 0u);
+        shape_collector->set_shape_outcome(0u, 1u, 1u);
+
+        shape_collector->begin(command(11u));
+        shape_collector->use(
+            command(11u), 0u, keys[3], &receipts[3], 1u);
+        shape_collector->use(
+            command(11u), 0u, keys[1], &receipts[1], 1u);
+        shape_collector->use(
+            command(11u), 0u, keys[2], &receipts[2], 1u);
+        shape_collector->use(
+            command(11u), 0u, keys[2], &receipts[2], 1u);
+        shape_collector->commit(command(11u));
+
+        shape_collector->begin(command(12u));
+        shape_collector->use(
+            command(12u), 0u, keys[4], &receipts[4], 1u);
+        shape_collector->commit(command(12u));
+
+        shape_collector->begin(command(13u));
+        for (std::size_t slot = 8u; slot < 11u; ++slot) {
+            shape_collector->use(
+                command(13u), 0u, keys[slot], &receipts[slot], 1u);
+        }
+        shape_collector->use(
+            command(13u), 0u, keys[5], &receipts[5], 1u);
+        shape_collector->commit(command(13u));
+
+        shape_collector->begin(command(14u));
+        shape_collector->use(
+            command(14u), 0u, keys[7], &receipts[7], 1u);
+        shape_collector->use(
+            command(14u), 0u, keys[6], &receipts[6], 1u);
+        shape_collector->commit(command(14u));
+        shape = shape_collector->seal();
+    } catch (...) {
+        return false;
+    }
+    if (!query.accepted_query_sketch()
+        || !shape.accepted_shape_v5_coordinate()) {
+        return false;
+    }
+
+    PersistedShapeV5CoordinateOperationProof proof{};
+    proof.operation_identity_ = 202u;
+    try {
+        proof.admit_records(1u);
+    } catch (...) {
+        return false;
+    }
+    proof.records_[0].state =
+        PersistedShapeV5CoordinateOperationProof::RecordState::accepted;
+    proof.accepted_count_ = 1u;
+    proof.query_pipeline_proof_ = std::move(query);
+    proof.shape_pipeline_proof_ = std::move(shape);
+    proof.sealed_ = true;
+    const PersistedShapeV5CoordinateOperationEvidencePreview expected =
+        proof.operation_evidence_preview();
+    if (!proof.all_jobs_accepted() || !expected.accepted()
+        || expected.acceptance.shape_pipeline_receipt_count != 10u) {
+        return false;
+    }
+    VulkanFeatureSet live_features{};
+    live_features.device_uuid = expected.device_uuid;
+    live_features.api_version = expected.api_version;
+    live_features.driver_version = expected.driver_version;
+    live_features.vendor_id = expected.vendor_id;
+    live_features.device_id = expected.device_id;
+    live_features.pipeline_cache_uuid = expected.pipeline_cache_uuid;
+    bool seed_claimed = false;
+    const auto claims_unchanged = [&]() {
+        return !seed_claimed
+            && std::none_of(
+                receipts.begin(), receipts.end(), [](const auto& receipt) {
+                    return receipt.metrics_claimed_;
+                });
+    };
+    if (!claims_unchanged()) return false;
+    {
+        auto accepted = prepare_persisted_shape_v5_coordinate_finalization(
+            proof, expected, live_features, seed_claimed);
+        if (!accepted.accepted()
+            || accepted.acceptance != expected.acceptance
+            || accepted.environment != proof.environment_preview()
+            || accepted.cache_claim_plan.audit()
+                != expected.maximum_cache_metrics
+            || accepted.cache_claim_plan.committed()) {
+            return false;
+        }
+    }
+    if (!claims_unchanged()) return false;
+
+    const auto rejected = [&](const auto& candidate,
+                              const VulkanFeatureSet& live) {
+        auto plan = prepare_persisted_shape_v5_coordinate_finalization(
+            proof, candidate, live, seed_claimed);
+        return !plan.accepted() && claims_unchanged();
+    };
+    const auto rejected_preview = [&](auto mutate) {
+        auto candidate = expected;
+        mutate(candidate);
+        return rejected(candidate, live_features);
+    };
+    const auto rejected_live = [&](auto mutate) {
+        auto candidate = live_features;
+        mutate(candidate);
+        return rejected(expected, candidate);
+    };
+
+    // Every fixed field crossing the SQL-preview/finalizer equality gate gets
+    // an independent mutation. Rejection must leave all report-once bits clear.
+    if (!rejected_preview([](auto& value) {
+            ++value.acceptance.operation_identity;
+            value.shape_pipeline_operation_identity =
+                value.acceptance.operation_identity;
+            value.maximum_cache_metrics.token_identity =
+                value.acceptance.operation_identity;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.acceptance.expected_job_count;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.acceptance.consumed_count;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.acceptance.accepted_count;
+        })
+        || !rejected_preview([](auto& value) {
+            value.acceptance.burned_count = 1u;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.acceptance.query_pipeline_receipt_count;
+        })
+        || !rejected_preview([](auto& value) {
+            --value.acceptance.shape_pipeline_receipt_count;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.acceptance.committed_submission_count;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.acceptance.seed_receipt_identity;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.query_pipeline_operation_identity;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.shape_pipeline_operation_identity;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.query_submission_ordinals[0];
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.query_submission_ordinals[1];
+        })
+        || !rejected_preview([](auto& value) {
+            value.device_uuid[0] ^= 0x80u;
+        })
+        || !rejected_preview([](auto& value) { ++value.api_version; })
+        || !rejected_preview([](auto& value) { ++value.driver_version; })
+        || !rejected_preview([](auto& value) { ++value.vendor_id; })
+        || !rejected_preview([](auto& value) { ++value.device_id; })
+        || !rejected_preview([](auto& value) {
+            value.pipeline_cache_uuid[0] ^= 0x80u;
+        })
+        || !rejected_preview([](auto& value) {
+            value.seed_sha256[0] ^= 0x80u;
+        })
+        || !rejected_preview([](auto& value) { ++value.seed_size; })
+        || !rejected_preview([](auto& value) {
+            ++value.manifest_checksum;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.maximum_cache_metrics.token_identity;
+        })
+        || !rejected_preview([](auto& value) {
+            value.maximum_cache_metrics.gpu_pipeline_cache_loads = 0u;
+            value.maximum_cache_metrics.gpu_pipeline_cache_seed_bytes = 0u;
+            value.maximum_cache_metrics.gpu_pipeline_cache_load_ns = 0u;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.maximum_cache_metrics.gpu_pipeline_cache_seed_bytes;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.maximum_cache_metrics.gpu_pipeline_cache_load_ns;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.maximum_cache_metrics.gpu_pipeline_creates;
+        })
+        || !rejected_preview([](auto& value) {
+            ++value.maximum_cache_metrics.gpu_pipeline_creation_ns;
+        })
+        || !rejected_preview([](auto& value) {
+            value.maximum_cache_metrics.saturated = true;
+        })) {
+        return false;
+    }
+
+    if (!rejected_live([](auto& value) {
+            value.device_uuid[0] ^= 0x40u;
+        })
+        || !rejected_live([](auto& value) { ++value.api_version; })
+        || !rejected_live([](auto& value) { ++value.driver_version; })
+        || !rejected_live([](auto& value) { ++value.vendor_id; })
+        || !rejected_live([](auto& value) { ++value.device_id; })
+        || !rejected_live([](auto& value) {
+            value.pipeline_cache_uuid[0] ^= 0x40u;
+        })) {
+        return false;
+    }
+
+    const auto rejected_receipt = [&](auto mutate) {
+        RuntimeMetalArchivePipelineAudit saved = receipts[10].audit_;
+        mutate(receipts[10].audit_);
+        // Receipt mutations exercise the finalizer's frozen PREPARED/USED
+        // equality gate, not the qualification's own self-consistency gate.
+        // Keep the process qualification bound to the mutated live audit so
+        // the receipt remains independently accepted before the finalizer
+        // rejects its drift from the sealed operation proof.
+        RuntimeMetalArchiveProcessQualification& qualification =
+            receipts[10].audit_.cache_qualification;
+        qualification.archive_set = receipts[10].audit_.expected_archives;
+        qualification.vulkan_device_uuid =
+            receipts[10].audit_.runtime_vulkan_device_uuid;
+        qualification.api_version = receipts[10].audit_.api_version;
+        qualification.driver_version = receipts[10].audit_.driver_version;
+        qualification.vendor_id = receipts[10].audit_.vendor_id;
+        qualification.device_id = receipts[10].audit_.device_id;
+        qualification.pipeline_cache_uuid =
+            receipts[10].audit_.pipeline_cache_uuid;
+        qualification.seed_receipt_identity =
+            receipts[10].audit_.seed_receipt_identity;
+        qualification.seed_sha256 = receipts[10].audit_.seed_sha256;
+        qualification.seed_size = receipts[10].audit_.seed_size;
+        qualification.manifest_checksum =
+            receipts[10].audit_.manifest_checksum;
+        qualification.identity =
+            runtime_metal_archive_process_qualification_identity(
+                qualification);
+        const bool remained_valid = receipts[10].accepted();
+        const bool result = remained_valid
+            && rejected(expected, live_features);
+        receipts[10].audit_ = std::move(saved);
+        return result && claims_unchanged();
+    };
+    const auto change_nonzero = [](auto& value) {
+        using Value = std::remove_reference_t<decltype(value)>;
+        value = value == (std::numeric_limits<Value>::max)()
+            ? value - 1u
+            : value + 1u;
+    };
+    const auto change_nonzero_byte = [](auto& bytes) {
+        bytes[0] = bytes[0] == 0xffu
+            ? static_cast<std::uint8_t>(0xfeu)
+            : static_cast<std::uint8_t>(bytes[0] + 1u);
+    };
+    if (!rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.receipt_identity);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            audit.shader_key = keys[0];
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero_byte(audit.configured_vulkan_device_uuid);
+            audit.runtime_vulkan_device_uuid =
+                audit.configured_vulkan_device_uuid;
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.api_version);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.driver_version);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.vendor_id);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.device_id);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero_byte(audit.pipeline_cache_uuid);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero_byte(audit.seed_sha256);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.seed_size);
+            audit.seed_artifact_bytes = audit.seed_size;
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.manifest_checksum);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.seed_receipt_identity);
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.expected_archives.ordered_checksum);
+            audit.loaded_archives = audit.expected_archives;
+        })
+        || !rejected_receipt([&](auto& audit) {
+            change_nonzero(audit.pipeline_create_ns);
+        })) {
+        return false;
+    }
+    return claims_unchanged();
+}
+
+bool Runtime::self_test_gpu_cache_partial_delta_contract(
+    RuntimeMetalArchivePipelineAudit base_audit) {
+    if (!base_audit.accepted() || base_audit.pipeline_create_ns == 0u) {
+        return false;
+    }
+    const std::array<ShaderVariantKey, 3> keys{
+        make_shader_key(
+            ShaderKind::phase_c_sketch_tile, 384u, 64u, 10u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_block, 384u, 1u, 1u),
+        make_shader_key(
+            ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u),
+    };
+    if (!std::all_of(
+            keys.begin(), keys.end(), [](const ShaderVariantKey& key) {
+                return valid_shader_variant_key(key);
+            })) {
+        return false;
+    }
+    std::array<RuntimeMetalArchivePipelineReceipt, 3> receipts{};
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        RuntimeMetalArchivePipelineAudit audit = base_audit;
+        audit.receipt_identity = 7000u + i;
+        audit.scope_identity = 7100u + i;
+        audit.shader_key = keys[i];
+        receipts[i] = RuntimeMetalArchivePipelineReceipt{
+            std::move(audit)};
+        if (!receipts[i].accepted()) return false;
+    }
+    std::array<const RuntimeMetalArchivePipelineReceipt*, 3> pointers{};
+    RuntimeGpuCacheMetricsAudit maximum{
+        .token_identity = 7200u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = receipts[0].audit().seed_size,
+        .gpu_pipeline_cache_load_ns = receipts[0].audit().seed_load_ns,
+        .gpu_pipeline_creates =
+            static_cast<std::uint64_t>(receipts.size()),
+    };
+    for (std::size_t i = 0u; i < receipts.size(); ++i) {
+        pointers[i] = &receipts[i];
+        if (receipts[i].audit().pipeline_create_ns
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - maximum.gpu_pipeline_creation_ns) {
+            return false;
+        }
+        maximum.gpu_pipeline_creation_ns +=
+            receipts[i].audit().pipeline_create_ns;
+    }
+    if (!maximum.accepted()) return false;
+
+    bool seed_claimed = false;
+    RuntimeGpuCacheMetricsAudit subset_maximum{
+        .token_identity = 7199u,
+        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_seed_bytes = receipts[0].audit().seed_size,
+        .gpu_pipeline_cache_load_ns = receipts[0].audit().seed_load_ns,
+        .gpu_pipeline_creates = 1u,
+        .gpu_pipeline_creation_ns =
+            receipts[0].audit().pipeline_create_ns,
+    };
+    auto subset = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        subset_maximum.token_identity, subset_maximum, seed_claimed,
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+            pointers.data(), 1u});
+    if (!subset.accepted() || subset.audit() != subset_maximum) {
+        return false;
+    }
+    subset.commit(seed_claimed);
+    if (!subset.committed() || !seed_claimed
+        || !receipts[0].metrics_claimed_
+        || receipts[1].metrics_claimed_
+        || receipts[2].metrics_claimed_) {
+        return false;
+    }
+
+    auto remainder = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        maximum.token_identity, maximum, seed_claimed,
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+            pointers.data(), pointers.size()});
+    if (!remainder.accepted()) return false;
+    const RuntimeGpuCacheMetricsAudit partial = remainder.audit();
+    if (!partial.componentwise_bounded_by(maximum)
+        || partial == maximum
+        || partial.gpu_pipeline_cache_loads != 0u
+        || partial.gpu_pipeline_cache_seed_bytes != 0u
+        || partial.gpu_pipeline_cache_load_ns != 0u
+        || partial.gpu_pipeline_creates != 2u
+        || partial.gpu_pipeline_creation_ns == 0u) {
+        return false;
+    }
+    remainder.commit(seed_claimed);
+    if (!remainder.committed()
+        || std::any_of(
+            receipts.begin(), receipts.end(), [](const auto& receipt) {
+                return !receipt.metrics_claimed_;
+            })) {
+        return false;
+    }
+
+    RuntimeGpuCacheMetricsDelta issued{};
+    issued.audit_ = partial;
+    issued.issued_ = true;
+    RuntimeGpuCacheMetricsDelta moved{std::move(issued)};
+    if (issued.accepted() || issued.audit() != RuntimeGpuCacheMetricsAudit{}
+        || !moved.accepted() || moved.audit() != partial) {
+        return false;
+    }
+    moved.consume();
+    if (moved.accepted()
+        || moved.audit() != RuntimeGpuCacheMetricsAudit{}) {
+        return false;
+    }
+
+    RuntimeGpuCacheMetricsAudit later_maximum = maximum;
+    later_maximum.token_identity = 7201u;
+    auto later = runtime_detail::RuntimeGpuCacheMetricsClaimPlan::prepare(
+        later_maximum.token_identity, later_maximum, seed_claimed,
+        std::span<const RuntimeMetalArchivePipelineReceipt* const>{
+            pointers.data(), pointers.size()});
+    const RuntimeGpuCacheMetricsAudit zero = later.audit();
+    if (!later.accepted()
+        || zero.token_identity != later_maximum.token_identity
+        || zero.gpu_pipeline_cache_loads != 0u
+        || zero.gpu_pipeline_cache_seed_bytes != 0u
+        || zero.gpu_pipeline_cache_load_ns != 0u
+        || zero.gpu_pipeline_creates != 0u
+        || zero.gpu_pipeline_creation_ns != 0u
+        || zero.saturated) {
+        return false;
+    }
+    later.commit(seed_claimed);
+    if (!later.committed()) return false;
+    RuntimeGpuCacheMetricsDelta zero_delta{};
+    zero_delta.audit_ = zero;
+    zero_delta.issued_ = true;
+    if (!zero_delta.accepted()) return false;
+    zero_delta.consume();
+    return !zero_delta.accepted()
+        && zero_delta.audit() == RuntimeGpuCacheMetricsAudit{};
+}
+
+PersistedShapeV5CoordinateAcceptedOperation
+Runtime::finalize_persisted_shape_v5_coordinate_operation(
+    PersistedShapeV5CoordinateOperationProof&& proof,
+    const PersistedShapeV5CoordinateOperationEvidencePreview&
+        expected_preview) {
+    std::scoped_lock lock(mu_);
+    auto plan = prepare_persisted_shape_v5_coordinate_finalization(
+        proof, expected_preview, features_, seed_metrics_claimed_);
+    if (!plan.accepted()) {
+        throw VulkanRuntimeError(
+            "persisted Shape-V5 operation finalization payload is invalid");
+    }
+
+    // This is deliberately the last external-state check. Everything after it
+    // is fixed-field move/copy construction and cannot dispatch or allocate.
+    require_immutable_metal_policy_live(
+        "persisted Shape-V5 operation final publication");
+
+    // No failing work follows this mutation. The queue/cache mutex makes the
+    // seed and receipt claims one transaction with authority minting.
+    const RuntimeGpuCacheMetricsAudit cache_metrics =
+        plan.cache_claim_plan.audit();
+    plan.cache_claim_plan.commit(seed_metrics_claimed_);
+    PersistedShapeV5CoordinateAcceptedOperation accepted{};
+    accepted.audit_ = plan.acceptance;
+    accepted.environment_ = plan.environment;
+    accepted.cache_metrics_.audit_ = cache_metrics;
+    accepted.cache_metrics_.issued_ = true;
+    accepted.issued_ = true;
+    proof = PersistedShapeV5CoordinateOperationProof{};
+    return accepted;
 }
 
 std::vector<GpuCoordinateOnlyResultWire>
@@ -8803,7 +16781,8 @@ GpuCoordinateOnlyResultWire Runtime::run_phase_c_seed_to_coordinate_roundtrip(
         get_phase_b_pipeline_locked(ShaderKind::phase_c_chain_range_build, 1u, 1u);
     const PhaseBPipeline coord_pipe =
         get_phase_b_pipeline_locked(ShaderKind::phase_c_coordinate_reduce, 128u, 1u);
-    const VkPipeline chain_pipeline = create_pipeline_locked(chain_key);
+    const VkPipeline chain_pipeline =
+        create_pipeline_locked(chain_key).pipeline;
 
     const std::uint32_t target_offset_lo =
         static_cast<std::uint32_t>(inputs.target_position_offset & 0xffffffffull);

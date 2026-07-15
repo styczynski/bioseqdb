@@ -73,6 +73,183 @@ inline constexpr std::uint32_t k_gpu_grouped32_control_bytes = 12u;
 inline constexpr std::uint32_t k_gpu_grouped32_position_bytes = 4u;
 inline constexpr std::uint32_t k_gpu_grouped32_max_local_bp = 0x7fffffffu;
 
+// Persisted Format-5 is the shape-aware GPU ABI3.  Controls stay in their
+// authenticated variable-width SoA byte stream and positions stay encoded as
+// segment-local `(bp << 1) | strand` scalars.  A resident loader only rebases
+// the four array byte offsets below after concatenating extents; it must not
+// decode controls, widen positions, or rebuild a hash table on the CPU.
+inline constexpr std::uint32_t k_gpu_shape_v5_abi_version = 3u;
+inline constexpr std::uint32_t k_gpu_shape_v5_partition_raw_soa = 1u << 0u;
+inline constexpr std::uint32_t
+    k_gpu_shape_v5_partition_segment_local = 1u << 1u;
+inline constexpr std::uint32_t
+    k_gpu_shape_v5_partition_terminal_prefix = 1u << 2u;
+inline constexpr std::uint32_t k_gpu_shape_v5_partition_required_flags =
+    k_gpu_shape_v5_partition_raw_soa
+    | k_gpu_shape_v5_partition_segment_local
+    | k_gpu_shape_v5_partition_terminal_prefix;
+
+/// Fail-closed status bits written by the direct Format-5 count/emit shaders.
+/// The status word lives at `counts[status_index]`; scan only receives the
+/// preceding query-local count range, so it cannot overwrite the evidence.
+enum class GpuShapeV5SeedStatus : std::uint32_t {
+    none = 0u,
+    contract = 1u << 0u,
+    query = 1u << 1u,
+    control = 1u << 2u,
+    position = 1u << 3u,
+    emission = 1u << 4u,
+};
+
+[[nodiscard]] constexpr std::uint32_t gpu_shape_v5_seed_status_bit(
+    GpuShapeV5SeedStatus status) noexcept
+{
+    return static_cast<std::uint32_t>(status);
+}
+
+/// Device descriptor for one admitted Format-5 directory entry.  All byte
+/// offsets are absolute in the resident aggregate control/position buffers.
+/// Widths are the persisted scalar widths and must be exactly 2, 4, or 8.
+/// Three control offsets identify the SoA hash, terminal-prefix, and
+/// saturated-count arrays; the fourth offset addresses the raw position
+/// extent, all without changing their persisted representation.
+struct GpuShapeV5ResidentPartitionDescriptor {
+    std::uint32_t partition_id = 0;
+    std::uint32_t directory_ordinal = 0;
+    std::uint32_t position_segment = 0;
+    std::uint32_t flags = 0;
+    std::uint64_t hash_byte_offset = 0;
+    std::uint64_t prefix_byte_offset = 0;
+    std::uint64_t count_byte_offset = 0;
+    std::uint64_t position_byte_offset = 0;
+    std::uint32_t control_count = 0;
+    std::uint32_t position_count = 0;
+    std::uint32_t hash_width = 0;
+    std::uint32_t offset_width = 0;
+    std::uint32_t count_width = 0;
+    std::uint32_t position_width = 0;
+    std::uint64_t low_hash = 0;
+    std::uint64_t high_hash = 0;
+    std::uint64_t segment_base_bp = 0;
+    std::uint64_t segment_end_bp = 0;
+};
+
+/// Push ABI for direct count/emit from resident Format-5 bytes.  The persisted
+/// cap is carried independently of the query's `max_occ`: count/emit is legal
+/// only when the query threshold is no larger than the cap under which the
+/// on-disk saturated-count array was encoded.
+struct GpuShapeV5SeedPush {
+    std::uint32_t abi_version = k_gpu_shape_v5_abi_version;
+    std::uint32_t words32_per_minimizer = 0;
+    std::uint32_t word_kind = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t pos_bits = 0;
+    std::uint32_t kmer_size = 0;
+    std::uint32_t partition_count = 0;
+    std::uint32_t max_occ = 0;
+    std::uint32_t emit_mode = 0;
+    std::uint32_t record_count = 0;
+    std::uint32_t target_ref_bits = 0;
+    std::uint32_t query_minimizer_count = 0;
+    std::uint32_t control_word_count = 0;
+    std::uint32_t position_word_count = 0;
+    std::uint32_t anchor_capacity = 0;
+    std::uint32_t max_occ_cap_lo = 0;
+    std::uint32_t max_occ_cap_hi = 0;
+    // Query-local counts occupy [0, status_index); this final N+1 word is
+    // reserved for fail-closed shader status and is never part of prefix scan.
+    std::uint32_t status_index = 0;
+};
+
+static_assert(sizeof(GpuShapeV5ResidentPartitionDescriptor) == 104u);
+static_assert(alignof(GpuShapeV5ResidentPartitionDescriptor) == 8u);
+static_assert(offsetof(
+    GpuShapeV5ResidentPartitionDescriptor, hash_byte_offset) == 16u);
+static_assert(offsetof(
+    GpuShapeV5ResidentPartitionDescriptor, control_count) == 48u);
+static_assert(offsetof(
+    GpuShapeV5ResidentPartitionDescriptor, low_hash) == 72u);
+static_assert(offsetof(
+    GpuShapeV5ResidentPartitionDescriptor, segment_end_bp) == 96u);
+static_assert(std::is_standard_layout_v<
+    GpuShapeV5ResidentPartitionDescriptor>);
+static_assert(sizeof(GpuShapeV5SeedPush) == 72u);
+static_assert(offsetof(GpuShapeV5SeedPush, abi_version) == 0u);
+static_assert(offsetof(GpuShapeV5SeedPush, partition_count) == 24u);
+static_assert(offsetof(GpuShapeV5SeedPush, query_minimizer_count) == 44u);
+static_assert(offsetof(GpuShapeV5SeedPush, max_occ_cap_lo) == 60u);
+static_assert(offsetof(GpuShapeV5SeedPush, status_index) == 68u);
+
+[[nodiscard]] constexpr bool gpu_shape_v5_scalar_width_valid(
+    std::uint32_t width) noexcept
+{
+    return width == 2u || width == 4u || width == 8u;
+}
+
+[[nodiscard]] constexpr bool gpu_shape_v5_scalar_range_fits(
+    std::uint64_t byte_offset,
+    std::uint64_t element_count,
+    std::uint32_t width,
+    std::uint64_t buffer_bytes) noexcept
+{
+    if (!gpu_shape_v5_scalar_width_valid(width)
+        || byte_offset % width != 0u
+        || byte_offset > buffer_bytes
+        || element_count
+            > ((std::numeric_limits<std::uint64_t>::max)() - byte_offset)
+                / width) {
+        return false;
+    }
+    return element_count * width <= buffer_bytes - byte_offset;
+}
+
+/// Validate the complete resident descriptor against the aggregate byte
+/// buffers before it is uploaded.  This is shape validation only; generation,
+/// source, checksum, and device identities remain obligations of the resident
+/// generation owner.
+[[nodiscard]] constexpr bool gpu_shape_v5_partition_descriptor_valid(
+    const GpuShapeV5ResidentPartitionDescriptor& descriptor,
+    std::uint64_t control_buffer_bytes,
+    std::uint64_t position_buffer_bytes) noexcept
+{
+    if (descriptor.flags != k_gpu_shape_v5_partition_required_flags
+        || descriptor.control_count == 0u
+        || descriptor.position_count == 0u
+        || descriptor.low_hash > descriptor.high_hash
+        || descriptor.segment_base_bp >= descriptor.segment_end_bp
+        || !gpu_shape_v5_scalar_width_valid(descriptor.hash_width)
+        || !gpu_shape_v5_scalar_width_valid(descriptor.offset_width)
+        || !gpu_shape_v5_scalar_width_valid(descriptor.count_width)
+        || !gpu_shape_v5_scalar_width_valid(descriptor.position_width)) {
+        return false;
+    }
+    const std::uint64_t position_bits = descriptor.position_width * 8u;
+    const std::uint64_t maximum_segment_span =
+        std::uint64_t{1} << (position_bits - 1u);
+    return descriptor.segment_end_bp - descriptor.segment_base_bp
+            <= maximum_segment_span
+        && gpu_shape_v5_scalar_range_fits(
+            descriptor.hash_byte_offset,
+            descriptor.control_count,
+            descriptor.hash_width,
+            control_buffer_bytes)
+        && gpu_shape_v5_scalar_range_fits(
+            descriptor.prefix_byte_offset,
+            static_cast<std::uint64_t>(descriptor.control_count) + 1u,
+            descriptor.offset_width,
+            control_buffer_bytes)
+        && gpu_shape_v5_scalar_range_fits(
+            descriptor.count_byte_offset,
+            descriptor.control_count,
+            descriptor.count_width,
+            control_buffer_bytes)
+        && gpu_shape_v5_scalar_range_fits(
+            descriptor.position_byte_offset,
+            descriptor.position_count,
+            descriptor.position_width,
+            position_buffer_bytes);
+}
+
 enum class GpuGrouped32ValidationError : std::uint32_t {
     none = 0u,
     descriptor_bounds = 1u << 0u,

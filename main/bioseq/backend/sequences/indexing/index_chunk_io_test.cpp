@@ -150,12 +150,17 @@ TEST_CASE("DOC0371 payload-row checksum pins LE metadata order and relocation id
         std::span<const std::byte>{blob}));
 }
 
-TEST_CASE("DOC0371 revision-3 PostgreSQL tuple batching is bounded and genuinely multi-row",
-          "[indexing][chunk-io][rev3][postgres-batch]") {
+TEST_CASE("DOC0373 Format-5 PostgreSQL tuple batching flushes before row nine",
+          "[indexing][chunk-io][rev3][postgres-batch][doc0373]") {
     using bioseq::indexing::plan_revision3_tuple_batch_append;
     constexpr std::uint64_t max_rows = 4096;
     constexpr std::uint64_t max_bytes = 65'535;
-    constexpr std::uint64_t tuple_bytes = 7'000;
+    // This is the PostgreSQL writer's admitted size for one maximally filled
+    // Format-5 row: 8,140 formed-tuple bytes plus its 32-byte slot/tuple
+    // admission overhead.  Keep PostgreSQL-only types out of this portable
+    // unit target; the PG integration fixture checks the runtime equation.
+    constexpr std::uint64_t tuple_bytes = 8'172;
+    STATIC_REQUIRE(tuple_bytes == 8'172);
 
     std::uint64_t pending_rows = 0;
     std::uint64_t pending_bytes = 0;
@@ -163,7 +168,9 @@ TEST_CASE("DOC0371 revision-3 PostgreSQL tuple batching is bounded and genuinely
     std::uint64_t multirow_flush_count = 0;
     std::uint64_t maximum_observed_rows = 0;
     std::uint64_t maximum_observed_bytes = 0;
-    const auto flush = [&] {
+    const auto flush = [&pending_rows, &pending_bytes, &flush_count,
+                        &multirow_flush_count, &maximum_observed_rows,
+                        &maximum_observed_bytes] {
         REQUIRE(pending_rows > 0);
         REQUIRE(pending_rows <= max_rows);
         REQUIRE(pending_bytes <= max_bytes);
@@ -190,8 +197,14 @@ TEST_CASE("DOC0371 revision-3 PostgreSQL tuple batching is bounded and genuinely
 
     REQUIRE(flush_count < 250);
     REQUIRE(multirow_flush_count == flush_count);
-    REQUIRE(maximum_observed_rows == 9);
-    REQUIRE(maximum_observed_bytes == 63'000);
+    REQUIRE(maximum_observed_rows == 8);
+    REQUIRE(maximum_observed_bytes == 65'376);
+
+    const auto ninth = plan_revision3_tuple_batch_append(
+        8, 8 * tuple_bytes, tuple_bytes, max_rows, max_bytes);
+    REQUIRE(ninth.valid);
+    REQUIRE(ninth.flush_before);
+    REQUIRE_FALSE(ninth.flush_after);
 
     REQUIRE_FALSE(plan_revision3_tuple_batch_append(
         0, 0, 0, max_rows, max_bytes).valid);
@@ -227,18 +240,17 @@ TEST_CASE("DOC0371 publication RETURNING must equal every proven head byte",
 
 TEST_CASE("DOC0371 admitted owned buffers die before their permit",
           "[indexing][chunk-io][rev3][admission]") {
-    auto& admission =
-        bioseq::parallelism::MemoryAdmissionController::instance();
+    bioseq::parallelism::MemoryAdmissionController admission;
     REQUIRE(admission.reserved_bytes() == 0u);
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
     admission.set_index_memory_cap_bytes(1u << 20u);
     std::uint64_t observed_during_buffer_destruction = 0;
 
     struct BufferLifetimeProbe {
+        bioseq::parallelism::MemoryAdmissionController* admission = nullptr;
         std::uint64_t* observed = nullptr;
         ~BufferLifetimeProbe() {
-            *observed = bioseq::parallelism::MemoryAdmissionController::instance()
-                .reserved_bytes();
+            *observed = admission->reserved_bytes();
         }
     };
     struct AdmittedOwner {
@@ -252,6 +264,7 @@ TEST_CASE("DOC0371 admitted owned buffers die before their permit",
         AdmittedOwner owner{
             .permit = std::move(*permit),
             .buffer = BufferLifetimeProbe{
+                .admission = &admission,
                 .observed = &observed_during_buffer_destruction},
         };
         REQUIRE(admission.reserved_bytes() == 4096u);

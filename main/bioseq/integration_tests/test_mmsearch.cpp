@@ -159,6 +159,12 @@ public:
     return query_rows(ctx, "SELECT * FROM bioseq.last_alignment_execution_stats();");
 }
 
+[[nodiscard]] rowset_t last_alignment_stats_v2(
+        const connection_test_context& ctx) {
+    return query_rows(
+        ctx, "SELECT * FROM bioseq.last_alignment_execution_stats_v2();");
+}
+
 [[nodiscard]] long long stats_i64(
         const row_t& row,
         const std::size_t column) {
@@ -215,7 +221,29 @@ void require_no_current_compatible_persisted_index(
         seq_typmod{.alphabet = "dna4", .width = 32});
 }
 
-void seed_batch_join_target(connection_test_context& ctx) {
+[[nodiscard]] std::string batch_join_wide_target_sequence() {
+    /* A reproducible high-entropy target large enough to produce several
+     * 256-KiB Format-4 directory partitions.  Repeating the small hoe fixture
+     * would make the prefix minimizer recur in every partition and therefore
+     * exercise the full route instead of selective loading. */
+    constexpr std::size_t target_bp = 512u * 1024u;
+    constexpr std::string_view bases = "ACGT";
+    std::string sequence(target_bp, 'A');
+    std::uint64_t state = 0x6a09e667f3bcc909ull;
+    for (char& base : sequence) {
+        state = state * 6364136223846793005ull
+            + 1442695040888963407ull;
+        base = bases[static_cast<std::size_t>(state >> 62u)];
+    }
+    return sequence;
+}
+
+void seed_batch_join_target(
+        connection_test_context& ctx,
+        std::string_view target_sequence = {}) {
+    const std::string target = target_sequence.empty()
+        ? hoe_seed_rows().front().sequences.front()
+        : std::string{target_sequence};
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -226,7 +254,7 @@ void seed_batch_join_target(connection_test_context& ctx) {
         },
         {seq_row{
             .pk = 1,
-            .sequences = {hoe_seed_rows().front().sequences.front()},
+            .sequences = {target},
         }});
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
@@ -269,6 +297,22 @@ void load_batch_join_queries(
         kBatchJoinQueries,
         query_expression,
         count - 1);
+}
+
+void load_batch_join_query(
+        const connection_test_context& ctx,
+        std::string_view sequence) {
+    exec_sqlf(
+        ctx,
+        "CREATE TEMP TABLE {} "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 32));",
+        kBatchJoinQueries);
+    exec_sqlf(
+        ctx,
+        "INSERT INTO {} VALUES (0, {});",
+        kBatchJoinQueries,
+        format_literal(
+            sequence, seq_typmod{.alphabet = "dna4", .width = 32}));
 }
 
 [[nodiscard]] std::string batch_join_sql(
@@ -443,8 +487,26 @@ TEST_CASE("alignment execution SRF is empty before the first published root",
           "[mmsearch][pipeline-stats][statement][srf]") {
     connection_test_context ctx;
     REQUIRE(last_alignment_stats(ctx).empty());
+    REQUIRE(last_alignment_stats_v2(ctx).empty());
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() IS NULL)::int;")
+        == 1);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(last_alignment_stats(ctx).empty());
+    REQUIRE(last_alignment_stats_v2(ctx).empty());
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() IS NULL)::int;")
+        == 1);
 }
 
 TEST_CASE("alignment execution SRF publishes one exact stage row set",
@@ -502,6 +564,369 @@ TEST_CASE("alignment execution SRF publishes one exact stage row set",
     }
 }
 
+TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proof",
+          "[mmsearch][pipeline-stats][statement][srf][v2][doc0372]") {
+    auto ctx = fresh_context({kBatchJoinTarget});
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_format5_reader_memory_evidence() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_format5_reader_memory_evidence_v2() IS NULL)::int;")
+        == 1);
+    seed_batch_join_target(ctx);
+    load_batch_join_queries(ctx, 2);
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    require_batch_join_aligned_query_rows(
+        ctx,
+        batch_join_sql(1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
+        2,
+        "t");
+
+    const rowset_t v1 = last_alignment_stats(ctx);
+    const rowset_t v2 = last_alignment_stats_v2(ctx);
+    REQUIRE(v1.size() == 20u);
+    REQUIRE(v2.size() == 20u);
+    for (std::size_t stage = 0; stage < v1.size(); ++stage) {
+        REQUIRE(v1[stage].size() == 150u);
+        REQUIRE(v2[stage].size() == 151u);
+        REQUIRE(std::equal(v1[stage].begin(), v1[stage].end(),
+            v2[stage].begin()));
+        REQUIRE(v2[stage][150] == v2.front()[150]);
+    }
+    /* Reading either version is observational: no new executor root is
+     * published, and repeated v2 reads return the same immutable snapshot. */
+    REQUIRE(last_alignment_stats_v2(ctx) == v2);
+
+    const row_t schema = query_one(ctx,
+        "WITH s AS ("
+        " SELECT cold_index_preparation AS cold, simd_execution_evidence AS simd"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(simd)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(simd))=16, "
+        "simd ?& ARRAY["
+        " 'schema','version','requested_policy','observed_policy',"
+        " 'requested_alignment_algorithm','observed_alignment_algorithm',"
+        " 'nthash_vector_batches',"
+        " 'nthash_resident_vector_stream_kernel_calls',"
+        " 'simd_chaining_exact_policy_calls',"
+        " 'simd_chaining_bounded_policy_calls',"
+        " 'simd_chaining_bounded_score_batches',"
+        " 'simd_chaining_bounded_cutoff_stops',"
+        " 'simd_chaining_bounded_candidates_skipped',"
+        " 'simd_chaining_policy_rejections',"
+        " 'simd_chaining_policy_evidence_saturated',"
+        " 'block_aligner_execution_proof'], "
+        "simd->>'schema'='bioseq.simd_execution_evidence' "
+        " AND jsonb_typeof(simd->'schema')='string' "
+        " AND (simd->>'version')::bigint=2 "
+        " AND jsonb_typeof(simd->'version')='number', "
+        "simd->>'requested_policy'='bounded_batch_approximate' "
+        " AND simd->>'observed_policy'='bounded_batch_approximate' "
+        " AND simd->>'requested_alignment_algorithm'='block_aligner' "
+        " AND simd->>'observed_alignment_algorithm'='block_aligner' "
+        " AND jsonb_typeof(simd->'requested_policy')='string' "
+        " AND jsonb_typeof(simd->'observed_policy')='string' "
+        " AND jsonb_typeof(simd->'requested_alignment_algorithm')='string' "
+        " AND jsonb_typeof(simd->'observed_alignment_algorithm')='string', "
+        "((simd->>'nthash_vector_batches')::bigint > 0 "
+        " OR (simd->>'nthash_resident_vector_stream_kernel_calls')::bigint > 0) "
+        " AND jsonb_typeof(simd->'block_aligner_execution_proof')='object' "
+        " AND (SELECT count(*) FROM jsonb_object_keys("
+        "      simd->'block_aligner_execution_proof'))=10 "
+        " AND (simd->'block_aligner_execution_proof'->>'present')::boolean "
+        " AND (simd->'block_aligner_execution_proof'->>'accepted')::boolean "
+        " AND (simd->'block_aligner_execution_proof'->>'executed_calls')::bigint>0 "
+        " AND (simd->'block_aligner_execution_proof'->>'nonempty_calls')::bigint>0 "
+        " AND (simd->'block_aligner_execution_proof'->>'simd_dp_vector_batches')::bigint>0 "
+        " AND (simd->'block_aligner_execution_proof'->>'simd_dp_cells')::bigint>0, "
+        "(simd->>'simd_chaining_exact_policy_calls')::bigint=0 "
+        " AND (simd->>'simd_chaining_bounded_policy_calls')::bigint>0 "
+        " AND (simd->>'simd_chaining_bounded_score_batches')::bigint>0 "
+        " AND (simd->>'simd_chaining_policy_rejections')::bigint=0 "
+        " AND jsonb_typeof(simd->'simd_chaining_policy_evidence_saturated')="
+        "     'boolean' "
+        " AND NOT (simd->>'simd_chaining_policy_evidence_saturated')::boolean "
+        " AND (simd->'block_aligner_execution_proof'->>'nonempty_calls_with_simd')::bigint"
+        "     =(simd->'block_aligner_execution_proof'->>'nonempty_calls')::bigint "
+        " AND (simd->'block_aligner_execution_proof'->>'forbidden_ksw2_calls')::bigint=0 "
+        " AND (simd->'block_aligner_execution_proof'->>'forbidden_scalar_biological_fallbacks')::bigint=0 "
+        " AND NOT (simd->'block_aligner_execution_proof'->>'saturated')::boolean, "
+        "jsonb_typeof(cold)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(cold))=56, "
+        "cold ?& ARRAY["
+        " 'schema','version','timing_semantics','decode_timing_available',"
+        " 'transfer_timing_available','target_relation_reuses',"
+        " 'target_relation_extra_opens','parent_random_reads',"
+        " 'policy_heap_opens','policy_index_opens','source_heap_opens',"
+        " 'source_index_opens','fragment_heap_opens','sidecar_heap_opens',"
+        " 'sidecar_index_opens','policy_schema_validations',"
+        " 'source_schema_validations','sidecar_schema_validations',"
+        " 'lock_acquires','lock_releases','snapshot_registers',"
+        " 'route_empty','route_selective','route_full',"
+        " 'route_candidate_rows','route_full_rows','route_candidate_bytes',"
+        " 'route_full_bytes','route_selective_cost','route_full_cost',"
+        " 'memory_reroutes','payload_bytes_requested',"
+        " 'payload_bytes_delivered','payload_rows_requested',"
+        " 'payload_rows_delivered','payload_rows_scanned',"
+        " 'payload_bytes_scanned','payload_rows_skipped',"
+        " 'heap_tid_adjacent','heap_tid_forward_gap',"
+        " 'heap_tid_backward_jump','extent_crc_bytes','row_crc_bytes',"
+        " 'tuple_form_bytes','policy_ns','source_ns','bind_ns','head_ns',"
+        " 'directory_ns','payload_ns','decode_ns','transfer_ns','close_ns',"
+        " 'shared_blks_hit','shared_blks_read','stats_saturated'] "
+        "FROM s;");
+    REQUIRE(schema.size() == 10u);
+    for (const auto& assertion : schema) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t memory = query_one(ctx,
+        "WITH first_read AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence()"
+        "        AS evidence"
+        "), second_read AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence()"
+        "        AS evidence"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, stats_saturated,"
+        "        actual_target_index_source"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "first_read.evidence = second_read.evidence, "
+        "jsonb_typeof(first_read.evidence) = 'object', "
+        "(SELECT count(*) FROM jsonb_object_keys(first_read.evidence)) = 13 "
+        "AND first_read.evidence ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'format5_reader_capacity_accounting_passes',"
+        " 'format5_reader_global_position_storage_preparations',"
+        " 'format5_reader_global_position_storage_allocations',"
+        " 'format5_reader_position_append_growth_reservations',"
+        " 'format5_reader_retained_position_count',"
+        " 'format5_reader_retained_position_capacity',"
+        " 'format5_reader_memory_evidence_saturated','stats_saturated'"
+        "]::text[], "
+        "first_read.evidence->>'schema' = "
+        " 'bioseq.format5_reader_memory_evidence' "
+        "AND jsonb_typeof(first_read.evidence->'schema') = 'string' "
+        "AND (first_read.evidence->>'version')::bigint = 1 "
+        "AND jsonb_typeof(first_read.evidence->'version') = 'number', "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(first_read.evidence) AS entry"
+        " WHERE entry.key IN ("
+        "  'version','execution_id','backend_pid','database_oid',"
+        "  'format5_reader_capacity_accounting_passes',"
+        "  'format5_reader_global_position_storage_preparations',"
+        "  'format5_reader_global_position_storage_allocations',"
+        "  'format5_reader_position_append_growth_reservations',"
+        "  'format5_reader_retained_position_count',"
+        "  'format5_reader_retained_position_capacity'"
+        " ) AND jsonb_typeof(entry.value) <> 'number'"
+        "), "
+        "(first_read.evidence->>'execution_id')::bigint = stats.execution_id "
+        "AND (first_read.evidence->>'backend_pid')::bigint = stats.backend_pid "
+        "AND (first_read.evidence->>'database_oid')::bigint = stats.database_oid, "
+        "(first_read.evidence->>'format5_reader_capacity_accounting_passes')"
+        "::bigint = 0 "
+        "AND (first_read.evidence->>"
+        "'format5_reader_global_position_storage_preparations')::bigint = 0 "
+        "AND (first_read.evidence->>"
+        "'format5_reader_global_position_storage_allocations')::bigint = 0 "
+        "AND (first_read.evidence->>"
+        "'format5_reader_position_append_growth_reservations')::bigint = 0 "
+        "AND (first_read.evidence->>'format5_reader_retained_position_count')"
+        "::bigint = 0 "
+        "AND (first_read.evidence->>'format5_reader_retained_position_capacity')"
+        "::bigint = 0 "
+        "AND stats.actual_target_index_source = 'recomputed', "
+        "jsonb_typeof(first_read.evidence->"
+        "'format5_reader_memory_evidence_saturated') = 'boolean' "
+        "AND NOT (first_read.evidence->>"
+        "'format5_reader_memory_evidence_saturated')::boolean "
+        "AND jsonb_typeof(first_read.evidence->'stats_saturated') = 'boolean' "
+        "AND (first_read.evidence->>'stats_saturated')::boolean "
+        "    = stats.stats_saturated "
+        "AND NOT (first_read.evidence->>'stats_saturated')::boolean "
+        "FROM first_read CROSS JOIN second_read CROSS JOIN stats;");
+    REQUIRE(memory.size() == 8u);
+    for (const auto& assertion : memory) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t memory_v2 = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence_v2()"
+        "        AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, stats_saturated"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(evidence.value)='object' "
+        "AND (SELECT count(*) FROM jsonb_object_keys(evidence.value))=27 "
+        "AND (evidence.value->>'version')::bigint=2, "
+        "(evidence.value->>'execution_id')::bigint=stats.execution_id "
+        "AND (evidence.value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (evidence.value->>'database_oid')::bigint=stats.database_oid, "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+        " WHERE entry.key LIKE 'format5_reader_%'"
+        " AND jsonb_typeof(entry.value)='number'"
+        " AND (entry.value #>> '{}')::numeric<>0"
+        "), "
+        "NOT (evidence.value->>"
+        "'format5_reader_memory_evidence_saturated')::boolean "
+        "AND (evidence.value->>'stats_saturated')::boolean "
+        "    = stats.stats_saturated "
+        "AND NOT (evidence.value->>'stats_saturated')::boolean "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(memory_v2.size() == 4u);
+    for (const auto& assertion : memory_v2) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+}
+
+TEST_CASE("persisted GPU SQL evidence is exact-empty and immutable for completed CPU work",
+          "[mmsearch][pipeline-stats][statement][gpu-evidence][sql][lifecycle]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+
+    const std::string first = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
+    const std::string second = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
+    REQUIRE(second == first);
+    const std::string first_v2 = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()::text;");
+    const std::string second_v2 = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()::text;");
+    REQUIRE(second_v2 == first_v2);
+    REQUIRE(first_v2 != first);
+
+    const row_t proof = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, completed, partial,"
+        "        fully_drained"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(value)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(value))=18 "
+        "AND value ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'completed','partial','fully_drained','accepted','complete',"
+        " 'saturated','dropped_operation_count','operation_count',"
+        " 'accepted_operation_count','complete_operation_count','job_count',"
+        " 'accepted_job_count','operations']::text[], "
+        "value->>'schema'='bioseq.persisted_gpu_operation_evidence' "
+        "AND (value->>'version')::bigint=1 "
+        "AND jsonb_typeof(value->'schema')='string' "
+        "AND jsonb_typeof(value->'version')='number', "
+        "(value->>'execution_id')::bigint=stats.execution_id "
+        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (value->>'database_oid')::bigint=stats.database_oid, "
+        "(value->>'completed')::boolean=stats.completed "
+        "AND (value->>'partial')::boolean=stats.partial "
+        "AND (value->>'fully_drained')::boolean=stats.fully_drained "
+        "AND stats.completed AND NOT stats.partial AND stats.fully_drained, "
+        "NOT (value->>'accepted')::boolean "
+        "AND (value->>'complete')::boolean "
+        "AND NOT (value->>'saturated')::boolean, "
+        "(value->>'dropped_operation_count')::bigint=0 "
+        "AND (value->>'operation_count')::bigint=0 "
+        "AND (value->>'accepted_operation_count')::bigint=0 "
+        "AND (value->>'complete_operation_count')::bigint=0 "
+        "AND (value->>'job_count')::bigint=0 "
+        "AND (value->>'accepted_job_count')::bigint=0, "
+        "jsonb_typeof(value->'operations')='array' "
+        "AND jsonb_array_length(value->'operations')=0, "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(value) AS entry"
+        " WHERE entry.key IN ("
+        "  'version','execution_id','backend_pid','database_oid',"
+        "  'dropped_operation_count','operation_count',"
+        "  'accepted_operation_count','complete_operation_count',"
+        "  'job_count','accepted_job_count'"
+        " ) AND jsonb_typeof(entry.value)<>'number'"
+        "), "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(value) AS entry"
+        " WHERE entry.key IN ("
+        "  'completed','partial','fully_drained','accepted','complete',"
+        "  'saturated'"
+        " ) AND jsonb_typeof(entry.value)<>'boolean'"
+        "), "
+        "(SELECT provolatile='v' AND proparallel='r' "
+        " FROM pg_proc WHERE oid='bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()'::regprocedure) "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(proof.size() == 11u);
+    for (const auto& assertion : proof) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t v2_proof = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, completed, partial,"
+        "        fully_drained"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(value)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(value))=19 "
+        "AND value ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'completed','partial','fully_drained','accepted','complete',"
+        " 'saturated','dropped_operation_count','operation_count',"
+        " 'accepted_operation_count','complete_operation_count','job_count',"
+        " 'accepted_job_count','cache_qualification','operations']::text[], "
+        "value->>'schema'='bioseq.persisted_gpu_operation_evidence' "
+        "AND (value->>'version')::bigint=2, "
+        "(value->>'execution_id')::bigint=stats.execution_id "
+        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (value->>'database_oid')::bigint=stats.database_oid, "
+        "(value->>'completed')::boolean=stats.completed "
+        "AND (value->>'partial')::boolean=stats.partial "
+        "AND (value->>'fully_drained')::boolean=stats.fully_drained, "
+        "NOT (value->>'accepted')::boolean "
+        "AND (value->>'complete')::boolean "
+        "AND NOT (value->>'saturated')::boolean, "
+        "(value->>'dropped_operation_count')::bigint=0 "
+        "AND (value->>'operation_count')::bigint=0 "
+        "AND (value->>'accepted_operation_count')::bigint=0 "
+        "AND (value->>'complete_operation_count')::bigint=0 "
+        "AND (value->>'job_count')::bigint=0 "
+        "AND (value->>'accepted_job_count')::bigint=0, "
+        "jsonb_typeof(value->'operations')='array' "
+        "AND jsonb_array_length(value->'operations')=0, "
+        "jsonb_typeof(value->'cache_qualification')='null', "
+        "(SELECT provolatile='v' AND proparallel='r' "
+        " FROM pg_proc WHERE oid='bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()'::regprocedure) "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(v2_proof.size() == 10u);
+    for (const auto& assertion : v2_proof) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+}
+
 TEST_CASE("alignment execution id is fresh and errors do not publish",
           "[mmsearch][pipeline-stats][statement][freshness][error]") {
     auto ctx = fresh_context({kHoe});
@@ -511,15 +936,26 @@ TEST_CASE("alignment execution id is fresh and errors do not publish",
 
     (void)query_rows(ctx, index_requirement_sql(kHoe, 1));
     const long long first_id = stats_i64(last_alignment_stats(ctx).front(), 0);
+    const std::string first_evidence = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
 
     require_no_current_compatible_persisted_index(
         ctx, index_requirement_sql(kHoe, 2));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;")
+        == first_evidence);
 
     (void)query_rows(ctx, index_requirement_sql(kHoe, 1));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id + 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()->>"
+        "'execution_id')::bigint;") == first_id + 1);
 }
 
 TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
@@ -528,6 +964,12 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     seed_hoe_fixture(ctx, kHoe);
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+    const long long completed_id = stats_i64(
+        last_alignment_stats(ctx).front(), 0);
+    const std::string completed_evidence = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     const std::string limited_sql = fmt::format(
         "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
         "aligner_options(index_read_requirement => 1)) LIMIT 1;",
@@ -536,6 +978,7 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE_FALSE(query_rows(ctx, limited_sql).empty());
     const auto rows = last_alignment_stats(ctx);
     REQUIRE(rows.size() == 20);
+    REQUIRE(stats_i64(rows.front(), 0) == completed_id + 1);
     REQUIRE_FALSE(stats_bool(rows.front(), 13));
     REQUIRE(stats_bool(rows.front(), 14));
     REQUIRE_FALSE(stats_bool(rows.front(), 15));
@@ -544,6 +987,14 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE(stats_i64(rows.front(), 33) > 0);
     REQUIRE(stats_i64(rows.front(), 34) == 0);
     REQUIRE(stats_i64(rows.front(), 35) == stats_i64(rows.front(), 33));
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;")
+        == completed_evidence);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()->>"
+        "'execution_id')::bigint;") == completed_id);
 }
 
 TEST_CASE("one executor root aggregates two invoked alignment nodes",
@@ -859,20 +1310,251 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
 
-TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
-			  "[mmsearch][batch-join][just-index][rev3][grouped32][simd]"
-			  "[doc0373][p1][one-open]") {
+TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and selective query unions",
+				  "[mmsearch][batch-join][just-index][rev3][format5][simd]"
+				  "[cold-route][full][empty][selective][zero-work-authenticity]") {
+	struct RouteCase {
+		std::string_view name;
+		std::string query;
+		bool empty = false;
+	};
+	const std::string target = batch_join_wide_target_sequence();
+	/* A high-entropy exact interior subsequence is long enough to create multiple
+	 * real anchors and alignment work, while remaining sparse relative to the
+	 * 512-Kibp target.  Route identity and all three SIMD stages are asserted
+	 * from runtime evidence below; length alone is never treated as proof. */
+	constexpr std::size_t selective_query_offset = 193u * 1024u + 17u;
+	constexpr std::size_t selective_query_bp = 48u;
+	REQUIRE(target.size()
+		>= selective_query_offset + selective_query_bp);
+	const std::array<RouteCase, 2> routes{{
+		RouteCase{
+			.name = "empty query union",
+			.query = std::string(14u, 'A'),
+			.empty = true,
+		},
+		RouteCase{
+			.name = "long sparse high-entropy selective intersection",
+			.query = target.substr(
+				selective_query_offset, selective_query_bp),
+			.empty = false,
+		},
+	}};
+
 	for (const std::string_view index_name : {
 			std::string_view{"minimizers_per_fragment"},
 			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
-			seed_batch_join_target(ctx);
-			load_batch_join_queries(ctx, 2);
+			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+			seed_batch_join_target(ctx, target);
 			exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
 			exec_sql(ctx, "SET bioseq.index_async_persist = off;");
 			exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
 			exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+			/* The runtime capability gate alone is not a GPU request. */
+			exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
+			const auto rowno = static_cast<std::uint64_t>(query_scalar_int(
+				ctx,
+				fmt::format(
+					"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+					"FROM {} ORDER BY pk LIMIT 1;",
+					kBatchJoinTarget, kBatchJoinTarget)));
+			if (index_name == "minimizers_per_sequence") {
+				exec_sqlf(ctx,
+					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+					kBatchJoinTarget, index_name);
+			}
+			const row_t publication = query_one(ctx, fmt::format(
+				"SELECT * FROM bioseq_internal.rev3_test_build_ready_{}_generation("
+				"'{}'::regclass, '{}', {}, 'exact_simd');",
+				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
+				kBatchJoinTarget, index_name, rowno));
+			REQUIRE(publication.size() > 25u);
+			/* The production fixture now publishes Format 5 / ABI 3.  Format 5
+			 * currently authenticates and streams the complete payload in one
+			 * PostgreSQL index scan for every query union; it does not use the
+			 * Format-4 compatibility path's two-phase selective reader. */
+			REQUIRE(publication[7].value_or("") == "5");
+			REQUIRE(publication[19].value_or("") == "3");
+			REQUIRE(publication[8].value_or("") == "t");
+			REQUIRE(publication[9].value_or("") == "t");
+			REQUIRE(std::stoull(publication[14].value()) == target.size());
+			REQUIRE(std::stoull(publication[24].value()) > 10u);
+
+			for (const RouteCase& route : routes) {
+				INFO(fmt::format(
+					"route={} query_bp={}", route.name, route.query.size()));
+				exec_sqlf(ctx, "DROP TABLE IF EXISTS {};", kBatchJoinQueries);
+				load_batch_join_query(ctx, route.query);
+				const rowset_t aligned = query_rows(
+					ctx,
+					batch_join_sql(
+						2, "q.id, bioseq.has_cigar(t.pk) AS has_cigar")
+						+ ";");
+				if (route.empty) {
+					REQUIRE(aligned.empty());
+				} else {
+					REQUIRE(aligned.size() == 1u);
+					REQUIRE(aligned.front().size() == 2u);
+					REQUIRE(aligned.front()[0].value_or("") == "0");
+					REQUIRE(aligned.front()[1].value_or("") == "t");
+				}
+				const auto stage_stats = last_alignment_stats(ctx);
+				REQUIRE(stage_stats.size() == 20u);
+				const row_t proof = query_one(ctx,
+					"SELECT requested_backend, actual_backend, "
+					"requested_target_index_source, actual_target_index_source, "
+					"persisted_generation_id::text, backend_fallbacks::text, "
+					"recomputed_target_index_rows::text, "
+					"persisted_hash_build_calls::text, "
+					"persisted_generation_read_sessions::text, "
+					"persisted_relation_opens::text, persisted_index_scans::text, "
+					"persisted_bulk_read_calls::text, "
+					"persisted_planned_request_groups::text, "
+					"persisted_executed_request_groups::text, "
+					"persisted_range_scan_calls::text, "
+					"cold_index_preparation->>'route_empty', "
+					"cold_index_preparation->>'route_selective', "
+					"cold_index_preparation->>'route_full', "
+					"cold_index_preparation->>'route_candidate_rows', "
+					"cold_index_preparation->>'route_full_rows', "
+					"cold_index_preparation->>'route_candidate_bytes', "
+					"cold_index_preparation->>'route_full_bytes', "
+					"cold_index_preparation->>'route_selective_cost', "
+					"cold_index_preparation->>'route_full_cost', "
+					"cold_index_preparation->>'payload_rows_requested', "
+					"cold_index_preparation->>'payload_bytes_requested', "
+					"NOT (cold_index_preparation->>'stats_saturated')::boolean, "
+					"cold_index_preparation->>'memory_reroutes', "
+					"executed_scalar_cpu_jobs::text, "
+					"executed_simd_cpu_jobs::text, "
+					"executed_vulkan_gpu_jobs::text, fallback_jobs::text "
+					"FROM bioseq.last_alignment_execution_stats() "
+					"WHERE stage='query_sketch';");
+				REQUIRE(proof.size() == 32u);
+				for (const auto& field : proof) REQUIRE(field.has_value());
+				const auto number = [&proof](std::size_t field) {
+					return std::stoll(proof[field].value());
+				};
+				REQUIRE(proof[0].value() == "simd_cpu");
+				INFO(fmt::format(
+					"requested_backend={} actual_backend={} empty={} "
+					"route_bits={}/{}/{} query_simd={} chain_score_simd={} "
+					"chain_backtrack_simd={}",
+					proof[0].value(), proof[1].value(), route.empty,
+					proof[15].value(), proof[16].value(), proof[17].value(),
+					stats_i64(stage_stats[0], 27),
+					stats_i64(stage_stats[7], 27),
+					stats_i64(stage_stats[8], 27)));
+				/* The 14-bp query has no complete k=15 minimizer and therefore
+				 * executes no biological backend. Keep the requested SIMD intent,
+				 * but do not manufacture a SIMD execution claim from configuration.
+				 * The selective route below still requires real SIMD evidence. */
+				REQUIRE(proof[1].value()
+					== (route.empty ? "mixed_invalid" : "simd_cpu"));
+				REQUIRE(proof[2].value() == "persisted");
+				REQUIRE(proof[3].value() == "persisted");
+				REQUIRE(number(4) > 0);
+				for (const std::size_t zero : {5u, 6u, 7u, 27u}) {
+					REQUIRE(number(zero) == 0);
+				}
+				REQUIRE(number(8) == 1);
+				REQUIRE(number(9) == 1);
+				REQUIRE(number(10) == 3);
+				REQUIRE(number(11) == 1);
+				REQUIRE(number(12) == 1);
+				REQUIRE(number(13) == 1);
+				REQUIRE(number(14) == 1);
+				REQUIRE(number(15) == 0);
+				REQUIRE(number(16) == 0);
+				REQUIRE(number(17) == 1);
+				REQUIRE(number(18) == 0);
+				REQUIRE(number(19) > 0);
+				REQUIRE(number(20) == 0);
+				REQUIRE(number(21) > 0);
+				REQUIRE(number(22) == 0);
+				REQUIRE(number(23) > number(19));
+				REQUIRE(number(24) == number(19));
+				REQUIRE(number(25) == number(21));
+				REQUIRE(proof[26].value() == "t");
+
+				if (route.empty) {
+					for (const std::size_t zero : {28u, 29u, 30u, 31u}) {
+						REQUIRE(number(zero) == 0);
+					}
+				} else {
+					REQUIRE(number(28) == 0);
+					REQUIRE(number(29) > 0);
+					REQUIRE(number(30) == 0);
+					REQUIRE(number(31) == 0);
+
+					/* The aggregate identity is accepted only after real
+					 * algorithm-local proofs.  Inspect the complete 20-row SRF
+					 * as an independent regression: ntHash, chaining score and
+					 * backtrack all ran SIMD, and at least one Block Aligner
+					 * extension performed nonempty SIMD work. */
+					REQUIRE(stage_stats.front()[16].value_or("") == "simd_cpu");
+					REQUIRE(stage_stats.front()[17].value_or("") == "simd_cpu");
+					REQUIRE(stage_stats.front()[18].value_or("") == "persisted");
+					REQUIRE(stage_stats.front()[19].value_or("") == "persisted");
+					REQUIRE(stats_i64(stage_stats.front(), 94) > 0);
+					REQUIRE(stats_i64(stage_stats.front(), 95) == 0);
+					REQUIRE(stats_i64(stage_stats.front(), 96) == 0);
+					REQUIRE(stats_i64(stage_stats.front(), 98) > 0);
+					REQUIRE(stats_i64(stage_stats.front(), 99) > 0);
+					REQUIRE(stats_i64(stage_stats.front(), 100) == 0);
+					REQUIRE(stats_i64(stage_stats.front(), 101) == 0);
+					for (const std::size_t stage_no : {
+							std::size_t{0}, std::size_t{7}, std::size_t{8}}) {
+						REQUIRE(stats_i64(stage_stats[stage_no], 24) == 1);
+						REQUIRE(stats_i64(stage_stats[stage_no], 25) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 26) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 27) == 1);
+						REQUIRE(stats_i64(stage_stats[stage_no], 28) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 29) == 0);
+					}
+					long long block_simd_executions = 0;
+					for (std::size_t stage_no = 17; stage_no <= 19; ++stage_no) {
+						REQUIRE(stats_i64(stage_stats[stage_no], 25) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 26) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 27)
+							== stats_i64(stage_stats[stage_no], 24));
+						REQUIRE(stats_i64(stage_stats[stage_no], 28) == 0);
+						REQUIRE(stats_i64(stage_stats[stage_no], 29) == 0);
+						block_simd_executions +=
+							stats_i64(stage_stats[stage_no], 27);
+					}
+					INFO(fmt::format(
+						"Block Aligner SIMD extension executions={}",
+						block_simd_executions));
+					REQUIRE(block_simd_executions >= 1);
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS",
+			  "[mmsearch][batch-join][just-index][format5][simd]"
+			  "[generation-publication][one-open][cold-route][full]") {
+	for (const std::string_view index_name : {
+			std::string_view{"minimizers_per_fragment"},
+			std::string_view{"minimizers_per_sequence"}}) {
+		DYNAMIC_SECTION(index_name) {
+			auto ctx = fresh_context({kBatchJoinTarget});
+			// Disable the legacy INSERT-time writer before the target row is
+			// created. Setting this after seed_batch_join_target() leaves a
+			// same-name logged legacy sidecar that the strict UNLOGGED Format-5
+			// creator must correctly reject rather than silently replace.
+			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+			seed_batch_join_target(ctx);
+			load_batch_join_queries(ctx, 2);
+			exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+			exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+			exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+			exec_sql(ctx,
+				"SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
 			exec_sql(ctx,
 				"SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash';");
 			exec_sql(ctx,
@@ -893,14 +1575,17 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
 					kBatchJoinTarget, index_name);
 			}
+			REQUIRE(query_scalar_int(ctx, fmt::format(
+				"SELECT bioseq.update_index('{}'::regclass, '{}');",
+				kBatchJoinTarget, index_name)) == 1);
 			const row_t publication = query_one(ctx, fmt::format(
-				"SELECT * FROM bioseq_internal.rev3_test_build_ready_{}_generation("
-				"'{}'::regclass, '{}', {}, 'exact_simd');",
-				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
+				"SELECT generation_id::text, gpu_abi_version::text "
+				"FROM bioseq.inspect_ready_minimizer_generation("
+				"'{}'::regclass, '{}', {});",
 				kBatchJoinTarget, index_name, rowno));
-			REQUIRE(!publication.empty());
-			REQUIRE(publication[8].value_or("") == "t");
-			REQUIRE(publication[9].value_or("") == "t");
+			REQUIRE(publication.size() == 2u);
+			REQUIRE(std::stoll(publication[0].value()) > 0);
+			REQUIRE(publication[1].value_or("") == "3");
 
 			require_batch_join_aligned_query_rows(
 				ctx,
@@ -952,7 +1637,8 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"WITH stats AS ("
 				" SELECT cold_index_preparation AS cold,"
 				" persisted_head_scans, persisted_manifest_directory_scans,"
-				" persisted_range_scan_calls, persisted_toast_values_read,"
+				" persisted_range_scan_calls, persisted_bulk_read_calls,"
+				" persisted_toast_values_read,"
 				" persisted_detoast_bytes, stats_saturated AS scalar_saturated"
 				" FROM bioseq.last_alignment_execution_stats()"
 				" WHERE stage='query_sketch'"
@@ -1032,12 +1718,16 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"(cold->>'route_empty')::bigint = 0 "
 				" AND (cold->>'route_selective')::bigint = 0 "
 				" AND (cold->>'route_full')::bigint = 1, "
+				/* Format 5 currently has only its authenticated one-scan full
+				 * reader. Unlike grouped32, it does not run the selective-route
+				 * planner, so candidate estimates must remain explicitly zero. */
 				"(cold->>'route_candidate_rows')::bigint = 0 "
 				" AND (cold->>'route_candidate_bytes')::bigint = 0, "
 				"(cold->>'route_full_rows')::bigint > 0 "
 				" AND (cold->>'route_full_bytes')::bigint > 0 "
 				" AND (cold->>'route_full_cost')::bigint "
-				" > (cold->>'route_full_rows')::bigint, "
+				" > (cold->>'route_full_rows')::bigint "
+				" AND (cold->>'route_selective_cost')::bigint = 0, "
 				"(cold->>'memory_reroutes')::bigint = 0, "
 				"(cold->>'payload_bytes_requested')::bigint "
 				" = (cold->>'payload_bytes_delivered')::bigint "
@@ -1073,6 +1763,7 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				"AND persisted_head_scans = 1 "
 				"AND persisted_manifest_directory_scans = 1 "
 				"AND persisted_range_scan_calls = 1 "
+				"AND persisted_bulk_read_calls = 1 "
 				"AND persisted_toast_values_read = 0 "
 				"AND persisted_detoast_bytes = 0 "
 				"AND (cold->>'stats_saturated')::boolean = scalar_saturated "
@@ -1082,7 +1773,219 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes READY grouped32 MPF and MPS",
 				REQUIRE(assertion.value_or("") == "t");
 			}
 
-			/* Extra secondary indexes must not increase the cold reader's open
+			const row_t memory = query_one(ctx,
+				"WITH stats AS ("
+				" SELECT execution_id, backend_pid, database_oid,"
+				" persisted_generation_read_sessions, persisted_extents_read,"
+				" stats_saturated"
+				" FROM bioseq.last_alignment_execution_stats_v2()"
+				" WHERE stage='query_sketch'"
+				"), evidence AS MATERIALIZED ("
+				" SELECT bioseq."
+				"last_alignment_format5_reader_memory_evidence() AS value"
+				") SELECT "
+				"jsonb_typeof(evidence.value) = 'object', "
+				"(SELECT count(*) FROM jsonb_object_keys(evidence.value)) = 13 "
+				"AND evidence.value ?& ARRAY["
+				" 'schema','version','execution_id','backend_pid','database_oid',"
+				" 'format5_reader_capacity_accounting_passes',"
+				" 'format5_reader_global_position_storage_preparations',"
+				" 'format5_reader_global_position_storage_allocations',"
+				" 'format5_reader_position_append_growth_reservations',"
+				" 'format5_reader_retained_position_count',"
+				" 'format5_reader_retained_position_capacity',"
+				" 'format5_reader_memory_evidence_saturated','stats_saturated'"
+				"]::text[], "
+				"evidence.value->>'schema' = "
+				" 'bioseq.format5_reader_memory_evidence' "
+				"AND jsonb_typeof(evidence.value->'schema') = 'string' "
+				"AND (evidence.value->>'version')::bigint = 1 "
+				"AND jsonb_typeof(evidence.value->'version') = 'number', "
+				"NOT EXISTS ("
+				" SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+				" WHERE entry.key IN ("
+				"  'version','execution_id','backend_pid','database_oid',"
+				"  'format5_reader_capacity_accounting_passes',"
+				"  'format5_reader_global_position_storage_preparations',"
+				"  'format5_reader_global_position_storage_allocations',"
+				"  'format5_reader_position_append_growth_reservations',"
+				"  'format5_reader_retained_position_count',"
+				"  'format5_reader_retained_position_capacity'"
+				" ) AND jsonb_typeof(entry.value) <> 'number'"
+				"), "
+				"(evidence.value->>'execution_id')::bigint = stats.execution_id "
+				"AND (evidence.value->>'backend_pid')::bigint = stats.backend_pid "
+				"AND (evidence.value->>'database_oid')::bigint = stats.database_oid, "
+				"(evidence.value->>"
+				"'format5_reader_global_position_storage_preparations')::bigint "
+				" = stats.persisted_generation_read_sessions "
+				"AND (evidence.value->>"
+				"'format5_reader_global_position_storage_allocations')::bigint "
+				" = stats.persisted_generation_read_sessions "
+				"AND stats.persisted_generation_read_sessions = 1, "
+				"(evidence.value->>"
+				"'format5_reader_position_append_growth_reservations')::bigint = 0 "
+				"AND (evidence.value->>'format5_reader_retained_position_count')"
+				"::bigint > 0 "
+				"AND (evidence.value->>'format5_reader_retained_position_capacity')"
+				"::bigint >= (evidence.value->>"
+				"'format5_reader_retained_position_count')::bigint, "
+				"(evidence.value->>'format5_reader_capacity_accounting_passes')"
+				"::numeric >= 7 * stats.persisted_generation_read_sessions::numeric "
+				" + stats.persisted_extents_read::numeric "
+				"AND stats.persisted_extents_read::numeric "
+				">= 2 * stats.persisted_generation_read_sessions::numeric "
+				"AND mod(stats.persisted_extents_read::numeric, 2) = 0 "
+				"AND (evidence.value->>"
+				"'format5_reader_capacity_accounting_passes')::numeric "
+				"<= 7 * stats.persisted_generation_read_sessions::numeric "
+				" + 3 * stats.persisted_extents_read::numeric "
+				"AND mod((evidence.value->>"
+				"'format5_reader_capacity_accounting_passes')::numeric "
+				" - 7 * stats.persisted_generation_read_sessions::numeric "
+				" - stats.persisted_extents_read::numeric, 4) = 0 "
+				"AND ((evidence.value->>"
+				"'format5_reader_capacity_accounting_passes')::numeric "
+				" - 7 * stats.persisted_generation_read_sessions::numeric "
+				" - stats.persisted_extents_read::numeric) / 4 "
+				"<= stats.persisted_extents_read::numeric / 2, "
+				"jsonb_typeof(evidence.value->"
+				"'format5_reader_memory_evidence_saturated') = 'boolean' "
+				"AND NOT (evidence.value->>"
+				"'format5_reader_memory_evidence_saturated')::boolean "
+				"AND jsonb_typeof(evidence.value->'stats_saturated') = 'boolean' "
+				"AND (evidence.value->>'stats_saturated')::boolean "
+				"    = stats.stats_saturated "
+				"AND NOT (evidence.value->>'stats_saturated')::boolean "
+				"FROM stats CROSS JOIN evidence;");
+			REQUIRE(memory.size() == 9u);
+				for (const auto& assertion : memory) {
+					REQUIRE(assertion.value_or("") == "t");
+				}
+
+				const row_t memory_v2 = query_one(ctx,
+					"WITH stats AS ("
+					" SELECT execution_id, backend_pid, database_oid,"
+					" persisted_generation_read_sessions, stats_saturated"
+					" FROM bioseq.last_alignment_execution_stats_v2()"
+					" WHERE stage='query_sketch'"
+					"), evidence AS MATERIALIZED ("
+					" SELECT bioseq."
+					"last_alignment_format5_reader_memory_evidence_v2() AS value"
+					") SELECT "
+					"jsonb_typeof(evidence.value) = 'object' "
+					"AND (SELECT count(*) FROM jsonb_object_keys(evidence.value)) = 27 "
+					"AND evidence.value ?& ARRAY["
+					" 'schema','version','execution_id','backend_pid','database_oid',"
+					" 'format5_reader_capacity_accounting_passes',"
+					" 'format5_reader_global_position_storage_preparations',"
+					" 'format5_reader_global_position_storage_allocations',"
+					" 'format5_reader_position_append_growth_reservations',"
+					" 'format5_reader_retained_position_count',"
+					" 'format5_reader_retained_position_capacity',"
+					" 'format5_reader_directory_capacity_bytes',"
+					" 'format5_reader_query_hash_capacity_bytes',"
+					" 'format5_reader_query_record_capacity_bytes',"
+					" 'format5_reader_ordinal_route_capacity_bytes',"
+					" 'format5_reader_selected_extent_capacity_bytes',"
+					" 'format5_reader_current_selected_control_capacity_bytes',"
+					" 'format5_reader_global_position_capacity_bytes',"
+					" 'format5_reader_control_payload_capacity_bytes',"
+					" 'format5_reader_owned_capacity_bytes',"
+					" 'format5_reader_admitted_bytes',"
+					" 'format5_reader_exact_position_image_checks',"
+					" 'format5_reader_exact_position_image_failures',"
+					" 'format5_reader_retained_layout_checks',"
+					" 'format5_reader_retained_layout_failures',"
+					" 'format5_reader_memory_evidence_saturated','stats_saturated'"
+					"]::text[], "
+					"evidence.value->>'schema' = "
+					" 'bioseq.format5_reader_memory_evidence' "
+					"AND (evidence.value->>'version')::bigint = 2, "
+					"NOT EXISTS ("
+					" SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+					" WHERE entry.key NOT IN ("
+					"  'schema','format5_reader_memory_evidence_saturated',"
+					"  'stats_saturated'"
+					" ) AND jsonb_typeof(entry.value) <> 'number'"
+					"), "
+					"(evidence.value->>'execution_id')::bigint = stats.execution_id "
+					"AND (evidence.value->>'backend_pid')::bigint = stats.backend_pid "
+					"AND (evidence.value->>'database_oid')::bigint = stats.database_oid, "
+					"(evidence.value->>"
+					"'format5_reader_global_position_storage_preparations')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND (evidence.value->>"
+					"'format5_reader_global_position_storage_allocations')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND stats.persisted_generation_read_sessions = 1, "
+					"(evidence.value->>"
+					"'format5_reader_position_append_growth_reservations')::bigint = 0 "
+					"AND (evidence.value->>'format5_reader_retained_position_count')"
+					"::bigint > 0 "
+					"AND (evidence.value->>'format5_reader_retained_position_capacity')"
+					"::bigint = (evidence.value->>"
+					"'format5_reader_retained_position_count')::bigint, "
+					"(evidence.value->>"
+					"'format5_reader_global_position_capacity_bytes')::numeric "
+					" = 8 * (evidence.value->>"
+					"'format5_reader_retained_position_count')::numeric, "
+					"(evidence.value->>"
+					"'format5_reader_exact_position_image_checks')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND (evidence.value->>"
+					"'format5_reader_exact_position_image_failures')::bigint = 0, "
+					"(evidence.value->>'format5_reader_retained_layout_checks')::bigint "
+					" = stats.persisted_generation_read_sessions "
+					"AND (evidence.value->>"
+					"'format5_reader_retained_layout_failures')::bigint = 0, "
+					"(evidence.value->>'format5_reader_owned_capacity_bytes')::numeric "
+					" = (evidence.value->>"
+					"'format5_reader_directory_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_query_hash_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_query_record_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_ordinal_route_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_selected_extent_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_current_selected_control_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_global_position_capacity_bytes')::numeric "
+					" + (evidence.value->>"
+					"'format5_reader_control_payload_capacity_bytes')::numeric, "
+					"(evidence.value->>'format5_reader_owned_capacity_bytes')::bigint "
+					" = (evidence.value->>'format5_reader_admitted_bytes')::bigint "
+					"AND (evidence.value->>"
+					"'format5_reader_query_hash_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_current_selected_control_capacity_bytes')::bigint = 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_control_payload_capacity_bytes')::bigint = 0, "
+					"(evidence.value->>'format5_reader_directory_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_query_record_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_ordinal_route_capacity_bytes')::bigint > 0 "
+					"AND (evidence.value->>"
+					"'format5_reader_selected_extent_capacity_bytes')::bigint > 0, "
+					"jsonb_typeof(evidence.value->"
+					"'format5_reader_memory_evidence_saturated') = 'boolean' "
+					"AND NOT (evidence.value->>"
+					"'format5_reader_memory_evidence_saturated')::boolean "
+					"AND jsonb_typeof(evidence.value->'stats_saturated') = 'boolean' "
+					"AND (evidence.value->>'stats_saturated')::boolean "
+					" = stats.stats_saturated "
+					"AND NOT (evidence.value->>'stats_saturated')::boolean "
+					"FROM stats CROSS JOIN evidence;");
+				REQUIRE(memory_v2.size() == 13u);
+				for (const auto& assertion : memory_v2) {
+					REQUIRE(assertion.value_or("") == "t");
+				}
+
+				/* Extra secondary indexes must not increase the cold reader's open
 			 * count: it binds and validates only the exact named primary index. */
 			exec_sql(ctx,
 				"CREATE INDEX sequence_source_version_user_relid_probe_idx "
@@ -1113,6 +2016,7 @@ TEST_CASE("DOC0373 P1 releases cold sidecar/catalog locks before later work",
 			  "[mmsearch][batch-join][just-index][doc0373][p1]"
 			  "[one-open][lock-order][concurrency]") {
 	auto reader = fresh_context({kBatchJoinTarget});
+	exec_sql(reader, "SET bioseq.update_index_on_insert = off;");
 	seed_batch_join_target(reader);
 	load_batch_join_queries(reader, 2);
 	exec_sql(reader, "SET bioseq.update_index_on_insert = on;");
@@ -1380,6 +2284,7 @@ TEST_CASE("ordinal-2 BatchJoin rejects a malformed revision-3 relation without f
 			  "[mmsearch][batch-join][just-index][rev3][schema][malformed]"
 			  "[doc0373][p1][cleanup]") {
 	auto ctx = fresh_context({kBatchJoinTarget});
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 	seed_batch_join_target(ctx);
 	load_batch_join_queries(ctx, 2);
 	exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
@@ -1414,6 +2319,7 @@ TEST_CASE("ordinal-2 BatchJoin rejects a malformed revision-3 relation without f
 TEST_CASE("ordinal-2 BatchJoin LIMIT cleans up an undrained 8193-query reader",
 		  "[mmsearch][batch-join][just-index][rev3][grouped32][limit][partial]") {
 	auto ctx = fresh_context({kBatchJoinTarget});
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 	seed_batch_join_target(ctx);
 	load_batch_join_queries(ctx, 8193);
 	exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
@@ -2498,6 +3404,7 @@ TEST_CASE("DOC0372 PostgreSQL finalizes SIMD chaining policy after the last over
 
     SECTION("RMQ and Vulkan overrides never carry the bounded SIMD policy") {
         exec_sql(ctx, "SET bioseq.aligner.chaining_algorithm = 'simd_mm2';");
+        exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
         for (const int ordinal : {2, 3}) {
             CAPTURE(ordinal);
             const std::string sql = fmt::format(
@@ -2510,6 +3417,9 @@ TEST_CASE("DOC0372 PostgreSQL finalizes SIMD chaining policy after the last over
             REQUIRE_FALSE(plan_contains(
                 plan,
                 "simd_chaining_policy: bounded_batch_approximate"));
+            if (ordinal == 3) {
+                REQUIRE(plan_contains(plan, "| ChainStage: Vulkan tiled DP"));
+            }
         }
     }
 }

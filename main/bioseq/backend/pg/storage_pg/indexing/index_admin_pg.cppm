@@ -11,6 +11,7 @@ module;
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/heapam.h"
+#include "commands/tablespace.h"
 #include "executor/tuptable.h"
 #include "utils/inval.h"
 #include "utils/snapmgr.h"
@@ -1019,22 +1020,29 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
     }
 
-    // clear the index for EVERY SEQ column first (idempotent rebuild).
-    for (std::int16_t a : seq_attnos) {
-        acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name);
-        auto f = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
-        auto q = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
-        auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, nullptr, work);
-        try {
-            idx.clear_index(f, q, tb, name);
-            f.close_checked();
-            q.close_checked();
-            tb.close_checked();
-        } catch (...) {
-            f.abandon_after_pg_error_noexcept();
-            q.abandon_after_pg_error_noexcept();
-            tb.abandon_after_pg_error_noexcept();
-            throw;
+    // Legacy layouts are replace-in-place and still require a destructive
+    // clear.  Generation-backed minimizers instead append a new immutable
+    // positive generation to the existing canonical sidecar and atomically
+    // replace only generation zero's head.  Clearing here would drop the
+    // relation, invalidate its OID/relfilenode, and erase the rollback/GC
+    // predecessor before publication.
+    if (!use_grouped32_generation) {
+        for (std::int16_t a : seq_attnos) {
+            acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name);
+            auto f = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
+            auto q = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, seq_locator{}, 0, nullptr, work);
+            auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, nullptr, work);
+            try {
+                idx.clear_index(f, q, tb, name);
+                f.close_checked();
+                q.close_checked();
+                tb.close_checked();
+            } catch (...) {
+                f.abandon_after_pg_error_noexcept();
+                q.abandon_after_pg_error_noexcept();
+                tb.abandon_after_pg_error_noexcept();
+                throw;
+            }
         }
     }
 
@@ -1674,6 +1682,7 @@ private:
     bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend_ =
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
     ReadyMinimizerGenerationExecutionEvidencePg execution_{};
+    std::optional<std::uint64_t> replaced_generation_id_{};
     std::uint64_t mps_spill_generation_token_ = 0;
     std::uint64_t mps_spill_mutation_before_release_ = 0;
     std::uint64_t mps_spill_mutation_after_release_ = 0;
@@ -1689,6 +1698,7 @@ private:
             std::uint64_t writer_batches,
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
             ReadyMinimizerGenerationExecutionEvidencePg execution,
+            std::optional<std::uint64_t> replaced_generation_id,
             std::uint64_t mps_spill_generation_token,
             std::uint64_t mps_spill_mutation_before_release,
             std::uint64_t mps_spill_mutation_after_release,
@@ -1701,6 +1711,7 @@ private:
           writer_batches_(writer_batches),
           selected_backend_(backend),
           execution_(std::move(execution)),
+          replaced_generation_id_(replaced_generation_id),
           mps_spill_generation_token_(mps_spill_generation_token),
           mps_spill_mutation_before_release_(
               mps_spill_mutation_before_release),
@@ -1750,6 +1761,10 @@ public:
     selected_backend() const noexcept { return selected_backend_; }
     [[nodiscard]] const ReadyMinimizerGenerationExecutionEvidencePg&
     execution() const noexcept { return execution_; }
+    [[nodiscard]] std::optional<std::uint64_t>
+    replaced_generation_id() const noexcept {
+        return replaced_generation_id_;
+    }
     [[nodiscard]] std::uint64_t
     mps_spill_generation_token() const noexcept {
         return mps_spill_generation_token_;
@@ -1849,16 +1864,17 @@ static_assert(!publicly_relabelable_ready_minimizer_publication<
     pg_unreachable();
 }
 
-/// Build, completely reread, and atomically publish one format-4 MPF or MPS
+/// Build, completely reread, and atomically publish one Format-5 MPF or MPS
 /// generation from an already-authoritative PostgreSQL-backed lazy sequence.
 ///
 /// Ordinary update_index uses this route for PostgreSQL locator-backed MPF/MPS
 /// sources only while the explicit grouped32 persistence GUC is enabled.
 /// INSERT/load and default ordinary rebuilds retain their existing route.
 /// The caller retains both the registered source snapshot and metadata-age
-/// ownership. The destructive same-name schema cutover remains inside
-/// `storage.begin_generation_write()`; publication remains impossible until the
-/// sink has returned its private complete-reread token.
+/// ownership. `storage.begin_generation_write()` creates a missing canonical
+/// sidecar or reuses an exact one; legacy/malformed same-name relations require
+/// an explicit lifecycle clear before this route. Publication remains
+/// impossible until the sink has returned its private complete-reread token.
 template <class R, class Scanner>
 [[nodiscard]] inline ReadyMinimizerGenerationPublicationPg
 build_and_publish_grouped32_minimizer_generation_pg(
@@ -1926,6 +1942,11 @@ build_and_publish_grouped32_minimizer_generation_pg(
 
     constexpr std::uint16_t kWindowSize = 10u;
     constexpr std::uint16_t kKmerSize = 15u;
+    constexpr std::uint64_t kMaxOccCap =
+        bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap;
+    constexpr std::uint16_t kAlphabetCode =
+        pgseq_supported_alphabets::index_of<
+            typename Traits::alphabet_type>();
     constexpr std::uint64_t letters_per_unit = Traits::letters_per_unit;
     static_assert(letters_per_unit != 0);
     const std::uint64_t expected_units = locator.total_bp_size / letters_per_unit
@@ -1983,13 +2004,14 @@ build_and_publish_grouped32_minimizer_generation_pg(
         const auto derived_profile =
             bioseq::indexing::minimizer_generation_payload_profile(
                 bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32,
-                scheme,
-                kKmerSize);
+                    grouped_shape_soa_segment_local,
+                scheme, kAlphabetCode, kKmerSize,
+                bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
+                kMaxOccCap);
         if (!derived_profile) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
-                "READY minimizer backend has no canonical format-4 profile",
+                "READY minimizer backend has no canonical Format-5 profile",
                 fmt::format("backend={} wire_error={}",
                     bioseq::simd::HWY_NAMESPACE::
                         minimizer_sketch_backend_name(backend),
@@ -2040,6 +2062,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend =
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
         ReadyMinimizerGenerationExecutionEvidencePg execution{};
+        std::optional<std::uint64_t> replaced_generation_id{};
         std::uint64_t mps_spill_generation_token = 0;
         std::uint64_t mps_spill_mutation_before_release = 0;
         std::uint64_t mps_spill_mutation_after_release = 0;
@@ -2098,7 +2121,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
             const bioseq::indexing::MinimizerGenerationEncodeOptions options{
                 .wire_format = bioseq::indexing::
                     MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32,
+                        grouped_shape_soa_segment_local,
                 .generation_id = result.generation_id,
                 .source_identity = result.source_identity,
                 .source_content_checksum =
@@ -2111,6 +2134,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 .window_size = kWindowSize,
                 .minimizer_scheme_id = scheme.id,
                 .minimizer_scheme_version = scheme.version,
+                .max_occ_cap = kMaxOccCap,
             };
             if (is_mpf) {
                 auto encoded = MpfIndex::encode_persisted_generation(
@@ -2273,7 +2297,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 result.compatibility_checksum;
             if (manifest.wire_format != bioseq::indexing::
                     MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32
+                        grouped_shape_soa_segment_local
                 || manifest.generation_id != result.generation_id
                 || manifest.source_identity != result.source_identity
                 || manifest.source_content_checksum
@@ -2290,6 +2314,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 || manifest.producer_backend_identity_version
                     != producer_backend.version
                 || manifest.gpu_abi_version != profile.gpu_abi_version
+                || !manifest.shape_v5
+                || manifest.shape_v5->max_occ_cap != kMaxOccCap
                 || manifest.position_segment_span_bp == 0
                 || manifest.position_segment_span_bp
                     > bioseq::indexing::kMinimizerPreferredSegmentSpanBp
@@ -2323,6 +2349,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 publish_ready_minimizer_generation_head_pg(
                     std::move(*state->ready_token));
             state->ready_token.reset();
+            result.replaced_generation_id =
+                publication_receipt.replaced_generation_id;
 
             bioseq::pg_utils::invoke_pg_as_cpp(
                 [] { CommandCounterIncrement(); });
@@ -2339,10 +2367,10 @@ build_and_publish_grouped32_minimizer_generation_pg(
             const auto reread_expected = bioseq::indexing::
                 expected_minimizer_compatibility_for_backend(
                     bioseq::indexing::MinimizerGenerationWireFormat::
-                        grouped_hash32_segment_local32,
+                        grouped_shape_soa_segment_local,
                     backend, state->source.alphabet_code,
                     state->source.storage_unit_byte_width,
-                    kKmerSize, kWindowSize);
+                    kKmerSize, kWindowSize, kMaxOccCap);
             if (!reread_expected) {
                 ready_minimizer_error_as_cpp(
                     ERRCODE_DATA_CORRUPTED,
@@ -2354,6 +2382,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                     publication_receipt.query_key,
                     verification_snapshot,
                     *reread_expected,
+                    state->identity.tablespace_oid,
                     Rev3SnapshotRegistration::borrow_registered};
                 const MinimizerGenerationHead reread_head =
                     reader.read_active_head_once();
@@ -2414,6 +2443,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         result.writer_batches,
         result.selected_backend,
         std::move(result.execution),
+        result.replaced_generation_id,
         result.mps_spill_generation_token,
         result.mps_spill_mutation_before_release,
         result.mps_spill_mutation_after_release,
@@ -3077,9 +3107,10 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
         const auto expected = bioseq::indexing::
             expected_minimizer_compatibility_for_backend(
                 bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32,
+                    grouped_shape_soa_segment_local,
                 backend, result.alphabet_code,
-                result.storage_unit_byte_width, kKmerSize, kWindowSize);
+                result.storage_unit_byte_width, kKmerSize, kWindowSize,
+                bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap);
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
@@ -3088,6 +3119,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
         state->verification_session.emplace(
             result.table_name, sequence_rowno,
             state->verification_snapshot, *expected,
+            relation_identity.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         result.head = state->verification_session->read_active_head_once();
         result.manifest = state->verification_session
@@ -3100,7 +3132,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
             minimizer_producer_backend_identity_for_backend(backend);
         if (result.head.wire_format
                 != bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32
+                    grouped_shape_soa_segment_local
             || result.head.generation_id
                 != result.publication->generation_id()
             || result.head.source_identity
@@ -3412,20 +3444,35 @@ build_rev3_pg_integration_fixture_impl(
 
         const char* quoted_table = bioseq::pg_utils::invoke_pg_as_cpp(
             [&result] { return quote_identifier(result.table_name.c_str()); });
+        char* raw_tablespace_name = bioseq::pg_utils::invoke_pg_as_cpp(
+            [&rid] { return get_tablespace_name(rid.tablespace_oid); });
+        if (raw_tablespace_name == nullptr) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_UNDEFINED_OBJECT,
+                "bioseq rev3 fixture source tablespace is missing");
+        }
+        const std::string tablespace_name{raw_tablespace_name};
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [raw_tablespace_name] { pfree(raw_tablespace_name); });
+        const char* quoted_tablespace = bioseq::pg_utils::invoke_pg_as_cpp(
+            [&tablespace_name] {
+                return quote_identifier(tablespace_name.c_str());
+            });
         const std::string drop_ddl = fmt::format(
             "DROP TABLE IF EXISTS bioseq_internal.{}",
             quoted_table);
         bioseq::pg_utils::invoke_pg_as_cpp(
             [&drop_ddl] { run_internal_ddl(drop_ddl.c_str()); });
         const std::string create_ddl = fmt::format(
-            "CREATE TABLE bioseq_internal.{} ("
+            "CREATE UNLOGGED TABLE bioseq_internal.{} ("
             "query_key BIGINT NOT NULL, generation_id BIGINT NOT NULL, "
             "position_segment INTEGER NOT NULL, sub_key BIGINT NOT NULL, "
             "chunk_no INTEGER NOT NULL, chunk_bytes INTEGER NOT NULL, "
             "checksum BIGINT NOT NULL, blob BYTEA NOT NULL, "
-            "PRIMARY KEY (query_key,generation_id,position_segment,sub_key,chunk_no)) "
-            "USING heap",
-            quoted_table);
+            "PRIMARY KEY (generation_id,query_key,sub_key,position_segment,chunk_no) "
+            "WITH (fillfactor=90) USING INDEX TABLESPACE {}) "
+            "USING heap WITH (fillfactor=100) TABLESPACE {}",
+            quoted_table, quoted_tablespace, quoted_tablespace);
         bioseq::pg_utils::invoke_pg_as_cpp(
             [&create_ddl] { run_internal_ddl(create_ddl.c_str()); });
         const std::string alter_ddl = fmt::format(
@@ -3638,6 +3685,7 @@ read_rev3_pg_integration_fixture_impl(
     struct FixtureReadState {
         Snapshot registered_snapshot = nullptr;
         std::optional<Rev3AuthoritativeSourceProof> source_proof;
+        std::optional<Rev3CatalogSourceProof> catalog_source_proof;
         std::optional<IndexStorageFragmentGenerationReadSessionPg> session;
         std::optional<bioseq::indexing::PreparedSerializedSegment>
             serialized_reader;
@@ -3651,8 +3699,7 @@ read_rev3_pg_integration_fixture_impl(
             selective_probe_control_groups;
         std::vector<MinimizerGenerationPayloadReadGroup>
             selective_probe_position_groups;
-        std::uint64_t selective_probe_expected_skipped_rows = 0;
-        std::uint64_t selective_probe_expected_skipped_bytes = 0;
+        bool selective_probe_full_generation = false;
     };
     auto* state = new FixtureReadState{};
     Rev3PgIntegrationFixtureResult result{};
@@ -3708,6 +3755,7 @@ read_rev3_pg_integration_fixture_impl(
             sequence_rowno,
             state->registered_snapshot,
             *expected,
+            rid.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& session =
             *state->session;
@@ -3743,141 +3791,118 @@ read_rev3_pg_integration_fixture_impl(
                 "bioseq rev3 fixture reader identity disagrees");
         }
 
-        /* Integration-only selective telemetry probe. Find three consecutive
-         * directory entries in one position segment, request the first and
-         * third in one qualified range, and leave the middle entry as the
-         * deterministic authorized skip budget. Production grouping/routing
-         * is not consulted or changed by this fixture. */
+        /* Integration-only cold-read telemetry probe.  A directory entry is
+         * an authenticated control+position pair, so a strict subset exists
+         * only when the generation owns more than one populated entry.  Read
+         * one exact entry in that case.  A one-entry generation is already the
+         * complete payload and must use the full-generation scan; an empty
+         * directory must execute the real zero-payload phase protocol.  This
+         * keeps route identity, row counts, byte counts, and TID transitions
+         * tied to I/O that actually occurred. */
         const auto directory_entries = metadata.directory.entries();
-        std::optional<std::size_t> selective_probe_first;
-        for (std::size_t ordinal = 0;
-             ordinal + 2u < directory_entries.size(); ++ordinal) {
-            const MinimizerBucketDirEntry& first = directory_entries[ordinal];
-            const MinimizerBucketDirEntry& middle =
-                directory_entries[ordinal + 1u];
-            const MinimizerBucketDirEntry& last =
-                directory_entries[ordinal + 2u];
-            if (first.position_segment == middle.position_segment
-                && middle.position_segment == last.position_segment
-                && first.control_chunk_count != 0
-                && middle.control_chunk_count != 0
-                && last.control_chunk_count != 0
-                && first.position_chunk_count != 0
-                && middle.position_chunk_count != 0
-                && last.position_chunk_count != 0
-                && first.sub_key < middle.sub_key
-                && middle.sub_key < last.sub_key
-                && last.sub_key
-                    != (std::numeric_limits<index_sub_key_t>::max)()) {
-                selective_probe_first = ordinal;
-                break;
-            }
+        const bool generation_payload_empty = directory_entries.empty();
+        std::uint64_t total_directory_payload_rows = 0;
+        for (const MinimizerBucketDirEntry& entry : directory_entries) {
+            total_directory_payload_rows =
+                bioseq::parallelism::saturating_add(
+                    total_directory_payload_rows,
+                    bioseq::parallelism::saturating_add(
+                        static_cast<std::uint64_t>(
+                            entry.control_chunk_count),
+                        static_cast<std::uint64_t>(
+                            entry.position_chunk_count)));
         }
-        if (!selective_probe_first) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_DATA_CORRUPTED,
-                "bioseq rev3 fixture has no three-entry selective telemetry range");
-        }
-        const MinimizerBucketDirEntry& probe_first =
-            directory_entries[*selective_probe_first];
-        const MinimizerBucketDirEntry& probe_middle =
-            directory_entries[*selective_probe_first + 1u];
-        const MinimizerBucketDirEntry& probe_last =
-            directory_entries[*selective_probe_first + 2u];
-        const auto first_position_sub_key =
-            derive_minimizer_position_extent_sub_key(probe_first.sub_key);
-        const auto last_position_sub_key =
-            derive_minimizer_position_extent_sub_key(probe_last.sub_key);
-        if (!first_position_sub_key || !last_position_sub_key
-            || *last_position_sub_key
-                == (std::numeric_limits<index_sub_key_t>::max)()) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_DATA_CORRUPTED,
-                "bioseq rev3 fixture selective position range is invalid");
-        }
-        state->selective_probe_expected_skipped_rows =
-            bioseq::parallelism::saturating_add(
-                static_cast<std::uint64_t>(
-                    probe_middle.control_chunk_count),
-                static_cast<std::uint64_t>(
-                    probe_middle.position_chunk_count));
-        state->selective_probe_expected_skipped_bytes =
-            bioseq::parallelism::saturating_add(
-                probe_middle.control_encoded_bytes,
-                probe_middle.position_encoded_bytes);
-        if (state->selective_probe_expected_skipped_rows
-                == (std::numeric_limits<std::uint64_t>::max)()
-            || state->selective_probe_expected_skipped_bytes
+        if (total_directory_payload_rows
                 == (std::numeric_limits<std::uint64_t>::max)()) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-                "bioseq rev3 fixture selective skip budget overflows");
+                "bioseq rev3 fixture directory payload-row count overflows");
         }
-        state->selective_probe_control_groups.push_back(
-            MinimizerGenerationPayloadReadGroup{
-                .range = IndexSubKeyRange{
-                    .generation_id = result.generation_id,
-                    .position_segment = probe_first.position_segment,
-                    .begin = probe_first.sub_key,
-                    .end = probe_last.sub_key + 1,
-                },
-                .requests = {
-                    IndexSubKeyRequest{
+        std::optional<std::size_t> selective_probe_entry;
+        if (!generation_payload_empty) {
+            for (std::size_t ordinal = 0;
+                 ordinal < directory_entries.size(); ++ordinal) {
+                const MinimizerBucketDirEntry& entry =
+                    directory_entries[ordinal];
+                const std::uint64_t entry_payload_rows =
+                    bioseq::parallelism::saturating_add(
+                        static_cast<std::uint64_t>(
+                            entry.control_chunk_count),
+                        static_cast<std::uint64_t>(
+                            entry.position_chunk_count));
+                if (entry.position_segment >= 0
+                    && entry.control_chunk_count != 0
+                    && entry.position_chunk_count != 0
+                    && entry_payload_rows < total_directory_payload_rows
+                    && entry.sub_key
+                        != (std::numeric_limits<index_sub_key_t>::max)()) {
+                    selective_probe_entry = ordinal;
+                    break;
+                }
+            }
+        }
+        state->selective_probe_full_generation =
+            !generation_payload_empty && !selective_probe_entry.has_value();
+        if (selective_probe_entry) {
+            const MinimizerBucketDirEntry& entry =
+                directory_entries[*selective_probe_entry];
+            const auto position_sub_key =
+                derive_minimizer_position_extent_sub_key(entry.sub_key);
+            if (!position_sub_key
+                || *position_sub_key
+                    == (std::numeric_limits<index_sub_key_t>::max)()) {
+                ready_minimizer_error_as_cpp(
+                    ERRCODE_DATA_CORRUPTED,
+                    "bioseq rev3 fixture selective position extent is invalid");
+            }
+            state->selective_probe_control_groups.push_back(
+                MinimizerGenerationPayloadReadGroup{
+                    .range = IndexSubKeyRange{
                         .generation_id = result.generation_id,
-                        .position_segment = probe_first.position_segment,
-                        .sub_key = probe_first.sub_key,
-                        .first_chunk_no = probe_first.control_first_chunk,
-                        .expected_chunk_count = probe_first.control_chunk_count,
-                        .expected_total_bytes = probe_first.control_encoded_bytes,
-                        .expected_checksum = probe_first.control_checksum,
+                        .position_segment = entry.position_segment,
+                        .begin = entry.sub_key,
+                        .end = entry.sub_key + 1,
                     },
-                    IndexSubKeyRequest{
+                    .requests = {
+                        IndexSubKeyRequest{
+                            .generation_id = result.generation_id,
+                            .position_segment = entry.position_segment,
+                            .sub_key = entry.sub_key,
+                            .first_chunk_no = entry.control_first_chunk,
+                            .expected_chunk_count = entry.control_chunk_count,
+                            .expected_total_bytes = entry.control_encoded_bytes,
+                            .expected_checksum = entry.control_checksum,
+                        },
+                    },
+                });
+            state->selective_probe_position_groups.push_back(
+                MinimizerGenerationPayloadReadGroup{
+                    .range = IndexSubKeyRange{
                         .generation_id = result.generation_id,
-                        .position_segment = probe_last.position_segment,
-                        .sub_key = probe_last.sub_key,
-                        .first_chunk_no = probe_last.control_first_chunk,
-                        .expected_chunk_count = probe_last.control_chunk_count,
-                        .expected_total_bytes = probe_last.control_encoded_bytes,
-                        .expected_checksum = probe_last.control_checksum,
+                        .position_segment = entry.position_segment,
+                        .begin = *position_sub_key,
+                        .end = *position_sub_key + 1,
                     },
-                },
-            });
-        state->selective_probe_position_groups.push_back(
-            MinimizerGenerationPayloadReadGroup{
-                .range = IndexSubKeyRange{
-                    .generation_id = result.generation_id,
-                    .position_segment = probe_first.position_segment,
-                    .begin = *first_position_sub_key,
-                    .end = *last_position_sub_key + 1,
-                },
-                .requests = {
-                    IndexSubKeyRequest{
-                        .generation_id = result.generation_id,
-                        .position_segment = probe_first.position_segment,
-                        .sub_key = *first_position_sub_key,
-                        .first_chunk_no = probe_first.position_first_chunk,
-                        .expected_chunk_count = probe_first.position_chunk_count,
-                        .expected_total_bytes = probe_first.position_encoded_bytes,
-                        .expected_checksum = probe_first.position_checksum,
+                    .requests = {
+                        IndexSubKeyRequest{
+                            .generation_id = result.generation_id,
+                            .position_segment = entry.position_segment,
+                            .sub_key = *position_sub_key,
+                            .first_chunk_no = entry.position_first_chunk,
+                            .expected_chunk_count = entry.position_chunk_count,
+                            .expected_total_bytes = entry.position_encoded_bytes,
+                            .expected_checksum = entry.position_checksum,
+                        },
                     },
-                    IndexSubKeyRequest{
-                        .generation_id = result.generation_id,
-                        .position_segment = probe_last.position_segment,
-                        .sub_key = *last_position_sub_key,
-                        .first_chunk_no = probe_last.position_first_chunk,
-                        .expected_chunk_count = probe_last.position_chunk_count,
-                        .expected_total_bytes = probe_last.position_encoded_bytes,
-                        .expected_checksum = probe_last.position_checksum,
-                    },
-                },
-            });
+                });
+        }
 
         const std::array<std::uint64_t, 1> query_hashes{
-            metadata.directory.entries().empty()
+            generation_payload_empty
                 ? std::uint64_t{1}
                 : metadata.directory.entries().front().lo_hash};
         std::optional<MinimizerGenerationWireError> reader_error;
-        if (wire_format
+        if (!generation_payload_empty && wire_format
                 == bioseq::indexing::MinimizerGenerationWireFormat::
                     sorted_dense_global64) {
             for (const MinimizerBucketDirEntry& entry
@@ -3906,7 +3931,7 @@ read_rev3_pg_integration_fixture_impl(
                 }
             }
             state->position_ordinals = state->control_ordinals;
-        } else {
+        } else if (!generation_payload_empty) {
             {
                 auto reader =
                     bioseq::indexing::PreparedGrouped32QueryReader::begin(
@@ -3939,7 +3964,7 @@ read_rev3_pg_integration_fixture_impl(
                     static_cast<unsigned>(wire_format),
                     static_cast<unsigned>(*reader_error)));
         }
-        if (state->control_ordinals.empty()) {
+        if (!generation_payload_empty && state->control_ordinals.empty()) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
                 "bioseq rev3 fixture reader selected no control extent");
@@ -4042,7 +4067,7 @@ read_rev3_pg_integration_fixture_impl(
                     control_bytes, expected_control_bytes));
         }
 
-        if (wire_format
+        if (!generation_payload_empty && wire_format
                 == bioseq::indexing::MinimizerGenerationWireFormat::
                     grouped_hash32_segment_local32) {
             const auto finished_controls =
@@ -4058,7 +4083,7 @@ read_rev3_pg_integration_fixture_impl(
                 state->grouped32_reader->retained_position_ordinals().begin(),
                 state->grouped32_reader->retained_position_ordinals().end());
         }
-        if (state->position_ordinals.empty()) {
+        if (!generation_payload_empty && state->position_ordinals.empty()) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
                 "bioseq rev3 fixture reader selected no position extent");
@@ -4159,7 +4184,12 @@ read_rev3_pg_integration_fixture_impl(
                     position_bytes, expected_position_bytes));
         }
 
-        if (wire_format
+        if (generation_payload_empty) {
+            result.lookup_count = 0;
+            result.lookup_bp = 0;
+            result.lookup_reverse = false;
+            result.positions_complete = true;
+        } else if (wire_format
                 == bioseq::indexing::MinimizerGenerationWireFormat::
                     sorted_dense_global64) {
             const auto finished = state->serialized_reader->finish_load();
@@ -4213,9 +4243,18 @@ read_rev3_pg_integration_fixture_impl(
                 (lookup->positions.front() & std::uint64_t{1}) != 0u;
             result.positions_complete = lookup->positions_complete;
         }
-        if (result.lookup_count == 0
-            || result.lookup_bp >= source.locator.total_bp_size
-            || !result.positions_complete) {
+        if ((!generation_payload_empty
+                && (result.lookup_count == 0
+                    || result.lookup_bp >= source.locator.total_bp_size
+                    || !result.positions_complete))
+            || (generation_payload_empty
+                && (result.lookup_count != 0
+                    || result.lookup_bp != 0
+                    || result.lookup_reverse
+                    || !result.positions_complete
+                    || metadata.manifest.control_count != 0
+                    || metadata.manifest.position_count != 0
+                    || metadata.manifest.payload_bytes != 0))) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
                 "bioseq rev3 fixture reader lookup proof disagrees");
@@ -4249,33 +4288,146 @@ read_rev3_pg_integration_fixture_impl(
         state->grouped32_reader.reset();
         state->session.reset();
 
-        state->source_proof.emplace(
-            derive_rev3_authoritative_source_proof_pg(
-                identity, sequence_rowno, state->registered_snapshot));
+        if (state->selective_probe_full_generation) {
+            state->catalog_source_proof.emplace(
+                derive_rev3_catalog_source_proof_pg(
+                    identity, sequence_rowno, state->registered_snapshot));
+        } else {
+            state->source_proof.emplace(
+                derive_rev3_authoritative_source_proof_pg(
+                    identity, sequence_rowno, state->registered_snapshot));
+        }
         state->session.emplace(
             result.table_name,
             sequence_rowno,
             state->registered_snapshot,
             *expected,
+            rid.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& probe_session =
             *state->session;
         const MinimizerGenerationHead probe_head =
             probe_session.read_active_head_once();
-        (void)probe_session.read_manifest_directory_once(probe_head);
-        probe_session.validate_full_source_attestation(
-            std::move(*state->source_proof));
-        state->source_proof.reset();
-        probe_session.plan_control_groups(
-            state->selective_probe_control_groups);
-        (void)probe_session.read_chunks_in_range(
-            0, IndexChunkCachePolicy::bypass_one_shot,
-            [](const IndexChunkAddress&, const char*, std::size_t) {});
-        probe_session.plan_position_groups(
-            state->selective_probe_position_groups);
-        (void)probe_session.read_chunks_in_range(
-            0, IndexChunkCachePolicy::bypass_one_shot,
-            [](const IndexChunkAddress&, const char*, std::size_t) {});
+        const MinimizerGenerationReadMetadata& probe_metadata =
+            probe_session.read_manifest_directory_once(probe_head);
+        if (state->selective_probe_full_generation) {
+            probe_session.validate_source_attestation(
+                std::move(*state->catalog_source_proof));
+            state->catalog_source_proof.reset();
+        } else {
+            probe_session.validate_full_source_attestation(
+                std::move(*state->source_proof));
+            state->source_proof.reset();
+        }
+        if (state->selective_probe_full_generation) {
+            std::optional<MinimizerGenerationWireError> full_stream_error;
+            std::exception_ptr full_stream_exception;
+            if (wire_format
+                    == bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_hash32_segment_local32) {
+                auto full_reader = bioseq::indexing::
+                    PreparedGrouped32QueryReader::begin_full_generation_stream(
+                        bioseq::parallelism::
+                            MemoryAdmissionController::instance(),
+                        probe_head,
+                        probe_metadata.manifest,
+                        *expected,
+                        backend,
+                        probe_metadata.directory.encoded_bytes(),
+                        query_hashes,
+                        /*max_occ=*/probe_metadata.manifest.position_count);
+                if (!full_reader) {
+                    ready_minimizer_error_as_cpp(
+                        ERRCODE_DATA_CORRUPTED,
+                        "bioseq rev3 fixture full-stream reader begin failed",
+                        fmt::format("wire_error={}",
+                            static_cast<unsigned>(full_reader.error())));
+                }
+                state->grouped32_reader.emplace(std::move(*full_reader));
+            }
+            (void)probe_session.read_full_generation_payload_once(
+                [state, wire_format, &full_stream_error,
+                 &full_stream_exception](
+                        const IndexChunkAddress& address,
+                        const char* payload,
+                        std::size_t payload_bytes) {
+                    if (wire_format
+                            != bioseq::indexing::MinimizerGenerationWireFormat::
+                                grouped_hash32_segment_local32
+                        || full_stream_error || full_stream_exception) {
+                        return;
+                    }
+                    try {
+                        auto accepted = state->grouped32_reader->
+                            accept_full_generation_control_chunk(
+                                address,
+                                std::as_bytes(std::span<const char>{
+                                    payload, payload_bytes}));
+                        if (!accepted) full_stream_error = accepted.error();
+                    } catch (...) {
+                        full_stream_exception = std::current_exception();
+                    }
+                },
+                [state, wire_format, &full_stream_error,
+                 &full_stream_exception](
+                        const IndexChunkAddress& address,
+                        const char* payload,
+                        std::size_t payload_bytes) {
+                    if (wire_format
+                            != bioseq::indexing::MinimizerGenerationWireFormat::
+                                grouped_hash32_segment_local32
+                        || full_stream_error || full_stream_exception) {
+                        return;
+                    }
+                    try {
+                        auto accepted = state->grouped32_reader->
+                            accept_full_generation_position_chunk(
+                                address,
+                                std::as_bytes(std::span<const char>{
+                                    payload, payload_bytes}));
+                        if (!accepted) full_stream_error = accepted.error();
+                    } catch (...) {
+                        full_stream_exception = std::current_exception();
+                    }
+                });
+            if (full_stream_exception) {
+                std::rethrow_exception(full_stream_exception);
+            }
+            if (full_stream_error) {
+                ready_minimizer_error_as_cpp(
+                    ERRCODE_DATA_CORRUPTED,
+                    "bioseq rev3 fixture full-stream payload ingest failed",
+                    fmt::format("wire_error={}",
+                        static_cast<unsigned>(*full_stream_error)));
+            }
+            if (state->grouped32_reader) {
+                auto finished =
+                    state->grouped32_reader->finish_full_generation_stream();
+                if (!finished) {
+                    ready_minimizer_error_as_cpp(
+                        ERRCODE_DATA_CORRUPTED,
+                        "bioseq rev3 fixture full-stream final validation failed",
+                        fmt::format("wire_error={}",
+                            static_cast<unsigned>(finished.error())));
+                }
+                state->grouped32_reader.reset();
+            }
+        } else {
+            probe_session.plan_control_groups(
+                state->selective_probe_control_groups);
+            if (!state->selective_probe_control_groups.empty()) {
+                (void)probe_session.read_chunks_in_range(
+                    0, IndexChunkCachePolicy::bypass_one_shot,
+                    [](const IndexChunkAddress&, const char*, std::size_t) {});
+            }
+            probe_session.plan_position_groups(
+                state->selective_probe_position_groups);
+            if (!state->selective_probe_position_groups.empty()) {
+                (void)probe_session.read_chunks_in_range(
+                    0, IndexChunkCachePolicy::bypass_one_shot,
+                    [](const IndexChunkAddress&, const char*, std::size_t) {});
+            }
+        }
         result.selective_probe_stats = probe_session.finish();
         const ColdIndexPreparationStatsPg& probe_cold =
             result.selective_probe_stats.cold;
@@ -4290,46 +4442,62 @@ read_rev3_pg_integration_fixture_impl(
             bioseq::parallelism::saturating_add(
                 probe_cold.payload_rows_delivered,
                 probe_cold.payload_rows_skipped);
-        const std::uint64_t expected_scanned_bytes =
-            bioseq::parallelism::saturating_add(
-                probe_cold.payload_bytes_delivered,
-                state->selective_probe_expected_skipped_bytes);
-        if (probe_cold.route_empty != 0
-            || probe_cold.route_selective != 1
-            || probe_cold.route_full != 0
-            || probe_cold.payload_rows_requested
-                != probe_cold.payload_rows_delivered
-            || probe_cold.payload_rows_delivered == 0
-            || probe_cold.payload_bytes_requested
-                != probe_cold.payload_bytes_delivered
-            || probe_cold.payload_bytes_delivered == 0
-            || probe_cold.payload_rows_skipped
-                != state->selective_probe_expected_skipped_rows
-            || probe_cold.payload_rows_skipped == 0
-            || probe_cold.payload_rows_scanned
-                != expected_scanned_rows
-            || probe_cold.payload_bytes_scanned
-                != expected_scanned_bytes
-            || probe_cold.payload_bytes_scanned
-                <= probe_cold.payload_bytes_delivered
-            || probe_cold.row_crc_bytes
-                != probe_cold.payload_bytes_scanned
-            || probe_cold.extent_crc_bytes
-                != probe_cold.payload_bytes_delivered
-            || probe_cold.payload_rows_scanned == 0
+        const bool expected_empty_route = generation_payload_empty;
+        const bool expected_full_route =
+            state->selective_probe_full_generation;
+        const bool expected_selective_route =
+            !expected_empty_route && !expected_full_route;
+        const bool payload_equations_disagree = expected_empty_route
+            ? probe_cold.payload_rows_requested != 0
+                || probe_cold.payload_rows_delivered != 0
+                || probe_cold.payload_rows_scanned != 0
+                || probe_cold.payload_rows_skipped != 0
+                || probe_cold.payload_bytes_requested != 0
+                || probe_cold.payload_bytes_delivered != 0
+                || probe_cold.payload_bytes_scanned != 0
+                || probe_cold.row_crc_bytes != 0
+                || probe_cold.extent_crc_bytes != 0
+                || probe_cold.extent_crc_raw_bytes_hashed != 0
+                || probe_cold.extent_crc_combined_bytes != 0
+                || probe_cold.extent_crc_combine_rows != 0
+                || probe_tid_transitions != 0
+            : probe_cold.payload_rows_requested
+                    != probe_cold.payload_rows_delivered
+                || probe_cold.payload_rows_delivered == 0
+                || probe_cold.payload_rows_skipped != 0
+                || probe_cold.payload_rows_scanned != expected_scanned_rows
+                || probe_cold.payload_bytes_requested
+                    != probe_cold.payload_bytes_delivered
+                || probe_cold.payload_bytes_delivered == 0
+                || probe_cold.payload_bytes_scanned
+                    != probe_cold.payload_bytes_delivered
+                || probe_cold.row_crc_bytes
+                    != probe_cold.payload_bytes_scanned
+                || probe_cold.extent_crc_bytes
+                    != probe_cold.payload_bytes_delivered
+                || probe_cold.extent_crc_raw_bytes_hashed != 0
+                || probe_cold.extent_crc_combined_bytes
+                    != probe_cold.payload_bytes_delivered
+                || probe_cold.extent_crc_combine_rows
+                    != probe_cold.payload_rows_delivered
+                || probe_tid_transitions
+                    != probe_cold.payload_rows_scanned - 1u;
+        if (probe_cold.route_empty
+                != static_cast<std::uint64_t>(expected_empty_route)
+            || probe_cold.route_selective
+                != static_cast<std::uint64_t>(expected_selective_route)
+            || probe_cold.route_full
+                != static_cast<std::uint64_t>(expected_full_route)
+            || payload_equations_disagree
             || expected_scanned_rows
                 == (std::numeric_limits<std::uint64_t>::max)()
-            || expected_scanned_bytes
-                == (std::numeric_limits<std::uint64_t>::max)()
             || probe_tid_transitions
                 == (std::numeric_limits<std::uint64_t>::max)()
-            || probe_tid_transitions
-                != probe_cold.payload_rows_scanned - 1
             || probe_cold.decode_ns != 0
             || probe_cold.transfer_ns != 0) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
-                "bioseq rev3 fixture selective telemetry equations disagree");
+                "bioseq rev3 fixture cold telemetry equations disagree");
         }
         state->session.reset();
         bioseq::pg_utils::invoke_pg_as_cpp(
@@ -4344,6 +4512,7 @@ read_rev3_pg_integration_fixture_impl(
             state->grouped32_reader.reset();
             state->session.reset();
             state->source_proof.reset();
+            state->catalog_source_proof.reset();
         }
         if (state != nullptr && state->registered_snapshot != nullptr) {
             Snapshot cleanup = std::exchange(
@@ -4393,12 +4562,8 @@ read_rev3_pg_full_generation_fixture_impl(
     }
     if (kmer_size == 0 || window_size == 0
         || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
-        || (wire_format
-                != bioseq::indexing::MinimizerGenerationWireFormat::
-                    sorted_dense_global64
-            && wire_format
-                != bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_hash32_segment_local32)) {
+        || !bioseq::indexing::is_supported_minimizer_generation_wire_format(
+            wire_format)) {
         ready_minimizer_error_as_cpp(
             ERRCODE_INVALID_PARAMETER_VALUE,
             "bioseq rev3 full-generation reader parameters are invalid");
@@ -4451,7 +4616,12 @@ read_rev3_pg_full_generation_fixture_impl(
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 kmer_size,
-                window_size);
+                window_size,
+                wire_format == bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local
+                    ? std::optional<std::uint64_t>{bioseq::indexing::
+                        kMinimizerShapeV5DefaultMaxOccCap}
+                    : std::nullopt);
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_INVALID_PARAMETER_VALUE,
@@ -4461,7 +4631,8 @@ read_rev3_pg_full_generation_fixture_impl(
         }
         state->session.emplace(
             result.table_name, sequence_rowno, state->registered_snapshot,
-            *expected, Rev3SnapshotRegistration::borrow_registered);
+            *expected, rid.tablespace_oid,
+            Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& session =
             *state->session;
         const MinimizerGenerationHead head = session.read_active_head_once();
@@ -4820,6 +4991,7 @@ inline void exercise_rev3_pg_session_failure_impl(
         state->read_session.emplace(
             identity.table_name, sequence_rowno, state->registered_snapshot,
             *expected,
+            rid.tablespace_oid,
             Rev3SnapshotRegistration::borrow_registered);
         IndexStorageFragmentGenerationReadSessionPg& session =
             *state->read_session;
@@ -5012,9 +5184,10 @@ struct CacheKeys {
 }  // namespace rev3_generation_storage_test_detail
 
 /// Revoked integration seam for storage invariants that SQL alone cannot
-/// prove: C++ handles must rebind after rolled-back schema mutation, committed
-/// replacement/clear must evict both residency forms in another backend, and
-/// generation clear must invalidate its initiating OID handle.
+/// prove: explicit clear/create rollback must rebind C++ handles, committed
+/// clear/create must evict both residency forms in another backend, normal
+/// ensure must fail closed on noncanonical relations, and generation clear
+/// must invalidate its initiating OID handle.
 [[nodiscard]] inline Rev3GenerationStorageStateResult
 exercise_rev3_generation_storage_state_impl(
         Oid rel_oid,
@@ -5049,6 +5222,8 @@ exercise_rev3_generation_storage_state_impl(
     const bool warm_generation_residency =
         operation == "warm_generation_residency";
     const bool ensure_generation = operation == "ensure_generation";
+    const bool ensure_without_clear =
+        operation == "ensure_generation_without_clear";
     const bool probe_residency = operation == "probe_residency";
     const bool clear_generation = operation == "clear_generation";
     const bool clear_generation_absent =
@@ -5057,6 +5232,7 @@ exercise_rev3_generation_storage_state_impl(
         operation == "clear_generation_savepoint_rollback";
     if (!savepoint_rollback && !warm_residency
         && !warm_generation_residency && !ensure_generation
+        && !ensure_without_clear
         && !probe_residency && !clear_generation
         && !clear_generation_absent && !clear_generation_rollback) {
         ready_minimizer_error_as_cpp(
@@ -5143,7 +5319,13 @@ exercise_rev3_generation_storage_state_impl(
 
         const bool generation_input = warm_generation_residency
             || clear_generation || clear_generation_rollback;
-        if (generation_input) {
+        if (ensure_generation || ensure_without_clear) {
+            result.before_oid = resolve_table_oid();
+            if (!OidIsValid(result.before_oid)) {
+                rev3_storage_error(
+                    "generation-storage ensure fixture relation is missing");
+            }
+        } else if (generation_input) {
             result.before_oid = resolve_table_oid();
             if (!OidIsValid(result.before_oid)
                 || !rev3_generation_storage_test_detail::
@@ -5200,6 +5382,19 @@ exercise_rev3_generation_storage_state_impl(
             result.chunk_cache_hit = chunk_hit;
             result.assembled_cache_hit = assembled_hit;
         } else if (ensure_generation) {
+            if (!rev3_generation_storage_test_detail::
+                    relation_has_generation_schema(result.before_oid)) {
+                // This is the fixture's explicit legacy-to-generation
+                // cutover.  The production generation clear deliberately
+                // ignores noncanonical same-name relations, so use the
+                // existing broad index reset seam before exercising normal
+                // non-destructive generation ensure.
+                storage.clear(state->identity.index_name);
+                if (OidIsValid(resolve_table_oid())) {
+                    rev3_storage_error(
+                        "generation-storage fixture explicit cutover clear failed");
+                }
+            }
             result.operation_oid =
                 storage.ensure_minimizer_generation_storage();
             result.after_oid = resolve_table_oid();
@@ -5212,6 +5407,10 @@ exercise_rev3_generation_storage_state_impl(
                     "generation-storage fixture ensure did not publish the exact schema");
             }
             result.generation_schema_after = true;
+        } else if (ensure_without_clear) {
+            (void)storage.ensure_minimizer_generation_storage();
+            rev3_storage_error(
+                "generation-storage fixture unexpectedly accepted a noncanonical relation");
         } else if (probe_residency) {
             const bool chunk_hit =
                 lookup_cached_chunk(cache_keys.chunk).has_value();
@@ -5346,6 +5545,14 @@ exercise_rev3_generation_storage_state_impl(
                 });
             std::exception_ptr subxact_error;
             try {
+                // Savepoint rollback starts from the legacy five-column
+                // relation and must restore that exact object.  The strict
+                // generation-only clear cannot remove this legacy input.
+                storage.clear(state->identity.index_name);
+                if (OidIsValid(resolve_table_oid())) {
+                    rev3_storage_error(
+                        "generation-storage rollback fixture explicit clear failed");
+                }
                 result.operation_oid =
                     storage.ensure_minimizer_generation_storage();
                 // Deliberately recreate the old defect's stale member state.
@@ -5721,6 +5928,7 @@ inspect_ready_minimizer_generation_impl(
             IndexStorageFragmentGenerationReadSessionPg discovery{
                 table_name, sequence_rowno, state->registered_snapshot,
                 *discovery_expected,
+                relation_identity.tablespace_oid,
                 Rev3SnapshotRegistration::borrow_registered};
             preliminary_head =
                 discovery.discover_active_head_wire_format_and_close();
@@ -5730,7 +5938,10 @@ inspect_ready_minimizer_generation_impl(
                     grouped_hash32_segment_local32
             && preliminary_head.wire_format
                 != bioseq::indexing::MinimizerGenerationWireFormat::
-                    sorted_dense_global64) {
+                    sorted_dense_global64
+            && preliminary_head.wire_format
+                != bioseq::indexing::MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
                 "bioseq minimizer generation wire format is unsupported");
@@ -5742,7 +5953,14 @@ inspect_ready_minimizer_generation_impl(
                 result.source.alphabet_code,
                 result.source.storage_unit_byte_width,
                 static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
-                static_cast<std::uint16_t>(bioseq_aligner_window_size));
+                static_cast<std::uint16_t>(bioseq_aligner_window_size),
+                preliminary_head.wire_format
+                        == bioseq::indexing::MinimizerGenerationWireFormat::
+                            grouped_shape_soa_segment_local
+                    ? std::optional<std::uint64_t>{
+                        bioseq::indexing::
+                            kMinimizerShapeV5DefaultMaxOccCap}
+                    : std::nullopt);
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -5752,6 +5970,7 @@ inspect_ready_minimizer_generation_impl(
             IndexStorageFragmentGenerationReadSessionPg preliminary{
                 table_name, sequence_rowno, state->registered_snapshot,
                 *expected,
+                relation_identity.tablespace_oid,
                 Rev3SnapshotRegistration::borrow_registered};
             const MinimizerGenerationHead exact_head =
                 preliminary.read_active_head_once();

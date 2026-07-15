@@ -60,6 +60,22 @@ struct MemoryAdmissionFailure {
     }
 };
 
+/// Read-only controller and host-memory snapshot used by fail-closed callers
+/// that need to explain an allocator or post-allocation reconciliation failure
+/// after the admission predicate itself succeeded.  A rejected `try_reserve`
+/// still returns the stronger single-predicate `MemoryAdmissionFailure` above.
+struct MemoryAdmissionSnapshot {
+    std::uint64_t reserved_bytes = 0;
+    std::uint64_t budget_ceiling_bytes =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t allocatable_after_reservations_bytes =
+        (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t process_footprint_bytes = 0;
+    std::uint64_t system_available_bytes = 0;
+    std::uint64_t system_total_bytes = 0;
+    std::uint64_t process_soft_cap_bytes = 0;
+};
+
 [[nodiscard]] inline constexpr std::string_view
 memory_admission_failure_reason_name(
     MemoryAdmissionFailureReason reason) noexcept
@@ -307,6 +323,55 @@ public:
         }
         const std::uint64_t reserved = reserved_bytes();
         return reserved < budget ? budget - reserved : 0;
+    }
+
+    /// Capture the memory values available to a diagnostic without reserving
+    /// or releasing anything.  The OS probes are sampled once each; callers
+    /// must prefer `MemoryAdmissionFailure` when a reservation was rejected,
+    /// because that record is tied to the exact failed predicate snapshot.
+    [[nodiscard]] MemoryAdmissionSnapshot diagnostic_snapshot() const noexcept {
+        auto& live_budget = bioseq::common::memory::default_budget();
+        MemoryAdmissionSnapshot snapshot{
+            .reserved_bytes = reserved_bytes(),
+            .process_footprint_bytes = live_budget.footprint_bytes(),
+            .system_available_bytes = live_budget.available_bytes(),
+            .system_total_bytes = live_budget.total_bytes(),
+        };
+        std::uint64_t allocatable =
+            (std::numeric_limits<std::uint64_t>::max)();
+        if (snapshot.system_total_bytes != 0u) {
+            snapshot.process_soft_cap_bytes = static_cast<std::uint64_t>(
+                static_cast<double>(snapshot.system_total_bytes)
+                * live_budget.cap_fraction);
+        }
+        if (snapshot.system_total_bytes != 0u
+            && snapshot.system_available_bytes != 0u) {
+            const std::uint64_t by_cap =
+                snapshot.process_footprint_bytes
+                        < snapshot.process_soft_cap_bytes
+                    ? snapshot.process_soft_cap_bytes
+                        - snapshot.process_footprint_bytes
+                    : 0u;
+            const std::uint64_t by_free =
+                snapshot.system_available_bytes > live_budget.min_free_bytes
+                    ? snapshot.system_available_bytes
+                        - live_budget.min_free_bytes
+                    : 0u;
+            allocatable = std::min(by_cap, by_free);
+        }
+        const std::uint64_t cap = index_memory_cap_bytes();
+        snapshot.budget_ceiling_bytes = cap == 0u
+            ? allocatable
+            : allocatable == (std::numeric_limits<std::uint64_t>::max)()
+                ? cap : std::min(allocatable, cap);
+        snapshot.allocatable_after_reservations_bytes =
+            snapshot.budget_ceiling_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                ? snapshot.budget_ceiling_bytes
+                : snapshot.reserved_bytes < snapshot.budget_ceiling_bytes
+                    ? snapshot.budget_ceiling_bytes - snapshot.reserved_bytes
+                    : 0u;
+        return snapshot;
     }
 
     [[nodiscard]] std::optional<MemoryPermit> try_reserve(

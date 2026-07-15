@@ -37,6 +37,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -151,15 +152,28 @@ enum class JustIndexSetupKind {
     Gpu,
 };
 
-struct E2eCliSelection {
-    bool saw_cases_filter = false;
-    bool scalar_just_index = true;
-    bool simd_just_index = true;
-    bool gpu_just_index = true;
-    bool minimap2_just_index = true;
+struct E2eSetupSelection {
+    bool scalar_just_index = false;
+    bool simd_just_index = false;
+    bool gpu_just_index = false;
+    bool minimap2_just_index = false;
 };
 
-E2eCliSelection g_e2e_cli_selection{};
+struct E2eJustIndexSetupRequirements {
+    bool scalar_per_fragment = false;
+    bool scalar_per_sequence = false;
+    bool simd_per_fragment = false;
+    bool simd_per_sequence = false;
+    bool gpu_per_fragment = false;
+    bool gpu_per_sequence = false;
+    bool minimap2 = false;
+
+    [[nodiscard]] bool any_bioseq() const noexcept {
+        return scalar_per_fragment || scalar_per_sequence
+            || simd_per_fragment || simd_per_sequence
+            || gpu_per_fragment || gpu_per_sequence;
+    }
+};
 
 struct E2eQueryTruth {
     std::int32_t id = 0;
@@ -183,6 +197,10 @@ struct E2eInput {
     std::string just_index_table_scalar_per_sequence;
     std::string just_index_table_gpu_per_fragment;
     std::string just_index_table_gpu_per_sequence;
+    // The BIOSEQ table AM owns this identity.  It is not a zero-based ordinal:
+    // capture it from the loaded row's ctid and carry that exact query key into
+    // every READY-generation inspection before and after setup.
+    std::map<std::string, std::int64_t> just_index_sequence_rowno_by_table;
     std::string no_index_table;                  // base target loaded untimed; no minimizer sidecar
     std::string target_fasta;                    // single-record, for bioseq.load
     std::string target_fasta_split;              // <=split_bp records, for minimap2
@@ -216,7 +234,8 @@ struct ColdNoIndexPolicyAbsenceEvidence {
 };
 
 struct E2eOutput {
-	static constexpr std::size_t kAlignmentSnapshotColumnCount = 149;
+	static constexpr std::size_t kAlignmentSnapshotV1ColumnCount = 150;
+	static constexpr std::size_t kAlignmentSnapshotColumnCount = 151;
     static constexpr std::size_t kAlignmentSnapshotRowCount = 20;
     bool found = false;
     std::int64_t target_start = -1;
@@ -232,6 +251,30 @@ struct E2eOutput {
     std::string actual_backend;
     std::string requested_target_index_source;
     std::string actual_target_index_source;
+    std::string requested_simd_chaining_policy;
+    std::string observed_simd_chaining_policy;
+    std::string requested_simd_alignment_algorithm;
+    std::string observed_simd_alignment_algorithm;
+    std::int64_t simd_evidence_schema_valid = -1;
+    std::int64_t nthash_vector_batches = -1;
+    std::int64_t nthash_resident_vector_stream_kernel_calls = -1;
+    std::int64_t simd_chaining_exact_policy_calls = -1;
+    std::int64_t simd_chaining_bounded_policy_calls = -1;
+    std::int64_t simd_chaining_bounded_score_batches = -1;
+    std::int64_t simd_chaining_bounded_cutoff_stops = -1;
+    std::int64_t simd_chaining_bounded_candidates_skipped = -1;
+    std::int64_t simd_chaining_policy_rejections = -1;
+    std::int64_t simd_chaining_policy_evidence_saturated = -1;
+    std::int64_t block_aligner_execution_proof_present = -1;
+    std::int64_t block_aligner_execution_proof_accepted = -1;
+    std::int64_t block_aligner_executed_calls = -1;
+    std::int64_t block_aligner_nonempty_calls = -1;
+    std::int64_t block_aligner_nonempty_calls_with_simd = -1;
+    std::int64_t block_aligner_simd_dp_vector_batches = -1;
+    std::int64_t block_aligner_simd_dp_cells = -1;
+    std::int64_t block_aligner_forbidden_ksw2_calls = -1;
+    std::int64_t block_aligner_forbidden_scalar_biological_fallbacks = -1;
+    std::int64_t block_aligner_execution_proof_saturated = -1;
     std::int64_t pipeline_proof_present = 0;
     std::int64_t pipeline_proof_attached_to_measurement = 0;
     std::int64_t pipeline_proof_accepted = 0;
@@ -279,6 +322,59 @@ struct E2eOutput {
     std::int64_t persisted_generation_read_sessions = -1;
     std::int64_t persisted_relation_opens = -1;
     std::int64_t persisted_index_scans = -1;
+    std::int64_t persisted_manifest_rows_read = -1;
+    std::int64_t persisted_manifest_bytes_read = -1;
+    std::int64_t persisted_format5_manifest_contract_valid = -1;
+    std::int64_t cold_index_schema_valid = -1;
+    std::int64_t cold_index_route_empty = -1;
+    std::int64_t cold_index_route_selective = -1;
+    std::int64_t cold_index_route_full = -1;
+    std::int64_t cold_index_route_candidate_rows = -1;
+    std::int64_t cold_index_route_full_rows = -1;
+    std::int64_t cold_index_route_candidate_bytes = -1;
+    std::int64_t cold_index_route_full_bytes = -1;
+    std::int64_t cold_index_route_selective_cost = -1;
+    std::int64_t cold_index_route_full_cost = -1;
+    std::int64_t cold_index_payload_rows_requested = -1;
+    std::int64_t cold_index_payload_rows_delivered = -1;
+    std::int64_t cold_index_payload_rows_scanned = -1;
+    std::int64_t cold_index_payload_rows_skipped = -1;
+    std::int64_t cold_index_payload_bytes_requested = -1;
+    std::int64_t cold_index_payload_bytes_delivered = -1;
+    std::int64_t cold_index_payload_bytes_scanned = -1;
+    std::int64_t format5_reader_capacity_accounting_passes = -1;
+    std::int64_t format5_reader_global_position_storage_preparations = -1;
+    std::int64_t format5_reader_global_position_storage_allocations = -1;
+    std::int64_t format5_reader_position_append_growth_reservations = -1;
+    std::int64_t format5_reader_retained_position_count = -1;
+    std::int64_t format5_reader_retained_position_capacity = -1;
+    std::int64_t format5_reader_directory_capacity_bytes = -1;
+    std::int64_t format5_reader_query_hash_capacity_bytes = -1;
+    std::int64_t format5_reader_query_record_capacity_bytes = -1;
+    std::int64_t format5_reader_ordinal_route_capacity_bytes = -1;
+    std::int64_t format5_reader_selected_extent_capacity_bytes = -1;
+    std::int64_t format5_reader_current_selected_control_capacity_bytes = -1;
+    std::int64_t format5_reader_global_position_capacity_bytes = -1;
+    std::int64_t format5_reader_control_payload_capacity_bytes = -1;
+    std::int64_t format5_reader_owned_capacity_bytes = -1;
+    std::int64_t format5_reader_admitted_bytes = -1;
+    std::int64_t format5_reader_exact_position_image_checks = -1;
+    std::int64_t format5_reader_exact_position_image_failures = -1;
+    std::int64_t format5_reader_retained_layout_checks = -1;
+    std::int64_t format5_reader_retained_layout_failures = -1;
+    std::int64_t format5_reader_memory_evidence_saturated = -1;
+    nlohmann::json format5_reader_memory_evidence = nullptr;
+    std::int64_t persisted_gpu_operation_evidence_schema_valid = -1;
+    std::int64_t persisted_gpu_operation_evidence_accepted = -1;
+    std::int64_t persisted_gpu_operation_evidence_complete = -1;
+    std::int64_t persisted_gpu_operation_evidence_saturated = -1;
+    std::int64_t persisted_gpu_dropped_operation_count = -1;
+    std::int64_t persisted_gpu_operation_count = -1;
+    std::int64_t persisted_gpu_accepted_operation_count = -1;
+    std::int64_t persisted_gpu_job_count = -1;
+    std::int64_t persisted_gpu_accepted_job_count = -1;
+    nlohmann::json persisted_gpu_operation_evidence = nullptr;
+    std::int64_t cold_index_stats_saturated = -1;
     std::int64_t gpu_persisted_resident_uploads = -1;
     std::int64_t gpu_persisted_resident_cache_hits = -1;
     std::int64_t gpu_seed_dispatches = -1;
@@ -309,6 +405,7 @@ struct E2eOutput {
     std::int64_t post_restart_database_oid = -1;
     std::int64_t cold_restart_identity_changed = -1;
     std::int64_t pre_restart_persisted_generation_id = -1;
+    std::int64_t pre_restart_persisted_gpu_abi_version = -1;
     std::string pre_restart_persisted_source_identity;
     // Dedicated no-index lifecycle evidence.  Do not overload the persisted
     // just_index fields: no_index proves an untimed base-data load with no
@@ -341,6 +438,7 @@ struct E2eOutput {
     ColdNoIndexPolicyAbsenceEvidence cold_no_index_measured_mpf{};
     ColdNoIndexPolicyAbsenceEvidence cold_no_index_measured_mps{};
     std::int64_t cold_no_index_lifecycle_accepted = 0;
+    std::int64_t persisted_policy_audit_accepted = -1;
     std::int64_t audit_selected_minimizer_is_sequence = -1;
     std::int64_t audit_mpf_rows = -1;
     std::int64_t audit_mps_rows = -1;
@@ -387,49 +485,101 @@ struct E2eOutput {
     it::rowset_t alignment_snapshot_rows{};
 };
 
-void note_e2e_filtered_case(std::string_view name, E2eCliSelection& selection) {
+static_assert(
+    E2eOutput::kAlignmentSnapshotColumnCount
+    == E2eOutput::kAlignmentSnapshotV1ColumnCount + 1);
+
+[[nodiscard]] std::optional<JustIndexSetupKind>
+e2e_just_index_setup_kind(std::string_view name) {
     if (name == "bioseq_ksw2_scalar_dp_scalar_mm_just_index") {
-        selection.scalar_just_index = true;
-    } else if (name == "bioseq_just_index"
-        || name == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
-        selection.simd_just_index = true;
-    } else if (name == "bioseq_block_vulkan_phase_c_frontend_just_index"
-               || name == "bioseq_block_gpu_dp_gpu_seed_just_index") {
-        selection.gpu_just_index = true;
-    } else if (name == "minimap2_just_index") {
-        selection.minimap2_just_index = true;
+        return JustIndexSetupKind::Scalar;
     }
+    if (name == "bioseq_just_index"
+        || name == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
+        return JustIndexSetupKind::Simd;
+    }
+    if (name == "bioseq_block_vulkan_phase_c_frontend_just_index"
+               || name == "bioseq_block_gpu_dp_gpu_seed_just_index") {
+        return JustIndexSetupKind::Gpu;
+    }
+    return std::nullopt;
 }
 
-void parse_e2e_cli_selection(int argc, char** argv) {
-    E2eCliSelection selection{};
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::string_view{argv[i]} != "--filter") {
+[[nodiscard]] E2eJustIndexSetupRequirements
+e2e_just_index_setup_requirements(
+        const RunConstraints& constraints) {
+    E2eJustIndexSetupRequirements requirements{};
+    for (const auto& tuple : constraints.execution_tuples) {
+        if (tuple.algorithm_name == "minimap2_just_index") {
+            requirements.minimap2 = true;
             continue;
         }
-        const std::string_view spec{argv[i + 1]};
-        constexpr std::string_view prefix = "cases=";
-        if (!spec.starts_with(prefix)) {
-            continue;
-        }
-        selection.saw_cases_filter = true;
-        selection.scalar_just_index = false;
-        selection.simd_just_index = false;
-        selection.gpu_just_index = false;
-        selection.minimap2_just_index = false;
-        std::string_view rest = spec.substr(prefix.size());
-        while (!rest.empty()) {
-            const std::size_t comma = rest.find(',');
-            const std::string_view item =
-                rest.substr(0, comma == std::string_view::npos ? rest.size() : comma);
-            note_e2e_filtered_case(item, selection);
-            if (comma == std::string_view::npos) {
-                break;
+        const auto setup_kind =
+            e2e_just_index_setup_kind(tuple.algorithm_name);
+        if (!setup_kind.has_value()) {
+            if (std::string_view{tuple.algorithm_name}.ends_with("_just_index")) {
+                throw std::invalid_argument(fmt::format(
+                    "unsupported E2E just_index execution tuple '{}'",
+                    tuple.algorithm_name));
             }
-            rest.remove_prefix(comma + 1);
+            continue;
         }
+        const auto policy_it = tuple.params.find("minimizer_index");
+        if (policy_it == tuple.params.end() || !policy_it->second.is_string()) {
+            throw std::invalid_argument(fmt::format(
+                "E2E just_index tuple '{}' has no resolved string "
+                "minimizer_index parameter",
+                tuple.algorithm_name));
+        }
+        const std::string_view policy = policy_it->second.as_string();
+        bool* required = nullptr;
+        if (policy == kMinimizersPerFragmentIndex) {
+            switch (*setup_kind) {
+                case JustIndexSetupKind::Scalar:
+                    required = &requirements.scalar_per_fragment;
+                    break;
+                case JustIndexSetupKind::Simd:
+                    required = &requirements.simd_per_fragment;
+                    break;
+                case JustIndexSetupKind::Gpu:
+                    required = &requirements.gpu_per_fragment;
+                    break;
+            }
+        } else if (policy == kMinimizersPerSequenceIndex) {
+            switch (*setup_kind) {
+                case JustIndexSetupKind::Scalar:
+                    required = &requirements.scalar_per_sequence;
+                    break;
+                case JustIndexSetupKind::Simd:
+                    required = &requirements.simd_per_sequence;
+                    break;
+                case JustIndexSetupKind::Gpu:
+                    required = &requirements.gpu_per_sequence;
+                    break;
+            }
+        } else {
+            throw std::invalid_argument(fmt::format(
+                "E2E just_index tuple '{}' resolved unsupported "
+                "minimizer_index '{}'",
+                tuple.algorithm_name,
+                policy));
+        }
+        *required = true;
     }
-    g_e2e_cli_selection = selection;
+    return requirements;
+}
+
+[[nodiscard]] E2eSetupSelection e2e_setup_selection_for(
+        const E2eJustIndexSetupRequirements& requirements) noexcept {
+    return E2eSetupSelection{
+        .scalar_just_index = requirements.scalar_per_fragment
+            || requirements.scalar_per_sequence,
+        .simd_just_index = requirements.simd_per_fragment
+            || requirements.simd_per_sequence,
+        .gpu_just_index = requirements.gpu_per_fragment
+            || requirements.gpu_per_sequence,
+        .minimap2_just_index = requirements.minimap2,
+    };
 }
 
 void preflight_e2e_resources(it::connection_test_context& conn,
@@ -1278,6 +1428,11 @@ struct AlignmentSnapshotIdentity {
     }
 }
 
+[[nodiscard]] constexpr bool alignment_stats_json_column(
+        const std::size_t column) noexcept {
+    return column == 149 || column == 150;
+}
+
 inline constexpr std::array<std::string_view,
     E2eOutput::kAlignmentSnapshotColumnCount> kAlignmentSnapshotColumnNames{
     "execution_id",
@@ -1429,9 +1584,11 @@ inline constexpr std::array<std::string_view,
 	"persisted_source_decoded_bp",
 	"persisted_legacy_globalize_calls",
 	"persisted_legacy_rebase_calls",
+	"cold_index_preparation",
+	"simd_execution_evidence",
 };
 
-[[nodiscard]] bool fixed_lower_hex(
+[[nodiscard]] constexpr bool fixed_lower_hex(
         std::string_view value,
         const std::size_t expected_size) noexcept {
     if (value.size() != expected_size) return false;
@@ -1443,11 +1600,1434 @@ inline constexpr std::array<std::string_view,
     return true;
 }
 
+[[nodiscard]] constexpr bool nonzero_fixed_lower_hex(
+        std::string_view value,
+        const std::size_t expected_size) noexcept {
+    return fixed_lower_hex(value, expected_size)
+        && value.find_first_not_of('0') != std::string_view::npos;
+}
+
+struct GpuCacheIdentityGateEvidence {
+    std::string_view device_uuid;
+    std::string_view driver;
+    std::string_view policy;
+    std::string_view seed_sha256;
+    std::int64_t seed_size = -1;
+    std::string_view manifest_checksum;
+    std::int64_t hit = -1;
+};
+
+[[nodiscard]] constexpr bool gpu_cache_identity_evidence_valid(
+        const GpuCacheIdentityGateEvidence& evidence) noexcept {
+    return nonzero_fixed_lower_hex(evidence.device_uuid, 32)
+        && !evidence.driver.empty()
+        && evidence.policy == "immutable_preseed_all_hit"
+        && nonzero_fixed_lower_hex(evidence.seed_sha256, 64)
+        && evidence.seed_size > 0
+        && nonzero_fixed_lower_hex(evidence.manifest_checksum, 16)
+        && evidence.hit == 1;
+}
+
+struct GpuCacheRuntimeGateEvidence {
+    std::int64_t declared_seed_size = -1;
+    std::int64_t loads = -1;
+    std::int64_t seed_bytes = -1;
+    std::int64_t load_ns = -1;
+    std::int64_t creation_ns = -1;
+    std::int64_t timestamp_failures = -1;
+    std::int64_t pipeline_creates = -1;
+    std::int64_t backend_declines = -1;
+    std::int64_t backend_fallbacks = -1;
+};
+
+[[nodiscard]] constexpr bool gpu_cache_runtime_evidence_valid(
+        const GpuCacheRuntimeGateEvidence& evidence) noexcept {
+    return evidence.declared_seed_size > 0
+        && evidence.loads == 1
+        && evidence.seed_bytes == evidence.declared_seed_size
+        && evidence.load_ns > 0
+        && evidence.creation_ns > 0
+        && evidence.timestamp_failures == 0
+        && evidence.pipeline_creates > 0
+        && evidence.backend_declines == 0
+        && evidence.backend_fallbacks == 0;
+}
+
+consteval bool gpu_cache_gate_contract_self_test() {
+    constexpr GpuCacheIdentityGateEvidence valid_identity{
+        .device_uuid = "11111111111111111111111111111111",
+        .driver = "vk",
+        .policy = "immutable_preseed_all_hit",
+        .seed_sha256 =
+            "11111111111111111111111111111111"
+            "11111111111111111111111111111111",
+        .seed_size = 64,
+        .manifest_checksum = "0000000000001234",
+        .hit = 1,
+    };
+    constexpr auto changed_identity = []<typename T>(
+            GpuCacheIdentityGateEvidence evidence,
+            T GpuCacheIdentityGateEvidence::* member,
+            T value) constexpr {
+        evidence.*member = value;
+        return evidence;
+    };
+    struct IdentityCase {
+        std::string_view name;
+        GpuCacheIdentityGateEvidence evidence;
+        bool expected;
+    };
+    constexpr auto identity_cases = std::to_array<IdentityCase>({
+        {"valid immutable hit", valid_identity, true},
+        {"isolated policy rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::policy,
+            std::string_view{"isolated_miss_diagnostic"}), false},
+        {"not-applicable policy rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::policy,
+            std::string_view{"not_applicable"}), false},
+        {"mixed policy rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::policy,
+            std::string_view{"mixed_invalid"}), false},
+        {"cache miss rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::hit, std::int64_t{0}), false},
+        {"unset hit rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::hit, std::int64_t{-1}), false},
+        {"mixed hit rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::hit, std::int64_t{2}), false},
+        {"zero UUID rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::device_uuid,
+            std::string_view{"00000000000000000000000000000000"}), false},
+        {"malformed UUID rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::device_uuid,
+            std::string_view{"A1111111111111111111111111111111"}), false},
+        {"empty driver rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::driver,
+            std::string_view{}), false},
+        {"zero SHA rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::seed_sha256,
+            std::string_view{
+                "00000000000000000000000000000000"
+                "00000000000000000000000000000000"}), false},
+        {"malformed SHA rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::seed_sha256,
+            std::string_view{"1"}), false},
+        {"zero seed size rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::seed_size,
+            std::int64_t{0}), false},
+        {"zero manifest rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::manifest_checksum,
+            std::string_view{"0000000000000000"}), false},
+        {"malformed manifest rejected", changed_identity(valid_identity,
+            &GpuCacheIdentityGateEvidence::manifest_checksum,
+            std::string_view{"000000000000123G"}), false},
+    });
+    for (const auto& test : identity_cases) {
+        (void)test.name;
+        if (gpu_cache_identity_evidence_valid(test.evidence)
+                != test.expected) {
+            return false;
+        }
+    }
+
+    constexpr GpuCacheRuntimeGateEvidence valid_runtime{
+        .declared_seed_size = 64,
+        .loads = 1,
+        .seed_bytes = 64,
+        .load_ns = 1,
+        .creation_ns = 1,
+        .timestamp_failures = 0,
+        .pipeline_creates = 1,
+        .backend_declines = 0,
+        .backend_fallbacks = 0,
+    };
+    constexpr auto changed_runtime = [](
+            GpuCacheRuntimeGateEvidence evidence,
+            std::int64_t GpuCacheRuntimeGateEvidence::* member,
+            const std::int64_t value) constexpr {
+        evidence.*member = value;
+        return evidence;
+    };
+    struct RuntimeCase {
+        std::string_view name;
+        GpuCacheRuntimeGateEvidence evidence;
+        bool expected;
+    };
+    constexpr auto runtime_cases = std::to_array<RuntimeCase>({
+        {"valid runtime proof", valid_runtime, true},
+        {"zero declared bytes rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::declared_seed_size, 0), false},
+        {"zero loads rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::loads, 0), false},
+        {"multiple loads rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::loads, 2), false},
+        {"zero seed bytes rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::seed_bytes, 0), false},
+        {"mismatched seed bytes rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::seed_bytes, 63), false},
+        {"zero load timing rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::load_ns, 0), false},
+        {"zero creation timing rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::creation_ns, 0), false},
+        {"timestamp failure rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::timestamp_failures, 1), false},
+        {"zero pipeline creates rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::pipeline_creates, 0), false},
+        {"backend decline rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::backend_declines, 1), false},
+        {"backend fallback rejected", changed_runtime(valid_runtime,
+            &GpuCacheRuntimeGateEvidence::backend_fallbacks, 1), false},
+    });
+    for (const auto& test : runtime_cases) {
+        (void)test.name;
+        if (gpu_cache_runtime_evidence_valid(test.evidence)
+                != test.expected) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(gpu_cache_gate_contract_self_test());
+
+inline constexpr auto kColdIndexEvidenceKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "timing_semantics",
+        "decode_timing_available", "transfer_timing_available",
+        "target_relation_reuses", "target_relation_extra_opens",
+        "parent_random_reads", "policy_heap_opens", "policy_index_opens",
+        "source_heap_opens", "source_index_opens", "fragment_heap_opens",
+        "sidecar_heap_opens", "sidecar_index_opens",
+        "policy_schema_validations", "source_schema_validations",
+        "sidecar_schema_validations", "lock_acquires", "lock_releases",
+        "snapshot_registers", "route_empty", "route_selective",
+        "route_full", "route_candidate_rows", "route_full_rows",
+        "route_candidate_bytes", "route_full_bytes", "route_selective_cost",
+        "route_full_cost", "memory_reroutes", "payload_bytes_requested",
+        "payload_bytes_delivered", "payload_rows_requested",
+        "payload_rows_delivered", "payload_rows_scanned",
+        "payload_bytes_scanned", "payload_rows_skipped", "heap_tid_adjacent",
+        "heap_tid_forward_gap", "heap_tid_backward_jump", "extent_crc_bytes",
+        "row_crc_bytes", "tuple_form_bytes", "policy_ns", "source_ns",
+        "bind_ns", "head_ns", "directory_ns", "payload_ns", "decode_ns",
+        "transfer_ns", "close_ns", "shared_blks_hit", "shared_blks_read",
+        "stats_saturated",
+    });
+static_assert(kColdIndexEvidenceKeys.size() == 56);
+
+inline constexpr auto kFormat5ReaderMemoryEvidenceKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "execution_id", "backend_pid", "database_oid",
+        "format5_reader_capacity_accounting_passes",
+        "format5_reader_global_position_storage_preparations",
+        "format5_reader_global_position_storage_allocations",
+        "format5_reader_position_append_growth_reservations",
+        "format5_reader_retained_position_count",
+        "format5_reader_retained_position_capacity",
+        "format5_reader_directory_capacity_bytes",
+        "format5_reader_query_hash_capacity_bytes",
+        "format5_reader_query_record_capacity_bytes",
+        "format5_reader_ordinal_route_capacity_bytes",
+        "format5_reader_selected_extent_capacity_bytes",
+        "format5_reader_current_selected_control_capacity_bytes",
+        "format5_reader_global_position_capacity_bytes",
+        "format5_reader_control_payload_capacity_bytes",
+        "format5_reader_owned_capacity_bytes",
+        "format5_reader_admitted_bytes",
+        "format5_reader_exact_position_image_checks",
+        "format5_reader_exact_position_image_failures",
+        "format5_reader_retained_layout_checks",
+        "format5_reader_retained_layout_failures",
+        "format5_reader_memory_evidence_saturated", "stats_saturated",
+    });
+static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 27);
+
+inline constexpr auto kSimdExecutionEvidenceKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "requested_policy", "observed_policy",
+        "requested_alignment_algorithm", "observed_alignment_algorithm",
+        "nthash_vector_batches",
+        "nthash_resident_vector_stream_kernel_calls",
+        "simd_chaining_exact_policy_calls",
+        "simd_chaining_bounded_policy_calls",
+        "simd_chaining_bounded_score_batches",
+        "simd_chaining_bounded_cutoff_stops",
+        "simd_chaining_bounded_candidates_skipped",
+        "simd_chaining_policy_rejections",
+        "simd_chaining_policy_evidence_saturated",
+        "block_aligner_execution_proof",
+    });
+static_assert(kSimdExecutionEvidenceKeys.size() == 16);
+
+inline constexpr auto kBlockAlignerExecutionProofKeys =
+    std::to_array<std::string_view>({
+        "present", "accepted", "executed_calls", "nonempty_calls",
+        "nonempty_calls_with_simd", "simd_dp_vector_batches",
+        "simd_dp_cells", "forbidden_ksw2_calls",
+        "forbidden_scalar_biological_fallbacks", "saturated",
+    });
+static_assert(kBlockAlignerExecutionProofKeys.size() == 10);
+
+inline constexpr auto kPersistedGpuOperationEvidenceKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "execution_id", "backend_pid", "database_oid",
+        "completed", "partial", "fully_drained", "accepted", "complete",
+        "saturated", "dropped_operation_count", "operation_count",
+        "accepted_operation_count", "complete_operation_count", "job_count",
+        "accepted_job_count", "cache_qualification", "operations",
+    });
+static_assert(kPersistedGpuOperationEvidenceKeys.size() == 19);
+
+inline constexpr auto kPersistedGpuOperationKeys =
+    std::to_array<std::string_view>({
+        "operation_identity", "expected_jobs", "proof_jobs",
+        "consumed_jobs", "accepted_jobs", "burned_jobs", "pending_jobs",
+        "staged_jobs", "published_jobs", "publication_commits",
+        "query_pipeline_receipt_count", "shape_pipeline_receipt_count",
+        "submission_count", "query_pipeline_operation_identity",
+        "shape_pipeline_operation_identity", "query_submission_ordinals",
+        "seed_receipt_identity", "cache_token_identity",
+        "cache_qualification_identity", "generation_id", "source_identity",
+        "cold_load_identity", "source", "environment", "cache_metrics",
+        "jobs",
+    });
+static_assert(kPersistedGpuOperationKeys.size() == 26);
+
+inline constexpr auto kPersistedGpuCacheQualificationKeys =
+    std::to_array<std::string_view>({
+        "version", "identity", "accepted", "saturated", "archive_count",
+        "archive_bytes", "archive_checksum", "receipt_count", "hash_passes",
+        "hashed_bytes", "private_files_created", "private_files_unlinked",
+        "live_private_paths", "pipeline_filesystem_hash_passes",
+        "pipeline_filesystem_hashed_bytes", "helper_protocol_version",
+        "helper_build_identity", "helper_source", "helper_executable_size",
+        "helper_executable_sha256", "helper_metal_registry_id", "device_uuid",
+        "api_version", "driver_version", "vendor_id", "device_id",
+        "pipeline_cache_uuid", "seed_receipt_identity", "seed_sha256",
+        "seed_size", "manifest_checksum",
+    });
+static_assert(kPersistedGpuCacheQualificationKeys.size() == 31);
+
+inline constexpr auto kPersistedGpuEnvironmentKeys =
+    std::to_array<std::string_view>({
+        "device_uuid", "api_version", "driver_version", "vendor_id",
+        "device_id", "pipeline_cache_uuid", "seed_sha256", "seed_size",
+        "manifest_checksum",
+    });
+static_assert(kPersistedGpuEnvironmentKeys.size() == 9);
+
+inline constexpr auto kPersistedGpuCacheMetricsKeys =
+    std::to_array<std::string_view>({
+        "pipeline_cache_loads", "pipeline_cache_seed_bytes",
+        "pipeline_cache_load_ns", "pipeline_creates",
+        "pipeline_creation_ns",
+    });
+static_assert(kPersistedGpuCacheMetricsKeys.size() == 5);
+
+inline constexpr auto kPersistedGpuJobKeys =
+    std::to_array<std::string_view>({
+        "logical_target_row", "logical_query_ordinal", "query_index",
+        "query_length", "query_minimizer_count", "query_tile_count",
+        "query", "direct", "submissions", "status", "forbidden",
+        "coordinate",
+    });
+static_assert(kPersistedGpuJobKeys.size() == 12);
+
+inline constexpr auto kPersistedGpuQueryKeys =
+    std::to_array<std::string_view>({
+        "count_dispatches", "scan_dispatches", "emit_dispatches",
+        "completed_roundtrips",
+    });
+static_assert(kPersistedGpuQueryKeys.size() == 4);
+
+inline constexpr auto kPersistedGpuDirectKeys =
+    std::to_array<std::string_view>({
+        "count_dispatches", "scan_dispatches", "anchor_count",
+        "emit_dispatches", "sort_operations", "range_build_dispatches",
+        "range_count", "chain_dispatches", "chain_backtrack_dispatches",
+        "coordinate_dispatches",
+    });
+static_assert(kPersistedGpuDirectKeys.size() == 10);
+
+inline constexpr auto kPersistedGpuSubmissionKeys =
+    std::to_array<std::string_view>({
+        "stage", "operation_identity", "ordinal", "submit_wait_identity",
+    });
+static_assert(kPersistedGpuSubmissionKeys.size() == 4);
+
+inline constexpr auto kPersistedGpuStatusKeys =
+    std::to_array<std::string_view>({
+        "count_checks", "emit_checks", "status_or", "result_readbacks",
+    });
+static_assert(kPersistedGpuStatusKeys.size() == 4);
+
+inline constexpr auto kPersistedGpuForbiddenKeys =
+    std::to_array<std::string_view>({
+        "coordinate_vote_dispatches", "cpu_or_simd_biological_calls",
+        "recompute_calls", "fallback_calls",
+    });
+static_assert(kPersistedGpuForbiddenKeys.size() == 4);
+
+inline constexpr auto kPersistedGpuCoordinateKeys =
+    std::to_array<std::string_view>({
+        "valid", "query_start", "query_end", "target_start", "target_end",
+        "match_length", "block_length", "chain_score", "seed_count",
+        "is_reverse",
+    });
+static_assert(kPersistedGpuCoordinateKeys.size() == 10);
+
+template<std::size_t N>
+[[nodiscard]] bool json_has_exact_keys(
+        const nlohmann::json& value,
+        const std::array<std::string_view, N>& keys) {
+    if (!value.is_object() || value.size() != keys.size()) return false;
+    return std::all_of(keys.begin(), keys.end(), [&value](const auto key) {
+        return value.contains(std::string{key});
+    });
+}
+
+[[nodiscard]] std::int64_t required_json_counter(
+        const nlohmann::json& object,
+        std::string_view key) {
+    const auto found = object.find(std::string{key});
+    if (found == object.end()
+        || !(found->is_number_unsigned() || found->is_number_integer())) {
+        abort_pipeline_proof_capture(
+            "alignment evidence JSON counter is absent or ill-typed");
+    }
+    if (found->is_number_unsigned()) {
+        const auto value = found->get<std::uint64_t>();
+        if (value > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)())) {
+            abort_pipeline_proof_capture(
+                "alignment evidence JSON counter exceeds SQL bigint");
+        }
+        return static_cast<std::int64_t>(value);
+    }
+    const auto value = found->get<std::int64_t>();
+    if (value < 0) {
+        abort_pipeline_proof_capture(
+            "alignment evidence JSON counter is negative");
+    }
+    return value;
+}
+
+[[nodiscard]] nlohmann::json parse_exact_json_cell(
+        const std::optional<std::string>& cell,
+        std::string_view diagnostic) {
+    if (!cell.has_value()) {
+        abort_pipeline_proof_capture(diagnostic);
+    }
+    try {
+        return nlohmann::json::parse(*cell);
+    } catch (const nlohmann::json::exception&) {
+        abort_pipeline_proof_capture(diagnostic);
+    }
+}
+
+/// Read one required JSON Boolean or fail the evidence capture closed.
+[[nodiscard]] bool required_json_boolean(
+        const nlohmann::json& object,
+        std::string_view key) {
+    const auto found = object.find(std::string{key});
+    if (found == object.end() || !found->is_boolean()) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence Boolean is absent or ill-typed");
+    }
+    return found->get<bool>();
+}
+
+/// Read one required JSON string without copying its retained value.
+[[nodiscard]] const std::string& required_json_text(
+        const nlohmann::json& object,
+        std::string_view key) {
+    const auto found = object.find(std::string{key});
+    if (found == object.end() || !found->is_string()) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence text is absent or ill-typed");
+    }
+    return found->get_ref<const std::string&>();
+}
+
+/// Read one required JSON array from the retained evidence object.
+[[nodiscard]] const nlohmann::json& required_json_array(
+        const nlohmann::json& object,
+        std::string_view key) {
+    const auto found = object.find(std::string{key});
+    if (found == object.end() || !found->is_array()) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence array is absent or ill-typed");
+    }
+    return *found;
+}
+
+/// Read one required nested JSON object from the retained evidence object.
+[[nodiscard]] const nlohmann::json& required_json_object(
+        const nlohmann::json& object,
+        std::string_view key) {
+    const auto found = object.find(std::string{key});
+    if (found == object.end() || !found->is_object()) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence object is absent or ill-typed");
+    }
+    return *found;
+}
+
+/// Read one nonzero lower-hex identity with an exact byte-string width.
+[[nodiscard]] const std::string& required_json_hex_identity(
+        const nlohmann::json& object,
+        std::string_view key,
+        const std::size_t width) {
+    const std::string& value = required_json_text(object, key);
+    if (!nonzero_fixed_lower_hex(value, width)) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence identity is zero or malformed");
+    }
+    return value;
+}
+
+/// Read one nonnegative SQL-bigint-compatible JSON array element.
+[[nodiscard]] std::int64_t required_json_integer_value(
+        const nlohmann::json& value) {
+    if (!(value.is_number_unsigned() || value.is_number_integer())) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence array integer is ill-typed");
+    }
+    if (value.is_number_unsigned()) {
+        const auto parsed = value.get<std::uint64_t>();
+        if (parsed > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)())) {
+            abort_pipeline_proof_capture(
+                "persisted GPU evidence array integer exceeds SQL bigint");
+        }
+        return static_cast<std::int64_t>(parsed);
+    }
+    const auto parsed = value.get<std::int64_t>();
+    if (parsed < 0) {
+        abort_pipeline_proof_capture(
+            "persisted GPU evidence array integer is negative");
+    }
+    return parsed;
+}
+
+void capture_versioned_alignment_json(
+        const it::rowset_t& rows,
+        E2eOutput& out) {
+    const nlohmann::json cold = parse_exact_json_cell(
+        rows.front()[149], "cold-index evidence JSON failed to parse");
+    const bool cold_header_valid = json_has_exact_keys(
+            cold, kColdIndexEvidenceKeys)
+        && cold["schema"].is_string()
+        && cold["schema"] == "bioseq.cold_index_preparation"
+        && cold["version"].is_number_integer()
+        && cold["version"] == 1
+        && cold["timing_semantics"].is_string()
+        && cold["timing_semantics"] == "payload_inclusive_wall_v1"
+        && cold["decode_timing_available"].is_boolean()
+        && !cold["decode_timing_available"].get<bool>()
+        && cold["transfer_timing_available"].is_boolean()
+        && !cold["transfer_timing_available"].get<bool>()
+        && cold["decode_ns"].is_null()
+        && cold["transfer_ns"].is_null()
+        && cold["stats_saturated"].is_boolean();
+    if (!cold_header_valid) {
+        abort_pipeline_proof_capture(
+            "cold-index evidence JSON has the wrong exact schema or types");
+    }
+    for (const auto key : kColdIndexEvidenceKeys) {
+        if (key == "schema" || key == "version"
+            || key == "timing_semantics"
+            || key == "decode_timing_available"
+            || key == "transfer_timing_available"
+            || key == "decode_ns" || key == "transfer_ns"
+            || key == "stats_saturated") {
+            continue;
+        }
+        (void)required_json_counter(cold, key);
+    }
+    out.cold_index_schema_valid = 1;
+    out.cold_index_route_empty = required_json_counter(cold, "route_empty");
+    out.cold_index_route_selective =
+        required_json_counter(cold, "route_selective");
+    out.cold_index_route_full = required_json_counter(cold, "route_full");
+    out.cold_index_route_candidate_rows =
+        required_json_counter(cold, "route_candidate_rows");
+    out.cold_index_route_full_rows =
+        required_json_counter(cold, "route_full_rows");
+    out.cold_index_route_candidate_bytes =
+        required_json_counter(cold, "route_candidate_bytes");
+    out.cold_index_route_full_bytes =
+        required_json_counter(cold, "route_full_bytes");
+    out.cold_index_route_selective_cost =
+        required_json_counter(cold, "route_selective_cost");
+    out.cold_index_route_full_cost =
+        required_json_counter(cold, "route_full_cost");
+    out.cold_index_payload_rows_requested =
+        required_json_counter(cold, "payload_rows_requested");
+    out.cold_index_payload_rows_delivered =
+        required_json_counter(cold, "payload_rows_delivered");
+    out.cold_index_payload_rows_scanned =
+        required_json_counter(cold, "payload_rows_scanned");
+    out.cold_index_payload_rows_skipped =
+        required_json_counter(cold, "payload_rows_skipped");
+    out.cold_index_payload_bytes_requested =
+        required_json_counter(cold, "payload_bytes_requested");
+    out.cold_index_payload_bytes_delivered =
+        required_json_counter(cold, "payload_bytes_delivered");
+    out.cold_index_payload_bytes_scanned =
+        required_json_counter(cold, "payload_bytes_scanned");
+    out.cold_index_stats_saturated =
+        cold["stats_saturated"].get<bool>() ? 1 : 0;
+
+    const nlohmann::json simd = parse_exact_json_cell(
+        rows.front()[150], "SIMD execution evidence JSON failed to parse");
+    const auto valid_policy_name = [](const nlohmann::json& value) {
+        if (!value.is_string()) return false;
+        const std::string& policy = value.get_ref<const std::string&>();
+        return policy == "none" || policy == "exact_visited"
+            || policy == "bounded_batch_approximate"
+            || policy == "mixed_invalid";
+    };
+    const auto valid_alignment_algorithm_name = [](
+            const nlohmann::json& value) {
+        if (!value.is_string()) return false;
+        const std::string& algorithm =
+            value.get_ref<const std::string&>();
+        return algorithm == "none" || algorithm == "block_aligner"
+            || algorithm == "mixed_invalid";
+    };
+    const bool simd_header_valid = json_has_exact_keys(
+            simd, kSimdExecutionEvidenceKeys)
+        && simd["schema"].is_string()
+        && simd["schema"] == "bioseq.simd_execution_evidence"
+        && simd["version"].is_number_integer()
+        && simd["version"] == 2
+        && valid_policy_name(simd["requested_policy"])
+        && valid_policy_name(simd["observed_policy"])
+        && valid_alignment_algorithm_name(
+            simd["requested_alignment_algorithm"])
+        && valid_alignment_algorithm_name(
+            simd["observed_alignment_algorithm"])
+        && simd["simd_chaining_policy_evidence_saturated"].is_boolean()
+        && json_has_exact_keys(
+            simd["block_aligner_execution_proof"],
+            kBlockAlignerExecutionProofKeys)
+        && simd["block_aligner_execution_proof"]["present"].is_boolean()
+        && simd["block_aligner_execution_proof"]["accepted"].is_boolean()
+        && simd["block_aligner_execution_proof"]["saturated"].is_boolean();
+    if (!simd_header_valid) {
+        abort_pipeline_proof_capture(
+            "SIMD execution evidence JSON has the wrong exact schema or types");
+    }
+    const nlohmann::json& block =
+        simd["block_aligner_execution_proof"];
+    out.simd_evidence_schema_valid = 1;
+    out.requested_simd_chaining_policy =
+        simd["requested_policy"].get<std::string>();
+    out.observed_simd_chaining_policy =
+        simd["observed_policy"].get<std::string>();
+    out.requested_simd_alignment_algorithm =
+        simd["requested_alignment_algorithm"].get<std::string>();
+    out.observed_simd_alignment_algorithm =
+        simd["observed_alignment_algorithm"].get<std::string>();
+    out.nthash_vector_batches =
+        required_json_counter(simd, "nthash_vector_batches");
+    out.nthash_resident_vector_stream_kernel_calls = required_json_counter(
+        simd, "nthash_resident_vector_stream_kernel_calls");
+    out.simd_chaining_exact_policy_calls = required_json_counter(
+        simd, "simd_chaining_exact_policy_calls");
+    out.simd_chaining_bounded_policy_calls = required_json_counter(
+        simd, "simd_chaining_bounded_policy_calls");
+    out.simd_chaining_bounded_score_batches = required_json_counter(
+        simd, "simd_chaining_bounded_score_batches");
+    out.simd_chaining_bounded_cutoff_stops = required_json_counter(
+        simd, "simd_chaining_bounded_cutoff_stops");
+    out.simd_chaining_bounded_candidates_skipped = required_json_counter(
+        simd, "simd_chaining_bounded_candidates_skipped");
+    out.simd_chaining_policy_rejections = required_json_counter(
+        simd, "simd_chaining_policy_rejections");
+    out.simd_chaining_policy_evidence_saturated =
+        simd["simd_chaining_policy_evidence_saturated"].get<bool>() ? 1 : 0;
+    out.block_aligner_execution_proof_present =
+        block["present"].get<bool>() ? 1 : 0;
+    out.block_aligner_execution_proof_accepted =
+        block["accepted"].get<bool>() ? 1 : 0;
+    out.block_aligner_executed_calls =
+        required_json_counter(block, "executed_calls");
+    out.block_aligner_nonempty_calls =
+        required_json_counter(block, "nonempty_calls");
+    out.block_aligner_nonempty_calls_with_simd =
+        required_json_counter(block, "nonempty_calls_with_simd");
+    out.block_aligner_simd_dp_vector_batches =
+        required_json_counter(block, "simd_dp_vector_batches");
+    out.block_aligner_simd_dp_cells =
+        required_json_counter(block, "simd_dp_cells");
+    out.block_aligner_forbidden_ksw2_calls =
+        required_json_counter(block, "forbidden_ksw2_calls");
+    out.block_aligner_forbidden_scalar_biological_fallbacks =
+        required_json_counter(
+            block, "forbidden_scalar_biological_fallbacks");
+    out.block_aligner_execution_proof_saturated =
+        block["saturated"].get<bool>() ? 1 : 0;
+}
+
+void capture_format5_reader_memory_evidence(
+        const it::connection_test_context& connection,
+        E2eOutput& out) {
+    const it::row_t row = it::query_one(
+        connection,
+        "SELECT bioseq.last_alignment_format5_reader_memory_evidence_v2();");
+    if (row.size() != 1) {
+        abort_pipeline_proof_capture(
+            "Format-5 reader memory evidence has an invalid scalar shape");
+    }
+    const nlohmann::json evidence = parse_exact_json_cell(
+        row.front(), "Format-5 reader memory evidence JSON failed to parse");
+    const bool header_valid = json_has_exact_keys(
+            evidence, kFormat5ReaderMemoryEvidenceKeys)
+        && evidence["schema"].is_string()
+        && evidence["schema"] == "bioseq.format5_reader_memory_evidence"
+        && evidence["version"].is_number_integer()
+        && evidence["version"] == 2
+        && evidence["format5_reader_memory_evidence_saturated"].is_boolean()
+        && evidence["stats_saturated"].is_boolean();
+    if (!header_valid) {
+        abort_pipeline_proof_capture(
+            "Format-5 reader memory evidence has the wrong exact schema or types");
+    }
+
+    const std::int64_t execution_id =
+        required_json_counter(evidence, "execution_id");
+    const std::int64_t backend_pid =
+        required_json_counter(evidence, "backend_pid");
+    const std::int64_t database_oid =
+        required_json_counter(evidence, "database_oid");
+    if (execution_id != out.alignment_execution_id
+        || backend_pid != out.alignment_backend_pid
+        || database_oid != out.alignment_database_oid
+        || evidence["stats_saturated"].get<bool>()
+            != (out.stats_saturated != 0)) {
+        abort_pipeline_proof_capture(
+            "Format-5 reader memory evidence identity/saturation does not match v2");
+    }
+
+    out.format5_reader_capacity_accounting_passes = required_json_counter(
+        evidence, "format5_reader_capacity_accounting_passes");
+    out.format5_reader_global_position_storage_preparations =
+        required_json_counter(
+            evidence,
+            "format5_reader_global_position_storage_preparations");
+    out.format5_reader_global_position_storage_allocations =
+        required_json_counter(
+            evidence,
+            "format5_reader_global_position_storage_allocations");
+    out.format5_reader_position_append_growth_reservations =
+        required_json_counter(
+            evidence,
+            "format5_reader_position_append_growth_reservations");
+    out.format5_reader_retained_position_count = required_json_counter(
+        evidence, "format5_reader_retained_position_count");
+    out.format5_reader_retained_position_capacity = required_json_counter(
+        evidence, "format5_reader_retained_position_capacity");
+    out.format5_reader_directory_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_directory_capacity_bytes");
+    out.format5_reader_query_hash_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_query_hash_capacity_bytes");
+    out.format5_reader_query_record_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_query_record_capacity_bytes");
+    out.format5_reader_ordinal_route_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_ordinal_route_capacity_bytes");
+    out.format5_reader_selected_extent_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_selected_extent_capacity_bytes");
+    out.format5_reader_current_selected_control_capacity_bytes =
+        required_json_counter(
+            evidence,
+            "format5_reader_current_selected_control_capacity_bytes");
+    out.format5_reader_global_position_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_global_position_capacity_bytes");
+    out.format5_reader_control_payload_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_control_payload_capacity_bytes");
+    out.format5_reader_owned_capacity_bytes = required_json_counter(
+        evidence, "format5_reader_owned_capacity_bytes");
+    out.format5_reader_admitted_bytes = required_json_counter(
+        evidence, "format5_reader_admitted_bytes");
+    out.format5_reader_exact_position_image_checks = required_json_counter(
+        evidence, "format5_reader_exact_position_image_checks");
+    out.format5_reader_exact_position_image_failures = required_json_counter(
+        evidence, "format5_reader_exact_position_image_failures");
+    out.format5_reader_retained_layout_checks = required_json_counter(
+        evidence, "format5_reader_retained_layout_checks");
+    out.format5_reader_retained_layout_failures = required_json_counter(
+        evidence, "format5_reader_retained_layout_failures");
+    out.format5_reader_memory_evidence_saturated =
+        evidence["format5_reader_memory_evidence_saturated"].get<bool>()
+            ? 1 : 0;
+    out.format5_reader_memory_evidence = evidence;
+}
+
+/// Validate and retain the immediate cache-qualified persisted-GPU ledger.
+void capture_persisted_gpu_operation_evidence(
+        const it::row_t& row,
+        E2eOutput& out) {
+    if (row.size() != 1) {
+        abort_pipeline_proof_capture(
+            "persisted GPU operation evidence has an invalid scalar shape");
+    }
+    const nlohmann::json evidence = parse_exact_json_cell(
+        row.front(), "persisted GPU operation evidence JSON failed to parse");
+    if (!json_has_exact_keys(evidence, kPersistedGpuOperationEvidenceKeys)
+        || required_json_text(evidence, "schema")
+            != "bioseq.persisted_gpu_operation_evidence"
+        || required_json_counter(evidence, "version") != 2) {
+        abort_pipeline_proof_capture(
+            "persisted GPU operation evidence has the wrong exact schema");
+    }
+
+    const std::int64_t execution_id =
+        required_json_counter(evidence, "execution_id");
+    const std::int64_t backend_pid =
+        required_json_counter(evidence, "backend_pid");
+    const std::int64_t database_oid =
+        required_json_counter(evidence, "database_oid");
+    const bool completed = required_json_boolean(evidence, "completed");
+    const bool partial = required_json_boolean(evidence, "partial");
+    const bool fully_drained =
+        required_json_boolean(evidence, "fully_drained");
+    const bool producer_accepted =
+        required_json_boolean(evidence, "accepted");
+    const bool complete = required_json_boolean(evidence, "complete");
+    const bool saturated = required_json_boolean(evidence, "saturated");
+    const std::int64_t dropped_operation_count =
+        required_json_counter(evidence, "dropped_operation_count");
+    const std::int64_t operation_count =
+        required_json_counter(evidence, "operation_count");
+    const std::int64_t accepted_operation_count =
+        required_json_counter(evidence, "accepted_operation_count");
+    const std::int64_t complete_operation_count =
+        required_json_counter(evidence, "complete_operation_count");
+    const std::int64_t job_count =
+        required_json_counter(evidence, "job_count");
+    const std::int64_t accepted_job_count =
+        required_json_counter(evidence, "accepted_job_count");
+    const nlohmann::json& operations =
+        required_json_array(evidence, "operations");
+    const bool expects_persisted_gpu = out.actual_backend == "vulkan_gpu"
+        && out.actual_target_index_source == "persisted";
+    const auto qualification_found = evidence.find("cache_qualification");
+    if (qualification_found == evidence.end()) {
+        abort_pipeline_proof_capture(
+            "persisted GPU cache qualification is absent");
+    }
+
+    if (execution_id != out.alignment_execution_id
+        || backend_pid != out.alignment_backend_pid
+        || database_oid != out.alignment_database_oid
+        || completed != (out.alignment_completed != 0)
+        || partial != (out.alignment_partial != 0)
+        || fully_drained != (out.alignment_fully_drained != 0)) {
+        abort_pipeline_proof_capture(
+            "persisted GPU operation evidence identity/lifecycle differs from v2");
+    }
+    if (operations.size() > static_cast<std::size_t>(
+            (std::numeric_limits<std::int64_t>::max)())
+        || operation_count
+            != static_cast<std::int64_t>(operations.size())) {
+        abort_pipeline_proof_capture(
+            "persisted GPU operation evidence operation count is inconsistent");
+    }
+
+    std::string qualification_identity;
+    std::string qualification_seed_receipt_identity;
+    std::string qualification_device_uuid;
+    std::string qualification_pipeline_cache_uuid;
+    std::string qualification_seed_sha256;
+    std::string qualification_manifest_checksum;
+    std::int64_t qualification_api_version = 0;
+    std::int64_t qualification_driver_version = 0;
+    std::int64_t qualification_vendor_id = 0;
+    std::int64_t qualification_device_id = 0;
+    std::int64_t qualification_seed_size = 0;
+    bool cache_qualification_equations_valid = !expects_persisted_gpu;
+    if (expects_persisted_gpu) {
+        if (!qualification_found->is_object()
+            || !json_has_exact_keys(
+                *qualification_found,
+                kPersistedGpuCacheQualificationKeys)) {
+            abort_pipeline_proof_capture(
+                "persisted GPU cache qualification has the wrong exact schema");
+        }
+        const nlohmann::json& qualification = *qualification_found;
+        const std::int64_t qualification_version =
+            required_json_counter(qualification, "version");
+        qualification_identity = required_json_hex_identity(
+            qualification, "identity", 16);
+        const bool qualification_accepted =
+            required_json_boolean(qualification, "accepted");
+        const bool qualification_saturated =
+            required_json_boolean(qualification, "saturated");
+        const std::int64_t archive_count =
+            required_json_counter(qualification, "archive_count");
+        const std::int64_t archive_bytes =
+            required_json_counter(qualification, "archive_bytes");
+        (void)required_json_hex_identity(
+            qualification, "archive_checksum", 16);
+        const std::int64_t receipt_count =
+            required_json_counter(qualification, "receipt_count");
+        const std::int64_t hash_passes =
+            required_json_counter(qualification, "hash_passes");
+        const std::int64_t hashed_bytes =
+            required_json_counter(qualification, "hashed_bytes");
+        const std::int64_t private_files_created = required_json_counter(
+            qualification, "private_files_created");
+        const std::int64_t private_files_unlinked = required_json_counter(
+            qualification, "private_files_unlinked");
+        const std::int64_t live_private_paths = required_json_counter(
+            qualification, "live_private_paths");
+        const std::int64_t pipeline_filesystem_hash_passes =
+            required_json_counter(
+                qualification, "pipeline_filesystem_hash_passes");
+        const std::int64_t pipeline_filesystem_hashed_bytes =
+            required_json_counter(
+                qualification, "pipeline_filesystem_hashed_bytes");
+        const std::int64_t helper_protocol_version = required_json_counter(
+            qualification, "helper_protocol_version");
+        const std::string& helper_build_identity = required_json_text(
+            qualification, "helper_build_identity");
+        const std::string& helper_source =
+            required_json_text(qualification, "helper_source");
+        const std::int64_t helper_executable_size = required_json_counter(
+            qualification, "helper_executable_size");
+        (void)required_json_hex_identity(
+            qualification, "helper_executable_sha256", 64);
+        (void)required_json_hex_identity(
+            qualification, "helper_metal_registry_id", 16);
+        qualification_device_uuid = required_json_hex_identity(
+            qualification, "device_uuid", 32);
+        qualification_api_version =
+            required_json_counter(qualification, "api_version");
+        qualification_driver_version =
+            required_json_counter(qualification, "driver_version");
+        qualification_vendor_id =
+            required_json_counter(qualification, "vendor_id");
+        qualification_device_id =
+            required_json_counter(qualification, "device_id");
+        qualification_pipeline_cache_uuid = required_json_hex_identity(
+            qualification, "pipeline_cache_uuid", 32);
+        qualification_seed_receipt_identity = required_json_hex_identity(
+            qualification, "seed_receipt_identity", 16);
+        qualification_seed_sha256 = required_json_hex_identity(
+            qualification, "seed_sha256", 64);
+        qualification_seed_size =
+            required_json_counter(qualification, "seed_size");
+        qualification_manifest_checksum = required_json_hex_identity(
+            qualification, "manifest_checksum", 16);
+
+        const bool helper_build_valid = helper_build_identity
+            == "bioseq_gpu_archive_builder_v2";
+        const bool numeric_driver_identity_valid =
+            qualification_api_version > 0
+            && qualification_driver_version > 0
+            && qualification_api_version
+                <= (std::numeric_limits<std::uint32_t>::max)()
+            && qualification_driver_version
+                <= (std::numeric_limits<std::uint32_t>::max)()
+            && qualification_vendor_id
+                <= (std::numeric_limits<std::uint32_t>::max)()
+            && qualification_device_id
+                <= (std::numeric_limits<std::uint32_t>::max)();
+        const std::string canonical_driver = numeric_driver_identity_valid
+            ? fmt::format(
+                "api={:08x};driver={:08x};vendor={:08x};device={:08x};pcuuid={}",
+                static_cast<std::uint32_t>(qualification_api_version),
+                static_cast<std::uint32_t>(qualification_driver_version),
+                static_cast<std::uint32_t>(qualification_vendor_id),
+                static_cast<std::uint32_t>(qualification_device_id),
+                qualification_pipeline_cache_uuid)
+            : std::string{};
+        cache_qualification_equations_valid = qualification_version == 2
+            && qualification_accepted && !qualification_saturated
+            && archive_count > 0 && archive_bytes > 0
+            && receipt_count == archive_count && hash_passes == 1
+            && hashed_bytes == archive_bytes
+            && private_files_created == archive_count
+            && private_files_unlinked == archive_count
+            && live_private_paths == 0
+            && pipeline_filesystem_hash_passes == 0
+            && pipeline_filesystem_hashed_bytes == 0
+            && helper_protocol_version == 2 && helper_build_valid
+            && helper_source == "installed-sibling"
+            && helper_executable_size > 0
+            && numeric_driver_identity_valid
+            && qualification_device_uuid == out.gpu_device_uuid
+            && canonical_driver == out.gpu_driver
+            && qualification_seed_sha256
+                == out.gpu_pipeline_cache_seed_sha256
+            && qualification_seed_size == out.gpu_pipeline_cache_seed_size
+            && qualification_manifest_checksum
+                == out.gpu_pipeline_cache_manifest_checksum;
+    } else if (!qualification_found->is_null()) {
+        abort_pipeline_proof_capture(
+            "non-persisted-GPU evidence retained cache qualification");
+    }
+
+    bool operation_equations_valid = true;
+    __int128 expected_job_sum = 0;
+    __int128 accepted_job_sum = 0;
+    __int128 cache_load_sum = 0;
+    __int128 cache_seed_bytes_sum = 0;
+    __int128 cache_load_ns_sum = 0;
+    __int128 pipeline_create_sum = 0;
+    __int128 pipeline_creation_ns_sum = 0;
+    std::set<std::string> operation_identities;
+    std::set<std::string> pipeline_operation_identities;
+    std::set<std::tuple<std::string, std::int64_t, std::int64_t>>
+        logical_jobs;
+    std::optional<std::string> common_seed_receipt_identity;
+    std::optional<std::string> common_cold_load_identity;
+    bool output_coordinate_witness = false;
+
+    for (const nlohmann::json& operation : operations) {
+        if (!json_has_exact_keys(operation, kPersistedGpuOperationKeys)) {
+            abort_pipeline_proof_capture(
+                "persisted GPU operation has the wrong exact schema");
+        }
+        const std::string& operation_identity = required_json_hex_identity(
+            operation, "operation_identity", 16);
+        const std::int64_t expected_jobs =
+            required_json_counter(operation, "expected_jobs");
+        const std::int64_t proof_jobs =
+            required_json_counter(operation, "proof_jobs");
+        const std::int64_t consumed_jobs =
+            required_json_counter(operation, "consumed_jobs");
+        const std::int64_t accepted_jobs =
+            required_json_counter(operation, "accepted_jobs");
+        const std::int64_t burned_jobs =
+            required_json_counter(operation, "burned_jobs");
+        const std::int64_t pending_jobs =
+            required_json_counter(operation, "pending_jobs");
+        const std::int64_t staged_jobs =
+            required_json_counter(operation, "staged_jobs");
+        const std::int64_t published_jobs =
+            required_json_counter(operation, "published_jobs");
+        const std::int64_t publication_commits =
+            required_json_counter(operation, "publication_commits");
+        const std::int64_t query_receipts = required_json_counter(
+            operation, "query_pipeline_receipt_count");
+        const std::int64_t shape_receipts = required_json_counter(
+            operation, "shape_pipeline_receipt_count");
+        const std::int64_t submission_count =
+            required_json_counter(operation, "submission_count");
+        const std::string& query_operation_identity =
+            required_json_hex_identity(
+                operation, "query_pipeline_operation_identity", 16);
+        const std::string& shape_operation_identity =
+            required_json_hex_identity(
+                operation, "shape_pipeline_operation_identity", 16);
+        const nlohmann::json& query_submission_ordinals =
+            required_json_array(operation, "query_submission_ordinals");
+        const std::string& seed_receipt_identity =
+            required_json_hex_identity(
+                operation, "seed_receipt_identity", 16);
+        const std::string& cache_token_identity =
+            required_json_hex_identity(
+                operation, "cache_token_identity", 16);
+        const std::string& cache_qualification_identity =
+            required_json_hex_identity(
+                operation, "cache_qualification_identity", 16);
+        const std::int64_t generation_id =
+            required_json_counter(operation, "generation_id");
+        const std::string& source_identity = required_json_hex_identity(
+            operation, "source_identity", 16);
+        const std::string& cold_load_identity = required_json_hex_identity(
+            operation, "cold_load_identity", 16);
+        const std::string& source = required_json_text(operation, "source");
+        const nlohmann::json& environment =
+            required_json_object(operation, "environment");
+        const nlohmann::json& cache_metrics =
+            required_json_object(operation, "cache_metrics");
+        const nlohmann::json& jobs = required_json_array(operation, "jobs");
+
+        if (!json_has_exact_keys(environment, kPersistedGpuEnvironmentKeys)
+            || !json_has_exact_keys(
+                cache_metrics, kPersistedGpuCacheMetricsKeys)) {
+            abort_pipeline_proof_capture(
+                "persisted GPU operation environment/cache schema is invalid");
+        }
+        const std::string& device_uuid = required_json_hex_identity(
+            environment, "device_uuid", 32);
+        const std::int64_t api_version =
+            required_json_counter(environment, "api_version");
+        const std::int64_t driver_version =
+            required_json_counter(environment, "driver_version");
+        const std::int64_t vendor_id =
+            required_json_counter(environment, "vendor_id");
+        const std::int64_t device_id =
+            required_json_counter(environment, "device_id");
+        const std::string& pipeline_cache_uuid =
+            required_json_hex_identity(
+                environment, "pipeline_cache_uuid", 32);
+        const std::string& seed_sha256 = required_json_hex_identity(
+            environment, "seed_sha256", 64);
+        const std::int64_t seed_size =
+            required_json_counter(environment, "seed_size");
+        const std::string& manifest_checksum = required_json_hex_identity(
+            environment, "manifest_checksum", 16);
+
+        const bool numeric_driver_identity_valid = api_version > 0
+            && driver_version > 0
+            && api_version <= (std::numeric_limits<std::uint32_t>::max)()
+            && driver_version <= (std::numeric_limits<std::uint32_t>::max)()
+            && vendor_id <= (std::numeric_limits<std::uint32_t>::max)()
+            && device_id <= (std::numeric_limits<std::uint32_t>::max)();
+        const std::string canonical_driver = numeric_driver_identity_valid
+            ? fmt::format(
+                "api={:08x};driver={:08x};vendor={:08x};device={:08x};pcuuid={}",
+                static_cast<std::uint32_t>(api_version),
+                static_cast<std::uint32_t>(driver_version),
+                static_cast<std::uint32_t>(vendor_id),
+                static_cast<std::uint32_t>(device_id),
+                pipeline_cache_uuid)
+            : std::string{};
+        const bool environment_valid = numeric_driver_identity_valid
+            && device_uuid == out.gpu_device_uuid
+            && canonical_driver == out.gpu_driver
+            && seed_sha256 == out.gpu_pipeline_cache_seed_sha256
+            && seed_size == out.gpu_pipeline_cache_seed_size
+            && manifest_checksum == out.gpu_pipeline_cache_manifest_checksum;
+
+        const std::int64_t cache_loads = required_json_counter(
+            cache_metrics, "pipeline_cache_loads");
+        const std::int64_t cache_seed_bytes = required_json_counter(
+            cache_metrics, "pipeline_cache_seed_bytes");
+        const std::int64_t cache_load_ns = required_json_counter(
+            cache_metrics, "pipeline_cache_load_ns");
+        const std::int64_t pipeline_creates = required_json_counter(
+            cache_metrics, "pipeline_creates");
+        const std::int64_t pipeline_creation_ns = required_json_counter(
+            cache_metrics, "pipeline_creation_ns");
+        const bool cache_shape_valid = cache_loads <= 1
+            && (cache_loads == 0
+                ? cache_seed_bytes == 0 && cache_load_ns == 0
+                : cache_seed_bytes == seed_size && cache_load_ns > 0)
+            && static_cast<__int128>(pipeline_creates)
+                <= static_cast<__int128>(shape_receipts) + 1
+            && (pipeline_creates == 0
+                ? pipeline_creation_ns == 0
+                : pipeline_creation_ns > 0);
+        cache_load_sum += cache_loads;
+        cache_seed_bytes_sum += cache_seed_bytes;
+        cache_load_ns_sum += cache_load_ns;
+        pipeline_create_sum += pipeline_creates;
+        pipeline_creation_ns_sum += pipeline_creation_ns;
+
+        std::set<std::pair<std::string, std::int64_t>>
+            structured_submissions;
+        std::map<
+            std::pair<std::string, std::int64_t>,
+            std::pair<std::size_t, std::string>> shape_submission_receipts;
+        std::map<
+            std::string,
+            std::pair<std::string, std::int64_t>> submit_wait_domains;
+        bool query_submissions_valid = query_submission_ordinals.size() == 2;
+        for (const nlohmann::json& ordinal_json : query_submission_ordinals) {
+            const std::int64_t ordinal =
+                required_json_integer_value(ordinal_json);
+            query_submissions_valid = query_submissions_valid && ordinal > 0
+                && structured_submissions.emplace(
+                    query_operation_identity, ordinal).second;
+        }
+
+        bool jobs_valid = jobs.size() <= static_cast<std::size_t>(
+                (std::numeric_limits<std::int64_t>::max)())
+            && expected_jobs == static_cast<std::int64_t>(jobs.size());
+        constexpr std::array<std::string_view, 4> expected_submission_stages{
+            "count", "emit", "sort_range", "chain_coordinate",
+        };
+        for (const nlohmann::json& job : jobs) {
+            if (!json_has_exact_keys(job, kPersistedGpuJobKeys)) {
+                abort_pipeline_proof_capture(
+                    "persisted GPU job has the wrong exact schema");
+            }
+            const std::int64_t logical_target_row =
+                required_json_counter(job, "logical_target_row");
+            const std::int64_t logical_query_ordinal =
+                required_json_counter(job, "logical_query_ordinal");
+            const std::int64_t query_index =
+                required_json_counter(job, "query_index");
+            const std::int64_t query_length =
+                required_json_counter(job, "query_length");
+            const std::int64_t query_minimizer_count =
+                required_json_counter(job, "query_minimizer_count");
+            const std::int64_t query_tile_count =
+                required_json_counter(job, "query_tile_count");
+            const nlohmann::json& query =
+                required_json_object(job, "query");
+            const nlohmann::json& direct =
+                required_json_object(job, "direct");
+            const nlohmann::json& submissions =
+                required_json_array(job, "submissions");
+            const nlohmann::json& status =
+                required_json_object(job, "status");
+            const nlohmann::json& forbidden =
+                required_json_object(job, "forbidden");
+            const nlohmann::json& coordinate =
+                required_json_object(job, "coordinate");
+            if (!json_has_exact_keys(query, kPersistedGpuQueryKeys)
+                || !json_has_exact_keys(direct, kPersistedGpuDirectKeys)
+                || !json_has_exact_keys(status, kPersistedGpuStatusKeys)
+                || !json_has_exact_keys(
+                    forbidden, kPersistedGpuForbiddenKeys)
+                || !json_has_exact_keys(
+                    coordinate, kPersistedGpuCoordinateKeys)) {
+                abort_pipeline_proof_capture(
+                    "persisted GPU job nested object schema is invalid");
+            }
+
+            const bool query_valid = query_length > 0
+                && query_minimizer_count > 0 && query_tile_count > 0
+                && required_json_counter(query, "count_dispatches") == 1
+                && required_json_counter(query, "scan_dispatches") == 3
+                && required_json_counter(query, "emit_dispatches") == 1
+                && required_json_counter(query, "completed_roundtrips") == 2;
+            const std::int64_t anchor_count =
+                required_json_counter(direct, "anchor_count");
+            const std::int64_t range_count =
+                required_json_counter(direct, "range_count");
+            const bool direct_valid =
+                required_json_counter(direct, "count_dispatches") == 1
+                && required_json_counter(direct, "scan_dispatches") == 3
+                && anchor_count > 0
+                && required_json_counter(direct, "emit_dispatches") == 1
+                && required_json_counter(direct, "sort_operations") == 1
+                && required_json_counter(
+                    direct, "range_build_dispatches") == 1
+                && range_count > 0
+                && required_json_counter(direct, "chain_dispatches") == 1
+                && required_json_counter(
+                    direct, "chain_backtrack_dispatches") == 1
+                && required_json_counter(
+                    direct, "coordinate_dispatches") == 1;
+
+            bool submissions_valid =
+                submissions.size() == expected_submission_stages.size();
+            std::set<std::int64_t> job_submission_ordinals;
+            std::set<std::string> job_submit_wait_identities;
+            for (std::size_t submission_index = 0;
+                 submission_index < submissions.size(); ++submission_index) {
+                const nlohmann::json& submission =
+                    submissions[submission_index];
+                if (!json_has_exact_keys(
+                        submission, kPersistedGpuSubmissionKeys)) {
+                    abort_pipeline_proof_capture(
+                        "persisted GPU submission has the wrong exact schema");
+                }
+                const std::string& stage =
+                    required_json_text(submission, "stage");
+                const std::string& submission_operation_identity =
+                    required_json_hex_identity(
+                        submission, "operation_identity", 16);
+                const std::int64_t ordinal =
+                    required_json_counter(submission, "ordinal");
+                const std::string& submit_wait_identity =
+                    required_json_hex_identity(
+                        submission, "submit_wait_identity", 16);
+                const auto submission_domain = std::pair{
+                    submission_operation_identity, ordinal};
+                const auto [receipt, receipt_inserted] =
+                    shape_submission_receipts.emplace(
+                        submission_domain,
+                        std::pair{submission_index, submit_wait_identity});
+                const bool receipt_consistent = receipt_inserted
+                    || receipt->second
+                        == std::pair{submission_index, submit_wait_identity};
+                const auto [wait_domain, wait_inserted] =
+                    submit_wait_domains.emplace(
+                        submit_wait_identity, submission_domain);
+                const bool wait_consistent = wait_inserted
+                    || wait_domain->second == submission_domain;
+                submissions_valid = submissions_valid
+                    && submission_index < expected_submission_stages.size()
+                    && stage == expected_submission_stages[submission_index]
+                    && submission_operation_identity
+                        == shape_operation_identity
+                    && ordinal > 0
+                    && job_submission_ordinals.emplace(ordinal).second
+                    && job_submit_wait_identities.emplace(
+                        submit_wait_identity).second
+                    && receipt_consistent && wait_consistent;
+                structured_submissions.emplace(
+                    submission_operation_identity, ordinal);
+            }
+
+            const bool status_valid =
+                required_json_counter(status, "count_checks") == 1
+                && required_json_counter(status, "emit_checks") == 1
+                && required_json_counter(status, "status_or") == 0
+                && required_json_counter(status, "result_readbacks") == 1;
+            const bool forbidden_valid = required_json_counter(
+                    forbidden, "coordinate_vote_dispatches") == 0
+                && required_json_counter(
+                    forbidden, "cpu_or_simd_biological_calls") == 0
+                && required_json_counter(forbidden, "recompute_calls") == 0
+                && required_json_counter(forbidden, "fallback_calls") == 0;
+
+            const bool coordinate_valid_flag =
+                required_json_boolean(coordinate, "valid");
+            const std::int64_t query_start =
+                required_json_counter(coordinate, "query_start");
+            const std::int64_t query_end =
+                required_json_counter(coordinate, "query_end");
+            const std::int64_t target_start =
+                required_json_counter(coordinate, "target_start");
+            const std::int64_t target_end =
+                required_json_counter(coordinate, "target_end");
+            const std::int64_t match_length =
+                required_json_counter(coordinate, "match_length");
+            const std::int64_t block_length =
+                required_json_counter(coordinate, "block_length");
+            const std::int64_t chain_score =
+                required_json_counter(coordinate, "chain_score");
+            const std::int64_t seed_count =
+                required_json_counter(coordinate, "seed_count");
+            const bool is_reverse =
+                required_json_boolean(coordinate, "is_reverse");
+            const bool coordinate_valid = coordinate_valid_flag
+                && query_start < query_end && query_end <= query_length
+                && target_start < target_end
+                && match_length > 0 && match_length <= block_length
+                && match_length <= query_end - query_start
+                && match_length <= target_end - target_start
+                && static_cast<__int128>(block_length)
+                    <= static_cast<__int128>(query_end - query_start)
+                        + static_cast<__int128>(target_end - target_start)
+                && chain_score > 0 && seed_count > 0;
+
+            if (query_index == 0
+                && target_start == out.target_start
+                && is_reverse == out.is_reverse) {
+                output_coordinate_witness = true;
+            }
+
+            jobs_valid = jobs_valid
+                && logical_jobs.emplace(
+                    operation_identity,
+                    logical_target_row,
+                    logical_query_ordinal).second
+                && query_index < expected_jobs
+                && query_valid && direct_valid && submissions_valid
+                && status_valid && forbidden_valid && coordinate_valid;
+        }
+
+        const bool seed_receipt_matches =
+            !common_seed_receipt_identity.has_value()
+                || *common_seed_receipt_identity == seed_receipt_identity;
+        const bool cold_load_matches = !common_cold_load_identity.has_value()
+            || *common_cold_load_identity == cold_load_identity;
+        if (!common_seed_receipt_identity.has_value()) {
+            common_seed_receipt_identity = seed_receipt_identity;
+        }
+        if (!common_cold_load_identity.has_value()) {
+            common_cold_load_identity = cold_load_identity;
+        }
+        const bool identity_valid =
+            operation_identities.emplace(operation_identity).second
+            && pipeline_operation_identities.emplace(
+                query_operation_identity).second
+            && pipeline_operation_identities.emplace(
+                shape_operation_identity).second
+            && operation_identity != query_operation_identity
+            && operation_identity == shape_operation_identity
+            && query_operation_identity != shape_operation_identity
+            && cache_token_identity == operation_identity
+            && cache_qualification_identity == qualification_identity
+            && seed_receipt_identity
+                == qualification_seed_receipt_identity
+            && seed_receipt_matches && cold_load_matches
+            && generation_id == out.persisted_generation_id
+            && source_identity == out.persisted_source_identity
+            && source == "persisted_shape_v5"
+            && device_uuid == qualification_device_uuid
+            && api_version == qualification_api_version
+            && driver_version == qualification_driver_version
+            && vendor_id == qualification_vendor_id
+            && device_id == qualification_device_id
+            && pipeline_cache_uuid == qualification_pipeline_cache_uuid
+            && seed_sha256 == qualification_seed_sha256
+            && seed_size == qualification_seed_size
+            && manifest_checksum == qualification_manifest_checksum;
+        const bool publication_valid = expected_jobs > 0
+            && proof_jobs == expected_jobs
+            && consumed_jobs == expected_jobs
+            && accepted_jobs == expected_jobs
+            && burned_jobs == 0 && pending_jobs == 0
+            && staged_jobs == expected_jobs
+            && published_jobs == expected_jobs
+            && publication_commits == 1
+            && query_receipts == 3
+            && shape_receipts >= 7 && shape_receipts <= 10
+            && query_submissions_valid
+            && submission_count > 0
+            && structured_submissions.size() <= static_cast<std::size_t>(
+                (std::numeric_limits<std::int64_t>::max)())
+            && submission_count
+                == static_cast<std::int64_t>(structured_submissions.size());
+        operation_equations_valid = operation_equations_valid
+            && identity_valid && publication_valid && environment_valid
+            && cache_shape_valid && jobs_valid;
+        expected_job_sum += expected_jobs;
+        accepted_job_sum += accepted_jobs;
+    }
+
+    const auto counter = [&out](const std::size_t column) noexcept {
+        return out.alignment_snapshot_numeric_columns[column];
+    };
+    const bool aggregate_cache_valid =
+        cache_load_sum == static_cast<__int128>(counter(124))
+        && cache_seed_bytes_sum == static_cast<__int128>(counter(125))
+        && cache_load_ns_sum == static_cast<__int128>(counter(126))
+        && pipeline_creation_ns_sum == static_cast<__int128>(counter(127))
+        && pipeline_create_sum == static_cast<__int128>(counter(138));
+    const bool accepted_equations = producer_accepted
+        && completed && !partial && fully_drained && complete && !saturated
+        && dropped_operation_count == 0 && operation_count > 0
+        && accepted_operation_count == operation_count
+        && complete_operation_count == operation_count
+        && expected_job_sum == static_cast<__int128>(job_count)
+        && accepted_job_sum == static_cast<__int128>(accepted_job_count)
+        && job_count == out.attempted_alignment_jobs
+        && accepted_job_count == out.fully_attested_alignment_jobs
+        && out.unattested_alignment_jobs == 0
+        && output_coordinate_witness
+        && cache_qualification_equations_valid
+        && operation_equations_valid && aggregate_cache_valid;
+    const bool exact_empty_non_gpu_evidence = !producer_accepted && complete
+        && !saturated && dropped_operation_count == 0
+        && operation_count == 0 && accepted_operation_count == 0
+        && complete_operation_count == 0 && job_count == 0
+        && accepted_job_count == 0 && operations.empty();
+    if (!expects_persisted_gpu && !exact_empty_non_gpu_evidence) {
+        abort_pipeline_proof_capture(
+            "non-persisted-GPU snapshot retained stale operation evidence");
+    }
+
+    out.persisted_gpu_operation_evidence_schema_valid = 1;
+    out.persisted_gpu_operation_evidence_accepted =
+        expects_persisted_gpu && accepted_equations ? 1 : 0;
+    out.persisted_gpu_operation_evidence_complete = complete ? 1 : 0;
+    out.persisted_gpu_operation_evidence_saturated = saturated ? 1 : 0;
+    out.persisted_gpu_dropped_operation_count = dropped_operation_count;
+    out.persisted_gpu_operation_count = operation_count;
+    out.persisted_gpu_accepted_operation_count = accepted_operation_count;
+    out.persisted_gpu_job_count = job_count;
+    out.persisted_gpu_accepted_job_count = accepted_job_count;
+    out.persisted_gpu_operation_evidence = evidence;
+}
+
 void capture_alignment_statement_stats(
         const it::connection_test_context& connection,
         const AlignmentSnapshotIdentity& prior,
         E2eOutput& out) {
-	constexpr std::size_t kColumnCount = 149;
+    constexpr std::size_t kColumnCount =
+        E2eOutput::kAlignmentSnapshotColumnCount;
     constexpr std::size_t kStageCount = 20;
     const std::array<std::string_view, kStageCount> expected_stages{
         "query_sketch", "target_sketch", "target_index_build",
@@ -1461,7 +3041,13 @@ void capture_alignment_statement_stats(
     };
     const it::rowset_t rows = it::query_rows(
         connection,
-        "SELECT * FROM bioseq.last_alignment_execution_stats();");
+        "SELECT * FROM bioseq.last_alignment_execution_stats_v2();");
+    // This must be the very next SQL statement on the same backend. Retain
+    // its scalar value now, before any other diagnostic query can obscure the
+    // one-shot cache-qualified ledger bound to the execution identity.
+    const it::row_t persisted_gpu_operation_row = it::query_one(
+        connection,
+        "SELECT bioseq.last_alignment_persisted_gpu_operation_evidence_v2();");
     if (rows.size() != kStageCount) {
         abort_pipeline_proof_capture(
             "alignment snapshot did not return exactly 20 stage rows");
@@ -1476,7 +3062,8 @@ void capture_alignment_statement_stats(
         }
         for (std::size_t column = 0; column < row.size(); ++column) {
             if (!row[column].has_value()
-                || alignment_stats_text_column(column)) {
+                || alignment_stats_text_column(column)
+                || alignment_stats_json_column(column)) {
                 continue;
             }
             if (alignment_stats_boolean_column(column)) {
@@ -1503,6 +3090,7 @@ void capture_alignment_statement_stats(
     // copy made after the timed statement; it cannot affect the measured
     // region and it is the sole source for raw attestation serialization.
     out.alignment_snapshot_rows = rows;
+    capture_versioned_alignment_json(rows, out);
 
     const auto required_i64 = [&rows](const std::size_t column) {
         const auto parsed = parse_snapshot_i64(rows.front()[column]);
@@ -1522,6 +3110,7 @@ void capture_alignment_statement_stats(
     };
     for (std::size_t column = 0; column < kColumnCount; ++column) {
         if (alignment_stats_text_column(column)
+            || alignment_stats_json_column(column)
             || !rows.front()[column].has_value()) {
             continue;
         }
@@ -1595,6 +3184,8 @@ void capture_alignment_statement_stats(
     out.persisted_generation_read_sessions = required_i64(48);
     out.persisted_relation_opens = required_i64(49);
     out.persisted_index_scans = required_i64(50);
+    out.persisted_manifest_rows_read = required_i64(55);
+    out.persisted_manifest_bytes_read = required_i64(56);
     out.host_query_hash_readbacks = required_i64(87);
     out.host_query_symbol_packing_calls = required_i64(88);
     out.host_target_symbol_packing_calls = required_i64(89);
@@ -1609,6 +3200,9 @@ void capture_alignment_statement_stats(
     out.backend_declines = required_i64(139);
     out.backend_fallbacks = required_i64(140);
     out.stats_saturated = required_bool(141);
+    capture_persisted_gpu_operation_evidence(
+        persisted_gpu_operation_row, out);
+    capture_format5_reader_memory_evidence(connection, out);
     out.query_sketch_host_wall_ns = required_i64(30);
     out.target_index_build_host_wall_ns = [&rows] {
         const auto parsed = parse_snapshot_i64(rows[2][30]);
@@ -1998,8 +3592,79 @@ inline void require_pipeline_execution_proof(
         return static_cast<__int128>(total)
             == static_cast<__int128>(count) * static_cast<__int128>(width);
     };
+    // Production just_index is Format 5 for every backend. A compatibility
+    // Format-4 read must never make an E2E SIMD/GPU performance sample pass.
+    const bool persisted_manifest_size_valid =
+        scaled_equal(
+            counter(56), counter(55),
+            bioseq::indexing::MinimizerGenerationManifest::
+                format5_encoded_bytes);
+    out.persisted_format5_manifest_contract_valid = expect_persisted
+        && out.pre_restart_persisted_gpu_abi_version == 3
+        && counter(55) == out.persisted_generation_read_sessions
+        && persisted_manifest_size_valid
+            ? 1
+            : 0;
+    const bool cold_payload_equations =
+        out.cold_index_payload_rows_requested
+            == out.cold_index_payload_rows_delivered
+        && out.cold_index_payload_rows_delivered >= 0
+        && out.cold_index_payload_rows_scanned
+            >= out.cold_index_payload_rows_delivered
+        && sum_equal(
+            out.cold_index_payload_rows_scanned,
+            out.cold_index_payload_rows_delivered,
+            out.cold_index_payload_rows_skipped)
+        && out.cold_index_payload_bytes_requested
+            == out.cold_index_payload_bytes_delivered
+        && out.cold_index_payload_bytes_scanned
+            >= out.cold_index_payload_bytes_delivered;
+    const bool one_cold_route =
+        out.cold_index_route_empty >= 0
+        && out.cold_index_route_selective >= 0
+        && out.cold_index_route_full >= 0
+        && static_cast<__int128>(out.cold_index_route_empty)
+                + static_cast<__int128>(out.cold_index_route_selective)
+                + static_cast<__int128>(out.cold_index_route_full)
+            == static_cast<__int128>(1);
+    const bool selective_read_gate =
+        out.cold_index_route_selective == 1
+        && out.cold_index_route_empty == 0
+        && out.cold_index_route_full == 0
+        && out.cold_index_route_candidate_rows > 0
+        && out.cold_index_route_candidate_rows
+            < out.cold_index_route_full_rows
+        && out.cold_index_route_candidate_bytes > 0
+        && out.cold_index_route_candidate_bytes
+            < out.cold_index_route_full_bytes
+        && out.cold_index_route_selective_cost
+            < out.cold_index_route_full_cost
+        && out.cold_index_payload_rows_requested > 0
+        && out.cold_index_payload_rows_requested
+            <= out.cold_index_route_candidate_rows
+        && out.cold_index_payload_bytes_requested > 0
+        && out.cold_index_payload_bytes_requested
+            <= out.cold_index_route_candidate_bytes
+        && counter(78) > 0
+        && counter(78) == counter(79)
+        && counter(80) > 0;
+    const bool full_read_gate =
+        out.cold_index_route_full == 1
+        && out.cold_index_route_empty == 0
+        && out.cold_index_route_selective == 0
+        && out.cold_index_route_full_rows > 0
+        && out.cold_index_route_full_bytes > 0
+        && out.cold_index_payload_rows_requested
+            == out.cold_index_route_full_rows
+        && out.cold_index_payload_bytes_requested
+            == out.cold_index_route_full_bytes
+        && counter(80) == 1;
     const bool persisted_read_gate = expect_persisted
-        ? out.persisted_generation_read_sessions == 1
+        ? out.cold_index_schema_valid == 1
+            && one_cold_route
+            && (selective_read_gate || full_read_gate)
+            && cold_payload_equations
+            && out.persisted_generation_read_sessions == 1
             && out.persisted_generation_read_sessions == out.target_rows
             && out.persisted_relation_opens == out.target_rows
             && counter(51) == out.persisted_generation_read_sessions
@@ -2007,7 +3672,10 @@ inline void require_pipeline_execution_proof(
             && scaled_equal(counter(53), counter(52), 64)
             && counter(54) == out.persisted_generation_read_sessions
             && counter(55) == out.persisted_generation_read_sessions
-            && scaled_equal(counter(56), counter(55), 128)
+            && out.persisted_manifest_rows_read == counter(55)
+            && out.persisted_manifest_bytes_read == counter(56)
+            && out.persisted_format5_manifest_contract_valid == 1
+            && persisted_manifest_size_valid
             && counter(57) > 0
             && counter(58) > 0
             && counter(59) == 0
@@ -2019,6 +3687,8 @@ inline void require_pipeline_execution_proof(
                 == static_cast<__int128>(counter(53))
                     + static_cast<__int128>(counter(56))
                     + static_cast<__int128>(counter(58))
+            && counter(62) == out.cold_index_payload_rows_delivered
+            && counter(63) == out.cold_index_payload_bytes_delivered
             && counter(63) > 0
             && counter(67) > 0
             && counter(68) > 0
@@ -2028,32 +3698,205 @@ inline void require_pipeline_execution_proof(
             && counter(71) > 0
             && counter(71) == counter(75)
             && counter(76) > 0
-            && counter(77) == out.target_rows
-            && counter(78) > 0
-            && counter(78) == counter(79)
-            && counter(80) == counter(79)
+            && counter(77) >= 1
             && static_cast<__int128>(out.persisted_index_scans)
                 == static_cast<__int128>(counter(51))
                     + static_cast<__int128>(counter(54))
                     + static_cast<__int128>(counter(80))
-            && sum_equal(counter(62), counter(75), counter(72))
             && sum_equal(counter(64), counter(60), counter(62))
-            && sum_equal(counter(76), counter(61), counter(63))
-            && counter(72) <= counter(81)
+            // persisted_bytes_read is the authenticated payload delivered to
+            // the reader, not metadata+payload physical I/O. Metadata remains
+            // accounted independently by counter(61).
+            && counter(76) == out.cold_index_payload_bytes_delivered
             && counter(65) == 0
             && counter(66) == 0
             && counter(73) == 0
             && counter(82) == 0
             && counter(84) == 0
             && counter(85) == 0
-        : std::all_of(
-            out.alignment_snapshot_numeric_columns.begin() + 48,
-            out.alignment_snapshot_numeric_columns.begin() + 84,
-            [](const std::int64_t value) noexcept { return value == 0; });
+        : out.cold_index_schema_valid == 1
+            && out.cold_index_route_empty == 0
+            && out.cold_index_route_selective == 0
+            && out.cold_index_route_full == 0
+            && out.cold_index_payload_rows_requested == 0
+            && out.cold_index_payload_rows_delivered == 0
+            && out.cold_index_payload_rows_scanned == 0
+            && out.cold_index_payload_rows_skipped == 0
+            && out.cold_index_payload_bytes_requested == 0
+            && out.cold_index_payload_bytes_delivered == 0
+            && out.cold_index_payload_bytes_scanned == 0
+            && std::all_of(
+                out.alignment_snapshot_numeric_columns.begin() + 48,
+                out.alignment_snapshot_numeric_columns.begin() + 84,
+                [](const std::int64_t value) noexcept { return value == 0; });
+    // Keep these diagnostic groups mathematically identical to the persisted
+    // branch above.  They do not participate in acceptance; they only make a
+    // failed cold-reader proof identify its exact class of disagreement
+    // without another opaque E2E run.
+    const bool persisted_read_route_proof =
+        out.cold_index_schema_valid == 1
+        && one_cold_route
+        && (selective_read_gate || full_read_gate)
+        && cold_payload_equations;
+    const bool persisted_read_session_proof =
+        out.persisted_generation_read_sessions == 1
+        && out.persisted_generation_read_sessions == out.target_rows
+        && out.persisted_relation_opens == out.target_rows;
+    const bool persisted_read_head_proof =
+        counter(51) == out.persisted_generation_read_sessions
+        && counter(52) == out.persisted_generation_read_sessions
+        && scaled_equal(counter(53), counter(52), 64);
+    const bool persisted_read_manifest_proof =
+        counter(54) == out.persisted_generation_read_sessions
+        && counter(55) == out.persisted_generation_read_sessions
+        && out.persisted_manifest_rows_read == counter(55)
+        && out.persisted_manifest_bytes_read == counter(56)
+        && out.persisted_format5_manifest_contract_valid == 1
+        && persisted_manifest_size_valid;
+    const bool persisted_read_directory_proof =
+        counter(57) > 0
+        && counter(58) > 0
+        && counter(59) == 0
+        && static_cast<__int128>(counter(60))
+            == static_cast<__int128>(counter(52))
+                + static_cast<__int128>(counter(55))
+                + static_cast<__int128>(counter(57))
+        && static_cast<__int128>(counter(61))
+            == static_cast<__int128>(counter(53))
+                + static_cast<__int128>(counter(56))
+                + static_cast<__int128>(counter(58));
+    const bool persisted_read_payload_proof =
+        counter(62) == out.cold_index_payload_rows_delivered
+        && counter(63) == out.cold_index_payload_bytes_delivered
+        && counter(63) > 0
+        && counter(67) > 0
+        && counter(68) > 0
+        && counter(68) == counter(69)
+        && counter(70) > 0
+        && counter(70) == counter(74)
+        && counter(71) > 0
+        && counter(71) == counter(75)
+        && counter(76) > 0
+        && counter(77) >= 1;
+    const bool persisted_read_scan_equations =
+        static_cast<__int128>(out.persisted_index_scans)
+            == static_cast<__int128>(counter(51))
+                + static_cast<__int128>(counter(54))
+                + static_cast<__int128>(counter(80))
+        && sum_equal(counter(64), counter(60), counter(62))
+        && counter(76) == out.cold_index_payload_bytes_delivered;
+    const bool persisted_read_zero_work_proof =
+        counter(65) == 0
+        && counter(66) == 0
+        && counter(73) == 0
+        && counter(82) == 0
+        && counter(84) == 0
+        && counter(85) == 0;
+    const bool no_format5_reader_memory_evidence =
+        out.format5_reader_capacity_accounting_passes == 0
+        && out.format5_reader_global_position_storage_preparations == 0
+        && out.format5_reader_global_position_storage_allocations == 0
+        && out.format5_reader_position_append_growth_reservations == 0
+        && out.format5_reader_retained_position_count == 0
+        && out.format5_reader_retained_position_capacity == 0
+        && out.format5_reader_directory_capacity_bytes == 0
+        && out.format5_reader_query_hash_capacity_bytes == 0
+        && out.format5_reader_query_record_capacity_bytes == 0
+        && out.format5_reader_ordinal_route_capacity_bytes == 0
+        && out.format5_reader_selected_extent_capacity_bytes == 0
+        && out.format5_reader_current_selected_control_capacity_bytes == 0
+        && out.format5_reader_global_position_capacity_bytes == 0
+        && out.format5_reader_control_payload_capacity_bytes == 0
+        && out.format5_reader_owned_capacity_bytes == 0
+        && out.format5_reader_admitted_bytes == 0
+        && out.format5_reader_exact_position_image_checks == 0
+        && out.format5_reader_exact_position_image_failures == 0
+        && out.format5_reader_retained_layout_checks == 0
+        && out.format5_reader_retained_layout_failures == 0
+        && out.format5_reader_memory_evidence_saturated == 0;
+    const __int128 format5_reader_sessions =
+        static_cast<__int128>(out.persisted_generation_read_sessions);
+    const __int128 format5_reader_extents =
+        static_cast<__int128>(counter(74));
+    const __int128 format5_reader_passes = static_cast<__int128>(
+        out.format5_reader_capacity_accounting_passes);
+    const __int128 format5_reader_fixed_passes =
+        7 * format5_reader_sessions + format5_reader_extents;
+    const __int128 format5_reader_selection_passes =
+        format5_reader_passes - format5_reader_fixed_passes;
+    /* Format 5 performs seven fixed ownership calculations per reader, one
+     * after every completed control/position extent, and four for each
+     * selected control extent. Every directory entry contributes one control
+     * and one position extent, so the aggregate extent count is even and has
+     * at least one pair per nonempty reader. There are at most half as many
+     * selected controls as total extents. These scale-aware bounds and the
+     * four-pass congruence reject accounting growth inconsistent with that
+     * structure without imposing the one-entry unit fixture's accidental
+     * constant bound on real genomes. */
+    const bool format5_reader_accounting_shape =
+        format5_reader_sessions > 0
+        && format5_reader_extents >= 2 * format5_reader_sessions
+        && format5_reader_extents % 2 == 0
+        && format5_reader_passes >= format5_reader_fixed_passes
+        && format5_reader_passes
+            <= 7 * format5_reader_sessions + 3 * format5_reader_extents
+        && format5_reader_selection_passes % 4 == 0
+        && format5_reader_selection_passes / 4
+            <= format5_reader_extents / 2;
+    const __int128 format5_reader_exact_position_bytes =
+        static_cast<__int128>(out.format5_reader_retained_position_count)
+            * static_cast<__int128>(sizeof(std::uint64_t));
+    const __int128 format5_reader_layout_bytes =
+        static_cast<__int128>(out.format5_reader_directory_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_query_hash_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_query_record_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_ordinal_route_capacity_bytes)
+        + static_cast<__int128>(out.format5_reader_selected_extent_capacity_bytes)
+        + static_cast<__int128>(
+            out.format5_reader_current_selected_control_capacity_bytes)
+        + static_cast<__int128>(
+            out.format5_reader_global_position_capacity_bytes)
+        + static_cast<__int128>(
+            out.format5_reader_control_payload_capacity_bytes);
+    const bool format5_reader_memory_gate = expect_persisted && !expect_gpu
+        ? out.format5_reader_global_position_storage_preparations
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_global_position_storage_allocations
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_position_append_growth_reservations == 0
+            && out.format5_reader_retained_position_count > 0
+            && out.format5_reader_retained_position_capacity
+                == out.format5_reader_retained_position_count
+            && static_cast<__int128>(
+                    out.format5_reader_global_position_capacity_bytes)
+                == format5_reader_exact_position_bytes
+            && out.format5_reader_exact_position_image_checks
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_exact_position_image_failures == 0
+            && out.format5_reader_retained_layout_checks
+                == out.persisted_generation_read_sessions
+            && out.format5_reader_retained_layout_failures == 0
+            && format5_reader_layout_bytes
+                == static_cast<__int128>(
+                    out.format5_reader_owned_capacity_bytes)
+            && out.format5_reader_owned_capacity_bytes
+                == out.format5_reader_admitted_bytes
+            && out.format5_reader_directory_capacity_bytes > 0
+            && out.format5_reader_query_record_capacity_bytes > 0
+            && out.format5_reader_ordinal_route_capacity_bytes > 0
+            && out.format5_reader_selected_extent_capacity_bytes > 0
+            && out.format5_reader_query_hash_capacity_bytes > 0
+            && out.format5_reader_current_selected_control_capacity_bytes == 0
+            && out.format5_reader_control_payload_capacity_bytes == 0
+            && format5_reader_accounting_shape
+            && out.format5_reader_memory_evidence_saturated == 0
+        : no_format5_reader_memory_evidence;
+    // Format 5 is consumed directly from the authenticated persisted reader.
+    // That path prepares a key set and matching reader checksum, but it does
+    // not construct or reuse the legacy in-memory target-index hashmap.
     const bool cpu_prepared_gate = expect_persisted && !expect_gpu
-        ? out.cpu_prepared_index_builds == 1
-            && out.cpu_prepared_index_reuses
-                == expectation.attempted_alignment_jobs - 1
+        ? out.cpu_prepared_index_builds == 0
+            && out.cpu_prepared_index_reuses == 0
             && out.cpu_prepared_unique_keys > 0
             && out.cpu_prepared_duplicate_build_attempts == 0
             && fixed_lower_hex(out.cpu_prepared_key_set_checksum, 16)
@@ -2072,9 +3915,67 @@ inline void require_pipeline_execution_proof(
                 == expectation.attempted_alignment_jobs - 1
         : out.gpu_persisted_resident_uploads == 0
             && out.gpu_persisted_resident_cache_hits == 0;
+    const bool simd_json_counters_match_prefix =
+        out.simd_evidence_schema_valid == 1
+        && out.nthash_vector_batches == counter(94);
+    const bool no_block_aligner_execution_evidence =
+        out.requested_simd_alignment_algorithm == "none"
+        && out.observed_simd_alignment_algorithm == "none"
+        && out.block_aligner_execution_proof_present == 0
+        && out.block_aligner_execution_proof_accepted == 0
+        && out.block_aligner_executed_calls == 0
+        && out.block_aligner_nonempty_calls == 0
+        && out.block_aligner_nonempty_calls_with_simd == 0
+        && out.block_aligner_simd_dp_vector_batches == 0
+        && out.block_aligner_simd_dp_cells == 0
+        && out.block_aligner_forbidden_ksw2_calls == 0
+        && out.block_aligner_forbidden_scalar_biological_fallbacks == 0
+        && out.block_aligner_execution_proof_saturated == 0;
+    const bool accepted_block_aligner_execution_evidence =
+        out.requested_simd_alignment_algorithm == "block_aligner"
+        && out.observed_simd_alignment_algorithm == "block_aligner"
+        && out.block_aligner_execution_proof_present == 1
+        && out.block_aligner_execution_proof_accepted == 1
+        && out.block_aligner_executed_calls > 0
+        && out.block_aligner_nonempty_calls > 0
+        && out.block_aligner_nonempty_calls_with_simd
+            == out.block_aligner_nonempty_calls
+        && out.block_aligner_simd_dp_vector_batches > 0
+        && out.block_aligner_simd_dp_cells > 0
+        && out.block_aligner_forbidden_ksw2_calls == 0
+        && out.block_aligner_forbidden_scalar_biological_fallbacks == 0
+        && out.block_aligner_execution_proof_saturated == 0;
+    const bool no_simd_policy_evidence =
+        simd_json_counters_match_prefix
+        && out.requested_simd_chaining_policy == "none"
+        && out.observed_simd_chaining_policy == "none"
+        && out.nthash_vector_batches == 0
+        && out.nthash_resident_vector_stream_kernel_calls == 0
+        && out.simd_chaining_exact_policy_calls == 0
+        && out.simd_chaining_bounded_policy_calls == 0
+        && out.simd_chaining_bounded_score_batches == 0
+        && out.simd_chaining_bounded_cutoff_stops == 0
+        && out.simd_chaining_bounded_candidates_skipped == 0
+        && out.simd_chaining_policy_rejections == 0
+        && out.simd_chaining_policy_evidence_saturated == 0
+        && no_block_aligner_execution_evidence;
+    const bool bounded_simd_policy_evidence =
+        simd_json_counters_match_prefix
+        && out.requested_simd_chaining_policy
+            == "bounded_batch_approximate"
+        && out.observed_simd_chaining_policy
+            == "bounded_batch_approximate"
+        && (out.nthash_vector_batches > 0
+            || out.nthash_resident_vector_stream_kernel_calls > 0)
+        && out.simd_chaining_exact_policy_calls == 0
+        && out.simd_chaining_bounded_policy_calls > 0
+        && out.simd_chaining_bounded_score_batches > 0
+        && out.simd_chaining_policy_rejections == 0
+        && out.simd_chaining_policy_evidence_saturated == 0
+        && accepted_block_aligner_execution_evidence;
     const bool simd_operational_gate = !expect_simd
-        || (counter(93) == 0
-            && counter(94) > 0
+        || (bounded_simd_policy_evidence
+            && counter(93) == 0
             && counter(95) == 0
             && counter(96) == 0
             && counter(98) > 0
@@ -2086,7 +3987,8 @@ inline void require_pipeline_execution_proof(
                 out.alignment_snapshot_numeric_columns.begin() + 139,
                 [](const std::int64_t value) noexcept { return value == 0; }));
     const bool scalar_operational_gate = !expect_scalar
-        || (std::all_of(
+        || (no_simd_policy_evidence
+            && std::all_of(
                 out.alignment_snapshot_numeric_columns.begin() + 94,
                 out.alignment_snapshot_numeric_columns.begin() + 102,
                 [](const std::int64_t value) noexcept { return value == 0; })
@@ -2094,8 +3996,33 @@ inline void require_pipeline_execution_proof(
                 out.alignment_snapshot_numeric_columns.begin() + 103,
                 out.alignment_snapshot_numeric_columns.begin() + 139,
                 [](const std::int64_t value) noexcept { return value == 0; }));
+    const bool gpu_cache_identity_gate = !expect_gpu
+        || gpu_cache_identity_evidence_valid({
+            .device_uuid = out.gpu_device_uuid,
+            .driver = out.gpu_driver,
+            .policy = out.gpu_pipeline_cache_policy,
+            .seed_sha256 = out.gpu_pipeline_cache_seed_sha256,
+            .seed_size = out.gpu_pipeline_cache_seed_size,
+            .manifest_checksum = out.gpu_pipeline_cache_manifest_checksum,
+            .hit = out.gpu_pipeline_cache_hit,
+        });
+    const bool gpu_cache_runtime_gate = !expect_gpu
+        || gpu_cache_runtime_evidence_valid({
+            .declared_seed_size = out.gpu_pipeline_cache_seed_size,
+            .loads = counter(124),
+            .seed_bytes = counter(125),
+            .load_ns = counter(126),
+            .creation_ns = counter(127),
+            .timestamp_failures = counter(133),
+            .pipeline_creates = counter(138),
+            .backend_declines = out.backend_declines,
+            .backend_fallbacks = out.backend_fallbacks,
+        });
     const bool gpu_operational_gate = !expect_gpu
-        || (counter(82) == 0
+        || (no_simd_policy_evidence
+            && gpu_cache_identity_gate
+            && gpu_cache_runtime_gate
+            && counter(82) == 0
             && counter(84) == 0
             && counter(85) == 0
             && counter(86) == 0
@@ -2110,11 +4037,21 @@ inline void require_pipeline_execution_proof(
                 out.alignment_snapshot_numeric_columns.begin() + 94,
                 out.alignment_snapshot_numeric_columns.begin() + 103,
                 [](const std::int64_t value) noexcept { return value == 0; })
-            && counter(112) == 0
-            && counter(124) == 1
-            && counter(125) == out.gpu_pipeline_cache_seed_size
-            && out.gpu_pipeline_cache_hit == 1
-            && counter(133) == 0);
+            && counter(112) == 0);
+    const bool persisted_gpu_operation_gate =
+        !expect_gpu || !expect_persisted
+        || (out.persisted_gpu_operation_evidence_schema_valid == 1
+            && out.persisted_gpu_operation_evidence_accepted == 1
+            && out.persisted_gpu_operation_evidence_complete == 1
+            && out.persisted_gpu_operation_evidence_saturated == 0
+            && out.persisted_gpu_dropped_operation_count == 0
+            && out.persisted_gpu_operation_count > 0
+            && out.persisted_gpu_accepted_operation_count
+                == out.persisted_gpu_operation_count
+            && out.persisted_gpu_job_count
+                == expectation.attempted_alignment_jobs
+            && out.persisted_gpu_accepted_job_count
+                == out.persisted_gpu_job_count);
     const bool cold_restart_gate = !expect_persisted
         || (out.just_index_restart_performed == 1
             && out.cold_restart_identity_changed == 1
@@ -2141,7 +4078,9 @@ inline void require_pipeline_execution_proof(
                 == out.persisted_source_identity);
     const bool cold_no_index_gate = expect_persisted
         || out.cold_no_index_lifecycle_accepted == 1;
-    const bool accepted =
+    const bool persisted_policy_gate = !expect_persisted
+        || out.persisted_policy_audit_accepted == 1;
+    const bool proof_envelope_gate =
         out.pipeline_proof_present == 1
         && out.pipeline_proof_attached_to_measurement == 1
         && out.stage_engine_matrix_valid == 1
@@ -2154,33 +4093,43 @@ inline void require_pipeline_execution_proof(
         && out.alignment_completed == 1
         && out.alignment_partial == 0
         && out.alignment_fully_drained == 1
-        && expectation.attempted_alignment_jobs > 0
+        && out.stats_saturated == 0
+        && out.cold_index_stats_saturated == out.stats_saturated
+        && out.backend_declines == 0
+        && out.backend_fallbacks == 0;
+    const bool attested_cardinality_gate =
+        expectation.attempted_alignment_jobs > 0
         && exact_cardinality
         && gpu_signoff_shape
         && out.fully_attested_alignment_jobs
             == out.attempted_alignment_jobs
-        && out.unattested_alignment_jobs == 0
-        && out.requested_backend == expected_backend
+        && out.unattested_alignment_jobs == 0;
+    const bool backend_identity_gate =
+        out.requested_backend == expected_backend
         && out.actual_backend == expected_backend
         && out.requested_target_index_source == expected_source
         && out.actual_target_index_source == expected_source
         && out.environment_mixed_invalid == 0
         && out.mixed_persisted_identity == 0
-        && out.operational_identity_conflict == 0
-        && out.stats_saturated == 0
-        && out.backend_declines == 0
-        && out.backend_fallbacks == 0
+        && out.operational_identity_conflict == 0;
+    const bool accepted =
+        proof_envelope_gate
+        && attested_cardinality_gate
+        && backend_identity_gate
         && row_equation
         && source_valid
         && persisted_identity_valid
         && persisted_read_gate
+        && format5_reader_memory_gate
         && cpu_prepared_gate
         && gpu_residency_gate
         && simd_operational_gate
         && scalar_operational_gate
         && gpu_operational_gate
+        && persisted_gpu_operation_gate
         && cold_restart_gate
         && cold_no_index_gate
+        && persisted_policy_gate
         && backend_specific;
     out.pipeline_proof_accepted = accepted ? 1 : 0;
     if (accepted) {
@@ -2198,6 +4147,7 @@ inline void require_pipeline_execution_proof(
         "prepared_builds=%lld prepared_reuses=%lld prepared_unique=%lld "
         "prepared_duplicates=%lld generation_reads=%lld relation_opens=%lld "
         "index_scans=%lld gpu_uploads=%lld gpu_hits=%lld restart_changed=%lld "
+        "persisted_policy_accepted=%lld "
         "declines=%lld fallbacks=%lld\n",
         static_cast<int>(algo.size()), algo.data(),
         static_cast<long long>(out.pipeline_proof_present),
@@ -2229,8 +4179,192 @@ inline void require_pipeline_execution_proof(
         static_cast<long long>(out.gpu_persisted_resident_uploads),
         static_cast<long long>(out.gpu_persisted_resident_cache_hits),
         static_cast<long long>(out.cold_restart_identity_changed),
+        static_cast<long long>(out.persisted_policy_audit_accepted),
         static_cast<long long>(out.backend_declines),
         static_cast<long long>(out.backend_fallbacks));
+    std::fprintf(
+        stderr,
+        "[bench_e2e] PIPELINE-PROOF-FAIL-GATES "
+        "proof_envelope=%d attested_cardinality=%d backend_identity=%d "
+        "row_equation=%d source_valid=%d persisted_identity=%d "
+        "persisted_read=%d format5_reader_memory=%d cpu_prepared=%d "
+        "gpu_residency=%d "
+        "simd_operational=%d scalar_operational=%d gpu_operational=%d "
+        "persisted_gpu_operation=%d "
+        "gpu_cache_identity=%d gpu_cache_runtime=%d "
+        "cold_restart=%d cold_no_index=%d persisted_policy=%d "
+        "backend_specific=%d manifest_size=%d cold_payload_equations=%d "
+        "one_cold_route=%d selective_read=%d full_read=%d "
+        "prepared_key_checksum=%s prepared_reader_checksum=%s\n",
+        static_cast<int>(proof_envelope_gate),
+        static_cast<int>(attested_cardinality_gate),
+        static_cast<int>(backend_identity_gate),
+        static_cast<int>(row_equation),
+        static_cast<int>(source_valid),
+        static_cast<int>(persisted_identity_valid),
+        static_cast<int>(persisted_read_gate),
+        static_cast<int>(format5_reader_memory_gate),
+        static_cast<int>(cpu_prepared_gate),
+        static_cast<int>(gpu_residency_gate),
+        static_cast<int>(simd_operational_gate),
+        static_cast<int>(scalar_operational_gate),
+        static_cast<int>(gpu_operational_gate),
+        static_cast<int>(persisted_gpu_operation_gate),
+        static_cast<int>(gpu_cache_identity_gate),
+        static_cast<int>(gpu_cache_runtime_gate),
+        static_cast<int>(cold_restart_gate),
+        static_cast<int>(cold_no_index_gate),
+        static_cast<int>(persisted_policy_gate),
+        static_cast<int>(backend_specific),
+        static_cast<int>(persisted_manifest_size_valid),
+        static_cast<int>(cold_payload_equations),
+        static_cast<int>(one_cold_route),
+        static_cast<int>(selective_read_gate),
+        static_cast<int>(full_read_gate),
+        out.cpu_prepared_key_set_checksum.c_str(),
+        out.cpu_prepared_build_set_checksum.c_str());
+    if (expect_gpu) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] PIPELINE-PROOF-FAIL-GPU-CACHE "
+            "identity=%d runtime=%d uuid=%s driver=%s policy=%s "
+            "seed_sha256=%s seed_size=%lld manifest=%s hit=%lld "
+            "loads=%lld seed_bytes=%lld load_ns=%lld creation_ns=%lld "
+            "timestamp_failures=%lld pipeline_creates=%lld "
+            "declines=%lld fallbacks=%lld\n",
+            static_cast<int>(gpu_cache_identity_gate),
+            static_cast<int>(gpu_cache_runtime_gate),
+            out.gpu_device_uuid.c_str(),
+            out.gpu_driver.c_str(),
+            out.gpu_pipeline_cache_policy.c_str(),
+            out.gpu_pipeline_cache_seed_sha256.c_str(),
+            static_cast<long long>(out.gpu_pipeline_cache_seed_size),
+            out.gpu_pipeline_cache_manifest_checksum.c_str(),
+            static_cast<long long>(out.gpu_pipeline_cache_hit),
+            static_cast<long long>(counter(124)),
+            static_cast<long long>(counter(125)),
+            static_cast<long long>(counter(126)),
+            static_cast<long long>(counter(127)),
+            static_cast<long long>(counter(133)),
+            static_cast<long long>(counter(138)),
+            static_cast<long long>(out.backend_declines),
+            static_cast<long long>(out.backend_fallbacks));
+        std::fprintf(
+            stderr,
+            "[bench_e2e] PIPELINE-PROOF-FAIL-GPU-OPERATION "
+            "gate=%d schema=%lld accepted=%lld complete=%lld "
+            "saturated=%lld dropped=%lld operations=%lld/%lld "
+            "jobs=%lld/%lld expected_jobs=%lld\n",
+            static_cast<int>(persisted_gpu_operation_gate),
+            static_cast<long long>(
+                out.persisted_gpu_operation_evidence_schema_valid),
+            static_cast<long long>(
+                out.persisted_gpu_operation_evidence_accepted),
+            static_cast<long long>(
+                out.persisted_gpu_operation_evidence_complete),
+            static_cast<long long>(
+                out.persisted_gpu_operation_evidence_saturated),
+            static_cast<long long>(
+                out.persisted_gpu_dropped_operation_count),
+            static_cast<long long>(out.persisted_gpu_accepted_operation_count),
+            static_cast<long long>(out.persisted_gpu_operation_count),
+            static_cast<long long>(out.persisted_gpu_accepted_job_count),
+            static_cast<long long>(out.persisted_gpu_job_count),
+            static_cast<long long>(expectation.attempted_alignment_jobs));
+    }
+    if (expect_persisted) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-READ "
+            "route=%d session=%d head=%d manifest=%d directory=%d "
+            "payload=%d scan_equations=%d zero_work=%d "
+            "cold_schema=%lld pre_restart_gpu_abi=%lld "
+            "format5_contract=%lld target_rows=%lld "
+            "memory_passes=%lld memory_preparations=%lld "
+            "memory_allocations=%lld append_growth=%lld retained=%lld/%lld "
+            "position_bytes=%lld layout=%lld/%lld admitted=%lld "
+            "exact_checks=%lld/%lld layout_checks=%lld/%lld "
+            "memory_saturated=%lld\n",
+            static_cast<int>(persisted_read_route_proof),
+            static_cast<int>(persisted_read_session_proof),
+            static_cast<int>(persisted_read_head_proof),
+            static_cast<int>(persisted_read_manifest_proof),
+            static_cast<int>(persisted_read_directory_proof),
+            static_cast<int>(persisted_read_payload_proof),
+            static_cast<int>(persisted_read_scan_equations),
+            static_cast<int>(persisted_read_zero_work_proof),
+            static_cast<long long>(out.cold_index_schema_valid),
+            static_cast<long long>(out.pre_restart_persisted_gpu_abi_version),
+            static_cast<long long>(
+                out.persisted_format5_manifest_contract_valid),
+            static_cast<long long>(out.target_rows),
+            static_cast<long long>(
+                out.format5_reader_capacity_accounting_passes),
+            static_cast<long long>(
+                out.format5_reader_global_position_storage_preparations),
+            static_cast<long long>(
+                out.format5_reader_global_position_storage_allocations),
+            static_cast<long long>(
+                out.format5_reader_position_append_growth_reservations),
+            static_cast<long long>(out.format5_reader_retained_position_count),
+            static_cast<long long>(out.format5_reader_retained_position_capacity),
+            static_cast<long long>(
+                out.format5_reader_global_position_capacity_bytes),
+            static_cast<long long>(out.format5_reader_owned_capacity_bytes),
+            static_cast<long long>(format5_reader_layout_bytes),
+            static_cast<long long>(out.format5_reader_admitted_bytes),
+            static_cast<long long>(
+                out.format5_reader_exact_position_image_checks),
+            static_cast<long long>(
+                out.format5_reader_exact_position_image_failures),
+            static_cast<long long>(out.format5_reader_retained_layout_checks),
+            static_cast<long long>(out.format5_reader_retained_layout_failures),
+            static_cast<long long>(
+                out.format5_reader_memory_evidence_saturated));
+        std::fputs(
+            "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-COUNTERS",
+            stderr);
+        for (std::size_t column = 48; column <= 85; ++column) {
+            const std::string_view name =
+                kAlignmentSnapshotColumnNames[column];
+            std::fprintf(
+                stderr, " %.*s=%lld",
+                static_cast<int>(name.size()), name.data(),
+                static_cast<long long>(counter(column)));
+        }
+        std::fputc('\n', stderr);
+    }
+    std::fprintf(
+        stderr,
+        "[bench_e2e] PIPELINE-PROOF-FAIL-SIMD "
+        "requested_policy=%s observed_policy=%s "
+        "requested_alignment=%s observed_alignment=%s "
+        "json_matches_prefix=%d no_simd_evidence=%d bounded_simd_evidence=%d "
+        "no_block_evidence=%d accepted_block_evidence=%d "
+        "block_present=%lld block_accepted=%lld block_calls=%lld "
+        "block_nonempty=%lld block_nonempty_simd=%lld "
+        "block_vector_batches=%lld block_cells=%lld block_ksw2=%lld "
+        "block_scalar_fallbacks=%lld block_saturated=%lld\n",
+        out.requested_simd_chaining_policy.c_str(),
+        out.observed_simd_chaining_policy.c_str(),
+        out.requested_simd_alignment_algorithm.c_str(),
+        out.observed_simd_alignment_algorithm.c_str(),
+        static_cast<int>(simd_json_counters_match_prefix),
+        static_cast<int>(no_simd_policy_evidence),
+        static_cast<int>(bounded_simd_policy_evidence),
+        static_cast<int>(no_block_aligner_execution_evidence),
+        static_cast<int>(accepted_block_aligner_execution_evidence),
+        static_cast<long long>(out.block_aligner_execution_proof_present),
+        static_cast<long long>(out.block_aligner_execution_proof_accepted),
+        static_cast<long long>(out.block_aligner_executed_calls),
+        static_cast<long long>(out.block_aligner_nonempty_calls),
+        static_cast<long long>(out.block_aligner_nonempty_calls_with_simd),
+        static_cast<long long>(out.block_aligner_simd_dp_vector_batches),
+        static_cast<long long>(out.block_aligner_simd_dp_cells),
+        static_cast<long long>(out.block_aligner_forbidden_ksw2_calls),
+        static_cast<long long>(
+            out.block_aligner_forbidden_scalar_biological_fallbacks),
+        static_cast<long long>(out.block_aligner_execution_proof_saturated));
     std::fflush(stderr);
     std::abort();
 }
@@ -2477,6 +4611,51 @@ void configure_bioseq_minimizer_policy(
         return -1;
     }
     return parse_i64(*row[col]);
+}
+
+[[nodiscard]] std::int64_t capture_only_sequence_rowno(
+        const it::connection_test_context& connection,
+        const std::string& table) {
+    const auto rows = it::query_rows(
+        connection,
+        fmt::format(
+            "SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+            "FROM {} ORDER BY ctid;",
+            table,
+            table));
+    const std::int64_t sequence_rowno = rows.size() == 1
+        ? row_i64_or_minus_one(rows.front(), 0)
+        : -1;
+    if (sequence_rowno > 0) {
+        return sequence_rowno;
+    }
+    std::fprintf(
+        stderr,
+        "[bench_e2e] READY-generation setup requires exactly one visible "
+        "source row with a valid table-AM row number; table=%s rows=%zu "
+        "sequence_rowno=%lld\n",
+        table.c_str(),
+        rows.size(),
+        static_cast<long long>(sequence_rowno));
+    std::fflush(stderr);
+    std::abort();
+}
+
+[[nodiscard]] std::int64_t just_index_sequence_rowno_for(
+        const E2eInput& in,
+        const std::string& table) {
+    const auto found = in.just_index_sequence_rowno_by_table.find(table);
+    if (found != in.just_index_sequence_rowno_by_table.end()
+        && found->second > 0) {
+        return found->second;
+    }
+    std::fprintf(
+        stderr,
+        "[bench_e2e] missing captured table-AM source row identity for "
+        "just_index table=%s\n",
+        table.c_str());
+    std::fflush(stderr);
+    std::abort();
 }
 
 void capture_mps_build_stats(
@@ -2924,6 +5103,47 @@ void capture_index_audit(
     out.audit_async_persist_jobs_waiting = first_i64_or_minus_one(stats);
 }
 
+// Validate the policy that setup persisted before the cold restart.  This is
+// deliberately called only after the measured statement: validating policy in
+// the fresh backend before the timer would warm the exact relation/catalog
+// metadata whose cold cost the just_index benchmark is intended to include.
+void finalize_post_measure_persisted_policy_audit(
+        std::string_view minimizer_index,
+        E2eOutput& out) {
+    const bool expect_sequence =
+        minimizer_index == kMinimizersPerSequenceIndex;
+    const bool mpf_selected = !expect_sequence;
+    const bool accepted =
+        out.audit_selected_minimizer_is_sequence
+            == (expect_sequence ? 1 : 0)
+        && out.audit_mpf_update_on_insert == (mpf_selected ? 1 : 0)
+        && out.audit_mps_update_on_insert == (expect_sequence ? 1 : 0)
+        && out.audit_mpf_active_read == (mpf_selected ? 1 : 0)
+        && out.audit_mps_active_read == (expect_sequence ? 1 : 0)
+        && (mpf_selected ? out.audit_mpf_rows > 0 : out.audit_mpf_rows == 0)
+        && (expect_sequence ? out.audit_mps_rows > 0 : out.audit_mps_rows == 0)
+        && out.audit_async_persist_jobs_waiting == 0
+        && out.audit_index_rows_wait_attempts == 0;
+    out.persisted_policy_audit_accepted = accepted ? 1 : 0;
+    if (!accepted) {
+        bioseq_log<ERR>(
+            "[bench_e2e] post-measure persisted-policy audit failed "
+            "index={} selected_is_sequence={} mpf_rows={} mps_rows={} "
+            "mpf_update={} mps_update={} mpf_active={} mps_active={} "
+            "async_waiting={} wait_attempts={}",
+            minimizer_index,
+            out.audit_selected_minimizer_is_sequence,
+            out.audit_mpf_rows,
+            out.audit_mps_rows,
+            out.audit_mpf_update_on_insert,
+            out.audit_mps_update_on_insert,
+            out.audit_mpf_active_read,
+            out.audit_mps_active_read,
+            out.audit_async_persist_jobs_waiting,
+            out.audit_index_rows_wait_attempts);
+    }
+}
+
 void capture_async_persist_waiting(
         const it::connection_test_context& c,
         E2eOutput& out) {
@@ -3084,7 +5304,7 @@ template <sequence_alphabet A>
 [[nodiscard]] E2eInput e2e_input_typed(std::string_view /*data_dir*/,
                                        std::string_view test_case_name,
                                        simdjson::dom::element data,
-                                       const RunConstraints&) {
+                                       const RunConstraints& constraints) {
     gen::generator_params gp{};
     gp.reference_length       = static_cast<std::size_t>(jint(data, "reference_length", kDefaultReferenceLengthBp));
     gp.fragment_count         = static_cast<std::size_t>(jint(data, "fragment_count", 1));
@@ -3262,11 +5482,37 @@ template <sequence_alphabet A>
              just_index_setup_only_name);
         std::abort();
     }
-    const auto should_setup_just_index =
-        [&just_index_setup_only_name](std::string_view index_name) {
-            return just_index_setup_only_name.empty()
-                || just_index_setup_only_name == index_name;
-        };
+    if (constraints.execution_tuples.empty()) {
+        std::fputs(
+            "[bench_e2e] framework supplied no expanded execution tuples "
+            "to input setup\n",
+            stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+    const E2eJustIndexSetupRequirements setup_requirements =
+        e2e_just_index_setup_requirements(constraints);
+    const E2eSetupSelection setup_selection =
+        e2e_setup_selection_for(setup_requirements);
+    const bool setup_only_mismatch =
+        just_index_setup_only_name == kMinimizersPerFragmentIndex
+            ? setup_requirements.scalar_per_sequence
+                || setup_requirements.simd_per_sequence
+                || setup_requirements.gpu_per_sequence
+            : just_index_setup_only_name == kMinimizersPerSequenceIndex
+                ? setup_requirements.scalar_per_fragment
+                    || setup_requirements.simd_per_fragment
+                    || setup_requirements.gpu_per_fragment
+                : false;
+    if (setup_only_mismatch) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] just_index_setup_only='%s' conflicts with the "
+            "expanded execution tuple policies\n",
+            just_index_setup_only_name.c_str());
+        std::fflush(stderr);
+        std::abort();
+    }
     const char* just_index_setup_pipeline_env =
         std::getenv("BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE");
     const std::string just_index_setup_pipeline_mode =
@@ -3357,32 +5603,125 @@ template <sequence_alphabet A>
                     "END $$;");
             }
             configure_bioseq_minimizer_policy(*in.conn, table, index_name);
-            it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = on;");
+            // A just_index sample owns a fully published PostgreSQL generation
+            // before timing starts.  Load only the base sequence first, then
+            // build the selected minimizer index explicitly: relying on the
+            // INSERT hook writes the legacy layout and does not establish the
+            // READY-generation identity that the post-restart reader proves.
+            it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
+            it::exec_sql(
+                *in.conn,
+                "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+            it::exec_sql(*in.conn, "SET bioseq.index_async_persist = off;");
+            it::exec_sql(*in.conn, "SET bioseq.recompute_async_persist = off;");
             it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
             it::exec_sqlf(
                 *in.conn,
                 "SELECT bioseq.load('{}'::regclass, '{}');",
                 table,
                 in.target_fasta);
+            const std::int64_t sequence_rowno =
+                capture_only_sequence_rowno(*in.conn, table);
+            const std::int64_t indexed_sequences = it::query_scalar_int(
+                *in.conn,
+                fmt::format(
+                    "SELECT bioseq.update_index('{}'::regclass, '{}');",
+                    table,
+                    index_name));
             const std::string audit_sql = fmt::format(
                 "SELECT current_setting('bioseq.aligner.minimizer_algorithm'), "
                 "current_setting('bioseq.aligner.vulkan_enabled'), "
                 "current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled'), "
-                "bioseq.index_table_row_count('{}'::regclass, '{}')",
+                "(current_setting('bioseq.aligner.grouped32_persisted_generation_enabled') "
+                " = 'on')::int, "
+                "(current_setting('bioseq.update_index_on_insert') = 'off')::int, "
+                "(current_setting('bioseq.index_async_persist') = 'off')::int, "
+                "(current_setting('bioseq.recompute_async_persist') = 'off')::int, "
+                "generation_id, sequence_rowno, gpu_abi_version, total_bp_size, "
+                "kmer_size, window_size "
+                "FROM bioseq.inspect_ready_minimizer_generation("
+                "'{}'::regclass, '{}', {})",
                 table,
-                index_name);
+                index_name,
+                sequence_rowno);
             const auto audit_rows = it::query_rows(*in.conn, audit_sql);
-            const std::int64_t setup_rows =
-                audit_rows.empty() || audit_rows.front().size() < 4
-                    || !audit_rows.front()[3].has_value()
-                    ? -1
-                    : parse_i64(*audit_rows.front()[3]);
-            if (audit_rows.empty() || setup_rows <= 0) {
+            const bool audit_shape_valid =
+                audit_rows.size() == 1 && audit_rows.front().size() == 13;
+            const std::int64_t grouped32_enabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 3)
+                : -1;
+            const std::int64_t insert_maintenance_disabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 4)
+                : -1;
+            const std::int64_t async_persist_disabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 5)
+                : -1;
+            const std::int64_t recompute_persist_disabled = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 6)
+                : -1;
+            const std::int64_t generation_id = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 7)
+                : -1;
+            const std::int64_t observed_sequence_rowno = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 8)
+                : -1;
+            const std::int64_t gpu_abi_version = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 9)
+                : -1;
+            const std::int64_t persisted_bp = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 10)
+                : -1;
+            const std::int64_t persisted_k = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 11)
+                : -1;
+            const std::int64_t persisted_w = audit_shape_valid
+                ? row_i64_or_minus_one(audit_rows.front(), 12)
+                : -1;
+            if (!audit_shape_valid
+                || indexed_sequences <= 0
+                || grouped32_enabled != 1
+                || insert_maintenance_disabled != 1
+                || async_persist_disabled != 1
+                || recompute_persist_disabled != 1
+                || generation_id <= 0
+                || observed_sequence_rowno != sequence_rowno
+                || gpu_abi_version != 3
+                || persisted_bp != in.target_bp
+                || persisted_k != in.kmer_size
+                || persisted_w != in.window_size) {
                 bioseq_log<ERR>(
-                    "[bench_e2e] invalid just_index setup audit for table={} index={} rows={}",
+                    "[bench_e2e] invalid just_index READY-generation setup "
+                    "for table={} index={} indexed_sequences={} generation={} "
+                    "sequence_rowno={}/{} gpu_abi={} persisted_bp={} "
+                    "expected_bp={} k={} w={} "
+                    "grouped32={} insert_off={} async_off={} recompute_off={}",
                     table,
                     index_name,
-                    setup_rows);
+                    indexed_sequences,
+                    generation_id,
+                    observed_sequence_rowno,
+                    sequence_rowno,
+                    gpu_abi_version,
+                    persisted_bp,
+                    in.target_bp,
+                    persisted_k,
+                    persisted_w,
+                    grouped32_enabled,
+                    insert_maintenance_disabled,
+                    async_persist_disabled,
+                    recompute_persist_disabled);
+                std::abort();
+            }
+            const bool inserted =
+                in.just_index_sequence_rowno_by_table.emplace(
+                    table, sequence_rowno).second;
+            if (!inserted) {
+                std::fprintf(
+                    stderr,
+                    "[bench_e2e] duplicate captured source row identity for "
+                    "just_index table=%s\n",
+                    table.c_str());
+                std::fflush(stderr);
                 std::abort();
             }
         };
@@ -3390,57 +5729,50 @@ template <sequence_alphabet A>
     // (5) just_index tables: each indexed cell gets its own table and policy.
     // This avoids a per-sequence run accidentally succeeding through a residual
     // per-fragment index, and keeps the per-fragment cell valid too.
-    if (!skip_index_baseline_setup
-        && (g_e2e_cli_selection.scalar_just_index
-            || g_e2e_cli_selection.simd_just_index
-            || g_e2e_cli_selection.gpu_just_index)) {
-        if (should_setup_just_index(kMinimizersPerFragmentIndex)) {
-            if (g_e2e_cli_selection.scalar_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_scalar_per_fragment,
-                    kMinimizersPerFragmentIndex,
-                    JustIndexSetupKind::Scalar);
-            }
-            if (g_e2e_cli_selection.simd_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_simd_per_fragment,
-                    kMinimizersPerFragmentIndex,
-                    JustIndexSetupKind::Simd);
-            }
-            if (g_e2e_cli_selection.gpu_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_gpu_per_fragment,
-                    kMinimizersPerFragmentIndex,
-                    JustIndexSetupKind::Gpu);
-            }
+    if (!skip_index_baseline_setup && setup_requirements.any_bioseq()) {
+        if (setup_requirements.scalar_per_fragment) {
+            setup_just_index_table(
+                in.just_index_table_scalar_per_fragment,
+                kMinimizersPerFragmentIndex,
+                JustIndexSetupKind::Scalar);
         }
-        if (should_setup_just_index(kMinimizersPerSequenceIndex)) {
-            if (g_e2e_cli_selection.scalar_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_scalar_per_sequence,
-                    kMinimizersPerSequenceIndex,
-                    JustIndexSetupKind::Scalar);
-            }
-            if (g_e2e_cli_selection.simd_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_simd_per_sequence,
-                    kMinimizersPerSequenceIndex,
-                    JustIndexSetupKind::Simd);
-            }
-            if (g_e2e_cli_selection.gpu_just_index) {
-                setup_just_index_table(
-                    in.just_index_table_gpu_per_sequence,
-                    kMinimizersPerSequenceIndex,
-                    JustIndexSetupKind::Gpu);
-            }
+        if (setup_requirements.simd_per_fragment) {
+            setup_just_index_table(
+                in.just_index_table_simd_per_fragment,
+                kMinimizersPerFragmentIndex,
+                JustIndexSetupKind::Simd);
+        }
+        if (setup_requirements.gpu_per_fragment) {
+            setup_just_index_table(
+                in.just_index_table_gpu_per_fragment,
+                kMinimizersPerFragmentIndex,
+                JustIndexSetupKind::Gpu);
+        }
+        if (setup_requirements.scalar_per_sequence) {
+            setup_just_index_table(
+                in.just_index_table_scalar_per_sequence,
+                kMinimizersPerSequenceIndex,
+                JustIndexSetupKind::Scalar);
+        }
+        if (setup_requirements.simd_per_sequence) {
+            setup_just_index_table(
+                in.just_index_table_simd_per_sequence,
+                kMinimizersPerSequenceIndex,
+                JustIndexSetupKind::Simd);
+        }
+        if (setup_requirements.gpu_per_sequence) {
+            setup_just_index_table(
+                in.just_index_table_gpu_per_sequence,
+                kMinimizersPerSequenceIndex,
+                JustIndexSetupKind::Gpu);
         }
     } else {
         bioseq_log<DBG>("[bench_e2e] skipping bioseq persisted-index setup "
                 "(skip_index_baseline_setup={}, scalar_just_index={}, simd_just_index={}, gpu_just_index={})",
                 skip_index_baseline_setup,
-                g_e2e_cli_selection.scalar_just_index,
-                g_e2e_cli_selection.simd_just_index,
-                g_e2e_cli_selection.gpu_just_index);
+                setup_selection.scalar_just_index,
+                setup_selection.simd_just_index,
+                setup_selection.gpu_just_index);
     }
 
     // (6) no_index table: create empty. Each rep loads base data untimed, proves
@@ -3450,13 +5782,13 @@ template <sequence_alphabet A>
 
     // (7) minimap2 prebuilt .mmi for the just_index baseline (untimed).
     if (!skip_index_baseline_setup && !skip_minimap2_baseline_setup
-        && g_e2e_cli_selection.minimap2_just_index) {
+        && setup_requirements.minimap2) {
         run_cmd(fmt::format("{} -k{} -w{} -d {} {}", BIOSEQ_E2E_MINIMAP2_BIN,
                             in.kmer_size, in.window_size, in.mmi_path, in.target_fasta_split));
     } else if (skip_minimap2_baseline_setup) {
         bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi baseline setup because "
                 "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP=1");
-    } else if (!g_e2e_cli_selection.minimap2_just_index) {
+    } else if (!setup_requirements.minimap2) {
         bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi setup because "
                 "minimap2_just_index is not selected");
     }
@@ -3529,29 +5861,41 @@ void capture_pre_restart_persisted_identity(
         const it::connection_test_context& connection,
         const std::string& table,
         const std::string_view minimizer_index,
+        const std::int64_t sequence_rowno,
         E2eOutput& out) {
     const auto rows = it::query_rows(
         connection,
         fmt::format(
-            "SELECT generation_id, source_identity "
+            "SELECT generation_id, source_identity, gpu_abi_version, "
+            "sequence_rowno "
             "FROM bioseq.inspect_ready_minimizer_generation("
-            "'{}'::regclass, '{}', 0)",
+            "'{}'::regclass, '{}', {})",
             table,
-            minimizer_index));
-    if (rows.size() != 1 || rows.front().size() != 2
+            minimizer_index,
+            sequence_rowno));
+    if (rows.size() != 1 || rows.front().size() != 4
         || !rows.front()[0].has_value()
-        || !rows.front()[1].has_value()) {
+        || !rows.front()[1].has_value()
+        || !rows.front()[2].has_value()
+        || !rows.front()[3].has_value()) {
         abort_pipeline_proof_capture(
             "pre-restart persisted generation identity has an invalid row shape");
     }
     const auto generation = parse_snapshot_i64(rows.front()[0]);
+    const auto gpu_abi_version = parse_snapshot_i64(rows.front()[2]);
+    const auto observed_sequence_rowno = parse_snapshot_i64(rows.front()[3]);
     if (!generation.has_value() || *generation == 0
         || !fixed_lower_hex(*rows.front()[1], 16)
-        || *rows.front()[1] == "0000000000000000") {
+        || *rows.front()[1] == "0000000000000000"
+        || !gpu_abi_version.has_value()
+        || *gpu_abi_version != 3
+        || !observed_sequence_rowno.has_value()
+        || *observed_sequence_rowno != sequence_rowno) {
         abort_pipeline_proof_capture(
-            "pre-restart persisted generation identity is missing or invalid");
+            "pre-restart persisted generation is not production Format-5 ABI3");
     }
     out.pre_restart_persisted_generation_id = *generation;
+    out.pre_restart_persisted_gpu_abi_version = *gpu_abi_version;
     out.pre_restart_persisted_source_identity = *rows.front()[1];
 }
 
@@ -3778,15 +6122,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_scalar_session(
             *in.conn, in.kmer_size, in.window_size);
         capture_pre_restart_persisted_identity(
-            *in.conn, table, minimizer_index, out);
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), out);
         out.just_index_restart_performed =
             restart_postgres_for_cold_just_index(in, out) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         configure_bioseq_scalar_session(
             *in.conn, in.kmer_size, in.window_size);
-        configure_bioseq_minimizer_policy(
-            *in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         load_e2e_query_table(*in.conn, in);
         const std::string sql = batched_coord_sql(table, proj, 2);
@@ -3805,12 +6148,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
             pipeline_proof_expectation(in, true, fair_workers));
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
-        capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out,
             minimizer_index);
@@ -3822,7 +6166,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_simd_session(
             *in.conn, in.kmer_size, in.window_size);
         capture_pre_restart_persisted_identity(
-            *in.conn, table, minimizer_index, out);
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), out);
         // Restart PostgreSQL first so the prebuilt index (built untimed in
         // on_input) is assembled cold from storage rather than served warm.
         out.just_index_restart_performed =
@@ -3830,8 +6175,6 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
-        configure_bioseq_minimizer_policy(
-            *in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         load_e2e_query_table(*in.conn, in);
         const std::string sql = batched_coord_sql(table, proj, 2);
@@ -3847,12 +6190,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
             pipeline_proof_expectation(in, true, fair_workers));
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
-        capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
@@ -3866,7 +6210,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             in.window_size,
             in.cigar_projection);
         capture_pre_restart_persisted_identity(
-            *in.conn, table, minimizer_index, out);
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), out);
         // DOC0310 Phase C resident two-submit Vulkan frontend applied to the
         // just_index e2e path: index is prebuilt (untimed), only the Vulkan-driven
         // alignment is timed. Same Vulkan settings as bench_v10's
@@ -3877,7 +6222,6 @@ void load_e2e_query_table(const it::connection_test_context& c,
             restart_postgres_for_cold_just_index(in, out) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
-        configure_bioseq_minimizer_policy(*in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         configure_bioseq_vulkan_index_session(
             *in.conn,
@@ -3898,12 +6242,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
             pipeline_proof_expectation(in, true, fair_workers));
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
-        capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_ksw2_scalar_dp_scalar_mm_no_index") {
@@ -4209,6 +6554,20 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"alignment_partial", static_cast<double>(o.alignment_partial)},
         {"alignment_fully_drained", static_cast<double>(o.alignment_fully_drained)},
         {"persisted_generation_id", static_cast<double>(o.persisted_generation_id)},
+        {"pre_restart_persisted_gpu_abi_version",
+            static_cast<double>(o.pre_restart_persisted_gpu_abi_version)},
+        {"persisted_manifest_rows_read",
+            static_cast<double>(o.persisted_manifest_rows_read)},
+        {"persisted_manifest_bytes_read",
+            static_cast<double>(o.persisted_manifest_bytes_read)},
+        {"persisted_format5_manifest_contract_valid",
+            static_cast<double>(o.persisted_format5_manifest_contract_valid)},
+        {"persisted_generation_read_sessions",
+            static_cast<double>(o.persisted_generation_read_sessions)},
+        {"persisted_relation_opens",
+            static_cast<double>(o.persisted_relation_opens)},
+        {"persisted_index_scans",
+            static_cast<double>(o.persisted_index_scans)},
         {"persisted_source_identity_present",
             o.persisted_source_identity.empty()
                 || o.persisted_source_identity == "0000000000000000" ? 0.0 : 1.0},
@@ -4230,6 +6589,36 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"actual_target_index_source_recomputed", o.actual_target_index_source == "recomputed" ? 1.0 : 0.0},
         {"actual_target_index_source_persisted", o.actual_target_index_source == "persisted" ? 1.0 : 0.0},
         {"actual_target_index_source_mixed_invalid", o.actual_target_index_source == "mixed_invalid" ? 1.0 : 0.0},
+        {"simd_evidence_schema_valid", static_cast<double>(o.simd_evidence_schema_valid)},
+        {"requested_simd_policy_none", o.requested_simd_chaining_policy == "none" ? 1.0 : 0.0},
+        {"requested_simd_policy_exact_visited", o.requested_simd_chaining_policy == "exact_visited" ? 1.0 : 0.0},
+        {"requested_simd_policy_bounded_batch_approximate", o.requested_simd_chaining_policy == "bounded_batch_approximate" ? 1.0 : 0.0},
+        {"requested_simd_policy_mixed_invalid", o.requested_simd_chaining_policy == "mixed_invalid" ? 1.0 : 0.0},
+        {"observed_simd_policy_none", o.observed_simd_chaining_policy == "none" ? 1.0 : 0.0},
+        {"observed_simd_policy_exact_visited", o.observed_simd_chaining_policy == "exact_visited" ? 1.0 : 0.0},
+        {"observed_simd_policy_bounded_batch_approximate", o.observed_simd_chaining_policy == "bounded_batch_approximate" ? 1.0 : 0.0},
+        {"observed_simd_policy_mixed_invalid", o.observed_simd_chaining_policy == "mixed_invalid" ? 1.0 : 0.0},
+        {"requested_simd_alignment_block_aligner", o.requested_simd_alignment_algorithm == "block_aligner" ? 1.0 : 0.0},
+        {"observed_simd_alignment_block_aligner", o.observed_simd_alignment_algorithm == "block_aligner" ? 1.0 : 0.0},
+        {"block_aligner_execution_proof_present", static_cast<double>(o.block_aligner_execution_proof_present)},
+        {"block_aligner_execution_proof_accepted", static_cast<double>(o.block_aligner_execution_proof_accepted)},
+        {"block_aligner_executed_calls", static_cast<double>(o.block_aligner_executed_calls)},
+        {"block_aligner_nonempty_calls", static_cast<double>(o.block_aligner_nonempty_calls)},
+        {"block_aligner_nonempty_calls_with_simd", static_cast<double>(o.block_aligner_nonempty_calls_with_simd)},
+        {"block_aligner_simd_dp_vector_batches", static_cast<double>(o.block_aligner_simd_dp_vector_batches)},
+        {"block_aligner_simd_dp_cells", static_cast<double>(o.block_aligner_simd_dp_cells)},
+        {"block_aligner_forbidden_ksw2_calls", static_cast<double>(o.block_aligner_forbidden_ksw2_calls)},
+        {"block_aligner_forbidden_scalar_biological_fallbacks", static_cast<double>(o.block_aligner_forbidden_scalar_biological_fallbacks)},
+        {"block_aligner_execution_proof_saturated", static_cast<double>(o.block_aligner_execution_proof_saturated)},
+        {"nthash_vector_batches", static_cast<double>(o.nthash_vector_batches)},
+        {"nthash_resident_vector_stream_kernel_calls", static_cast<double>(o.nthash_resident_vector_stream_kernel_calls)},
+        {"simd_chaining_exact_policy_calls", static_cast<double>(o.simd_chaining_exact_policy_calls)},
+        {"simd_chaining_bounded_policy_calls", static_cast<double>(o.simd_chaining_bounded_policy_calls)},
+        {"simd_chaining_bounded_score_batches", static_cast<double>(o.simd_chaining_bounded_score_batches)},
+        {"simd_chaining_bounded_cutoff_stops", static_cast<double>(o.simd_chaining_bounded_cutoff_stops)},
+        {"simd_chaining_bounded_candidates_skipped", static_cast<double>(o.simd_chaining_bounded_candidates_skipped)},
+        {"simd_chaining_policy_rejections", static_cast<double>(o.simd_chaining_policy_rejections)},
+        {"simd_chaining_policy_evidence_saturated", static_cast<double>(o.simd_chaining_policy_evidence_saturated)},
         {"attempted_alignment_jobs", static_cast<double>(o.attempted_alignment_jobs)},
         {"fully_attested_alignment_jobs", static_cast<double>(o.fully_attested_alignment_jobs)},
         {"unattested_alignment_jobs", static_cast<double>(o.unattested_alignment_jobs)},
@@ -4243,6 +6632,38 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"persisted_index_rows", static_cast<double>(o.persisted_index_rows)},
         {"missing_persisted_index_rows", static_cast<double>(o.missing_persisted_index_rows)},
         {"recomputed_target_index_rows", static_cast<double>(o.recomputed_target_index_rows)},
+        {"cold_index_schema_valid", static_cast<double>(o.cold_index_schema_valid)},
+        {"cold_index_route_empty", static_cast<double>(o.cold_index_route_empty)},
+        {"cold_index_route_selective", static_cast<double>(o.cold_index_route_selective)},
+        {"cold_index_route_full", static_cast<double>(o.cold_index_route_full)},
+        {"cold_index_payload_rows_requested", static_cast<double>(o.cold_index_payload_rows_requested)},
+        {"cold_index_payload_rows_delivered", static_cast<double>(o.cold_index_payload_rows_delivered)},
+        {"cold_index_payload_rows_scanned", static_cast<double>(o.cold_index_payload_rows_scanned)},
+        {"cold_index_payload_rows_skipped", static_cast<double>(o.cold_index_payload_rows_skipped)},
+        {"cold_index_payload_bytes_requested", static_cast<double>(o.cold_index_payload_bytes_requested)},
+        {"cold_index_payload_bytes_delivered", static_cast<double>(o.cold_index_payload_bytes_delivered)},
+        {"cold_index_payload_bytes_scanned", static_cast<double>(o.cold_index_payload_bytes_scanned)},
+        {"format5_reader_capacity_accounting_passes", static_cast<double>(o.format5_reader_capacity_accounting_passes)},
+        {"format5_reader_global_position_storage_preparations", static_cast<double>(o.format5_reader_global_position_storage_preparations)},
+        {"format5_reader_global_position_storage_allocations", static_cast<double>(o.format5_reader_global_position_storage_allocations)},
+        {"format5_reader_position_append_growth_reservations", static_cast<double>(o.format5_reader_position_append_growth_reservations)},
+        {"format5_reader_retained_position_count", static_cast<double>(o.format5_reader_retained_position_count)},
+        {"format5_reader_retained_position_capacity", static_cast<double>(o.format5_reader_retained_position_capacity)},
+        {"format5_reader_directory_capacity_bytes", static_cast<double>(o.format5_reader_directory_capacity_bytes)},
+        {"format5_reader_query_hash_capacity_bytes", static_cast<double>(o.format5_reader_query_hash_capacity_bytes)},
+        {"format5_reader_query_record_capacity_bytes", static_cast<double>(o.format5_reader_query_record_capacity_bytes)},
+        {"format5_reader_ordinal_route_capacity_bytes", static_cast<double>(o.format5_reader_ordinal_route_capacity_bytes)},
+        {"format5_reader_selected_extent_capacity_bytes", static_cast<double>(o.format5_reader_selected_extent_capacity_bytes)},
+        {"format5_reader_current_selected_control_capacity_bytes", static_cast<double>(o.format5_reader_current_selected_control_capacity_bytes)},
+        {"format5_reader_global_position_capacity_bytes", static_cast<double>(o.format5_reader_global_position_capacity_bytes)},
+        {"format5_reader_control_payload_capacity_bytes", static_cast<double>(o.format5_reader_control_payload_capacity_bytes)},
+        {"format5_reader_owned_capacity_bytes", static_cast<double>(o.format5_reader_owned_capacity_bytes)},
+        {"format5_reader_admitted_bytes", static_cast<double>(o.format5_reader_admitted_bytes)},
+        {"format5_reader_exact_position_image_checks", static_cast<double>(o.format5_reader_exact_position_image_checks)},
+        {"format5_reader_exact_position_image_failures", static_cast<double>(o.format5_reader_exact_position_image_failures)},
+        {"format5_reader_retained_layout_checks", static_cast<double>(o.format5_reader_retained_layout_checks)},
+        {"format5_reader_retained_layout_failures", static_cast<double>(o.format5_reader_retained_layout_failures)},
+        {"format5_reader_memory_evidence_saturated", static_cast<double>(o.format5_reader_memory_evidence_saturated)},
         {"gpu_seed_dispatches", static_cast<double>(o.gpu_seed_dispatches)},
         {"gpu_chain_dispatches", static_cast<double>(o.gpu_chain_dispatches)},
         {"gpu_chain_backtrack_dispatches", static_cast<double>(o.gpu_chain_backtrack_dispatches)},
@@ -4263,6 +6684,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"min_tmp_available_gib",   static_cast<double>(o.min_tmp_available_kb) / (1024.0 * 1024.0)},
         {"peak_swap_used_mb",       o.peak_swap_used_mb},
         {"just_index_restart_performed", static_cast<double>(o.just_index_restart_performed)},
+        {"just_index_restart_identity_changed",
+            static_cast<double>(o.cold_restart_identity_changed)},
         {"cold_no_index_restart_performed", static_cast<double>(o.cold_no_index_restart_performed)},
         {"cold_no_index_restart_identity_changed", static_cast<double>(o.cold_no_index_restart_identity_changed)},
         {"cold_no_index_pre_restart_target_rows", static_cast<double>(o.cold_no_index_pre_restart_target_rows)},
@@ -4276,6 +6699,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"cold_no_index_pre_restart_gucs_off", static_cast<double>(o.cold_no_index_pre_restart_gucs_off)},
         {"cold_no_index_post_restart_gucs_off", static_cast<double>(o.cold_no_index_post_restart_gucs_off)},
         {"cold_no_index_lifecycle_accepted", static_cast<double>(o.cold_no_index_lifecycle_accepted)},
+        {"persisted_policy_audit_accepted",
+            static_cast<double>(o.persisted_policy_audit_accepted)},
         {"audit_selected_minimizer_is_sequence", static_cast<double>(o.audit_selected_minimizer_is_sequence)},
         {"audit_mpf_rows",          static_cast<double>(o.audit_mpf_rows)},
         {"audit_mps_rows",          static_cast<double>(o.audit_mps_rows)},
@@ -4333,8 +6758,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
     nlohmann::json snapshot = nlohmann::json::object();
     snapshot["schema"] =
-        "bioseq.last_alignment_execution_stats/raw-rowset";
-    snapshot["schema_version"] = 1;
+        "bioseq.last_alignment_execution_stats_v2/raw-rowset";
+    snapshot["schema_version"] = 2;
     snapshot["expected_row_count"] =
         E2eOutput::kAlignmentSnapshotRowCount;
     snapshot["actual_row_count"] = out.alignment_snapshot_rows.size();
@@ -4344,11 +6769,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
     nlohmann::json columns = nlohmann::json::array();
     for (std::size_t column = 0;
          column < kAlignmentSnapshotColumnNames.size(); ++column) {
-        const std::string_view json_type = alignment_stats_text_column(column)
-            ? std::string_view{"string"}
-            : alignment_stats_boolean_column(column)
-                ? std::string_view{"boolean"}
-                : std::string_view{"integer"};
+        const std::string_view json_type = alignment_stats_json_column(column)
+            ? std::string_view{"object"}
+            : alignment_stats_text_column(column)
+                ? std::string_view{"string"}
+                : alignment_stats_boolean_column(column)
+                    ? std::string_view{"boolean"}
+                    : std::string_view{"integer"};
         columns.push_back(nlohmann::json{
             {"ordinal", column},
             {"name", kAlignmentSnapshotColumnNames[column]},
@@ -4361,13 +6788,22 @@ void load_e2e_query_table(const it::connection_test_context& c,
     for (const auto& row : out.alignment_snapshot_rows) {
         if (row.size() != E2eOutput::kAlignmentSnapshotColumnCount) {
             abort_raw_evidence_serialization(
-				"alignment SRF row does not have exactly 149 columns");
+				"alignment SRF v2 row does not have exactly 151 columns");
         }
         nlohmann::json serialized_row = nlohmann::json::array();
         for (std::size_t column = 0; column < row.size(); ++column) {
             const auto& cell = row[column];
             if (!cell.has_value()) {
                 serialized_row.push_back(nullptr);
+                continue;
+            }
+            if (alignment_stats_json_column(column)) {
+                try {
+                    serialized_row.push_back(nlohmann::json::parse(*cell));
+                } catch (const nlohmann::json::exception&) {
+                    abort_raw_evidence_serialization(
+                        "alignment SRF JSON changed after validation");
+                }
                 continue;
             }
             if (alignment_stats_text_column(column)) {
@@ -4409,6 +6845,10 @@ void load_e2e_query_table(const it::connection_test_context& c,
         || algorithm.find("_simd_") != std::string_view::npos
         || algorithm.find("_gpu_") != std::string_view::npos
         || algorithm.find("_vulkan_") != std::string_view::npos;
+    const bool persisted_gpu_sample = postgres_sample
+        && algorithm.ends_with("_just_index")
+        && (algorithm.find("_gpu_") != std::string_view::npos
+            || algorithm.find("_vulkan_") != std::string_view::npos);
     if (postgres_sample
         && out.alignment_snapshot_rows.size()
             != E2eOutput::kAlignmentSnapshotRowCount) {
@@ -4420,15 +6860,43 @@ void load_e2e_query_table(const it::connection_test_context& c,
         abort_raw_evidence_serialization(
             "selected backend sample was not accepted before serialization");
     }
+    if (postgres_sample
+        && (out.persisted_gpu_operation_evidence_schema_valid != 1
+            || out.persisted_gpu_operation_evidence.is_null())) {
+        abort_raw_evidence_serialization(
+            "PostgreSQL sample is missing versioned GPU operation evidence");
+    }
+    const bool format5_memory_v2_valid = json_has_exact_keys(
+            out.format5_reader_memory_evidence,
+            kFormat5ReaderMemoryEvidenceKeys)
+        && out.format5_reader_memory_evidence["schema"].is_string()
+        && out.format5_reader_memory_evidence["schema"]
+            == "bioseq.format5_reader_memory_evidence"
+        && out.format5_reader_memory_evidence["version"].is_number_integer()
+        && out.format5_reader_memory_evidence["version"] == 2;
+    if (postgres_sample && !format5_memory_v2_valid) {
+        abort_raw_evidence_serialization(
+            "PostgreSQL sample is missing exact Format-5 memory evidence v2");
+    }
+    if (persisted_gpu_sample
+        && out.persisted_gpu_operation_evidence_accepted != 1) {
+        abort_raw_evidence_serialization(
+            "persisted all-GPU sample lacks accepted operation evidence");
+    }
     if (postgres_sample && algorithm.ends_with("_no_index")
         && out.cold_no_index_lifecycle_accepted != 1) {
         abort_raw_evidence_serialization(
             "no_index sample lacks accepted cold lifecycle evidence");
     }
+    if (postgres_sample && algorithm.ends_with("_just_index")
+        && out.persisted_policy_audit_accepted != 1) {
+        abort_raw_evidence_serialization(
+            "just_index sample lacks accepted post-measure persisted-policy evidence");
+    }
 
     nlohmann::json payload = nlohmann::json::object();
     payload["payload_schema"] = "bioseq.e2e.raw-sample";
-    payload["payload_schema_version"] = 1;
+    payload["payload_schema_version"] = 4;
     payload["index_and_map_ns"] = out.measured_region_ns;
     payload["cache_policy"] = "process-cold-os-cache-unspecified";
     payload["benchmark_shape"] = nlohmann::json{
@@ -4474,6 +6942,66 @@ void load_e2e_query_table(const it::connection_test_context& c,
         const std::string expected_source = just_index
             ? out.pre_restart_persisted_source_identity
             : std::string{"0000000000000000"};
+        const std::string& restart_before_start = just_index
+            ? out.pre_restart_postmaster_start_time
+            : out.cold_no_index_pre_restart_postmaster_start_time;
+        const std::string& restart_after_start = just_index
+            ? out.post_restart_postmaster_start_time
+            : out.cold_no_index_post_restart_postmaster_start_time;
+        const std::int64_t restart_before_pid = just_index
+            ? out.pre_restart_backend_pid
+            : out.cold_no_index_pre_restart_backend_pid;
+        const std::int64_t restart_after_pid = just_index
+            ? out.post_restart_backend_pid
+            : out.cold_no_index_post_restart_backend_pid;
+        const std::int64_t restart_before_database_oid = just_index
+            ? out.pre_restart_database_oid
+            : out.cold_no_index_pre_restart_database_oid;
+        const std::int64_t restart_after_database_oid = just_index
+            ? out.post_restart_database_oid
+            : out.cold_no_index_post_restart_database_oid;
+        const nlohmann::json restart_identity = nlohmann::json{
+            {"before", nlohmann::json{
+                {"postmaster_start", restart_before_start},
+                {"backend_pid", restart_before_pid},
+                {"database_oid", restart_before_database_oid},
+            }},
+            {"after", nlohmann::json{
+                {"postmaster_start", restart_after_start},
+                {"backend_pid", restart_after_pid},
+                {"database_oid", restart_after_database_oid},
+            }},
+            {"timed_statement", nlohmann::json{
+                {"postmaster_start", out.timed_postmaster_start_time},
+                {"backend_pid", out.alignment_backend_pid},
+                {"database_oid", out.alignment_database_oid},
+            }},
+        };
+        const nlohmann::json persisted_policy = just_index
+            ? nlohmann::json{
+                {"accepted", out.persisted_policy_audit_accepted},
+                {"captured_after_timed_statement", true},
+                {"selected_index",
+                    out.audit_selected_minimizer_is_sequence == 1
+                        ? "minimizers_per_sequence"
+                        : "minimizers_per_fragment"},
+                {"selected_minimizer_is_sequence",
+                    out.audit_selected_minimizer_is_sequence},
+                {"minimizers_per_fragment", nlohmann::json{
+                    {"rows", out.audit_mpf_rows},
+                    {"update_on_insert", out.audit_mpf_update_on_insert},
+                    {"active_read", out.audit_mpf_active_read},
+                }},
+                {"minimizers_per_sequence", nlohmann::json{
+                    {"rows", out.audit_mps_rows},
+                    {"update_on_insert", out.audit_mps_update_on_insert},
+                    {"active_read", out.audit_mps_active_read},
+                }},
+                {"async_persist_jobs_waiting",
+                    out.audit_async_persist_jobs_waiting},
+                {"index_rows_wait_attempts", out.audit_index_rows_wait_attempts},
+            }
+            : nlohmann::json{nullptr};
         payload["postgres"] = nlohmann::json{
             {"postmaster_start", out.timed_postmaster_start_time},
             {"backend_pid", out.alignment_backend_pid},
@@ -4484,6 +7012,22 @@ void load_e2e_query_table(const it::connection_test_context& c,
             {"expected_source_identity", expected_source},
             {"actual_generation", out.persisted_generation_id},
             {"actual_source_identity", out.persisted_source_identity},
+            {"restart_identity", restart_identity},
+            {"persisted_policy", persisted_policy},
+            {"persisted_format", just_index
+                ? nlohmann::json{
+                    {"ready_generation_gpu_abi_version",
+                        out.pre_restart_persisted_gpu_abi_version},
+                    {"manifest_rows_read",
+                        out.persisted_manifest_rows_read},
+                    {"manifest_bytes_read",
+                        out.persisted_manifest_bytes_read},
+                    {"read_sessions",
+                        out.persisted_generation_read_sessions},
+                    {"format5_manifest_contract_valid",
+                        out.persisted_format5_manifest_contract_valid},
+                }
+                : nlohmann::json{nullptr}},
             {"restart_performed", just_index
                 ? out.just_index_restart_performed
                 : out.cold_no_index_restart_performed},
@@ -4538,9 +7082,12 @@ void load_e2e_query_table(const it::connection_test_context& c,
         };
         payload["alignment_snapshot"] =
             serialize_alignment_snapshot_rows(out);
+        payload["persisted_gpu_operation_evidence"] =
+            out.persisted_gpu_operation_evidence;
     } else {
         payload["postgres"] = nullptr;
         payload["alignment_snapshot"] = nullptr;
+        payload["persisted_gpu_operation_evidence"] = nullptr;
     }
     payload["attestation"] = nlohmann::json{
         {"proof_present", out.pipeline_proof_present},
@@ -4553,9 +7100,44 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"requested_target_index_source",
             out.requested_target_index_source},
         {"actual_target_index_source", out.actual_target_index_source},
+        {"requested_simd_chaining_policy",
+            out.requested_simd_chaining_policy},
+        {"observed_simd_chaining_policy",
+            out.observed_simd_chaining_policy},
+        {"requested_simd_alignment_algorithm",
+            out.requested_simd_alignment_algorithm},
+        {"observed_simd_alignment_algorithm",
+            out.observed_simd_alignment_algorithm},
+        {"nthash_vector_activity",
+            out.nthash_vector_batches > 0
+                || out.nthash_resident_vector_stream_kernel_calls > 0},
+        {"block_aligner_execution_proof", nlohmann::json{
+            {"present", out.block_aligner_execution_proof_present},
+            {"accepted", out.block_aligner_execution_proof_accepted},
+            {"executed_calls", out.block_aligner_executed_calls},
+            {"nonempty_calls", out.block_aligner_nonempty_calls},
+            {"nonempty_calls_with_simd",
+                out.block_aligner_nonempty_calls_with_simd},
+            {"simd_dp_vector_batches",
+                out.block_aligner_simd_dp_vector_batches},
+            {"simd_dp_cells", out.block_aligner_simd_dp_cells},
+            {"forbidden_ksw2_calls",
+                out.block_aligner_forbidden_ksw2_calls},
+            {"forbidden_scalar_biological_fallbacks",
+                out.block_aligner_forbidden_scalar_biological_fallbacks},
+            {"saturated", out.block_aligner_execution_proof_saturated},
+        }},
         {"backend_declines", out.backend_declines},
         {"backend_fallbacks", out.backend_fallbacks},
         {"stats_saturated", out.stats_saturated},
+        {"persisted_gpu_operation_evidence_accepted",
+            postgres_sample
+                ? nlohmann::json(
+                    out.persisted_gpu_operation_evidence_accepted)
+                : nlohmann::json{nullptr}},
+        {"format5_reader_memory_evidence", postgres_sample
+            ? out.format5_reader_memory_evidence
+            : nlohmann::json{nullptr}},
     };
     return payload.dump();
 }
@@ -7024,9 +9606,9 @@ void cleanup_sort_scan_input(
 }  // anonymous namespace
 HWY_AFTER_NAMESPACE();    // close the Highway per-target namespace
 
+#ifndef BIOSEQ_E2E_CONTRACT_TEST
 int main(int argc, char** argv) {
     log_configure(true); fmtlog::setLogLevel(fmtlog::INF);
-    parse_e2e_cli_selection(argc, argv);
     const char* cfg_override = std::getenv("BIOSEQ_E2E_CONFIG_OVERRIDE");
     const std::string cfg{cfg_override != nullptr && *cfg_override != '\0'
         ? cfg_override
@@ -7067,3 +9649,4 @@ int main(int argc, char** argv) {
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
             "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));
 }
+#endif

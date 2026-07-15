@@ -183,6 +183,11 @@ class CacheModeRoutingTest(unittest.TestCase):
         }
         self.assertEqual(
             install_modes, {"unit+integration", "bench-e2e"})
+        for name in install_modes:
+            with self.subTest(mode=name):
+                self.assertIn(
+                    "postgresql_bioseq_cache", server.MODES[name].targets)
+                self.assertIn("postgresql_bioseq", server.MODES[name].targets)
         for name, details in server.MODES.items():
             if name.startswith("cache-"):
                 self.assertFalse(details.install_extension, name)
