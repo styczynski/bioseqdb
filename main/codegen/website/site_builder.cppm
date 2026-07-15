@@ -677,6 +677,31 @@ namespace {
     return 3;
 }
 
+/// @brief Runs `website render`: renders a template against a JSON context.
+///
+/// Reads a Jinja template and a JSON page-data context (for example the
+/// cpp_entities/plan artifact) and writes the rendered document (§14). The
+/// structured render primitive entity/tutorial/landing pages are produced with.
+/// @param args Options after the `render` token.
+/// @return Zero on success; two on usage errors; three on render failure.
+[[nodiscard]] int run_render(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {"template", "context", "output"};
+    const auto options = parse_options(args, value_keys, {});
+    const fs::path template_path = require_option(options, "template");
+    const fs::path context_path = require_option(options, "context");
+    const fs::path output = require_option(options, "output");
+    const std::string document =
+        render_template_json(read_file(template_path), read_file(context_path));
+    write_if_different(output, document);
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website render: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website render: {}", error.what());
+    return 3;
+}
+
 /// @brief Dispatches a website subcommand and returns its process exit code.
 /// @param args Arguments after the leading `website` token (subcommand first).
 /// @return Exit code per §7: 2 usage, 3 parse/validation, 0 success.
@@ -696,8 +721,11 @@ namespace {
     if (command == "execute") {
         return run_execute(rest);
     }
+    if (command == "render") {
+        return run_render(rest);
+    }
     static constexpr std::string_view known[] = {
-        "source_graph", "render", "publish", "assemble"};
+        "source_graph", "publish", "assemble"};
     for (const std::string_view candidate : known) {
         if (command == candidate) {
             std::println(stderr,
