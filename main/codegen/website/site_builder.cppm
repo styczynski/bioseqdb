@@ -1351,6 +1351,162 @@ struct staging_writer {
     return 3;
 }
 
+/// @brief Runs `website assemble`: combines verified single-version sites (§16).
+///
+/// Verifies every input site root against its sibling `<root>.success` marker
+/// before copying anything, combines the per-version subtrees and asset bundles
+/// (root-level files come from the newest/primary version), regenerates the
+/// cross-version versions.json, and writes the immutable assembled manifest
+/// (schema assembled_manifest/v1) with the same exact set-equality rule before an
+/// atomic swap into place.
+/// @param args Options after the `assemble` token.
+/// @return Zero on success; two on usage errors; three on validation failure.
+[[nodiscard]] int run_assemble(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {"site-roots", "output"};
+    const auto options = parse_options(args, value_keys, {});
+    const std::string roots_list = require_option(options, "site-roots");
+    const fs::path output = require_option(options, "output");
+
+    std::vector<fs::path> roots;
+    std::size_t begin = 0;
+    while (begin <= roots_list.size()) {
+        const std::size_t end = roots_list.find(';', begin);
+        const std::size_t stop = end == std::string::npos ? roots_list.size() : end;
+        std::string entry = trim(roots_list.substr(begin, stop - begin));
+        if (!entry.empty()) {
+            roots.emplace_back(std::move(entry));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    if (roots.empty()) {
+        throw std::runtime_error("assemble requires at least one --site-roots entry");
+    }
+
+    struct input_site {
+        fs::path root;
+        std::string version;
+        std::string base_path;
+        std::vector<std::string> outputs;
+        std::string manifest_hash;
+        std::string success_hash;
+        std::vector<std::uint32_t> parts;
+    };
+    std::vector<input_site> inputs;
+    for (const fs::path& root : roots) {
+        const std::string manifest_text = read_file(root / "site-manifest.json");
+        const std::string manifest_hash = bioseq::codegen::sha256_hex(manifest_text);
+        const fs::path marker = root.string() + ".success";
+        std::error_code error;
+        if (!fs::exists(marker, error) || error) {
+            throw std::runtime_error("missing success marker for " + root.string());
+        }
+        const std::string marker_bytes = read_file(marker);
+        std::string marker_hash = trim(marker_bytes);
+        if (marker_hash != manifest_hash) {
+            throw std::runtime_error("success marker does not match site-manifest.json for "
+                                     + root.string());
+        }
+        input_site site;
+        site.root = root;
+        site.version = manifest_string_field(manifest_text, "version");
+        site.base_path = manifest_string_field(manifest_text, "base_path");
+        site.outputs = manifest_output_routes(manifest_text);
+        site.manifest_hash = manifest_hash;
+        site.success_hash = bioseq::codegen::sha256_hex(marker_bytes);
+        site.parts = parse_version_parts(site.version);
+        inputs.push_back(std::move(site));
+    }
+
+    std::ranges::sort(inputs, [](const input_site& lhs, const input_site& rhs) {
+        return lhs.parts > rhs.parts;
+    });
+    const std::string primary_version = inputs.front().version;
+    const std::string base_path = inputs.front().base_path;
+    std::set<std::string> version_set;
+    for (const input_site& site : inputs) {
+        if (!version_set.insert(site.version).second) {
+            throw std::runtime_error("duplicate version among assembled roots: "
+                                     + site.version);
+        }
+    }
+
+    const fs::path staging = output.string() + ".staging";
+    std::error_code staging_error;
+    fs::remove_all(staging, staging_error);
+    fs::create_directories(staging);
+    staging_writer writer{.root = staging, .manifest = {}};
+
+    for (const input_site& site : inputs) {
+        const std::string version_prefix = "/" + site.version + "/";
+        const bool is_primary = site.version == primary_version;
+        for (const std::string& route : site.outputs) {
+            if (route == "/site-manifest.json" || route == "/versions.json") {
+                continue;
+            }
+            const bool versioned =
+                route.starts_with(version_prefix) || route.starts_with("/assets/");
+            if (!versioned && !is_primary) {
+                continue;
+            }
+            writer.emit(route, read_file(site.root / route.substr(1)));
+        }
+    }
+
+    std::vector<std::string> version_labels;
+    std::vector<std::string> input_manifest_hashes;
+    std::vector<std::string> input_success_hashes;
+    for (const input_site& site : inputs) {
+        version_labels.push_back(site.version);
+        input_manifest_hashes.push_back(site.manifest_hash);
+        input_success_hashes.push_back(site.success_hash);
+    }
+    writer.emit("/versions.json", serialize_versions(version_labels, base_path));
+
+    std::vector<std::pair<std::string, std::string>> outputs(
+        writer.manifest.begin(), writer.manifest.end());
+    const std::string assembled = serialize_assembled_manifest(
+        primary_version, version_labels, base_path,
+        input_manifest_hashes, input_success_hashes, outputs);
+    {
+        std::ofstream manifest_out(staging / "site-manifest.json",
+                                   std::ios::binary | std::ios::trunc);
+        manifest_out.write(assembled.data(),
+                           static_cast<std::streamsize>(assembled.size()));
+        if (!manifest_out) {
+            throw std::runtime_error("cannot write assembled site-manifest.json");
+        }
+    }
+
+    std::set<std::string> present;
+    collect_site_files(staging, present);
+    present.erase("/site-manifest.json");
+    std::set<std::string> declared;
+    for (const auto& [route, digest] : writer.manifest) {
+        declared.insert(route);
+    }
+    if (present != declared) {
+        throw std::runtime_error("assembled manifest set mismatch: " + std::to_string(declared.size())
+                                 + " declared vs " + std::to_string(present.size()) + " present");
+    }
+
+    atomic_publish(staging, output);
+    const std::string manifest_hash =
+        bioseq::codegen::sha256_hex(read_file(output / "site-manifest.json"));
+    write_if_different(output.string() + ".success", manifest_hash + "\n");
+    std::println("assembled {} versions into {} ({} outputs)",
+                 inputs.size(), output.string(), writer.manifest.size());
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website assemble: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website assemble: {}", error.what());
+    return 3;
+}
+
 /// @brief Dispatches a website subcommand and returns its process exit code.
 /// @param args Arguments after the leading `website` token (subcommand first).
 /// @return Exit code per §7: 2 usage, 3 parse/validation, 0 success.
@@ -1379,8 +1535,11 @@ struct staging_writer {
     if (command == "publish") {
         return run_publish(rest);
     }
+    if (command == "assemble") {
+        return run_assemble(rest);
+    }
     static constexpr std::string_view known[] = {
-        "source_graph", "assemble"};
+        "source_graph"};
     for (const std::string_view candidate : known) {
         if (command == candidate) {
             std::println(stderr,

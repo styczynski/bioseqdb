@@ -520,6 +520,81 @@ namespace {
     return entities;
 }
 
+/// @brief Reads a top-level string field from a site manifest (or "" if absent).
+/// @param text site-manifest.json text.
+/// @param key Field name (for example "version" or "base_path").
+/// @return The string value, or empty when missing/non-string.
+[[nodiscard]] std::string manifest_string_field(
+    std::string_view text, std::string_view key) {
+    const boost::json::value root = parse_json(text);
+    if (!root.is_object()) {
+        return {};
+    }
+    const boost::json::object& object = root.as_object();
+    const auto found = object.find(key);
+    if (found == object.end() || !found->value().is_string()) {
+        return {};
+    }
+    return std::string(found->value().as_string());
+}
+
+/// @brief Reads the owned output route set from a site manifest (§16).
+/// @param text site-manifest.json text.
+/// @return The manifest's declared output routes (leading-slash), in stored order.
+[[nodiscard]] std::vector<std::string> manifest_output_routes(std::string_view text) {
+    const boost::json::value root = parse_json(text);
+    std::vector<std::string> routes;
+    const boost::json::object& outputs = root.at("outputs").as_object();
+    routes.reserve(outputs.size());
+    for (const auto& entry : outputs) {
+        routes.emplace_back(entry.key());
+    }
+    return routes;
+}
+
+/// @brief Serializes the immutable multi-version assembled manifest (§16).
+/// @param primary_version The primary (newest) version label.
+/// @param ordered_versions All version labels, newest first.
+/// @param base_path Normalized base path used to build version routes.
+/// @param input_manifest_hashes SHA-256 of each input site-manifest.json.
+/// @param input_success_hashes SHA-256 of each input `<root>.success` marker.
+/// @param outputs Every assembled output route and its SHA-256, except itself.
+/// @return Canonical JSON ending in one newline (schema assembled_manifest/v1).
+[[nodiscard]] std::string serialize_assembled_manifest(
+    std::string_view primary_version,
+    const std::vector<std::string>& ordered_versions,
+    std::string_view base_path,
+    const std::vector<std::string>& input_manifest_hashes,
+    const std::vector<std::string>& input_success_hashes,
+    const std::vector<std::pair<std::string, std::string>>& outputs) {
+    boost::json::object root;
+    root["schema"] = "bioseq.website.assembled_manifest/v1";
+    root["hash_algorithm"] = "sha256";
+    root["primary_version"] = std::string(primary_version);
+    root["base_path"] = std::string(base_path);
+    boost::json::array versions;
+    for (const std::string& version : ordered_versions) {
+        versions.push_back(boost::json::value(version));
+    }
+    root["versions"] = std::move(versions);
+    boost::json::array manifest_hashes;
+    for (const std::string& hash : input_manifest_hashes) {
+        manifest_hashes.push_back(boost::json::value(hash));
+    }
+    root["input_manifest_sha256"] = std::move(manifest_hashes);
+    boost::json::array success_hashes;
+    for (const std::string& hash : input_success_hashes) {
+        success_hashes.push_back(boost::json::value(hash));
+    }
+    root["input_success_sha256"] = std::move(success_hashes);
+    boost::json::object output_map;
+    for (const auto& [route, hash] : outputs) {
+        output_map[route] = hash;
+    }
+    root["outputs"] = std::move(output_map);
+    return serialize_canonical(root);
+}
+
 /// @brief Builds a full page render context from the site view and page fields.
 ///
 /// Produces {"site":..,"nav":..,"page":..[,<collection_key>:..]} as one HTML-safe
