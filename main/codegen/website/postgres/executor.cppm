@@ -2,6 +2,7 @@ module;
 
 #include <cstddef>
 #include <expected>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,8 +79,20 @@ public:
                 const bioseq::libpq::result visible =
                     connection.exec(example.visible_sql);
                 outcome.visible_results.push_back(project_result(visible));
+                // Exceeding a retention limit is a build error, never a silent
+                // truncation — displayed output must be the actual result (§13.4).
+                if (auto breach = check_result_limits(outcome.visible_results.back())) {
+                    diagnostic limit;
+                    limit.severity = diagnostic_severity::error;
+                    limit.phase = "execute";
+                    limit.message = std::move(*breach);
+                    return std::unexpected(limit);
+                }
             }
             for (const bioseq::libpq::notice& raw : connection.take_notices()) {
+                if (outcome.notices.size() >= 100) {  // §13.4: 100 captured notices
+                    break;
+                }
                 outcome.notices.push_back(sql_notice{
                     .phase = sql_phase::visible,
                     .severity = raw.severity,
@@ -152,6 +165,36 @@ private:
         unexpected_success.message =
             "example expected an error but the visible SQL succeeded";
         return std::unexpected(unexpected_success);
+    }
+
+    // Enforces the §13.4 per-visible-result retention limits. Returns an author-
+    // facing message on the first breach so the build fails with actionable
+    // guidance instead of rendering a silently truncated result.
+    [[nodiscard]] static std::optional<std::string> check_result_limits(
+        const sql_result_set& set) {
+        constexpr std::size_t max_rows = 200;
+        constexpr std::size_t max_columns = 100;
+        constexpr std::size_t max_cell_bytes = 64 * 1024;
+        constexpr std::size_t max_total_bytes = 2 * 1024 * 1024;
+        if (set.columns.size() > max_columns) {
+            return "visible result exceeds 100 columns; select an explicit column list";
+        }
+        if (set.rows.size() > max_rows) {
+            return "visible result exceeds 200 rows; add a deterministic LIMIT";
+        }
+        std::size_t total = 0;
+        for (const std::vector<sql_cell>& row : set.rows) {
+            for (const sql_cell& cell : row) {
+                if (cell.text.size() > max_cell_bytes) {
+                    return "a visible result cell exceeds 64 KiB; reduce the output";
+                }
+                total += cell.text.size();
+                if (total > max_total_bytes) {
+                    return "visible payload exceeds 2 MiB; reduce the output";
+                }
+            }
+        }
+        return std::nullopt;
     }
 
     [[nodiscard]] static sql_result_set project_result(const bioseq::libpq::result& result) {
