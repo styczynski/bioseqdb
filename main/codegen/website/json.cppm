@@ -319,6 +319,21 @@ namespace {
     return serialize_canonical(root);
 }
 
+/// @brief Serializes the SQL catalog entity index (§12.2).
+/// @param entities Documented SQL entities captured from the live catalog.
+/// @return Canonical HTML-safe JSON ending in one newline (schema sql_entities/v1).
+[[nodiscard]] std::string serialize_sql_entities(
+    const std::vector<documented_entity>& entities) {
+    boost::json::object root;
+    root["schema"] = "bioseq.website.sql_entities/v1";
+    boost::json::array items;
+    for (const documented_entity& entity : entities) {
+        items.push_back(serialize_entity(entity));
+    }
+    root["entities"] = std::move(items);
+    return serialize_canonical(root);
+}
+
 /// @brief Serializes the documentation-coverage report (§11.4).
 /// @param public_total Number of public entities considered.
 /// @param documented_total Number with a non-empty summary.

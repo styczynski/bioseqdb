@@ -45,11 +45,13 @@ export namespace bioseq::codegen::website {
     std::vector<documented_entity> entities;
     bioseq::libpq::connection connection(conninfo);
     for (const std::string& schema : include_schemas) {
+        // Base/composite/domain/enum types, excluding the implicit array types
+        // (typcategory 'A') PostgreSQL auto-creates for each of them.
         const std::string query =
             "select t.typname, obj_description(t.oid, 'pg_type') "
             "from pg_type t join pg_namespace n on n.oid = t.typnamespace "
-            "where n.nspname = '" + schema + "' and t.typtype in ('b','c','d') "
-            "order by t.typname";
+            "where n.nspname = '" + schema + "' and t.typtype in ('b','c','d','e') "
+            "and t.typcategory <> 'A' order by t.typname";
         const bioseq::libpq::result result = connection.exec(query);
         for (int row = 0; row < result.rows(); ++row) {
             documented_entity entity;
@@ -60,6 +62,46 @@ export namespace bioseq::codegen::website {
             entity.canonical_id = sql_canonical_id(schema, entity.display_name, "type");
             if (!result.is_null(row, 1)) {
                 entity.summary_text = std::string(result.value(row, 1));
+            }
+            entities.push_back(std::move(entity));
+        }
+    }
+    return entities;
+}
+
+/// @brief Reads schema-scoped function entities from the live catalog.
+/// @param conninfo Unix-socket conninfo for the private cluster.
+/// @param include_schemas Schemas whose functions are catalogued.
+/// @return Documented SQL function entities with identity arguments, in order.
+[[nodiscard]] std::vector<documented_entity> read_sql_function_catalog(
+    const std::string& conninfo,
+    const std::vector<std::string>& include_schemas) {
+    std::vector<documented_entity> entities;
+    bioseq::libpq::connection connection(conninfo);
+    for (const std::string& schema : include_schemas) {
+        const std::string query =
+            "select p.proname, pg_get_function_identity_arguments(p.oid), "
+            "pg_get_function_result(p.oid), obj_description(p.oid, 'pg_proc') "
+            "from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
+            "where n.nspname = '" + schema + "' order by p.proname, p.oid";
+        const bioseq::libpq::result result = connection.exec(query);
+        for (int row = 0; row < result.rows(); ++row) {
+            documented_entity entity;
+            entity.domain = entity_domain::sql;
+            entity.kind = entity_kind::sql_function;
+            entity.display_name = std::string(result.value(row, 0));
+            const std::string arguments =
+                result.is_null(row, 1) ? std::string{} : std::string(result.value(row, 1));
+            entity.qualified_name = schema + "." + entity.display_name;
+            entity.normalized_signature =
+                entity.qualified_name + "(" + arguments + ")";
+            if (!result.is_null(row, 2)) {
+                entity.return_type = std::string(result.value(row, 2));
+            }
+            entity.canonical_id = sql_canonical_id(
+                schema, entity.display_name + "(" + arguments + ")", "function");
+            if (!result.is_null(row, 3)) {
+                entity.summary_text = std::string(result.value(row, 3));
             }
             entities.push_back(std::move(entity));
         }

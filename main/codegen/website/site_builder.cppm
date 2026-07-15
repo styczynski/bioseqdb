@@ -684,6 +684,56 @@ namespace {
     return 3;
 }
 
+/// @brief Runs `website catalog`: captures live SQL entities to an artifact.
+///
+/// Connects to the private cluster, reads schema-scoped type and function
+/// entities with their COMMENT documentation (§12.2), and writes the canonical
+/// sql_entities/v1 artifact. A focused live catalog-capture entrypoint.
+/// @param args Options after the `catalog` token.
+/// @return Zero on success; two on usage errors; three on capture failure.
+[[nodiscard]] int run_catalog(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {"conninfo", "schemas", "output"};
+    const auto options = parse_options(args, value_keys, {});
+    const std::string conninfo = require_option(options, "conninfo");
+    const std::string schemas_csv = require_option(options, "schemas");
+    const fs::path output = require_option(options, "output");
+
+    std::vector<std::string> schemas;
+    std::size_t begin = 0;
+    while (begin <= schemas_csv.size()) {
+        const std::size_t end = schemas_csv.find(',', begin);
+        const std::size_t stop = end == std::string::npos ? schemas_csv.size() : end;
+        std::string schema = trim(schemas_csv.substr(begin, stop - begin));
+        if (!schema.empty()) {
+            schemas.push_back(std::move(schema));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+
+    std::vector<documented_entity> entities;
+    for (documented_entity& entity : read_sql_type_catalog(conninfo, schemas)) {
+        entities.push_back(std::move(entity));
+    }
+    for (documented_entity& entity : read_sql_function_catalog(conninfo, schemas)) {
+        entities.push_back(std::move(entity));
+    }
+    std::ranges::sort(entities, [](const documented_entity& lhs,
+                                   const documented_entity& rhs) {
+        return lhs.canonical_id < rhs.canonical_id;
+    });
+    write_if_different(output, serialize_sql_entities(entities));
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website catalog: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website catalog: {}", error.what());
+    return 3;
+}
+
 /// @brief Runs `website render`: renders a template against a JSON context.
 ///
 /// Reads a Jinja template and a JSON page-data context (for example the
@@ -730,6 +780,9 @@ namespace {
     }
     if (command == "render") {
         return run_render(rest);
+    }
+    if (command == "catalog") {
+        return run_catalog(rest);
     }
     static constexpr std::string_view known[] = {
         "source_graph", "publish", "assemble"};
