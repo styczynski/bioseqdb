@@ -9092,10 +9092,16 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
         == 8064u);
 
     constexpr std::uint64_t position_count = 5000u;
+    constexpr std::uint64_t first_control_count = 8064u / 4u;
+    constexpr std::uint64_t queried_control_count =
+        position_count - first_control_count - 1u;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
     minimizers.reserve(position_count);
     for (std::uint64_t position = 0; position < position_count; ++position) {
-        minimizers.emplace_back(7u, position << 1u);
+        const std::uint64_t hash = position < first_control_count ? 6u
+            : position < first_control_count + queried_control_count ? 7u
+            : 8u;
+        minimizers.emplace_back(hash, position << 1u);
     }
     VectorReplayMinimizerProducer producer{minimizers};
     CollectingMinimizerRowSink sink;
@@ -9132,6 +9138,9 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     REQUIRE(sink.max_callback_bytes == 8064u);
     require_complete_generation_rows(*generation, sink.rows);
 
+    // The first unqueried control ends exactly at the first position-row
+    // boundary. Querying only the middle of three controls forces the sparse
+    // route image and exercises its late ordinal on the following row.
     bioseq::parallelism::MemoryAdmissionController admission;
     const std::array<std::uint64_t, 1> query{7u};
     auto reader = PreparedShapeV5QueryReader::begin(
@@ -9150,9 +9159,14 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     }
     REQUIRE(reader->finish().has_value());
     const auto lookup = reader->lookup(7u);
-    REQUIRE(lookup.positions.size() == position_count);
-    REQUIRE(lookup.positions.front() == 0u);
-    REQUIRE(lookup.positions.back() == (position_count - 1u) << 1u);
+    REQUIRE(lookup.positions.size() == queried_control_count);
+    REQUIRE(lookup.positions.front() == first_control_count << 1u);
+    REQUIRE(lookup.positions.back()
+        == (first_control_count + queried_control_count - 1u) << 1u);
+    const auto evidence = reader->memory_evidence();
+    REQUIRE(evidence.decoded_control_records == 3u);
+    REQUIRE(evidence.retained_selected_control_capacity_bytes
+        == 3u * sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
 }
 
 TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",

@@ -5748,9 +5748,25 @@ protected:
         }
         const std::uint64_t additional =
             bioseq::parallelism::saturating_add(transient, retained);
-        const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
-            additional,
-            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        const std::uint64_t transient_headroom =
+            bioseq::parallelism::saturating_mul(
+                transient,
+                bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        const std::uint64_t retained_headroom = [&]() noexcept {
+            if constexpr (Traits::global_controls_then_positions) {
+                // Format-5 ends and route images are exact arrays. Their
+                // admitted peak is already represented by retained and must
+                // not receive vector growth headroom a second time.
+                return retained;
+            } else {
+                return bioseq::parallelism::saturating_mul(
+                    retained,
+                    bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+            }
+        }();
+        const std::uint64_t headroom =
+            bioseq::parallelism::saturating_add(
+                transient_headroom, retained_headroom);
         PermitGrowthGuard guard{*this};
         const std::uint64_t projected = bioseq::parallelism::saturating_add(
             protocol_owned_capacity_bytes(), headroom);
@@ -5805,17 +5821,25 @@ protected:
                         MinimizerGenerationWireError::row_order);
                 }
                 if constexpr (Traits::global_controls_then_positions) {
+                    std::unique_ptr<std::uint64_t[]> position_ends;
+                    std::unique_ptr<std::uint32_t[]> dense_routes;
                     if (decoded->size() != 0u) {
-                        selected.control_state.position_ends =
+                        position_ends =
                             std::make_unique_for_overwrite<std::uint64_t[]>(
                                 decoded->size());
-                        selected.route_state.dense_routes =
+                        dense_routes =
                             std::make_unique_for_overwrite<std::uint32_t[]>(
                                 decoded->size());
                         std::fill_n(
-                            selected.route_state.dense_routes.get(),
-                            decoded->size(), no_narrow_route);
+                            dense_routes.get(), decoded->size(),
+                            no_narrow_route);
                     }
+                    // Publish both exact owners together only after every
+                    // allocation succeeds, keeping failure evidence exact.
+                    selected.control_state.position_ends =
+                        std::move(position_ends);
+                    selected.route_state.dense_routes =
+                        std::move(dense_routes);
                     selected.control_state.control_count = decoded->size();
                 } else {
                     selected.control_state.controls.reserve(decoded->size());
