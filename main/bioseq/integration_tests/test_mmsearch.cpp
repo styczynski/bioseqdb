@@ -488,9 +488,17 @@ TEST_CASE("alignment execution SRF is empty before the first published root",
     connection_test_context ctx;
     REQUIRE(last_alignment_stats(ctx).empty());
     REQUIRE(last_alignment_stats_v2(ctx).empty());
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(last_alignment_stats(ctx).empty());
     REQUIRE(last_alignment_stats_v2(ctx).empty());
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
 }
 
 TEST_CASE("alignment execution SRF publishes one exact stage row set",
@@ -738,6 +746,88 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
     }
 }
 
+TEST_CASE("persisted GPU SQL evidence is exact-empty and immutable for completed CPU work",
+          "[mmsearch][pipeline-stats][statement][gpu-evidence][sql][lifecycle]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+
+    const std::string first = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
+    const std::string second = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
+    REQUIRE(second == first);
+
+    const row_t proof = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1() AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, completed, partial,"
+        "        fully_drained"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(value)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(value))=18 "
+        "AND value ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'completed','partial','fully_drained','accepted','complete',"
+        " 'saturated','dropped_operation_count','operation_count',"
+        " 'accepted_operation_count','complete_operation_count','job_count',"
+        " 'accepted_job_count','operations']::text[], "
+        "value->>'schema'='bioseq.persisted_gpu_operation_evidence' "
+        "AND (value->>'version')::bigint=1 "
+        "AND jsonb_typeof(value->'schema')='string' "
+        "AND jsonb_typeof(value->'version')='number', "
+        "(value->>'execution_id')::bigint=stats.execution_id "
+        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (value->>'database_oid')::bigint=stats.database_oid, "
+        "(value->>'completed')::boolean=stats.completed "
+        "AND (value->>'partial')::boolean=stats.partial "
+        "AND (value->>'fully_drained')::boolean=stats.fully_drained "
+        "AND stats.completed AND NOT stats.partial AND stats.fully_drained, "
+        "NOT (value->>'accepted')::boolean "
+        "AND (value->>'complete')::boolean "
+        "AND NOT (value->>'saturated')::boolean, "
+        "(value->>'dropped_operation_count')::bigint=0 "
+        "AND (value->>'operation_count')::bigint=0 "
+        "AND (value->>'accepted_operation_count')::bigint=0 "
+        "AND (value->>'complete_operation_count')::bigint=0 "
+        "AND (value->>'job_count')::bigint=0 "
+        "AND (value->>'accepted_job_count')::bigint=0, "
+        "jsonb_typeof(value->'operations')='array' "
+        "AND jsonb_array_length(value->'operations')=0, "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(value) AS entry"
+        " WHERE entry.key IN ("
+        "  'version','execution_id','backend_pid','database_oid',"
+        "  'dropped_operation_count','operation_count',"
+        "  'accepted_operation_count','complete_operation_count',"
+        "  'job_count','accepted_job_count'"
+        " ) AND jsonb_typeof(entry.value)<>'number'"
+        "), "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(value) AS entry"
+        " WHERE entry.key IN ("
+        "  'completed','partial','fully_drained','accepted','complete',"
+        "  'saturated'"
+        " ) AND jsonb_typeof(entry.value)<>'boolean'"
+        "), "
+        "(SELECT provolatile='v' AND proparallel='r' "
+        " FROM pg_proc WHERE oid='bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()'::regprocedure) "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(proof.size() == 11u);
+    for (const auto& assertion : proof) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+}
+
 TEST_CASE("alignment execution id is fresh and errors do not publish",
           "[mmsearch][pipeline-stats][statement][freshness][error]") {
     auto ctx = fresh_context({kHoe});
@@ -747,15 +837,26 @@ TEST_CASE("alignment execution id is fresh and errors do not publish",
 
     (void)query_rows(ctx, index_requirement_sql(kHoe, 1));
     const long long first_id = stats_i64(last_alignment_stats(ctx).front(), 0);
+    const std::string first_evidence = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
 
     require_no_current_compatible_persisted_index(
         ctx, index_requirement_sql(kHoe, 2));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;")
+        == first_evidence);
 
     (void)query_rows(ctx, index_requirement_sql(kHoe, 1));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id + 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()->>"
+        "'execution_id')::bigint;") == first_id + 1);
 }
 
 TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
@@ -764,6 +865,12 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     seed_hoe_fixture(ctx, kHoe);
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+    const long long completed_id = stats_i64(
+        last_alignment_stats(ctx).front(), 0);
+    const std::string completed_evidence = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     const std::string limited_sql = fmt::format(
         "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
         "aligner_options(index_read_requirement => 1)) LIMIT 1;",
@@ -772,6 +879,7 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE_FALSE(query_rows(ctx, limited_sql).empty());
     const auto rows = last_alignment_stats(ctx);
     REQUIRE(rows.size() == 20);
+    REQUIRE(stats_i64(rows.front(), 0) == completed_id + 1);
     REQUIRE_FALSE(stats_bool(rows.front(), 13));
     REQUIRE(stats_bool(rows.front(), 14));
     REQUIRE_FALSE(stats_bool(rows.front(), 15));
@@ -780,6 +888,14 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE(stats_i64(rows.front(), 33) > 0);
     REQUIRE(stats_i64(rows.front(), 34) == 0);
     REQUIRE(stats_i64(rows.front(), 35) == stats_i64(rows.front(), 33));
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()::text;")
+        == completed_evidence);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v1()->>"
+        "'execution_id')::bigint;") == completed_id);
 }
 
 TEST_CASE("one executor root aggregates two invoked alignment nodes",

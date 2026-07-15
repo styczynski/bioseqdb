@@ -2176,6 +2176,7 @@ struct PersistedGpuEnvironmentEvidence {
 
     [[nodiscard]] bool accepted() const noexcept {
         return api_version != 0u && driver_version != 0u
+            && vendor_id != 0u && device_id != 0u
             && seed_size != 0u && seed_size <= sql_bigint_value_max
             && manifest_checksum != 0u
             && std::any_of(
@@ -2238,9 +2239,10 @@ struct PersistedGpuCoordinateResultEvidence {
     [[nodiscard]] constexpr bool accepted(
         const std::uint64_t query_length,
         const std::uint64_t target_length) const noexcept {
-        return valid && seed_count > 0
+        return valid && chain_score > 0 && seed_count > 0
             && query_start < query_end && query_end <= query_length
             && target_start < target_end && target_end <= target_length
+            && match_length != 0u
             && match_length <= block_length
             && match_length <= query_end - query_start
             && match_length <= target_end - target_start
@@ -2727,6 +2729,13 @@ public:
         for (const PersistedGpuOperationEvidenceChunk* chunk = head_.get();
              chunk != nullptr; chunk = chunk->next()) {
             const auto& operation = chunk->operation();
+            ::bioseq::gpu::vulkan::VulkanFeatureSet identity{};
+            identity.api_version = operation.environment.api_version;
+            identity.driver_version = operation.environment.driver_version;
+            identity.vendor_id = operation.environment.vendor_id;
+            identity.device_id = operation.environment.device_id;
+            identity.pipeline_cache_uuid =
+                operation.environment.pipeline_cache_uuid;
             if (operation.generation_id != stats.persisted_generation_id
                 || operation.source_identity
                     != stats.persisted_source_identity
@@ -2739,6 +2748,9 @@ public:
                 || operation.environment.manifest_checksum
                     != stats.environment
                         .gpu_pipeline_cache_manifest_checksum
+                || ::bioseq::gpu::vulkan::
+                    canonical_vulkan_driver_identity(identity)
+                    != stats.environment.gpu_driver_identity
                 || !add(cache_loads,
                     operation.cache_metrics.pipeline_cache_loads)
                 || !add(cache_seed_bytes,

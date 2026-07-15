@@ -132,6 +132,12 @@ std::vector<AlignmentExecutorFrame*> alignment_start_in_progress{};
 std::vector<AlignmentExecutorFrame*> alignment_current_run{};
 std::optional<alignment_exec::AlignmentExecutionSnapshot>
 	last_alignment_execution_snapshot{};
+/* Evidence publication is stricter than the diagnostic v1/v2 SRFs: partial
+ * roots remain visible there, but must not replace the last completed
+ * operation ledger. Completed non-GPU roots deliberately publish an exact
+ * empty ledger so stale GPU proof cannot survive a later successful query. */
+std::optional<alignment_exec::AlignmentExecutionSnapshot>
+	last_completed_alignment_evidence_snapshot{};
 std::int64_t last_alignment_execution_id = 0;
 
 template<class T>
@@ -381,6 +387,24 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 	}
 
 	const std::int64_t execution_id = last_alignment_execution_id + 1;
+	if (fully_drained) {
+		last_completed_alignment_evidence_snapshot =
+			alignment_exec::AlignmentExecutionSnapshot{
+				.execution_id = execution_id,
+				.backend_pid = static_cast<std::int32_t>(MyProcPid),
+				.database_oid = MyDatabaseId,
+				.scan_node_count = static_cast<std::int32_t>(
+					frame->collector.alignment_nodes.size()),
+				.nested_alignment_executor_count = static_cast<std::int32_t>(
+					frame->collector.nested_alignment_executor_count),
+				.completed = true,
+				.partial = false,
+				.fully_drained = true,
+				.pipeline = statement_stats,
+				.persisted_gpu_operation_evidence = std::move(
+					frame->collector.persisted_gpu_operation_evidence),
+			};
+	}
 	last_alignment_execution_snapshot =
 		alignment_exec::AlignmentExecutionSnapshot{
 			.execution_id = execution_id,
@@ -394,8 +418,6 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 			.partial = !fully_drained,
 			.fully_drained = fully_drained,
 			.pipeline = statement_stats,
-			.persisted_gpu_operation_evidence = std::move(
-				frame->collector.persisted_gpu_operation_evidence),
 		};
 	last_alignment_execution_id = execution_id;
 }
@@ -2288,11 +2310,11 @@ CXX_PG_FUNCTION_INFO_V1(
 	bioseq_last_alignment_persisted_gpu_operation_evidence_v1);
 Datum bioseq_last_alignment_persisted_gpu_operation_evidence_v1(
 		PG_FUNCTION_ARGS) {
-	if (!last_alignment_execution_snapshot.has_value()) {
+	if (!last_completed_alignment_evidence_snapshot.has_value()) {
 		PG_RETURN_NULL();
 	}
 	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_alignment_execution_snapshot;
+		*last_completed_alignment_evidence_snapshot;
 	(void)validate_alignment_snapshot_environment(snapshot);
 	const std::string encoded =
 		persisted_gpu_operation_evidence_json(snapshot);

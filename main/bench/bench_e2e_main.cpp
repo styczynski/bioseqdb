@@ -2445,6 +2445,12 @@ void capture_persisted_gpu_operation_evidence(
 
         std::set<std::pair<std::string, std::int64_t>>
             structured_submissions;
+        std::map<
+            std::pair<std::string, std::int64_t>,
+            std::pair<std::size_t, std::string>> shape_submission_receipts;
+        std::map<
+            std::string,
+            std::pair<std::string, std::int64_t>> submit_wait_domains;
         bool query_submissions_valid = query_submission_ordinals.size() == 2;
         for (const nlohmann::json& ordinal_json : query_submission_ordinals) {
             const std::int64_t ordinal =
@@ -2548,6 +2554,20 @@ void capture_persisted_gpu_operation_evidence(
                 const std::string& submit_wait_identity =
                     required_json_hex_identity(
                         submission, "submit_wait_identity", 16);
+                const auto submission_domain = std::pair{
+                    submission_operation_identity, ordinal};
+                const auto [receipt, receipt_inserted] =
+                    shape_submission_receipts.emplace(
+                        submission_domain,
+                        std::pair{submission_index, submit_wait_identity});
+                const bool receipt_consistent = receipt_inserted
+                    || receipt->second
+                        == std::pair{submission_index, submit_wait_identity};
+                const auto [wait_domain, wait_inserted] =
+                    submit_wait_domains.emplace(
+                        submit_wait_identity, submission_domain);
+                const bool wait_consistent = wait_inserted
+                    || wait_domain->second == submission_domain;
                 submissions_valid = submissions_valid
                     && submission_index < expected_submission_stages.size()
                     && stage == expected_submission_stages[submission_index]
@@ -2556,7 +2576,8 @@ void capture_persisted_gpu_operation_evidence(
                     && ordinal > 0
                     && job_submission_ordinals.emplace(ordinal).second
                     && job_submit_wait_identities.emplace(
-                        submit_wait_identity).second;
+                        submit_wait_identity).second
+                    && receipt_consistent && wait_consistent;
                 structured_submissions.emplace(
                     submission_operation_identity, ordinal);
             }
