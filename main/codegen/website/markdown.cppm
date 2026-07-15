@@ -112,6 +112,12 @@ int on_enter_span(MD_SPANTYPE type, void* detail, void* userdata) {
         node.target = std::string(attribute_text(image->src));
         break;
     }
+    case MD_SPAN_WIKILINK: {
+        document_node& node = builder.push(document_node_kind::entity_link);
+        const auto* wiki = static_cast<MD_SPAN_WIKILINK_DETAIL*>(detail);
+        node.target = std::string(attribute_text(wiki->target));
+        break;
+    }
     default: builder.push(document_node_kind::emphasis); break;
     }
     return 0;
@@ -126,12 +132,17 @@ int on_leave_span(MD_SPANTYPE /*type*/, void* /*detail*/, void* userdata) {
 int on_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
     auto& builder = *static_cast<markdown_builder*>(userdata);
     std::string_view value(text, size);
+    document_node& parent = builder.current();
+    if (parent.kind == document_node_kind::code_block) {
+        // Verbatim code content, including newlines, accrues on the block node.
+        parent.text.append(value);
+        return 0;
+    }
     if (type == MD_TEXT_BR || type == MD_TEXT_SOFTBR) {
-        builder.current().children.push_back(
+        parent.children.push_back(
             document_node{.kind = document_node_kind::line_break});
         return 0;
     }
-    document_node& parent = builder.current();
     if (!parent.children.empty()
         && parent.children.back().kind == document_node_kind::text
         && type != MD_TEXT_CODE) {

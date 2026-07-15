@@ -95,11 +95,30 @@ struct sql_example {
 struct tutorial {
     tutorial_metadata metadata;
     site_version version;
+    std::string source_path;  // repository-relative source path
     std::vector<document_node> content;
     std::vector<sql_example> sql_examples;
     std::vector<code_annotation> annotations;
+    std::vector<unresolved_entity_query> entity_queries;
     std::optional<std::string> previous_slug;
     std::optional<std::string> next_slug;
+};
+
+// Aggregate written by the `website plan` stage (schema bioseq.website.plan/v1).
+struct plan_input {
+    std::string path;          // repository-relative forward-slash path
+    std::string content_hash;  // content digest (SHA-256 once §6 promotion lands)
+};
+
+struct website_plan {
+    std::string schema_version;
+    site_version version;
+    std::string base_path;
+    std::string source_revision;
+    std::string site_title;
+    std::vector<tutorial> tutorials;
+    std::vector<plan_input> inputs;
+    std::string signature;
 };
 
 // SQL result model, independent of libpq.
