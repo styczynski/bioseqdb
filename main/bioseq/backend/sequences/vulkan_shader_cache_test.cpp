@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -145,6 +146,17 @@ struct ScopedEnvironmentVariable {
     }
 };
 
+struct ScopedArchiveHelperStoreReset {
+    ScopedArchiveHelperStoreReset() {
+        REQUIRE(gv::qualified_metal_archive_helper_process_store()
+                    .reset_for_test());
+    }
+    ~ScopedArchiveHelperStoreReset() {
+        (void)gv::qualified_metal_archive_helper_process_store()
+            .reset_for_test();
+    }
+};
+
 [[nodiscard]] bool contains_key(
     const std::vector<gv::ShaderVariantKey>& keys,
     gv::ShaderVariantKey needle)
@@ -185,9 +197,35 @@ struct ScopedEnvironmentVariable {
 void write_fake_archive_qualification(
     const std::filesystem::path& archive,
     std::span<const std::byte> archive_bytes,
+    const gv::ShaderVariantKey& key,
+    std::span<const std::byte> metallib_bytes,
+    std::string_view entry_name,
     std::uint64_t max_threads = 256u)
 {
+#if defined(__APPLE__)
+    const auto helper =
+        gv::qualified_metal_archive_helper_process_store().load_once();
+    REQUIRE(helper);
+    const std::string helper_source = (**helper).source;
+    const std::uint64_t helper_size = (**helper).executable_size;
+    const std::array<std::uint8_t, 32> helper_sha256 =
+        (**helper).executable_sha256;
+#else
+    const auto portable_helper = bytes_of("portable-helper-fixture");
+    const std::string helper_source = "installed-sibling";
+    const std::uint64_t helper_size =
+        static_cast<std::uint64_t>(portable_helper.size());
+    const std::array<std::uint8_t, 32> helper_sha256 =
+        gv::sealed_shader_cache_detail::sha256(portable_helper);
+#endif
     const gv::MetalArchiveQualificationReceipt qualification{
+        .wire_version =
+            gv::sealed_shader_cache_detail::archive_qualification_version,
+        .shader_key = key,
+        .metallib_size = static_cast<std::uint64_t>(metallib_bytes.size()),
+        .metallib_sha256 =
+            gv::sealed_shader_cache_detail::sha256(metallib_bytes),
+        .entry_name = std::string(entry_name),
         .max_total_threads_per_threadgroup = max_threads,
         .threadgroup_size_is_multiple = false,
         .negative_error = gv::MetalArchiveNegativeErrorFingerprint{
@@ -197,6 +235,12 @@ void write_fake_archive_qualification(
         .archive_size = static_cast<std::uint64_t>(archive_bytes.size()),
         .archive_sha256 =
             gv::sealed_shader_cache_detail::sha256(archive_bytes),
+        .helper_protocol_version = 2u,
+        .helper_build_identity = "bioseq_gpu_archive_builder_v2",
+        .helper_source = helper_source,
+        .helper_executable_size = helper_size,
+        .helper_executable_sha256 = helper_sha256,
+        .helper_metal_registry_id = 0x1234u,
     };
     const auto qualification_bytes = gv::sealed_shader_cache_detail::
         serialize_metal_archive_qualification_receipt(qualification);
@@ -239,7 +283,7 @@ void write_fake_sealed_shader_artifacts(
                 "qualified-test-archive-" + archive.filename().string());
             REQUIRE(gv::durable_write_file(archive, archive_bytes));
             write_fake_archive_qualification(
-                archive, archive_bytes,
+                archive, archive_bytes, key, metallib, entry,
                 archive_ordinal == 0u ? exact_threads : 256u);
         }
     }
@@ -4210,13 +4254,50 @@ TEST_CASE("archive miss NSError fingerprint and receipt are canonical",
     CHECK_FALSE(gv::parse_archive_helper_negative_error_fingerprint(
         std::string{transcript} + std::string{transcript}));
 
+    const auto helper_qualification =
+        gv::parse_archive_helper_qualification_v2(
+            "HELPER_QUALIFICATION_V2 protocol=2 "
+            "build=bioseq_gpu_archive_builder_v2 registry_id=4660\n"
+            "RESULT: ok\n");
+    REQUIRE(helper_qualification);
+    CHECK(helper_qualification->protocol_version == 2u);
+    CHECK(helper_qualification->build_identity
+          == "bioseq_gpu_archive_builder_v2");
+    CHECK(helper_qualification->metal_registry_id == 4660u);
+    CHECK_FALSE(gv::parse_archive_helper_qualification_v2(
+        "HELPER_QUALIFICATION_V2 protocol=1 "
+        "build=bioseq_gpu_archive_builder_v2 registry_id=4660\n"));
+    CHECK_FALSE(gv::parse_archive_helper_qualification_v2(
+        "HELPER_QUALIFICATION_V2 protocol=2 build=other registry_id=4660\n"));
+    CHECK_FALSE(gv::parse_archive_helper_qualification_v2(
+        "HELPER_QUALIFICATION_V2 protocol=2 "
+        "build=bioseq_gpu_archive_builder_v2 registry_id=0\n"));
+
     const auto archive = bytes_of("qualified-archive-byte-image");
+    const auto metallib = bytes_of("qualified-metallib-byte-image");
+    const auto helper = bytes_of("qualified-helper-byte-image");
+    const gv::ShaderVariantKey key = gv::make_shader_key(
+        gv::ShaderKind::generate_units, 384u, 256u, 64u);
     const gv::MetalArchiveQualificationReceipt receipt{
+        .wire_version =
+            gv::sealed_shader_cache_detail::archive_qualification_version,
+        .shader_key = key,
+        .metallib_size = static_cast<std::uint64_t>(metallib.size()),
+        .metallib_sha256 =
+            gv::sealed_shader_cache_detail::sha256(metallib),
+        .entry_name = "main0",
         .max_total_threads_per_threadgroup = 256u,
         .threadgroup_size_is_multiple = false,
         .negative_error = *fingerprint,
         .archive_size = static_cast<std::uint64_t>(archive.size()),
         .archive_sha256 = gv::sealed_shader_cache_detail::sha256(archive),
+        .helper_protocol_version = 2u,
+        .helper_build_identity = "bioseq_gpu_archive_builder_v2",
+        .helper_source = "installed-sibling",
+        .helper_executable_size = static_cast<std::uint64_t>(helper.size()),
+        .helper_executable_sha256 =
+            gv::sealed_shader_cache_detail::sha256(helper),
+        .helper_metal_registry_id = 0x1234u,
     };
     auto wire = gv::sealed_shader_cache_detail::
         serialize_metal_archive_qualification_receipt(receipt);
@@ -4248,8 +4329,11 @@ TEST_CASE("failed archive helper output is never promoted",
         "exit 0\n");
     REQUIRE(gv::durable_write_file(helper, script));
     REQUIRE(::chmod(helper.c_str(), 0700) == 0);
+    ScopedEnvironmentVariable test_only_env{
+        "BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY", "1"};
     ScopedEnvironmentVariable helper_env{
         "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+    ScopedArchiveHelperStoreReset helper_store_reset;
 
     const gv::ShaderVariantKey key = gv::make_shader_key(
         gv::ShaderKind::generate_units, 384u, 256u, 64u);
@@ -4299,6 +4383,128 @@ TEST_CASE("failed archive helper output is never promoted",
 #endif
 }
 
+TEST_CASE("legacy archive qualification is diagnostic only",
+          "[shader_cache][metal-archive][qualification][wire-v1]") {
+    const auto archive = bytes_of("legacy-qualified-archive");
+    std::vector<std::byte> wire;
+    gv::sealed_shader_cache_detail::append_text(
+        wire, gv::sealed_shader_cache_detail::archive_qualification_magic);
+    gv::sealed_shader_cache_detail::append_u32(
+        wire,
+        gv::sealed_shader_cache_detail::archive_qualification_legacy_version);
+    gv::sealed_shader_cache_detail::append_u32(wire, 0u);
+    gv::sealed_shader_cache_detail::append_u64(wire, 256u);
+    gv::sealed_shader_cache_detail::append_u32(wire, 0u);
+    constexpr std::string_view domain = "MTLLibraryErrorDomain";
+    gv::sealed_shader_cache_detail::append_u32(
+        wire, static_cast<std::uint32_t>(domain.size()));
+    gv::sealed_shader_cache_detail::append_u64(
+        wire, std::bit_cast<std::uint64_t>(std::int64_t{-7}));
+    gv::sealed_shader_cache_detail::append_u64(
+        wire, static_cast<std::uint64_t>(archive.size()));
+    gv::sealed_shader_cache_detail::append_digest(
+        wire, gv::sealed_shader_cache_detail::sha256(archive));
+    gv::sealed_shader_cache_detail::append_text(wire, domain);
+    gv::sealed_shader_cache_detail::append_u64(
+        wire, gv::sealed_shader_cache_detail::manifest_checksum(wire));
+
+    const auto parsed = gv::sealed_shader_cache_detail::
+        parse_metal_archive_qualification_receipt(wire);
+    REQUIRE(parsed);
+    CHECK(parsed->wire_version
+          == gv::sealed_shader_cache_detail::
+              archive_qualification_legacy_version);
+    CHECK(parsed->diagnostic_valid());
+    CHECK_FALSE(parsed->accepted());
+    CHECK_FALSE(parsed->production_accepted());
+}
+
+TEST_CASE("archive helper qualification is terminal and hashes once",
+          "[shader_cache][metal-archive][qualification][helper]") {
+#if !defined(__APPLE__)
+    SKIP("archive helper qualification is Apple-only");
+#else
+    TempDir temp;
+    const std::filesystem::path helper = temp.path / "helper.sh";
+    const auto helper_bytes = bytes_of("#!/bin/sh\nexit 1\n");
+    REQUIRE(gv::durable_write_file(helper, helper_bytes));
+    REQUIRE(::chmod(helper.c_str(), 0700) == 0);
+    ScopedEnvironmentVariable test_only{
+        "BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY", "1"};
+    ScopedEnvironmentVariable override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+
+    gv::QualifiedMetalArchiveHelperProcessStore store;
+    const auto first = store.load_once();
+    REQUIRE(first);
+    CHECK((**first).source == "test-env-override");
+    CHECK(store.qualification_attempt_count() == 1u);
+    CHECK(store.filesystem_hash_count() == 1u);
+    REQUIRE(gv::durable_write_file(helper, bytes_of("mutated")));
+    const auto second = store.load_once();
+    REQUIRE(second);
+    CHECK(first->get() == second->get());
+    CHECK((**second).executable_bytes == helper_bytes);
+    CHECK(store.qualification_attempt_count() == 1u);
+    CHECK(store.filesystem_hash_count() == 1u);
+
+    const std::filesystem::path metallib = temp.path / "input.metallib";
+    REQUIRE(gv::durable_write_file(metallib, bytes_of("metallib")));
+    const int metallib_fd = ::open(
+        metallib.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    REQUIRE(metallib_fd >= 0);
+    auto staged = gv::stage_archive_helper_invocation(**first, metallib_fd);
+    REQUIRE(staged);
+    const std::filesystem::path staged_path = staged->helper_path();
+    const std::filesystem::path staged_directory = staged_path.parent_path();
+    CHECK(staged->helper_identity_matches());
+    CHECK(std::filesystem::exists(staged_path));
+    REQUIRE(staged->finish());
+    CHECK_FALSE(std::filesystem::exists(staged_path));
+    CHECK_FALSE(std::filesystem::exists(staged_directory));
+    REQUIRE(::close(metallib_fd) == 0);
+
+    const std::filesystem::path symlink = temp.path / "helper-link";
+    REQUIRE(::symlink(helper.c_str(), symlink.c_str()) == 0);
+    ScopedEnvironmentVariable symlink_override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", symlink.string()};
+    gv::QualifiedMetalArchiveHelperProcessStore failed_store;
+    CHECK_FALSE(failed_store.load_once());
+    CHECK_FALSE(failed_store.load_once());
+    CHECK(failed_store.qualification_attempt_count() == 1u);
+    CHECK(failed_store.filesystem_hash_count() == 0u);
+
+    REQUIRE(::chmod(helper.c_str(), 0702) == 0);
+    ScopedEnvironmentVariable writable_override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+    gv::QualifiedMetalArchiveHelperProcessStore writable_store;
+    CHECK_FALSE(writable_store.load_once());
+    CHECK(writable_store.qualification_attempt_count() == 1u);
+    CHECK(writable_store.filesystem_hash_count() == 0u);
+#endif
+}
+
+TEST_CASE("archive helper override is explicitly test-only",
+          "[shader_cache][metal-archive][qualification][helper]") {
+#if !defined(__APPLE__)
+    SKIP("archive helper qualification is Apple-only");
+#else
+    TempDir temp;
+    const std::filesystem::path helper = temp.path / "helper.sh";
+    REQUIRE(gv::durable_write_file(helper, bytes_of("#!/bin/sh\nexit 1\n")));
+    REQUIRE(::chmod(helper.c_str(), 0700) == 0);
+    ScopedEnvironmentVariable test_only{
+        "BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY", "0"};
+    ScopedEnvironmentVariable override{
+        "BIOSEQ_GPU_ARCHIVE_HELPER", helper.string()};
+    gv::QualifiedMetalArchiveHelperProcessStore store;
+    CHECK_FALSE(store.load_once());
+    CHECK_FALSE(store.load_once());
+    CHECK(store.qualification_attempt_count() == 1u);
+    CHECK(store.filesystem_hash_count() == 0u);
+#endif
+}
+
 TEST_CASE("DOC0341 shader cache meta and MoltenVK header payload are exact",
           "[shader_cache][doc0341]") {
     TempDir temp;
@@ -4332,7 +4538,8 @@ TEST_CASE("DOC0341 shader cache meta and MoltenVK header payload are exact",
         std::span<const std::byte>(fake_archive.data(), fake_archive.size()));
     REQUIRE(archive_write);
     write_fake_archive_qualification(
-        gv::cache_binary_archive_path(temp.path, key), fake_archive);
+        gv::cache_binary_archive_path(temp.path, key), fake_archive,
+        key, metallib, entry);
     REQUIRE(gv::cache_entry_complete(temp.path, key));
 
     std::string decoded_entry;
@@ -4444,7 +4651,8 @@ TEST_CASE("fixed radix cache accepts reflected workgroup and exact archive",
         gv::cache_binary_archive_path(temp.path, key),
         std::span<const std::byte>(archive.data(), archive.size())));
     write_fake_archive_qualification(
-        gv::cache_binary_archive_path(temp.path, key), archive);
+        gv::cache_binary_archive_path(temp.path, key), archive,
+        key, metallib, entry);
 
     // Publication uses reflected threads, so a 256-thread shader needs only
     // the exact base archive; completeness must not invent a duplicate
@@ -4506,6 +4714,21 @@ accepted_runtime_metal_archive_configuration() {
         const auto parsed = gv::sealed_shader_cache_detail::
             parse_metal_archive_qualification_receipt(qualification->bytes);
         REQUIRE(parsed);
+        if (configuration.qualification_receipt_count == 0u) {
+            configuration.qualification_version = parsed->wire_version;
+            configuration.helper_protocol_version =
+                parsed->helper_protocol_version;
+            configuration.helper_build_identity =
+                parsed->helper_build_identity;
+            configuration.helper_source = parsed->helper_source;
+            configuration.helper_executable_size =
+                parsed->helper_executable_size;
+            configuration.helper_executable_sha256 =
+                parsed->helper_executable_sha256;
+            configuration.helper_metal_registry_id =
+                parsed->helper_metal_registry_id;
+        }
+        ++configuration.qualification_receipt_count;
         configuration.archives.push_back(gv::RuntimeMetalArchiveSpec{
             .artifact_ordinal = static_cast<std::uint32_t>(ordinal),
             .artifact_filename = artifact.descriptor.filename,
@@ -4552,8 +4775,8 @@ accepted_runtime_metal_archive_audit() {
     audit.expected_archives = archive_identity;
     audit.loaded_archives = archive_identity;
     audit.archive_pre_post_identity_checks = archive_identity.archive_count;
-    audit.pipeline_pre_identity_checks = archive_identity.archive_count;
-    audit.pipeline_post_identity_checks = archive_identity.archive_count;
+    audit.pipeline_pre_identity_checks = 0u;
+    audit.pipeline_post_identity_checks = 0u;
     audit.command_interpose_installed = true;
     audit.command_interpose_immutable_fail_closed = true;
     audit.configured_vulkan_device_uuid = configuration.vulkan_device_uuid;
@@ -4564,6 +4787,40 @@ accepted_runtime_metal_archive_audit() {
     audit.device_id = 0x00000001u;
     audit.pipeline_cache_uuid[0] = 0x42u;
     audit.pipeline_cache_uuid[15] = 0x24u;
+    audit.cache_qualification = gv::RuntimeMetalArchiveProcessQualification{
+        .version = 2u,
+        .archive_set = archive_identity,
+        .receipt_count = configuration.qualification_receipt_count,
+        .hash_passes = 1u,
+        .hashed_bytes = archive_identity.total_size,
+        .private_files_created = archive_identity.archive_count,
+        .private_files_unlinked = archive_identity.archive_count,
+        .live_private_paths = 0u,
+        .pipeline_filesystem_hash_passes = 0u,
+        .pipeline_filesystem_hashed_bytes = 0u,
+        .helper_protocol_version = configuration.helper_protocol_version,
+        .helper_build_identity = "bioseq_gpu_archive_builder_v2",
+        .helper_source = "installed-sibling",
+        .helper_executable_size = configuration.helper_executable_size,
+        .helper_executable_sha256 =
+            configuration.helper_executable_sha256,
+        .helper_metal_registry_id =
+            configuration.helper_metal_registry_id,
+        .vulkan_device_uuid = audit.runtime_vulkan_device_uuid,
+        .api_version = audit.api_version,
+        .driver_version = audit.driver_version,
+        .vendor_id = audit.vendor_id,
+        .device_id = audit.device_id,
+        .pipeline_cache_uuid = audit.pipeline_cache_uuid,
+        .seed_receipt_identity = audit.seed_receipt_identity,
+        .seed_sha256 = audit.seed_sha256,
+        .seed_size = audit.seed_size,
+        .manifest_checksum = audit.manifest_checksum,
+        .saturated = false,
+    };
+    audit.cache_qualification.identity =
+        gv::runtime_metal_archive_process_qualification_identity(
+            audit.cache_qualification);
     audit.pipeline_create_ns = 17u;
     audit.expected_metal_registry_id =
         configuration.metal_device_registry_id;
@@ -4679,6 +4936,33 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
         CHECK_FALSE(invalid.accepted());
         invalid = accepted;
         invalid.archives[1] = invalid.archives[0];
+        CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("helper qualification metadata is exact") {
+        auto invalid = accepted;
+        invalid.qualification_version = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        --invalid.qualification_receipt_count;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_protocol_version = 1u;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_build_identity += ".other";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_source = "test-env-override";
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        ++invalid.helper_executable_size;
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_executable_sha256 = {};
+        CHECK_FALSE(invalid.accepted());
+        invalid = accepted;
+        invalid.helper_metal_registry_id = 0u;
         CHECK_FALSE(invalid.accepted());
     }
 
@@ -4888,6 +5172,43 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
         invalid = accepted;
         invalid.outer_vulkan_pipeline_succeeded = false;
         CHECK_FALSE(invalid.accepted());
+    }
+
+    SECTION("process qualification equations reject every filesystem shortcut") {
+        const auto reject = [&accepted](auto mutate) {
+            auto invalid = accepted;
+            mutate(invalid.cache_qualification);
+            invalid.cache_qualification.identity =
+                gv::runtime_metal_archive_process_qualification_identity(
+                    invalid.cache_qualification);
+            CHECK_FALSE(invalid.accepted());
+        };
+        reject([](auto& value) { value.hash_passes = 2u; });
+        reject([](auto& value) { ++value.hashed_bytes; });
+        reject([](auto& value) { --value.private_files_created; });
+        reject([](auto& value) { --value.private_files_unlinked; });
+        reject([](auto& value) { value.live_private_paths = 1u; });
+        reject([](auto& value) {
+            value.pipeline_filesystem_hash_passes = 1u;
+        });
+        reject([](auto& value) {
+            value.pipeline_filesystem_hashed_bytes = 1u;
+        });
+        reject([](auto& value) { value.helper_source = "test-env-override"; });
+        reject([](auto& value) { value.helper_metal_registry_id = 0u; });
+        reject([](auto& value) { value.vulkan_device_uuid[0] ^= 0x80u; });
+        reject([](auto& value) { ++value.api_version; });
+        reject([](auto& value) { ++value.driver_version; });
+        reject([](auto& value) { ++value.vendor_id; });
+        reject([](auto& value) { ++value.device_id; });
+        reject([](auto& value) { value.pipeline_cache_uuid[0] ^= 0x80u; });
+        reject([](auto& value) { value.seed_sha256[0] ^= 0x80u; });
+        reject([](auto& value) { ++value.seed_size; });
+        reject([](auto& value) { ++value.manifest_checksum; });
+
+        auto invalid_identity = accepted;
+        invalid_identity.cache_qualification.identity = 0u;
+        CHECK_FALSE(invalid_identity.accepted());
     }
 }
 
