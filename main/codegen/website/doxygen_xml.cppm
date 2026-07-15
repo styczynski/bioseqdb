@@ -323,6 +323,53 @@ std::vector<document_node> convert_children(
     return trim(text);
 }
 
+namespace {
+
+[[nodiscard]] entity_kind doxygen_compound_kind(std::string_view kind) {
+    if (kind == "class") { return entity_kind::class_; }
+    if (kind == "struct") { return entity_kind::struct_; }
+    if (kind == "union") { return entity_kind::union_; }
+    if (kind == "concept") { return entity_kind::concept_; }
+    return entity_kind::namespace_;
+}
+
+[[nodiscard]] entity_kind doxygen_member_kind(std::string_view kind) {
+    if (kind == "function") { return entity_kind::function; }
+    if (kind == "typedef") { return entity_kind::type_alias; }
+    if (kind == "enum") { return entity_kind::enum_; }
+    return entity_kind::variable;
+}
+
+// Concatenates the full mixed-content text of an element (for example a
+// Doxygen <type> holding `const <ref>Sequence</ref> &`).
+[[nodiscard]] std::string element_text(const pugi::xml_node& node) {
+    std::string text;
+    for (pugi::xml_node child : node.children()) {
+        if (child.type() == pugi::node_pcdata || child.type() == pugi::node_cdata) {
+            text += child.value();
+        } else if (child.type() == pugi::node_element) {
+            text += element_text(child);
+        }
+    }
+    return trim(text);
+}
+
+[[nodiscard]] std::optional<source_span> doxygen_location(const pugi::xml_node& node) {
+    const pugi::xml_node location = node.child("location");
+    if (!location) {
+        return std::nullopt;
+    }
+    source_span span;
+    span.path = location.attribute("file").as_string();
+    span.first_line = location.attribute("line").as_ullong();
+    span.first_column = location.attribute("column").as_ullong();
+    span.last_line = span.first_line;
+    span.last_column = span.first_column;
+    return span;
+}
+
+}  // namespace
+
 /// @brief Derives an entity summary from brief, else the first detailed para.
 /// @param node Doxygen definition node.
 /// @return The brief text, or a Unicode-safe-truncated first detailed paragraph.
@@ -353,11 +400,15 @@ std::vector<document_node> convert_children(
     std::vector<documented_entity> entities;
     const pugi::xml_node root = document.child("doxygen");
     for (pugi::xml_node compound : root.children("compounddef")) {
+        const std::string compound_kind = compound.attribute("kind").as_string();
         documented_entity entity;
         entity.domain = entity_domain::cpp;
+        entity.kind = doxygen_compound_kind(compound_kind);
         entity.qualified_name = compound.child_value("compoundname");
         entity.display_name = entity.qualified_name;
+        entity.normalized_signature = entity.qualified_name;
         entity.summary_text = derive_summary_text(compound);
+        entity.declaration = doxygen_location(compound);
         {
             conversion_context context{entity.qualified_name, nullptr};
             const pugi::xml_node detailed = compound.child("detaileddescription");
@@ -365,25 +416,47 @@ std::vector<document_node> convert_children(
                 convert_children(detailed, "detaileddescription", context);
         }
         entity.attributes.emplace("refid", compound.attribute("id").as_string());
-        entity.attributes.emplace("doxygen_kind", compound.attribute("kind").as_string());
+        entity.attributes.emplace("doxygen_kind", compound_kind);
         const std::string compound_name = entity.qualified_name;
         entities.push_back(std::move(entity));
         for (pugi::xml_node section : compound.children("sectiondef")) {
             for (pugi::xml_node member : section.children("memberdef")) {
+                const std::string member_kind = member.attribute("kind").as_string();
                 documented_entity member_entity;
                 member_entity.domain = entity_domain::cpp;
+                member_entity.kind = doxygen_member_kind(member_kind);
                 member_entity.display_name = member.child_value("name");
                 member_entity.qualified_name =
                     compound_name + "::" + member_entity.display_name;
                 member_entity.summary_text = derive_summary_text(member);
+                member_entity.declaration = doxygen_location(member);
+                if (member_kind == "function") {
+                    member_entity.return_type = element_text(member.child("type"));
+                    std::string signature = member_entity.qualified_name + "(";
+                    bool first = true;
+                    for (pugi::xml_node parameter : member.children("param")) {
+                        parameter_documentation info;
+                        info.type = element_text(parameter.child("type"));
+                        info.name = parameter.child_value("declname");
+                        if (!first) {
+                            signature += ", ";
+                        }
+                        signature += info.type;
+                        first = false;
+                        member_entity.parameters.push_back(std::move(info));
+                    }
+                    signature += ")";
+                    member_entity.normalized_signature = std::move(signature);
+                } else {
+                    member_entity.normalized_signature = member_entity.qualified_name;
+                }
                 conversion_context context{member_entity.qualified_name, nullptr};
                 const pugi::xml_node detailed = member.child("detaileddescription");
                 member_entity.documentation =
                     convert_children(detailed, "detaileddescription", context);
                 member_entity.attributes.emplace("refid",
                                                   member.attribute("id").as_string());
-                member_entity.attributes.emplace(
-                    "doxygen_kind", member.attribute("kind").as_string());
+                member_entity.attributes.emplace("doxygen_kind", member_kind);
                 entities.push_back(std::move(member_entity));
             }
         }

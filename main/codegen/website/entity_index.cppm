@@ -54,17 +54,14 @@ struct coverage_report {
 
 namespace {
 
-[[nodiscard]] bool same_parameter_types(
+// Compares parameter lists by arity. Clang prints fully-qualified parameter
+// types while Doxygen keeps the as-written (usually unqualified) spelling, so an
+// exact type-text comparison almost never holds across the two producers; arity
+// plus qualified-name-and-kind is the reliable name-based discriminator, with
+// the location rule disambiguating same-arity overloads.
+[[nodiscard]] bool same_parameter_arity(
     const documented_entity& lhs, const documented_entity& rhs) {
-    if (lhs.parameters.size() != rhs.parameters.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < lhs.parameters.size(); ++index) {
-        if (lhs.parameters[index].type != rhs.parameters[index].type) {
-            return false;
-        }
-    }
-    return true;
+    return lhs.parameters.size() == rhs.parameters.size();
 }
 
 [[nodiscard]] bool within_two_lines(
@@ -72,7 +69,9 @@ namespace {
     if (!lhs.declaration || !rhs.declaration) {
         return false;
     }
-    if (lhs.declaration->path != rhs.declaration->path) {
+    // Clang emits absolute paths; Doxygen emits STRIP_FROM_PATH-relative paths,
+    // so compare by the final path component within the two-line tolerance.
+    if (lhs.declaration->path.filename() != rhs.declaration->path.filename()) {
         return false;
     }
     const std::size_t a = lhs.declaration->first_line;
@@ -149,7 +148,7 @@ void attach_documentation(documented_entity& target, const documented_entity& so
     });
     apply_rule([](const documented_entity& clang, const documented_entity& doxygen) {
         return doxygen.qualified_name == clang.qualified_name
-            && doxygen.kind == clang.kind && same_parameter_types(clang, doxygen);
+            && doxygen.kind == clang.kind && same_parameter_arity(clang, doxygen);
     });
     apply_rule([](const documented_entity& clang, const documented_entity& doxygen) {
         return within_two_lines(clang, doxygen);

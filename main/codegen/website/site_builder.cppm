@@ -501,6 +501,110 @@ void collect_examples_and_queries(
     return 3;
 }
 
+namespace {
+
+[[nodiscard]] std::vector<std::string> read_lines(const fs::path& path) {
+    const std::string content = read_file(path);
+    std::vector<std::string> lines;
+    std::size_t begin = 0;
+    while (begin <= content.size()) {
+        const std::size_t end = content.find('\n', begin);
+        const std::size_t stop = end == std::string::npos ? content.size() : end;
+        std::string line = content.substr(begin, stop - begin);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (!trim(line).empty()) {
+            lines.push_back(std::move(line));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return lines;
+}
+
+[[nodiscard]] bool is_page_compound(std::string_view kind) {
+    return kind == "namespace" || kind == "class" || kind == "struct"
+        || kind == "union" || kind == "concept";
+}
+
+}  // namespace
+
+/// @brief Runs `website cpp_index`: Doxygen + Clang → cpp_entities + coverage.
+///
+/// Parses the Doxygen XML tree for documentation, runs the Clang 22 structural
+/// pass over the reachable interface units against the main compile database,
+/// merges them (§11.6), computes documentation coverage (§11.4), and writes the
+/// canonical cpp_entities/v1 and documentation_coverage/v1 artifacts. Missing
+/// required documentation is fatal.
+/// @param args Options after the `cpp_index` token.
+/// @return Zero on success; two on usage errors; three on parse/validation.
+[[nodiscard]] int run_cpp_index(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "doxygen-xml", "compile-db", "reachable-units", "site-config",
+        "output", "coverage-output"};
+    const auto options = parse_options(args, value_keys, {});
+    const fs::path doxygen_xml = require_option(options, "doxygen-xml");
+    const fs::path compile_db = require_option(options, "compile-db");
+    const fs::path reachable_units = require_option(options, "reachable-units");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path output = require_option(options, "output");
+    const fs::path coverage_output = require_option(options, "coverage-output");
+
+    const site_configuration config =
+        parse_site_config(read_file(site_config_path), site_config_path.generic_string());
+
+    std::vector<documented_entity> documented;
+    const std::string index_xml = read_file(doxygen_xml / "index.xml");
+    for (const doxygen_compound_ref& compound : parse_doxygen_index(index_xml)) {
+        if (!is_page_compound(compound.kind)) {
+            continue;
+        }
+        const fs::path compound_path = doxygen_xml / (compound.refid + ".xml");
+        std::error_code error;
+        if (!fs::exists(compound_path, error)) {
+            continue;
+        }
+        for (documented_entity& entity :
+             parse_doxygen_compound(read_file(compound_path))) {
+            documented.push_back(std::move(entity));
+        }
+    }
+
+    std::vector<fs::path> units;
+    for (const std::string& line : read_lines(reachable_units)) {
+        units.emplace_back(line);
+    }
+    const clang_structural_index structural =
+        parse_clang_structural_index(units, compile_db);
+
+    const std::vector<documented_entity> merged =
+        merge_cpp_entities(structural, documented);
+    const coverage_report coverage = compute_coverage(
+        merged, config.required_documentation_entities, {});
+
+    write_if_different(output, serialize_cpp_entities(merged, structural.clang_version));
+    write_if_different(coverage_output,
+                       serialize_coverage(coverage.public_total, coverage.documented_total,
+                                          coverage.missing_summary, coverage.fatal_missing));
+    if (!coverage.fatal_missing.empty()) {
+        std::string joined;
+        for (const std::string& id : coverage.fatal_missing) {
+            joined += (joined.empty() ? "" : ", ") + id;
+        }
+        throw std::runtime_error("required documentation missing for: " + joined);
+    }
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website cpp_index: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website cpp_index: {}", error.what());
+    return 3;
+}
+
 /// @brief Dispatches a website subcommand and returns its process exit code.
 /// @param args Arguments after the leading `website` token (subcommand first).
 /// @return Exit code per §7: 2 usage, 3 parse/validation, 0 success.
@@ -514,8 +618,11 @@ void collect_examples_and_queries(
     if (command == "plan") {
         return run_plan(rest);
     }
+    if (command == "cpp_index") {
+        return run_cpp_index(rest);
+    }
     static constexpr std::string_view known[] = {
-        "source_graph", "cpp_index", "execute", "render", "publish", "assemble"};
+        "source_graph", "execute", "render", "publish", "assemble"};
     for (const std::string_view candidate : known) {
         if (command == candidate) {
             std::println(stderr,
