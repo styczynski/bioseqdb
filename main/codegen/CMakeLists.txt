@@ -175,6 +175,35 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 
+  # Clang 22 LibTooling for the structural/export index (§11.3). Clang/LLVM
+  # headers are NOT GCC-16 C++26-module-clean: a module partition including them
+  # produces a BMI that segfaults the GCC 16 module serializer on import. So the
+  # pass is confined to an ordinary TU (clang_structural_impl.cpp, scanning off)
+  # behind the plain clang_structural_shim.h POD interface, exactly like the
+  # Jinja2Cpp shim. The generator links Clang's monolithic shared libraries; the
+  # include dir is SYSTEM so libstdc++-16 deprecation noise stays quiet.
+  execute_process(COMMAND "${LLVM_CONFIG_BINARY}" --includedir
+    OUTPUT_VARIABLE _bioseq_llvm_incdir OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${LLVM_CONFIG_BINARY}" --libdir
+    OUTPUT_VARIABLE _bioseq_llvm_libdir OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  find_library(BIOSEQ_CODEGEN_CLANG_CPP_LIB NAMES clang-cpp
+    PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH REQUIRED)
+  find_library(BIOSEQ_CODEGEN_LLVM_LIB NAMES LLVM
+    PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH REQUIRED)
+  add_library(bioseq_codegen_clang_shim STATIC
+    "${_codegen_src}/website/clang_structural_impl.cpp")
+  set_target_properties(bioseq_codegen_clang_shim PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
+    CXX_SCAN_FOR_MODULES OFF CXX_MODULE_STD OFF POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(bioseq_codegen_clang_shim SYSTEM PRIVATE
+    "${_bioseq_llvm_incdir}")
+  target_link_libraries(bioseq_codegen_clang_shim PUBLIC
+    "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}" "${BIOSEQ_CODEGEN_LLVM_LIB}")
+  target_link_options(bioseq_codegen_clang_shim INTERFACE
+    "-Wl,-rpath,${_bioseq_llvm_libdir}")
+
   list(APPEND _codegen_module_files
     "${BIOSEQ_REPOSITORY_ROOT}/main/common/libpq/index.cppm"
     "${_codegen_src}/website/model/index.cppm"
@@ -195,7 +224,8 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${_codegen_src}/website/contract_tests.cppm"
     "${_codegen_src}/website/index.cppm")
   list(APPEND _codegen_link_libs
-    md4c pugixml::pugixml bioseq_codegen_jinja_shim Boost::json PkgConfig::LIBPQ)
+    md4c pugixml::pugixml bioseq_codegen_jinja_shim Boost::json PkgConfig::LIBPQ
+    bioseq_codegen_clang_shim)
   string(APPEND _codegen_component_imports "import bioseq.codegen.website;\n")
   string(APPEND _codegen_component_entries
     "        {\"website\", &bioseq::codegen::website::self_test, "

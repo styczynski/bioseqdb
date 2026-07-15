@@ -137,6 +137,27 @@ void run_website_smoke() {
     expect(merged.size() == 1 && merged.front().canonical_id == "cpp:bioseq.io.seq",
            "entity merge canonical id");
 
+    // Clang 22 structural/export pass (§11.3): exported module members are
+    // recorded with kind/signature; a non-exported namespace is excluded.
+    const clang_structural_index clang_index = parse_clang_structural_index_from_code(
+        "export module bioseq.demo;\n"
+        "export namespace demo {\n"
+        "  struct Sequence { int length; };\n"
+        "  int len(const Sequence& value);\n"
+        "}\n"
+        "namespace hidden { struct Internal { int y; }; }\n",
+        {"-std=c++20", "-xc++"});
+    const auto has_entity = [&](std::string_view name) {
+        return std::ranges::any_of(
+            clang_index.entities, [&](const documented_entity& candidate) {
+                return candidate.qualified_name == name;
+            });
+    };
+    expect(has_entity("demo::Sequence"), "clang records exported struct");
+    expect(has_entity("demo::len"), "clang records exported function");
+    expect(!has_entity("hidden::Internal"), "clang excludes non-exported namespace");
+    expect(clang_index.clang_version.starts_with("22"), "clang version is 22");
+
     // Boost.JSON canonical + HTML-safe (reached through the json partition, not
     // by naming boost types here).
     const std::string search_json = build_search_index(merged);
