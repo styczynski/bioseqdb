@@ -2278,17 +2278,9 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     PipelineOperationalStats at_limit{};
     at_limit.cold_index_payload_bytes_scanned = sql_bigint_value_max;
     at_limit.format5_reader_retained_position_capacity = sql_bigint_value_max;
-    at_limit.format5_reader_query_hash_capacity_bytes = sql_bigint_value_max;
-    at_limit.format5_reader_current_selected_control_capacity_bytes =
-        sql_bigint_value_max;
-    at_limit.format5_reader_control_payload_capacity_bytes =
-        sql_bigint_value_max;
     PipelineOperationalStats overflow{};
     overflow.cold_index_payload_bytes_scanned = 1;
     overflow.format5_reader_retained_position_capacity = 1;
-    overflow.format5_reader_query_hash_capacity_bytes = 1;
-    overflow.format5_reader_current_selected_control_capacity_bytes = 1;
-    overflow.format5_reader_control_payload_capacity_bytes = 1;
     aggregate.merge(at_limit);
     aggregate.merge(overflow);
 
@@ -2296,13 +2288,31 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
             == sql_bigint_value_max);
     REQUIRE(aggregate.format5_reader_retained_position_capacity
             == sql_bigint_value_max);
-    REQUIRE(aggregate.format5_reader_query_hash_capacity_bytes
-            == sql_bigint_value_max);
-    REQUIRE(aggregate.format5_reader_current_selected_control_capacity_bytes
-            == sql_bigint_value_max);
-    REQUIRE(aggregate.format5_reader_control_payload_capacity_bytes
-            == sql_bigint_value_max);
     REQUIRE(aggregate.stats_saturated);
+
+    using CapacityMember =
+        std::uint64_t PipelineOperationalStats::*;
+    const auto require_independent_saturation = [](CapacityMember member) {
+        PipelineOperationalStats exact_limit{};
+        exact_limit.*member = sql_bigint_value_max;
+        PipelineOperationalStats independently_merged{};
+        independently_merged.merge(exact_limit);
+        REQUIRE((independently_merged.*member) == sql_bigint_value_max);
+        REQUIRE_FALSE(independently_merged.stats_saturated);
+
+        PipelineOperationalStats plus_one{};
+        plus_one.*member = 1;
+        independently_merged.merge(plus_one);
+        REQUIRE((independently_merged.*member) == sql_bigint_value_max);
+        REQUIRE(independently_merged.stats_saturated);
+    };
+    require_independent_saturation(
+        &PipelineOperationalStats::format5_reader_query_hash_capacity_bytes);
+    require_independent_saturation(
+        &PipelineOperationalStats::
+            format5_reader_current_selected_control_capacity_bytes);
+    require_independent_saturation(
+        &PipelineOperationalStats::format5_reader_control_payload_capacity_bytes);
 }
 
 TEST_CASE("DOC0371 aggregate environment drift reclassifies both job sets",

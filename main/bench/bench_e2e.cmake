@@ -53,13 +53,53 @@ AddCommonTargetX(
   SOURCES
     "${BENCH_E2E_DIR}/bench_e2e_main.cpp"
     "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
-  TESTS
-    "${BENCH_E2E_DIR}/bench_e2e_main_test.cpp"
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
   CXX_MOD_FILES
     ${BENCH_E2E_MOD_FILES}                     # common.cppm + bench index.cppm (fasta helpers are in main.cpp SOURCES)
   HWY 1.3.0)
+
+# Compile the production serializer itself into a dedicated Catch2 executable.
+# This is deliberately a separate target instead of AddCommonTargetX(TESTS):
+# the latter changes the production executable's Catch2 main/definitions too.
+AddCommonTargetX(
+  bioseq_bench_e2e_tests_exec
+  TYPE EXEC CXX 26
+  RELOCATABLE NAME bioseq_bench_e2e_tests_exec
+  COMMENT "BioSeq E2E raw serializer contract tests"
+  VERSION ${INSTALL_VERSION} COMPONENT ${PROJECT_NAME}
+  INCLUDE_DIRS
+    "${BIOSEQ_DIR}/../config" "${BIOSEQ_DIR}/include2"
+    "${BIOSEQ_DIR}/backend"
+    "${BIOSEQ_DIR}/../vendor/fmtlog" "${BIOSEQ_DIR}/../vendor/fmt"
+    "${BIOSEQ_DIR}/../vendor/seqan3/include"
+  LINKS
+    safestring_static fmt reflectcpp::reflectcpp libassert::assert
+    foonathan_memory ftxui::component ftxui::dom ftxui::screen
+    simdjson::simdjson nlohmann_json_schema_validator::validator
+    TBB::tbb lfreist-hwinfo::hwinfo
+    PostgreSQL::PostgreSQL
+    sqlgen::sqlgen
+    Catch2::Catch2WithMain
+    Vulkan::Vulkan
+    Vulkan::glslang
+    spirv-cross-msl
+    Vulkan::LayerSettings
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
+  SOURCES
+    "${BENCH_E2E_DIR}/bench_e2e_main_test.cpp"
+    "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+  SUPPORT_CXX_MODULES
+  CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
+  CXX_MOD_FILES
+    ${BENCH_E2E_MOD_FILES}
+  HWY 1.3.0)
+
+# Match the project's generated Catch2 targets: ThinLTO can drop TLS init
+# wrappers for module-attached mlogging state in test executables.
+set_target_properties(bioseq_bench_e2e_tests_exec PROPERTIES
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 target_compile_definitions(bioseq_bench_e2e PRIVATE
   "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bioseq_bench_e2e\""
