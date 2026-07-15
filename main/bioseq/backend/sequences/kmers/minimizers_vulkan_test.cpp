@@ -768,9 +768,16 @@ static void require_exact_device_only_batch_parity(
     const std::uint64_t device_query_record_capacity_bytes =
         static_cast<std::uint64_t>(device_only->query_records.capacity())
         * sizeof(vk::PhaseCSeedQueryRecordWire);
+    const std::uint64_t device_authority_capacity_bytes =
+        device_only->query_authority.owned_capacity_bytes();
+    REQUIRE(device_authority_capacity_bytes
+            == uploads.size()
+                * (sizeof(vk::PhaseCSeedQueryRecordWire)
+                    + sizeof(std::uint32_t)));
     REQUIRE(device_only->memory_retention->permit.bytes()
             == device_only->device->words.allocation_bytes
-                + device_query_record_capacity_bytes);
+                + device_query_record_capacity_bytes
+                + device_authority_capacity_bytes);
     REQUIRE(device_only->device_minimizer_count
             == host_and_device->host_minimizers.size());
     REQUIRE(device_only->device->count
@@ -922,6 +929,11 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
             vk::VulkanSketchHostMaterialization::device_only);
 
     REQUIRE(result.has_value());
+    REQUIRE_FALSE(vk::runtime_metal_archive_configuration_installed());
+    REQUIRE(result->query_authority.covers_device_output());
+    // Structural coverage cannot mint the causal immutable-pipeline proof
+    // required by the persisted Shape-V5 consumer.
+    REQUIRE_FALSE(result->query_authority.accepted());
     REQUIRE(result->dispatch_proof.accepted());
     REQUIRE(result->dispatch_proof.materialization()
             == vk::VulkanSketchHostMaterialization::device_only);
@@ -945,11 +957,15 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     REQUIRE(result->device->count == 0u);
     REQUIRE(result->device->capacity == 0u);
     REQUIRE(result->device->words.bytes == 4u);
+    REQUIRE(result->query_authority.owned_capacity_bytes()
+            == sizeof(vk::PhaseCSeedQueryRecordWire)
+                + sizeof(std::uint32_t));
     REQUIRE(result->memory_retention->permit.bytes()
             == result->device->words.allocation_bytes
                 + static_cast<std::uint64_t>(
                     result->query_records.capacity())
-                    * sizeof(vk::PhaseCSeedQueryRecordWire));
+                    * sizeof(vk::PhaseCSeedQueryRecordWire)
+                + result->query_authority.owned_capacity_bytes());
     REQUIRE(result->memory_retention->permit.bytes()
             >= result->device->words.allocation_bytes);
 
@@ -959,6 +975,85 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
         0u,
         std::span<std::byte>{downloaded.data(), downloaded.size()});
     REQUIRE(downloaded.empty());
+
+    // A malformed post-submit authority record must fail closed without
+    // leaving the shared arena cursor live for the next independent request.
+    std::vector<std::byte> packed_sequence(
+        static_cast<std::size_t>(all_n_uploads[0].padded_byte_size));
+    std::memcpy(
+        packed_sequence.data(),
+        all_n_uploads[0].bytes,
+        static_cast<std::size_t>(all_n_uploads[0].byte_size));
+    std::vector<vk::PhaseCSketchTileWire> tiles;
+    tiles.reserve(all_n_tile_plan.tile_count);
+    const std::uint32_t overlap = vk::phase_c_replay_overlap_bp(
+        static_cast<std::uint32_t>(kmer_size),
+        static_cast<std::uint32_t>(window_size));
+    for (std::uint32_t tile = 0u;
+         tile < all_n_tile_plan.tile_count; ++tile) {
+        const std::uint32_t lo = tile * all_n_tile_plan.tile_bp;
+        const std::uint32_t hi = std::min<std::uint32_t>(
+            static_cast<std::uint32_t>(all_n.size()),
+            (tile + 1u) * all_n_tile_plan.tile_bp);
+        tiles.push_back(vk::PhaseCSketchTileWire{
+            .seq_word_offset = 0u,
+            .bp_count = static_cast<std::uint32_t>(all_n.size()),
+            .replay_lo = lo > overlap ? lo - overlap : 0u,
+            .tile_lo = lo,
+            .tile_hi = hi,
+            .out_base = 0u,
+        });
+    }
+    const std::array malformed_layouts{
+        vk::PhaseCSketchQueryLayoutWire{
+            .begin = 0u,
+            .count = static_cast<std::uint32_t>(tiles.size()),
+            .query_len = 0u,
+        },
+    };
+    const vk::VulkanSketchParams malformed_params{
+        .bp_size = static_cast<std::uint32_t>(all_n.size()),
+        .window_size = static_cast<std::uint32_t>(window_size),
+        .kmer_size = static_cast<std::uint32_t>(kmer_size),
+        .hash_bits = vk::minimizer_wire_traits<
+            MinimapSketchData>::hash_bits,
+        .hash_shift = vk::minimizer_wire_traits<
+            MinimapSketchData>::hash_shift,
+        .pos_bits = vk::minimizer_wire_traits<
+            MinimapSketchData>::pos_bits,
+        .minimizer_word_kind = static_cast<std::uint32_t>(
+            vk::minimizer_wire_traits<MinimapSketchData>::word_kind),
+        .minimizer_words32 = vk::minimizer_wire_traits<
+            MinimapSketchData>::words32_per_minimizer,
+        .alphabet_kind = static_cast<std::uint32_t>(
+            all_n_uploads[0].alphabet_kind),
+        .unit_bits = all_n_uploads[0].unit_bits,
+        .bits_per_char = all_n_uploads[0].bits_per_char,
+        .letters_per_unit = all_n_uploads[0].letters_per_unit,
+        .alphabet_size = all_n_uploads[0].alphabet_size,
+        .seq_word_offset = 0u,
+        .char_mask = all_n_uploads[0].char_mask,
+        .padding_letters = all_n_uploads[0].padding_letters,
+    };
+    bool malformed_authority_rejected = false;
+    try {
+        (void)vk::Runtime::instance().run_phase_c_sketch_tile_batch_roundtrip(
+            std::span<const std::byte>{
+                packed_sequence.data(), packed_sequence.size()},
+            rank_lut,
+            malformed_params,
+            std::span<const vk::PhaseCSketchTileWire>{
+                tiles.data(), tiles.size()},
+            std::span<const vk::PhaseCSketchQueryLayoutWire>{
+                malformed_layouts.data(), malformed_layouts.size()},
+            pessimistic_count,
+            vk::VulkanSketchHostMaterialization::device_only);
+    } catch (const vk::VulkanRuntimeError& error) {
+        malformed_authority_rejected = std::string_view{error.what()}
+            == "phase_c sketch query authority does not cover device output";
+    }
+    REQUIRE(malformed_authority_rejected);
+    REQUIRE(vk::Runtime::instance().phase_c_arena().release_idle_capacity());
 }
 
 TEST_CASE("vulkan minimizer: dna4 parity equals scalar mm-sketch",

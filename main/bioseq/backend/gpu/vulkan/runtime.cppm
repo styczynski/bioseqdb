@@ -2360,7 +2360,9 @@ public:
         return *this;
     }
 
-    [[nodiscard]] bool accepted() const noexcept {
+    /// Structural, device-output coverage. This deliberately does not claim
+    /// the immutable pipeline provenance required by persisted Shape-V5.
+    [[nodiscard]] bool covers_device_output() const noexcept {
         const bool shape_valid = identity_ != 0u
             && runtime_ != nullptr
             && buffer_ != VK_NULL_HANDLE
@@ -2370,7 +2372,6 @@ public:
             && materialization_
                 == VulkanSketchHostMaterialization::device_only
             && dispatch_proof_.accepted()
-            && pipeline_proof_.accepted_query_sketch()
             && window_size_ != 0u
             && kmer_size_ != 0u
             && minimizer_word_kind_ <= 3u
@@ -2382,7 +2383,7 @@ public:
         if (!shape_valid) return false;
         std::uint64_t cursor = 0u;
         for (const auto& record : query_records_) {
-            if (record.flags != 0u
+            if (record.flags != 0u || record.query_len == 0u
                 || record.minimizer_offset != cursor
                 || record.minimizer_count
                     > (std::numeric_limits<std::uint64_t>::max)() - cursor) {
@@ -2391,6 +2392,11 @@ public:
             cursor += record.minimizer_count;
         }
         return cursor == minimizer_count_;
+    }
+    /// Strong one-shot authority accepted by the persisted Shape-V5 consumer.
+    [[nodiscard]] bool accepted() const noexcept {
+        return covers_device_output()
+            && pipeline_proof_.accepted_query_sketch();
     }
     [[nodiscard]] std::uint64_t identity() const noexcept {
         return identity_;
@@ -10837,6 +10843,13 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             arena_bytes));
     }
     const GpuArenaMark mark = arena.mark();
+    struct ArenaRewindOnExit {
+        GpuArena* arena = nullptr;
+        GpuArenaMark mark{};
+        ~ArenaRewindOnExit() {
+            if (arena != nullptr) arena->rewind(mark);
+        }
+    } arena_rewind_on_exit{&arena, mark};
 
     const GpuArenaSlice seq_s = arena.allocate_device(
         std::max<std::uint64_t>(packed_sequence.size(), 4u), 16u);
@@ -10856,7 +10869,6 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
     if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid()
         || !counts_s.valid() || !offsets_s.valid() || !blocks_s.valid()
         || !counters_s.valid() || !pairvals_s.valid()) {
-        arena.rewind(mark);
         throw VulkanRuntimeError(fmt::format(
             "phase_c sketch tile batch arena oversub (tiles={} arena_bytes={})",
             tile_count,
@@ -10888,7 +10900,11 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             static_cast<std::size_t>(host_materialized_out_words.bytes));
     }
     std::unique_ptr<RuntimePipelineUseCollector> query_pipeline_collector;
-    if (materialization == VulkanSketchHostMaterialization::device_only) {
+    const bool causal_pipeline_proof_required =
+        materialization == VulkanSketchHostMaterialization::device_only
+        && (use_shader_provider_locked()
+            || runtime_metal_archive_configuration_installed());
+    if (causal_pipeline_proof_required) {
         query_pipeline_collector = RuntimePipelineUseCollector::create(
             RuntimePipelineOperationKind::query_sketch,
             1u,
@@ -11085,7 +11101,6 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             exact_device_bytes,
             kPhaseBBufferUsage);
         if (out_words.mapped == nullptr) {
-            arena.rewind(mark);
             throw VulkanRuntimeError(
                 "phase_c sketch tile batch non-unified exact output memory");
         }
@@ -11160,8 +11175,10 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
         && materialization == VulkanSketchHostMaterialization::device_only
         && result.minimizer_words.valid()
         && dispatch_proof.accepted()) {
-        result.query_authority.pipeline_proof_ =
-            query_pipeline_collector->seal();
+        if (query_pipeline_collector != nullptr) {
+            result.query_authority.pipeline_proof_ =
+                query_pipeline_collector->seal();
+        }
         result.query_authority.identity_ =
             next_operation_proof_identity_locked();
         result.query_authority.runtime_ = this;
@@ -11216,12 +11233,11 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
             query_minimizer_cursor += query_minimizer_count;
         }
         if (query_minimizer_cursor != result.count
-            || !result.query_authority.accepted()) {
+            || !result.query_authority.covers_device_output()) {
             throw VulkanRuntimeError(
                 "phase_c sketch query authority does not cover device output");
         }
     }
-    arena.rewind(mark);
     if (query_pipeline_collector != nullptr) {
         query_pipeline_collector->burn_before_reset(command_buffer_);
     }

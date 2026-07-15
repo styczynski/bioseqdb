@@ -2511,10 +2511,10 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             "count/scan/emit proof"};
     }
     if (materialization == VulkanSketchHostMaterialization::device_only
-        && !raw.query_authority.accepted()) {
+        && !raw.query_authority.covers_device_output()) {
         throw VulkanRuntimeError{
             "device-only Vulkan batch sketch returned without runtime-issued "
-            "query authority"};
+            "device-output coverage authority"};
     }
 
     if (materialization == VulkanSketchHostMaterialization::host_and_device) {
