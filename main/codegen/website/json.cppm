@@ -703,6 +703,33 @@ namespace {
     return apply_html_safe_escapes(boost::json::serialize(root));
 }
 
+/// @brief Serializes the content-addressed per-version entity tooltip set (§12.4).
+///
+/// Richer than the search index: each record carries the normalized signature and
+/// route so a hovered entity link can show a summary/signature card without a
+/// second request. The file is named by its own SHA-256 (§16), so its bytes are
+/// immutable and long-cacheable.
+/// @param entities Canonical documented entities for the version.
+/// @return Canonical HTML-safe JSON ending in one newline (schema entity_tooltips/v1).
+[[nodiscard]] std::string serialize_entity_tooltips(
+    const std::vector<documented_entity>& entities) {
+    boost::json::object root;
+    root["schema"] = "bioseq.website.entity_tooltips/v1";
+    boost::json::object records;
+    for (const documented_entity& entity : entities) {
+        boost::json::object record;
+        record["title"] = entity.display_name;
+        record["qualified_name"] = entity.qualified_name;
+        record["kind"] = std::string(entity_kind_name(entity.kind));
+        record["signature"] = entity.normalized_signature;
+        record["summary"] = entity.summary_text;
+        record["route"] = entity.route_path;
+        records[entity.canonical_id] = std::move(record);
+    }
+    root["entities"] = std::move(records);
+    return serialize_canonical(root);
+}
+
 /// @brief Serializes the versions manifest consumed by the header selector (§16).
 /// @param version_labels Version path components, newest first.
 /// @param base_path Normalized base path used to build each version route.

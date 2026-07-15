@@ -1262,6 +1262,12 @@ struct staging_writer {
     all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
     writer.emit(route(version + "/search-index.json"),
                 build_search_index(all_entities));
+    // Content-addressed per-version tooltip dataset (§12.4, §16): named by its own
+    // SHA-256 so its immutable bytes are long-cacheable.
+    const std::string tooltip_json = serialize_entity_tooltips(all_entities);
+    writer.emit(route(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json)
+                          + ".json"),
+                tooltip_json);
     if (!sql_entities.empty()) {
         writer.emit(route(version + "/catalog-inventory.json"),
                     serialize_sql_entities(sql_entities));
