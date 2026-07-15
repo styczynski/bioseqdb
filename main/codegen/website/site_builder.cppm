@@ -1022,18 +1022,102 @@ struct staging_writer {
         writer.emit(route(rel), html);
     };
 
-    // Assign each entity its base-aware route and page location (§16).
-    const auto entity_dir = [&](const documented_entity& entity) {
-        const std::string domain = entity.domain == entity_domain::sql ? "sql" : "cpp";
-        return version + "/reference/" + domain + "/"
-            + bioseq::codegen::sha256_hex(entity.canonical_id) + "/";
+    // Assign each entity a readable, collision-checked route (§12.1): a domain and
+    // kind path plus a slug and the 16-hex fnv1a_64 of the (Doxygen/OID-independent)
+    // canonical ID. Both the canonical ID and the output path are checked for
+    // collisions before any page is rendered, per §12.1.
+    const auto kind_token = [](entity_kind kind) -> std::string {
+        switch (kind) {
+        case entity_kind::namespace_: return "namespace";
+        case entity_kind::module: return "module";
+        case entity_kind::class_: return "class";
+        case entity_kind::struct_: return "struct";
+        case entity_kind::union_: return "union";
+        case entity_kind::enum_: return "enum";
+        case entity_kind::enum_value: return "enumerator";
+        case entity_kind::concept_: return "concept";
+        case entity_kind::type_alias: return "type_alias";
+        case entity_kind::function: return "function";
+        case entity_kind::variable: return "variable";
+        case entity_kind::sql_schema: return "schema";
+        case entity_kind::sql_type: return "type";
+        case entity_kind::sql_function: return "function";
+        case entity_kind::overload_group: return "overload_group";
+        }
+        return "entity";
     };
-    for (documented_entity& entity : cpp_entities) {
-        entity.route_path = url(entity_dir(entity));
-    }
-    for (documented_entity& entity : sql_entities) {
-        entity.route_path = url(entity_dir(entity));
-    }
+    const auto slugify = [](std::string_view qualified) -> std::string {
+        const std::string_view name = qualified.substr(0, qualified.find('('));
+        std::vector<std::string> parts;
+        std::string current;
+        for (const char character : name) {
+            if (character == ':' || character == '.' || character == ' ') {
+                if (!current.empty()) {
+                    parts.push_back(std::move(current));
+                    current.clear();
+                }
+            } else {
+                current.push_back(character);
+            }
+        }
+        if (!current.empty()) {
+            parts.push_back(std::move(current));
+        }
+        std::string joined;
+        const std::size_t begin = parts.size() > 2 ? parts.size() - 2 : 0;
+        for (std::size_t index = begin; index < parts.size(); ++index) {
+            if (!joined.empty()) {
+                joined.push_back('-');
+            }
+            joined += parts[index];
+        }
+        std::string slug;
+        bool previous_dash = false;
+        for (const char character : joined) {
+            const char lowered = (character >= 'A' && character <= 'Z')
+                ? static_cast<char>(character - 'A' + 'a') : character;
+            const bool ok = (lowered >= 'a' && lowered <= 'z')
+                || (lowered >= '0' && lowered <= '9');
+            if (ok) {
+                slug.push_back(lowered);
+                previous_dash = false;
+            } else if (!previous_dash) {
+                slug.push_back('-');
+                previous_dash = true;
+            }
+        }
+        while (!slug.empty() && slug.back() == '-') {
+            slug.pop_back();
+        }
+        std::size_t lead = 0;
+        while (lead < slug.size() && slug[lead] == '-') {
+            ++lead;
+        }
+        slug.erase(0, lead);
+        return slug.empty() ? std::string("entity") : slug;
+    };
+    const auto entity_rel = [&](const documented_entity& entity) {
+        const std::string domain = entity.domain == entity_domain::sql ? "sql" : "cpp";
+        return version + "/reference/" + domain + "/" + kind_token(entity.kind) + "/"
+            + slugify(entity.qualified_name) + "-"
+            + hex64(bioseq::common::fnv1a_64(entity.canonical_id)) + "/";
+    };
+    std::set<std::string> seen_routes;
+    std::set<std::string> seen_ids;
+    const auto assign_routes = [&](std::vector<documented_entity>& list) {
+        for (documented_entity& entity : list) {
+            if (!seen_ids.insert(entity.canonical_id).second) {
+                throw std::runtime_error("duplicate canonical id: " + entity.canonical_id);
+            }
+            const std::string rel = entity_rel(entity);
+            if (!seen_routes.insert(rel).second) {
+                throw std::runtime_error("entity route collision at " + rel);
+            }
+            entity.route_path = url(rel);
+        }
+    };
+    assign_routes(cpp_entities);
+    assign_routes(sql_entities);
 
     // Root marketing landing page for the primary version (§16).
     render("index.html", "landing.html.j2",
@@ -1114,8 +1198,7 @@ struct staging_writer {
                    + ",\"canonical\":" + json_text(canonical(index_rel)) + "}",
                "entities", serialize_entity_array(entities));
         for (const documented_entity& entity : entities) {
-            const std::string rel = version + "/reference/" + std::string(domain) + "/"
-                + bioseq::codegen::sha256_hex(entity.canonical_id) + "/index.html";
+            const std::string rel = entity_rel(entity) + "index.html";
             render(rel, "entity.html.j2",
                    "{\"title\":" + json_text(entity.qualified_name)
                        + ",\"description\":"

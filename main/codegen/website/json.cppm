@@ -559,10 +559,30 @@ namespace {
     nav_object["tutorials"] = site.tutorials_url;
     nav_object["reference"] = site.reference_url;
 
+    // Synthesize the inert SEO JSON-LD (§15.5) from the page's own title/
+    // description/canonical. It is a serialized-JSON string bound as page.jsonld so
+    // the single application/ld+json block emits data, never executable script; no
+    // datePublished/dateModified is included (no deterministic source metadata).
+    boost::json::value page_value = parse_json(page_object);
+    if (page_value.is_object()) {
+        boost::json::object& page_object_ref = page_value.as_object();
+        boost::json::object json_ld;
+        json_ld["@context"] = "https://schema.org";
+        json_ld["@type"] = "WebPage";
+        json_ld["name"] = page_object_ref.contains("title")
+            ? page_object_ref.at("title") : boost::json::value("");
+        json_ld["description"] = page_object_ref.contains("description")
+            ? page_object_ref.at("description") : boost::json::value("");
+        json_ld["url"] = page_object_ref.contains("canonical")
+            ? page_object_ref.at("canonical") : boost::json::value("");
+        json_ld["isPartOf"] = site.title;
+        page_object_ref["jsonld"] = boost::json::serialize(json_ld);
+    }
+
     boost::json::object root;
     root["site"] = std::move(site_object);
     root["nav"] = std::move(nav_object);
-    root["page"] = parse_json(page_object);
+    root["page"] = std::move(page_value);
     if (!collection_key.empty()) {
         root[std::string(collection_key)] = parse_json(collection_json);
     }
