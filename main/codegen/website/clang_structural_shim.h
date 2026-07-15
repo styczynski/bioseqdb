@@ -54,6 +54,32 @@ struct index {
     std::string clang_version;
 };
 
+// One module interface unit's provided module and its import edges (§11.3). An
+// `export import` is a public edge (re-exported); a plain `import` is an internal
+// dependency and never a public edge — the distinction the closure relies on.
+struct module_edges {
+    std::string source_path;
+    std::string provided_module;
+    bool has_provided{};
+    std::vector<std::string> exported_imports;
+    std::vector<std::string> plain_imports;
+};
+
+struct module_graph {
+    std::vector<module_edges> units;
+    std::string clang_version;
+};
+
+// Scans each reachable unit's provided module and export/plain import edges via a
+// read-only AST pass over the compile database (§11.3).
+[[nodiscard]] module_graph scan_module_edges_from_db(
+    const std::vector<std::string>& reachable_units,
+    const std::string& compile_database);
+
+// Scans one in-memory unit's provided module and import edges (tests).
+[[nodiscard]] module_graph scan_module_edges_from_code(
+    const std::string& code, const std::vector<std::string>& args);
+
 // Runs the structural pass on a self-contained in-memory module unit (tests).
 [[nodiscard]] index run_structural_from_code(
     const std::string& code, const std::vector<std::string>& args);

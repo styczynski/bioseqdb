@@ -520,6 +520,45 @@ namespace {
     return entities;
 }
 
+/// @brief Serializes the Clang source-graph closure (§11.3, schema source_graph/v1).
+/// @param clang_version The Clang version the scan was linked against.
+/// @param roots Configured primary module names (the closure seeds).
+/// @param closure Reachable Bioseq-owned units, sorted by module name.
+/// @return Canonical JSON ending in one newline.
+[[nodiscard]] std::string serialize_source_graph(
+    std::string_view clang_version,
+    const std::vector<std::string>& roots,
+    const std::vector<module_graph_unit>& closure) {
+    boost::json::object root;
+    root["schema"] = "bioseq.website.source_graph/v1";
+    root["clang_version"] = std::string(clang_version);
+    boost::json::array root_array;
+    for (const std::string& name : roots) {
+        root_array.push_back(boost::json::value(name));
+    }
+    root["roots"] = std::move(root_array);
+    boost::json::array reachable;
+    boost::json::array edges;
+    for (const module_graph_unit& unit : closure) {
+        boost::json::object node;
+        node["module"] = unit.provided_module;
+        node["source"] = unit.source_path;
+        boost::json::array exported;
+        for (const std::string& name : unit.exported_imports) {
+            exported.push_back(boost::json::value(name));
+            boost::json::object edge;
+            edge["from"] = unit.provided_module;
+            edge["to"] = name;
+            edges.push_back(std::move(edge));
+        }
+        node["exported_imports"] = std::move(exported);
+        reachable.push_back(std::move(node));
+    }
+    root["reachable"] = std::move(reachable);
+    root["edges"] = std::move(edges);
+    return serialize_canonical(root);
+}
+
 /// @brief Reads a top-level string field from a site manifest (or "" if absent).
 /// @param text site-manifest.json text.
 /// @param key Field name (for example "version" or "base_path").

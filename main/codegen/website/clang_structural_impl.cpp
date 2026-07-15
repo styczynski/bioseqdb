@@ -324,7 +324,99 @@ clang::tooling::ArgumentsAdjuster allowlist_adjuster() {
     };
 }
 
+// Records the provided module and each import edge, classifying an import as a
+// public edge only when the ImportDecl sits in an export declaration context
+// (§11.3): `export import M;` is a re-export, plain `import M;` never is.
+struct edges_visitor : clang::RecursiveASTVisitor<edges_visitor> {
+    module_edges* out{};
+    bool VisitImportDecl(clang::ImportDecl* decl) {
+        const clang::Module* imported = decl->getImportedModule();
+        if (imported == nullptr) {
+            return true;
+        }
+        std::string name = imported->getFullModuleName();
+        if (decl->isInExportDeclContext()) {
+            out->exported_imports.push_back(std::move(name));
+        } else {
+            out->plain_imports.push_back(std::move(name));
+        }
+        return true;
+    }
+};
+
+struct edges_consumer : clang::ASTConsumer {
+    std::vector<module_edges>* out;
+    explicit edges_consumer(std::vector<module_edges>* target) : out(target) {}
+    void HandleTranslationUnit(clang::ASTContext& context) override {
+        module_edges unit;
+        const clang::SourceManager& sources = context.getSourceManager();
+        if (const auto file = sources.getFileEntryRefForID(sources.getMainFileID())) {
+            unit.source_path = std::string(file->getName());
+        }
+        if (const clang::Module* current = context.getCurrentNamedModule()) {
+            unit.provided_module = current->getFullModuleName();
+            unit.has_provided = true;
+        }
+        edges_visitor visitor;
+        visitor.out = &unit;
+        visitor.TraverseDecl(context.getTranslationUnitDecl());
+        out->push_back(std::move(unit));
+    }
+};
+
+struct edges_action : clang::ASTFrontendAction {
+    std::vector<module_edges>* out;
+    explicit edges_action(std::vector<module_edges>* target) : out(target) {}
+    std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(
+        clang::CompilerInstance&, llvm::StringRef) override {
+        return std::make_unique<edges_consumer>(out);
+    }
+};
+
+struct edges_factory : clang::tooling::FrontendActionFactory {
+    std::vector<module_edges>* out;
+    explicit edges_factory(std::vector<module_edges>* target) : out(target) {}
+    std::unique_ptr<clang::FrontendAction> create() override {
+        return std::make_unique<edges_action>(out);
+    }
+};
+
 }  // namespace
+
+module_graph scan_module_edges_from_db(
+    const std::vector<std::string>& reachable_units,
+    const std::string& compile_database) {
+    module_graph result;
+    result.clang_version = CLANG_VERSION_STRING;
+    std::string load_error;
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang::tooling::JSONCompilationDatabase::loadFromFile(
+            compile_database, load_error,
+            clang::tooling::JSONCommandLineSyntax::AutoDetect);
+    if (!database) {
+        throw std::runtime_error("cannot load compile database " + compile_database
+                                 + ": " + load_error);
+    }
+    clang::tooling::ClangTool tool(*database, reachable_units);
+    tool.appendArgumentsAdjuster(allowlist_adjuster());
+    edges_factory factory(&result.units);
+    if (tool.run(&factory) != 0) {
+        throw std::runtime_error("clang module-edge scan reported errors");
+    }
+    return result;
+}
+
+module_graph scan_module_edges_from_code(
+    const std::string& code, const std::vector<std::string>& args) {
+    module_graph result;
+    result.clang_version = CLANG_VERSION_STRING;
+    const bool ok = clang::tooling::runToolOnCodeWithArgs(
+        std::make_unique<edges_action>(&result.units), code, args, "unit.cppm");
+    if (!ok) {
+        throw std::runtime_error("clang module-edge scan failed on in-memory unit");
+    }
+    return result;
+}
 
 index run_structural_from_code(
     const std::string& code, const std::vector<std::string>& args) {

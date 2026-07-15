@@ -176,6 +176,15 @@ enum class entity_kind : std::uint8_t {
     overload_group
 };
 
+// One module interface unit's provided module and its public/internal import
+// edges, as recovered by the Clang 22 source-graph pass (§11.3).
+struct module_graph_unit {
+    std::string source_path;
+    std::string provided_module;
+    std::vector<std::string> exported_imports;  // public re-export edges
+    std::vector<std::string> internal_imports;  // plain imports, never public
+};
+
 struct pg_entrypoint_candidate {
     std::string symbol;
     std::string normalized_signature;

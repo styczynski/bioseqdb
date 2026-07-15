@@ -133,4 +133,53 @@ namespace {
         clang_shim::run_structural_from_db(units, compile_database.string()));
 }
 
+namespace {
+
+[[nodiscard]] module_graph_unit unit_from_shim(const clang_shim::module_edges& edges) {
+    module_graph_unit unit;
+    unit.source_path = edges.source_path;
+    unit.provided_module = edges.provided_module;
+    unit.exported_imports = edges.exported_imports;
+    unit.internal_imports = edges.plain_imports;
+    return unit;
+}
+
+}  // namespace
+
+/// @brief Scans each reachable unit's provided module and import edges (§11.3).
+/// @param reachable_units Module interface files to scan.
+/// @param compile_database Path to the Clang-produced compile_commands.json.
+/// @return One module_graph_unit per scanned interface unit.
+[[nodiscard]] std::vector<module_graph_unit> scan_module_graph(
+    const std::vector<std::filesystem::path>& reachable_units,
+    const std::filesystem::path& compile_database) {
+    std::vector<std::string> units;
+    units.reserve(reachable_units.size());
+    for (const std::filesystem::path& unit : reachable_units) {
+        units.push_back(unit.string());
+    }
+    const clang_shim::module_graph graph =
+        clang_shim::scan_module_edges_from_db(units, compile_database.string());
+    std::vector<module_graph_unit> result;
+    result.reserve(graph.units.size());
+    for (const clang_shim::module_edges& edges : graph.units) {
+        result.push_back(unit_from_shim(edges));
+    }
+    return result;
+}
+
+/// @brief Scans one in-memory unit's provided module and import edges (tests).
+/// @param code A self-contained C++ module translation unit.
+/// @param extra_args Compiler arguments (for example -std=c++26).
+/// @return The single scanned unit's module/edge record.
+[[nodiscard]] module_graph_unit scan_module_graph_from_code(
+    std::string_view code, const std::vector<std::string>& extra_args) {
+    const clang_shim::module_graph graph =
+        clang_shim::scan_module_edges_from_code(std::string(code), extra_args);
+    if (graph.units.empty()) {
+        return {};
+    }
+    return unit_from_shim(graph.units.front());
+}
+
 }  // namespace bioseq::codegen::website

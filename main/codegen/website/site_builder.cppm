@@ -191,6 +191,18 @@ void run_website_smoke() {
     expect(!has_entity("hidden::Internal"), "clang excludes non-exported namespace");
     expect(clang_index.clang_version.starts_with("22"), "clang version is 22");
 
+    // Clang 22 module-graph pass (§11.3): the provided module name is recovered and
+    // a unit with no imports yields no public edge (plain imports are validated
+    // against the real module graph in the source_graph command / integration).
+    const module_graph_unit demo_unit = scan_module_graph_from_code(
+        "export module bioseq.demo.leaf;\n"
+        "export namespace demo { struct Node { int value; }; }\n",
+        {"-std=c++20", "-xc++"});
+    expect(demo_unit.provided_module == "bioseq.demo.leaf",
+           "module graph records the provided module");
+    expect(demo_unit.exported_imports.empty(),
+           "a unit with no import has no public edge");
+
     // Boost.JSON canonical + HTML-safe (reached through the json partition, not
     // by naming boost types here).
     const std::string search_json = build_search_index(merged);
@@ -1507,6 +1519,104 @@ struct staging_writer {
     return 3;
 }
 
+/// @brief Runs `website source_graph`: Clang export-import reachable closure (§11.3).
+///
+/// Scans each reachable module interface unit for its provided module and its
+/// `export import` (public) versus plain `import` (internal) edges, then computes
+/// the closure reachable from the configured primary modules by following only
+/// public edges into other Bioseq-owned modules. Plain imports never create a
+/// public edge; an exported edge to a missing Bioseq module is fatal. Emits the
+/// roots, edges, and sorted reachable closure as source_graph/v1.
+/// @param args Options after the `source_graph` token.
+/// @return Zero on success; two on usage errors; three on validation failure.
+[[nodiscard]] int run_source_graph(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "reachable-units", "compile-db", "site-config", "output"};
+    const auto options = parse_options(args, value_keys, {});
+    const fs::path reachable_units = require_option(options, "reachable-units");
+    const fs::path compile_db = require_option(options, "compile-db");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path output = require_option(options, "output");
+
+    const site_configuration config =
+        parse_site_config(read_file(site_config_path), site_config_path.generic_string());
+
+    std::vector<fs::path> units;
+    for (const std::string& line : read_lines(reachable_units)) {
+        units.emplace_back(line);
+    }
+    const std::vector<module_graph_unit> scanned =
+        scan_module_graph(units, compile_db);
+
+    // Map each provided module to its unit; duplicate providers are fatal (§11.3).
+    std::map<std::string, module_graph_unit, std::less<>> universe;
+    for (const module_graph_unit& unit : scanned) {
+        if (unit.provided_module.empty()) {
+            continue;
+        }
+        if (!universe.emplace(unit.provided_module, unit).second) {
+            throw std::runtime_error("duplicate module provider: " + unit.provided_module);
+        }
+    }
+
+    // Seed the closure with the configured primary modules; each must be present.
+    std::vector<std::string> roots;
+    std::vector<std::string> worklist;
+    std::set<std::string> reached;
+    for (const auto& [module_name, interface] : config.cpp_public_modules) {
+        if (!universe.contains(module_name)) {
+            throw std::runtime_error("configured primary module not found in scan: "
+                                     + module_name);
+        }
+        roots.push_back(module_name);
+        if (reached.insert(module_name).second) {
+            worklist.push_back(module_name);
+        }
+    }
+
+    // Follow only public (export import) edges into other Bioseq-owned modules. A
+    // "bioseq."-prefixed exported edge with no provider is fatal; std/third-party
+    // exported edges remain external dependencies and are not part of the closure.
+    while (!worklist.empty()) {
+        const std::string current = std::move(worklist.back());
+        worklist.pop_back();
+        const auto found = universe.find(current);
+        if (found == universe.end()) {
+            continue;
+        }
+        for (const std::string& target : found->second.exported_imports) {
+            if (universe.contains(target)) {
+                if (reached.insert(target).second) {
+                    worklist.push_back(target);
+                }
+            } else if (target.starts_with("bioseq.")) {
+                throw std::runtime_error("exported Bioseq import has no provider: "
+                                         + current + " -> " + target);
+            }
+        }
+    }
+
+    std::vector<module_graph_unit> closure;
+    for (const std::string& module_name : reached) {
+        closure.push_back(universe.at(module_name));
+    }
+    std::ranges::sort(closure, [](const module_graph_unit& lhs,
+                                  const module_graph_unit& rhs) {
+        return lhs.provided_module < rhs.provided_module;
+    });
+    std::ranges::sort(roots);
+
+    write_if_different(output,
+                       serialize_source_graph(clang_api_version(), roots, closure));
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website source_graph: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website source_graph: {}", error.what());
+    return 3;
+}
+
 /// @brief Dispatches a website subcommand and returns its process exit code.
 /// @param args Arguments after the leading `website` token (subcommand first).
 /// @return Exit code per §7: 2 usage, 3 parse/validation, 0 success.
@@ -1538,14 +1648,8 @@ struct staging_writer {
     if (command == "assemble") {
         return run_assemble(rest);
     }
-    static constexpr std::string_view known[] = {
-        "source_graph"};
-    for (const std::string_view candidate : known) {
-        if (command == candidate) {
-            std::println(stderr,
-                         "website {}: not yet implemented (phase in progress)", command);
-            return 3;
-        }
+    if (command == "source_graph") {
+        return run_source_graph(rest);
     }
     std::println(stderr, "unknown website command: {}", command);
     return 2;
