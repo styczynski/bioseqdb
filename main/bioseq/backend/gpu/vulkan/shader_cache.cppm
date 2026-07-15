@@ -191,19 +191,55 @@ struct MetalArchiveNegativeErrorFingerprint {
 };
 
 struct MetalArchiveQualificationReceipt {
+    std::uint32_t wire_version = 0u;
+    ShaderVariantKey shader_key{};
+    std::uint64_t metallib_size = 0u;
+    std::array<std::uint8_t, 32> metallib_sha256{};
+    std::string entry_name;
     std::uint64_t max_total_threads_per_threadgroup = 0u;
     bool threadgroup_size_is_multiple = false;
     MetalArchiveNegativeErrorFingerprint negative_error;
     std::uint64_t archive_size = 0u;
     std::array<std::uint8_t, 32> archive_sha256{};
+    std::uint32_t helper_protocol_version = 0u;
+    std::string helper_build_identity;
+    std::string helper_source;
+    std::uint64_t helper_executable_size = 0u;
+    std::array<std::uint8_t, 32> helper_executable_sha256{};
+    std::uint64_t helper_metal_registry_id = 0u;
 
-    [[nodiscard]] bool accepted() const noexcept {
-        return max_total_threads_per_threadgroup > 0u
+    [[nodiscard]] bool diagnostic_valid() const noexcept {
+        return (wire_version == 1u || wire_version == 2u)
+            && max_total_threads_per_threadgroup > 0u
             && max_total_threads_per_threadgroup <= 1024u
             && negative_error.accepted() && archive_size != 0u
             && std::any_of(
                 archive_sha256.begin(), archive_sha256.end(),
                 [](std::uint8_t byte) { return byte != 0u; });
+    }
+    [[nodiscard]] bool accepted() const noexcept {
+        const auto nonzero_digest = [](const auto& digest) {
+            return std::any_of(
+                digest.begin(), digest.end(),
+                [](std::uint8_t byte) { return byte != 0u; });
+        };
+        return diagnostic_valid() && wire_version == 2u
+            && valid_shader_variant_key(shader_key)
+            && metallib_size != 0u && nonzero_digest(metallib_sha256)
+            && !entry_name.empty() && entry_name.size() <= 1024u
+            && entry_name.find('\0') == std::string::npos
+            && helper_protocol_version == 2u
+            && !helper_build_identity.empty()
+            && helper_build_identity.size() <= 1024u
+            && helper_build_identity.find('\0') == std::string::npos
+            && !helper_source.empty() && helper_source.size() <= 64u
+            && helper_source.find('\0') == std::string::npos
+            && helper_executable_size != 0u
+            && nonzero_digest(helper_executable_sha256)
+            && helper_metal_registry_id != 0u;
+    }
+    [[nodiscard]] bool production_accepted() const noexcept {
+        return accepted() && helper_source == "installed-sibling";
     }
     [[nodiscard]] bool operator==(
         const MetalArchiveQualificationReceipt&) const noexcept = default;
@@ -860,7 +896,7 @@ private:
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.minor);
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.patch);
     hash = bioseq::common::hash_combine_64(
-        hash, "bioseq-metal-binary-archive-v5-qualified-nserror-fingerprint-no-command-placeholder");
+        hash, "bioseq-metal-binary-archive-v6-qualified-helper-device-wire-v2");
     // SPIR-V -> MSL resource indices are pipeline ABI, even when the GLSL
     // shader body itself is unchanged.  Keep an explicit transform revision
     // and the concrete layout in the digest so an incompatible metallib or
@@ -2371,7 +2407,8 @@ public:
 };
 
 inline constexpr std::string_view archive_qualification_magic = "BAMISS01";
-inline constexpr std::uint32_t archive_qualification_version = 1u;
+inline constexpr std::uint32_t archive_qualification_legacy_version = 1u;
+inline constexpr std::uint32_t archive_qualification_version = 2u;
 inline constexpr std::size_t maximum_archive_qualification_bytes = 4096u;
 
 [[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
@@ -2382,10 +2419,21 @@ serialize_metal_archive_qualification_receipt(
         return std::unexpected("Metal archive qualification receipt is incomplete");
     }
     std::vector<std::byte> bytes;
-    bytes.reserve(96u + receipt.negative_error.domain.size());
+    bytes.reserve(
+        256u + receipt.entry_name.size()
+        + receipt.negative_error.domain.size()
+        + receipt.helper_build_identity.size()
+        + receipt.helper_source.size());
     append_text(bytes, archive_qualification_magic);
     append_u32(bytes, archive_qualification_version);
     append_u32(bytes, 0u);
+    append_u32(bytes, receipt.shader_key.kind);
+    append_u32(bytes, receipt.shader_key.tile_size);
+    append_u32(bytes, receipt.shader_key.local_size);
+    append_u32(bytes, receipt.shader_key.max_span);
+    append_u64(bytes, receipt.metallib_size);
+    append_digest(bytes, receipt.metallib_sha256);
+    append_u32(bytes, static_cast<std::uint32_t>(receipt.entry_name.size()));
     append_u64(bytes, receipt.max_total_threads_per_threadgroup);
     append_u32(bytes, receipt.threadgroup_size_is_multiple ? 1u : 0u);
     append_u32(
@@ -2394,7 +2442,19 @@ serialize_metal_archive_qualification_receipt(
     append_u64(bytes, std::bit_cast<std::uint64_t>(receipt.negative_error.code));
     append_u64(bytes, receipt.archive_size);
     append_digest(bytes, receipt.archive_sha256);
+    append_u32(bytes, receipt.helper_protocol_version);
+    append_u32(
+        bytes,
+        static_cast<std::uint32_t>(receipt.helper_build_identity.size()));
+    append_u32(bytes, static_cast<std::uint32_t>(receipt.helper_source.size()));
+    append_u32(bytes, 0u);
+    append_u64(bytes, receipt.helper_executable_size);
+    append_digest(bytes, receipt.helper_executable_sha256);
+    append_u64(bytes, receipt.helper_metal_registry_id);
+    append_text(bytes, receipt.entry_name);
     append_text(bytes, receipt.negative_error.domain);
+    append_text(bytes, receipt.helper_build_identity);
+    append_text(bytes, receipt.helper_source);
     append_u64(bytes, manifest_checksum(bytes));
     if (bytes.size() > maximum_archive_qualification_bytes) {
         return std::unexpected("Metal archive qualification receipt is too large");
@@ -2406,9 +2466,8 @@ serialize_metal_archive_qualification_receipt(
 parse_metal_archive_qualification_receipt(
     std::span<const std::byte> bytes)
 {
-    constexpr std::size_t fixed_bytes = 8u + 2u * 4u + 8u
-        + 2u * 4u + 2u * 8u + 32u + 8u;
-    if (bytes.size() < fixed_bytes
+    constexpr std::size_t minimum_fixed_bytes = 8u + 2u * 4u + 8u;
+    if (bytes.size() < minimum_fixed_bytes
         || bytes.size() > maximum_archive_qualification_bytes) {
         return std::unexpected("Metal archive qualification receipt size is invalid");
     }
@@ -2417,25 +2476,97 @@ parse_metal_archive_qualification_receipt(
     auto magic = reader.text(archive_qualification_magic.size());
     auto version = reader.u32();
     auto reserved = reader.u32();
+    if (!magic || !version || !reserved
+        || *magic != archive_qualification_magic || *reserved != 0u) {
+        return std::unexpected(
+            "Metal archive qualification receipt header is invalid");
+    }
+    if (*version == archive_qualification_legacy_version) {
+        auto max_threads = reader.u64();
+        auto multiple = reader.u32();
+        auto domain_size = reader.u32();
+        auto code_bits = reader.u64();
+        auto archive_size = reader.u64();
+        auto archive_sha = reader.digest();
+        if (!max_threads || !multiple || !domain_size || !code_bits
+            || !archive_size || !archive_sha || *multiple > 1u
+            || *domain_size == 0u || *domain_size > 1024u) {
+            return std::unexpected(
+                "legacy Metal archive qualification receipt is invalid");
+        }
+        auto domain = reader.text(*domain_size);
+        auto stored_checksum = reader.u64();
+        if (!domain || !stored_checksum || !reader.at_end()
+            || *stored_checksum
+                != manifest_checksum(bytes.first(checksum_offset))) {
+            return std::unexpected(
+                "legacy Metal archive qualification receipt payload is invalid");
+        }
+        MetalArchiveQualificationReceipt diagnostic{
+            .wire_version = archive_qualification_legacy_version,
+            .max_total_threads_per_threadgroup = *max_threads,
+            .threadgroup_size_is_multiple = *multiple != 0u,
+            .negative_error = MetalArchiveNegativeErrorFingerprint{
+                .domain = std::move(*domain),
+                .code = std::bit_cast<std::int64_t>(*code_bits),
+            },
+            .archive_size = *archive_size,
+            .archive_sha256 = *archive_sha,
+        };
+        if (!diagnostic.diagnostic_valid() || diagnostic.accepted()) {
+            return std::unexpected(
+                "legacy Metal archive qualification receipt values are invalid");
+        }
+        return diagnostic;
+    }
+    if (*version != archive_qualification_version) {
+        return std::unexpected(
+            "Metal archive qualification receipt version is unsupported");
+    }
+    auto key_kind = reader.u32();
+    auto key_tile = reader.u32();
+    auto key_local = reader.u32();
+    auto key_span = reader.u32();
+    auto metallib_size = reader.u64();
+    auto metallib_sha = reader.digest();
+    auto entry_size = reader.u32();
     auto max_threads = reader.u64();
     auto multiple = reader.u32();
     auto domain_size = reader.u32();
     auto code_bits = reader.u64();
     auto archive_size = reader.u64();
     auto archive_sha = reader.digest();
-    if (!magic || !version || !reserved || !max_threads || !multiple
-        || !domain_size || !code_bits || !archive_size || !archive_sha) {
+    auto helper_protocol = reader.u32();
+    auto helper_build_size = reader.u32();
+    auto helper_source_size = reader.u32();
+    auto reserved2 = reader.u32();
+    auto helper_executable_size = reader.u64();
+    auto helper_executable_sha = reader.digest();
+    auto helper_registry_id = reader.u64();
+    if (!key_kind || !key_tile || !key_local || !key_span
+        || !metallib_size || !metallib_sha || !entry_size
+        || !max_threads || !multiple || !domain_size || !code_bits
+        || !archive_size || !archive_sha || !helper_protocol
+        || !helper_build_size || !helper_source_size || !reserved2
+        || !helper_executable_size || !helper_executable_sha
+        || !helper_registry_id) {
         return std::unexpected("Metal archive qualification receipt is truncated");
     }
-    if (*magic != archive_qualification_magic
-        || *version != archive_qualification_version || *reserved != 0u
-        || *multiple > 1u || *domain_size == 0u || *domain_size > 1024u) {
+    if (*reserved2 != 0u || *multiple > 1u
+        || *entry_size == 0u || *entry_size > 1024u
+        || *domain_size == 0u || *domain_size > 1024u
+        || *helper_build_size == 0u || *helper_build_size > 1024u
+        || *helper_source_size == 0u || *helper_source_size > 64u) {
         return std::unexpected(
             "Metal archive qualification receipt header is invalid");
     }
+    auto entry_name = reader.text(*entry_size);
     auto domain = reader.text(*domain_size);
+    auto helper_build = reader.text(*helper_build_size);
+    auto helper_source = reader.text(*helper_source_size);
     auto stored_checksum = reader.u64();
-    if (!domain || !stored_checksum || !reader.at_end()) {
+    if (!entry_name || !domain || !helper_build || !helper_source
+        || !stored_checksum || !reader.at_end()) {
         return std::unexpected(
             "Metal archive qualification receipt payload is invalid");
     }
@@ -2444,6 +2575,16 @@ parse_metal_archive_qualification_receipt(
             "Metal archive qualification receipt checksum mismatch");
     }
     MetalArchiveQualificationReceipt receipt{
+        .wire_version = archive_qualification_version,
+        .shader_key = ShaderVariantKey{
+            .kind = *key_kind,
+            .tile_size = *key_tile,
+            .local_size = *key_local,
+            .max_span = *key_span,
+        },
+        .metallib_size = *metallib_size,
+        .metallib_sha256 = *metallib_sha,
+        .entry_name = std::move(*entry_name),
         .max_total_threads_per_threadgroup = *max_threads,
         .threadgroup_size_is_multiple = *multiple != 0u,
         .negative_error = MetalArchiveNegativeErrorFingerprint{
@@ -2452,6 +2593,12 @@ parse_metal_archive_qualification_receipt(
         },
         .archive_size = *archive_size,
         .archive_sha256 = *archive_sha,
+        .helper_protocol_version = *helper_protocol,
+        .helper_build_identity = std::move(*helper_build),
+        .helper_source = std::move(*helper_source),
+        .helper_executable_size = *helper_executable_size,
+        .helper_executable_sha256 = *helper_executable_sha,
+        .helper_metal_registry_id = *helper_registry_id,
     };
     if (!receipt.accepted()) {
         return std::unexpected(
@@ -2675,6 +2822,10 @@ load_validated_artifact_bytes(
         }
     }
     std::optional<MetalArchiveNegativeErrorFingerprint> common_negative_error;
+    using HelperIdentity = std::tuple<
+        std::uint32_t, std::string, std::string, std::uint64_t,
+        std::array<std::uint8_t, 32>, std::uint64_t>;
+    std::optional<HelperIdentity> common_helper;
     for (const SealedShaderCacheArtifact& archive : manifest.artifacts) {
         if (archive.kind
             != SealedShaderCacheArtifactKind::metal_binary_archive) {
@@ -2709,6 +2860,11 @@ load_validated_artifact_bytes(
                 "Metal archive qualification invalid for ", archive.filename,
                 ": ", qualification.error()));
         }
+        if (!qualification->production_accepted()) {
+            return std::unexpected(shader_cache_message(
+                "Metal archive qualification is not production v2 for ",
+                archive.filename));
+        }
         if (qualification->archive_size != archive.size
             || qualification->archive_sha256 != archive.sha256) {
             return std::unexpected(shader_cache_message(
@@ -2720,6 +2876,28 @@ load_validated_artifact_bytes(
                 "Metal archive qualification key index is out of range");
         }
         const ShaderVariantKey& key = manifest.keys[archive.key_index];
+        const std::string stem = cache_file_stem(key);
+        const auto metallib_artifact = std::find_if(
+            manifest.artifacts.begin(), manifest.artifacts.end(),
+            [archive_key = archive.key_index, &stem](
+                const SealedShaderCacheArtifact& candidate) {
+                return candidate.kind
+                        == SealedShaderCacheArtifactKind::shader_metallib
+                    && candidate.key_index == archive_key
+                    && candidate.filename == stem + ".metallib";
+            });
+        std::string expected_entry_name;
+        auto meta = read_compatible_cache_meta(
+            cache_dir, key, &expected_entry_name);
+        if (metallib_artifact == manifest.artifacts.end() || !meta
+            || qualification->shader_key != key
+            || qualification->metallib_size != metallib_artifact->size
+            || qualification->metallib_sha256 != metallib_artifact->sha256
+            || qualification->entry_name != expected_entry_name) {
+            return std::unexpected(shader_cache_message(
+                "Metal archive qualification key/metallib/entry mismatch for ",
+                archive.filename));
+        }
         const auto paths = cache_binary_archive_paths(cache_dir, key);
         const auto path = std::find_if(
             paths.begin(), paths.end(), [&archive](
@@ -2753,8 +2931,21 @@ load_validated_artifact_bytes(
                 "Metal archive qualifications disagree on NSError fingerprint");
         }
         common_negative_error = qualification->negative_error;
+        HelperIdentity helper_identity{
+            qualification->helper_protocol_version,
+            qualification->helper_build_identity,
+            qualification->helper_source,
+            qualification->helper_executable_size,
+            qualification->helper_executable_sha256,
+            qualification->helper_metal_registry_id,
+        };
+        if (common_helper && *common_helper != helper_identity) {
+            return std::unexpected(
+                "Metal archive qualifications disagree on helper or registry identity");
+        }
+        common_helper = std::move(helper_identity);
     }
-    if (!common_negative_error) {
+    if (!common_negative_error || !common_helper) {
         return std::unexpected(
             "sealed shader cache has no Metal archive qualification evidence");
     }
@@ -2827,6 +3018,10 @@ validate_all_artifact_images(
     }
 
     std::optional<MetalArchiveNegativeErrorFingerprint> common_negative_error;
+    using SeedHelperIdentity = std::tuple<
+        std::uint32_t, std::string, std::string, std::uint64_t,
+        std::array<std::uint8_t, 32>, std::uint64_t>;
+    std::optional<SeedHelperIdentity> common_helper;
     for (const SealedShaderCacheArtifactImage& archive : images) {
         if (archive.descriptor.kind
             != SealedShaderCacheArtifactKind::metal_binary_archive) {
@@ -2855,6 +3050,11 @@ validate_all_artifact_images(
                 "Metal archive qualification invalid for ",
                 archive.descriptor.filename, ": ", qualification.error()));
         }
+        if (!qualification->production_accepted()) {
+            return std::unexpected(shader_cache_message(
+                "Metal archive qualification is not production v2 for ",
+                archive.descriptor.filename));
+        }
         if (qualification->archive_size != archive.descriptor.size
             || qualification->archive_sha256 != archive.descriptor.sha256) {
             return std::unexpected(shader_cache_message(
@@ -2867,6 +3067,30 @@ validate_all_artifact_images(
         }
         const ShaderVariantKey& key =
             manifest.keys[archive.descriptor.key_index];
+        const std::string stem = cache_file_stem(key);
+        const auto* metallib = find_artifact_image(
+            images, SealedShaderCacheArtifactKind::shader_metallib,
+            archive.descriptor.key_index, stem + ".metallib");
+        const auto* metadata = find_artifact_image(
+            images, SealedShaderCacheArtifactKind::shader_meta,
+            archive.descriptor.key_index, stem + ".meta");
+        std::string expected_entry_name;
+        auto meta = metadata == nullptr
+            ? std::expected<ShaderCacheMeta, std::string>{
+                std::unexpected("metadata missing")}
+            : compatible_cache_meta_from_bytes(
+                metadata->bytes, key, &expected_entry_name);
+        if (metallib == nullptr || !meta
+            || qualification->shader_key != key
+            || qualification->metallib_size
+                != metallib->descriptor.size
+            || qualification->metallib_sha256
+                != metallib->descriptor.sha256
+            || qualification->entry_name != expected_entry_name) {
+            return std::unexpected(shader_cache_message(
+                "Metal archive qualification key/metallib/entry mismatch for ",
+                archive.descriptor.filename));
+        }
         const auto paths = cache_binary_archive_paths(cache_dir, key);
         const auto path = std::find_if(
             paths.begin(), paths.end(), [&archive](
@@ -2898,8 +3122,21 @@ validate_all_artifact_images(
                 "Metal archive qualifications disagree on NSError fingerprint");
         }
         common_negative_error = qualification->negative_error;
+        SeedHelperIdentity helper_identity{
+            qualification->helper_protocol_version,
+            qualification->helper_build_identity,
+            qualification->helper_source,
+            qualification->helper_executable_size,
+            qualification->helper_executable_sha256,
+            qualification->helper_metal_registry_id,
+        };
+        if (common_helper && *common_helper != helper_identity) {
+            return std::unexpected(
+                "Metal archive qualifications disagree on helper or registry identity");
+        }
+        common_helper = std::move(helper_identity);
     }
-    if (!common_negative_error) {
+    if (!common_negative_error || !common_helper) {
         return std::unexpected(
             "sealed shader cache seed has no Metal archive qualification evidence");
     }
@@ -3674,42 +3911,130 @@ load_sealed_shader_cache_manifest_for_key(
     return std::move(image->manifest);
 }
 
+struct QualifiedMetalArchiveHelper {
+    std::filesystem::path path;
+    sealed_shader_cache_detail::RegularFileIdentity identity{};
+    std::uint64_t executable_size = 0u;
+    std::array<std::uint8_t, 32> executable_sha256{};
+    std::string source;
+    std::uint64_t hash_passes = 0u;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return !path.empty() && executable_size != 0u && hash_passes == 1u
+            && (source == "installed-sibling"
+                || source == "test-env-override")
+            && std::any_of(
+                executable_sha256.begin(), executable_sha256.end(),
+                [](std::uint8_t byte) { return byte != 0u; });
+    }
+};
+
+[[nodiscard]] inline std::expected<QualifiedMetalArchiveHelper, std::string>
+load_qualified_metal_archive_helper()
+{
+#if !defined(__APPLE__)
+    return QualifiedMetalArchiveHelper{};
+#else
+    std::filesystem::path path;
+    std::string source;
+    if (const char* env = std::getenv("BIOSEQ_GPU_ARCHIVE_HELPER");
+        env != nullptr && *env != '\0') {
+        const char* test_only =
+            std::getenv("BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY");
+        if (test_only == nullptr || std::string_view{test_only} != "1") {
+            return std::unexpected(
+                "BIOSEQ_GPU_ARCHIVE_HELPER is rejected outside explicit test-only mode");
+        }
+        path = env;
+        source = "test-env-override";
+    } else {
+        Dl_info info{};
+        if (::dladdr(
+                reinterpret_cast<const void*>(
+                    &load_qualified_metal_archive_helper),
+                &info) == 0
+            || info.dli_fname == nullptr) {
+            return std::unexpected(
+                "cannot locate bioseq.dylib for installed archive helper qualification");
+        }
+        const std::filesystem::path dylib_path(info.dli_fname);
+        path = dylib_path.parent_path() / "bioseq_gpu_archive_builder";
+        source = "installed-sibling";
+    }
+    path = path.lexically_normal();
+    struct stat path_status {};
+    if (::lstat(path.c_str(), &path_status) != 0
+        || !S_ISREG(path_status.st_mode) || S_ISLNK(path_status.st_mode)
+        || (path_status.st_mode & S_IWOTH) != 0
+        || ::access(path.c_str(), X_OK) != 0) {
+        return std::unexpected(shader_cache_message(
+            "archive helper is not a non-symlink executable regular file: ",
+            path.string()));
+    }
+    auto digest = sealed_shader_cache_detail::stream_stable_regular_file_digest(
+        path, "qualified Metal archive helper",
+        sealed_shader_cache_detail::maximum_seed_artifact_bytes);
+    if (!digest) return std::unexpected(digest.error());
+    struct stat after_status {};
+    if (::lstat(path.c_str(), &after_status) != 0
+        || !S_ISREG(after_status.st_mode) || S_ISLNK(after_status.st_mode)
+        || (after_status.st_mode & S_IWOTH) != 0
+        || sealed_shader_cache_detail::regular_file_identity(after_status)
+            != digest->identity) {
+        return std::unexpected(
+            "archive helper identity changed during process qualification");
+    }
+    QualifiedMetalArchiveHelper helper{
+        .path = std::move(path),
+        .identity = digest->identity,
+        .executable_size = digest->size,
+        .executable_sha256 = digest->sha256,
+        .source = std::move(source),
+        .hash_passes = 1u,
+    };
+    if (!helper.accepted()) {
+        return std::unexpected("archive helper qualification is incomplete");
+    }
+    return helper;
+#endif
+}
+
+class QualifiedMetalArchiveHelperProcessStore {
+public:
+    [[nodiscard]] std::expected<QualifiedMetalArchiveHelper, std::string>
+    load_once()
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (helper_) return *helper_;
+        auto loaded = load_qualified_metal_archive_helper();
+        if (!loaded) return std::unexpected(loaded.error());
+        helper_ = std::move(*loaded);
+        return *helper_;
+    }
+
+    [[nodiscard]] std::uint64_t filesystem_hash_count() const noexcept {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return helper_ ? helper_->hash_passes : 0u;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::optional<QualifiedMetalArchiveHelper> helper_;
+};
+
+[[nodiscard]] inline QualifiedMetalArchiveHelperProcessStore&
+qualified_metal_archive_helper_process_store() noexcept
+{
+    static QualifiedMetalArchiveHelperProcessStore store;
+    return store;
+}
+
 [[nodiscard]] inline std::expected<std::filesystem::path, std::string>
 metal_archive_helper_path()
 {
-#if !defined(__APPLE__)
-    return std::filesystem::path{};
-#else
-    auto executable_candidate = [](const std::filesystem::path& path)
-        -> std::optional<std::filesystem::path> {
-        if (!path.empty() && ::access(path.c_str(), X_OK) == 0) {
-            return path;
-        }
-        return std::nullopt;
-    };
-
-    if (const char* env = std::getenv("BIOSEQ_GPU_ARCHIVE_HELPER");
-        env != nullptr && *env != '\0') {
-        if (auto path = executable_candidate(env)) {
-            return *path;
-        }
-        return std::unexpected(shader_cache_message(
-            "BIOSEQ_GPU_ARCHIVE_HELPER is not executable: ", env));
-    }
-
-    Dl_info info{};
-    if (::dladdr(reinterpret_cast<const void*>(&metal_archive_helper_path), &info) != 0
-        && info.dli_fname != nullptr) {
-        const std::filesystem::path dylib_path(info.dli_fname);
-        if (auto path = executable_candidate(
-                dylib_path.parent_path() / "bioseq_gpu_archive_builder")) {
-            return *path;
-        }
-    }
-
-    return std::unexpected(
-        "bioseq_gpu_archive_builder not found next to bioseq.dylib; set BIOSEQ_GPU_ARCHIVE_HELPER");
-#endif
+    auto helper = qualified_metal_archive_helper_process_store().load_once();
+    if (!helper) return std::unexpected(helper.error());
+    return helper->path;
 }
 
 [[nodiscard]] inline bool archive_helper_transcript_is_exact_success(
@@ -3794,6 +4119,76 @@ parse_archive_helper_negative_error_fingerprint(
     return fingerprint;
 }
 
+struct ArchiveHelperQualificationV2 {
+    std::uint32_t protocol_version = 0u;
+    std::string build_identity;
+    std::uint64_t metal_registry_id = 0u;
+};
+
+[[nodiscard]] inline std::expected<ArchiveHelperQualificationV2, std::string>
+parse_archive_helper_qualification_v2(std::string_view transcript)
+{
+    constexpr std::string_view prefix =
+        "HELPER_QUALIFICATION_V2 protocol=";
+    constexpr std::string_view build_separator = " build=";
+    constexpr std::string_view registry_separator = " registry_id=";
+    const std::size_t marker = transcript.find(prefix);
+    if (marker == std::string_view::npos
+        || transcript.find(prefix, marker + prefix.size())
+            != std::string_view::npos
+        || (marker != 0u && transcript[marker - 1u] != '\n')) {
+        return std::unexpected(
+            "archive helper v2 qualification line is missing or repeated");
+    }
+    const std::size_t line_end = transcript.find('\n', marker);
+    if (line_end == std::string_view::npos) {
+        return std::unexpected(
+            "archive helper v2 qualification line is unterminated");
+    }
+    const std::string_view payload = transcript.substr(
+        marker + prefix.size(), line_end - marker - prefix.size());
+    const std::size_t build_marker = payload.find(build_separator);
+    const std::size_t registry_marker = payload.find(registry_separator);
+    if (build_marker == std::string_view::npos
+        || registry_marker == std::string_view::npos
+        || build_marker >= registry_marker
+        || payload.find(build_separator, build_marker + 1u)
+            != std::string_view::npos
+        || payload.find(registry_separator, registry_marker + 1u)
+            != std::string_view::npos) {
+        return std::unexpected(
+            "archive helper v2 qualification fields are invalid");
+    }
+    const std::string_view protocol_text = payload.substr(0u, build_marker);
+    const std::string_view build = payload.substr(
+        build_marker + build_separator.size(),
+        registry_marker - build_marker - build_separator.size());
+    const std::string_view registry_text = payload.substr(
+        registry_marker + registry_separator.size());
+    std::uint32_t protocol = 0u;
+    std::uint64_t registry = 0u;
+    const auto [protocol_end, protocol_error] = std::from_chars(
+        protocol_text.data(), protocol_text.data() + protocol_text.size(),
+        protocol);
+    const auto [registry_end, registry_error] = std::from_chars(
+        registry_text.data(), registry_text.data() + registry_text.size(),
+        registry);
+    if (protocol_error != std::errc{}
+        || protocol_end != protocol_text.data() + protocol_text.size()
+        || registry_error != std::errc{}
+        || registry_end != registry_text.data() + registry_text.size()
+        || protocol != 2u || registry == 0u
+        || build != "bioseq_gpu_archive_builder_v2") {
+        return std::unexpected(
+            "archive helper v2 protocol, build, or registry identity is invalid");
+    }
+    return ArchiveHelperQualificationV2{
+        .protocol_version = protocol,
+        .build_identity = std::string(build),
+        .metal_registry_id = registry,
+    };
+}
+
 [[nodiscard]] inline std::expected<void, std::string> ensure_binary_archive(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key,
@@ -3846,9 +4241,19 @@ parse_archive_helper_negative_error_fingerprint(
             }
         }
     }
-    const auto helper = metal_archive_helper_path();
+    const auto helper =
+        qualified_metal_archive_helper_process_store().load_once();
     if (!helper) {
         return std::unexpected(helper.error());
+    }
+    const std::filesystem::path metallib_path =
+        cache_metallib_path(cache_dir, key);
+    auto metallib_digest =
+        sealed_shader_cache_detail::stream_stable_regular_file_digest(
+            metallib_path, "qualified Metal shader library",
+            sealed_shader_cache_detail::maximum_seed_artifact_bytes);
+    if (!metallib_digest) {
+        return std::unexpected(metallib_digest.error());
     }
 
     const std::uint64_t shader_threads =
@@ -3893,19 +4298,40 @@ parse_archive_helper_negative_error_fingerprint(
         ec.clear();
 
         const std::vector<std::string> args{
-            helper->string(),
-            cache_metallib_path(cache_dir, key).string(),
+            helper->path.string(),
+            metallib_path.string(),
             tmp_path.string(),
             std::string(entry_name),
             std::to_string(max_threads),
             "0",
         };
+        if (!sealed_shader_cache_detail::same_regular_file_identity(
+                helper->path, helper->identity)
+            || !sealed_shader_cache_detail::same_regular_file_identity(
+                metallib_path, metallib_digest->identity)) {
+            std::filesystem::remove(tmp_path, ec);
+            std::filesystem::remove(qualification_tmp, ec);
+            return std::unexpected(
+                "archive helper or metallib identity changed before helper execution");
+        }
         auto result = run_capture(
             args,
             RunCaptureLimits{
                 .maximum_output_bytes = 64u << 10u,
                 .timeout = std::chrono::minutes(2),
             });
+        const bool helper_identity_unchanged =
+            sealed_shader_cache_detail::same_regular_file_identity(
+                helper->path, helper->identity);
+        const bool metallib_identity_unchanged =
+            sealed_shader_cache_detail::same_regular_file_identity(
+                metallib_path, metallib_digest->identity);
+        if (!helper_identity_unchanged || !metallib_identity_unchanged) {
+            std::filesystem::remove(tmp_path, ec);
+            std::filesystem::remove(qualification_tmp, ec);
+            return std::unexpected(
+                "archive helper or metallib identity changed during helper execution");
+        }
         if (!result) {
             std::filesystem::remove(tmp_path, ec);
             std::filesystem::remove(qualification_tmp, ec);
@@ -3929,6 +4355,15 @@ parse_archive_helper_negative_error_fingerprint(
                 "MTLBinaryArchive helper returned invalid negative-control evidence for ",
                 cache_file_stem(key), ": ", negative_error.error()));
         }
+        auto helper_qualification =
+            parse_archive_helper_qualification_v2(*result);
+        if (!helper_qualification) {
+            std::filesystem::remove(tmp_path, ec);
+            std::filesystem::remove(qualification_tmp, ec);
+            return std::unexpected(shader_cache_message(
+                "MTLBinaryArchive helper returned invalid v2 provenance for ",
+                cache_file_stem(key), ": ", helper_qualification.error()));
+        }
         if (!std::filesystem::exists(tmp_path, ec) || ec
             || std::filesystem::file_size(tmp_path, ec) == 0 || ec) {
             std::filesystem::remove(tmp_path, ec);
@@ -3947,11 +4382,26 @@ parse_archive_helper_negative_error_fingerprint(
             return std::unexpected(archive_digest.error());
         }
         const MetalArchiveQualificationReceipt receipt{
+            .wire_version =
+                sealed_shader_cache_detail::archive_qualification_version,
+            .shader_key = key,
+            .metallib_size = metallib_digest->size,
+            .metallib_sha256 = metallib_digest->sha256,
+            .entry_name = std::string(entry_name),
             .max_total_threads_per_threadgroup = max_threads,
             .threadgroup_size_is_multiple = false,
             .negative_error = std::move(*negative_error),
             .archive_size = archive_digest->size,
             .archive_sha256 = archive_digest->sha256,
+            .helper_protocol_version =
+                helper_qualification->protocol_version,
+            .helper_build_identity =
+                std::move(helper_qualification->build_identity),
+            .helper_source = helper->source,
+            .helper_executable_size = helper->executable_size,
+            .helper_executable_sha256 = helper->executable_sha256,
+            .helper_metal_registry_id =
+                helper_qualification->metal_registry_id,
         };
         auto receipt_bytes = sealed_shader_cache_detail::
             serialize_metal_archive_qualification_receipt(receipt);

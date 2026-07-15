@@ -454,6 +454,17 @@ std::string build_binary_archive(
         return out.str();
     }
     out << "MTLCreateSystemDefaultDevice: ok\n";
+    using RegistryIdFn = unsigned long long (*)(Obj, Sel);
+    const std::uint64_t registry_id = static_cast<std::uint64_t>(
+        objc.msg<RegistryIdFn>()(device, objc.sel("registryID")));
+    if (registry_id == 0u) {
+        out << "MTLDevice registryID: failed\n";
+        return out.str();
+    }
+    out << "HELPER_QUALIFICATION_V2 protocol="
+        << k_archive_helper_protocol_version
+        << " build=" << k_archive_helper_build_identity
+        << " registry_id=" << registry_id << '\n';
 
     Obj function = load_function_from_metallib(objc, device, metallib_path, entry_name, out);
     if (function == nullptr) {

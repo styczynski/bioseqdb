@@ -6,6 +6,10 @@
 
 namespace bioseq::gpu::metal_archive {
 
+inline constexpr std::uint32_t k_archive_helper_protocol_version = 2u;
+inline constexpr std::string_view k_archive_helper_build_identity =
+    "bioseq_gpu_archive_builder_v2";
+
 // Create a Metal binary archive (.metalar) for the compute shader in metallib_path.
 // The qualified archive is written to archive_path. Production callers pass a
 // private temporary path and publish it with an fsync+rename only after the
