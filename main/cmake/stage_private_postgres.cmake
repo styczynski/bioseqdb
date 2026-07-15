@@ -71,6 +71,13 @@ file(COPY "${PG_PKGLIBDIR}/" DESTINATION "${STAGED_PKGLIBDIR}" USE_SOURCE_PERMIS
 # pkglibdir/bioseq*, and the exact library filename (§13.2 step 3).
 get_filename_component(_library_filename "${LIBRARY_FILE}" NAME)
 get_filename_component(_control_filename "${CONTROL_FILE}" NAME)
+# The extension version is the one baked into the install-SQL filename
+# (bioseq--<version>.sql), not the website source version handed in.
+get_filename_component(_install_sql_name "${INSTALL_SQL}" NAME)
+string(REGEX REPLACE "^.*--(.+)\\.sql$" "\\1" _extension_version "${_install_sql_name}")
+if(_extension_version STREQUAL "${_install_sql_name}")
+  set(_extension_version "${EXTENSION_VERSION}")
+endif()
 file(GLOB _global_bioseq_share "${STAGED_SHAREDIR}/extension/bioseq*")
 file(GLOB _global_bioseq_lib "${STAGED_PKGLIBDIR}/bioseq*")
 if(_global_bioseq_share)
@@ -152,7 +159,7 @@ set(_manifest "{
   },
   \"bioseq_artifacts\": {
     \"control\": {\"staged\": \"${_sharedir_rel}/extension/${_control_filename}\", \"sha256\": \"${_control_sha}\"},
-    \"install_sql\": {\"version\": \"${EXTENSION_VERSION}\", \"sha256\": \"${_sql_sha}\"},
+    \"install_sql\": {\"version\": \"${_extension_version}\", \"sha256\": \"${_sql_sha}\"},
     \"library\": {\"filename\": \"${_library_filename}\", \"staged\": \"${_pkglibdir_rel}/${_library_filename}\", \"sha256\": \"${_library_sha}\"}
   },
   \"expected_tool_paths\": {

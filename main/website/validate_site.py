@@ -37,6 +37,9 @@ def validate_html(path: Path, text: str) -> list[str]:
         problems.append(_fail(path, "contains an unrendered template placeholder"))
     if "javascript:" in text:
         problems.append(_fail(path, "contains a javascript: URL"))
+    for marker in ("bioseq:setup", "bioseq:visible", "bioseq:teardown"):
+        if marker in text:
+            problems.append(_fail(path, "leaks a hidden runnable-example SQL phase"))
     if any(handler in text for handler in _INLINE_HANDLERS):
         problems.append(_fail(path, "contains an inline event handler"))
     if " style=" in text:

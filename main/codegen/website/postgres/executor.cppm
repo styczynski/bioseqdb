@@ -87,6 +87,8 @@ public:
         sql_example const& example, isolation_settings const& settings) {
         std::string role;
         std::string clone;
+        std::expected<sql_example_result, diagnostic> result =
+            std::unexpected(diagnostic{});
         try {
             bioseq::libpq::connection admin(settings.admin_conninfo);
             const std::string suffix =
@@ -105,7 +107,6 @@ public:
             (void)admin.exec("REVOKE CONNECT ON DATABASE " + quoted_clone + " FROM PUBLIC");
             (void)admin.exec("GRANT CONNECT ON DATABASE " + quoted_clone
                 + " TO " + quoted_role);
-            std::expected<sql_example_result, diagnostic> result;
             try {
                 bioseq::libpq::connection role_connection(
                     bioseq::libpq::unix_socket_conninfo(
@@ -114,25 +115,14 @@ public:
             } catch (const bioseq::libpq::query_error& error) {
                 result = std::unexpected(make_error("execute", error));
             }
-            // Cleanup runs regardless of the example outcome (§13.3).
-            drop_quietly(admin, "DROP DATABASE " + quoted_clone + " WITH (FORCE)");
-            drop_quietly(admin, "DROP ROLE " + quoted_role);
-            return result;
         } catch (const bioseq::libpq::query_error& error) {
-            try {
-                bioseq::libpq::connection admin(settings.admin_conninfo);
-                if (!clone.empty()) {
-                    drop_quietly(admin, "DROP DATABASE "
-                        + admin.escape_identifier(clone) + " WITH (FORCE)");
-                }
-                if (!role.empty()) {
-                    drop_quietly(admin, "DROP ROLE " + admin.escape_identifier(role));
-                }
-            } catch (const bioseq::libpq::query_error&) {
-                // Best-effort provisioning cleanup; report the original failure.
-            }
-            return std::unexpected(make_error("isolate", error));
+            result = std::unexpected(make_error("isolate", error));
         }
+        // Cleanup always runs on a FRESH bounded admin connection so a dead or
+        // timed-out provisioning connection can never leak the clone/role (§13.3,
+        // §13.5). The drops are idempotent (IF EXISTS) and best-effort.
+        cleanup_isolated(settings.admin_conninfo, role, clone);
+        return result;
     }
 
 private:
@@ -233,6 +223,30 @@ private:
         try {
             (void)admin.exec(sql, std::chrono::seconds(5));
         } catch (const bioseq::libpq::query_error&) {
+        }
+    }
+
+    // Drops the per-example clone and role over a FRESH bounded admin connection
+    // (§13.5): the provisioning connection may have died or timed out, so cleanup
+    // must not depend on it. Both drops are idempotent and best-effort.
+    static void cleanup_isolated(const std::string& admin_conninfo,
+                                 const std::string& role, const std::string& clone) {
+        if (role.empty() && clone.empty()) {
+            return;
+        }
+        try {
+            bioseq::libpq::connection admin(admin_conninfo);
+            if (!clone.empty()) {
+                drop_quietly(admin, "DROP DATABASE IF EXISTS "
+                    + admin.escape_identifier(clone) + " WITH (FORCE)");
+            }
+            if (!role.empty()) {
+                drop_quietly(admin, "DROP ROLE IF EXISTS "
+                    + admin.escape_identifier(role));
+            }
+        } catch (const bioseq::libpq::query_error&) {
+            // A fresh admin connection could not be opened; the private cluster is
+            // torn down at build end regardless, so this is the bounded last try.
         }
     }
 

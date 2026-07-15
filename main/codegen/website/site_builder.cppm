@@ -408,6 +408,25 @@ void collect_examples_and_queries(
     }
 }
 
+// Rewrites each runnable SQL code block so only its visible phase is rendered.
+// A runnable fence's body carries the hidden setup/teardown SQL that the executor
+// needs but that must never reach the published page (§5.1); this runs after the
+// example has been collected, on the render-only copy of the document.
+void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::code_block) {
+            const auto language = node.attributes.find("language");
+            const auto info = node.attributes.find("info");
+            if (language != node.attributes.end() && language->second == "sql"
+                && info != node.attributes.end()
+                && parse_runnable_fence(info->second)) {
+                node.text = split_sql_phases(node.text).visible;
+            }
+        }
+        strip_runnable_fence_hidden_sql(node.children);
+    }
+}
+
 /// @brief Builds the deterministic website plan from validated source (§10).
 ///
 /// Parses every tutorial's frontmatter/Markdown under <source>/<version>/tutorials,
@@ -457,6 +476,8 @@ void collect_examples_and_queries(
         collect_examples_and_queries(document, item.metadata.slug,
                                      version.path_component, item.sql_examples,
                                      item.entity_queries);
+        // The render copy must not leak hidden setup/teardown SQL (§5.1).
+        strip_runnable_fence_hidden_sql(item.content);
         std::map<std::string, int, std::less<>> local_ids;
         for (const sql_example& example : item.sql_examples) {
             if (++local_ids[example.local_id] > 1) {
@@ -969,6 +990,13 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     }
     if (html.find("javascript:") != std::string_view::npos) {
         fail("contains a javascript: URL");
+    }
+    // Hidden runnable-example phases must never reach a published page (§5.1).
+    for (const std::string_view marker :
+         {"bioseq:setup", "bioseq:visible", "bioseq:teardown"}) {
+        if (html.find(marker) != std::string_view::npos) {
+            fail("leaks a hidden runnable-example SQL phase marker");
+        }
     }
     for (const std::string_view handler :
          {" onclick=", " onload=", " onerror=", " onmouseover=", " onfocus=",
