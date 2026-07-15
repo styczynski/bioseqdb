@@ -878,6 +878,29 @@ void collect_site_files(const fs::path& root, std::set<std::string>& routes) {
     }
 }
 
+[[nodiscard]] fs::path parent_or_dot(const fs::path& path) {
+    const fs::path parent = path.parent_path();
+    return parent.empty() ? fs::path(".") : parent;
+}
+
+// Flushes a file's bytes to stable storage (§14 durable write-ahead ordering).
+void fsync_file(const fs::path& path) {
+    const int descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor >= 0) {
+        ::fsync(descriptor);
+        ::close(descriptor);
+    }
+}
+
+// Flushes a directory entry (a rename/create) to stable storage (§14).
+void fsync_directory(const fs::path& path) {
+    const int descriptor = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
+    if (descriptor >= 0) {
+        ::fsync(descriptor);
+        ::close(descriptor);
+    }
+}
+
 // Atomically replaces output with staging (§14). When output is absent the
 // staging directory is renamed into place; when it exists the two sibling
 // directories are exchanged with renameat2(RENAME_EXCHANGE) and the now-old tree
@@ -1011,6 +1034,53 @@ struct staging_writer {
     const fs::path static_dir = require_option(options, "static");
     const fs::path output = require_option(options, "output");
     const bool include_drafts = options.contains("include-drafts");
+
+    // Crash recovery (§14): a prepublish descriptor beside output means a prior
+    // publish was interrupted after the write-ahead stamp. If output already matches
+    // the descriptor's manifest (hash + exact set), complete the publish by writing
+    // the success marker and dropping the descriptor; otherwise clear only the
+    // nonce-owned transient state and fail so the build DAG recreates staging.
+    {
+        const fs::path prepublish = output.string() + ".prepublish.json";
+        std::error_code probe;
+        if (fs::exists(prepublish, probe) && !probe) {
+            const std::string descriptor = read_file(prepublish);
+            const std::string expected =
+                manifest_string_field(descriptor, "new_manifest_sha256");
+            const fs::path site_manifest = output / "site-manifest.json";
+            bool output_valid = false;
+            if (!expected.empty() && fs::exists(site_manifest, probe) && !probe) {
+                const std::string manifest_text = read_file(site_manifest);
+                if (bioseq::codegen::sha256_hex(manifest_text) == expected) {
+                    std::set<std::string> present;
+                    collect_site_files(output, present);
+                    present.erase("/site-manifest.json");
+                    std::set<std::string> declared;
+                    for (const std::string& declared_route :
+                         manifest_output_routes(manifest_text)) {
+                        declared.insert(declared_route);
+                    }
+                    output_valid = (present == declared);
+                }
+            }
+            std::error_code cleanup;
+            const fs::path leftover_staging = output.string() + ".staging";
+            fs::remove_all(leftover_staging, cleanup);
+            fs::remove(leftover_staging.string() + ".owner.json", cleanup);
+            if (output_valid) {
+                write_if_different(output.string() + ".success", expected + "\n");
+                fsync_file(output.string() + ".success");
+                fs::remove(prepublish, cleanup);
+                fsync_directory(parent_or_dot(output));
+                std::println("recovered interrupted publish for {}", output.string());
+                return 0;
+            }
+            fs::remove(prepublish, cleanup);
+            fsync_directory(parent_or_dot(output));
+            throw std::runtime_error("crash recovery: output does not match the "
+                "prepublish descriptor; cleared transient state, rebuild required");
+        }
+    }
 
     const std::string site_yaml = read_file(site_config_path);
     const site_configuration config =
@@ -1412,10 +1482,37 @@ struct staging_writer {
             + " outputs but the staged tree has " + std::to_string(present.size()));
     }
 
-    atomic_publish(staging, output);
+    // Durable write-ahead publish (§14): stamp an fsynced 0600 prepublish
+    // descriptor plus an owner marker adjacent to staging, then swap atomically,
+    // then record the success marker and drop the descriptor/owner. A crash between
+    // any two steps is resolved by the crash-recovery pass on the next run.
     const std::string manifest_hash =
-        bioseq::codegen::sha256_hex(read_file(output / "site-manifest.json"));
+        bioseq::codegen::sha256_hex(read_file(staging / "site-manifest.json"));
+    const std::string nonce =
+        std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
+    const fs::path owner_marker = staging.string() + ".owner.json";
+    write_private_artifact(owner_marker,
+        "{\"schema\":\"bioseq.website.owner/v1\",\"nonce\":\"" + nonce
+        + "\",\"staging\":\"" + staging.filename().string() + "\"}\n");
+    const fs::path prepublish = output.string() + ".prepublish.json";
+    write_private_artifact(prepublish,
+        "{\n  \"schema\": \"bioseq.website.prepublish/v1\",\n"
+        "  \"operation\": \"publish\",\n  \"nonce\": \"" + nonce + "\",\n"
+        "  \"staging\": \"" + staging.filename().string() + "\",\n"
+        "  \"new_manifest_sha256\": \"" + manifest_hash + "\",\n"
+        "  \"validation_stamps\": []\n}\n");
+    fsync_file(prepublish);
+    fsync_directory(parent_or_dot(output));
+
+    atomic_publish(staging, output);
+    fsync_directory(parent_or_dot(output));
+
     write_if_different(output.string() + ".success", manifest_hash + "\n");
+    fsync_file(output.string() + ".success");
+    std::error_code cleanup;
+    fs::remove(prepublish, cleanup);
+    fs::remove(owner_marker, cleanup);
+    fsync_directory(parent_or_dot(output));
     std::println("published {} outputs to {} (bundle {})",
                  writer.manifest.size(), output.string(), bundle_sha256);
     return 0;
