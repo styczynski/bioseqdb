@@ -427,6 +427,71 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
     }
 }
 
+// Executes the landing page's runnable slots (§15.2) and serializes them to the
+// examples.<slot> render context. The slot name is the fence id with the
+// "landing_" prefix removed. When no connection is configured, each slot still
+// renders its visible SQL with no result table; when a connection is given, a
+// failing example fails the build. Hidden setup/teardown never leaves the model.
+[[nodiscard]] std::string build_landing_examples(
+    const fs::path& source, const std::string& version_string,
+    const std::map<std::string, std::string, std::less<>>& options) {
+    const fs::path landing_md = source / version_string / "landing_examples.md";
+    std::error_code probe;
+    if (!fs::exists(landing_md, probe) || probe) {
+        return "{}";
+    }
+    const front_matter_split split = split_front_matter(read_file(landing_md));
+    const document_node document = parse_markdown(split.body);
+    std::vector<sql_example> examples;
+    std::vector<unresolved_entity_query> queries;
+    collect_examples_and_queries(document, "landing", version_string, examples, queries);
+
+    const bool have_connection =
+        options.contains("conninfo") || options.contains("isolated");
+    std::optional<isolation_settings> isolation;
+    std::string conninfo;
+    if (options.contains("isolated")) {
+        isolation_settings settings;
+        settings.admin_conninfo = require_option(options, "admin-conninfo");
+        settings.socket_directory = require_option(options, "socket-dir");
+        settings.port = std::stoi(require_option(options, "port"));
+        settings.template_database = require_option(options, "template-db");
+        isolation = std::move(settings);
+    } else if (const auto found = options.find("conninfo"); found != options.end()) {
+        conninfo = found->second;
+    }
+
+    std::vector<landing_example_view> views;
+    for (const sql_example& example : examples) {
+        landing_example_view view;
+        view.slot = example.local_id.starts_with("landing_")
+            ? example.local_id.substr(std::string_view("landing_").size())
+            : example.local_id;
+        view.visible_sql = example.visible_sql;
+        if (have_connection) {
+            std::expected<sql_example_result, diagnostic> outcome =
+                std::unexpected(diagnostic{});
+            if (isolation) {
+                private_cluster_executor executor("");
+                outcome = executor.execute_isolated(example, *isolation);
+            } else {
+                private_cluster_executor executor(conninfo);
+                outcome = executor.execute(example);
+            }
+            if (!outcome) {
+                throw std::runtime_error("landing example '" + view.slot + "': ["
+                    + outcome.error().code + "] " + outcome.error().message);
+            }
+            if (!outcome->visible_results.empty()) {
+                view.result = outcome->visible_results.front();
+                view.has_result = true;
+            }
+        }
+        views.push_back(std::move(view));
+    }
+    return serialize_landing_examples(views);
+}
+
 /// @brief Builds the deterministic website plan from validated source (§10).
 ///
 /// Parses every tutorial's frontmatter/Markdown under <source>/<version>/tutorials,
@@ -1072,8 +1137,9 @@ struct staging_writer {
 [[nodiscard]] int run_publish(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "source", "version", "site-config", "cpp-entities", "sql-entities",
-        "templates", "static", "output", "base-path", "source-revision"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts"};
+        "templates", "static", "output", "base-path", "source-revision",
+        "conninfo", "admin-conninfo", "socket-dir", "port", "template-db"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
     const auto options = parse_options(args, value_keys, flag_keys);
     const fs::path source = require_option(options, "source");
     const std::string version_string = require_option(options, "version");
@@ -1307,7 +1373,12 @@ struct staging_writer {
     assign_routes(cpp_entities);
     assign_routes(sql_entities);
 
-    // Root marketing landing page for the primary version (§16).
+    // Root marketing landing page for the primary version (§16). Its runnable
+    // slots (§15.2) are executed from landing_examples.md and bound as the
+    // examples.<slot> collection; without a connection they render visible SQL
+    // only. Hidden setup/teardown never reaches the page (§5.1).
+    const std::string landing_examples_json =
+        build_landing_examples(source, version_string, options);
     render("index.html", "landing.html.j2",
            "{\"title\":" + json_text(config.title)
                + ",\"description\":" + json_text(config.short_description)
@@ -1316,7 +1387,7 @@ struct staging_writer {
                + ",\"headline\":" + json_text(config.title)
                + ",\"lede\":" + json_text(config.short_description)
                + ",\"install\":" + json_text("CREATE EXTENSION bioseq;") + "}",
-           "", "");
+           "examples", landing_examples_json);
 
     // Version overview / documentation home, distinct from the landing page.
     render(version + "/index.html", "version_home.html.j2",

@@ -239,31 +239,45 @@ add_custom_command(
   COMMENT "website: stage relocatable PostgreSQL + current extension artifacts"
   VERBATIM)
 
-# --- catalog / execute on the staged cluster (§17.3 step 7) -------------------
-# The staged bindir is the copied suite from step 6. run_private_postgres.py
-# starts the copied server under RLIMIT_AS containment, applies CREATE EXTENSION
-# bioseq, and launches one child: a wrapper that builds the private Unix-socket
-# conninfo from the runner-provided PG* environment and captures the live SQL
-# catalog into sql-entities.json (the artifact publish's reference pages consume).
+# --- execute + publish on the staged cluster (§17.3 step 7) -------------------
+# One owner process starts the copied server under RLIMIT_AS containment, applies
+# CREATE EXTENSION bioseq, then launches a single generator child (§17.3): a
+# wrapper that builds the private Unix-socket conninfo from the runner-provided
+# PG* environment, captures the live SQL catalog into sql-entities.json, and then
+# runs publish with that same conninfo so the runnable landing slots (§15.2) and
+# reference pages both resolve against the live extension before the durable swap.
 string(REGEX REPLACE "^/+" "" _pg_bindir_rel "${_pg_bindir}")
 set(_staged_bindir "${_stage_root}/${_pg_bindir_rel}")
 set(_sql_entities "${_output_root}/sql-entities.json")
+set(_publish_stamp "${_output_root}/site/site-manifest.json")
 
 # The private CREATE EXTENSION bootstrap the runner applies (§13.2).
 file(WRITE "${_output_root}/create-extension.sql" "CREATE EXTENSION bioseq;\n")
 
-# The cluster child: PG* env -> conninfo -> website catalog. Generated so the
-# dynamic socket/port the runner chooses never need to be known at configure.
-set(_catalog_child "${_output_root}/run-website-catalog.sh")
-file(WRITE "${_catalog_child}"
+# The single cluster child. Generated so the dynamic socket/port the runner
+# chooses never need to be known at configure; VERBATIM keeps the literal $PG*.
+set(_drafts_flag "")
+if(BIOSEQ_WEBSITE_INCLUDE_DRAFTS)
+  set(_drafts_flag "--include-drafts")
+endif()
+set(_cluster_child "${_output_root}/run-website-cluster.sh")
+file(WRITE "${_cluster_child}"
 "#!/usr/bin/env bash\n"
 "set -euo pipefail\n"
 "CONN=\"host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER\"\n"
-"exec \"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
-"  --schemas 'public,bioseq' --output '${_sql_entities}'\n")
+"\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
+"  --schemas 'public,bioseq' --output '${_sql_entities}'\n"
+"exec \"${_gen}\" website publish \\\n"
+"  --source '${_source_dir}' --version '${_version}' \\\n"
+"  --site-config '${_site_config}' \\\n"
+"  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
+"  --templates '${_templates_dir}' --static '${_static_dir}' \\\n"
+"  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
+"  --conninfo \"$CONN\" ${_drafts_flag} \\\n"
+"  --output '${_output_root}/site'\n")
 
 add_custom_command(
-  OUTPUT "${_sql_entities}"
+  OUTPUT "${_publish_stamp}" "${_sql_entities}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
           --pg-bin-dir "${_staged_bindir}"
           --data-dir-parent "${_output_root}/cluster"
@@ -272,35 +286,13 @@ add_custom_command(
           --database bioseq_site
           --address-space-limit-mib 4096
           --bootstrap "${_output_root}/create-extension.sql"
-          -- bash "${_catalog_child}"
-  DEPENDS ${_gen_dep} "${_stage_manifest}" "${_catalog_child}"
-          bioseq_private_postgres_tests
-  COMMENT "website: capture live SQL catalog on the staged cluster"
-  USES_TERMINAL VERBATIM)
-
-# --- render + publish (§17.3 steps 8-11) --------------------------------------
-# publish renders, validates fail-closed, and atomically swaps in one command,
-# consuming the C++ and SQL entity artifacts. It needs no cluster. Its real
-# output is site/site-manifest.json (the atomically published manifest).
-set(_publish_stamp "${_output_root}/site/site-manifest.json")
-add_custom_command(
-  OUTPUT "${_publish_stamp}"
-  COMMAND "${_gen}" website publish
-          --source "${_source_dir}"
-          --version "${_version}"
-          --site-config "${_site_config}"
-          --cpp-entities "${_cpp_entities}"
-          --sql-entities "${_sql_entities}"
-          --templates "${_templates_dir}"
-          --static "${_static_dir}"
-          --base-path "${_base_path}"
-          --source-revision "${_revision}"
-          $<$<BOOL:${BIOSEQ_WEBSITE_INCLUDE_DRAFTS}>:--include-drafts>
-          --output "${_output_root}/site"
-  DEPENDS ${_gen_dep} "${_cpp_entities}" "${_sql_entities}" "${_plan_json}"
+          -- bash "${_cluster_child}"
+  DEPENDS ${_gen_dep} "${_stage_manifest}" "${_cluster_child}"
+          "${_cpp_entities}" "${_plan_json}"
           ${_template_files} ${_static_files}
-  COMMENT "website: render + durable publish (no cluster)"
-  VERBATIM)
+          bioseq_private_postgres_tests
+  COMMENT "website: execute runnable SQL + catalog + durable publish on the cluster"
+  USES_TERMINAL VERBATIM)
 
 # --- independent HTML validation (§17.3 step 9) -------------------------------
 set(_html_validation_stamp "${_output_root}/html-validation.stamp")

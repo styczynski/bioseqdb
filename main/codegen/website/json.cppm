@@ -435,6 +435,59 @@ namespace {
         boost::json::serialize(boost::json::value(std::move(items))));
 }
 
+/// @brief One executed landing-page runnable slot (§15.2) for the render context.
+///
+/// `visible_sql` is the visible phase only (hidden setup/teardown never reaches
+/// the page, §5.1). `result` is meaningful only when has_result is set and the
+/// visible phase returned rows; otherwise the slot renders just its SQL.
+struct landing_example_view {
+    std::string slot;
+    std::string visible_sql;
+    bool has_result{};
+    sql_result_set result;
+};
+
+/// @brief Serializes executed landing slots to the `examples.<slot>` context.
+///
+/// Shape consumed by the landing partials: each slot has `visible_sql` and a
+/// nullable `result` with `columns[].name` and `rows[][].{is_null,text}`. Every
+/// plain-text value is HTML-escaped at the source; there is no autoescape (§14).
+[[nodiscard]] std::string serialize_landing_examples(
+    const std::vector<landing_example_view>& slots) {
+    boost::json::object root;
+    for (const landing_example_view& slot : slots) {
+        boost::json::object entry;
+        entry["visible_sql"] = html_escape(slot.visible_sql);
+        if (slot.has_result && slot.result.kind == sql_result_kind::rows) {
+            boost::json::object result;
+            boost::json::array columns;
+            for (const sql_column& column : slot.result.columns) {
+                boost::json::object header;
+                header["name"] = html_escape(column.name);
+                columns.push_back(std::move(header));
+            }
+            result["columns"] = std::move(columns);
+            boost::json::array rows;
+            for (const std::vector<sql_cell>& source_row : slot.result.rows) {
+                boost::json::array cells;
+                for (const sql_cell& cell : source_row) {
+                    boost::json::object rendered;
+                    rendered["is_null"] = cell.is_null;
+                    rendered["text"] = html_escape(cell.text);
+                    cells.push_back(std::move(rendered));
+                }
+                rows.push_back(std::move(cells));
+            }
+            result["rows"] = std::move(rows);
+            entry["result"] = std::move(result);
+        } else {
+            entry["result"] = nullptr;
+        }
+        root[slot.slot] = std::move(entry);
+    }
+    return apply_html_safe_escapes(boost::json::serialize(boost::json::value(std::move(root))));
+}
+
 namespace {
 
 [[nodiscard]] entity_kind entity_kind_from_name(std::string_view name) {
