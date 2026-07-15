@@ -188,6 +188,58 @@ TEST_CASE("shared admission never exceeds the live 25-percent ceiling") {
     REQUIRE(static_cast<bool>(moved));
     moved.release();
     REQUIRE(admission.reserved_bytes() == 0);
+
+    {
+        auto retained = admission.try_reserve(64);
+        REQUIRE(retained.has_value());
+        REQUIRE(retained->disown() == 64);
+    }
+    REQUIRE(admission.reserved_bytes() == 64);
+    counter.subtract(64);
+    REQUIRE(admission.reserved_bytes() == 0);
+}
+
+TEST_CASE("fixed and variable DSA accounting share one exact ceiling") {
+    REQUIRE(conservative_dsa_reservation_bytes(1).value() == 8'192);
+    REQUIRE(conservative_dsa_reservation_bytes(4'096).value() == 8'192);
+    REQUIRE(conservative_dsa_reservation_bytes(4'097).value() == 12'288);
+    REQUIRE(
+        conservative_dsa_reservation_bytes(8'192, 2).value() == 16'384);
+    REQUIRE(
+        conservative_dsa_reservation_bytes(0).error()
+        == AdmissionError::InvalidReservation);
+    REQUIRE(
+        conservative_dsa_reservation_bytes(
+            (std::numeric_limits<std::uint64_t>::max)())
+            .error()
+        == AdmissionError::CounterOverflow);
+
+    const std::array<std::uint64_t, 2> fixed_payloads{1, 4'097};
+    REQUIRE(
+        conservative_fixed_dsa_reservation_bytes(
+            65'536, fixed_payloads).value()
+        == 65'536);
+    REQUIRE(
+        conservative_fixed_dsa_reservation_bytes(
+            4'096, fixed_payloads).value()
+        == 20'480);
+    REQUIRE(
+        conservative_fixed_dsa_reservation_bytes(
+            0, fixed_payloads).error()
+        == AdmissionError::InvalidReservation);
+
+    TestCounter counter{.value = 16'384};
+    TestBudget budget{.allocatable = 32'768, .total = 131'072};
+    BasicCacheAdmission admission(counter, budget);
+    const auto variable = conservative_dsa_reservation_bytes(9'000);
+    REQUIRE(variable.has_value());
+    REQUIRE(*variable == 16'384);
+    auto permit = admission.try_reserve(*variable);
+    REQUIRE(permit.has_value());
+    REQUIRE(admission.reserved_bytes() == 32'768);
+    REQUIRE_FALSE(admission.try_reserve(1).has_value());
+    permit->release();
+    REQUIRE(admission.reserved_bytes() == 16'384);
 }
 
 TEST_CASE("admission reports pressure, overflow, and file floors") {

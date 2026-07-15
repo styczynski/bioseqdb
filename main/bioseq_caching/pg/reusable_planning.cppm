@@ -38,6 +38,51 @@ enum class CoverageCanonicalKeyKindV1 : std::uint8_t {
     Generation = 2,
 };
 
+/** Binding-neutral identity of the one provider fragment supported by V1. */
+struct CoverageFragmentBindingSignatureV1 {
+    std::uint32_t format_version = 1;
+    std::uint32_t fragment_binding_ordinal = 0;
+    std::uint32_t provider_rte_occurrence_ordinal = 0;
+    std::uint32_t provider_rte_occurrence_count = 0;
+    std::uint32_t logical_relation_oid = 0;
+    std::uint32_t selected_relation_oid = 0;
+    std::uint32_t provider_id = 0;
+    std::uint32_t flags = 0;
+    CacheDigest256 binding_role_digest{};
+
+    [[nodiscard]] bool operator==(
+        const CoverageFragmentBindingSignatureV1&) const noexcept = default;
+};
+
+static_assert(std::is_standard_layout_v<CoverageFragmentBindingSignatureV1>);
+static_assert(std::is_trivially_copyable_v<
+    CoverageFragmentBindingSignatureV1>);
+
+/** Structural checks that do not depend on PostgreSQL planner memory. */
+[[nodiscard]] constexpr bool valid_coverage_fragment_binding(
+    const CoverageFragmentBindingSignatureV1& binding) noexcept {
+    return binding.format_version == 1
+        && binding.fragment_binding_ordinal == 0
+        && binding.provider_rte_occurrence_count != 0
+        && binding.provider_rte_occurrence_ordinal
+            < binding.provider_rte_occurrence_count
+        && binding.logical_relation_oid != 0
+        && binding.selected_relation_oid != 0
+        && binding.provider_id != 0
+        && binding.flags == 0;
+}
+
+enum class CoverageBindingSemanticErrorV1 : std::uint8_t {
+    InvalidKind = 1,
+    InvalidBinding,
+    InvalidPredicateBytes,
+    OutputTooSmall,
+};
+
+inline constexpr std::array<std::byte, 4> kCoverageBindingSemanticMagicV1{
+    std::byte{0x46}, std::byte{0x56}, std::byte{0x54}, std::byte{0x31}};
+inline constexpr std::size_t kCoverageBindingSemanticFixedBytesV1 = 77;
+
 /** Fail-closed canonical framing errors; callers retain the provider path. */
 enum class CoverageCanonicalKeyErrorV1 : std::uint8_t {
     InvalidKind = 1,
@@ -101,6 +146,78 @@ constexpr void append_u64_le(
 }
 
 } // namespace canonical_key_detail
+
+/**
+ * Write the cache-owned fragment-binding trailer appended after provider
+ * semantic bytes. Generation trailers additionally carry the exact already-
+ * normalized predicate bytes; domain trailers deliberately exclude Pi.
+ */
+[[nodiscard]] inline std::expected<
+    std::size_t, CoverageBindingSemanticErrorV1>
+write_coverage_binding_semantics(
+    CoverageCanonicalKeyKindV1 kind,
+    const CoverageFragmentBindingSignatureV1& binding,
+    std::span<const std::byte> normalized_predicate,
+    std::span<std::byte> output) noexcept {
+    using namespace canonical_key_detail;
+    if (!valid_kind(kind)) {
+        return std::unexpected(
+            CoverageBindingSemanticErrorV1::InvalidKind);
+    }
+    if (!valid_coverage_fragment_binding(binding)) {
+        return std::unexpected(
+            CoverageBindingSemanticErrorV1::InvalidBinding);
+    }
+    const bool generation =
+        kind == CoverageCanonicalKeyKindV1::Generation;
+    if (generation != !normalized_predicate.empty()) {
+        return std::unexpected(
+            CoverageBindingSemanticErrorV1::InvalidPredicateBytes);
+    }
+    const std::size_t predicate_frame_bytes = generation
+        ? 1U + sizeof(std::uint64_t) + normalized_predicate.size()
+        : 0U;
+    if (normalized_predicate.size()
+            > (std::numeric_limits<std::size_t>::max)()
+                - kCoverageBindingSemanticFixedBytesV1
+                - 1U - sizeof(std::uint64_t)
+        || output.size()
+            < kCoverageBindingSemanticFixedBytesV1
+                + predicate_frame_bytes) {
+        return std::unexpected(
+            CoverageBindingSemanticErrorV1::OutputTooSmall);
+    }
+
+    std::size_t offset = 0;
+    for (const std::byte value : kCoverageBindingSemanticMagicV1) {
+        output[offset++] = value;
+    }
+    const auto append_tagged_u32 = [&output, &offset](
+            std::uint8_t tag, std::uint32_t value) constexpr {
+        append_u8(output, offset, tag);
+        append_u32_le(output, offset, value);
+    };
+    append_tagged_u32(0x01, binding.format_version);
+    append_tagged_u32(0x02, binding.fragment_binding_ordinal);
+    append_tagged_u32(0x03, binding.provider_rte_occurrence_ordinal);
+    append_tagged_u32(0x04, binding.provider_rte_occurrence_count);
+    append_tagged_u32(0x05, binding.logical_relation_oid);
+    append_tagged_u32(0x06, binding.selected_relation_oid);
+    append_tagged_u32(0x07, binding.provider_id);
+    append_tagged_u32(0x08, binding.flags);
+    append_u8(output, offset, 0x09);
+    for (const std::uint8_t value : binding.binding_role_digest.bytes) {
+        append_u8(output, offset, value);
+    }
+    if (generation) {
+        append_u8(output, offset, 0x0a);
+        append_u64_le(output, offset, normalized_predicate.size());
+        for (const std::byte value : normalized_predicate) {
+            output[offset++] = value;
+        }
+    }
+    return offset;
+}
 
 /** Copy the provider-owned fixed digest after validate_path_domain succeeds. */
 [[nodiscard]] inline CacheDigest256 provider_security_digest(

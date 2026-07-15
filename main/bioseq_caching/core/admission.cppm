@@ -9,6 +9,7 @@ module;
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -24,6 +25,68 @@ enum class AdmissionError : std::uint8_t {
     SystemPressure,
     InvalidReservation,
 };
+
+/**
+ * PostgreSQL 17 DSA obtains storage in 4-KiB pages and keeps allocator
+ * metadata outside the caller's payload.  Admission deliberately rounds each
+ * allocation to a page and reserves one additional metadata page.  This is a
+ * conservative accounting contract, not an estimate of returned payload.
+ */
+inline constexpr std::uint64_t kDsaAccountingPageBytesV1 = 4ULL << 10U;
+
+/** Return a checked conservative reservation for one or more DSA allocations. */
+[[nodiscard]] inline std::expected<std::uint64_t, AdmissionError>
+conservative_dsa_reservation_bytes(
+        std::uint64_t payload_bytes,
+        std::uint64_t allocation_count = 1) noexcept {
+    if (payload_bytes == 0 || allocation_count == 0) {
+        return std::unexpected(AdmissionError::InvalidReservation);
+    }
+    const auto payload_with_rounding = checked_add(
+        payload_bytes, kDsaAccountingPageBytesV1 - 1U);
+    const auto metadata_bytes = checked_mul(
+        allocation_count, kDsaAccountingPageBytesV1);
+    if (!payload_with_rounding.has_value() || !metadata_bytes.has_value()) {
+        return std::unexpected(AdmissionError::CounterOverflow);
+    }
+    const std::uint64_t rounded_payload =
+        (*payload_with_rounding / kDsaAccountingPageBytesV1) *
+        kDsaAccountingPageBytesV1;
+    const auto reservation = checked_add(rounded_payload, *metadata_bytes);
+    if (!reservation.has_value()) {
+        return std::unexpected(AdmissionError::CounterOverflow);
+    }
+    return *reservation;
+}
+
+/**
+ * Account a bootstrap arena and its fixed allocations exactly once.  The
+ * allocator arena already contains the payloads, so the admission baseline is
+ * the larger of the arena reservation and the sum of conservative allocation
+ * reservations, never their sum.
+ */
+[[nodiscard]] inline std::expected<std::uint64_t, AdmissionError>
+conservative_fixed_dsa_reservation_bytes(
+        std::uint64_t allocator_arena_bytes,
+        std::span<const std::uint64_t> allocation_payload_bytes) noexcept {
+    if (allocator_arena_bytes == 0 || allocation_payload_bytes.empty()) {
+        return std::unexpected(AdmissionError::InvalidReservation);
+    }
+    std::uint64_t allocation_bytes = 0;
+    for (const std::uint64_t payload_bytes : allocation_payload_bytes) {
+        const auto reservation = conservative_dsa_reservation_bytes(
+            payload_bytes);
+        if (!reservation.has_value()) {
+            return std::unexpected(reservation.error());
+        }
+        const auto next = checked_add(allocation_bytes, *reservation);
+        if (!next.has_value()) {
+            return std::unexpected(AdmissionError::CounterOverflow);
+        }
+        allocation_bytes = *next;
+    }
+    return std::max(allocator_arena_bytes, allocation_bytes);
+}
 
 template <class Counter>
 concept cache_reservation_counter = requires(
@@ -92,6 +155,12 @@ public:
 
     /** Release all currently owned bytes exactly once. */
     void release() noexcept;
+
+    /** Transfer an admitted reservation into a separately tracked owner. */
+    [[nodiscard]] std::uint64_t disown() noexcept {
+        admission_ = nullptr;
+        return std::exchange(bytes_, 0);
+    }
 
 private:
     /** Transfer ownership and clear the source permit. */

@@ -1133,7 +1133,6 @@ bool build_planner_gate_nodes(
         || valid->paramid < 0) {
         return false;
     }
-
     auto* invalid = makeNode(BooleanTest);
     invalid->arg = reinterpret_cast<Expr*>(copyObject(valid));
     invalid->booltesttype = IS_NOT_TRUE;

@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/reusable_registry.cppm
- * @brief Offset-backed, provider-neutral reusable-coverage shared registry.
+ * @brief Offset-backed unified exact-result and reusable-coverage registry.
  *
  * The region contains no process pointer, PostgreSQL Node, Datum, or lock.
  * A PostgreSQL adapter allocates the exact byte count during preload and owns
@@ -30,17 +30,21 @@ import :wire;
 export namespace bioseq::cache {
 
 inline constexpr std::uint32_t kReusableRegistryMagicV1 = 0x42524347U;
-inline constexpr std::uint32_t kReusableRegistryAbiVersionV1 = 4;
-inline constexpr std::uint32_t kDefaultReusableRegistryGenerationsV1 = 256;
+inline constexpr std::uint32_t kReusableRegistryAbiVersionV1 = 8;
+inline constexpr std::uint32_t kDefaultReusableRegistryGenerationsV1 = 1'024;
 inline constexpr std::uint32_t kDefaultReusableRegistryPartitionsV1 = 16;
 inline constexpr std::uint32_t kDefaultReusableRegistryArenaBytesV1 = 16U << 20;
 inline constexpr std::uint32_t kMaximumReusableRegistryGenerationsV1 = 65'536;
 inline constexpr std::uint32_t kMaximumReusableJanitorBatchV1 = 64;
-inline constexpr std::uint32_t kMaximumReusableInvalidationScanV1 = 64;
 inline constexpr std::uint32_t kReusableReferenceOwnersPerGenerationV1 = 64;
-inline constexpr std::uint32_t kReusableDisplaySqlCapacityV1 = 4U << 10;
-inline constexpr std::uint32_t kReusableCanonicalPlanCapacityV1 = 16U << 10;
-inline constexpr std::uint32_t kReusableProducerPlanCapacityV1 = 16U << 10;
+inline constexpr std::size_t kMaximumReusableJanitorLivenessObservationsV1 =
+    static_cast<std::size_t>(kMaximumReusableJanitorBatchV1)
+    * (static_cast<std::size_t>(kReusableReferenceOwnersPerGenerationV1)
+        + 1U);
+inline constexpr std::uint32_t kMaximumReusableInvalidationScanV1 = 64;
+inline constexpr std::uint32_t kReusableDisplaySqlCapacityV1 = 1U << 20;
+inline constexpr std::uint32_t kReusableCanonicalPlanCapacityV1 = 4U << 20;
+inline constexpr std::uint32_t kReusableProducerPlanCapacityV1 = 4U << 20;
 inline constexpr std::uint32_t kInvalidReusableRegistrySlotV1 =
     (std::numeric_limits<std::uint32_t>::max)();
 
@@ -169,7 +173,7 @@ struct ReusableProducerIdentityV1 {
 
   [[nodiscard]] bool valid() const noexcept {
     return proc_number != kInvalidReusableRegistrySlotV1 && pid > 0 &&
-           backend_nonce != 0;
+           backend_nonce != 0 && backend_started_at_us != 0;
   }
 
   [[nodiscard]] bool
@@ -215,6 +219,35 @@ struct ReusableGenerationMetadataV1 {
   std::uint64_t logical_bytes = 0;
   std::uint64_t stored_bytes = 0;
   std::uint64_t producer_ttl_ms = 0;
+};
+
+/**
+ * One conservative capability retained outside the logical plan vector.
+ * It never contributes to metadata.dependency_count or the plan envelope.
+ * The completion count is an in-flight/publication guard only; COMPLETE hits
+ * validate the retained dependency entry against a fresh snapshot handshake.
+ */
+struct ReusableConservativeGuardV1 {
+  DependencyVectorEntryV1 dependency{};
+  std::uint64_t snapshot_completion_count = 0;
+  bool active = false;
+  std::array<std::uint8_t, 7> reserved{};
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    const bool completion_valid =
+        database_guard_requires_completion_v1(dependency)
+        ? snapshot_completion_count != 0
+        : snapshot_completion_count == 0;
+    return active && completion_valid &&
+           database_guard_entry_valid_v1(dependency) &&
+           std::all_of(reserved.begin(), reserved.end(),
+                       [](std::uint8_t value) noexcept {
+                         return value == 0;
+                       });
+  }
+
+  [[nodiscard]] bool
+  operator==(const ReusableConservativeGuardV1 &) const noexcept = default;
 };
 
 /** ABA-safe public identity; callers never persist a region address. */
@@ -291,12 +324,89 @@ struct ReusableReferenceTokenV1 {
   ReusableReferenceKindV1 kind = ReusableReferenceKindV1::None;
   bool active = false;
   std::array<std::uint8_t, 2> reserved{};
+
+  [[nodiscard]] bool
+  operator==(const ReusableReferenceTokenV1 &) const noexcept = default;
+};
+
+/** Bounded lock-stable copy of every waiter attached to one generation. */
+struct ReusableWaiterOwnerBatchV1 {
+  std::array<ReusableReferenceTokenV1,
+             kReusableReferenceOwnersPerGenerationV1>
+      waiters{};
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  std::uint32_t count = 0;
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return error == ReusableRegistryErrorV1::None &&
+           count <= waiters.size();
+  }
+};
+
+/**
+ * One lock-stable liveness subject copied before PostgreSQL probes ProcArray.
+ * Producer observations carry a generation ABA reference and full owner
+ * identity. Reference observations additionally carry the exact shared owner
+ * token, including its slot and monotonically assigned sequence.
+ */
+struct ReusableJanitorOwnerObservationV1 {
+  ReusableGenerationReferenceV1 reference{};
+  ReusableReferenceOwnerV1 owner{};
+  ReusableReferenceTokenV1 reference_token{};
+  CacheEntryKind entry_kind = CacheEntryKind::ReusableCoverage;
+  bool producer = false;
+  std::array<std::uint8_t, 6> reserved{};
+
+  /** Reject malformed, partial, and unknown-kind observations. */
+  [[nodiscard]] bool valid() const noexcept {
+    const bool known_kind = entry_kind == CacheEntryKind::ExactFinalResult ||
+                            entry_kind == CacheEntryKind::ReusableCoverage;
+    const bool reserved_clear =
+        std::all_of(reserved.begin(), reserved.end(),
+                    [](std::uint8_t value) noexcept { return value == 0; });
+    const bool token_reserved_clear = std::all_of(
+        reference_token.reserved.begin(), reference_token.reserved.end(),
+        [](std::uint8_t value) noexcept { return value == 0; });
+    if (!known_kind || !reference || reference.reserved != 0 ||
+        !owner.valid() || !reserved_clear || !token_reserved_clear) {
+      return false;
+    }
+    if (producer) {
+      return !reference_token.active && !reference_token.reference &&
+             !reference_token.owner.valid() &&
+             reference_token.owner_sequence == 0 &&
+             reference_token.owner_slot == kInvalidReusableRegistrySlotV1 &&
+             reference_token.kind == ReusableReferenceKindV1::None;
+    }
+    return reference_token.active &&
+           reference_token.reference == reference &&
+           reference_token.owner == owner &&
+           reference_token.owner_sequence != 0 &&
+           reference_token.owner_slot <
+               kReusableReferenceOwnersPerGenerationV1 &&
+           (reference_token.kind == ReusableReferenceKindV1::Waiter ||
+            reference_token.kind == ReusableReferenceKindV1::PlannerPin ||
+            reference_token.kind == ReusableReferenceKindV1::ReaderPin);
+  }
+
+  [[nodiscard]] bool
+  operator==(const ReusableJanitorOwnerObservationV1 &) const noexcept =
+      default;
 };
 
 enum class ReusableRecordMembershipV1 : std::uint32_t {
   Free = 0,
   Indexed = 1,
   Retired = 2,
+};
+
+/** Dependency-reference ownership state for one unified generation. */
+enum class ReusableDependencyReleaseStateV1 : std::uint8_t {
+  None = 0,
+  Retained = 1,
+  Pending = 2,
+  Prepared = 3,
+  Released = 4,
 };
 
 /** Open-addressed exact digest bucket; full generation bytes prove equality. */
@@ -343,8 +453,15 @@ struct ReusableSharedGenerationV1 {
   ReusableSharedByteRangeV1 canonical_generation_key{};
   ReusableSharedByteRangeV1 canonical_domain_key{};
   ReusableSharedByteRangeV1 coverage_descriptor{};
+  ReusableSharedByteRangeV1 dependency_vector{};
+  ReusableConservativeGuardV1 conservative_guard{};
   std::uint32_t allocation_offset = 0;
   std::uint32_t allocation_length = 0;
+  std::uint32_t dependency_release_cursor = 0;
+  ReusableDependencyReleaseStateV1 dependency_release_state =
+      ReusableDependencyReleaseStateV1::None;
+  std::array<std::uint8_t, 3> reserved_dependency_release{};
+  std::uint64_t dependency_release_sequence = 0;
   ReusableProducerIdentityV1 producer{};
   std::uint32_t waiter_count = 0;
   std::uint32_t planner_pin_count = 0;
@@ -367,12 +484,9 @@ struct ReusableSharedGenerationV1 {
   bool canonical_plan_truncated = false;
   bool producer_plan_truncated = false;
   std::array<std::uint8_t, 3> reserved_diagnostic{};
-  std::uint32_t display_sql_bytes = 0;
-  std::uint32_t canonical_plan_bytes = 0;
-  std::uint32_t producer_plan_bytes = 0;
-  std::array<char, kReusableDisplaySqlCapacityV1> display_sql{};
-  std::array<char, kReusableCanonicalPlanCapacityV1> canonical_plan{};
-  std::array<char, kReusableProducerPlanCapacityV1> producer_plan{};
+  ReusableSharedByteRangeV1 display_sql{};
+  ReusableSharedByteRangeV1 canonical_plan{};
+  ReusableSharedByteRangeV1 producer_plan{};
 };
 
 /** Header occupies offset zero; every other structure is layout-addressed. */
@@ -388,6 +502,7 @@ struct ReusableRegistryHeaderV1 {
   std::uint64_t next_claim_sequence = 1;
   std::uint64_t next_slot_sequence = 1;
   std::uint64_t next_reference_sequence = 1;
+  std::uint64_t next_dependency_release_sequence = 1;
   std::uint32_t free_generation_head = kInvalidReusableRegistrySlotV1;
   std::uint32_t retired_generation_head = kInvalidReusableRegistrySlotV1;
   std::uint32_t free_extent_count = 0;
@@ -567,6 +682,12 @@ free_extents(ReusableRegistryAttachmentV1 &attachment) noexcept {
       attachment, header(attachment).layout.free_extents_offset);
 }
 
+[[nodiscard]] inline const ReusableFreeExtentV1 *
+free_extents(const ReusableRegistryAttachmentV1 &attachment) noexcept {
+  return array_at<ReusableFreeExtentV1>(
+      attachment, header(attachment).layout.free_extents_offset);
+}
+
 [[nodiscard]] inline bool
 range_valid(const ReusableRegistryAttachmentV1 &attachment,
             ReusableSharedByteRangeV1 range) noexcept {
@@ -595,6 +716,18 @@ range_equal(const ReusableRegistryAttachmentV1 &attachment,
   return state == CacheEntryState::Complete ||
          state == CacheEntryState::Failed ||
          state == CacheEntryState::Invalidated;
+}
+
+/** Accept only the two wire-stable cache products from DOC0371. */
+[[nodiscard]] constexpr bool known_entry_kind(CacheEntryKind kind) noexcept {
+  return kind == CacheEntryKind::ExactFinalResult ||
+         kind == CacheEntryKind::ReusableCoverage;
+}
+
+/** Only reusable coverage participates in candidate-domain discovery. */
+[[nodiscard]] constexpr bool
+has_coverage_membership(CacheEntryKind kind) noexcept {
+  return kind == CacheEntryKind::ReusableCoverage;
 }
 
 [[nodiscard]] inline bool
@@ -705,7 +838,14 @@ reusable_registry_preload_request(
                             sizeof(ReusableSharedGenerationV1),
                alignof(ReusableFreeExtentV1));
   layout.free_extents_offset = static_cast<std::uint32_t>(cursor);
-  layout.free_extent_capacity = requested.max_generations + 1U;
+  const std::uint64_t free_extent_capacity64 =
+      static_cast<std::uint64_t>(requested.max_generations) * 4U + 4U;
+  if (free_extent_capacity64 >
+      (std::numeric_limits<std::uint32_t>::max)()) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidConfiguration);
+  }
+  layout.free_extent_capacity =
+      static_cast<std::uint32_t>(free_extent_capacity64);
   cursor = align_up(
       cursor + static_cast<std::uint64_t>(layout.free_extent_capacity) *
                    sizeof(ReusableFreeExtentV1),
@@ -757,6 +897,7 @@ validate_reusable_registry_attachment(
       shared.boot_nonce == 0 || shared.next_generation == 0 ||
       shared.next_claim_sequence == 0 || shared.next_slot_sequence == 0 ||
       shared.next_reference_sequence == 0 ||
+      shared.next_dependency_release_sequence == 0 ||
       shared.free_extent_count > shared.layout.free_extent_capacity ||
       shared.janitor_scan_cursor >= shared.config.max_generations ||
       shared.indexed_generations > shared.config.max_generations ||
@@ -832,6 +973,7 @@ startup_reusable_registry(std::span<std::byte> region, std::uint64_t boot_nonce,
   shared.next_claim_sequence = 1;
   shared.next_slot_sequence = 1;
   shared.next_reference_sequence = 1;
+  shared.next_dependency_release_sequence = 1;
   shared.free_generation_head = 0;
   shared.retired_generation_head = kInvalidReusableRegistrySlotV1;
   shared.free_extent_count = 1;
@@ -902,13 +1044,16 @@ reusable_shared_bytes(const ReusableRegistryAttachmentV1 &attachment,
   };
 }
 
-/** Immutable request copied into a newly claimed reusable generation. */
+/** Immutable request copied into a newly claimed unified generation. */
 struct ReusableClaimRequestV1 {
+  CacheEntryKind entry_kind = CacheEntryKind::ReusableCoverage;
   ReusableCoverageDirectoryKeyV1 coverage_directory_key{};
   CacheDigest256 generation_digest{};
   std::span<const std::byte> canonical_domain_key{};
   std::span<const std::byte> canonical_generation_key{};
   std::span<const std::byte> coverage_descriptor{};
+  std::span<const std::byte> dependency_vector_envelope{};
+  ReusableConservativeGuardV1 conservative_guard{};
   ReusableGenerationMetadataV1 metadata{};
   ReusableProducerIdentityV1 producer{};
   ReusableReferenceOwnerV1 reference_owner{};
@@ -930,10 +1075,63 @@ struct ReusableClaimResultV1 {
   ReusableClaimDispositionV1 disposition = ReusableClaimDispositionV1::Rejected;
   ReusableGenerationReferenceV1 reference{};
   ReusableReferenceTokenV1 token{};
+  std::array<ReusableManifestHandleV1, 2> retired_manifests{};
+  std::uint32_t retired_manifest_count = 0;
+  std::uint32_t reserved = 0;
 
   [[nodiscard]] explicit operator bool() const noexcept {
     return error == ReusableRegistryErrorV1::None &&
            disposition != ReusableClaimDispositionV1::Rejected;
+  }
+};
+
+/**
+ * ABA token for one lock-dropped dependency-release attempt. The copied
+ * envelope is bound by its byte count and payload checksum. `first_reference`
+ * is an ordinal across plan entries followed by the optional guard.
+ */
+struct ReusableDependencyReleaseTicketV1 {
+  ReusableGenerationReferenceV1 reference{};
+  ReusableManifestHandleV1 manifest{};
+  ReusableConservativeGuardV1 conservative_guard{};
+  std::uint64_t release_sequence = 0;
+  std::uint64_t payload_checksum = 0;
+  std::uint32_t first_reference = 0;
+  std::uint32_t reference_count = 0;
+  std::uint32_t dependency_count = 0;
+  std::uint32_t vector_bytes = 0;
+  std::uint32_t reserved = 0;
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return reference && release_sequence != 0 &&
+           first_reference <= reference_count &&
+           dependency_count <= kMaxDependenciesPerGeneration &&
+           reference_count ==
+               dependency_count +
+                   static_cast<std::uint32_t>(conservative_guard.active) &&
+           (conservative_guard.active
+                ? static_cast<bool>(conservative_guard)
+                : conservative_guard == ReusableConservativeGuardV1{}) &&
+           vector_bytes ==
+               dependency_vector_envelope_bytes(dependency_count) &&
+           reserved == 0;
+  }
+
+  [[nodiscard]] bool
+  operator==(const ReusableDependencyReleaseTicketV1 &) const noexcept =
+      default;
+};
+
+/** Result of copying and claiming one retired generation's release work. */
+struct ReusableDependencyReleasePreparationV1 {
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  ReusableDependencyReleaseTicketV1 ticket{};
+  std::uint32_t required_vector_bytes = 0;
+  std::uint32_t copied_vector_bytes = 0;
+
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return error == ReusableRegistryErrorV1::None && ticket &&
+           copied_vector_bytes == required_vector_bytes;
   }
 };
 
@@ -946,6 +1144,7 @@ enum class ReusableLookupModeV1 : std::uint8_t {
 /** Fixed snapshot returned without exposing the shared record address. */
 struct ReusableGenerationSnapshotV1 {
   ReusableGenerationReferenceV1 reference{};
+  CacheEntryKind entry_kind = CacheEntryKind::ReusableCoverage;
   ReusableCoverageDirectoryKeyV1 coverage_directory_key{};
   CacheEntryState state = CacheEntryState::Absent;
   CacheFailureCode failure = CacheFailureCode::None;
@@ -955,6 +1154,8 @@ struct ReusableGenerationSnapshotV1 {
   ReusableSharedByteRangeV1 canonical_generation_key{};
   ReusableSharedByteRangeV1 canonical_domain_key{};
   ReusableSharedByteRangeV1 coverage_descriptor{};
+  ReusableSharedByteRangeV1 dependency_vector{};
+  ReusableConservativeGuardV1 conservative_guard{};
   std::uint32_t waiter_count = 0;
   std::uint32_t planner_pin_count = 0;
   std::uint32_t reader_pin_count = 0;
@@ -1083,6 +1284,8 @@ struct ReusableRegistrySnapshotV1 {
   std::uint32_t free_generations = 0;
   std::uint32_t exact_occupied_buckets = 0;
   std::uint32_t coverage_occupied_buckets = 0;
+  std::uint32_t exact_final_generations = 0;
+  std::uint32_t reusable_coverage_generations = 0;
   std::uint32_t inflight_generations = 0;
   std::uint32_t complete_generations = 0;
   std::uint32_t failed_generations = 0;
@@ -1121,6 +1324,9 @@ struct ReusableGenerationDiagnosticsRowV1 {
   std::uint64_t logical_bytes = 0;
   std::uint64_t stored_bytes = 0;
   std::uint64_t producer_ttl_ms = 0;
+  std::uint64_t conservative_guard_committed_epoch = 0;
+  std::uint64_t conservative_guard_record_generation = 0;
+  std::uint64_t snapshot_completion_count = 0;
   std::uint64_t started_monotonic_ns = 0;
   std::uint64_t completed_monotonic_ns = 0;
   std::uint64_t last_access_monotonic_ns = 0;
@@ -1131,7 +1337,8 @@ struct ReusableGenerationDiagnosticsRowV1 {
   bool display_sql_truncated = false;
   bool canonical_plan_truncated = false;
   bool producer_plan_truncated = false;
-  std::array<std::uint8_t, 3> reserved_diagnostic{};
+  bool has_conservative_guard = false;
+  std::array<std::uint8_t, 2> reserved_diagnostic{};
 };
 
 /** Counts for one caller-bounded diagnostics copy. */
@@ -1142,15 +1349,21 @@ struct ReusableGenerationDiagnosticsResultV1 {
   bool truncated = false;
 };
 
-using ReusableProducerAliveV1 =
-    bool (*)(void *, const ReusableProducerIdentityV1 &) noexcept;
-using ReusableReferenceOwnerAliveV1 =
-    bool (*)(void *, const ReusableReferenceOwnerV1 &) noexcept;
+using ReusableJanitorOwnerAliveV1 =
+    bool (*)(void *, const ReusableJanitorOwnerObservationV1 &) noexcept;
 
 struct ReusableJanitorCallbacksV1 {
   void *context = nullptr;
-  ReusableProducerAliveV1 producer_alive = nullptr;
-  ReusableReferenceOwnerAliveV1 reference_owner_alive = nullptr;
+  ReusableJanitorOwnerAliveV1 owner_alive = nullptr;
+};
+
+/** Counts returned after copying one caller-bounded janitor scan window. */
+struct ReusableJanitorLivenessSnapshotV1 {
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  std::size_t count = 0;
+  std::uint32_t scan_start = 0;
+  std::uint32_t scanned_generations = 0;
+  bool truncated = false;
 };
 
 struct ReusableJanitorSweepResultV1 {
@@ -1205,6 +1418,14 @@ struct GenerationByteBundleV1 {
   ReusableSharedByteRangeV1 domain_key{};
   ReusableSharedByteRangeV1 generation_key{};
   ReusableSharedByteRangeV1 descriptor{};
+  ReusableSharedByteRangeV1 dependency_vector{};
+};
+
+/** Three independently replaceable diagnostic arena allocations. */
+struct DiagnosticByteBundleV1 {
+  ReusableSharedByteRangeV1 display_sql{};
+  ReusableSharedByteRangeV1 canonical_plan{};
+  ReusableSharedByteRangeV1 producer_plan{};
 };
 
 [[nodiscard]] inline std::uint32_t
@@ -1410,8 +1631,10 @@ free_arena_bytes(ReusableRegistryAttachmentV1 &attachment,
 copy_generation_bytes(ReusableRegistryAttachmentV1 &attachment,
                       std::span<const std::byte> domain_key,
                       std::span<const std::byte> generation_key,
-                      std::span<const std::byte> descriptor) noexcept {
-  if (domain_key.empty() || generation_key.empty()) {
+                      std::span<const std::byte> descriptor,
+                      std::span<const std::byte>
+                          dependency_vector_envelope) noexcept {
+  if (generation_key.empty()) {
     return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
   }
   if (domain_key.size() > kMaxCoverageDomainKeyBytes ||
@@ -1421,8 +1644,14 @@ copy_generation_bytes(ReusableRegistryAttachmentV1 &attachment,
   if (descriptor.size() > kMaxProviderRecipeBytes) {
     return std::unexpected(ReusableRegistryErrorV1::DescriptorTooLarge);
   }
+  const DependencyVectorEnvelopeResultV1 dependency_vector_validation =
+      validate_dependency_vector_envelope(dependency_vector_envelope);
+  if (!dependency_vector_validation) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
   const std::uint64_t total64 =
-      domain_key.size() + generation_key.size() + descriptor.size();
+      domain_key.size() + generation_key.size() + descriptor.size() +
+      dependency_vector_envelope.size();
   if (total64 == 0 || total64 > (std::numeric_limits<std::uint32_t>::max)()) {
     return std::unexpected(ReusableRegistryErrorV1::ByteArenaFull);
   }
@@ -1434,11 +1663,6 @@ copy_generation_bytes(ReusableRegistryAttachmentV1 &attachment,
 
   GenerationByteBundleV1 bundle{
       .allocation = *allocation,
-      .domain_key =
-          {
-              .offset = allocation->offset,
-              .length = static_cast<std::uint32_t>(domain_key.size()),
-          },
       .generation_key =
           {
               .offset = allocation->offset +
@@ -1446,20 +1670,38 @@ copy_generation_bytes(ReusableRegistryAttachmentV1 &attachment,
               .length = static_cast<std::uint32_t>(generation_key.size()),
           },
   };
+  if (!domain_key.empty()) {
+    bundle.domain_key = ReusableSharedByteRangeV1{
+        .offset = allocation->offset,
+        .length = static_cast<std::uint32_t>(domain_key.size()),
+    };
+  }
   if (!descriptor.empty()) {
     bundle.descriptor = ReusableSharedByteRangeV1{
         .offset = bundle.generation_key.offset + bundle.generation_key.length,
         .length = static_cast<std::uint32_t>(descriptor.size()),
     };
   }
-  std::memcpy(attachment.region.data() + bundle.domain_key.offset,
-              domain_key.data(), domain_key.size());
+  bundle.dependency_vector = ReusableSharedByteRangeV1{
+      .offset = bundle.generation_key.offset + bundle.generation_key.length +
+                static_cast<std::uint32_t>(descriptor.size()),
+      .length = static_cast<std::uint32_t>(dependency_vector_envelope.size()),
+  };
+  std::memset(attachment.region.data() + allocation->offset, 0,
+              allocation->length);
+  if (!domain_key.empty()) {
+    std::memcpy(attachment.region.data() + bundle.domain_key.offset,
+                domain_key.data(), domain_key.size());
+  }
   std::memcpy(attachment.region.data() + bundle.generation_key.offset,
               generation_key.data(), generation_key.size());
   if (!descriptor.empty()) {
     std::memcpy(attachment.region.data() + bundle.descriptor.offset,
                 descriptor.data(), descriptor.size());
   }
+  std::memcpy(attachment.region.data() + bundle.dependency_vector.offset,
+              dependency_vector_envelope.data(),
+              dependency_vector_envelope.size());
   return bundle;
 }
 
@@ -1509,11 +1751,48 @@ make_reference(const ReusableSharedGenerationV1 &generation,
   };
 }
 
+/** Copy one in-flight producer as a generation-bound liveness subject. */
+[[nodiscard]] inline ReusableJanitorOwnerObservationV1
+make_producer_observation(const ReusableSharedGenerationV1 &generation,
+                          std::uint32_t slot) noexcept {
+  return ReusableJanitorOwnerObservationV1{
+      .reference = make_reference(generation, slot),
+      .owner = generation.producer,
+      .entry_kind = generation.entry_kind,
+      .producer = true,
+  };
+}
+
+/** Copy one active reference owner with its complete ABA release token. */
+[[nodiscard]] inline ReusableJanitorOwnerObservationV1
+make_reference_owner_observation(
+    const ReusableSharedGenerationV1 &generation, std::uint32_t slot,
+    const ReusableSharedReferenceOwnerV1 &shared_owner,
+    std::uint32_t owner_slot) noexcept {
+  const ReusableGenerationReferenceV1 reference =
+      make_reference(generation, slot);
+  const ReusableReferenceTokenV1 token{
+      .reference = reference,
+      .owner = shared_owner.owner,
+      .owner_sequence = shared_owner.owner_sequence,
+      .owner_slot = owner_slot,
+      .kind = shared_owner.kind,
+      .active = shared_owner.active,
+  };
+  return ReusableJanitorOwnerObservationV1{
+      .reference = reference,
+      .owner = shared_owner.owner,
+      .reference_token = token,
+      .entry_kind = generation.entry_kind,
+  };
+}
+
 [[nodiscard]] inline ReusableGenerationSnapshotV1
 make_snapshot(const ReusableSharedGenerationV1 &generation,
               std::uint32_t slot) noexcept {
   return ReusableGenerationSnapshotV1{
       .reference = make_reference(generation, slot),
+      .entry_kind = generation.entry_kind,
       .coverage_directory_key = generation.coverage_directory_key,
       .state = generation.state,
       .failure = generation.failure,
@@ -1523,6 +1802,8 @@ make_snapshot(const ReusableSharedGenerationV1 &generation,
       .canonical_generation_key = generation.canonical_generation_key,
       .canonical_domain_key = generation.canonical_domain_key,
       .coverage_descriptor = generation.coverage_descriptor,
+      .dependency_vector = generation.dependency_vector,
+      .conservative_guard = generation.conservative_guard,
       .waiter_count = generation.waiter_count,
       .planner_pin_count = generation.planner_pin_count,
       .reader_pin_count = generation.reader_pin_count,
@@ -1565,6 +1846,17 @@ make_diagnostics_row(const ReusableSharedGenerationV1 &generation,
       .logical_bytes = generation.metadata.logical_bytes,
       .stored_bytes = generation.metadata.stored_bytes,
       .producer_ttl_ms = generation.metadata.producer_ttl_ms,
+      .conservative_guard_committed_epoch =
+          generation.conservative_guard.active
+              ? generation.conservative_guard.dependency.version
+                    .committed_epoch
+              : 0,
+      .conservative_guard_record_generation =
+          generation.conservative_guard.active
+              ? generation.conservative_guard.dependency.record_generation
+              : 0,
+      .snapshot_completion_count =
+          generation.conservative_guard.snapshot_completion_count,
       .started_monotonic_ns = generation.started_monotonic_ns,
       .completed_monotonic_ns = generation.completed_monotonic_ns,
       .last_access_monotonic_ns = generation.last_access_monotonic_ns,
@@ -1574,6 +1866,7 @@ make_diagnostics_row(const ReusableSharedGenerationV1 &generation,
       .display_sql_truncated = generation.display_sql_truncated,
       .canonical_plan_truncated = generation.canonical_plan_truncated,
       .producer_plan_truncated = generation.producer_plan_truncated,
+      .has_conservative_guard = generation.conservative_guard.active,
   };
 }
 
@@ -1583,6 +1876,9 @@ link_exact_generation(ReusableRegistryAttachmentV1 &attachment,
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
   ReusableSharedGenerationV1 &generation = records[generation_slot];
+  if (!known_entry_kind(generation.entry_kind)) {
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
   const DirectoryProbeV1 probe =
       probe_exact_directory(attachment, generation.id.digest);
   if (probe.slot == kInvalidReusableRegistrySlotV1) {
@@ -1615,6 +1911,9 @@ link_coverage_generation(ReusableRegistryAttachmentV1 &attachment,
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
   ReusableSharedGenerationV1 &generation = records[generation_slot];
+  if (generation.entry_kind != CacheEntryKind::ReusableCoverage) {
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
   const DirectoryProbeV1 probe =
       probe_coverage_directory(attachment, generation.coverage_directory_key);
   if (probe.slot == kInvalidReusableRegistrySlotV1) {
@@ -1648,6 +1947,9 @@ unlink_exact_generation(ReusableRegistryAttachmentV1 &attachment,
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
   ReusableSharedGenerationV1 &generation = records[generation_slot];
+  if (!known_entry_kind(generation.entry_kind)) {
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
   const DirectoryProbeV1 probe =
       probe_exact_directory(attachment, generation.id.digest);
   if (!probe.found) {
@@ -1700,6 +2002,9 @@ unlink_coverage_generation(ReusableRegistryAttachmentV1 &attachment,
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
   ReusableSharedGenerationV1 &generation = records[generation_slot];
+  if (generation.entry_kind != CacheEntryKind::ReusableCoverage) {
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
   const DirectoryProbeV1 probe =
       probe_coverage_directory(attachment, generation.coverage_directory_key);
   if (!probe.found) {
@@ -1770,6 +2075,22 @@ unlink_coverage_generation(ReusableRegistryAttachmentV1 &attachment,
     --exact.terminal_generation_count;
   }
   release_exact(callbacks, exact_partition);
+
+  if (generation.entry_kind == CacheEntryKind::ExactFinalResult) {
+    return ReusableRegistryErrorV1::None;
+  }
+  if (generation.entry_kind != CacheEntryKind::ReusableCoverage) {
+    acquire_exact(callbacks, exact_partition);
+    ReusableExactBucketV1 &rollback =
+        exact_buckets(attachment)[exact_probe.slot];
+    if (increment) {
+      --rollback.terminal_generation_count;
+    } else {
+      ++rollback.terminal_generation_count;
+    }
+    release_exact(callbacks, exact_partition);
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
 
   const std::uint32_t coverage_partition = reusable_coverage_partition(
       attachment, generation.coverage_directory_key);
@@ -1861,12 +2182,43 @@ struct MatchingSlotV1 {
   std::uint32_t slot = kInvalidReusableRegistrySlotV1;
 };
 
+[[nodiscard]] inline bool claim_dependencies_match(
+    const ReusableRegistryAttachmentV1 &attachment,
+    const ReusableSharedGenerationV1 &generation,
+    const ReusableClaimRequestV1 &request) noexcept {
+  if (!range_equal(attachment, generation.dependency_vector,
+                   request.dependency_vector_envelope) ||
+      generation.conservative_guard.active !=
+          request.conservative_guard.active) {
+    return false;
+  }
+  if (!generation.conservative_guard.active) {
+    return generation.conservative_guard ==
+               ReusableConservativeGuardV1{} &&
+           request.conservative_guard ==
+               ReusableConservativeGuardV1{};
+  }
+  if (generation.conservative_guard.dependency !=
+      request.conservative_guard.dependency) {
+    return false;
+  }
+  const bool in_flight =
+      generation.state == CacheEntryState::Claimed ||
+      generation.state == CacheEntryState::Building;
+  return !in_flight ||
+         generation.conservative_guard.snapshot_completion_count ==
+             request.conservative_guard.snapshot_completion_count;
+}
+
 [[nodiscard]] inline MatchingSlotV1
 find_exact_current(const ReusableRegistryAttachmentV1 &attachment,
+                   CacheEntryKind entry_kind,
                    const ReusableCoverageDirectoryKeyV1 &coverage_key,
                    std::span<const std::byte> domain_key,
                    const CacheDigest256 &generation_digest,
-                   std::span<const std::byte> generation_key) noexcept {
+                   std::span<const std::byte> generation_key,
+                   const ReusableClaimRequestV1 *claim_request =
+                       nullptr) noexcept {
   const ReusableRegistryHeaderV1 &shared = header(attachment);
   const DirectoryProbeV1 probe =
       probe_exact_directory(attachment, generation_digest);
@@ -1893,16 +2245,28 @@ find_exact_current(const ReusableRegistryAttachmentV1 &attachment,
     }
     const ReusableSharedGenerationV1 &generation = records[current];
     if (generation.membership != ReusableRecordMembershipV1::Indexed ||
-        generation.entry_kind != CacheEntryKind::ReusableCoverage ||
+        !known_entry_kind(generation.entry_kind) ||
         generation.id.digest != generation_digest) {
       return MatchingSlotV1{
           .error = ReusableRegistryErrorV1::CorruptGeneration,
       };
     }
-    if (generation.coverage_directory_key == coverage_key &&
-        range_equal(attachment, generation.canonical_domain_key, domain_key) &&
+    const bool kind_matches = generation.entry_kind == entry_kind;
+    const bool coverage_identity_matches =
+        entry_kind == CacheEntryKind::ExactFinalResult
+            ? generation.coverage_directory_key.security_namespace ==
+                  coverage_key.security_namespace &&
+                  generation.coverage_directory_key.coverage_domain_digest ==
+                      CacheDigest256{}
+            : generation.coverage_directory_key == coverage_key &&
+                  range_equal(attachment, generation.canonical_domain_key,
+                              domain_key);
+    if (kind_matches && coverage_identity_matches &&
         range_equal(attachment, generation.canonical_generation_key,
-                    generation_key)) {
+                    generation_key) &&
+        (claim_request == nullptr ||
+         claim_dependencies_match(
+             attachment, generation, *claim_request))) {
       return MatchingSlotV1{.slot = current};
     }
     current = generation.next_in_exact_bucket;
@@ -1950,6 +2314,8 @@ increment_reference(ReusableRegistryAttachmentV1 &attachment,
     counter = &generation.reader_pin_count;
     break;
   case ReusableReferenceKindV1::None:
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  default:
     return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
   }
   if (*counter == (std::numeric_limits<std::uint32_t>::max)()) {
@@ -2027,26 +2393,114 @@ increment_reference(ReusableRegistryAttachmentV1 &attachment,
   return ReusableRegistryErrorV1::None;
 }
 
+/** Reject unknown/stale observability enum values before policy checks. */
+[[nodiscard]] inline bool
+write_observability_valid(WriteObservability observability) noexcept {
+  return observability == WriteObservability::None ||
+         observability == WriteObservability::ProviderComplete ||
+         observability == WriteObservability::ExecutorUtilityOnly ||
+         observability == WriteObservability::DatabaseWideFallback;
+}
+
+[[nodiscard]] inline bool conservative_guard_valid(
+    const ReusableConservativeGuardV1 &guard,
+    const ReusableGenerationMetadataV1 &metadata,
+    const ReusableSecurityNamespaceV1 &security_namespace) noexcept {
+  if (!guard.active) {
+    return guard == ReusableConservativeGuardV1{} &&
+           metadata.observability !=
+               WriteObservability::DatabaseWideFallback;
+  }
+  const DependencyVectorEntryV1 &entry = guard.dependency;
+  const bool conservative_data = metadata.observability ==
+      WriteObservability::DatabaseWideFallback;
+  const DependencyKind required_kind = conservative_data
+      ? DependencyKind::DatabaseWriteEpoch
+      : DependencyKind::DatabaseDefinitionEpoch;
+  return static_cast<bool>(guard) &&
+         database_guard_entry_valid_v1(entry) &&
+         entry.version.key.kind == required_kind &&
+         entry.version.key.database_oid == security_namespace.database_oid &&
+         entry.version.key.object_oid == security_namespace.database_oid;
+}
+
+[[nodiscard]] inline bool shared_dependency_vector_valid(
+    const ReusableRegistryAttachmentV1 &attachment,
+    const ReusableSharedGenerationV1 &generation) noexcept {
+  const std::size_t maximum_bytes =
+      dependency_vector_envelope_bytes(kMaxDependenciesPerGeneration);
+  if (!range_valid(attachment, generation.dependency_vector) ||
+      generation.dependency_vector.length > maximum_bytes) {
+    return false;
+  }
+  const std::span<const std::byte> envelope{
+      attachment.region.data() + generation.dependency_vector.offset,
+      generation.dependency_vector.length,
+  };
+  const DependencyVectorEnvelopeResultV1 validation =
+      validate_dependency_vector_envelope(envelope);
+  return validation &&
+         validation.header.entry_count == generation.metadata.dependency_count;
+}
+
+[[nodiscard]] inline std::uint32_t generation_reference_count(
+    const ReusableSharedGenerationV1 &generation) noexcept {
+  return generation.metadata.dependency_count +
+         static_cast<std::uint32_t>(generation.conservative_guard.active);
+}
+
 [[nodiscard]] inline bool
 claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
   const ReusableSecurityNamespaceV1 &security_namespace =
       request.coverage_directory_key.security_namespace;
-  return valid_reusable_security_namespace(security_namespace) &&
-         !request.canonical_domain_key.empty() &&
-         !request.canonical_generation_key.empty() &&
-         request.metadata.provider_id != 0 &&
-         request.metadata.provider_abi_version != 0 &&
-         request.metadata.provider_domain_abi_version != 0 &&
-         request.metadata.compatibility_family_id != 0 &&
-         request.metadata.dependency_count <= kMaxDependenciesPerGeneration &&
-         request.metadata.reserved == 0 &&
-         request.metadata.physical_identity.length <=
-             request.metadata.physical_identity.bytes.size() &&
-         request.metadata.observability ==
-             WriteObservability::ProviderComplete &&
-         request.producer.valid() &&
-         ((!request.pin_complete && !request.register_waiter) ||
-          request.reference_owner.valid());
+  const DependencyVectorEnvelopeResultV1 dependency_vector_validation =
+      validate_dependency_vector_envelope(
+          request.dependency_vector_envelope);
+  const bool common_valid =
+      known_entry_kind(request.entry_kind) &&
+      valid_reusable_security_namespace(security_namespace) &&
+      !request.canonical_generation_key.empty() &&
+      request.metadata.dependency_count <= kMaxDependenciesPerGeneration &&
+      dependency_vector_validation &&
+      dependency_vector_validation.header.entry_count ==
+          request.metadata.dependency_count &&
+      request.metadata.reserved == 0 &&
+      request.metadata.physical_identity.length <=
+          request.metadata.physical_identity.bytes.size() &&
+      write_observability_valid(request.metadata.observability) &&
+      conservative_guard_valid(
+          request.conservative_guard, request.metadata,
+          security_namespace) &&
+      request.producer.valid() &&
+      ((!request.pin_complete && !request.register_waiter) ||
+       request.reference_owner.valid());
+  if (!common_valid) {
+    return false;
+  }
+  if (request.entry_kind == CacheEntryKind::ReusableCoverage) {
+    return !request.canonical_domain_key.empty() &&
+           request.metadata.provider_id != 0 &&
+           request.metadata.provider_abi_version != 0 &&
+           request.metadata.provider_domain_abi_version != 0 &&
+           request.metadata.compatibility_family_id != 0 &&
+           request.metadata.observability ==
+               WriteObservability::ProviderComplete;
+  }
+  const bool provider_metadata_consistent =
+      request.metadata.provider_id == 0
+          ? request.metadata.provider_abi_version == 0 &&
+                request.metadata.provider_domain_abi_version == 0 &&
+                request.metadata.observability !=
+                    WriteObservability::ProviderComplete
+          : request.metadata.provider_abi_version != 0 &&
+                request.metadata.provider_domain_abi_version != 0 &&
+                request.metadata.observability ==
+                    WriteObservability::ProviderComplete;
+  return request.canonical_domain_key.empty() &&
+         request.coverage_descriptor.empty() &&
+         request.coverage_directory_key.coverage_domain_digest ==
+             CacheDigest256{} &&
+         provider_metadata_consistent;
 }
 
 [[nodiscard]] inline bool diagnostic_status_valid(
@@ -2093,21 +2547,228 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
                      [](std::uint8_t value) noexcept { return value == 0; });
 }
 
-[[nodiscard]] inline bool shared_diagnostic_text_valid(
+[[nodiscard]] inline bool empty_range_shape(
+    ReusableSharedByteRangeV1 range) noexcept {
+  return range.offset == 0 && range.length == 0;
+}
+
+[[nodiscard]] inline std::uint32_t diagnostic_allocation_length(
+    ReusableSharedByteRangeV1 range) noexcept {
+  const std::uint64_t aligned = align_up(range.length, 8U);
+  return aligned == 0 ||
+                 aligned > (std::numeric_limits<std::uint32_t>::max)()
+             ? 0
+             : static_cast<std::uint32_t>(aligned);
+}
+
+[[nodiscard]] inline bool diagnostic_range_layout_valid(
+    const ReusableRegistryAttachmentV1 &attachment,
+    ReusableSharedByteRangeV1 range, std::uint32_t maximum) noexcept {
+  if (range.length == 0) {
+    return range.offset == 0;
+  }
+  const std::uint32_t allocation_length =
+      diagnostic_allocation_length(range);
+  if (range.offset == 0 || range.offset % 8U != 0 ||
+      range.length > maximum || allocation_length == 0 ||
+      !range_valid(attachment, range)) {
+    return false;
+  }
+  const ReusableRegistryHeaderV1 &shared = header(attachment);
+  const std::uint64_t allocation_end =
+      static_cast<std::uint64_t>(range.offset) + allocation_length;
+  return allocation_end <=
+         static_cast<std::uint64_t>(shared.layout.byte_arena_offset) +
+             shared.config.byte_arena_bytes;
+}
+
+[[nodiscard]] inline bool diagnostic_range_valid(
+    const ReusableRegistryAttachmentV1 &attachment,
+    ReusableSharedByteRangeV1 range, std::uint32_t maximum) noexcept {
+  return diagnostic_range_layout_valid(attachment, range, maximum) &&
+         (range.length == 0 ||
+          std::memchr(attachment.region.data() + range.offset, 0,
+                      range.length) == nullptr);
+}
+
+[[nodiscard]] inline std::span<const char> diagnostic_text_span(
+    const ReusableRegistryAttachmentV1 &attachment,
+    ReusableSharedByteRangeV1 range) noexcept {
+  if (range.length == 0) {
+    return {};
+  }
+  return {
+      reinterpret_cast<const char *>(attachment.region.data() + range.offset),
+      range.length,
+  };
+}
+
+[[nodiscard]] inline bool arena_allocations_overlap(
+    ArenaAllocationV1 left, ArenaAllocationV1 right) noexcept {
+  if (left.length == 0 || right.length == 0) {
+    return false;
+  }
+  const std::uint64_t left_end =
+      static_cast<std::uint64_t>(left.offset) + left.length;
+  const std::uint64_t right_end =
+      static_cast<std::uint64_t>(right.offset) + right.length;
+  return left.offset < right_end && right.offset < left_end;
+}
+
+[[nodiscard]] inline ArenaAllocationV1 diagnostic_allocation(
+    ReusableSharedByteRangeV1 range) noexcept {
+  return ArenaAllocationV1{
+      .offset = range.offset,
+      .length = range.length == 0 ? 0U : diagnostic_allocation_length(range),
+  };
+}
+
+[[nodiscard]] inline DiagnosticByteBundleV1 diagnostic_bundle(
+    const ReusableSharedGenerationV1 &generation) noexcept {
+  return DiagnosticByteBundleV1{
+      .display_sql = generation.display_sql,
+      .canonical_plan = generation.canonical_plan,
+      .producer_plan = generation.producer_plan,
+  };
+}
+
+[[nodiscard]] inline bool free_diagnostic_range(
+    ReusableRegistryAttachmentV1 &attachment,
+    ReusableSharedByteRangeV1 range) noexcept {
+  if (range.length == 0) {
+    return range.offset == 0;
+  }
+  if (!diagnostic_range_layout_valid(
+          attachment, range,
+          (std::numeric_limits<std::uint32_t>::max)())) {
+    return false;
+  }
+  return free_arena_bytes(attachment, diagnostic_allocation(range));
+}
+
+[[nodiscard]] inline bool free_diagnostic_bundle(
+    ReusableRegistryAttachmentV1 &attachment,
+    const DiagnosticByteBundleV1 &bundle) noexcept {
+  bool valid = true;
+  if (!free_diagnostic_range(attachment, bundle.display_sql)) {
+    valid = false;
+  }
+  if (!free_diagnostic_range(attachment, bundle.canonical_plan)) {
+    valid = false;
+  }
+  if (!free_diagnostic_range(attachment, bundle.producer_plan)) {
+    valid = false;
+  }
+  return valid;
+}
+
+[[nodiscard]] inline std::expected<ReusableSharedByteRangeV1,
+                                   ReusableRegistryErrorV1>
+copy_diagnostic_range(ReusableRegistryAttachmentV1 &attachment,
+                      std::span<const char> text) noexcept {
+  if (text.empty()) {
+    return ReusableSharedByteRangeV1{};
+  }
+  if (text.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
+  auto allocation = allocate_arena_bytes(
+      attachment, static_cast<std::uint32_t>(text.size()));
+  if (!allocation.has_value()) {
+    return std::unexpected(allocation.error());
+  }
+  std::memset(attachment.region.data() + allocation->offset, 0,
+              allocation->length);
+  std::memcpy(attachment.region.data() + allocation->offset, text.data(),
+              text.size());
+  return ReusableSharedByteRangeV1{
+      .offset = allocation->offset,
+      .length = static_cast<std::uint32_t>(text.size()),
+  };
+}
+
+[[nodiscard]] inline std::expected<DiagnosticByteBundleV1,
+                                   ReusableRegistryErrorV1>
+copy_diagnostic_bytes(ReusableRegistryAttachmentV1 &attachment,
+                      const ReusableDiagnosticTextUpdateV1 &update) noexcept {
+  DiagnosticByteBundleV1 bundle{};
+  auto display = copy_diagnostic_range(attachment, update.display_sql);
+  if (!display.has_value()) {
+    return std::unexpected(display.error());
+  }
+  bundle.display_sql = *display;
+
+  auto canonical = copy_diagnostic_range(attachment, update.canonical_plan);
+  if (!canonical.has_value()) {
+    const ReusableRegistryErrorV1 error = canonical.error();
+    return free_diagnostic_bundle(attachment, bundle)
+               ? std::unexpected(error)
+               : std::unexpected(ReusableRegistryErrorV1::CorruptLayout);
+  }
+  bundle.canonical_plan = *canonical;
+
+  auto producer = copy_diagnostic_range(attachment, update.producer_plan);
+  if (!producer.has_value()) {
+    const ReusableRegistryErrorV1 error = producer.error();
+    return free_diagnostic_bundle(attachment, bundle)
+               ? std::unexpected(error)
+               : std::unexpected(ReusableRegistryErrorV1::CorruptLayout);
+  }
+  bundle.producer_plan = *producer;
+  return bundle;
+}
+
+[[nodiscard]] inline bool shared_diagnostic_layout_valid(
+    const ReusableRegistryAttachmentV1 &attachment,
     const ReusableSharedGenerationV1 &generation) noexcept {
   if (!std::all_of(generation.reserved_diagnostic.begin(),
                    generation.reserved_diagnostic.end(),
                    [](std::uint8_t value) noexcept { return value == 0; }) ||
-      generation.display_sql_bytes > generation.display_sql.size() ||
-      generation.canonical_plan_bytes > generation.canonical_plan.size() ||
-      generation.producer_plan_bytes > generation.producer_plan.size()) {
+      !diagnostic_range_layout_valid(attachment, generation.display_sql,
+                                     kReusableDisplaySqlCapacityV1) ||
+      !diagnostic_range_layout_valid(attachment, generation.canonical_plan,
+                                     kReusableCanonicalPlanCapacityV1) ||
+      !diagnostic_range_layout_valid(attachment, generation.producer_plan,
+                                     kReusableProducerPlanCapacityV1)) {
     return false;
   }
-  const bool has_sql = generation.display_sql_bytes != 0;
-  const std::span<const char> canonical_plan{
-      generation.canonical_plan.data(), generation.canonical_plan_bytes};
-  const std::span<const char> producer_plan{
-      generation.producer_plan.data(), generation.producer_plan_bytes};
+  const ArenaAllocationV1 identity{
+      .offset = generation.allocation_offset,
+      .length = generation.allocation_length,
+  };
+  const ArenaAllocationV1 display =
+      diagnostic_allocation(generation.display_sql);
+  const ArenaAllocationV1 canonical =
+      diagnostic_allocation(generation.canonical_plan);
+  const ArenaAllocationV1 producer =
+      diagnostic_allocation(generation.producer_plan);
+  return !arena_allocations_overlap(identity, display) &&
+         !arena_allocations_overlap(identity, canonical) &&
+         !arena_allocations_overlap(identity, producer) &&
+         !arena_allocations_overlap(display, canonical) &&
+         !arena_allocations_overlap(display, producer) &&
+         !arena_allocations_overlap(canonical, producer);
+}
+
+[[nodiscard]] inline bool shared_diagnostic_text_valid(
+    const ReusableRegistryAttachmentV1 &attachment,
+    const ReusableSharedGenerationV1 &generation) noexcept {
+  if (!shared_diagnostic_layout_valid(attachment, generation) ||
+      !diagnostic_range_valid(attachment, generation.display_sql,
+                              kReusableDisplaySqlCapacityV1) ||
+      !diagnostic_range_valid(attachment, generation.canonical_plan,
+                              kReusableCanonicalPlanCapacityV1) ||
+      !diagnostic_range_valid(attachment, generation.producer_plan,
+                              kReusableProducerPlanCapacityV1)) {
+    return false;
+  }
+  const std::span<const char> display_sql =
+      diagnostic_text_span(attachment, generation.display_sql);
+  const std::span<const char> canonical_plan =
+      diagnostic_text_span(attachment, generation.canonical_plan);
+  const std::span<const char> producer_plan =
+      diagnostic_text_span(attachment, generation.producer_plan);
+  const bool has_sql = !display_sql.empty();
   const bool analyzed_state_valid =
       generation.plan_snapshot_status !=
           ReusablePlanSnapshotStatusV1::Analyzed ||
@@ -2117,19 +2778,20 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
       generation.state == CacheEntryState::Invalidated ||
       generation.state == CacheEntryState::Evicting;
   if ((!has_sql && generation.display_sql_truncated) ||
-      (has_sql && std::memchr(generation.display_sql.data(), 0,
-                             generation.display_sql_bytes) != nullptr) ||
+      !diagnostic_text_valid(display_sql, kReusableDisplaySqlCapacityV1) ||
       !diagnostic_capture_valid(
-          canonical_plan, generation.canonical_plan.size(),
+          canonical_plan, kReusableCanonicalPlanCapacityV1,
           generation.canonical_plan_snapshot_status,
           generation.canonical_plan_truncated, false) ||
       !diagnostic_capture_valid(
-          producer_plan, generation.producer_plan.size(),
+          producer_plan, kReusableProducerPlanCapacityV1,
           generation.plan_snapshot_status,
           generation.producer_plan_truncated, true) ||
       (generation.plan_snapshot_status ==
            ReusablePlanSnapshotStatusV1::Analyzed &&
        !analyzed_state_valid) ||
+      (generation.state == CacheEntryState::Absent &&
+       (has_sql || !canonical_plan.empty() || !producer_plan.empty())) ||
       (generation.state == CacheEntryState::Claimed &&
        (has_sql || !canonical_plan.empty() || !producer_plan.empty())) ||
       ((generation.state == CacheEntryState::Building ||
@@ -2139,41 +2801,20 @@ claim_request_valid(const ReusableClaimRequestV1 &request) noexcept {
   return true;
 }
 
-/** Copy a previously validated diagnostic update while the exact lock is held. */
+/** Publish already-copied ranges after final ABA and ownership validation. */
 inline void assign_diagnostic_text_unchecked(
     ReusableSharedGenerationV1 &generation,
+    const DiagnosticByteBundleV1 &bundle,
     const ReusableDiagnosticTextUpdateV1 &update) noexcept {
-  std::fill(generation.display_sql.begin(), generation.display_sql.end(), 0);
-  std::fill(generation.canonical_plan.begin(),
-            generation.canonical_plan.end(), 0);
-  std::fill(generation.producer_plan.begin(), generation.producer_plan.end(),
-            0);
-  std::copy(update.display_sql.begin(), update.display_sql.end(),
-            generation.display_sql.begin());
-  std::copy(update.canonical_plan.begin(), update.canonical_plan.end(),
-            generation.canonical_plan.begin());
-  std::copy(update.producer_plan.begin(), update.producer_plan.end(),
-            generation.producer_plan.begin());
-  generation.display_sql_bytes =
-      static_cast<std::uint32_t>(update.display_sql.size());
-  generation.canonical_plan_bytes =
-      static_cast<std::uint32_t>(update.canonical_plan.size());
-  generation.producer_plan_bytes =
-      static_cast<std::uint32_t>(update.producer_plan.size());
+  generation.display_sql = bundle.display_sql;
+  generation.canonical_plan = bundle.canonical_plan;
+  generation.producer_plan = bundle.producer_plan;
   generation.display_sql_truncated = update.display_sql_truncated;
   generation.canonical_plan_truncated = update.canonical_plan_truncated;
   generation.producer_plan_truncated = update.producer_plan_truncated;
   generation.canonical_plan_snapshot_status =
       update.canonical_plan_status;
   generation.plan_snapshot_status = update.plan_status;
-}
-
-[[nodiscard]] inline bool
-write_observability_valid(WriteObservability observability) noexcept {
-  return observability == WriteObservability::None ||
-         observability == WriteObservability::ProviderComplete ||
-         observability == WriteObservability::ExecutorUtilityOnly ||
-         observability == WriteObservability::DatabaseWideFallback;
 }
 
 [[nodiscard]] inline bool invalidation_selector_valid(
@@ -2263,14 +2904,223 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
                  consumer_ttl_ms, now_ns);
 }
 
+struct AdmissionVictimSelectionV1 {
+  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
+  ReusableGenerationReferenceV1 reference{};
+  bool bucket_full = false;
+};
+
+[[nodiscard]] inline std::uint8_t admission_victim_priority(
+    const ReusableSharedGenerationV1 &generation,
+    std::uint64_t now_monotonic_ns) noexcept {
+  if (generation.state == CacheEntryState::Complete &&
+      completed_generation_expired(
+          generation, (std::numeric_limits<std::uint64_t>::max)(),
+          now_monotonic_ns)) {
+    return 0;
+  }
+  if (generation.state == CacheEntryState::Invalidated) {
+    return 1;
+  }
+  if (generation.state == CacheEntryState::Failed) {
+    return 2;
+  }
+  return generation.state == CacheEntryState::Complete ? 3 : 4;
+}
+
+[[nodiscard]] inline bool admission_victim_precedes(
+    const ReusableSharedGenerationV1 &candidate, std::uint32_t candidate_slot,
+    const ReusableSharedGenerationV1 &current, std::uint32_t current_slot,
+    std::uint64_t now_monotonic_ns) noexcept {
+  const std::uint8_t candidate_priority =
+      admission_victim_priority(candidate, now_monotonic_ns);
+  const std::uint8_t current_priority =
+      admission_victim_priority(current, now_monotonic_ns);
+  if (candidate_priority != current_priority) {
+    return candidate_priority < current_priority;
+  }
+  if (candidate.last_access_monotonic_ns != current.last_access_monotonic_ns) {
+    return candidate.last_access_monotonic_ns <
+           current.last_access_monotonic_ns;
+  }
+  if (candidate.id.claim_sequence != current.id.claim_sequence) {
+    return candidate.id.claim_sequence < current.id.claim_sequence;
+  }
+  return candidate_slot < current_slot;
+}
+
+[[nodiscard]] inline bool admission_victim_eligible(
+    const ReusableSharedGenerationV1 &generation) noexcept {
+  return generation.membership == ReusableRecordMembershipV1::Indexed &&
+         terminal_state(generation.state) && generation.waiter_count == 0 &&
+         generation.planner_pin_count == 0 &&
+         generation.reader_pin_count == 0;
+}
+
+/** Select without mutation while the exact partition is held. */
+[[nodiscard]] inline AdmissionVictimSelectionV1
+select_exact_admission_victim(ReusableRegistryAttachmentV1 &attachment,
+                              const CacheDigest256 &digest,
+                              std::uint64_t now_monotonic_ns) noexcept {
+  AdmissionVictimSelectionV1 result{};
+  const DirectoryProbeV1 probe = probe_exact_directory(attachment, digest);
+  if (!probe.found) {
+    return result;
+  }
+  const ReusableExactBucketV1 &bucket = exact_buckets(attachment)[probe.slot];
+  if (bucket.generation_count > kMaxGenerationsPerExactDigest) {
+    result.error = ReusableRegistryErrorV1::CorruptDirectory;
+    return result;
+  }
+  if (bucket.generation_count < kMaxGenerationsPerExactDigest) {
+    return result;
+  }
+  result.bucket_full = true;
+  if (bucket.terminal_generation_count == 0) {
+    return result;
+  }
+
+  const ReusableRegistryHeaderV1 &shared = header(attachment);
+  ReusableSharedGenerationV1 *records = generations(attachment);
+  std::uint32_t current = bucket.first_generation;
+  std::uint32_t selected = kInvalidReusableRegistrySlotV1;
+  for (std::uint32_t visited = 0; visited < bucket.generation_count;
+       ++visited) {
+    if (current == kInvalidReusableRegistrySlotV1 ||
+        current >= shared.config.max_generations) {
+      result.error = ReusableRegistryErrorV1::CorruptDirectory;
+      return result;
+    }
+    const ReusableSharedGenerationV1 &generation = records[current];
+    if (generation.membership != ReusableRecordMembershipV1::Indexed ||
+        !known_entry_kind(generation.entry_kind) ||
+        generation.id.digest != digest) {
+      result.error = ReusableRegistryErrorV1::CorruptDirectory;
+      return result;
+    }
+    if (admission_victim_eligible(generation) &&
+        (selected == kInvalidReusableRegistrySlotV1 ||
+         admission_victim_precedes(generation, current, records[selected],
+                                   selected, now_monotonic_ns))) {
+      selected = current;
+    }
+    current = generation.next_in_exact_bucket;
+  }
+  if (current != kInvalidReusableRegistrySlotV1) {
+    result.error = ReusableRegistryErrorV1::CorruptDirectory;
+    return result;
+  }
+  if (selected != kInvalidReusableRegistrySlotV1) {
+    result.reference = make_reference(records[selected], selected);
+  }
+  return result;
+}
+
+/** Select without mutation while the coverage partition is held. */
+[[nodiscard]] inline AdmissionVictimSelectionV1
+select_coverage_admission_victim(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableCoverageDirectoryKeyV1 &key,
+    std::uint64_t now_monotonic_ns) noexcept {
+  AdmissionVictimSelectionV1 result{};
+  const DirectoryProbeV1 probe = probe_coverage_directory(attachment, key);
+  if (!probe.found) {
+    return result;
+  }
+  const ReusableCoverageBucketV1 &bucket =
+      coverage_buckets(attachment)[probe.slot];
+  if (bucket.generation_count > kMaxCoverageGenerationsPerDomain) {
+    result.error = ReusableRegistryErrorV1::CorruptDirectory;
+    return result;
+  }
+  if (bucket.generation_count < kMaxCoverageGenerationsPerDomain) {
+    return result;
+  }
+  result.bucket_full = true;
+  if (bucket.terminal_generation_count == 0) {
+    return result;
+  }
+
+  const ReusableRegistryHeaderV1 &shared = header(attachment);
+  ReusableSharedGenerationV1 *records = generations(attachment);
+  std::uint32_t current = bucket.first_generation;
+  std::uint32_t selected = kInvalidReusableRegistrySlotV1;
+  for (std::uint32_t visited = 0; visited < bucket.generation_count;
+       ++visited) {
+    if (current == kInvalidReusableRegistrySlotV1 ||
+        current >= shared.config.max_generations) {
+      result.error = ReusableRegistryErrorV1::CorruptDirectory;
+      return result;
+    }
+    const ReusableSharedGenerationV1 &generation = records[current];
+    if (generation.membership != ReusableRecordMembershipV1::Indexed ||
+        generation.entry_kind != CacheEntryKind::ReusableCoverage ||
+        generation.coverage_directory_key != key) {
+      result.error = ReusableRegistryErrorV1::CorruptDirectory;
+      return result;
+    }
+    if (admission_victim_eligible(generation) &&
+        (selected == kInvalidReusableRegistrySlotV1 ||
+         admission_victim_precedes(generation, current, records[selected],
+                                   selected, now_monotonic_ns))) {
+      selected = current;
+    }
+    current = generation.next_in_coverage_bucket;
+  }
+  if (current != kInvalidReusableRegistrySlotV1) {
+    result.error = ReusableRegistryErrorV1::CorruptDirectory;
+    return result;
+  }
+  if (selected != kInvalidReusableRegistrySlotV1) {
+    result.reference = make_reference(records[selected], selected);
+  }
+  return result;
+}
+
+[[nodiscard]] inline bool admission_victim_reduces_coverage_bucket(
+    const ReusableRegistryAttachmentV1 &attachment,
+    const ReusableGenerationReferenceV1 &reference,
+    const ReusableCoverageDirectoryKeyV1 &key) noexcept {
+  if (!reference ||
+      reference.generation_slot >= header(attachment).config.max_generations) {
+    return false;
+  }
+  const ReusableSharedGenerationV1 &generation =
+      generations(attachment)[reference.generation_slot];
+  return reference_matches(generation, reference) &&
+         generation.entry_kind == CacheEntryKind::ReusableCoverage &&
+         generation.coverage_directory_key == key;
+}
+
+[[nodiscard]] inline bool remember_claim_retired_manifest(
+    ReusableClaimResultV1 &result,
+    const ReusableManifestHandleV1 &manifest) noexcept {
+  if (!manifest) {
+    return true;
+  }
+  if (result.retired_manifest_count >= result.retired_manifests.size()) {
+    return false;
+  }
+  result.retired_manifests[result.retired_manifest_count++] = manifest;
+  return true;
+}
+
 } // namespace reusable_registry_detail
 
-/**
- * Collision-safe exact-current lookup. The caller holds shared membership;
- * this function takes only the exact partition through the supplied callback.
- */
-[[nodiscard]] inline ReusableLookupResultV1 lookup_reusable_current(
+[[nodiscard]] inline std::expected<ReusableManifestHandleV1,
+                                   ReusableRegistryErrorV1>
+retire_reusable_generation(
     ReusableRegistryAttachmentV1 &attachment,
+    const ReusableGenerationReferenceV1 &reference,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept;
+
+/**
+ * Collision-safe current-generation lookup for either cache product. The
+ * caller holds shared membership; only the exact partition is acquired.
+ */
+[[nodiscard]] inline ReusableLookupResultV1 lookup_cache_current(
+    ReusableRegistryAttachmentV1 &attachment,
+    CacheEntryKind entry_kind,
     const ReusableCoverageDirectoryKeyV1 &coverage_key,
     std::span<const std::byte> domain_key,
     const CacheDigest256 &generation_digest,
@@ -2282,7 +3132,7 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   const ReusableRegistryErrorV1 attachment_error =
       validate_reusable_registry_attachment(attachment);
   if (attachment_error != ReusableRegistryErrorV1::None || !callbacks.valid() ||
-      domain_key.empty() || generation_key.empty() ||
+      !known_entry_kind(entry_kind) || generation_key.empty() ||
       (mode != ReusableLookupModeV1::Observe && !reference_owner.valid())) {
     result.error = attachment_error != ReusableRegistryErrorV1::None
                        ? attachment_error
@@ -2291,8 +3141,13 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   }
   const ReusableSecurityNamespaceV1 &security_namespace =
       coverage_key.security_namespace;
+  const bool kind_identity_valid =
+      entry_kind == CacheEntryKind::ReusableCoverage
+          ? !domain_key.empty()
+          : domain_key.empty() &&
+                coverage_key.coverage_domain_digest == CacheDigest256{};
   if (!valid_reusable_security_namespace(security_namespace) ||
-      domain_key.size() > kMaxCoverageDomainKeyBytes ||
+      !kind_identity_valid || domain_key.size() > kMaxCoverageDomainKeyBytes ||
       generation_key.size() > kMaxCanonicalKeyBytes) {
     result.error = ReusableRegistryErrorV1::InvalidArgument;
     return result;
@@ -2300,8 +3155,9 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   const std::uint32_t partition =
       reusable_exact_partition(attachment, generation_digest);
   acquire_exact(callbacks, partition);
-  const MatchingSlotV1 match = find_exact_current(
-      attachment, coverage_key, domain_key, generation_digest, generation_key);
+  const MatchingSlotV1 match =
+      find_exact_current(attachment, entry_kind, coverage_key, domain_key,
+                         generation_digest, generation_key);
   if (match.error != ReusableRegistryErrorV1::None) {
     release_exact(callbacks, partition);
     result.error = match.error;
@@ -2328,6 +3184,20 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   }
   release_exact(callbacks, partition);
   return result;
+}
+
+/** Reusable-coverage convenience overload retaining the provider API shape. */
+[[nodiscard]] inline ReusableLookupResultV1 lookup_reusable_current(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableCoverageDirectoryKeyV1 &coverage_key,
+    std::span<const std::byte> domain_key,
+    const CacheDigest256 &generation_digest,
+    std::span<const std::byte> generation_key, ReusableLookupModeV1 mode,
+    const ReusableReferenceOwnerV1 &reference_owner,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+  return lookup_cache_current(
+      attachment, CacheEntryKind::ReusableCoverage, coverage_key, domain_key,
+      generation_digest, generation_key, mode, reference_owner, callbacks);
 }
 
 /**
@@ -2365,8 +3235,9 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
       reusable_exact_partition(attachment, request.generation_digest);
   acquire_exact(callbacks, exact_partition);
   const MatchingSlotV1 existing = find_exact_current(
-      attachment, request.coverage_directory_key, request.canonical_domain_key,
-      request.generation_digest, request.canonical_generation_key);
+      attachment, request.entry_kind, request.coverage_directory_key,
+      request.canonical_domain_key, request.generation_digest,
+      request.canonical_generation_key, &request);
   if (existing.error == ReusableRegistryErrorV1::None) {
     ReusableSharedGenerationV1 &generation =
         generations(attachment)[existing.slot];
@@ -2411,35 +3282,15 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
     result.error = existing.error;
     return result;
   }
-  const DirectoryProbeV1 exact_probe =
-      probe_exact_directory(attachment, request.generation_digest);
-  if (exact_probe.found &&
-      exact_buckets(attachment)[exact_probe.slot].generation_count >=
-          kMaxGenerationsPerExactDigest) {
-    release_exact(callbacks, exact_partition);
-    result.error = ReusableRegistryErrorV1::ExactBucketFull;
-    return result;
-  }
   release_exact(callbacks, exact_partition);
 
+  const bool coverage_membership =
+      has_coverage_membership(request.entry_kind);
   const std::uint32_t coverage_partition =
-      reusable_coverage_partition(attachment, request.coverage_directory_key);
-  acquire_coverage(callbacks, coverage_partition);
-  const DirectoryProbeV1 coverage_probe =
-      probe_coverage_directory(attachment, request.coverage_directory_key);
-  if (coverage_probe.found &&
-      coverage_buckets(attachment)[coverage_probe.slot].generation_count >=
-          kMaxCoverageGenerationsPerDomain) {
-    release_coverage(callbacks, coverage_partition);
-    result.error = ReusableRegistryErrorV1::CoverageBucketFull;
-    return result;
-  }
-  if (coverage_probe.slot == kInvalidReusableRegistrySlotV1) {
-    release_coverage(callbacks, coverage_partition);
-    result.error = ReusableRegistryErrorV1::DirectoryFull;
-    return result;
-  }
-  release_coverage(callbacks, coverage_partition);
+      coverage_membership
+          ? reusable_coverage_partition(attachment,
+                                        request.coverage_directory_key)
+          : 0;
 
   auto record_slot = allocate_generation_record(attachment);
   if (!record_slot.has_value()) {
@@ -2448,7 +3299,8 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   }
   auto bundle = copy_generation_bytes(attachment, request.canonical_domain_key,
                                       request.canonical_generation_key,
-                                      request.coverage_descriptor);
+                                      request.coverage_descriptor,
+                                      request.dependency_vector_envelope);
   if (!bundle.has_value()) {
     return_generation_record(attachment, *record_slot);
     result.error = bundle.error();
@@ -2469,7 +3321,7 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
   const std::uint64_t slot_sequence = generation.slot_sequence;
   generation = ReusableSharedGenerationV1{
       .membership = ReusableRecordMembershipV1::Indexed,
-      .entry_kind = CacheEntryKind::ReusableCoverage,
+      .entry_kind = request.entry_kind,
       .state = CacheEntryState::Claimed,
       .slot_sequence = slot_sequence,
       .id =
@@ -2483,19 +3335,96 @@ completed_generation_expired(const ReusableSharedGenerationV1 &generation,
       .canonical_generation_key = bundle->generation_key,
       .canonical_domain_key = bundle->domain_key,
       .coverage_descriptor = bundle->descriptor,
+      .dependency_vector = bundle->dependency_vector,
+      .conservative_guard = request.conservative_guard,
       .allocation_offset = bundle->allocation.offset,
       .allocation_length = bundle->allocation.length,
+      .dependency_release_state =
+          ReusableDependencyReleaseStateV1::Retained,
       .producer = request.producer,
       .started_monotonic_ns = request.started_monotonic_ns,
       .last_access_monotonic_ns = request.started_monotonic_ns,
       .metadata = request.metadata,
   };
 
+  const auto discard_provisional_generation = [
+      &attachment, &bundle, &record_slot]() noexcept {
+    static_cast<void>(free_arena_bytes(attachment, bundle->allocation));
+    return_generation_record(attachment, *record_slot);
+  };
+
+  acquire_exact(callbacks, exact_partition);
+  const AdmissionVictimSelectionV1 exact_victim =
+      select_exact_admission_victim(attachment, request.generation_digest,
+                                    request.started_monotonic_ns);
+  release_exact(callbacks, exact_partition);
+  if (exact_victim.error != ReusableRegistryErrorV1::None) {
+    discard_provisional_generation();
+    result.error = exact_victim.error;
+    return result;
+  }
+
+  AdmissionVictimSelectionV1 coverage_victim{};
+  if (coverage_membership) {
+    acquire_coverage(callbacks, coverage_partition);
+    coverage_victim = select_coverage_admission_victim(
+        attachment, request.coverage_directory_key,
+        request.started_monotonic_ns);
+    release_coverage(callbacks, coverage_partition);
+    if (coverage_victim.error != ReusableRegistryErrorV1::None) {
+      discard_provisional_generation();
+      result.error = coverage_victim.error;
+      return result;
+    }
+  }
+
+  if (exact_victim.bucket_full && !exact_victim.reference) {
+    discard_provisional_generation();
+    result.error = ReusableRegistryErrorV1::ExactBucketFull;
+    return result;
+  }
+  const bool exact_victim_reduces_coverage =
+      coverage_membership && exact_victim.reference &&
+      admission_victim_reduces_coverage_bucket(
+          attachment, exact_victim.reference,
+          request.coverage_directory_key);
+  if (coverage_victim.bucket_full && !exact_victim_reduces_coverage &&
+      !coverage_victim.reference) {
+    discard_provisional_generation();
+    result.error = ReusableRegistryErrorV1::CoverageBucketFull;
+    return result;
+  }
+
+  std::array<ReusableGenerationReferenceV1, 2> victims{};
+  std::size_t victim_count = 0;
+  if (exact_victim.reference) {
+    victims[victim_count++] = exact_victim.reference;
+  }
+  if (coverage_victim.bucket_full && !exact_victim_reduces_coverage &&
+      coverage_victim.reference &&
+      (victim_count == 0 || victims[0] != coverage_victim.reference)) {
+    victims[victim_count++] = coverage_victim.reference;
+  }
+  for (std::size_t index = 0; index < victim_count; ++index) {
+    auto retired =
+        retire_reusable_generation(attachment, victims[index], callbacks);
+    if (!retired.has_value()) {
+      discard_provisional_generation();
+      result.error = retired.error();
+      return result;
+    }
+    if (!remember_claim_retired_manifest(result, *retired)) {
+      discard_provisional_generation();
+      result.error = ReusableRegistryErrorV1::CorruptLayout;
+      return result;
+    }
+  }
+
   acquire_exact(callbacks, exact_partition);
   ReusableRegistryErrorV1 link_error =
       link_exact_generation(attachment, *record_slot);
   release_exact(callbacks, exact_partition);
-  if (link_error == ReusableRegistryErrorV1::None) {
+  if (link_error == ReusableRegistryErrorV1::None && coverage_membership) {
     acquire_coverage(callbacks, coverage_partition);
     link_error = link_coverage_generation(attachment, *record_slot);
     release_coverage(callbacks, coverage_partition);
@@ -2687,6 +3616,75 @@ wait_reusable_generation(
 }
 
 /**
+ * Copy all active waiter capabilities while the exact partition is stable.
+ * Callers that must exclude new waiters also hold exclusive membership across
+ * this snapshot and the terminal publication that consumes it.
+ */
+[[nodiscard]] inline ReusableWaiterOwnerBatchV1
+snapshot_reusable_waiter_owners(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableGenerationReferenceV1 &reference,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+  using namespace reusable_registry_detail;
+  ReusableWaiterOwnerBatchV1 result{};
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None ||
+      !callbacks.valid() || !reference ||
+      reference.generation_slot >=
+          header(attachment).config.max_generations) {
+    result.error = attachment_error != ReusableRegistryErrorV1::None
+                       ? attachment_error
+                       : ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+  const std::uint32_t partition =
+      reusable_exact_partition(attachment, reference.id.digest);
+  acquire_exact(callbacks, partition);
+  const ReusableSharedGenerationV1 &generation =
+      generations(attachment)[reference.generation_slot];
+  if (!reference_matches(generation, reference)) {
+    release_exact(callbacks, partition);
+    result.error = ReusableRegistryErrorV1::StaleReference;
+    return result;
+  }
+  for (std::uint32_t owner_slot = 0;
+       owner_slot < kReusableReferenceOwnersPerGenerationV1;
+       ++owner_slot) {
+    const ReusableSharedReferenceOwnerV1 &shared_owner =
+        generation.reference_owners[owner_slot];
+    if (!shared_owner.active ||
+        shared_owner.kind != ReusableReferenceKindV1::Waiter) {
+      continue;
+    }
+    const bool reserved_clear = std::all_of(
+        shared_owner.reserved.begin(), shared_owner.reserved.end(),
+        [](std::uint8_t value) noexcept { return value == 0; });
+    if (!shared_owner.owner.valid() || shared_owner.owner_sequence == 0 ||
+        !reserved_clear || result.count >= result.waiters.size()) {
+      release_exact(callbacks, partition);
+      result.error = ReusableRegistryErrorV1::CorruptGeneration;
+      result.count = 0;
+      return result;
+    }
+    result.waiters[result.count++] = ReusableReferenceTokenV1{
+        .reference = reference,
+        .owner = shared_owner.owner,
+        .owner_sequence = shared_owner.owner_sequence,
+        .owner_slot = owner_slot,
+        .kind = ReusableReferenceKindV1::Waiter,
+        .active = true,
+    };
+  }
+  if (result.count != generation.waiter_count) {
+    result.error = ReusableRegistryErrorV1::CorruptGeneration;
+    result.count = 0;
+  }
+  release_exact(callbacks, partition);
+  return result;
+}
+
+/**
  * Snapshot at most 64 full-domain-equal candidates in deterministic order.
  * Every returned candidate owns one planner pin until explicitly released.
  */
@@ -2871,10 +3869,145 @@ snapshot_reusable_candidates(
   return first_error;
 }
 
+namespace reusable_registry_detail {
+
+enum class DiagnosticMutationModeV1 : std::uint8_t {
+  BeginBuilding,
+  Replace,
+};
+
+[[nodiscard]] inline ReusableRegistryErrorV1 diagnostic_mutation_error(
+    const ReusableRegistryAttachmentV1 &attachment,
+    const ReusableSharedGenerationV1 &generation,
+    const ReusableDiagnosticTextUpdateV1 &update,
+    DiagnosticMutationModeV1 mode) noexcept {
+  if (!known_entry_kind(generation.entry_kind) ||
+      !shared_diagnostic_layout_valid(attachment, generation)) {
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
+  if (generation.producer != update.producer) {
+    return ReusableRegistryErrorV1::InvalidState;
+  }
+  if (mode == DiagnosticMutationModeV1::BeginBuilding) {
+    return legal_state_transition(generation.state, CacheEntryState::Building)
+               ? ReusableRegistryErrorV1::None
+               : ReusableRegistryErrorV1::InvalidState;
+  }
+
+  const bool state_allows_update =
+      generation.state == CacheEntryState::Building ||
+      generation.state == CacheEntryState::Complete;
+  const bool analyzed_state_valid =
+      update.plan_status != ReusablePlanSnapshotStatusV1::Analyzed ||
+      state_allows_update;
+  const bool no_status_downgrade =
+      generation.plan_snapshot_status !=
+          ReusablePlanSnapshotStatusV1::Analyzed ||
+      update.plan_status == ReusablePlanSnapshotStatusV1::Analyzed;
+  const bool no_canonical_status_downgrade =
+      generation.canonical_plan_snapshot_status !=
+          ReusablePlanSnapshotStatusV1::Planned ||
+      update.canonical_plan_status == ReusablePlanSnapshotStatusV1::Planned;
+  return state_allows_update && analyzed_state_valid && no_status_downgrade &&
+                 no_canonical_status_downgrade
+             ? ReusableRegistryErrorV1::None
+             : ReusableRegistryErrorV1::InvalidState;
+}
+
+[[nodiscard]] inline ReusableRegistryErrorV1 rollback_diagnostic_bundle(
+    ReusableRegistryAttachmentV1 &attachment,
+    const DiagnosticByteBundleV1 &bundle,
+    ReusableRegistryErrorV1 error) noexcept {
+  return free_diagnostic_bundle(attachment, bundle)
+             ? error
+             : ReusableRegistryErrorV1::CorruptLayout;
+}
+
+/**
+ * Allocate outside the exact lock, then publish only after full ABA, kind,
+ * producer, state, and status revalidation. Membership EXCLUSIVE stabilizes
+ * arena ownership across both exact-lock windows.
+ */
+[[nodiscard]] inline ReusableRegistryErrorV1 mutate_diagnostic_text(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableDiagnosticTextUpdateV1 &update,
+    DiagnosticMutationModeV1 mode,
+    const ReusableRegistryPartitionCallbacksV1 &callbacks) noexcept {
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None) {
+    return attachment_error;
+  }
+  if (!callbacks.valid() || !diagnostic_update_valid(update) ||
+      (mode == DiagnosticMutationModeV1::BeginBuilding &&
+       update.plan_status == ReusablePlanSnapshotStatusV1::Analyzed) ||
+      update.reference.generation_slot >=
+          header(attachment).config.max_generations) {
+    return ReusableRegistryErrorV1::InvalidArgument;
+  }
+
+  const std::uint32_t partition =
+      reusable_exact_partition(attachment, update.reference.id.digest);
+  acquire_exact(callbacks, partition);
+  ReusableSharedGenerationV1 &preflight =
+      generations(attachment)[update.reference.generation_slot];
+  if (!reference_matches(preflight, update.reference)) {
+    release_exact(callbacks, partition);
+    return ReusableRegistryErrorV1::StaleReference;
+  }
+  const ReusableRegistryErrorV1 preflight_error =
+      diagnostic_mutation_error(attachment, preflight, update, mode);
+  const CacheEntryKind preflight_kind = preflight.entry_kind;
+  release_exact(callbacks, partition);
+  if (preflight_error != ReusableRegistryErrorV1::None) {
+    return preflight_error;
+  }
+  if (!shared_diagnostic_text_valid(attachment, preflight)) {
+    return ReusableRegistryErrorV1::CorruptGeneration;
+  }
+
+  auto replacement = copy_diagnostic_bytes(attachment, update);
+  if (!replacement.has_value()) {
+    return replacement.error();
+  }
+
+  acquire_exact(callbacks, partition);
+  ReusableSharedGenerationV1 &generation =
+      generations(attachment)[update.reference.generation_slot];
+  ReusableRegistryErrorV1 publish_error = ReusableRegistryErrorV1::None;
+  if (!reference_matches(generation, update.reference)) {
+    publish_error = ReusableRegistryErrorV1::StaleReference;
+  } else if (generation.entry_kind != preflight_kind ||
+             !known_entry_kind(generation.entry_kind)) {
+    publish_error = ReusableRegistryErrorV1::CorruptGeneration;
+  } else {
+    publish_error =
+        diagnostic_mutation_error(attachment, generation, update, mode);
+  }
+  if (publish_error != ReusableRegistryErrorV1::None) {
+    release_exact(callbacks, partition);
+    return rollback_diagnostic_bundle(attachment, *replacement,
+                                      publish_error);
+  }
+
+  const DiagnosticByteBundleV1 previous = diagnostic_bundle(generation);
+  assign_diagnostic_text_unchecked(generation, *replacement, update);
+  if (mode == DiagnosticMutationModeV1::BeginBuilding) {
+    generation.state = CacheEntryState::Building;
+  }
+  release_exact(callbacks, partition);
+  return free_diagnostic_bundle(attachment, previous)
+             ? ReusableRegistryErrorV1::None
+             : ReusableRegistryErrorV1::CorruptLayout;
+}
+
+} // namespace reusable_registry_detail
+
 /**
  * Transition CLAIMED to BUILDING with explicit unavailable plan statuses.
  * New producer paths should use the diagnostic overload below so BUILDING is
- * first published with the initialized child's planned snapshot.
+ * first published with the initialized child's planned snapshot. The caller
+ * holds membership EXCLUSIVE because diagnostics allocate from the arena.
  */
 [[nodiscard]] inline ReusableRegistryErrorV1 begin_reusable_build(
     ReusableRegistryAttachmentV1 &attachment,
@@ -2893,32 +4026,29 @@ snapshot_reusable_candidates(
   const std::uint32_t partition =
       reusable_exact_partition(attachment, reference.id.digest);
   acquire_exact(callbacks, partition);
-  ReusableSharedGenerationV1 &generation =
+  const ReusableSharedGenerationV1 &generation =
       generations(attachment)[reference.generation_slot];
   if (!reference_matches(generation, reference)) {
     release_exact(callbacks, partition);
     return ReusableRegistryErrorV1::StaleReference;
   }
-  if (!legal_state_transition(generation.state, CacheEntryState::Building)) {
-    release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::InvalidState;
-  }
+  const ReusableProducerIdentityV1 producer = generation.producer;
+  release_exact(callbacks, partition);
   constexpr char unavailable_sql[] = "SQL capture unavailable";
   const ReusableDiagnosticTextUpdateV1 unavailable{
       .reference = reference,
-      .producer = generation.producer,
+      .producer = producer,
       .display_sql = std::span<const char>{
           unavailable_sql, sizeof(unavailable_sql) - 1},
   };
-  assign_diagnostic_text_unchecked(generation, unavailable);
-  generation.state = CacheEntryState::Building;
-  release_exact(callbacks, partition);
-  return ReusableRegistryErrorV1::None;
+  return mutate_diagnostic_text(attachment, unavailable,
+                                DiagnosticMutationModeV1::BeginBuilding,
+                                callbacks);
 }
 
 /**
  * Publish initialized-child diagnostics and BUILDING atomically. The caller
- * holds shared membership; the state becomes observable only after text and
+ * holds membership EXCLUSIVE; the state becomes observable only after text and
  * status are complete under the exact partition lock.
  */
 [[nodiscard]] inline ReusableRegistryErrorV1
@@ -2927,40 +4057,15 @@ begin_reusable_build_with_diagnostics(
     const ReusableDiagnosticTextUpdateV1 &update,
     const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
   using namespace reusable_registry_detail;
-  const ReusableRegistryErrorV1 attachment_error =
-      validate_reusable_registry_attachment(attachment);
-  if (attachment_error != ReusableRegistryErrorV1::None) {
-    return attachment_error;
-  }
-  if (!callbacks.valid() || !diagnostic_update_valid(update) ||
-      update.plan_status == ReusablePlanSnapshotStatusV1::Analyzed ||
-      update.reference.generation_slot >=
-          header(attachment).config.max_generations) {
-    return ReusableRegistryErrorV1::InvalidArgument;
-  }
-  const std::uint32_t partition = reusable_exact_partition(
-      attachment, update.reference.id.digest);
-  acquire_exact(callbacks, partition);
-  ReusableSharedGenerationV1 &generation =
-      generations(attachment)[update.reference.generation_slot];
-  if (!reference_matches(generation, update.reference)) {
-    release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::StaleReference;
-  }
-  if (!legal_state_transition(generation.state, CacheEntryState::Building) ||
-      generation.producer != update.producer) {
-    release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::InvalidState;
-  }
-  assign_diagnostic_text_unchecked(generation, update);
-  generation.state = CacheEntryState::Building;
-  release_exact(callbacks, partition);
-  return ReusableRegistryErrorV1::None;
+  return mutate_diagnostic_text(attachment, update,
+                                DiagnosticMutationModeV1::BeginBuilding,
+                                callbacks);
 }
 
 /**
  * Store bounded producer-owned diagnostic text after child initialization.
- * The caller holds shared membership; this function takes the exact partition.
+ * The caller holds membership EXCLUSIVE; arena allocation precedes a second
+ * exact-lock validation and old ranges are reclaimed only after publication.
  */
 [[nodiscard]] inline ReusableRegistryErrorV1
 store_reusable_diagnostic_text(
@@ -2968,54 +4073,15 @@ store_reusable_diagnostic_text(
     const ReusableDiagnosticTextUpdateV1 &update,
     const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
   using namespace reusable_registry_detail;
-  const ReusableRegistryErrorV1 attachment_error =
-      validate_reusable_registry_attachment(attachment);
-  if (attachment_error != ReusableRegistryErrorV1::None) {
-    return attachment_error;
-  }
-  if (!callbacks.valid() || !diagnostic_update_valid(update) ||
-      update.reference.generation_slot >=
-          header(attachment).config.max_generations) {
-    return ReusableRegistryErrorV1::InvalidArgument;
-  }
-  const std::uint32_t partition =
-      reusable_exact_partition(attachment, update.reference.id.digest);
-  acquire_exact(callbacks, partition);
-  ReusableSharedGenerationV1 &generation =
-      generations(attachment)[update.reference.generation_slot];
-  if (!reference_matches(generation, update.reference)) {
-    release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::StaleReference;
-  }
-  const bool state_allows_update =
-      generation.state == CacheEntryState::Building ||
-      generation.state == CacheEntryState::Complete;
-  const bool analyzed_state_valid =
-      update.plan_status != ReusablePlanSnapshotStatusV1::Analyzed ||
-      generation.state == CacheEntryState::Building ||
-      generation.state == CacheEntryState::Complete;
-  const bool no_status_downgrade =
-      generation.plan_snapshot_status !=
-          ReusablePlanSnapshotStatusV1::Analyzed ||
-      update.plan_status == ReusablePlanSnapshotStatusV1::Analyzed;
-  const bool no_canonical_status_downgrade =
-      generation.canonical_plan_snapshot_status !=
-          ReusablePlanSnapshotStatusV1::Planned ||
-      update.canonical_plan_status ==
-          ReusablePlanSnapshotStatusV1::Planned;
-  if (!state_allows_update || !analyzed_state_valid ||
-      !no_status_downgrade || !no_canonical_status_downgrade ||
-      generation.producer != update.producer) {
-    release_exact(callbacks, partition);
-    return ReusableRegistryErrorV1::InvalidState;
-  }
-  assign_diagnostic_text_unchecked(generation, update);
-  release_exact(callbacks, partition);
-  return ReusableRegistryErrorV1::None;
+  return mutate_diagnostic_text(attachment, update,
+                                DiagnosticMutationModeV1::Replace,
+                                callbacks);
 }
 
 /**
  * Copy diagnostic text only after the PostgreSQL adapter authorizes this row.
+ * The caller holds membership SHARED across validation and copying, so an
+ * exclusive replacement or retired-range reclaim cannot race the byte copy.
  * No canonical key, predicate serialization, or shared pointer is returned.
  */
 [[nodiscard]] inline std::expected<ReusableDiagnosticTextCopyV1,
@@ -3047,33 +4113,46 @@ copy_reusable_diagnostic_text(
     release_exact(callbacks, partition);
     return std::unexpected(ReusableRegistryErrorV1::StaleReference);
   }
-  if (!shared_diagnostic_text_valid(generation)) {
+  if (!shared_diagnostic_layout_valid(attachment, generation)) {
     release_exact(callbacks, partition);
     return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
   }
-  if (display_sql.size() < generation.display_sql_bytes ||
-      canonical_plan.size() < generation.canonical_plan_bytes ||
-      producer_plan.size() < generation.producer_plan_bytes) {
-    release_exact(callbacks, partition);
-    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
-  }
-  std::copy_n(generation.display_sql.begin(), generation.display_sql_bytes,
-              display_sql.begin());
-  std::copy_n(generation.canonical_plan.begin(),
-              generation.canonical_plan_bytes, canonical_plan.begin());
-  std::copy_n(generation.producer_plan.begin(),
-              generation.producer_plan_bytes, producer_plan.begin());
+  const DiagnosticByteBundleV1 ranges = diagnostic_bundle(generation);
   const ReusableDiagnosticTextCopyV1 result{
       .canonical_plan_status = generation.canonical_plan_snapshot_status,
       .plan_status = generation.plan_snapshot_status,
       .display_sql_truncated = generation.display_sql_truncated,
       .canonical_plan_truncated = generation.canonical_plan_truncated,
       .producer_plan_truncated = generation.producer_plan_truncated,
-      .display_sql_bytes = generation.display_sql_bytes,
-      .canonical_plan_bytes = generation.canonical_plan_bytes,
-      .producer_plan_bytes = generation.producer_plan_bytes,
+      .display_sql_bytes = ranges.display_sql.length,
+      .canonical_plan_bytes = ranges.canonical_plan.length,
+      .producer_plan_bytes = ranges.producer_plan.length,
   };
   release_exact(callbacks, partition);
+
+  if (!shared_diagnostic_text_valid(attachment, generation)) {
+    return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
+  }
+  if (display_sql.size() < result.display_sql_bytes ||
+      canonical_plan.size() < result.canonical_plan_bytes ||
+      producer_plan.size() < result.producer_plan_bytes) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
+  if (result.display_sql_bytes != 0) {
+    std::memcpy(display_sql.data(),
+                attachment.region.data() + ranges.display_sql.offset,
+                result.display_sql_bytes);
+  }
+  if (result.canonical_plan_bytes != 0) {
+    std::memcpy(canonical_plan.data(),
+                attachment.region.data() + ranges.canonical_plan.offset,
+                result.canonical_plan_bytes);
+  }
+  if (result.producer_plan_bytes != 0) {
+    std::memcpy(producer_plan.data(),
+                attachment.region.data() + ranges.producer_plan.offset,
+                result.producer_plan_bytes);
+  }
   return result;
 }
 
@@ -3303,15 +4382,16 @@ invalidate_reusable_generations(
 }
 
 /**
- * Unlink both public indexes and move one unreferenced terminal generation to
- * the bounded retired list. The manifest handle remains valid for storage.
+ * Unlink every index owned by the entry kind and move one unreferenced
+ * terminal generation to the bounded retired list. Exact results own only the
+ * digest membership; coverage results own digest plus coverage membership.
  */
 [[nodiscard]] inline std::expected<ReusableManifestHandleV1,
                                    ReusableRegistryErrorV1>
 retire_reusable_generation(
     ReusableRegistryAttachmentV1 &attachment,
     const ReusableGenerationReferenceV1 &reference,
-    const ReusableRegistryPartitionCallbacksV1 &callbacks = {}) noexcept {
+    const ReusableRegistryPartitionCallbacksV1 &callbacks) noexcept {
   using namespace reusable_registry_detail;
   const ReusableRegistryErrorV1 attachment_error =
       validate_reusable_registry_attachment(attachment);
@@ -3334,6 +4414,21 @@ retire_reusable_generation(
       generation.reader_pin_count != 0) {
     return std::unexpected(ReusableRegistryErrorV1::InvalidState);
   }
+  if (!shared_dependency_vector_valid(attachment, generation) ||
+      !conservative_guard_valid(
+          generation.conservative_guard, generation.metadata,
+          generation.coverage_directory_key.security_namespace) ||
+      !std::all_of(generation.reserved_dependency_release.begin(),
+                   generation.reserved_dependency_release.end(),
+                   [](std::uint8_t value) noexcept { return value == 0; })) {
+    return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
+  }
+  if (generation.dependency_release_state !=
+          ReusableDependencyReleaseStateV1::Retained ||
+      generation.dependency_release_cursor != 0 ||
+      generation.dependency_release_sequence != 0) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidState);
+  }
   if (shared.indexed_generations == 0) {
     return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
   }
@@ -3348,24 +4443,36 @@ retire_reusable_generation(
     return std::unexpected(exact_error);
   }
 
-  const std::uint32_t coverage_partition = reusable_coverage_partition(
-      attachment, generation.coverage_directory_key);
-  acquire_coverage(callbacks, coverage_partition);
-  const ReusableRegistryErrorV1 coverage_error =
-      unlink_coverage_generation(attachment, reference.generation_slot);
-  release_coverage(callbacks, coverage_partition);
-  if (coverage_error != ReusableRegistryErrorV1::None) {
+  if (generation.entry_kind == CacheEntryKind::ReusableCoverage) {
+    const std::uint32_t coverage_partition = reusable_coverage_partition(
+        attachment, generation.coverage_directory_key);
+    acquire_coverage(callbacks, coverage_partition);
+    const ReusableRegistryErrorV1 coverage_error =
+        unlink_coverage_generation(attachment, reference.generation_slot);
+    release_coverage(callbacks, coverage_partition);
+    if (coverage_error != ReusableRegistryErrorV1::None) {
+      acquire_exact(callbacks, exact_partition);
+      const ReusableRegistryErrorV1 rollback_error =
+          link_exact_generation(attachment, reference.generation_slot);
+      release_exact(callbacks, exact_partition);
+      return std::unexpected(rollback_error == ReusableRegistryErrorV1::None
+                                 ? coverage_error
+                                 : rollback_error);
+    }
+  } else if (generation.entry_kind != CacheEntryKind::ExactFinalResult) {
     acquire_exact(callbacks, exact_partition);
     const ReusableRegistryErrorV1 rollback_error =
         link_exact_generation(attachment, reference.generation_slot);
     release_exact(callbacks, exact_partition);
     return std::unexpected(rollback_error == ReusableRegistryErrorV1::None
-                               ? coverage_error
+                               ? ReusableRegistryErrorV1::CorruptGeneration
                                : rollback_error);
   }
 
   generation.state = CacheEntryState::Evicting;
   generation.membership = ReusableRecordMembershipV1::Retired;
+  generation.dependency_release_state =
+      ReusableDependencyReleaseStateV1::Pending;
   generation.next_retired_or_free = shared.retired_generation_head;
   shared.retired_generation_head = reference.generation_slot;
   --shared.indexed_generations;
@@ -3376,57 +4483,425 @@ retire_reusable_generation(
 
 namespace reusable_registry_detail {
 
-struct ReclaimRetiredResultV1 {
-  ReusableRegistryErrorV1 error = ReusableRegistryErrorV1::None;
-  std::uint32_t reclaimed = 0;
-};
+[[nodiscard]] inline bool arena_allocation_reclaimable(
+    const ReusableRegistryAttachmentV1 &attachment,
+    ArenaAllocationV1 allocation) noexcept {
+  if (allocation.length == 0) {
+    return allocation.offset == 0;
+  }
+  const ReusableRegistryHeaderV1 &shared = header(attachment);
+  const std::uint64_t end =
+      static_cast<std::uint64_t>(allocation.offset) + allocation.length;
+  if (allocation.offset < shared.layout.byte_arena_offset ||
+      allocation.offset % 8U != 0 || allocation.length % 8U != 0 ||
+      end > static_cast<std::uint64_t>(shared.layout.byte_arena_offset) +
+                shared.config.byte_arena_bytes) {
+    return false;
+  }
+  const ReusableFreeExtentV1 *extents = free_extents(attachment);
+  for (std::uint32_t index = 0; index < shared.free_extent_count; ++index) {
+    if (arena_allocations_overlap(
+            allocation,
+            ArenaAllocationV1{.offset = extents[index].offset,
+                              .length = extents[index].length})) {
+      return false;
+    }
+  }
+  return true;
+}
 
-[[nodiscard]] inline ReclaimRetiredResultV1
-reclaim_retired_records(ReusableRegistryAttachmentV1 &attachment,
-                        std::uint32_t maximum) noexcept {
-  ReclaimRetiredResultV1 result{};
+[[nodiscard]] inline bool dependency_release_ticket_matches(
+    const ReusableRegistryAttachmentV1 &attachment,
+    const ReusableSharedGenerationV1 &generation,
+    const ReusableDependencyReleaseTicketV1 &ticket) noexcept {
+  if (!reference_matches(generation, ticket.reference, true) ||
+      generation.membership != ReusableRecordMembershipV1::Retired ||
+      generation.state != CacheEntryState::Evicting ||
+      generation.dependency_release_sequence != ticket.release_sequence ||
+      generation.metadata.dependency_count != ticket.dependency_count ||
+      generation_reference_count(generation) != ticket.reference_count ||
+      generation.conservative_guard != ticket.conservative_guard ||
+      generation.dependency_vector.length != ticket.vector_bytes ||
+      generation.manifest != ticket.manifest ||
+      !conservative_guard_valid(
+          generation.conservative_guard, generation.metadata,
+          generation.coverage_directory_key.security_namespace) ||
+      !shared_dependency_vector_valid(attachment, generation)) {
+    return false;
+  }
+  const std::span<const std::byte> envelope{
+      attachment.region.data() + generation.dependency_vector.offset,
+      generation.dependency_vector.length,
+  };
+  const DependencyVectorEnvelopeResultV1 validation =
+      validate_dependency_vector_envelope(envelope);
+  return validation &&
+         validation.header.payload_checksum == ticket.payload_checksum;
+}
+
+} // namespace reusable_registry_detail
+
+/**
+ * Under exclusive membership, copy and mark one retired generation's pending
+ * dependency-release work. The caller must drop every registry lock before it
+ * decodes the copied envelope or calls the dependency-directory release API.
+ * A short output reports the exact byte requirement without claiming work.
+ */
+[[nodiscard]] inline ReusableDependencyReleasePreparationV1
+prepare_reusable_dependency_release(
+    ReusableRegistryAttachmentV1 &attachment,
+    std::span<std::byte> copied_dependency_vector) noexcept {
+  using namespace reusable_registry_detail;
+  ReusableDependencyReleasePreparationV1 result{};
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None) {
+    result.error = attachment_error;
+    return result;
+  }
+
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
   std::uint32_t current = shared.retired_generation_head;
+  std::uint32_t visited = 0;
   while (current != kInvalidReusableRegistrySlotV1 &&
-         result.reclaimed < maximum) {
+         visited < shared.config.max_generations) {
     if (current >= shared.config.max_generations) {
       result.error = ReusableRegistryErrorV1::CorruptGeneration;
       return result;
     }
     ReusableSharedGenerationV1 &generation = records[current];
-    const std::uint32_t next = generation.next_retired_or_free;
     if (generation.membership != ReusableRecordMembershipV1::Retired ||
         generation.state != CacheEntryState::Evicting ||
         generation.waiter_count != 0 || generation.planner_pin_count != 0 ||
-        generation.reader_pin_count != 0) {
+        generation.reader_pin_count != 0 ||
+        generation.dependency_release_cursor >
+            generation_reference_count(generation) ||
+        !std::all_of(generation.reserved_dependency_release.begin(),
+                     generation.reserved_dependency_release.end(),
+                     [](std::uint8_t value) noexcept { return value == 0; }) ||
+        !conservative_guard_valid(
+            generation.conservative_guard, generation.metadata,
+            generation.coverage_directory_key.security_namespace) ||
+        !shared_dependency_vector_valid(attachment, generation)) {
       result.error = ReusableRegistryErrorV1::CorruptGeneration;
       return result;
     }
-    if (!free_arena_bytes(attachment,
-                          ArenaAllocationV1{
-                              .offset = generation.allocation_offset,
-                              .length = generation.allocation_length,
-                          })) {
-      result.error = ReusableRegistryErrorV1::CorruptLayout;
-      return result;
-    }
-    shared.retired_generation_head = next;
-    if (shared.retired_generations == 0) {
+    const ReusableDependencyReleaseStateV1 release_state =
+        generation.dependency_release_state;
+    if (release_state == ReusableDependencyReleaseStateV1::None ||
+        release_state == ReusableDependencyReleaseStateV1::Retained ||
+        (release_state == ReusableDependencyReleaseStateV1::Released &&
+         generation.dependency_release_cursor !=
+             generation_reference_count(generation)) ||
+        (release_state == ReusableDependencyReleaseStateV1::Prepared &&
+         generation.dependency_release_sequence == 0)) {
       result.error = ReusableRegistryErrorV1::CorruptGeneration;
       return result;
     }
-    --shared.retired_generations;
-    return_generation_record(attachment, current);
-    ++result.reclaimed;
-    current = next;
+    if (release_state == ReusableDependencyReleaseStateV1::Pending ||
+        release_state == ReusableDependencyReleaseStateV1::Released) {
+      const std::span<const std::byte> envelope{
+          attachment.region.data() + generation.dependency_vector.offset,
+          generation.dependency_vector.length,
+      };
+      const DependencyVectorEnvelopeResultV1 validation =
+          validate_dependency_vector_envelope(envelope);
+      if (!validation ||
+          validation.header.entry_count !=
+              generation.metadata.dependency_count) {
+        result.error = ReusableRegistryErrorV1::CorruptGeneration;
+        return result;
+      }
+      result.required_vector_bytes = generation.dependency_vector.length;
+      if (copied_dependency_vector.size() < result.required_vector_bytes) {
+        result.error = ReusableRegistryErrorV1::RegionTooSmall;
+        return result;
+      }
+      const std::uint64_t release_sequence =
+          take_sequence(shared.next_dependency_release_sequence);
+      if (release_sequence == 0) {
+        result.error = ReusableRegistryErrorV1::CounterOverflow;
+        return result;
+      }
+      std::memcpy(copied_dependency_vector.data(), envelope.data(),
+                  envelope.size());
+      generation.dependency_release_sequence = release_sequence;
+      generation.dependency_release_state =
+          ReusableDependencyReleaseStateV1::Prepared;
+      result.ticket = ReusableDependencyReleaseTicketV1{
+          .reference = make_reference(generation, current),
+          .manifest = generation.manifest,
+          .conservative_guard = generation.conservative_guard,
+          .release_sequence = release_sequence,
+          .payload_checksum = validation.header.payload_checksum,
+          .first_reference = generation.dependency_release_cursor,
+          .reference_count = generation_reference_count(generation),
+          .dependency_count = generation.metadata.dependency_count,
+          .vector_bytes = generation.dependency_vector.length,
+      };
+      result.copied_vector_bytes = generation.dependency_vector.length;
+      return result;
+    }
+    current = generation.next_retired_or_free;
+    ++visited;
+  }
+  if (current != kInvalidReusableRegistrySlotV1) {
+    result.error = ReusableRegistryErrorV1::CorruptGeneration;
+    return result;
+  }
+  result.error = ReusableRegistryErrorV1::NoReclaimableGeneration;
+  return result;
+}
+
+/**
+ * Persist the exact successfully-applied prefix after external release calls.
+ * `released_dependencies` counts directory mutations with `applied == true`,
+ * even when the directory also reports a diagnostic/fallback error. A partial
+ * prefix returns the record to Pending so the next ticket starts after it.
+ */
+[[nodiscard]] inline std::expected<bool, ReusableRegistryErrorV1>
+record_reusable_dependency_release_progress(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableDependencyReleaseTicketV1 &ticket,
+    std::uint32_t released_dependencies) noexcept {
+  using namespace reusable_registry_detail;
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None) {
+    return std::unexpected(attachment_error);
+  }
+  if (!ticket ||
+      ticket.reference.generation_slot >=
+          header(attachment).config.max_generations) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
+  ReusableSharedGenerationV1 &generation =
+      generations(attachment)[ticket.reference.generation_slot];
+  if (!dependency_release_ticket_matches(attachment, generation, ticket)) {
+    return std::unexpected(ReusableRegistryErrorV1::StaleReference);
+  }
+  const std::uint32_t remaining =
+      ticket.reference_count - ticket.first_reference;
+  if (released_dependencies > remaining) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
+  if (generation.dependency_release_state ==
+          ReusableDependencyReleaseStateV1::Released &&
+      generation.dependency_release_cursor == ticket.reference_count &&
+      released_dependencies == remaining) {
+    return true;
+  }
+  if (generation.dependency_release_state !=
+          ReusableDependencyReleaseStateV1::Prepared ||
+      generation.dependency_release_cursor != ticket.first_reference) {
+    return std::unexpected(ReusableRegistryErrorV1::StaleReference);
+  }
+  generation.dependency_release_cursor =
+      ticket.first_reference + released_dependencies;
+  const bool complete = generation.dependency_release_cursor ==
+                        generation_reference_count(generation);
+  generation.dependency_release_state =
+      complete ? ReusableDependencyReleaseStateV1::Released
+               : ReusableDependencyReleaseStateV1::Pending;
+  if (!complete) {
+    generation.dependency_release_sequence = 0;
+  }
+  return complete;
+}
+
+/**
+ * ABA-revalidate a completed release ticket, unlink its arbitrary retired-list
+ * position, free all generation bytes, and return the slot to the free list.
+ * The caller holds exclusive membership; no directory callback is made here.
+ */
+[[nodiscard]] inline std::expected<ReusableManifestHandleV1,
+                                   ReusableRegistryErrorV1>
+finalize_reusable_generation_reclaim(
+    ReusableRegistryAttachmentV1 &attachment,
+    const ReusableDependencyReleaseTicketV1 &ticket) noexcept {
+  using namespace reusable_registry_detail;
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None) {
+    return std::unexpected(attachment_error);
+  }
+  ReusableRegistryHeaderV1 &shared = header(attachment);
+  if (!ticket ||
+      ticket.reference.generation_slot >= shared.config.max_generations) {
+    return std::unexpected(ReusableRegistryErrorV1::InvalidArgument);
+  }
+  ReusableSharedGenerationV1 *records = generations(attachment);
+  ReusableSharedGenerationV1 &generation =
+      records[ticket.reference.generation_slot];
+  if (generation.dependency_release_state !=
+          ReusableDependencyReleaseStateV1::Released ||
+      !dependency_release_ticket_matches(attachment, generation, ticket) ||
+      generation.dependency_release_cursor !=
+          generation_reference_count(generation)) {
+    return std::unexpected(ReusableRegistryErrorV1::StaleReference);
+  }
+  if (!shared_diagnostic_text_valid(attachment, generation) ||
+      shared.retired_generations == 0) {
+    return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
+  }
+
+  std::uint32_t previous = kInvalidReusableRegistrySlotV1;
+  std::uint32_t current = shared.retired_generation_head;
+  std::uint32_t visited = 0;
+  while (current != kInvalidReusableRegistrySlotV1 &&
+         current != ticket.reference.generation_slot &&
+         visited < shared.config.max_generations) {
+    if (current >= shared.config.max_generations ||
+        records[current].membership != ReusableRecordMembershipV1::Retired) {
+      return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
+    }
+    previous = current;
+    current = records[current].next_retired_or_free;
+    ++visited;
+  }
+  if (current != ticket.reference.generation_slot) {
+    return std::unexpected(ReusableRegistryErrorV1::CorruptGeneration);
+  }
+
+  const ArenaAllocationV1 identity{
+      .offset = generation.allocation_offset,
+      .length = generation.allocation_length,
+  };
+  const DiagnosticByteBundleV1 diagnostics = diagnostic_bundle(generation);
+  const std::array<ArenaAllocationV1, 4> allocations{
+      identity,
+      diagnostic_allocation(diagnostics.display_sql),
+      diagnostic_allocation(diagnostics.canonical_plan),
+      diagnostic_allocation(diagnostics.producer_plan),
+  };
+  std::uint32_t allocation_count = 0;
+  for (const ArenaAllocationV1 allocation : allocations) {
+    if (allocation.length != 0) {
+      ++allocation_count;
+    }
+    if (!arena_allocation_reclaimable(attachment, allocation)) {
+      return std::unexpected(ReusableRegistryErrorV1::CorruptLayout);
+    }
+  }
+  if (shared.free_extent_count + allocation_count >
+      shared.layout.free_extent_capacity) {
+    return std::unexpected(ReusableRegistryErrorV1::CorruptLayout);
+  }
+
+  if (!free_diagnostic_bundle(attachment, diagnostics) ||
+      !free_arena_bytes(attachment, identity)) {
+    return std::unexpected(ReusableRegistryErrorV1::CorruptLayout);
+  }
+  if (previous == kInvalidReusableRegistrySlotV1) {
+    shared.retired_generation_head = generation.next_retired_or_free;
+  } else {
+    records[previous].next_retired_or_free = generation.next_retired_or_free;
+  }
+  const ReusableManifestHandleV1 manifest = generation.manifest;
+  --shared.retired_generations;
+  return_generation_record(attachment, ticket.reference.generation_slot);
+  return manifest;
+}
+
+/**
+ * Copy every producer/reference-owner token in the next janitor window.
+ * The adapter holds membership shared; partition callbacks make each record
+ * internally consistent. Liveness probing happens only after those locks drop.
+ * A short destination is reported as truncated and must disable reaping for
+ * that sample.
+ */
+[[nodiscard]] inline ReusableJanitorLivenessSnapshotV1
+snapshot_reusable_janitor_liveness(
+    const ReusableRegistryAttachmentV1 &attachment,
+    std::span<ReusableJanitorOwnerObservationV1> observations,
+    std::uint32_t maximum = kMaximumReusableJanitorBatchV1,
+    const ReusableRegistryPartitionCallbacksV1 &partition_callbacks =
+        {}) noexcept {
+  using namespace reusable_registry_detail;
+  ReusableJanitorLivenessSnapshotV1 result{};
+  const ReusableRegistryErrorV1 attachment_error =
+      validate_reusable_registry_attachment(attachment);
+  if (attachment_error != ReusableRegistryErrorV1::None ||
+      !partition_callbacks.valid()) {
+    result.error = attachment_error != ReusableRegistryErrorV1::None
+                       ? attachment_error
+                       : ReusableRegistryErrorV1::InvalidArgument;
+    return result;
+  }
+  const ReusableRegistryHeaderV1 &shared = header(attachment);
+  const ReusableSharedGenerationV1 *records = generations(attachment);
+  maximum = std::min(maximum, kMaximumReusableJanitorBatchV1);
+  const std::uint32_t scan_limit =
+      std::min(maximum, shared.config.max_generations);
+  result.scan_start = shared.janitor_scan_cursor;
+  for (std::uint32_t scanned = 0; scanned < scan_limit; ++scanned) {
+    const std::uint32_t slot =
+        (result.scan_start + scanned) % shared.config.max_generations;
+    const ReusableSharedGenerationV1 &generation = records[slot];
+    ++result.scanned_generations;
+    if (generation.membership != ReusableRecordMembershipV1::Indexed) {
+      continue;
+    }
+    const ReusableGenerationReferenceV1 reference =
+        make_reference(generation, slot);
+    const std::uint32_t exact_partition =
+        reusable_exact_partition(attachment, reference.id.digest);
+    acquire_exact(partition_callbacks, exact_partition);
+    if (!reference_matches(generation, reference)) {
+      release_exact(partition_callbacks, exact_partition);
+      continue;
+    }
+    if (generation.state == CacheEntryState::Claimed ||
+        generation.state == CacheEntryState::Building) {
+      const ReusableJanitorOwnerObservationV1 observation =
+          make_producer_observation(generation, slot);
+      if (!observation.valid()) {
+        release_exact(partition_callbacks, exact_partition);
+        result.error = ReusableRegistryErrorV1::CorruptGeneration;
+        return result;
+      }
+      if (result.count >= observations.size()) {
+        result.truncated = true;
+      } else {
+        observations[result.count++] = observation;
+      }
+    }
+    for (std::uint32_t owner_slot = 0;
+         owner_slot < kReusableReferenceOwnersPerGenerationV1;
+         ++owner_slot) {
+      const ReusableSharedReferenceOwnerV1 &owner =
+          generation.reference_owners[owner_slot];
+      if (!owner.active) {
+        continue;
+      }
+      const ReusableJanitorOwnerObservationV1 observation =
+          make_reference_owner_observation(generation, slot, owner,
+                                           owner_slot);
+      if (!observation.valid()) {
+        release_exact(partition_callbacks, exact_partition);
+        result.error = ReusableRegistryErrorV1::CorruptGeneration;
+        return result;
+      }
+      if (result.count >= observations.size()) {
+        result.truncated = true;
+        break;
+      }
+      observations[result.count++] = observation;
+    }
+    release_exact(partition_callbacks, exact_partition);
+    if (result.truncated) {
+      break;
+    }
   }
   return result;
 }
 
-} // namespace reusable_registry_detail
-
-/** Reclaim metadata for generations unlinked by an earlier janitor pass. */
+/**
+ * Legacy safety probe. Retired generations are never freed through this API;
+ * callers must use prepare, lock-dropped directory release, progress, and
+ * ABA-finalize. Returning zero keeps old janitor adapters fail-open.
+ */
 [[nodiscard]] inline std::expected<std::uint32_t, ReusableRegistryErrorV1>
 reclaim_retired_reusable_generations(
     ReusableRegistryAttachmentV1 &attachment,
@@ -3436,12 +4911,8 @@ reclaim_retired_reusable_generations(
   if (attachment_error != ReusableRegistryErrorV1::None) {
     return std::unexpected(attachment_error);
   }
-  const auto result = reusable_registry_detail::reclaim_retired_records(
-      attachment, std::min(maximum, kMaximumReusableJanitorBatchV1));
-  if (result.error != ReusableRegistryErrorV1::None) {
-    return std::unexpected(result.error);
-  }
-  return result.reclaimed;
+  static_cast<void>(maximum);
+  return 0;
 }
 
 /**
@@ -3466,20 +4937,13 @@ reclaim_retired_reusable_generations(
     return result;
   }
   maximum = std::min(maximum, kMaximumReusableJanitorBatchV1);
-  const ReclaimRetiredResultV1 reclaimed =
-      reclaim_retired_records(attachment, maximum);
-  if (reclaimed.error != ReusableRegistryErrorV1::None) {
-    result.error = reclaimed.error;
-    return result;
-  }
-  result.reclaimed_retired = reclaimed.reclaimed;
-  if (maximum == 0 || reclaimed.reclaimed >= maximum) {
+  if (maximum == 0) {
     return result;
   }
 
   ReusableRegistryHeaderV1 &shared = header(attachment);
   ReusableSharedGenerationV1 *records = generations(attachment);
-  const std::uint32_t remaining = maximum - reclaimed.reclaimed;
+  const std::uint32_t remaining = maximum;
   const std::uint32_t scan_limit =
       std::min(remaining, shared.config.max_generations);
   const std::uint32_t scan_start = shared.janitor_scan_cursor;
@@ -3504,15 +4968,28 @@ reclaim_retired_reusable_generations(
       release_exact(partition_callbacks, exact_partition);
       continue;
     }
-    if (janitor_callbacks.reference_owner_alive != nullptr) {
-      for (ReusableSharedReferenceOwnerV1 &shared_owner :
-           generation.reference_owners) {
+    if (janitor_callbacks.owner_alive != nullptr) {
+      for (std::uint32_t owner_slot = 0;
+           owner_slot < kReusableReferenceOwnersPerGenerationV1;
+           ++owner_slot) {
+        ReusableSharedReferenceOwnerV1 &shared_owner =
+            generation.reference_owners[owner_slot];
         if (retired_this_pass + reaped_this_pass >= remaining) {
           break;
         }
-        if (!shared_owner.active ||
-            janitor_callbacks.reference_owner_alive(
-                janitor_callbacks.context, shared_owner.owner)) {
+        if (!shared_owner.active) {
+          continue;
+        }
+        const ReusableJanitorOwnerObservationV1 observation =
+            make_reference_owner_observation(generation, slot, shared_owner,
+                                             owner_slot);
+        if (!observation.valid()) {
+          release_exact(partition_callbacks, exact_partition);
+          result.error = ReusableRegistryErrorV1::CorruptGeneration;
+          return result;
+        }
+        if (janitor_callbacks.owner_alive(janitor_callbacks.context,
+                                          observation)) {
           continue;
         }
         const ReusableReferenceKindV1 reaped_kind = shared_owner.kind;
@@ -3537,12 +5014,20 @@ reclaim_retired_reusable_generations(
         ++reaped_this_pass;
       }
     }
-    const bool producer_dead =
-        (generation.state == CacheEntryState::Claimed ||
+    bool producer_dead = false;
+    if ((generation.state == CacheEntryState::Claimed ||
          generation.state == CacheEntryState::Building) &&
-        janitor_callbacks.producer_alive != nullptr &&
-        !janitor_callbacks.producer_alive(janitor_callbacks.context,
-                                          generation.producer);
+        janitor_callbacks.owner_alive != nullptr) {
+      const ReusableJanitorOwnerObservationV1 observation =
+          make_producer_observation(generation, slot);
+      if (!observation.valid()) {
+        release_exact(partition_callbacks, exact_partition);
+        result.error = ReusableRegistryErrorV1::CorruptGeneration;
+        return result;
+      }
+      producer_dead = !janitor_callbacks.owner_alive(
+          janitor_callbacks.context, observation);
+    }
     release_exact(partition_callbacks, exact_partition);
 
     if (producer_dead) {
@@ -3681,7 +5166,8 @@ snapshot_reusable_generation_diagnostics(
         generation.state == CacheEntryState::Failed ||
         generation.state == CacheEntryState::Invalidated;
     if (!reference_matches(generation, reference) || !known_kind ||
-        !known_state || !shared_diagnostic_text_valid(generation)) {
+        !known_state ||
+        !shared_diagnostic_text_valid(attachment, generation)) {
       release_exact(partition_callbacks, exact_partition);
       result.error = ReusableRegistryErrorV1::CorruptGeneration;
       return result;
@@ -3725,6 +5211,13 @@ snapshot_reusable_generation_diagnostics(
     if (generation.membership != ReusableRecordMembershipV1::Indexed) {
       continue;
     }
+    if (generation.entry_kind == CacheEntryKind::ExactFinalResult) {
+      ++result.exact_final_generations;
+    } else if (generation.entry_kind == CacheEntryKind::ReusableCoverage) {
+      ++result.reusable_coverage_generations;
+    } else {
+      return ReusableRegistrySnapshotV1{};
+    }
     if (generation.state == CacheEntryState::Claimed ||
         generation.state == CacheEntryState::Building) {
       ++result.inflight_generations;
@@ -3760,6 +5253,8 @@ snapshot_reusable_generation_diagnostics(
   const ReusableRegistryHeaderV1 &shared = header(attachment);
   const ReusableSharedGenerationV1 *records = generations(attachment);
   std::uint32_t indexed_records = 0;
+  std::uint32_t indexed_exact_records = 0;
+  std::uint32_t indexed_coverage_records = 0;
   std::uint32_t retired_records = 0;
   std::uint32_t free_records = 0;
   std::uint64_t allocated_bytes = 0;
@@ -3810,9 +5305,22 @@ snapshot_reusable_generation_diagnostics(
           generation.allocation_length != 0 ||
           generation.canonical_generation_key ||
           generation.canonical_domain_key || generation.coverage_descriptor ||
+          generation.dependency_vector ||
+          generation.conservative_guard !=
+              ReusableConservativeGuardV1{} ||
+          generation.dependency_release_cursor != 0 ||
+          generation.dependency_release_state !=
+              ReusableDependencyReleaseStateV1::None ||
+          generation.dependency_release_sequence != 0 ||
+          !std::all_of(generation.reserved_dependency_release.begin(),
+                       generation.reserved_dependency_release.end(),
+                       [](std::uint8_t value) noexcept { return value == 0; }) ||
+          !empty_range_shape(generation.display_sql) ||
+          !empty_range_shape(generation.canonical_plan) ||
+          !empty_range_shape(generation.producer_plan) ||
           generation.waiter_count != 0 || generation.planner_pin_count != 0 ||
           generation.reader_pin_count != 0 ||
-          !shared_diagnostic_text_valid(generation) ||
+          !shared_diagnostic_text_valid(attachment, generation) ||
           generation.next_in_exact_bucket != kInvalidReusableRegistrySlotV1 ||
           generation.next_in_coverage_bucket !=
               kInvalidReusableRegistrySlotV1) {
@@ -3824,56 +5332,107 @@ snapshot_reusable_generation_diagnostics(
         generation.membership != ReusableRecordMembershipV1::Retired) {
       return ReusableRegistryErrorV1::CorruptGeneration;
     }
-    if (generation.entry_kind != CacheEntryKind::ReusableCoverage ||
+    const bool known_kind = known_entry_kind(generation.entry_kind);
+    const bool is_coverage =
+        generation.entry_kind == CacheEntryKind::ReusableCoverage;
+    const bool provider_metadata_consistent =
+        generation.metadata.provider_id == 0
+            ? generation.metadata.provider_abi_version == 0 &&
+                  generation.metadata.provider_domain_abi_version == 0 &&
+                  generation.metadata.observability !=
+                      WriteObservability::ProviderComplete
+            : generation.metadata.provider_abi_version != 0 &&
+                  generation.metadata.provider_domain_abi_version != 0 &&
+                  generation.metadata.observability ==
+                      WriteObservability::ProviderComplete;
+    const bool kind_metadata_valid =
+        is_coverage
+            ? generation.metadata.provider_id != 0 &&
+                  generation.metadata.provider_abi_version != 0 &&
+                  generation.metadata.provider_domain_abi_version != 0 &&
+                  generation.metadata.compatibility_family_id != 0 &&
+                  generation.metadata.observability ==
+                      WriteObservability::ProviderComplete
+            : provider_metadata_consistent;
+    if (!known_kind || !kind_metadata_valid ||
         generation.slot_sequence == 0 ||
         generation.id.boot_nonce != shared.boot_nonce ||
         generation.id.generation == 0 || generation.id.claim_sequence == 0 ||
         !generation.producer.valid() ||
         !valid_reusable_security_namespace(
             generation.coverage_directory_key.security_namespace) ||
-        generation.metadata.provider_id == 0 ||
-        generation.metadata.provider_abi_version == 0 ||
-        generation.metadata.provider_domain_abi_version == 0 ||
-        generation.metadata.compatibility_family_id == 0 ||
         generation.metadata.dependency_count > kMaxDependenciesPerGeneration ||
         generation.metadata.reserved != 0 ||
         generation.manifest.reserved != 0 ||
-        generation.metadata.observability !=
-            WriteObservability::ProviderComplete ||
+        !write_observability_valid(generation.metadata.observability) ||
+        !conservative_guard_valid(
+            generation.conservative_guard, generation.metadata,
+            generation.coverage_directory_key.security_namespace) ||
         generation.metadata.physical_identity.length >
             generation.metadata.physical_identity.bytes.size() ||
-        !shared_diagnostic_text_valid(generation) ||
-        !range_valid(attachment, generation.canonical_domain_key) ||
+        !std::all_of(generation.reserved_dependency_release.begin(),
+                     generation.reserved_dependency_release.end(),
+                     [](std::uint8_t value) noexcept { return value == 0; }) ||
+        !shared_dependency_vector_valid(attachment, generation) ||
+        !shared_diagnostic_text_valid(attachment, generation) ||
         !range_valid(attachment, generation.canonical_generation_key) ||
-        generation.canonical_domain_key.length > kMaxCoverageDomainKeyBytes ||
         generation.canonical_generation_key.length > kMaxCanonicalKeyBytes ||
         generation.coverage_descriptor.length > kMaxProviderRecipeBytes) {
       return ReusableRegistryErrorV1::CorruptGeneration;
     }
-    const bool descriptor_valid =
+    const bool domain_valid =
+        is_coverage
+            ? range_valid(attachment, generation.canonical_domain_key) &&
+                  generation.canonical_domain_key.length <=
+                      kMaxCoverageDomainKeyBytes
+            : generation.canonical_domain_key.offset == 0 &&
+                  generation.canonical_domain_key.length == 0 &&
+                  generation.coverage_directory_key.coverage_domain_digest ==
+                      CacheDigest256{};
+    const bool descriptor_shape_valid =
         generation.coverage_descriptor.length == 0
             ? generation.coverage_descriptor.offset == 0
             : range_valid(attachment, generation.coverage_descriptor);
+    const bool descriptor_valid =
+        is_coverage ? descriptor_shape_valid
+                    : generation.coverage_descriptor.offset == 0 &&
+                          generation.coverage_descriptor.length == 0;
     const std::uint64_t unaligned_length =
         static_cast<std::uint64_t>(generation.canonical_domain_key.length) +
         generation.canonical_generation_key.length +
-        generation.coverage_descriptor.length;
+        generation.coverage_descriptor.length +
+        generation.dependency_vector.length;
     const std::uint64_t aligned_length = align_up(unaligned_length, 8U);
-    const bool contiguous =
-        generation.allocation_offset ==
-            generation.canonical_domain_key.offset &&
+    const bool identity_start_valid =
+        is_coverage
+            ? generation.allocation_offset ==
+                  generation.canonical_domain_key.offset
+            : generation.allocation_offset ==
+                  generation.canonical_generation_key.offset;
+    const bool domain_contiguous =
+        !is_coverage ||
         static_cast<std::uint64_t>(generation.canonical_domain_key.offset) +
                 generation.canonical_domain_key.length ==
-            generation.canonical_generation_key.offset &&
-        (generation.coverage_descriptor.length == 0 ||
-         static_cast<std::uint64_t>(
-             generation.canonical_generation_key.offset) +
-                 generation.canonical_generation_key.length ==
-             generation.coverage_descriptor.offset);
+            generation.canonical_generation_key.offset;
+    const std::uint64_t generation_key_end =
+        static_cast<std::uint64_t>(
+            generation.canonical_generation_key.offset) +
+        generation.canonical_generation_key.length;
+    const bool descriptor_contiguous =
+        generation.coverage_descriptor.length == 0
+            ? generation.coverage_descriptor.offset == 0
+            : generation_key_end == generation.coverage_descriptor.offset;
+    const bool dependency_vector_contiguous =
+        generation_key_end + generation.coverage_descriptor.length ==
+        generation.dependency_vector.offset;
+    const bool contiguous = identity_start_valid && domain_contiguous &&
+                            descriptor_contiguous &&
+                            dependency_vector_contiguous;
     const std::uint64_t allocation_end =
         static_cast<std::uint64_t>(generation.allocation_offset) +
         generation.allocation_length;
-    if (!descriptor_valid || !contiguous || aligned_length == 0 ||
+    if (!domain_valid || !descriptor_valid || !contiguous ||
+        aligned_length == 0 ||
         generation.allocation_length != aligned_length ||
         generation.allocation_offset % 8U != 0 ||
         generation.allocation_length % 8U != 0 ||
@@ -3883,16 +5442,40 @@ snapshot_reusable_generation_diagnostics(
                 shared.config.byte_arena_bytes) {
       return ReusableRegistryErrorV1::CorruptGeneration;
     }
-    allocated_bytes += generation.allocation_length;
+    const std::uint64_t diagnostic_bytes =
+        diagnostic_allocation(generation.display_sql).length +
+        static_cast<std::uint64_t>(
+            diagnostic_allocation(generation.canonical_plan).length) +
+        diagnostic_allocation(generation.producer_plan).length;
+    allocated_bytes += generation.allocation_length + diagnostic_bytes;
     if (allocated_bytes > shared.config.byte_arena_bytes) {
       return ReusableRegistryErrorV1::CorruptLayout;
     }
 
     if (generation.membership == ReusableRecordMembershipV1::Retired) {
       ++retired_records;
+      const bool pending_release =
+          generation.dependency_release_state ==
+              ReusableDependencyReleaseStateV1::Pending &&
+          generation.dependency_release_cursor <=
+              generation_reference_count(generation) &&
+          generation.dependency_release_sequence == 0;
+      const bool prepared_release =
+          generation.dependency_release_state ==
+              ReusableDependencyReleaseStateV1::Prepared &&
+          generation.dependency_release_cursor <=
+              generation_reference_count(generation) &&
+          generation.dependency_release_sequence != 0;
+      const bool released =
+          generation.dependency_release_state ==
+              ReusableDependencyReleaseStateV1::Released &&
+          generation.dependency_release_cursor ==
+              generation_reference_count(generation) &&
+          generation.dependency_release_sequence != 0;
       if (generation.state != CacheEntryState::Evicting ||
           generation.waiter_count != 0 || generation.planner_pin_count != 0 ||
           generation.reader_pin_count != 0 ||
+          (!pending_release && !prepared_release && !released) ||
           generation.next_in_exact_bucket != kInvalidReusableRegistrySlotV1 ||
           generation.next_in_coverage_bucket !=
               kInvalidReusableRegistrySlotV1) {
@@ -3901,6 +5484,21 @@ snapshot_reusable_generation_diagnostics(
       continue;
     }
     ++indexed_records;
+    if (generation.dependency_release_state !=
+            ReusableDependencyReleaseStateV1::Retained ||
+        generation.dependency_release_cursor != 0 ||
+        generation.dependency_release_sequence != 0) {
+      return ReusableRegistryErrorV1::CorruptGeneration;
+    }
+    if (is_coverage) {
+      ++indexed_coverage_records;
+    } else {
+      ++indexed_exact_records;
+      if (generation.next_in_coverage_bucket !=
+          kInvalidReusableRegistrySlotV1) {
+        return ReusableRegistryErrorV1::CorruptGeneration;
+      }
+    }
     const bool indexed_state = generation.state == CacheEntryState::Claimed ||
                                generation.state == CacheEntryState::Building ||
                                generation.state == CacheEntryState::Complete ||
@@ -3924,6 +5522,7 @@ snapshot_reusable_generation_diagnostics(
     }
   }
   if (indexed_records != shared.indexed_generations ||
+      indexed_exact_records + indexed_coverage_records != indexed_records ||
       retired_records != shared.retired_generations ||
       indexed_records + retired_records + free_records !=
           shared.config.max_generations) {
@@ -3990,6 +5589,7 @@ snapshot_reusable_generation_diagnostics(
       if (current == kInvalidReusableRegistrySlotV1 ||
           current >= shared.config.max_generations ||
           records[current].membership != ReusableRecordMembershipV1::Indexed ||
+          !known_entry_kind(records[current].entry_kind) ||
           records[current].id.digest != bucket.digest) {
         return ReusableRegistryErrorV1::CorruptDirectory;
       }
@@ -4037,6 +5637,7 @@ snapshot_reusable_generation_diagnostics(
       if (current == kInvalidReusableRegistrySlotV1 ||
           current >= shared.config.max_generations ||
           records[current].membership != ReusableRecordMembershipV1::Indexed ||
+          records[current].entry_kind != CacheEntryKind::ReusableCoverage ||
           records[current].coverage_directory_key != bucket.key) {
         return ReusableRegistryErrorV1::CorruptDirectory;
       }
@@ -4050,7 +5651,7 @@ snapshot_reusable_generation_diagnostics(
     coverage_members += bucket.generation_count;
   }
   if (coverage_occupied != shared.coverage_occupied_buckets ||
-      coverage_members != indexed_records) {
+      coverage_members != indexed_coverage_records) {
     return ReusableRegistryErrorV1::CorruptDirectory;
   }
 
@@ -4061,9 +5662,7 @@ snapshot_reusable_generation_diagnostics(
     }
     const DirectoryProbeV1 exact_probe =
         probe_exact_directory(attachment, generation.id.digest);
-    const DirectoryProbeV1 coverage_probe =
-        probe_coverage_directory(attachment, generation.coverage_directory_key);
-    if (!exact_probe.found || !coverage_probe.found) {
+    if (!exact_probe.found) {
       return ReusableRegistryErrorV1::CorruptDirectory;
     }
     std::uint32_t occurrences = 0;
@@ -4076,15 +5675,25 @@ snapshot_reusable_generation_diagnostics(
     if (occurrences != 1) {
       return ReusableRegistryErrorV1::CorruptDirectory;
     }
-    occurrences = 0;
-    current = coverage[coverage_probe.slot].first_generation;
-    for (std::uint32_t visited = 0;
-         visited < coverage[coverage_probe.slot].generation_count; ++visited) {
-      occurrences += current == slot ? 1U : 0U;
-      current = records[current].next_in_coverage_bucket;
-    }
-    if (occurrences != 1) {
-      return ReusableRegistryErrorV1::CorruptDirectory;
+    if (generation.entry_kind == CacheEntryKind::ReusableCoverage) {
+      const DirectoryProbeV1 coverage_probe = probe_coverage_directory(
+          attachment, generation.coverage_directory_key);
+      if (!coverage_probe.found) {
+        return ReusableRegistryErrorV1::CorruptDirectory;
+      }
+      occurrences = 0;
+      current = coverage[coverage_probe.slot].first_generation;
+      for (std::uint32_t visited = 0;
+           visited < coverage[coverage_probe.slot].generation_count;
+           ++visited) {
+        occurrences += current == slot ? 1U : 0U;
+        current = records[current].next_in_coverage_bucket;
+      }
+      if (occurrences != 1) {
+        return ReusableRegistryErrorV1::CorruptDirectory;
+      }
+    } else if (generation.entry_kind != CacheEntryKind::ExactFinalResult) {
+      return ReusableRegistryErrorV1::CorruptGeneration;
     }
   }
 
@@ -4122,6 +5731,8 @@ static_assert(std::is_trivially_copyable_v<ReusableManifestHandleV1>);
 static_assert(std::is_trivially_copyable_v<ReusableGenerationReferenceV1>);
 static_assert(std::is_trivially_copyable_v<ReusableSharedReferenceOwnerV1>);
 static_assert(std::is_trivially_copyable_v<ReusableReferenceTokenV1>);
+static_assert(
+    std::is_trivially_copyable_v<ReusableJanitorOwnerObservationV1>);
 static_assert(std::is_trivially_copyable_v<ReusableInvalidationSelectorV1>);
 static_assert(std::is_trivially_copyable_v<ReusableInvalidationResultV1>);
 static_assert(std::is_standard_layout_v<ReusableGenerationDiagnosticsRowV1>);

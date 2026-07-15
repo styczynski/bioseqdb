@@ -1,6 +1,6 @@
--- Common object body for both CREATE EXTENSION and build-tree test bootstrap.
--- The caller creates/selects the fixed schema and substitutes either
--- MODULE_PATHNAME or the quoted absolute build-tree DSO path.
+-- Unguarded object body shared by the guarded extension installer and the
+-- build-tree test bootstrap. The caller creates/selects the fixed schema and
+-- substitutes either MODULE_PATHNAME or the quoted absolute build-tree DSO.
 
 REVOKE CREATE ON SCHEMA bioseq_cache FROM PUBLIC;
 REVOKE ALL ON SCHEMA bioseq_cache FROM PUBLIC;

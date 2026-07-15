@@ -1,14 +1,16 @@
+module;
+
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <expected>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <span>
@@ -18,6 +20,8 @@
 #include <system_error>
 #include <vector>
 
+export module bioseq.cache.bench;
+
 import bioseq.cache.core;
 
 using namespace bioseq::cache;
@@ -26,7 +30,33 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+/** Write the complete CLI payload and report any terminal write failure. */
+[[nodiscard]] bool write_stream(
+    std::FILE& stream,
+    std::string_view text) noexcept {
+    std::size_t written = 0;
+    while (written < text.size()) {
+        const std::size_t chunk = std::fwrite(
+            text.data() + written,
+            1,
+            text.size() - written,
+            &stream);
+        if (chunk == 0) {
+            return false;
+        }
+        written += chunk;
+    }
+    return std::fflush(&stream) == 0;
+}
+
+/** Best-effort diagnostic output for a CLI path that is already failing. */
+void write_error(std::string_view text) noexcept {
+    static_cast<void>(write_stream(*stderr, text));
+}
+
+/** Deterministic checksum policy used by the standalone column-store probe. */
 struct BenchChecksums {
+    /** Compute the block checksum required by the column-store policy. */
     [[nodiscard]] std::expected<std::uint32_t, ChecksumError> block_crc32c(
         std::span<const std::byte> bytes) const noexcept {
         std::uint32_t hash = 2'166'136'261u;
@@ -37,6 +67,7 @@ struct BenchChecksums {
         return hash;
     }
 
+    /** Compute a deterministic 256-bit digest for benchmark correctness. */
     [[nodiscard]] std::expected<CacheDigest256, ChecksumError> sha256(
         std::span<const std::byte> bytes) const noexcept {
         std::array<std::uint64_t, 4> lanes{
@@ -64,6 +95,7 @@ struct BenchChecksums {
         return digest;
     }
 
+    /** Fold block digests into the manifest-level digest. */
     [[nodiscard]] std::expected<CacheDigest256, ChecksumError>
     manifest_sha256(
         std::span<const CacheDigest256> block_digests) const noexcept {
@@ -78,13 +110,16 @@ struct BenchChecksums {
     }
 };
 
+/** Single-threaded reservation counter satisfying BasicCacheAdmission. */
 struct BenchCounter {
     std::uint64_t value = 0;
 
+    /** Read the current reserved-byte count. */
     [[nodiscard]] std::uint64_t load() const noexcept {
         return value;
     }
 
+    /** Apply the admission counter's compare/exchange operation. */
     bool compare_exchange(
         std::uint64_t& expected,
         std::uint64_t desired) noexcept {
@@ -96,20 +131,25 @@ struct BenchCounter {
         return true;
     }
 
+    /** Release a previously reserved byte count. */
     void subtract(std::uint64_t bytes) noexcept {
         value -= bytes;
     }
 };
 
+/** Stable no-pressure budget for measuring reservation mechanics only. */
 struct BenchBudget {
+    /** Return the bytes currently available to admission. */
     [[nodiscard]] std::uint64_t allocatable_bytes() const noexcept {
         return (std::numeric_limits<std::uint64_t>::max)();
     }
 
+    /** Return a representative finite cache capacity. */
     [[nodiscard]] std::uint64_t total_bytes() const noexcept {
         return 8ULL << 30;
     }
 
+    /** Keep the standalone mechanics probe outside pressure mode. */
     [[nodiscard]] bool under_pressure() const noexcept {
         return false;
     }
@@ -123,6 +163,7 @@ constexpr ColumnStoreIdentity kIdentity{
     .datum_width = sizeof(std::uintptr_t),
 };
 
+/** Build the fixed synthetic schema shared by encode and replay. */
 std::array<ColumnSchema, 3> benchmark_schema() {
     return {{
         {
@@ -165,6 +206,7 @@ std::array<ColumnSchema, 3> benchmark_schema() {
     }};
 }
 
+/** Encode the deterministic synthetic rows into one validated store blob. */
 std::expected<std::vector<std::byte>, FormatError> make_blob(
     std::uint64_t row_count,
     BenchChecksums& checksums) {
@@ -197,6 +239,7 @@ std::expected<std::vector<std::byte>, FormatError> make_blob(
     return builder.seal(checksums);
 }
 
+/** Return an integer nearest-rank percentile from nonempty samples. */
 std::uint64_t percentile(
     std::vector<std::uint64_t> samples,
     std::uint64_t numerator,
@@ -207,6 +250,7 @@ std::uint64_t percentile(
     return samples[static_cast<std::size_t>(std::max<std::uint64_t>(1, rank) - 1u)];
 }
 
+/** Append a numeric sample vector without allocating an intermediate JSON tree. */
 void append_samples_json(
     std::ostringstream& output,
     std::span<const std::uint64_t> samples) {
@@ -220,12 +264,14 @@ void append_samples_json(
     output << ']';
 }
 
+/** Mix one replayed byte into the independent ordered row oracle. */
 std::uint64_t mix_byte(std::uint64_t hash, std::uint8_t byte) noexcept {
     hash ^= byte;
     hash *= 0x100000001b3ULL;
     return hash;
 }
 
+/** Compute the expected ordered digest without reading the encoded blob. */
 std::uint64_t expected_row_digest(std::uint64_t rows) noexcept {
     std::uint64_t hash = 0xcbf29ce484222325ULL;
     for (std::uint64_t row = 0; row < rows; ++row) {
@@ -242,12 +288,14 @@ std::uint64_t expected_row_digest(std::uint64_t rows) noexcept {
     return hash;
 }
 
+/** Render a fixed-width 64-bit checksum. */
 std::string hex_u64(std::uint64_t value) {
     std::ostringstream output;
     output << std::hex << std::setfill('0') << std::setw(16) << value;
     return output.str();
 }
 
+/** Render all bytes of a 256-bit storage digest. */
 std::string hex_digest(const CacheDigest256& digest) {
     std::ostringstream output;
     output << std::hex << std::setfill('0');
@@ -263,6 +311,7 @@ struct Options {
     std::uint32_t samples = 7;
 };
 
+/** Parse a strictly positive decimal CLI integer. */
 template <class Integer>
 bool parse_positive_integer(std::string_view text, Integer& value) noexcept {
     Integer parsed = 0;
@@ -277,6 +326,7 @@ bool parse_positive_integer(std::string_view text, Integer& value) noexcept {
     return true;
 }
 
+/** Parse the intentionally small standalone benchmark command line. */
 std::optional<Options> parse_options(int argc, char** argv) {
     Options options;
     for (int index = 1; index < argc; ++index) {
@@ -305,11 +355,13 @@ std::optional<Options> parse_options(int argc, char** argv) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+/** Run core encode/prevalidation/decode/admission measurements and emit JSON. */
+export int bioseq_cache_bench_main(int argc, char** argv) {
     const auto options = parse_options(argc, argv);
     if (!options.has_value()) {
-        std::cerr << "usage: bioseq_cache_bench [--output PATH] "
-                     "[--rows=N] [--samples=N]\n";
+        write_error(
+            "usage: bioseq_cache_bench [--output PATH] "
+            "[--rows=N] [--samples=N]\n");
         return 2;
     }
 
@@ -323,7 +375,7 @@ int main(int argc, char** argv) {
         auto encoded = make_blob(options->rows, checksums);
         const auto finished = Clock::now();
         if (!encoded.has_value()) {
-            std::cerr << "column encoding failed\n";
+            write_error("column encoding failed\n");
             return 1;
         }
         blob = std::move(*encoded);
@@ -342,7 +394,7 @@ int main(int argc, char** argv) {
         auto view = validate_column_store(blob, kIdentity, schema, checksums);
         const auto finished = Clock::now();
         if (!view.has_value() || view->row_count() != options->rows) {
-            std::cerr << "column prevalidation failed\n";
+            write_error("column prevalidation failed\n");
             return 1;
         }
         row_group_count = view->row_group_count();
@@ -353,24 +405,27 @@ int main(int argc, char** argv) {
 
     auto decode_view = validate_column_store(blob, kIdentity, schema, checksums);
     if (!decode_view.has_value()) {
-        std::cerr << "column validation failed\n";
+        write_error("column validation failed\n");
         return 1;
     }
     auto score_chunks = decode_view->column_chunks(1);
     if (!score_chunks.has_value() || score_chunks->empty()) {
-        std::cerr << "fixed column chunks are unavailable\n";
+        write_error("fixed column chunks are unavailable\n");
         return 1;
     }
     constexpr std::size_t fixed_width = sizeof(std::uint32_t);
     std::vector<std::byte> decoded_fixed(
         static_cast<std::size_t>(options->rows) * fixed_width);
-    constexpr std::uint64_t decode_repetitions = 64;
+    using TimedCopyFunction = void* (*)(void*, const void*, std::size_t);
+    TimedCopyFunction volatile timed_copy = &std::memcpy;
+    constexpr std::uint64_t transfer_repetitions = 64;
     std::vector<std::uint64_t> decode_samples;
     decode_samples.reserve(options->samples);
+    std::uint64_t decode_guard = 0xcbf29ce484222325ULL;
     for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
         const auto started = Clock::now();
         for (std::uint64_t repetition = 0;
-             repetition < decode_repetitions;
+             repetition < transfer_repetitions;
              ++repetition) {
             std::size_t destination_offset = 0;
             for (const auto& chunk : *score_chunks) {
@@ -378,34 +433,54 @@ int main(int argc, char** argv) {
                     || chunk.fixed_width != fixed_width
                     || chunk.fixed_stride < chunk.fixed_width
                     || !chunk.validity_bitmap.empty()) {
-                    std::cerr << "fixed column chunk contract mismatch\n";
+                    write_error("fixed column chunk contract mismatch\n");
                     return 1;
                 }
                 if (chunk.fixed_stride == chunk.fixed_width) {
-                    std::memcpy(
+                    static_cast<void>(timed_copy(
                         decoded_fixed.data() + destination_offset,
                         chunk.values.data(),
-                        chunk.values.size());
+                        chunk.values.size()));
                     destination_offset += chunk.values.size();
                     continue;
                 }
                 for (std::uint64_t row = 0; row < chunk.row_count; ++row) {
-                    std::memcpy(
+                    static_cast<void>(timed_copy(
                         decoded_fixed.data() + destination_offset,
                         chunk.values.data() + row * chunk.fixed_stride,
-                        fixed_width);
+                        fixed_width));
                     destination_offset += fixed_width;
                 }
             }
             if (destination_offset != decoded_fixed.size()) {
-                std::cerr << "fixed column decode length mismatch\n";
+                write_error("fixed column decode length mismatch\n");
                 return 1;
             }
+            decode_guard = mix_byte(
+                decode_guard,
+                std::to_integer<std::uint8_t>(
+                    decoded_fixed[repetition % decoded_fixed.size()]));
         }
         const auto finished = Clock::now();
         decode_samples.push_back(static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 finished - started).count()));
+    }
+
+    std::uint64_t expected_iteration_guard = 0xcbf29ce484222325ULL;
+    for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
+        for (std::uint64_t repetition = 0;
+             repetition < transfer_repetitions;
+             ++repetition) {
+            expected_iteration_guard = mix_byte(
+                expected_iteration_guard,
+                std::to_integer<std::uint8_t>(
+                    decoded_fixed[repetition % decoded_fixed.size()]));
+        }
+    }
+    if (decode_guard != expected_iteration_guard) {
+        write_error("fixed column decode iteration guard mismatch\n");
+        return 1;
     }
 
     for (std::uint64_t row = 0; row < options->rows; ++row) {
@@ -420,7 +495,7 @@ int main(int argc, char** argv) {
                 bytes.begin(), bytes.end(),
                 decoded_fixed.begin()
                     + static_cast<std::ptrdiff_t>(row * fixed_width))) {
-            std::cerr << "fixed column decode correctness mismatch\n";
+            write_error("fixed column decode correctness mismatch\n");
             return 1;
         }
     }
@@ -439,7 +514,7 @@ int main(int argc, char** argv) {
             || !accepted->is_boolean || accepted->is_null
             || score->is_null || payload->is_null
             || score->bytes.size() != 4 || payload->bytes.size() != 16) {
-            std::cerr << "column replay failed\n";
+            write_error("column replay failed\n");
             return 1;
         }
         local_digest = mix_byte(
@@ -455,7 +530,7 @@ int main(int argc, char** argv) {
         }
     }
     if (local_digest != expected_digest) {
-        std::cerr << "decoded correctness digest mismatch\n";
+        write_error("decoded correctness digest mismatch\n");
         return 1;
     }
     decoded_digest = local_digest;
@@ -463,24 +538,29 @@ int main(int argc, char** argv) {
     std::vector<std::uint64_t> memory_copy_samples;
     memory_copy_samples.reserve(options->samples);
     std::vector<std::byte> copied(decoded_fixed.size());
-    constexpr std::uint64_t copy_repetitions = 64;
-    std::uint8_t copy_guard = 0;
+    std::uint64_t copy_guard = 0xcbf29ce484222325ULL;
     for (std::uint32_t sample = 0; sample < options->samples; ++sample) {
         const auto started = Clock::now();
         for (std::uint64_t repetition = 0;
-             repetition < copy_repetitions;
+             repetition < transfer_repetitions;
              ++repetition) {
-            std::memcpy(
-                copied.data(), decoded_fixed.data(), decoded_fixed.size());
+            static_cast<void>(timed_copy(
+                copied.data(), decoded_fixed.data(), decoded_fixed.size()));
             if (!copied.empty()) {
-                copy_guard ^= std::to_integer<std::uint8_t>(
-                    copied[repetition % copied.size()]);
+                copy_guard = mix_byte(
+                    copy_guard,
+                    std::to_integer<std::uint8_t>(
+                        copied[repetition % copied.size()]));
             }
         }
         const auto finished = Clock::now();
         memory_copy_samples.push_back(static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 finished - started).count()));
+    }
+    if (copy_guard != expected_iteration_guard) {
+        write_error("memory-copy iteration guard mismatch\n");
+        return 1;
     }
 
     std::vector<std::uint64_t> admission_samples;
@@ -496,14 +576,14 @@ int main(int argc, char** argv) {
              ++operation) {
             auto permit = admission.try_reserve(64);
             if (!permit.has_value()) {
-                std::cerr << "admission failed\n";
+                write_error("admission failed\n");
                 return 1;
             }
             permit->release();
         }
         const auto finished = Clock::now();
         if (counter.value != 0) {
-            std::cerr << "admission permit leak\n";
+            write_error("admission permit leak\n");
             return 1;
         }
         admission_samples.push_back(static_cast<std::uint64_t>(
@@ -519,10 +599,10 @@ int main(int argc, char** argv) {
     const auto memory_copy_p50 = percentile(memory_copy_samples, 50, 100);
     const long double fixed_decode_bytes =
         static_cast<long double>(options->rows) * fixed_width
-        * static_cast<long double>(decode_repetitions);
+        * static_cast<long double>(transfer_repetitions);
     const long double copied_bytes =
         static_cast<long double>(decoded_fixed.size())
-        * static_cast<long double>(copy_repetitions);
+        * static_cast<long double>(transfer_repetitions);
     const std::uint64_t fixed_decode_bytes_per_second = decode_p50 == 0
         ? 0
         : static_cast<std::uint64_t>(
@@ -545,8 +625,12 @@ int main(int argc, char** argv) {
          << hex_u64(decoded_digest) << "\",\n"
          << "    \"column_blob_digest\": \"" << hex_digest(*digest)
          << "\",\n"
+         << "    \"expected_iteration_guard\": "
+         << expected_iteration_guard << ",\n"
+         << "    \"decode_guard\": "
+         << decode_guard << ",\n"
          << "    \"memory_copy_guard\": "
-         << static_cast<unsigned int>(copy_guard) << ",\n"
+         << copy_guard << ",\n"
          << "    \"admission_final_reserved_bytes\": 0\n"
          << "  },\n"
          << "  \"metrics\": {\n"
@@ -591,7 +675,7 @@ int main(int argc, char** argv) {
          << ", \"p95_ns\": " << percentile(decode_samples, 95, 100)
          << ", \"p99_ns\": " << percentile(decode_samples, 99, 100)
          << ", \"operations\": "
-         << options->rows * decode_repetitions << "},\n"
+         << options->rows * transfer_repetitions << "},\n"
          << "    {\"name\": \"admission_reserve_release\", "
             "\"raw_samples_ns\": ";
     append_samples_json(json, admission_samples);
@@ -605,23 +689,26 @@ int main(int argc, char** argv) {
     json << ", \"p50_ns\": " << memory_copy_p50
          << ", \"p95_ns\": " << percentile(memory_copy_samples, 95, 100)
          << ", \"p99_ns\": " << percentile(memory_copy_samples, 99, 100)
-         << ", \"operations\": " << copy_repetitions << "}\n"
+         << ", \"operations\": " << transfer_repetitions << "}\n"
          << "  ]\n"
          << "}\n";
 
     if (options->output.has_value()) {
         std::ofstream output(*options->output, std::ios::binary);
         if (!output) {
-            std::cerr << "cannot open benchmark output\n";
+            write_error("cannot open benchmark output\n");
             return 2;
         }
         output << json.str();
         if (!output) {
-            std::cerr << "cannot write benchmark output\n";
+            write_error("cannot write benchmark output\n");
             return 2;
         }
     } else {
-        std::cout << json.str();
+        if (!write_stream(*stdout, json.str())) {
+            write_error("cannot write benchmark output\n");
+            return 2;
+        }
     }
     return 0;
 }

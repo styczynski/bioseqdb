@@ -4,9 +4,12 @@
  */
 module;
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <type_traits>
 
 export module bioseq.cache.core:wire;
@@ -171,6 +174,7 @@ enum class WriteObservability : std::uint32_t {
 
 struct DependencyVersion {
     DependencyKey key{};
+    std::uint32_t alignment_reserved = 0;
     std::uint64_t committed_epoch = 0;
     PhysicalIdentityV1 physical_identity{};
     WriteObservability observability = WriteObservability::DatabaseWideFallback;
@@ -179,6 +183,548 @@ struct DependencyVersion {
     [[nodiscard]] bool operator==(
         const DependencyVersion&) const noexcept = default;
 };
+
+inline constexpr std::uint32_t kDependencyVectorMagicV1 = 0x42445631U;
+inline constexpr std::uint32_t kDependencyVectorAbiVersionV1 = 1;
+
+/** Exact dependency epoch plus the ABA generation of its directory record. */
+struct DependencyVectorEntryV1 {
+    DependencyVersion version{};
+    std::uint64_t record_generation = 0;
+
+    [[nodiscard]] bool operator==(
+        const DependencyVectorEntryV1&) const noexcept = default;
+};
+
+inline constexpr std::uint32_t kDependencyVectorHeaderBytesV1 = 40;
+inline constexpr std::uint32_t kDependencyVectorEntryBytesV1 = 88;
+
+/** Native shared-memory envelope; no process pointer enters persisted bytes. */
+struct DependencyVectorHeaderV1 {
+    std::uint32_t magic = kDependencyVectorMagicV1;
+    std::uint32_t abi_version = kDependencyVectorAbiVersionV1;
+    std::uint32_t header_bytes = kDependencyVectorHeaderBytesV1;
+    std::uint32_t entry_bytes = kDependencyVectorEntryBytesV1;
+    std::uint32_t entry_count = 0;
+    std::uint32_t reserved = 0;
+    std::uint64_t total_bytes = kDependencyVectorHeaderBytesV1;
+    std::uint64_t payload_checksum = 0;
+};
+
+enum class DependencyVectorEnvelopeErrorV1 : std::uint32_t {
+    None = 0,
+    InvalidArgument,
+    InvalidSize,
+    InvalidMagic,
+    AbiMismatch,
+    InvalidHeader,
+    CountExceeded,
+    ChecksumMismatch,
+    InvalidEntry,
+    NonCanonical,
+};
+
+struct DependencyVectorEnvelopeResultV1 {
+    DependencyVectorHeaderV1 header{};
+    DependencyVectorEnvelopeErrorV1 error =
+        DependencyVectorEnvelopeErrorV1::None;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return error == DependencyVectorEnvelopeErrorV1::None;
+    }
+};
+
+/** Exact byte requirement, or zero when the bounded count is invalid. */
+[[nodiscard]] constexpr std::size_t dependency_vector_envelope_bytes(
+        std::size_t entry_count) noexcept {
+    return entry_count <= kMaxDependenciesPerGeneration
+        ? kDependencyVectorHeaderBytesV1
+            + entry_count * kDependencyVectorEntryBytesV1
+        : 0;
+}
+
+/** Stable non-cryptographic integrity checksum over canonical entry bytes. */
+[[nodiscard]] constexpr std::uint64_t dependency_vector_payload_checksum(
+        std::span<const std::byte> payload) noexcept {
+    std::uint64_t checksum = 14695981039346656037ULL;
+    for (const std::byte value : payload) {
+        checksum ^= static_cast<std::uint64_t>(
+            std::to_integer<std::uint8_t>(value));
+        checksum *= 1099511628211ULL;
+    }
+    return checksum;
+}
+
+[[nodiscard]] constexpr bool dependency_key_less_v1(
+        const DependencyKey& left, const DependencyKey& right) noexcept {
+    if (left.database_oid != right.database_oid) {
+        return left.database_oid < right.database_oid;
+    }
+    if (left.class_oid != right.class_oid) {
+        return left.class_oid < right.class_oid;
+    }
+    if (left.object_oid != right.object_oid) {
+        return left.object_oid < right.object_oid;
+    }
+    if (left.object_sub_id != right.object_sub_id) {
+        return left.object_sub_id < right.object_sub_id;
+    }
+    return left.kind < right.kind;
+}
+
+[[nodiscard]] constexpr bool physical_identity_valid_v1(
+        const PhysicalIdentityV1& identity) noexcept {
+    if (identity.kind < PhysicalIdentityKind::None
+        || identity.kind > PhysicalIdentityKind::ProviderOpaque
+        || identity.length > identity.bytes.size()
+        || (identity.kind == PhysicalIdentityKind::None
+            && identity.length != 0)) {
+        return false;
+    }
+    for (std::size_t index = identity.length;
+         index < identity.bytes.size(); ++index) {
+        if (identity.bytes[index] != std::byte{}) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] constexpr bool dependency_vector_entry_valid_v1(
+        const DependencyVectorEntryV1& entry) noexcept {
+    const DependencyVersion& version = entry.version;
+    const bool observability_valid =
+        version.observability >= WriteObservability::ProviderComplete
+        && version.observability <= WriteObservability::DatabaseWideFallback;
+    return entry.record_generation != 0
+        && version.key.database_oid != 0
+        && version.key.kind >= DependencyKind::RelationContent
+        && version.key.kind <= DependencyKind::DatabaseDefinitionEpoch
+        && version.key.reserved == 0
+        && version.alignment_reserved == 0
+        && version.committed_epoch != 0
+        && physical_identity_valid_v1(version.physical_identity)
+        && observability_valid
+        && version.reserved == 0;
+}
+
+/** One database-wide committed-write epoch used as an exact fallback guard. */
+[[nodiscard]] constexpr bool database_write_guard_entry_valid_v1(
+        const DependencyVectorEntryV1& entry) noexcept {
+    const DependencyVersion& version = entry.version;
+    return dependency_vector_entry_valid_v1(entry)
+        && version.key.class_oid == 0
+        && version.key.object_oid == version.key.database_oid
+        && version.key.object_sub_id == 0
+        && version.key.kind == DependencyKind::DatabaseWriteEpoch
+        && version.physical_identity.kind == PhysicalIdentityKind::None
+        && version.physical_identity.length == 0
+        && version.observability == WriteObservability::DatabaseWideFallback;
+}
+
+/** One database-wide committed-definition epoch used by precise generations. */
+[[nodiscard]] constexpr bool database_definition_guard_entry_valid_v1(
+        const DependencyVectorEntryV1& entry) noexcept {
+    const DependencyVersion& version = entry.version;
+    return dependency_vector_entry_valid_v1(entry)
+        && version.key.class_oid == 0
+        && version.key.object_oid == version.key.database_oid
+        && version.key.object_sub_id == 0
+        && version.key.kind == DependencyKind::DatabaseDefinitionEpoch
+        && version.physical_identity.kind == PhysicalIdentityKind::None
+        && version.physical_identity.length == 0
+        && version.observability == WriteObservability::DatabaseWideFallback;
+}
+
+/** Validate the single outside-envelope per-database epoch guard. */
+[[nodiscard]] constexpr bool database_guard_entry_valid_v1(
+        const DependencyVectorEntryV1& entry) noexcept {
+    return database_write_guard_entry_valid_v1(entry)
+        || database_definition_guard_entry_valid_v1(entry);
+}
+
+/** Only the conservative data-write guard carries a continuing XID oracle. */
+[[nodiscard]] constexpr bool database_guard_requires_completion_v1(
+        const DependencyKey& key) noexcept {
+    return key.kind == DependencyKind::DatabaseWriteEpoch;
+}
+
+[[nodiscard]] constexpr bool database_guard_requires_completion_v1(
+        const DependencyVectorEntryV1& entry) noexcept {
+    return database_guard_entry_valid_v1(entry)
+        && database_guard_requires_completion_v1(entry.version.key);
+}
+
+/**
+ * Validate the PG snapshot-to-dependency handshake without depending on a
+ * native SnapshotData layout.  PostgreSQL deliberately clears the copied
+ * snapshot field, so a nonzero caller-minted binding is always authoritative;
+ * a nonzero snapshot field is an additional equality proof.  The continuing
+ * count is optional and is used only by conservative in-flight generations.
+ */
+[[nodiscard]] constexpr bool dependency_completion_handshake_valid_v1(
+        std::uint64_t copied_snapshot_completion_count,
+        std::uint64_t snapshot_binding_completion_count,
+        std::uint64_t current_completion_count,
+        std::uint64_t continuing_completion_count) noexcept {
+    return snapshot_binding_completion_count != 0
+        && current_completion_count == snapshot_binding_completion_count
+        && (copied_snapshot_completion_count == 0
+            || copied_snapshot_completion_count
+                == snapshot_binding_completion_count)
+        && (continuing_completion_count == 0
+            || continuing_completion_count == current_completion_count);
+}
+
+namespace dependency_vector_wire_detail {
+
+constexpr void write_u16(
+        std::span<std::byte> output, std::size_t offset,
+        std::uint16_t value) noexcept {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        output[offset + index] = static_cast<std::byte>(
+            (value >> (index * 8U)) & 0xffU);
+    }
+}
+
+constexpr void write_u32(
+        std::span<std::byte> output, std::size_t offset,
+        std::uint32_t value) noexcept {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        output[offset + index] = static_cast<std::byte>(
+            (value >> (index * 8U)) & 0xffU);
+    }
+}
+
+constexpr void write_u64(
+        std::span<std::byte> output, std::size_t offset,
+        std::uint64_t value) noexcept {
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        output[offset + index] = static_cast<std::byte>(
+            (value >> (index * 8U)) & 0xffU);
+    }
+}
+
+[[nodiscard]] constexpr std::uint16_t read_u16(
+        std::span<const std::byte> input, std::size_t offset) noexcept {
+    std::uint16_t value = 0;
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        value |= static_cast<std::uint16_t>(
+            std::to_integer<std::uint8_t>(input[offset + index]))
+            << (index * 8U);
+    }
+    return value;
+}
+
+[[nodiscard]] constexpr std::uint32_t read_u32(
+        std::span<const std::byte> input, std::size_t offset) noexcept {
+    std::uint32_t value = 0;
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        value |= static_cast<std::uint32_t>(
+            std::to_integer<std::uint8_t>(input[offset + index]))
+            << (index * 8U);
+    }
+    return value;
+}
+
+[[nodiscard]] constexpr std::uint64_t read_u64(
+        std::span<const std::byte> input, std::size_t offset) noexcept {
+    std::uint64_t value = 0;
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        value |= static_cast<std::uint64_t>(
+            std::to_integer<std::uint8_t>(input[offset + index]))
+            << (index * 8U);
+    }
+    return value;
+}
+
+constexpr void encode_header(
+        std::span<std::byte> output,
+        const DependencyVectorHeaderV1& header) noexcept {
+    write_u32(output, 0, header.magic);
+    write_u32(output, 4, header.abi_version);
+    write_u32(output, 8, header.header_bytes);
+    write_u32(output, 12, header.entry_bytes);
+    write_u32(output, 16, header.entry_count);
+    write_u32(output, 20, header.reserved);
+    write_u64(output, 24, header.total_bytes);
+    write_u64(output, 32, header.payload_checksum);
+}
+
+[[nodiscard]] constexpr DependencyVectorHeaderV1 decode_header(
+        std::span<const std::byte> input) noexcept {
+    return DependencyVectorHeaderV1{
+        .magic = read_u32(input, 0),
+        .abi_version = read_u32(input, 4),
+        .header_bytes = read_u32(input, 8),
+        .entry_bytes = read_u32(input, 12),
+        .entry_count = read_u32(input, 16),
+        .reserved = read_u32(input, 20),
+        .total_bytes = read_u64(input, 24),
+        .payload_checksum = read_u64(input, 32),
+    };
+}
+
+constexpr void encode_entry(
+        std::span<std::byte> output,
+        const DependencyVectorEntryV1& entry) noexcept {
+    const DependencyVersion& version = entry.version;
+    write_u32(output, 0, version.key.database_oid);
+    write_u32(output, 4, version.key.class_oid);
+    write_u32(output, 8, version.key.object_oid);
+    write_u32(
+        output, 12,
+        std::bit_cast<std::uint32_t>(version.key.object_sub_id));
+    write_u16(
+        output, 16, static_cast<std::uint16_t>(version.key.kind));
+    write_u16(output, 18, version.key.reserved);
+    write_u32(output, 20, version.alignment_reserved);
+    write_u64(output, 24, version.committed_epoch);
+    write_u32(
+        output, 32,
+        static_cast<std::uint32_t>(version.physical_identity.kind));
+    write_u32(output, 36, version.physical_identity.length);
+    for (std::size_t index = 0;
+         index < version.physical_identity.bytes.size(); ++index) {
+        output[40 + index] = version.physical_identity.bytes[index];
+    }
+    write_u32(
+        output, 72, static_cast<std::uint32_t>(version.observability));
+    write_u32(output, 76, version.reserved);
+    write_u64(output, 80, entry.record_generation);
+}
+
+[[nodiscard]] constexpr DependencyVectorEntryV1 decode_entry(
+        std::span<const std::byte> input) noexcept {
+    DependencyVectorEntryV1 entry{};
+    entry.version.key.database_oid = read_u32(input, 0);
+    entry.version.key.class_oid = read_u32(input, 4);
+    entry.version.key.object_oid = read_u32(input, 8);
+    entry.version.key.object_sub_id =
+        std::bit_cast<std::int32_t>(read_u32(input, 12));
+    entry.version.key.kind =
+        static_cast<DependencyKind>(read_u16(input, 16));
+    entry.version.key.reserved = read_u16(input, 18);
+    entry.version.alignment_reserved = read_u32(input, 20);
+    entry.version.committed_epoch = read_u64(input, 24);
+    entry.version.physical_identity.kind =
+        static_cast<PhysicalIdentityKind>(read_u32(input, 32));
+    entry.version.physical_identity.length = read_u32(input, 36);
+    for (std::size_t index = 0;
+         index < entry.version.physical_identity.bytes.size(); ++index) {
+        entry.version.physical_identity.bytes[index] = input[40 + index];
+    }
+    entry.version.observability =
+        static_cast<WriteObservability>(read_u32(input, 72));
+    entry.version.reserved = read_u32(input, 76);
+    entry.record_generation = read_u64(input, 80);
+    return entry;
+}
+
+}  // namespace dependency_vector_wire_detail
+
+/** Build an exact, canonical envelope without allocating or retaining pointers. */
+[[nodiscard]] inline DependencyVectorEnvelopeResultV1
+initialize_dependency_vector_envelope(
+        std::span<std::byte> envelope,
+        std::span<const DependencyVectorEntryV1> entries) noexcept {
+    DependencyVectorEnvelopeResultV1 result{};
+    const std::size_t required = dependency_vector_envelope_bytes(entries.size());
+    if (required == 0) {
+        result.error = DependencyVectorEnvelopeErrorV1::CountExceeded;
+        return result;
+    }
+    if (envelope.data() == nullptr || envelope.size() != required) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidSize;
+        return result;
+    }
+    std::fill(envelope.begin(), envelope.end(), std::byte{});
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        if (!dependency_vector_entry_valid_v1(entries[index])) {
+            result.error = DependencyVectorEnvelopeErrorV1::InvalidEntry;
+            return result;
+        }
+        if (index != 0
+            && !dependency_key_less_v1(
+                entries[index - 1].version.key,
+                entries[index].version.key)) {
+            result.error = DependencyVectorEnvelopeErrorV1::NonCanonical;
+            return result;
+        }
+    }
+    const std::size_t payload_bytes =
+        entries.size() * kDependencyVectorEntryBytesV1;
+    std::span<std::byte> payload =
+        envelope.subspan(kDependencyVectorHeaderBytesV1, payload_bytes);
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        dependency_vector_wire_detail::encode_entry(
+            payload.subspan(
+                index * kDependencyVectorEntryBytesV1,
+                kDependencyVectorEntryBytesV1),
+            entries[index]);
+    }
+    result.header = DependencyVectorHeaderV1{
+        .entry_count = static_cast<std::uint32_t>(entries.size()),
+        .total_bytes = static_cast<std::uint64_t>(required),
+        .payload_checksum = dependency_vector_payload_checksum(payload),
+    };
+    dependency_vector_wire_detail::encode_header(
+        envelope.first(kDependencyVectorHeaderBytesV1), result.header);
+    return result;
+}
+
+/** Validate shape, cap, checksum, entry semantics, and strict canonical order. */
+[[nodiscard]] inline DependencyVectorEnvelopeResultV1
+validate_dependency_vector_envelope(
+        std::span<const std::byte> envelope) noexcept {
+    DependencyVectorEnvelopeResultV1 result{};
+    if (envelope.data() == nullptr
+        || envelope.size() < kDependencyVectorHeaderBytesV1) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidArgument;
+        return result;
+    }
+    result.header = dependency_vector_wire_detail::decode_header(
+        envelope.first(kDependencyVectorHeaderBytesV1));
+    if (result.header.magic != kDependencyVectorMagicV1) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidMagic;
+        return result;
+    }
+    if (result.header.abi_version != kDependencyVectorAbiVersionV1) {
+        result.error = DependencyVectorEnvelopeErrorV1::AbiMismatch;
+        return result;
+    }
+    if (result.header.header_bytes != kDependencyVectorHeaderBytesV1
+        || result.header.entry_bytes != kDependencyVectorEntryBytesV1
+        || result.header.reserved != 0) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidHeader;
+        return result;
+    }
+    if (result.header.entry_count > kMaxDependenciesPerGeneration) {
+        result.error = DependencyVectorEnvelopeErrorV1::CountExceeded;
+        return result;
+    }
+    const std::size_t required =
+        dependency_vector_envelope_bytes(result.header.entry_count);
+    if (required == 0 || result.header.total_bytes != required
+        || envelope.size() != required) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidSize;
+        return result;
+    }
+    const std::span<const std::byte> payload =
+        envelope.subspan(kDependencyVectorHeaderBytesV1);
+    if (dependency_vector_payload_checksum(payload)
+        != result.header.payload_checksum) {
+        result.error = DependencyVectorEnvelopeErrorV1::ChecksumMismatch;
+        return result;
+    }
+    DependencyKey previous{};
+    bool have_previous = false;
+    for (std::uint32_t index = 0; index < result.header.entry_count; ++index) {
+        const DependencyVectorEntryV1 entry =
+            dependency_vector_wire_detail::decode_entry(
+                payload.subspan(
+                    static_cast<std::size_t>(index)
+                        * kDependencyVectorEntryBytesV1,
+                    kDependencyVectorEntryBytesV1));
+        if (!dependency_vector_entry_valid_v1(entry)) {
+            result.error = DependencyVectorEnvelopeErrorV1::InvalidEntry;
+            return result;
+        }
+        if (have_previous
+            && !dependency_key_less_v1(previous, entry.version.key)) {
+            result.error = DependencyVectorEnvelopeErrorV1::NonCanonical;
+            return result;
+        }
+        previous = entry.version.key;
+        have_previous = true;
+    }
+    return result;
+}
+
+/** Decode every validated entry into caller-owned process-local storage. */
+[[nodiscard]] inline DependencyVectorEnvelopeResultV1
+copy_dependency_vector_entries(
+        std::span<const std::byte> envelope,
+        std::span<DependencyVectorEntryV1> output) noexcept {
+    DependencyVectorEnvelopeResultV1 result =
+        validate_dependency_vector_envelope(envelope);
+    if (!result) {
+        return result;
+    }
+    if (output.size() != result.header.entry_count) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidSize;
+        return result;
+    }
+    const std::span<const std::byte> payload =
+        envelope.subspan(kDependencyVectorHeaderBytesV1);
+    for (std::uint32_t index = 0; index < result.header.entry_count; ++index) {
+        output[index] = dependency_vector_wire_detail::decode_entry(
+            payload.subspan(
+                static_cast<std::size_t>(index)
+                    * kDependencyVectorEntryBytesV1,
+                kDependencyVectorEntryBytesV1));
+    }
+    return result;
+}
+
+/**
+ * Exact SHA input size for a canonical plan envelope and optional database
+ * guard.  The completion counter is deliberately absent: it is an in-flight
+ * publication handshake, not a committed dependency version.
+ */
+[[nodiscard]] constexpr std::size_t dependency_fingerprint_material_bytes(
+        std::size_t plan_dependency_count,
+        bool has_database_guard) noexcept {
+    const std::size_t plan_bytes =
+        dependency_vector_envelope_bytes(plan_dependency_count);
+    return plan_bytes == 0
+        ? 0
+        : plan_bytes
+            + (has_database_guard
+                   ? kDependencyVectorEntryBytesV1
+                   : 0U);
+}
+
+/**
+ * Copy stable dependency-fingerprint material without native layout bytes:
+ * the validated canonical plan envelope followed by one encoded guard entry.
+ */
+[[nodiscard]] inline DependencyVectorEnvelopeResultV1
+initialize_dependency_fingerprint_material(
+        std::span<std::byte> material,
+        std::span<const std::byte> canonical_plan_envelope,
+        std::span<const DependencyVectorEntryV1> database_guard) noexcept {
+    DependencyVectorEnvelopeResultV1 result =
+        validate_dependency_vector_envelope(canonical_plan_envelope);
+    if (!result) {
+        return result;
+    }
+    if (database_guard.size() > 1) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidArgument;
+        return result;
+    }
+    if (!database_guard.empty()
+        && !database_guard_entry_valid_v1(database_guard.front())) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidEntry;
+        return result;
+    }
+    const std::size_t required = dependency_fingerprint_material_bytes(
+        result.header.entry_count, !database_guard.empty());
+    if (required == 0 || material.data() == nullptr
+        || material.size() != required) {
+        result.error = DependencyVectorEnvelopeErrorV1::InvalidSize;
+        return result;
+    }
+    std::copy(canonical_plan_envelope.begin(), canonical_plan_envelope.end(),
+              material.begin());
+    if (!database_guard.empty()) {
+        dependency_vector_wire_detail::encode_entry(
+            material.subspan(canonical_plan_envelope.size(),
+                             kDependencyVectorEntryBytesV1),
+            database_guard.front());
+    }
+    return result;
+}
 
 enum class DirectorySlotState : std::uint32_t {
     Empty = 0,
@@ -366,6 +912,14 @@ static_assert(std::is_trivially_copyable_v<CacheDigest256>);
 static_assert(std::is_trivially_copyable_v<CacheEntryId>);
 static_assert(std::is_trivially_copyable_v<DependencyKey>);
 static_assert(std::is_trivially_copyable_v<DependencyVersion>);
+static_assert(std::is_trivially_copyable_v<DependencyVectorEntryV1>);
+static_assert(std::is_standard_layout_v<DependencyVectorEntryV1>);
+static_assert(sizeof(DependencyVectorEntryV1)
+              == kDependencyVectorEntryBytesV1);
+static_assert(std::is_trivially_copyable_v<DependencyVectorHeaderV1>);
+static_assert(std::is_standard_layout_v<DependencyVectorHeaderV1>);
+static_assert(sizeof(DependencyVectorHeaderV1)
+              == kDependencyVectorHeaderBytesV1);
 static_assert(std::is_trivially_copyable_v<ColumnStoreHeaderV1>);
 static_assert(std::is_trivially_copyable_v<RowGroupHeaderV1>);
 static_assert(std::is_trivially_copyable_v<ColumnChunkV1>);

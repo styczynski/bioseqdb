@@ -45,6 +45,11 @@ BEGIN
     IF position('BioseqCacheGenericTestProvider' in plan_text) = 0 THEN
         RAISE EXCEPTION 'generic provider CustomScan was not chosen: %', plan_text;
     END IF;
+    IF plan_text !~
+            'BioseqReusableCoverageScan\) on public\.cache_provider_rows' THEN
+        RAISE EXCEPTION
+            'reusable coverage scan lost its relation identity: %', plan_text;
+    END IF;
 END
 $$;
 
@@ -52,14 +57,15 @@ $$;
 -- entering the provider's gated executor on the identical second request.
 SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache_test.request_janitor_sweep();
-SELECT bioseq_cache_test.provider_reset();
-SELECT bioseq_cache.reset_stats();
 DO $$
 DECLARE
     plan_line text;
     plan_text text := '';
     plan jsonb;
     cache_node jsonb;
+    cache_nodes jsonb;
+    exact_node_count bigint;
+    reusable_node_count bigint;
 BEGIN
     FOR plan_line IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF) '
@@ -95,6 +101,9 @@ BEGIN
        OR cache_node->>'Planned Cache Action' IS NULL
        OR cache_node ? 'Actual Cache Action'
        OR length(cache_node->>'Cache Entry') <> 16
+       OR cache_node->>'Schema' <> 'public'
+       OR cache_node->>'Relation Name' <> 'cache_provider_rows'
+       OR cache_node->>'Alias' <> 'cache_provider_rows'
        OR cache_node->>'SQL' IS NULL
        OR cache_node->>'State' <> 'planned/provisional'
        OR jsonb_typeof(
@@ -104,8 +113,56 @@ BEGIN
         RAISE EXCEPTION
             'structured reusable EXPLAIN contract is incomplete: %', plan;
     END IF;
+    WITH RECURSIVE plan_nodes(node, parent_path) AS (
+        SELECT plan->0->'Plan', ARRAY[]::text[]
+        UNION ALL
+        SELECT child.value,
+               plan_nodes.parent_path
+                   || COALESCE(plan_nodes.node->>'Node Type', '<unknown>')
+        FROM plan_nodes
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ExactFinalResult'),
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'),
+        jsonb_agg(jsonb_build_object(
+        'cache_entry_kind', node->>'Cache Entry Kind',
+        'node_type', node->>'Node Type',
+        'parent_path', to_jsonb(parent_path),
+        'child_node_types', COALESCE((
+            SELECT jsonb_agg(child.value->>'Node Type')
+            FROM jsonb_array_elements(
+                COALESCE(node->'Plans', '[]'::jsonb)) AS child
+        ), '[]'::jsonb),
+        'child_paths', COALESCE((
+            SELECT jsonb_agg(to_jsonb(
+                parent_path
+                    || COALESCE(node->>'Node Type', '<unknown>')
+                    || COALESCE(child.value->>'Node Type', '<unknown>')))
+            FROM jsonb_array_elements(
+                COALESCE(node->'Plans', '[]'::jsonb)) AS child
+        ), '[]'::jsonb),
+        'cache_force_bypass', node->>'Cache Force Bypass'))
+    INTO exact_node_count, reusable_node_count, cache_nodes
+    FROM plan_nodes
+    WHERE node->>'Cache Entry Kind' IN (
+        'ExactFinalResult', 'ReusableCoverage');
+    IF exact_node_count <> 0 OR reusable_node_count <> 1
+       OR plan->0->'Plan'->>'Cache Entry Kind' <> 'ReusableCoverage' THEN
+        RAISE EXCEPTION
+            'cold reusable plan cache-kind counts exact=%, reusable=%: %',
+            exact_node_count, reusable_node_count, cache_nodes;
+    END IF;
 END
 $$;
+
+-- Planning diagnostics can legitimately bypass exact-result caching. Reset
+-- observable counters after proving the plan and before measuring execution.
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
 
 \o
 SELECT row_id, base_id, occurrence_no, nullable_value, payload,
@@ -115,6 +172,7 @@ WHERE nullable_value <= 10
 ORDER BY row_id;
 SELECT jsonb_build_object(
     'produced', cache_stats.produced,
+    'completed_hits', cache_stats.completed_hits,
     'reuse_hits', cache_stats.reuse_hits,
     'fallbacks', cache_stats.fallbacks,
     'extract_occurrence',
@@ -134,6 +192,7 @@ WHERE nullable_value <= 10
 ORDER BY row_id;
 SELECT jsonb_build_object(
     'produced', cache_stats.produced,
+    'completed_hits', cache_stats.completed_hits,
     'reuse_hits', cache_stats.reuse_hits,
     'fallbacks', cache_stats.fallbacks,
     'extract_occurrence',
@@ -145,7 +204,356 @@ FROM bioseq_cache.stats() AS cache_stats
 CROSS JOIN LATERAL (
     SELECT bioseq_cache_test.provider_stats() AS stats
 ) AS provider;
+
+-- A selected reusable final path suppresses the outer exact wrapper.  The
+-- second request must replay coverage without entering its retained child.
+DO $$
+DECLARE
+    cache_stats record;
+    provider_stats jsonb := bioseq_cache_test.provider_stats();
+BEGIN
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    IF cache_stats.produced <> 1
+       OR cache_stats.completed_hits <> 0
+       OR cache_stats.reuse_hits <> 1
+       OR cache_stats.fallbacks <> 0
+       OR (provider_stats->>'executor_rows')::bigint <> 4
+       OR (provider_stats->>'gated_expensive_rows')::bigint <> 4
+       OR (provider_stats->>'extract_occurrence')::bigint <> 4 THEN
+        RAISE EXCEPTION
+            'reusable replay entered its retained child: %, %',
+            row_to_json(cache_stats), provider_stats;
+    END IF;
+END
+$$;
+
+DO $$
+DECLARE
+    stats jsonb := bioseq_cache_test.provider_stats();
+BEGIN
+    IF (stats->>'last_boundary_column_count')::bigint <> 6
+       OR (stats->>'last_required_boundary_count')::bigint <> 6
+       OR (stats->>'last_lineage_column_count')::bigint <> 3
+       OR (stats->>'last_required_lineage_count')::bigint <> 3
+       OR (stats->>'last_recipe_required_boundary_count')::bigint <> 6 THEN
+        RAISE EXCEPTION 'all-column provider contract mismatch: %', stats;
+    END IF;
+END
+$$;
 \o /dev/null
+
+-- An ordinary main-tree SubqueryScan owns the coverage lifecycle and remains
+-- enabled.  A separate InitPlan in the same statement is permanently bypassed.
+DO $$
+DECLARE
+    plan_text text;
+    plan jsonb;
+    coverage_node_count bigint;
+    enabled_coverage_count bigint;
+    bypassed_coverage_count bigint;
+    observed_ids bigint[];
+BEGIN
+    EXECUTE
+        'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
+        'SELECT nested.row_id FROM ('
+        '  SELECT row_id FROM ONLY cache_provider_rows '
+        '  WHERE nullable_value <= 10 OFFSET 0'
+        ') AS nested ORDER BY nested.row_id'
+        INTO plan_text;
+    plan := plan_text::jsonb;
+    WITH RECURSIVE plan_nodes(node) AS (
+        SELECT plan->0->'Plan'
+        UNION ALL
+        SELECT child.value
+        FROM plan_nodes
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'),
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'
+              AND NOT (node->>'Cache Force Bypass')::boolean),
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'
+              AND (node->>'Cache Force Bypass')::boolean)
+    INTO coverage_node_count, enabled_coverage_count,
+         bypassed_coverage_count
+    FROM plan_nodes;
+    IF coverage_node_count <> 1 OR enabled_coverage_count <> 1
+       OR bypassed_coverage_count <> 0
+       OR position('Subquery Scan' in plan_text) = 0 THEN
+        RAISE EXCEPTION
+            'main-tree SubqueryScan coverage marker is wrong: %', plan;
+    END IF;
+    EXECUTE
+        'SELECT array_agg(nested.row_id ORDER BY nested.row_id) FROM ('
+        '  SELECT row_id FROM ONLY cache_provider_rows '
+        '  WHERE nullable_value <= 10 OFFSET 0'
+        ') AS nested'
+        INTO observed_ids;
+    IF observed_ids IS DISTINCT FROM ARRAY[2, 3, 4, 5]::bigint[] THEN
+        RAISE EXCEPTION
+            'main-tree SubqueryScan changed rows: %', observed_ids;
+    END IF;
+
+    -- The InitPlan may legitimately select its ordinary index path.  The
+    -- selected main-tree SubqueryScan coverage node was asserted above.
+    EXECUTE
+        'SELECT array_agg(nested.row_id ORDER BY nested.row_id) FROM ('
+        '  SELECT row_id FROM ONLY cache_provider_rows '
+        '  WHERE nullable_value <= 10 OFFSET 0'
+        ') AS nested '
+        'WHERE nested.row_id <= ('
+        '  SELECT max(row_id) FROM ONLY cache_provider_rows '
+        '  WHERE nullable_value <= 10)'
+        INTO observed_ids;
+    IF observed_ids IS DISTINCT FROM ARRAY[2, 3, 4, 5]::bigint[] THEN
+        RAISE EXCEPTION
+            'mixed main/subplan coverage changed rows: %', observed_ids;
+    END IF;
+END
+$$;
+
+-- A provider reachable only through an InitPlan referenced by a join filter
+-- must still contribute one finalized exact recipe.  A bad nested recipe
+-- bypasses the exact root; the reusable subplan remains visibly force-bypassed.
+CREATE TABLE cache_recipe_left(id integer PRIMARY KEY);
+CREATE TABLE cache_recipe_right(id integer PRIMARY KEY);
+INSERT INTO cache_recipe_left VALUES (1), (2), (3);
+INSERT INTO cache_recipe_right VALUES (1), (2), (3);
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache_test.request_janitor_sweep();
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
+
+DO $$
+DECLARE
+    plan_text text;
+    plan jsonb;
+    coverage_node_count bigint;
+    bypassed_coverage_count bigint;
+BEGIN
+    EXECUTE
+        'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
+        'SELECT l.id, r.id FROM cache_recipe_left l '
+        'LEFT JOIN cache_recipe_right r '
+        'ON l.id = r.id AND l.id + r.id <= '
+        '(SELECT sum(row_id) FROM cache_provider_rows '
+        ' WHERE nullable_value <= 10) ORDER BY l.id'
+        INTO plan_text;
+    plan := plan_text::jsonb;
+    WITH RECURSIVE plan_nodes(node) AS (
+        SELECT plan->0->'Plan'
+        UNION ALL
+        SELECT child.value
+        FROM plan_nodes
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'),
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'
+              AND (node->>'Cache Force Bypass')::boolean)
+    INTO coverage_node_count, bypassed_coverage_count
+    FROM plan_nodes;
+    IF plan->0->'Plan'->>'Cache Entry Kind' <> 'ExactFinalResult'
+       OR (plan->0->'Plan'->>'Cache Force Bypass')::boolean
+       OR (plan->0->'Plan'->>'Provider Runtime Recipes')::integer <> 1
+       OR coverage_node_count <> 1
+       OR bypassed_coverage_count <> 1
+       OR position('BioseqCacheGenericTestProvider' in plan_text) = 0
+       OR position('InitPlan' in plan_text) = 0
+       OR position('Join Filter' in plan_text) = 0 THEN
+        RAISE EXCEPTION
+            'nested provider recipe was not captured from join/initplan: %',
+            plan;
+    END IF;
+END
+$$;
+
+-- If top exact dependency discovery declines while coverage exists only in a
+-- separate InitPlan, a permanent internal wrapper still finalizes its gate
+-- Param IDs.  Both layers must remain registry-free passthroughs.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache_test.request_janitor_sweep();
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
+SELECT bioseq_cache_test.set_exact_plan_fault(
+    'dependency_finalization_declined');
+DO $$
+DECLARE
+    plan_text text;
+    plan jsonb;
+    coverage_node_count bigint;
+    bypassed_coverage_count bigint;
+    first_ids integer[];
+    second_ids integer[];
+    cache_stats record;
+    active_entries bigint;
+    nested_query constant text :=
+        'SELECT array_agg(COALESCE(joined.right_id, -1) '
+        'ORDER BY joined.left_id) FROM ('
+        'SELECT l.id AS left_id, r.id AS right_id '
+        'FROM cache_recipe_left l LEFT JOIN cache_recipe_right r '
+        'ON l.id = r.id AND l.id + r.id <= '
+        '(SELECT sum(row_id) FROM cache_provider_rows '
+        ' WHERE nullable_value <= 10)) AS joined';
+BEGIN
+    EXECUTE
+        'EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF) '
+        'SELECT l.id FROM cache_recipe_left l '
+        'LEFT JOIN cache_recipe_right r '
+        'ON l.id = r.id AND l.id + r.id <= '
+        '(SELECT sum(row_id) FROM cache_provider_rows '
+        ' WHERE nullable_value <= 10) ORDER BY l.id'
+        INTO plan_text;
+    plan := plan_text::jsonb;
+    WITH RECURSIVE plan_nodes(node) AS (
+        SELECT plan->0->'Plan'
+        UNION ALL
+        SELECT child.value
+        FROM plan_nodes
+        CROSS JOIN LATERAL jsonb_array_elements(
+            COALESCE(plan_nodes.node->'Plans', '[]'::jsonb)) AS child
+    )
+    SELECT
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'),
+        count(*) FILTER (
+            WHERE node->>'Cache Entry Kind' = 'ReusableCoverage'
+              AND (node->>'Cache Force Bypass')::boolean)
+    INTO coverage_node_count, bypassed_coverage_count
+    FROM plan_nodes;
+    IF plan->0->'Plan'->>'Cache Entry Kind' <> 'ExactFinalResult'
+       OR NOT (plan->0->'Plan'->>'Cache Force Bypass')::boolean
+       OR plan->0->'Plan'->>'Cache Bypass Reason'
+            <> 'internal nested-coverage gate finalizer'
+       OR coverage_node_count <> 1
+       OR bypassed_coverage_count <> 1
+       OR position('InitPlan' in plan_text) = 0 THEN
+        RAISE EXCEPTION
+            'nested gate finalizer plan is unsafe: %', plan;
+    END IF;
+
+    EXECUTE nested_query INTO first_ids;
+    EXECUTE nested_query INTO second_ids;
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    SELECT count(*) INTO active_entries
+    FROM bioseq_cache_test.entry_states()
+    WHERE state IN ('CLAIMED', 'BUILDING', 'COMPLETE');
+    IF first_ids IS DISTINCT FROM ARRAY[1, 2, 3]
+       OR second_ids IS DISTINCT FROM first_ids
+       OR cache_stats.produced <> 0
+       OR cache_stats.completed_hits <> 0
+       OR cache_stats.inflight_waits <> 0
+       OR cache_stats.reuse_hits <> 0
+       -- Each execution visits both the permanent exact gate-finalizer
+       -- wrapper and the permanent InitPlan coverage wrapper.
+       OR cache_stats.fallbacks <> 4
+       OR active_entries <> 0 THEN
+        RAISE EXCEPTION
+            'nested gate finalizer touched cache or rows: %, %, %, %, %',
+            first_ids, second_ids, row_to_json(cache_stats),
+            active_entries, plan;
+    END IF;
+END
+$$;
+SELECT bioseq_cache_test.set_exact_plan_fault('none');
+
+SELECT bioseq_cache_test.set_exact_recipe_fault('expected_digest_mismatch');
+DO $$
+DECLARE
+    first_ids integer[];
+    second_ids integer[];
+    first_provider_rows bigint;
+    second_provider_rows bigint;
+    cache_stats record;
+    nested_query constant text :=
+        'SELECT array_agg(COALESCE(joined.right_id, -1) '
+        'ORDER BY joined.left_id) FROM ('
+        'SELECT l.id AS left_id, r.id AS right_id '
+        'FROM cache_recipe_left l LEFT JOIN cache_recipe_right r '
+        'ON l.id = r.id AND l.id + r.id <= '
+        '(SELECT sum(row_id) FROM cache_provider_rows '
+        ' WHERE nullable_value <= 10)) AS joined';
+BEGIN
+    EXECUTE nested_query INTO first_ids;
+    first_provider_rows := (
+        bioseq_cache_test.provider_stats()->>'executor_rows')::bigint;
+    EXECUTE nested_query INTO second_ids;
+    second_provider_rows := (
+        bioseq_cache_test.provider_stats()->>'executor_rows')::bigint;
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    IF first_ids IS DISTINCT FROM ARRAY[1, 2, 3]
+       OR second_ids IS DISTINCT FROM first_ids
+       OR first_provider_rows <= 0
+       OR second_provider_rows <= first_provider_rows
+       OR cache_stats.completed_hits <> 0
+       OR cache_stats.reuse_hits <> 0
+       OR cache_stats.produced <> 0
+       -- Four fallbacks carry over from the gate-finalizer proof.  Each of
+       -- these two executions then adds one exact recipe bypass and one
+       -- permanent InitPlan coverage bypass.
+       OR cache_stats.fallbacks <> 8 THEN
+        RAISE EXCEPTION
+            'nested recipe did not fail open through reusable child: %, %, %, %, %',
+            first_ids, second_ids, first_provider_rows,
+            second_provider_rows, row_to_json(cache_stats);
+    END IF;
+END
+$$;
+SELECT bioseq_cache_test.set_exact_recipe_fault('none');
+
+-- Exact roots may legitimately coexist with reusable coverage in an InitPlan.
+-- The complete frozen coverage semantic frame must therefore partition the
+-- outer exact key when provider-defined security identity changes.
+SELECT bioseq_cache.invalidate_all();
+SELECT bioseq_cache_test.request_janitor_sweep();
+SELECT bioseq_cache_test.provider_reset();
+SELECT bioseq_cache.reset_stats();
+SELECT bioseq_cache_test.provider_set_security_digest(
+    decode(repeat('11', 32), 'hex'));
+PREPARE cache_nested_security AS
+SELECT array_agg(COALESCE(joined.right_id, -1) ORDER BY joined.left_id)
+FROM (
+    SELECT l.id AS left_id, r.id AS right_id
+    FROM cache_recipe_left AS l
+    LEFT JOIN cache_recipe_right AS r
+      ON l.id = r.id
+     AND l.id + r.id <= (
+        SELECT sum(row_id)
+        FROM cache_provider_rows
+        WHERE nullable_value <= 10)
+) AS joined;
+EXECUTE cache_nested_security;
+EXECUTE cache_nested_security;
+SELECT bioseq_cache_test.provider_set_security_digest(
+    decode(repeat('22', 32), 'hex'));
+EXECUTE cache_nested_security;
+EXECUTE cache_nested_security;
+DO $$
+DECLARE
+    cache_stats record;
+BEGIN
+    SELECT * INTO cache_stats FROM bioseq_cache.stats();
+    IF cache_stats.produced <> 2
+       OR cache_stats.completed_hits <> 2
+       OR cache_stats.reuse_hits <> 0
+       -- Every prepared execution records one permanent InitPlan coverage
+       -- bypass while the exact root produces or replays normally.
+       OR cache_stats.fallbacks <> 4 THEN
+        RAISE EXCEPTION
+            'nested coverage semantics did not partition exact key: %',
+            row_to_json(cache_stats);
+    END IF;
+END
+$$;
+DEALLOCATE cache_nested_security;
+SELECT bioseq_cache_test.provider_clear_security_digest();
 
 -- A retained coverage alternative must not suppress exact caching when the
 -- final path instead chooses PostgreSQL's ordered index scan.
@@ -335,6 +743,45 @@ BEGIN
     PERFORM bioseq_cache_test.provider_set_mapping_fault('none');
 END
 $$;
+
+-- Freeze a correct prepared plan, then corrupt each serialized source mapping
+-- immediately before BeginCustomScan.  Every malformed List must close the
+-- cached-source gate and execute the complete retained provider child.
+SET plan_cache_mode = force_generic_plan;
+\set mapping_fault persisted_wrong_top_tag
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_short_top
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_long_top
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_magic
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_version
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_count_overflow
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_wrong_entry_tag
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_short_entry
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_long_entry
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_semantic_size
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_fingerprint_size
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_bad_entry_metadata
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_source_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_consumer_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_decorated_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\set mapping_fault persisted_map_fingerprint_mismatch
+\ir ../../../bioseq_caching/test/regress/sql/cache_reuse_provider_mapping_fault_case.sql
+\unset mapping_fault
+RESET plan_cache_mode;
 
 -- Capability-superset rejection and plan/runtime digest mismatches also
 -- expand to the complete residual without changing rows.

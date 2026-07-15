@@ -15,3 +15,7 @@ export import :readiness;
 export import :provider_validation;
 export import :column_format;
 export import :reusable_registry;
+export import :write_observation;
+export import :object_definition_dependencies;
+export import :transition_ledger;
+export import :dependency_directory;

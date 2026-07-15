@@ -4,6 +4,9 @@
  */
 module;
 
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -52,165 +55,165 @@ enum BioseqCacheProviderSecurityDigestFormatV1 {
 };
 
 struct BioseqCacheDigestSinkV1 {
-    std::uint32_t struct_size;
+    uint32_t struct_size;
     void* opaque;
-    bool (*append)(void* opaque, const void* data, std::size_t size);
+    bool (*append)(void* opaque, const void* data, size_t size);
 };
 
 struct BioseqCachePhysicalIdentityV1 {
-    std::uint32_t struct_size;
-    std::uint32_t kind;
-    std::uint32_t length;
-    std::uint32_t reserved;
-    std::uint8_t bytes[32];
+    uint32_t struct_size;
+    uint32_t kind;
+    uint32_t length;
+    uint32_t reserved;
+    uint8_t bytes[32];
 };
 
 struct BioseqCacheQueryIntentV1 {
-    std::uint32_t struct_size;
-    std::uint32_t provider_id;
-    std::uint32_t flags;
-    std::uint32_t reserved;
+    uint32_t struct_size;
+    uint32_t provider_id;
+    uint32_t flags;
+    uint32_t reserved;
     List* provider_private_nodes;
 };
 
 struct BioseqCacheColumnSchemaV1 {
-    std::uint32_t struct_size;
-    std::uint32_t attno;
-    std::uint64_t semantic_id_high;
-    std::uint64_t semantic_id_low;
-    std::uint32_t type_oid;
-    std::int32_t typmod;
-    std::uint32_t collation_oid;
-    std::uint32_t flags;
+    uint32_t struct_size;
+    uint32_t attno;
+    uint64_t semantic_id_high;
+    uint64_t semantic_id_low;
+    uint32_t type_oid;
+    int32_t typmod;
+    uint32_t collation_oid;
+    uint32_t flags;
 };
 
 struct BioseqCacheColumnMapEntryV1 {
-    std::uint32_t struct_size;
-    std::uint32_t consumer_attno;
-    std::uint32_t source_attno;
-    std::uint32_t flags;
-    std::uint64_t semantic_id_high;
-    std::uint64_t semantic_id_low;
-    std::uint32_t type_oid;
-    std::int32_t typmod;
-    std::uint32_t collation_oid;
-    std::uint32_t reserved;
+    uint32_t struct_size;
+    uint32_t consumer_attno;
+    uint32_t source_attno;
+    uint32_t flags;
+    uint64_t semantic_id_high;
+    uint64_t semantic_id_low;
+    uint32_t type_oid;
+    int32_t typmod;
+    uint32_t collation_oid;
+    uint32_t reserved;
 };
 
 struct BioseqCachePathDomainV1 {
-    std::uint32_t struct_size;
-    std::uint32_t provider_id;
-    std::uint64_t compatibility_family_id;
-    std::uint64_t capability_mask;
+    uint32_t struct_size;
+    uint32_t provider_id;
+    uint64_t compatibility_family_id;
+    uint64_t capability_mask;
     Expr* coverage_predicate;
     const BioseqCacheColumnSchemaV1* boundary_columns;
-    std::size_t boundary_column_count;
+    size_t boundary_column_count;
     const BioseqCacheColumnSchemaV1* lineage_columns;
-    std::size_t lineage_column_count;
-    const std::uint32_t* required_boundary_attnos;
-    std::size_t required_boundary_attno_count;
-    const std::uint32_t* required_lineage_attnos;
-    std::size_t required_lineage_attno_count;
+    size_t lineage_column_count;
+    const uint32_t* required_boundary_attnos;
+    size_t required_boundary_attno_count;
+    const uint32_t* required_lineage_attnos;
+    size_t required_lineage_attno_count;
     List* dependency_nodes;
     List* provider_private_nodes;
-    std::uint32_t provider_security_digest_format_version;
-    std::uint32_t provider_security_flags;
-    std::uint8_t provider_security_digest[32];
+    uint32_t provider_security_digest_format_version;
+    uint32_t provider_security_flags;
+    uint8_t provider_security_digest[32];
 };
 
 struct BioseqCachePathDescriptionV1 {
-    std::uint32_t struct_size;
-    std::uint32_t flags;
-    std::uint64_t capability_mask;
+    uint32_t struct_size;
+    uint32_t flags;
+    uint64_t capability_mask;
     List* dependency_nodes;
     List* provider_private_nodes;
 };
 
 struct BioseqCacheReusableSourceV1 {
-    std::uint32_t struct_size;
-    std::uint32_t provider_id;
-    std::uint64_t compatibility_family_id;
-    std::uint64_t capability_mask;
+    uint32_t struct_size;
+    uint32_t provider_id;
+    uint64_t compatibility_family_id;
+    uint64_t capability_mask;
     const BioseqCacheColumnSchemaV1* boundary_columns;
-    std::size_t boundary_column_count;
+    size_t boundary_column_count;
     const BioseqCacheColumnSchemaV1* lineage_columns;
-    std::size_t lineage_column_count;
+    size_t lineage_column_count;
     List* provider_private_nodes;
 };
 
 struct BioseqCacheSourceMappingV1 {
-    std::uint32_t struct_size;
-    std::uint32_t flags;
+    uint32_t struct_size;
+    uint32_t flags;
     const BioseqCacheColumnMapEntryV1* boundary_map;
-    std::size_t boundary_map_count;
+    size_t boundary_map_count;
     const BioseqCacheColumnMapEntryV1* lineage_map;
-    std::size_t lineage_map_count;
+    size_t lineage_map_count;
     List* provider_private_nodes;
 };
 
 struct BioseqCachePlanDigestRecipeV1 {
-    std::uint32_t struct_size;
-    std::uint32_t flags;
-    std::uint32_t digest_format_version;
-    std::uint32_t reserved;
+    uint32_t struct_size;
+    uint32_t flags;
+    uint32_t digest_format_version;
+    uint32_t reserved;
     List* plan_domain_nodes;
-    std::uint8_t expected_generation_digest[32];
+    uint8_t expected_generation_digest[32];
 };
 
 struct BioseqCacheDecoratedPathV1 {
-    std::uint32_t struct_size;
-    std::uint32_t flags;
+    uint32_t struct_size;
+    uint32_t flags;
     Path* path;
     const BioseqCacheColumnSchemaV1* actual_boundary_columns;
-    std::size_t actual_boundary_column_count;
+    size_t actual_boundary_column_count;
     const BioseqCacheColumnSchemaV1* actual_lineage_columns;
-    std::size_t actual_lineage_column_count;
+    size_t actual_lineage_column_count;
     List* provider_private_nodes;
 };
 
 struct BioseqCacheOccurrenceV1 {
-    std::uint32_t struct_size;
-    std::uint32_t rte_ordinal;
-    std::uint32_t logical_relation_oid;
-    std::uint32_t leaf_relation_oid;
-    std::uint32_t identity_kind;
-    std::uint32_t reserved;
-    std::uint64_t row_identity;
-    std::uint64_t occurrence_high;
-    std::uint64_t occurrence_low;
-    std::uint64_t capability_mask;
+    uint32_t struct_size;
+    uint32_t rte_ordinal;
+    uint32_t logical_relation_oid;
+    uint32_t leaf_relation_oid;
+    uint32_t identity_kind;
+    uint32_t reserved;
+    uint64_t row_identity;
+    uint64_t occurrence_high;
+    uint64_t occurrence_low;
+    uint64_t capability_mask;
 };
 
 struct BioseqCacheLateFetchSinkV1 {
-    std::uint32_t struct_size;
+    uint32_t struct_size;
     void* opaque;
     BioseqCacheStatusV1 (*emit_value)(
         void* opaque,
-        std::size_t reference_index,
-        std::size_t requested_attribute_index,
-        std::uintptr_t datum,
+        size_t reference_index,
+        size_t requested_attribute_index,
+        uintptr_t datum,
         bool is_null);
     void (*emit_reference_status)(
         void* opaque,
-        std::size_t reference_index,
+        size_t reference_index,
         BioseqCacheStatusV1 status);
 };
 
 struct BioseqCacheExplainSinkV1 {
-    std::uint32_t struct_size;
+    uint32_t struct_size;
     void* opaque;
     void (*property_text)(void* opaque, const char* name, const char* value);
-    void (*property_uint64)(void* opaque, const char* name, std::uint64_t value);
+    void (*property_uint64)(void* opaque, const char* name, uint64_t value);
     void (*property_bool)(void* opaque, const char* name, bool value);
 };
 
 struct BioseqCacheProviderV1 {
-    std::uint32_t struct_size;
-    std::uint32_t abi_version;
-    std::uint32_t postgres_major;
-    std::uint32_t provider_id;
-    std::uint32_t provider_flags;
-    std::uint32_t reserved;
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t postgres_major;
+    uint32_t provider_id;
+    uint32_t provider_flags;
+    uint32_t reserved;
     const char* provider_name;
     const CustomScanMethods* provider_scan_methods;
 
@@ -257,9 +260,9 @@ struct BioseqCacheProviderV1 {
         List* plan_domain_nodes,
         EState* estate,
         const BioseqCacheOccurrenceV1* occurrences,
-        std::size_t occurrence_count,
-        const std::int16_t* attribute_numbers,
-        std::size_t attribute_count,
+        size_t occurrence_count,
+        const int16_t* attribute_numbers,
+        size_t attribute_count,
         BioseqCacheLateFetchSinkV1* sink);
     void (*explain_domain)(
         List* plan_domain_nodes,
@@ -267,9 +270,9 @@ struct BioseqCacheProviderV1 {
 };
 
 struct BioseqCachePlannerBridgeV1 {
-    std::uint32_t struct_size;
-    std::uint32_t abi_version;
-    std::uint32_t postgres_major;
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t postgres_major;
     void (*after_provider_rel_paths)(
         PlannerInfo* root,
         RelOptInfo* rel,
@@ -279,14 +282,14 @@ struct BioseqCachePlannerBridgeV1 {
 };
 
 struct BioseqCacheApiV1 {
-    std::uint32_t struct_size;
-    std::uint32_t abi_version;
-    std::uint32_t postgres_major;
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t postgres_major;
     bool (*register_provider)(const BioseqCacheProviderV1* provider);
-    void (*unregister_provider)(std::uint32_t provider_id);
+    void (*unregister_provider)(uint32_t provider_id);
     void (*record_relation_write)(
-        std::uint32_t database_oid,
-        std::uint32_t relation_oid,
+        uint32_t database_oid,
+        uint32_t relation_oid,
         const BioseqCachePhysicalIdentityV1* physical_identity);
     const BioseqCachePlannerBridgeV1* planner_bridge;
 };

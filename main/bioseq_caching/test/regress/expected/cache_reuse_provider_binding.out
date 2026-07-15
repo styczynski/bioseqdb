@@ -1,0 +1,9 @@
+\set ECHO none
+t|t|t
+raw_producer_var|1|0|1|0|0|0
+foreign_mixed_var|1|0|1|0|0|0
+wrong_node_type|1|0|1|0|0|0
+malformed_syntax|1|0|1|0|0|0
+binding_signature_mismatch|1|0|1|0|0|0
+plan_private_short|1|0|1|0|0|0
+plan_private_bad_version|1|0|1|0|0|0

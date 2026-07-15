@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -149,7 +150,8 @@ std::span<const std::byte> text_bytes(std::string_view text) {
     return std::as_bytes(std::span<const char>{text.data(), text.size()});
 }
 
-void append_mixed_rows(ColumnStoreBuilder& builder) {
+template <class Builder>
+void append_mixed_rows(Builder& builder) {
     const std::array<std::byte, 1> boolean_true{std::byte{1}};
     const std::array<std::byte, 1> boolean_false{std::byte{0}};
     const std::array<std::byte, 4> score_10{
@@ -186,7 +188,569 @@ void append_mixed_rows(ColumnStoreBuilder& builder) {
     REQUIRE(builder.append_row(row3).has_value());
 }
 
+struct CapturingBlockSink {
+    struct token_type {
+        std::size_t slot = 0;
+
+        [[nodiscard]] bool operator==(const token_type&) const noexcept = default;
+    };
+
+    [[nodiscard]] std::expected<token_type, FormatError> store(
+        ColumnStoreBlockKind kind,
+        std::uint64_t ordinal,
+        std::span<const std::byte> bytes) {
+        const std::size_t call = store_calls++;
+        if (fail_on_store.has_value() && call == *fail_on_store) {
+            return std::unexpected(FormatError::SinkFailed);
+        }
+        const std::size_t slot = blocks.size();
+        blocks.emplace_back(bytes.begin(), bytes.end());
+        kinds.push_back(kind);
+        ordinals.push_back(ordinal);
+        discard_counts.push_back(0);
+        return token_type{.slot = slot};
+    }
+
+    void discard(const token_type& token) noexcept {
+        if (token.slot < discard_counts.size()) {
+            ++discard_counts[token.slot];
+        }
+    }
+
+    [[nodiscard]] std::vector<std::byte> assemble(
+            std::span<const token_type> logical_tokens) const {
+        std::vector<std::byte> bytes;
+        for (const token_type& token : logical_tokens) {
+            bytes.insert(
+                bytes.end(), blocks[token.slot].begin(), blocks[token.slot].end());
+        }
+        return bytes;
+    }
+
+    [[nodiscard]] bool every_stored_block_discarded_once() const noexcept {
+        for (const std::uint32_t count : discard_counts) {
+            if (count != 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::optional<std::size_t> fail_on_store;
+    std::size_t store_calls = 0;
+    std::vector<std::vector<std::byte>> blocks;
+    std::vector<ColumnStoreBlockKind> kinds;
+    std::vector<std::uint64_t> ordinals;
+    std::vector<std::uint32_t> discard_counts;
+};
+
+struct CountingBlockSink {
+    using token_type = std::uint32_t;
+
+    [[nodiscard]] std::expected<token_type, FormatError> store(
+        ColumnStoreBlockKind,
+        std::uint64_t,
+        std::span<const std::byte>) {
+        return stored++;
+    }
+
+    void discard(const token_type&) noexcept {
+        ++discarded;
+    }
+
+    std::uint32_t stored = 0;
+    std::uint32_t discarded = 0;
+};
+
+struct CapturingPhysicalSink {
+    struct token_type {
+        std::size_t slot = 0;
+
+        [[nodiscard]] bool operator==(const token_type&) const noexcept = default;
+    };
+
+    [[nodiscard]] std::expected<token_type, FormatError> store_physical(
+            std::span<const std::byte> bytes) {
+        const std::size_t call = store_calls++;
+        if (fail_on_store.has_value() && call == *fail_on_store) {
+            return std::unexpected(FormatError::SinkFailed);
+        }
+        const std::size_t slot = blocks.size();
+        blocks.emplace_back(bytes.begin(), bytes.end());
+        discard_counts.push_back(0);
+        return token_type{.slot = slot};
+    }
+
+    void discard_physical(const token_type& token) noexcept {
+        if (token.slot < discard_counts.size()) {
+            ++discard_counts[token.slot];
+        }
+    }
+
+    [[nodiscard]] std::vector<std::byte> assemble(
+            std::span<const token_type> tokens) const {
+        std::vector<std::byte> bytes;
+        for (const token_type& token : tokens) {
+            bytes.insert(
+                bytes.end(), blocks[token.slot].begin(), blocks[token.slot].end());
+        }
+        return bytes;
+    }
+
+    [[nodiscard]] bool every_stored_block_discarded_once() const noexcept {
+        for (const std::uint32_t count : discard_counts) {
+            if (count != 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::optional<std::size_t> fail_on_store;
+    std::size_t store_calls = 0;
+    std::vector<std::vector<std::byte>> blocks;
+    std::vector<std::uint32_t> discard_counts;
+};
+
+struct MetadataHeavyPhysicalSink {
+    struct token_type {
+        std::array<
+            std::byte,
+            (kMaximumColumnStoreMetadataBytes /
+                kMaximumColumnStorePhysicalBlocks) + 1u> bytes{};
+    };
+
+    [[nodiscard]] std::expected<token_type, FormatError> store_physical(
+            std::span<const std::byte>) {
+        return std::unexpected(FormatError::SinkFailed);
+    }
+
+    void discard_physical(const token_type&) noexcept {}
+};
+
 } // namespace
+
+TEST_CASE("streaming output is byte-identical across mixed multi-groups") {
+    auto schema = mixed_schema();
+    constexpr RowGroupLimits limits{.rows = 2, .value_bytes = 1'024};
+    TestChecksums checksums;
+    ColumnStoreBuilder retained(kIdentity, schema, limits);
+    CapturingBlockSink sink;
+    StreamingColumnStoreBuilder streamed(
+        kIdentity, schema, checksums, sink, limits);
+
+    append_mixed_rows(retained);
+    append_mixed_rows(streamed);
+    REQUIRE(streamed.row_count() == 4);
+    REQUIRE(streamed.pending_row_count() == 2);
+    REQUIRE(streamed.emitted_row_group_count() == 1);
+    REQUIRE(streamed.retained_value_bytes() <= limits.value_bytes);
+    REQUIRE(streamed.retained_metadata_bytes()
+        <= kMaximumColumnStoreMetadataBytes);
+
+    const auto expected = retained.seal(checksums);
+    REQUIRE(expected.has_value());
+    auto actual = streamed.finalize();
+    REQUIRE(actual.has_value());
+    REQUIRE(actual->logical_bytes() == expected->size());
+    REQUIRE(actual->row_count() == 4);
+    REQUIRE(actual->row_group_count() == 2);
+    REQUIRE(sink.kinds == std::vector<ColumnStoreBlockKind>{
+        ColumnStoreBlockKind::RowGroup,
+        ColumnStoreBlockKind::RowGroup,
+        ColumnStoreBlockKind::Header,
+        ColumnStoreBlockKind::Schema,
+        ColumnStoreBlockKind::Index,
+        ColumnStoreBlockKind::Footer,
+    });
+    const std::vector<std::byte> assembled = sink.assemble(actual->tokens());
+    REQUIRE(assembled == *expected);
+    const auto view = validate_column_store(
+        assembled, kIdentity, schema, checksums);
+    REQUIRE(view.has_value());
+    REQUIRE(view->value(0, 0)->boolean_value);
+    REQUIRE(view->value(1, 0)->is_null);
+    REQUIRE(view->value(2, 1)->bytes[0] == std::byte{20});
+    REQUIRE(view->value(3, 2)->bytes.size() == 5);
+
+    auto corrupt = assembled;
+    corrupt[kRowGroupHeaderBytes] ^= std::byte{1};
+    REQUIRE_FALSE(validate_column_store(
+        corrupt, kIdentity, schema, checksums).has_value());
+    actual->mark_published();
+}
+
+TEST_CASE("streaming preserves empty, aligned fixed, and flat-varlena wire bytes") {
+    TestChecksums checksums;
+    auto mixed = mixed_schema();
+    ColumnStoreBuilder empty_retained(kIdentity, mixed);
+    CapturingBlockSink empty_sink;
+    StreamingColumnStoreBuilder empty_streamed(
+        kIdentity, mixed, checksums, empty_sink);
+    const auto empty_expected = empty_retained.seal(checksums);
+    auto empty_actual = empty_streamed.finalize();
+    REQUIRE(empty_expected.has_value());
+    REQUIRE(empty_actual.has_value());
+    REQUIRE(empty_sink.assemble(empty_actual->tokens()) == *empty_expected);
+    empty_actual->mark_published();
+
+    const std::array<ColumnSchema, 2> schema{{
+        {
+            .name = "fixed_ref",
+            .descriptor = {
+                .type_oid = 1'000,
+                .typmod = -1,
+                .type_length = 3,
+                .by_value = 0,
+                .type_alignment = 8,
+                .encoding = ColumnEncoding::FixedByReference,
+                .flags = kColumnFlagNullable,
+            },
+            .semantic_id = {.low = 10},
+        },
+        {
+            .name = "flat_text",
+            .descriptor = {
+                .type_oid = 25,
+                .typmod = -1,
+                .type_length = -1,
+                .by_value = 0,
+                .type_alignment = 4,
+                .encoding = ColumnEncoding::FlatVarlena,
+                .flags = kColumnFlagNullable,
+            },
+            .semantic_id = {.low = 11},
+        },
+    }};
+    const std::array<std::byte, 3> fixed0{
+        std::byte{1}, std::byte{2}, std::byte{3}};
+    const std::array<std::byte, 3> fixed1{
+        std::byte{4}, std::byte{5}, std::byte{6}};
+    const std::array<EncodedColumnValue, 2> row0{{
+        {.bytes = fixed0},
+        {.is_null = true},
+    }};
+    const std::array<EncodedColumnValue, 2> row1{{
+        {.is_null = true},
+        {.bytes = text_bytes("varlena")},
+    }};
+    const std::array<EncodedColumnValue, 2> row2{{
+        {.bytes = fixed1},
+        {.bytes = text_bytes("")},
+    }};
+    constexpr RowGroupLimits limits{.rows = 2, .value_bytes = 32};
+    ColumnStoreBuilder retained(kIdentity, schema, limits);
+    CapturingBlockSink sink;
+    StreamingColumnStoreBuilder streamed(
+        kIdentity, schema, checksums, sink, limits);
+    for (const auto& row : {row0, row1, row2}) {
+        REQUIRE(retained.append_row(row).has_value());
+        REQUIRE(streamed.append_row(row).has_value());
+    }
+    const auto expected = retained.seal(checksums);
+    auto actual = streamed.finalize();
+    REQUIRE(expected.has_value());
+    REQUIRE(actual.has_value());
+    const auto assembled = sink.assemble(actual->tokens());
+    REQUIRE(assembled == *expected);
+    const auto view = validate_column_store(
+        assembled, kIdentity, schema, checksums);
+    REQUIRE(view.has_value());
+    REQUIRE(view->row_group_count() == 2);
+    REQUIRE(view->value(0, 0)->bytes[0] == std::byte{1});
+    REQUIRE(view->value(1, 0)->is_null);
+    REQUIRE(view->value(0, 1)->is_null);
+    REQUIRE(view->value(1, 1)->bytes.size() == 7);
+    actual->mark_published();
+}
+
+TEST_CASE("streaming row-value boundaries and hard caps fail before retention") {
+    TestChecksums checksums;
+    const std::array<ColumnSchema, 1> schema{{
+        {
+            .name = "bytes",
+            .descriptor = {
+                .type_oid = 17,
+                .typmod = -1,
+                .type_length = -1,
+                .by_value = 0,
+                .type_alignment = 1,
+                .encoding = ColumnEncoding::BinarySend,
+                .send_function_oid = 1,
+                .receive_function_oid = 2,
+            },
+        },
+    }};
+    constexpr RowGroupLimits limits{.rows = 4, .value_bytes = 5};
+    const std::array<EncodedColumnValue, 1> three{{
+        {.bytes = text_bytes("abc")},
+    }};
+    const std::array<EncodedColumnValue, 1> two{{
+        {.bytes = text_bytes("de")},
+    }};
+    const std::array<EncodedColumnValue, 1> one{{
+        {.bytes = text_bytes("f")},
+    }};
+    ColumnStoreBuilder retained(kIdentity, schema, limits);
+    CapturingBlockSink sink;
+    StreamingColumnStoreBuilder streamed(
+        kIdentity, schema, checksums, sink, limits);
+    for (const auto& row : {three, two, one}) {
+        REQUIRE(retained.append_row(row).has_value());
+        REQUIRE(streamed.append_row(row).has_value());
+    }
+    REQUIRE(streamed.emitted_row_group_count() == 1);
+    const auto expected = retained.seal(checksums);
+    auto actual = streamed.finalize();
+    REQUIRE(expected.has_value());
+    REQUIRE(actual.has_value());
+    REQUIRE(sink.assemble(actual->tokens()) == *expected);
+    actual->mark_published();
+
+    const std::array<EncodedColumnValue, 1> six{{
+        {.bytes = text_bytes("123456")},
+    }};
+    CapturingBlockSink rejected_sink;
+    StreamingColumnStoreBuilder rejected(
+        kIdentity, schema, checksums, rejected_sink, limits);
+    REQUIRE(rejected.append_row(six).error()
+        == FormatError::RowGroupValueLimitExceeded);
+    REQUIRE(rejected.row_count() == 0);
+    REQUIRE(rejected.pending_row_count() == 0);
+    REQUIRE(rejected_sink.store_calls == 0);
+
+    CapturingBlockSink invalid_limits_sink;
+    StreamingColumnStoreBuilder invalid_limits(
+        kIdentity,
+        schema,
+        checksums,
+        invalid_limits_sink,
+        {.rows = kDefaultRowGroupRows + 1u, .value_bytes = 1});
+    REQUIRE(invalid_limits.append_row(one).error()
+        == FormatError::InvalidRowGroupLimits);
+    REQUIRE(invalid_limits_sink.store_calls == 0);
+
+    REQUIRE(projected_column_store_bytes(
+        kMaximumColumnStoreBytes - 152u, 0).value()
+        == kMaximumColumnStoreBytes);
+    REQUIRE(projected_column_store_bytes(
+        kMaximumColumnStoreBytes - 151u, 0).error()
+        == FormatError::MaximumStoreBytesExceeded);
+    REQUIRE(projected_column_store_bytes(
+        (std::numeric_limits<std::uint64_t>::max)(), 0).error()
+        == FormatError::ArithmeticOverflow);
+    REQUIRE(projected_column_store_bytes(
+        0, static_cast<std::uint64_t>(kMaximumColumnStoreRowGroups) + 1u)
+        .error() == FormatError::TooManyRowGroups);
+}
+
+TEST_CASE("streaming row-group metadata is capped and cleaned exactly once") {
+    TestChecksums checksums;
+    const std::array<ColumnSchema, 0> schema{};
+    const std::array<EncodedColumnValue, 0> row{};
+    CountingBlockSink sink;
+    {
+        StreamingColumnStoreBuilder streamed(
+            kIdentity,
+            schema,
+            checksums,
+            sink,
+            {.rows = 1, .value_bytes = 1});
+        for (std::uint32_t index = 0;
+             index <= kMaximumColumnStoreRowGroups; ++index) {
+            INFO("row ordinal " << index);
+            REQUIRE(streamed.append_row(row).has_value());
+        }
+        REQUIRE(streamed.emitted_row_group_count()
+            == kMaximumColumnStoreRowGroups);
+        REQUIRE(streamed.retained_metadata_bytes()
+            <= kMaximumColumnStoreMetadataBytes);
+        REQUIRE(streamed.finalize().error() == FormatError::TooManyRowGroups);
+        REQUIRE(sink.stored == kMaximumColumnStoreRowGroups);
+        REQUIRE(sink.discarded == sink.stored);
+    }
+    REQUIRE(sink.discarded == sink.stored);
+}
+
+TEST_CASE("streaming sink failures discard every temporary token once") {
+    TestChecksums checksums;
+    const std::array<ColumnSchema, 0> schema{};
+    const std::array<EncodedColumnValue, 0> row{};
+
+    CapturingBlockSink group_failure;
+    group_failure.fail_on_store = 1;
+    {
+        StreamingColumnStoreBuilder streamed(
+            kIdentity,
+            schema,
+            checksums,
+            group_failure,
+            {.rows = 1, .value_bytes = 1});
+        REQUIRE(streamed.append_row(row).has_value());
+        REQUIRE(streamed.append_row(row).has_value());
+        REQUIRE(streamed.append_row(row).error() == FormatError::SinkFailed);
+        REQUIRE(group_failure.blocks.size() == 1);
+        REQUIRE(group_failure.every_stored_block_discarded_once());
+        REQUIRE(streamed.append_row(row).error() == FormatError::SinkFailed);
+    }
+    REQUIRE(group_failure.every_stored_block_discarded_once());
+
+    CapturingBlockSink terminal_failure;
+    terminal_failure.fail_on_store = 4;
+    {
+        StreamingColumnStoreBuilder streamed(
+            kIdentity,
+            schema,
+            checksums,
+            terminal_failure,
+            {.rows = 1, .value_bytes = 1});
+        REQUIRE(streamed.append_row(row).has_value());
+        REQUIRE(streamed.append_row(row).has_value());
+        REQUIRE(streamed.finalize().error() == FormatError::SinkFailed);
+        REQUIRE(terminal_failure.blocks.size() == 4);
+        REQUIRE(terminal_failure.every_stored_block_discarded_once());
+    }
+    REQUIRE(terminal_failure.every_stored_block_discarded_once());
+
+    CapturingBlockSink abandoned;
+    {
+        StreamingColumnStoreBuilder streamed(
+            kIdentity, schema, checksums, abandoned);
+        REQUIRE(streamed.append_row(row).has_value());
+        {
+            auto result = streamed.finalize();
+            REQUIRE(result.has_value());
+            REQUIRE_FALSE(abandoned.every_stored_block_discarded_once());
+        }
+        REQUIRE(abandoned.every_stored_block_discarded_once());
+    }
+    REQUIRE(abandoned.every_stored_block_discarded_once());
+}
+
+TEST_CASE("coalescing sink publishes physical bytes in logical v1 order") {
+    auto schema = mixed_schema();
+    constexpr RowGroupLimits limits{.rows = 2, .value_bytes = 1'024};
+    TestChecksums checksums;
+    ColumnStoreBuilder retained(kIdentity, schema, limits);
+    CapturingPhysicalSink physical;
+    CoalescingColumnStoreSink coalesced(physical, 256, 32);
+    StreamingColumnStoreBuilder streamed(
+        kIdentity, schema, checksums, coalesced, limits);
+    append_mixed_rows(retained);
+    append_mixed_rows(streamed);
+
+    const auto expected = retained.seal(checksums);
+    auto logical = streamed.finalize();
+    REQUIRE(expected.has_value());
+    REQUIRE(logical.has_value());
+    const auto manifest = coalesced.manifest_tokens(logical->tokens());
+    REQUIRE(manifest.has_value());
+    REQUIRE(manifest->size() <= kMaximumColumnStorePhysicalBlocks);
+    REQUIRE(manifest->size() == coalesced.physical_block_count());
+    REQUIRE(coalesced.retained_buffer_bytes() == 0);
+    REQUIRE(coalesced.retained_metadata_bytes()
+        <= kMaximumColumnStoreMetadataBytes);
+    for (const auto& block : physical.blocks) {
+        REQUIRE(block.size() <= 256);
+    }
+    REQUIRE_FALSE(manifest->empty());
+    REQUIRE((*manifest)[0].slot != 0);
+    const auto assembled = physical.assemble(*manifest);
+    REQUIRE(assembled == *expected);
+    REQUIRE(validate_column_store(
+        assembled, kIdentity, schema, checksums).has_value());
+
+    coalesced.mark_published();
+    logical->mark_published();
+    REQUIRE(physical.discard_counts == std::vector<std::uint32_t>(
+        physical.blocks.size(), 0));
+}
+
+TEST_CASE("coalescing sink cleans group, prefix, and suffix flush failures") {
+    const std::array<std::byte, 4> full{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const std::array<std::byte, 1> one{std::byte{5}};
+    const std::array<std::byte, 3> three{
+        std::byte{6}, std::byte{7}, std::byte{8}};
+
+    for (std::size_t failure_call = 0; failure_call < 3; ++failure_call) {
+        CapturingPhysicalSink physical;
+        physical.fail_on_store = failure_call;
+        {
+            CoalescingColumnStoreSink coalesced(physical, 4, 32);
+            std::vector<ColumnStoreLogicalBlockToken> tokens;
+            const auto group = coalesced.store(
+                ColumnStoreBlockKind::RowGroup, 0, full);
+            if (failure_call == 0) {
+                REQUIRE(group.error() == FormatError::SinkFailed);
+            } else {
+                REQUIRE(group.has_value());
+                tokens.push_back(*group);
+                const auto header = coalesced.store(
+                    ColumnStoreBlockKind::Header, 0, one);
+                REQUIRE(header.has_value());
+                tokens.push_back(*header);
+                const auto schema = coalesced.store(
+                    ColumnStoreBlockKind::Schema, 0, three);
+                if (failure_call == 1) {
+                    REQUIRE(schema.error() == FormatError::SinkFailed);
+                } else {
+                    REQUIRE(schema.has_value());
+                    tokens.push_back(*schema);
+                    const auto index = coalesced.store(
+                        ColumnStoreBlockKind::Index, 0, one);
+                    REQUIRE(index.has_value());
+                    tokens.push_back(*index);
+                    const auto footer = coalesced.store(
+                        ColumnStoreBlockKind::Footer, 0, three);
+                    REQUIRE(footer.error() == FormatError::SinkFailed);
+                }
+            }
+            for (const auto& token : tokens) {
+                coalesced.discard(token);
+            }
+            REQUIRE(physical.every_stored_block_discarded_once());
+        }
+        REQUIRE(physical.every_stored_block_discarded_once());
+    }
+}
+
+TEST_CASE("coalescing sink rejects physical manifest overflow fail-open") {
+    const std::array<std::byte, 1> one{std::byte{1}};
+    CapturingPhysicalSink physical;
+    {
+        CoalescingColumnStoreSink coalesced(
+            physical,
+            1,
+            kMaximumColumnStorePhysicalBlocks);
+        std::vector<ColumnStoreLogicalBlockToken> tokens;
+        for (std::uint32_t index = 0;
+             index < kMaximumColumnStorePhysicalBlocks; ++index) {
+            auto stored = coalesced.store(
+                ColumnStoreBlockKind::RowGroup, index, one);
+            REQUIRE(stored.has_value());
+            tokens.push_back(*stored);
+        }
+        REQUIRE(coalesced.store(
+            ColumnStoreBlockKind::RowGroup,
+            kMaximumColumnStorePhysicalBlocks,
+            one).error()
+            == FormatError::PhysicalBlockLimitExceeded);
+        REQUIRE(physical.blocks.size()
+            == kMaximumColumnStorePhysicalBlocks);
+        REQUIRE(physical.every_stored_block_discarded_once());
+        for (const auto& token : tokens) {
+            coalesced.discard(token);
+        }
+    }
+    REQUIRE(physical.every_stored_block_discarded_once());
+
+    MetadataHeavyPhysicalSink heavy;
+    CoalescingColumnStoreSink rejected(heavy, 4, 32);
+    REQUIRE(rejected.store(
+        ColumnStoreBlockKind::RowGroup, 0, one).error()
+        == FormatError::MetadataLimitExceeded);
+}
 
 TEST_CASE("validity bitmaps are canonical at byte boundaries") {
     const std::array<bool, 10> valid{
@@ -380,7 +944,8 @@ TEST_CASE("row-group row target splits at minus, at, and plus one") {
     TestChecksums checksums;
     const std::array<ColumnSchema, 0> schema{};
     const std::array<EncodedColumnValue, 0> values{};
-    const auto group_count_for = [&](std::uint32_t rows) {
+    const auto group_count_for = [&checksums, &schema, &values](
+            std::uint32_t rows) {
         ColumnStoreBuilder builder(
             kIdentity, schema, {.rows = 4, .value_bytes = 1'024});
         for (std::uint32_t row = 0; row < rows; ++row) {

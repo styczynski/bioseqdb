@@ -53,89 +53,95 @@ FROM cache_security_rows WHERE nullable_value <= 10 ORDER BY row_id;
 SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask
 FROM cache_security_rows WHERE nullable_value <= 10 ORDER BY row_id;
 RESET ROLE;
-DO $$
-DECLARE
-    observed record;
-BEGIN
-    SELECT * INTO observed FROM bioseq_cache.stats();
-    IF observed.produced <> 2
-       OR observed.reuse_hits <> 2
-       OR observed.fallbacks <> 0 THEN
-        RAISE EXCEPTION 'role namespaces coalesced: %', row_to_json(observed);
-    END IF;
+WITH observed AS (
+    SELECT * FROM bioseq_cache.stats()
+)
+SELECT 1 / CASE
+    WHEN produced = 2 AND reuse_hits = 2 AND fallbacks = 0 THEN 1
+    ELSE 0
 END
-$$;
+FROM observed;
 
 -- C-side row filtering applies before reusable SQL and Plan text are copied.
 SET ROLE cache_security_alice;
-DO $$
-DECLARE
-    own_rows integer;
-    leaked_rows integer;
-BEGIN
-    SELECT count(*) INTO own_rows
+WITH observed AS (
+    SELECT
+        count(*) FILTER (
+            WHERE kind = 'ReusableCoverage'
+              AND state = 'COMPLETE'
+              AND owner_role = 'cache_security_alice'::regrole
+              AND producer_pid IS NOT NULL
+              AND sql IS NOT NULL
+              AND producer_plan IS NOT NULL
+              AND dependencies->>'canonical_plan_status' = 'Planned'
+              AND dependencies->>'producer_plan_status' = 'Planned'
+        ) AS own_rows,
+        count(*) FILTER (
+            WHERE kind = 'ReusableCoverage'
+              AND state = 'COMPLETE'
+              AND entry_key IS NOT NULL
+              AND age IS NOT NULL
+              AND rows IS NOT NULL
+              AND logical_bytes IS NOT NULL
+              AND stored_bytes IS NOT NULL
+        ) AS scalar_rows,
+        count(*) FILTER (
+            WHERE kind = 'ReusableCoverage'
+              AND state = 'COMPLETE'
+              AND owner_role IS NULL
+              AND producer_pid IS NULL
+              AND sql IS NULL
+              AND producer_plan IS NULL
+              AND dependencies IS NULL
+        ) AS foreign_rows,
+        count(*) FILTER (
+            WHERE kind = 'ReusableCoverage'
+              AND state = 'COMPLETE'
+              AND owner_role IS NULL
+              AND (producer_pid IS NOT NULL OR sql IS NOT NULL
+                   OR producer_plan IS NOT NULL OR dependencies IS NOT NULL)
+        ) AS leaked_rows
     FROM bioseq_cache.entries()
-    WHERE kind = 'ReusableCoverage'
-      AND state = 'COMPLETE'
-      AND owner_role = 'cache_security_alice'::regrole
-      AND producer_pid IS NOT NULL
-      AND sql IS NOT NULL
-      AND producer_plan IS NOT NULL
-      AND dependencies->>'canonical_plan_status' = 'Planned'
-      AND dependencies->>'producer_plan_status' = 'Planned';
-    SELECT count(*) INTO leaked_rows
-    FROM bioseq_cache.entries()
-    WHERE kind = 'ReusableCoverage'
-      AND state = 'COMPLETE'
-      AND owner_role IS NULL
-      AND (producer_pid IS NOT NULL OR sql IS NOT NULL
-           OR producer_plan IS NOT NULL OR dependencies IS NOT NULL);
-    IF own_rows <> 1 OR leaked_rows <> 0 THEN
-        RAISE EXCEPTION
-            'producer row-level diagnostic filtering failed: %, %',
-            own_rows, leaked_rows;
-    END IF;
+)
+SELECT 1 / CASE
+    WHEN own_rows = 1 AND scalar_rows = 2 AND foreign_rows = 1
+         AND leaked_rows = 0 THEN 1
+    ELSE 0
 END
-$$;
+FROM observed;
 RESET ROLE;
 
 SET ROLE cache_security_monitor;
-DO $$
-DECLARE
-    scalar_rows integer;
-    leaked_rows integer;
-BEGIN
-    SELECT count(*) INTO scalar_rows
+WITH observed AS (
+    SELECT
+        count(*) FILTER (
+            WHERE kind = 'ReusableCoverage'
+              AND state = 'COMPLETE'
+              AND entry_key IS NOT NULL
+              AND age IS NOT NULL
+              AND rows IS NOT NULL
+              AND logical_bytes IS NOT NULL
+              AND stored_bytes IS NOT NULL
+        ) AS scalar_rows,
+        count(*) FILTER (
+            WHERE kind = 'ReusableCoverage'
+              AND state = 'COMPLETE'
+              AND (owner_role IS NOT NULL OR producer_pid IS NOT NULL
+                   OR sql IS NOT NULL OR producer_plan IS NOT NULL
+                   OR dependencies IS NOT NULL)
+        ) AS leaked_rows
     FROM bioseq_cache.entries()
-    WHERE kind = 'ReusableCoverage'
-      AND state = 'COMPLETE'
-      AND entry_key IS NOT NULL
-      AND age IS NOT NULL
-      AND rows IS NOT NULL
-      AND logical_bytes IS NOT NULL
-      AND stored_bytes IS NOT NULL;
-    SELECT count(*) INTO leaked_rows
-    FROM bioseq_cache.entries()
-    WHERE kind = 'ReusableCoverage'
-      AND state = 'COMPLETE'
-      AND (owner_role IS NOT NULL OR producer_pid IS NOT NULL
-           OR sql IS NOT NULL OR producer_plan IS NOT NULL
-           OR dependencies IS NOT NULL);
-    IF scalar_rows <> 2 OR leaked_rows <> 0 THEN
-        RAISE EXCEPTION
-            'explicit monitor reusable redaction failed: %, %',
-            scalar_rows, leaked_rows;
-    END IF;
+)
+SELECT 1 / CASE
+    WHEN scalar_rows = 2 AND leaked_rows = 0 THEN 1
+    ELSE 0
 END
-$$;
+FROM observed;
 RESET ROLE;
 
 SET ROLE pg_read_all_stats;
-DO $$
-DECLARE
-    full_rows integer;
-BEGIN
-    SELECT count(*) INTO full_rows
+WITH observed AS (
+    SELECT count(*) AS full_rows
     FROM bioseq_cache.entries()
     WHERE kind = 'ReusableCoverage'
       AND state = 'COMPLETE'
@@ -143,13 +149,10 @@ BEGIN
       AND producer_pid IS NOT NULL
       AND sql IS NOT NULL
       AND producer_plan IS NOT NULL
-      AND dependencies IS NOT NULL;
-    IF full_rows <> 2 THEN
-        RAISE EXCEPTION
-            'pg_read_all_stats reusable disclosure failed: %', full_rows;
-    END IF;
-END
-$$;
+      AND dependencies IS NOT NULL
+)
+SELECT 1 / CASE WHEN full_rows = 2 THEN 1 ELSE 0 END
+FROM observed;
 RESET ROLE;
 
 REVOKE EXECUTE ON FUNCTION bioseq_cache.entries()
@@ -173,19 +176,14 @@ FROM cache_security_rows WHERE nullable_value <= 10 ORDER BY row_id;
 SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask
 FROM cache_security_rows WHERE nullable_value <= 10 ORDER BY row_id;
 SET row_security = on;
-DO $$
-DECLARE
-    observed record;
-BEGIN
-    SELECT * INTO observed FROM bioseq_cache.stats();
-    IF observed.produced <> 2
-       OR observed.reuse_hits <> 2
-       OR observed.fallbacks <> 0 THEN
-        RAISE EXCEPTION 'row-security namespaces coalesced: %',
-            row_to_json(observed);
-    END IF;
+WITH observed AS (
+    SELECT * FROM bioseq_cache.stats()
+)
+SELECT 1 / CASE
+    WHEN produced = 2 AND reuse_hits = 2 AND fallbacks = 0 THEN 1
+    ELSE 0
 END
-$$;
+FROM observed;
 
 -- The provider-defined 32-byte namespace is mandatory key material.  The
 -- setter resets cached plans so each Plan captures exactly one frozen value.
@@ -204,19 +202,14 @@ SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask
 FROM cache_security_rows WHERE nullable_value <= 10 ORDER BY row_id;
 SELECT row_id, base_id, occurrence_no, nullable_value, payload, capability_mask
 FROM cache_security_rows WHERE nullable_value <= 10 ORDER BY row_id;
-DO $$
-DECLARE
-    observed record;
-BEGIN
-    SELECT * INTO observed FROM bioseq_cache.stats();
-    IF observed.produced <> 2
-       OR observed.reuse_hits <> 2
-       OR observed.fallbacks <> 0 THEN
-        RAISE EXCEPTION 'provider-security namespaces coalesced: %',
-            row_to_json(observed);
-    END IF;
+WITH observed AS (
+    SELECT * FROM bioseq_cache.stats()
+)
+SELECT 1 / CASE
+    WHEN produced = 2 AND reuse_hits = 2 AND fallbacks = 0 THEN 1
+    ELSE 0
 END
-$$;
+FROM observed;
 
 SELECT bioseq_cache_test.provider_clear_security_digest();
 SELECT bioseq_cache_test.provider_shutdown();

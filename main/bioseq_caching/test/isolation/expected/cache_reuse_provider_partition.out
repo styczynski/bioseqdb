@@ -1,0 +1,295 @@
+Parsed test spec with 3 sessions
+
+starting permutation: partition_init partition_mode partition_generic partition_relation_a partition_prepare_source_a partition_freeze_source_a partition_source_a partition_relation_b partition_prepare_source_b partition_freeze_source_b partition_source_b partition_source_state partition_relations_all partition_prepare_consumer partition_freeze_consumer partition_reset_stats partition_arm partition_consume partition_paused partition_pinned_state partition_begin partition_write_b partition_commit partition_transition_drained partition_after_b_write partition_release partition_consume_stats partition_future_relation_a partition_prepare_future_a partition_freeze_future_a partition_future_a partition_final_stats partition_deallocate
+reset_stats
+-----------
+           
+(1 row)
+
+step partition_init: SELECT bioseq_cache_test.provider_init();
+provider_init
+-------------
+             
+(1 row)
+
+step partition_mode: SET bioseq.query_cache_optimisation_mode = 'reuse';
+step partition_generic: SET plan_cache_mode = force_generic_plan;
+step partition_relation_a: 
+  SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_part_a');
+
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step partition_prepare_source_a: 
+  PREPARE cache_provider_partition_source_a AS
+  SELECT row_id
+  FROM ONLY cache_provider_iso_part_a
+  WHERE nullable_value <= 10
+  ORDER BY row_id;
+
+step partition_freeze_source_a: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_partition_source_a', 1, 0);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step partition_source_a: 
+  EXECUTE cache_provider_partition_source_a;
+
+row_id
+------
+     1
+     2
+(2 rows)
+
+step partition_relation_b: 
+  SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_part_b');
+
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step partition_prepare_source_b: 
+  PREPARE cache_provider_partition_source_b AS
+  SELECT row_id
+  FROM ONLY cache_provider_iso_part_b
+  WHERE nullable_value <= 10
+  ORDER BY row_id;
+
+step partition_freeze_source_b: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_partition_source_b', 1, 0);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step partition_source_b: 
+  EXECUTE cache_provider_partition_source_b;
+
+row_id
+------
+     3
+(1 row)
+
+step partition_source_state: 
+  SELECT count(*) = 2 AS two_complete_sources
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ReusableCoverage' AND state = 'COMPLETE';
+
+two_complete_sources
+--------------------
+t                   
+(1 row)
+
+step partition_relations_all: 
+  SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_part_a');
+  SELECT bioseq_cache_test.provider_add_relation('cache_provider_iso_part_b');
+
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+provider_add_relation
+---------------------
+                     
+(1 row)
+
+step partition_prepare_consumer: 
+  PREPARE cache_provider_partition_consumer AS
+  SELECT a.row_id AS a_row_id, b.row_id AS b_row_id
+  FROM ONLY cache_provider_iso_part_a AS a
+  CROSS JOIN ONLY cache_provider_iso_part_b AS b
+  WHERE a.nullable_value >= 5
+    AND b.nullable_value >= 5
+  ORDER BY a.row_id, b.row_id;
+
+step partition_freeze_consumer: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_partition_consumer', 2, 2);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step partition_reset_stats: SELECT bioseq_cache.reset_stats();
+reset_stats
+-----------
+           
+(1 row)
+
+step partition_arm: 
+  SELECT bioseq_cache_test.arm_pause('after_coverage_reader_pinned');
+
+arm_pause
+---------
+         
+(1 row)
+
+step partition_consume: 
+  EXECUTE cache_provider_partition_consumer;
+ <waiting ...>
+step partition_paused: 
+  SELECT bioseq_cache_test.wait_until_paused(
+    'after_coverage_reader_pinned');
+
+wait_until_paused
+-----------------
+                 
+(1 row)
+
+step partition_pinned_state: 
+  SELECT
+    count(*) FILTER (
+      WHERE kind = 'ReusableCoverage'
+        AND state = 'COMPLETE'
+        AND readers = 1
+        AND sql LIKE '%cache_provider_partition_source_a%') = 1
+      AS a_reader_pinned,
+    count(*) FILTER (
+      WHERE kind = 'ReusableCoverage'
+        AND state = 'COMPLETE'
+        AND readers = 0
+        AND sql LIKE '%cache_provider_partition_source_b%') = 1
+      AS b_not_yet_pinned
+  FROM bioseq_cache.entries();
+
+a_reader_pinned|b_not_yet_pinned
+---------------+----------------
+t              |t               
+(1 row)
+
+step partition_begin: BEGIN;
+step partition_write_b: 
+  UPDATE ONLY cache_provider_iso_part_b
+  SET payload = 'b-updated' WHERE row_id = 3;
+  SELECT bioseq_cache_test.provider_record_write(
+    'cache_provider_iso_part_b') IS NOT NULL AS x;
+
+x
+-
+t
+(1 row)
+
+step partition_commit: COMMIT;
+step partition_transition_drained: 
+  SELECT database_transitions = 0 AS no_database_transition,
+         coarse_transitions = 0 AS no_coarse_transition
+  FROM bioseq_cache_test.transition_state();
+
+no_database_transition|no_coarse_transition
+----------------------+--------------------
+t                     |t                   
+(1 row)
+
+step partition_after_b_write: 
+  SELECT
+    count(*) FILTER (
+      WHERE kind = 'ReusableCoverage'
+        AND state = 'COMPLETE'
+        AND readers = 1
+        AND sql LIKE '%cache_provider_partition_source_a%') = 1
+      AS a_remains_complete,
+    count(*) FILTER (
+      WHERE kind = 'ReusableCoverage'
+        AND state = 'COMPLETE'
+        AND readers = 0
+        AND sql LIKE '%cache_provider_partition_source_b%') = 1
+      AS b_non_current,
+    count(*) FILTER (
+      WHERE kind = 'ReusableCoverage'
+        AND state = 'INVALIDATED'
+        AND sql LIKE '%cache_provider_partition_source_a%') = 0
+      AS no_global_reusable_purge
+  FROM bioseq_cache.entries();
+
+a_remains_complete|b_non_current|no_global_reusable_purge
+------------------+-------------+------------------------
+t                 |t            |t                       
+(1 row)
+
+step partition_release: 
+  SELECT bioseq_cache_test.release_pause(
+    'after_coverage_reader_pinned');
+
+release_pause
+-------------
+             
+(1 row)
+
+step partition_consume: <... completed>
+a_row_id|b_row_id
+--------+--------
+       1|       3
+       2|       3
+(2 rows)
+
+step partition_consume_stats: 
+  SELECT produced = 1 AS only_a_current_generation,
+         reuse_hits = 1 AS only_a_reused,
+         fallbacks = 1 AS b_precise_fallback
+  FROM bioseq_cache.stats();
+
+only_a_current_generation|only_a_reused|b_precise_fallback
+-------------------------+-------------+------------------
+t                        |t            |t                 
+(1 row)
+
+step partition_future_relation_a: 
+  SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_part_a');
+
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step partition_prepare_future_a: 
+  PREPARE cache_provider_partition_future_a AS
+  SELECT row_id
+  FROM ONLY cache_provider_iso_part_a
+  WHERE nullable_value = 10
+  ORDER BY row_id;
+
+step partition_freeze_future_a: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_partition_future_a', 1, 2);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step partition_future_a: 
+  EXECUTE cache_provider_partition_future_a;
+
+row_id
+------
+     2
+(1 row)
+
+step partition_final_stats: 
+  SELECT produced = 2 AS two_current_generations,
+         reuse_hits = 2 AS future_a_reused,
+         fallbacks = 1 AS only_b_fell_back
+  FROM bioseq_cache.stats();
+
+two_current_generations|future_a_reused|only_b_fell_back
+-----------------------+---------------+----------------
+t                      |t              |t               
+(1 row)
+
+step partition_deallocate: 
+  DEALLOCATE cache_provider_partition_source_a;
+  DEALLOCATE cache_provider_partition_source_b;
+  DEALLOCATE cache_provider_partition_consumer;
+  DEALLOCATE cache_provider_partition_future_a;
+

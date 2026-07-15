@@ -26,6 +26,7 @@ extern "C" {
 
 export module bioseq.cache.pg.maintenance;
 
+import bioseq.cache.pg.shared_registry;
 import bioseq.cache.pg.storage;
 
 export namespace bioseq::cache::pg::maintenance {
@@ -34,7 +35,7 @@ inline constexpr char kJanitorWorkerName[] = "bioseq_cache janitor";
 inline constexpr char kJanitorWorkerFunction[] =
     "bioseq_cache_storage_janitor_main";
 
-/** Bounded backend-local maintenance work invoked after each storage sweep. */
+/** Bounded registry maintenance invoked before each physical storage sweep. */
 using ReusableJanitorCallbackV1 = void (*)() noexcept;
 
 /** Register exactly one postmaster-managed worker during shared preload. */
@@ -160,8 +161,8 @@ extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
             ProcessConfigFile(PGC_SIGHUP);
         }
         publish_worker_heartbeat();
-        static_cast<void>(janitor_sweep());
         run_reusable_janitor_callback();
+        static_cast<void>(janitor_sweep());
 
         ResetLatch(MyLatch);
         const int events = WaitLatch(
@@ -175,8 +176,13 @@ extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
     }
 
     publish_worker_lifecycle(WorkerLifecycle::Stopping, MyProcPid);
-    static_cast<void>(janitor_sweep());
     run_reusable_janitor_callback();
+    static_cast<void>(janitor_sweep());
     publish_worker_lifecycle(WorkerLifecycle::Stopped, 0);
+    /* The janitor is the sole owner of the boot-wide area pin.  Its existing
+     * before_shmem_exit callbacks detach storage references and then the
+     * session-pinned mapping after this orderly unpin. */
+    static_cast<void>(
+        bioseq::cache::pg::shared_registry::orderly_unpin_shared_registry());
     proc_exit(0);
 }

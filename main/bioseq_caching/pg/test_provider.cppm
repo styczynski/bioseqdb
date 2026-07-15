@@ -22,6 +22,7 @@ extern "C" {
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
+#include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
@@ -38,6 +39,7 @@ extern "C" {
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -61,11 +63,20 @@ inline constexpr std::uint32_t kProviderId = 0x54535431U;
 inline constexpr std::uint64_t kCompatibilityFamily =
     0x746573745f763031ULL;
 inline constexpr std::int32_t kPlanMagic = 0x54535031;
-inline constexpr std::int32_t kPlanVersion = 1;
+inline constexpr std::int32_t kPlanVersion = 2;
+inline constexpr std::uint32_t kGenerationSemanticVersion = 2;
+inline constexpr std::size_t kPlanFixedNodeCount = 11;
+inline constexpr std::size_t kMaximumPlanNodeCount = 1024;
+inline constexpr std::size_t kMaximumRequiredBoundaryCount =
+    kMaximumPlanNodeCount - kPlanFixedNodeCount;
 inline constexpr std::size_t kDigestBytes = 32;
+inline constexpr std::size_t kMaximumTargetRelations = 16;
 inline constexpr char kApiRendezvousName[] = "bioseq_cache.api.v1";
 inline constexpr char kBridgeRendezvousName[] =
     "bioseq_cache.planner_bridge.v1";
+inline constexpr std::uint32_t kPgRelFileLocatorIdentityKindV1 = 1;
+inline constexpr std::size_t kPgRelFileLocatorIdentityBytesV1 =
+    sizeof(Oid) + sizeof(Oid) + sizeof(RelFileNumber);
 
 enum class MappingFault : std::uint16_t {
     None = 0,
@@ -91,6 +102,7 @@ enum class MappingFault : std::uint16_t {
     DecoratedBoundarySchemaMismatch,
     DecoratedLineageSchemaMismatch,
     ProviderError,
+    LateFetchErrorOnce,
     PersistedWrongTopTag,
     PersistedShortTop,
     PersistedLongTop,
@@ -111,7 +123,6 @@ enum class MappingFault : std::uint16_t {
 
 enum class DigestFault : std::uint16_t {
     None = 0,
-    RecipeMismatch,
     RuntimeMismatch,
 };
 
@@ -132,14 +143,25 @@ struct CallbackCounters {
     std::uint64_t extract_occurrence = 0;
     std::uint64_t late_fetch_batch = 0;
     std::uint64_t late_fetch_references = 0;
+    std::uint64_t late_fetch_values = 0;
+    std::uint64_t late_fetch_bytes = 0;
+    std::uint64_t late_fetch_errors = 0;
     std::uint64_t planner_bridge_calls = 0;
     std::uint64_t executor_rows = 0;
     std::uint64_t gated_expensive_rows = 0;
+    std::uint64_t last_boundary_column_count = 0;
+    std::uint64_t last_required_boundary_count = 0;
+    std::uint64_t last_lineage_column_count = 0;
+    std::uint64_t last_required_lineage_count = 0;
+    std::uint64_t last_recipe_required_boundary_count = 0;
 };
 
 inline Oid g_target_relation_oid = InvalidOid;
+inline std::array<Oid, kMaximumTargetRelations> g_additional_target_relations{};
+inline std::size_t g_additional_target_relation_count = 0;
 inline std::uint64_t g_requested_capabilities = 1;
 inline MappingFault g_mapping_fault = MappingFault::None;
+inline const PlannedStmt* g_persisted_mapping_fault_statement = nullptr;
 inline DigestFault g_digest_fault = DigestFault::None;
 inline ProjectionOrder g_projection_order = ProjectionOrder::Natural;
 inline bool g_force_domain_digest_collision = false;
@@ -150,6 +172,37 @@ inline set_rel_pathlist_hook_type g_previous_set_rel_pathlist_hook = nullptr;
 inline CallbackCounters g_counters{};
 inline std::array<std::uint8_t, kDigestBytes> g_provider_security_digest{};
 
+[[nodiscard]] bool configured_target_relation(Oid relation_oid) noexcept {
+    if (!OidIsValid(relation_oid)) {
+        return false;
+    }
+    if (relation_oid == g_target_relation_oid) {
+        return true;
+    }
+    for (std::size_t index = 0;
+         index < g_additional_target_relation_count;
+         ++index) {
+        if (g_additional_target_relations[index] == relation_oid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool add_configured_target_relation(
+        Oid relation_oid) noexcept {
+    if (!OidIsValid(relation_oid) || configured_target_relation(relation_oid)) {
+        return OidIsValid(relation_oid);
+    }
+    if (g_additional_target_relation_count
+        >= g_additional_target_relations.size()) {
+        return false;
+    }
+    g_additional_target_relations[
+        g_additional_target_relation_count++] = relation_oid;
+    return true;
+}
+
 /** Require superuser for every mutation of the deterministic test provider. */
 void require_test_superuser() {
     if (!superuser()) {
@@ -157,6 +210,60 @@ void require_test_superuser() {
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("bioseq_cache test-provider controls require superuser")));
     }
+}
+
+/** Encode the cache ABI's padding-free PostgreSQL locator identity. */
+[[nodiscard]] bool provider_relation_physical_identity(
+        Oid relation_oid,
+        BioseqCachePhysicalIdentityV1* output) {
+    if (!OidIsValid(relation_oid) || output == nullptr
+        || kPgRelFileLocatorIdentityBytesV1 > sizeof(output->bytes)) {
+        return false;
+    }
+    Relation relation = table_open(relation_oid, AccessShareLock);
+    const RelFileLocator locator = relation->rd_locator;
+    table_close(relation, AccessShareLock);
+    if (!OidIsValid(locator.spcOid) || !OidIsValid(locator.dbOid)
+        || !RelFileNumberIsValid(locator.relNumber)) {
+        return false;
+    }
+    *output = BioseqCachePhysicalIdentityV1{
+        .struct_size = sizeof(BioseqCachePhysicalIdentityV1),
+        .kind = kPgRelFileLocatorIdentityKindV1,
+        .length = static_cast<std::uint32_t>(
+            kPgRelFileLocatorIdentityBytesV1),
+    };
+    std::size_t offset = 0;
+    std::memcpy(output->bytes + offset, &locator.spcOid, sizeof(locator.spcOid));
+    offset += sizeof(locator.spcOid);
+    std::memcpy(output->bytes + offset, &locator.dbOid, sizeof(locator.dbOid));
+    offset += sizeof(locator.dbOid);
+    std::memcpy(
+        output->bytes + offset, &locator.relNumber, sizeof(locator.relNumber));
+    return true;
+}
+
+/** Emit a provider-complete write marker before transaction PRE_COMMIT. */
+[[nodiscard]] bool record_provider_relation_write(Oid relation_oid) {
+    BioseqCachePhysicalIdentityV1 identity{};
+    void** slot = find_rendezvous_variable(kApiRendezvousName);
+    if (!provider_relation_physical_identity(relation_oid, &identity)
+        || slot == nullptr || *slot == nullptr) {
+        return false;
+    }
+    const auto* api = static_cast<const BioseqCacheApiV1*>(*slot);
+    if (api->struct_size < sizeof(*api)
+        || api->abi_version != bioseq::cache::kProviderAbiVersion
+        || api->postgres_major
+            != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
+        || api->record_relation_write == nullptr) {
+        return false;
+    }
+    api->record_relation_write(
+        static_cast<std::uint32_t>(MyDatabaseId),
+        static_cast<std::uint32_t>(relation_oid),
+        &identity);
+    return true;
 }
 
 /** Reconstruct a uint64 from two PostgreSQL Integer Nodes. */
@@ -218,13 +325,106 @@ digest_plan_nodes(const List* nodes) noexcept {
     return result;
 }
 
+struct ProjectedBoundaryWalkV1 {
+    Index relation_index = 0;
+    Bitmapset* attnos = nullptr;
+    bool whole_row = false;
+    bool invalid = false;
+};
+
+/** Collect only output-boundary Vars; base restriction Vars stay late-fetchable. */
+[[nodiscard]] bool projected_boundary_walker(Node* node, void* opaque) {
+    if (node == nullptr) {
+        return false;
+    }
+    auto* context = static_cast<ProjectedBoundaryWalkV1*>(opaque);
+    if (context == nullptr) {
+        return true;
+    }
+    if (IsA(node, Var)) {
+        const auto* variable = reinterpret_cast<const Var*>(node);
+        if (variable->varlevelsup != 0
+            || variable->varno != context->relation_index) {
+            return false;
+        }
+        if (variable->varattno == InvalidAttrNumber) {
+            context->whole_row = true;
+        } else if (variable->varattno > 0) {
+            context->attnos = bms_add_member(
+                context->attnos, variable->varattno);
+        } else {
+            context->invalid = true;
+        }
+        return false;
+    }
+    return expression_tree_walker(node, projected_boundary_walker, opaque);
+}
+
+/** Freeze projected physical attributes in stable table order. */
+[[nodiscard]] bool collect_projected_boundary_attnos(
+    RelOptInfo* relation_info,
+    Index relation_index,
+    Oid relation_oid,
+    std::uint32_t** output,
+    std::size_t* output_count) {
+    if (relation_info == nullptr || relation_info->reltarget == nullptr
+        || relation_index == 0 || !OidIsValid(relation_oid)
+        || output == nullptr || output_count == nullptr) {
+        return false;
+    }
+    *output = nullptr;
+    *output_count = 0;
+    ProjectedBoundaryWalkV1 context{.relation_index = relation_index};
+    static_cast<void>(projected_boundary_walker(
+        reinterpret_cast<Node*>(relation_info->reltarget->exprs), &context));
+    if (context.invalid) {
+        bms_free(context.attnos);
+        return false;
+    }
+
+    Relation relation = table_open(relation_oid, NoLock);
+    TupleDesc descriptor = RelationGetDescr(relation);
+    std::size_t count = 0;
+    for (int index = 0; index < descriptor->natts; ++index) {
+        if (!TupleDescAttr(descriptor, index)->attisdropped
+            && (context.whole_row
+                || bms_is_member(index + 1, context.attnos))) {
+            ++count;
+        }
+    }
+    if (count > kMaximumRequiredBoundaryCount) {
+        table_close(relation, NoLock);
+        bms_free(context.attnos);
+        return false;
+    }
+    auto* attnos = count == 0
+        ? nullptr
+        : static_cast<std::uint32_t*>(
+            palloc0(count * sizeof(std::uint32_t)));
+    std::size_t output_index = 0;
+    for (int index = 0; index < descriptor->natts; ++index) {
+        if (!TupleDescAttr(descriptor, index)->attisdropped
+            && (context.whole_row
+                || bms_is_member(index + 1, context.attnos))) {
+            attnos[output_index++] = static_cast<std::uint32_t>(index + 1);
+        }
+    }
+    table_close(relation, NoLock);
+    bms_free(context.attnos);
+    *output = attnos;
+    *output_count = count;
+    return true;
+}
+
 /** Provider raw-plan metadata; every value is a copyable PostgreSQL Node. */
 [[nodiscard]] List* make_plan_nodes(
     Oid relation_oid,
     AttrNumber row_identity_attno,
     AttrNumber base_identity_attno,
     AttrNumber occurrence_attno,
-    AttrNumber capability_attno) {
+    AttrNumber capability_attno,
+    const std::uint32_t* required_boundary_attnos,
+    std::size_t required_boundary_count) {
     List* nodes = list_make3(
         makeInteger(kPlanVersion),
         makeInteger(kPlanMagic),
@@ -236,7 +436,23 @@ digest_plan_nodes(const List* nodes) noexcept {
     nodes = lappend(nodes, makeInteger(base_identity_attno));
     nodes = lappend(nodes, makeInteger(occurrence_attno));
     nodes = lappend(nodes, makeInteger(capability_attno));
+    nodes = lappend(nodes, makeInteger(
+        static_cast<std::int32_t>(required_boundary_count)));
+    for (std::size_t index = 0; index < required_boundary_count; ++index) {
+        const std::size_t source_index =
+            g_projection_order == ProjectionOrder::Natural
+            ? index
+            : required_boundary_count - index - 1;
+        nodes = lappend(nodes, makeInteger(static_cast<std::int32_t>(
+            required_boundary_attnos[source_index])));
+    }
     return nodes;
+}
+
+[[nodiscard]] std::uint32_t plan_required_boundary_attno(
+    const List* nodes, std::size_t index) noexcept {
+    return static_cast<std::uint32_t>(intVal(list_nth(
+        nodes, static_cast<int>(kPlanFixedNodeCount + index))));
 }
 
 /** Parse and validate the fixed test-provider plan recipe. */
@@ -246,11 +462,13 @@ digest_plan_nodes(const List* nodes) noexcept {
     AttrNumber* row_identity_attno,
     AttrNumber* base_identity_attno,
     AttrNumber* occurrence_attno,
-    AttrNumber* capability_attno) noexcept {
-    if (nodes == nullptr || list_length(nodes) != 10) {
+    AttrNumber* capability_attno,
+    std::size_t* required_boundary_count) noexcept {
+    if (nodes == nullptr
+        || list_length(nodes) < static_cast<int>(kPlanFixedNodeCount)) {
         return false;
     }
-    for (int index = 0; index < 10; ++index) {
+    for (int index = 0; index < list_length(nodes); ++index) {
         const auto* node = static_cast<const Node*>(list_nth(nodes, index));
         if (node == nullptr || !IsA(node, Integer)) {
             return false;
@@ -262,17 +480,46 @@ digest_plan_nodes(const List* nodes) noexcept {
     }
     const auto relation = static_cast<Oid>(
         static_cast<std::uint32_t>(intVal(list_nth(nodes, 2))));
-    const auto row_attno = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 6)));
-    const auto base_attno = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 7)));
-    const auto occurrence_column = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 8)));
-    const auto capability_column = static_cast<AttrNumber>(
-        intVal(list_nth(nodes, 9)));
-    if (!OidIsValid(relation) || row_attno <= 0 || base_attno <= 0
-        || occurrence_column <= 0 || capability_column <= 0) {
+    const int raw_row_attno = intVal(list_nth(nodes, 6));
+    const int raw_base_attno = intVal(list_nth(nodes, 7));
+    const int raw_occurrence_attno = intVal(list_nth(nodes, 8));
+    const int raw_capability_attno = intVal(list_nth(nodes, 9));
+    const int required_count = intVal(list_nth(nodes, 10));
+    if (!OidIsValid(relation)
+        || raw_row_attno <= 0
+        || raw_row_attno > MaxTupleAttributeNumber
+        || raw_base_attno <= 0
+        || raw_base_attno > MaxTupleAttributeNumber
+        || raw_occurrence_attno <= 0
+        || raw_occurrence_attno > MaxTupleAttributeNumber
+        || raw_capability_attno <= 0
+        || raw_capability_attno > MaxTupleAttributeNumber
+        || required_count < 0
+        || required_count
+            > static_cast<int>(kMaximumRequiredBoundaryCount)
+        || list_length(nodes)
+            != static_cast<int>(kPlanFixedNodeCount) + required_count) {
         return false;
+    }
+    const auto row_attno = static_cast<AttrNumber>(raw_row_attno);
+    const auto base_attno = static_cast<AttrNumber>(raw_base_attno);
+    const auto occurrence_column = static_cast<AttrNumber>(
+        raw_occurrence_attno);
+    const auto capability_column = static_cast<AttrNumber>(
+        raw_capability_attno);
+    for (int index = 0; index < required_count; ++index) {
+        const std::uint32_t attno = plan_required_boundary_attno(
+            nodes, static_cast<std::size_t>(index));
+        if (attno == 0
+            || attno > static_cast<std::uint32_t>(MaxTupleAttributeNumber)) {
+            return false;
+        }
+        for (int prior = 0; prior < index; ++prior) {
+            if (plan_required_boundary_attno(
+                    nodes, static_cast<std::size_t>(prior)) == attno) {
+                return false;
+            }
+        }
     }
     if (relation_oid != nullptr) {
         *relation_oid = relation;
@@ -288,6 +535,9 @@ digest_plan_nodes(const List* nodes) noexcept {
     }
     if (capability_attno != nullptr) {
         *capability_attno = capability_column;
+    }
+    if (required_boundary_count != nullptr) {
+        *required_boundary_count = static_cast<std::size_t>(required_count);
     }
     return true;
 }
@@ -416,7 +666,9 @@ void provider_explain_custom_scan(
     scan->flags = best_path->flags;
     scan->scan.scanrelid = 0;
     scan->scan.plan.targetlist = target_list;
-    scan->scan.plan.qual = extract_actual_clauses(clauses, false);
+    List* all_clauses = list_concat(
+        list_copy(clauses), list_copy(best_path->custom_restrictinfo));
+    scan->scan.plan.qual = extract_actual_clauses(all_clauses, false);
     scan->custom_exprs = static_cast<List*>(
         copyObject(scan->scan.plan.qual));
     scan->custom_private = static_cast<List*>(
@@ -531,6 +783,53 @@ void fill_column_schema(
     return nullptr;
 }
 
+struct NormalizedPredicateContextV1 {
+    const BioseqCachePathDomainV1* domain = nullptr;
+    bool valid = true;
+};
+
+/** Semantic callbacks reject any query-global Var leaked by the adapter. */
+bool normalized_predicate_walker(Node* node, void* opaque) {
+    if (node == nullptr) {
+        return false;
+    }
+    auto* context = static_cast<NormalizedPredicateContextV1*>(opaque);
+    if (context == nullptr || context->domain == nullptr
+        || !context->valid) {
+        return true;
+    }
+    if (IsA(node, Var)) {
+        const auto* variable = reinterpret_cast<const Var*>(node);
+        const auto* column = variable->varattno > 0
+            ? find_schema_column(
+                context->domain->boundary_columns,
+                context->domain->boundary_column_count,
+                static_cast<std::uint32_t>(variable->varattno))
+            : nullptr;
+        context->valid = variable->varno == INDEX_VAR
+            && variable->varnosyn == INDEX_VAR
+            && variable->varattnosyn == variable->varattno
+            && variable->varlevelsup == 0
+            && bms_is_empty(variable->varnullingrels)
+            && variable->location == -1
+            && column != nullptr
+            && variable->vartype == column->type_oid
+            && variable->vartypmod == column->typmod
+            && variable->varcollid == column->collation_oid;
+        return !context->valid;
+    }
+    return expression_tree_walker(
+        node, normalized_predicate_walker, opaque);
+}
+
+[[nodiscard]] bool provider_received_normalized_predicate(
+        const BioseqCachePathDomainV1& domain) {
+    NormalizedPredicateContextV1 context{.domain = &domain};
+    static_cast<void>(normalized_predicate_walker(
+        reinterpret_cast<Node*>(domain.coverage_predicate), &context));
+    return context.valid;
+}
+
 /** Query analysis admits only statements containing the configured table. */
 [[nodiscard]] BioseqCacheStatusV1 provider_analyze_query(
     const Query* query,
@@ -546,7 +845,7 @@ void fill_column_schema(
     foreach(cell, query->rtable) {
         const auto* entry = static_cast<const RangeTblEntry*>(lfirst(cell));
         if (entry != nullptr && entry->rtekind == RTE_RELATION
-            && entry->relid == g_target_relation_oid) {
+            && configured_target_relation(entry->relid)) {
             found = true;
             break;
         }
@@ -584,10 +883,30 @@ void fill_column_schema(
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
 
-    const auto* range_entry = rt_fetch(
-        relation_info->relid, root->parse->rtable);
+    const bool index_valid = root->simple_rte_array != nullptr
+        ? relation_info->relid
+            < static_cast<Index>(root->simple_rel_array_size)
+        : relation_info->relid
+            <= static_cast<Index>(list_length(root->parse->rtable));
+    const auto* range_entry = index_valid
+        ? planner_rt_fetch(relation_info->relid, root)
+        : nullptr;
     if (range_entry == nullptr || range_entry->rtekind != RTE_RELATION
-        || range_entry->relid != g_target_relation_oid) {
+        || !configured_target_relation(range_entry->relid)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    Oid recipe_relation_oid = InvalidOid;
+    std::size_t required_boundary_count = 0;
+    const auto* provider_custom = reinterpret_cast<CustomPath*>(provider_path);
+    if (!parse_plan_nodes(
+            provider_custom->custom_private,
+            &recipe_relation_oid,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            &required_boundary_count)
+        || recipe_relation_oid != range_entry->relid) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
 
@@ -625,8 +944,10 @@ void fill_column_schema(
 
     auto* boundary = static_cast<BioseqCacheColumnSchemaV1*>(
         palloc0(boundary_count * sizeof(BioseqCacheColumnSchemaV1)));
-    auto* required_boundary = static_cast<std::uint32_t*>(
-        palloc0(boundary_count * sizeof(std::uint32_t)));
+    auto* required_boundary = required_boundary_count == 0
+        ? nullptr
+        : static_cast<std::uint32_t*>(palloc0(
+            required_boundary_count * sizeof(std::uint32_t)));
     std::size_t boundary_index = 0;
     for (int index = 0; index < descriptor->natts; ++index) {
         Form_pg_attribute attribute = TupleDescAttr(descriptor, index);
@@ -638,12 +959,14 @@ void fill_column_schema(
             boundary[boundary_index], attno, attribute, false);
         ++boundary_index;
     }
-    for (std::size_t index = 0; index < boundary_count; ++index) {
-        const std::size_t schema_index =
-            g_projection_order == ProjectionOrder::Natural
-            ? index
-            : boundary_count - index - 1;
-        required_boundary[index] = boundary[schema_index].attno;
+    for (std::size_t index = 0; index < required_boundary_count; ++index) {
+        const std::uint32_t attno = plan_required_boundary_attno(
+            provider_custom->custom_private, index);
+        if (find_schema_column(boundary, boundary_count, attno) == nullptr) {
+            table_close(relation, NoLock);
+            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        }
+        required_boundary[index] = attno;
     }
 
     constexpr std::array<const char*, 3> lineage_names{
@@ -678,7 +1001,7 @@ void fill_column_schema(
     output->lineage_columns = lineage;
     output->lineage_column_count = lineage_names.size();
     output->required_boundary_attnos = required_boundary;
-    output->required_boundary_attno_count = boundary_count;
+    output->required_boundary_attno_count = required_boundary_count;
     output->required_lineage_attnos = required_lineage;
     output->required_lineage_attno_count = lineage_names.size();
     output->dependency_nodes = list_make1(
@@ -692,6 +1015,10 @@ void fill_column_schema(
         output->provider_security_digest,
         g_provider_security_digest.data(),
         sizeof(output->provider_security_digest));
+    g_counters.last_boundary_column_count = boundary_count;
+    g_counters.last_required_boundary_count = required_boundary_count;
+    g_counters.last_lineage_column_count = lineage_names.size();
+    g_counters.last_required_lineage_count = lineage_names.size();
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
@@ -716,7 +1043,8 @@ void fill_column_schema(
     BioseqCacheDigestSinkV1* sink) {
     ++g_counters.domain_digest;
     if (domain == nullptr || domain->provider_id != kProviderId
-        || domain->coverage_predicate == nullptr) {
+        || domain->coverage_predicate == nullptr
+        || !provider_received_normalized_predicate(*domain)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     Oid relation_oid = InvalidOid;
@@ -730,7 +1058,8 @@ void fill_column_schema(
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno,
+            nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     const std::uint64_t header = g_force_domain_digest_collision
@@ -776,6 +1105,19 @@ void fill_column_schema(
             sink, &domain->capability_mask, sizeof(domain->capability_mask))) {
         return BIOSEQ_CACHE_STATUS_ERROR;
     }
+    const std::array<std::uint32_t, 5> semantic_shape{
+        kGenerationSemanticVersion,
+        static_cast<std::uint32_t>(domain->boundary_column_count),
+        static_cast<std::uint32_t>(domain->lineage_column_count),
+        static_cast<std::uint32_t>(domain->required_boundary_attno_count),
+        static_cast<std::uint32_t>(domain->required_lineage_attno_count),
+    };
+    if (!append_digest_bytes(
+            sink,
+            semantic_shape.data(),
+            semantic_shape.size() * sizeof(semantic_shape[0]))) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
     for (std::size_t index = 0; index < domain->boundary_column_count; ++index) {
         if (!append_digest_bytes(
                 sink, &domain->boundary_columns[index],
@@ -789,6 +1131,18 @@ void fill_column_schema(
                 sizeof(BioseqCacheColumnSchemaV1))) {
             return BIOSEQ_CACHE_STATUS_ERROR;
         }
+    }
+    if (!append_digest_bytes(
+            sink,
+            domain->required_boundary_attnos,
+            domain->required_boundary_attno_count
+                * sizeof(std::uint32_t))
+        || !append_digest_bytes(
+            sink,
+            domain->required_lineage_attnos,
+            domain->required_lineage_attno_count
+                * sizeof(std::uint32_t))) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
     }
     return BIOSEQ_CACHE_STATUS_OK;
 }
@@ -918,7 +1272,7 @@ void provider_set_rel_pathlist_hook(
     if (root == nullptr || relation == nullptr || range_entry == nullptr
         || range_entry->rtekind != RTE_RELATION
         || (range_entry->inh && has_subclass(range_entry->relid))
-        || range_entry->relid != g_target_relation_oid
+        || !configured_target_relation(range_entry->relid)
         || !g_provider_registered) {
         return;
     }
@@ -926,12 +1280,20 @@ void provider_set_rel_pathlist_hook(
     AttrNumber base_attno = 0;
     AttrNumber occurrence_attno = 0;
     AttrNumber capability_attno = 0;
+    std::uint32_t* required_boundary_attnos = nullptr;
+    std::size_t required_boundary_count = 0;
     if (!relation_contract_attnos(
             range_entry->relid,
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno)
+        || !collect_projected_boundary_attnos(
+            relation,
+            range_table_index,
+            range_entry->relid,
+            &required_boundary_attnos,
+            &required_boundary_count)) {
         return;
     }
     Path* child = make_provider_child(root, relation);
@@ -972,7 +1334,9 @@ void provider_set_rel_pathlist_hook(
         row_attno,
         base_attno,
         occurrence_attno,
-        capability_attno);
+        capability_attno,
+        required_boundary_attnos,
+        required_boundary_count);
     provider_path->methods = &provider_path_methods();
     add_path(relation, &provider_path->path);
     set_cheapest(relation);
@@ -1031,6 +1395,7 @@ void shutdown_provider() noexcept {
         }
     }
     g_provider_registered = false;
+    g_persisted_mapping_fault_statement = nullptr;
 }
 
 /** Parse the normative mapping-fault control vocabulary. */
@@ -1039,7 +1404,7 @@ void shutdown_provider() noexcept {
         const char* name;
         MappingFault value;
     };
-    static constexpr std::array<NamedFault, 39> faults{{
+    static constexpr std::array<NamedFault, 40> faults{{
         {"none", MappingFault::None},
         {"null_pointer_nonzero_count", MappingFault::NullPointerNonzeroCount},
         {"short_boundary_map", MappingFault::ShortBoundaryMap},
@@ -1063,6 +1428,7 @@ void shutdown_provider() noexcept {
         {"decorated_boundary_schema_mismatch", MappingFault::DecoratedBoundarySchemaMismatch},
         {"decorated_lineage_schema_mismatch", MappingFault::DecoratedLineageSchemaMismatch},
         {"provider_error", MappingFault::ProviderError},
+        {"late_fetch_error_once", MappingFault::LateFetchErrorOnce},
         {"persisted_wrong_top_tag", MappingFault::PersistedWrongTopTag},
         {"persisted_short_top", MappingFault::PersistedShortTop},
         {"persisted_long_top", MappingFault::PersistedLongTop},
@@ -1141,6 +1507,57 @@ Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS) {
              errdetail("Required columns: row_id bigint, base_id bigint, occurrence_no integer, capability_mask bigint.")));
     }
     g_target_relation_oid = relation_oid;
+    g_additional_target_relations.fill(InvalidOid);
+    g_additional_target_relation_count = 0;
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_record_write(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_record_write);
+Datum bioseq_cache_test_provider_record_write(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    const Oid relation_oid = PG_GETARG_OID(0);
+    if (!record_provider_relation_write(relation_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("generic test-provider write marker could not be recorded")));
+    }
+    PG_RETURN_VOID();
+}
+
+PGDLLEXPORT Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_add_relation);
+Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    const Oid relation_oid = PG_GETARG_OID(0);
+    AttrNumber row_attno = 0;
+    AttrNumber base_attno = 0;
+    AttrNumber occurrence_attno = 0;
+    AttrNumber capability_attno = 0;
+    Relation relation = table_open(relation_oid, AccessShareLock);
+    const bool compatible =
+        (relation->rd_rel->relkind == RELKIND_RELATION
+            || relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+        && relation_contract_attnos(
+            relation_oid,
+            &row_attno,
+            &base_attno,
+            &occurrence_attno,
+            &capability_attno);
+    table_close(relation, AccessShareLock);
+    if (!compatible) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("generic test-provider relation has the wrong contract"),
+             errdetail("Required columns: row_id bigint, base_id bigint, occurrence_no integer, capability_mask bigint.")));
+    }
+    if (!add_configured_target_relation(relation_oid)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("generic test-provider relation target limit exceeded")));
+    }
     PG_RETURN_VOID();
 }
 
@@ -1151,6 +1568,7 @@ Datum bioseq_cache_test_provider_set_mapping_fault(PG_FUNCTION_ARGS) {
     require_test_superuser();
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     g_mapping_fault = parse_mapping_fault(name);
+    g_persisted_mapping_fault_statement = nullptr;
     pfree(name);
     PG_RETURN_VOID();
 }
@@ -1163,8 +1581,6 @@ Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS) {
     char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
     if (std::strcmp(name, "none") == 0) {
         g_digest_fault = DigestFault::None;
-    } else if (std::strcmp(name, "recipe_mismatch") == 0) {
-        g_digest_fault = DigestFault::RecipeMismatch;
     } else if (std::strcmp(name, "runtime_mismatch") == 0) {
         g_digest_fault = DigestFault::RuntimeMismatch;
     } else {
@@ -1258,6 +1674,7 @@ Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS) {
     require_test_superuser();
     g_requested_capabilities = 1;
     g_mapping_fault = MappingFault::None;
+    g_persisted_mapping_fault_statement = nullptr;
     g_digest_fault = DigestFault::None;
     g_projection_order = ProjectionOrder::Natural;
     g_force_domain_digest_collision = false;
@@ -1281,8 +1698,15 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
         "\"runtime_digest\":%llu,\"map_source\":%llu,"
         "\"decorate_path\":%llu,\"build_recipe\":%llu,"
         "\"extract_occurrence\":%llu,\"late_fetch_batch\":%llu,"
-        "\"late_fetch_references\":%llu,\"planner_bridge_calls\":%llu,"
-        "\"executor_rows\":%llu,\"gated_expensive_rows\":%llu}",
+        "\"late_fetch_references\":%llu,\"late_fetch_values\":%llu,"
+        "\"late_fetch_bytes\":%llu,\"late_fetch_errors\":%llu,"
+        "\"planner_bridge_calls\":%llu,\"executor_rows\":%llu,"
+        "\"gated_expensive_rows\":%llu,"
+        "\"last_boundary_column_count\":%llu,"
+        "\"last_required_boundary_count\":%llu,"
+        "\"last_lineage_column_count\":%llu,"
+        "\"last_required_lineage_count\":%llu,"
+        "\"last_recipe_required_boundary_count\":%llu}",
         g_provider_registered ? "true" : "false",
         g_target_relation_oid,
         static_cast<unsigned long long>(g_counters.analyze_query),
@@ -1296,9 +1720,22 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
         static_cast<unsigned long long>(g_counters.extract_occurrence),
         static_cast<unsigned long long>(g_counters.late_fetch_batch),
         static_cast<unsigned long long>(g_counters.late_fetch_references),
+        static_cast<unsigned long long>(g_counters.late_fetch_values),
+        static_cast<unsigned long long>(g_counters.late_fetch_bytes),
+        static_cast<unsigned long long>(g_counters.late_fetch_errors),
         static_cast<unsigned long long>(g_counters.planner_bridge_calls),
         static_cast<unsigned long long>(g_counters.executor_rows),
-        static_cast<unsigned long long>(g_counters.gated_expensive_rows));
+        static_cast<unsigned long long>(g_counters.gated_expensive_rows),
+        static_cast<unsigned long long>(
+            g_counters.last_boundary_column_count),
+        static_cast<unsigned long long>(
+            g_counters.last_required_boundary_count),
+        static_cast<unsigned long long>(
+            g_counters.last_lineage_column_count),
+        static_cast<unsigned long long>(
+            g_counters.last_required_lineage_count),
+        static_cast<unsigned long long>(
+            g_counters.last_recipe_required_boundary_count));
     Datum result = DirectFunctionCall1(
         jsonb_in, CStringGetDatum(json.data));
     pfree(json.data);
@@ -1328,7 +1765,8 @@ namespace bioseq::cache::pg::test_provider {
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno,
+            nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     bool row_is_null = false;
@@ -1390,6 +1828,13 @@ void emit_batch_failure_statuses(
     BioseqCacheLateFetchSinkV1* sink) {
     ++g_counters.late_fetch_batch;
     g_counters.late_fetch_references += occurrence_count;
+    if (g_mapping_fault == MappingFault::LateFetchErrorOnce) {
+        g_mapping_fault = MappingFault::None;
+        ++g_counters.late_fetch_errors;
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("injected generic cache-provider late-fetch error")));
+    }
     Oid relation_oid = InvalidOid;
     AttrNumber row_attno = 0;
     AttrNumber base_attno = 0;
@@ -1408,7 +1853,8 @@ void emit_batch_failure_statuses(
             &row_attno,
             &base_attno,
             &occurrence_attno,
-            &capability_attno)) {
+            &capability_attno,
+            nullptr)) {
         emit_batch_failure_statuses(
             sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
@@ -1493,8 +1939,24 @@ void emit_batch_failure_statuses(
                  requested < attribute_count;
                  ++requested) {
                 bool is_null = false;
+                const AttrNumber requested_attno =
+                    attribute_numbers[requested];
                 const Datum value = slot_getattr(
-                    slot, attribute_numbers[requested], &is_null);
+                    slot, requested_attno, &is_null);
+                std::uint64_t value_bytes = 0;
+                if (!is_null) {
+                    const Form_pg_attribute attribute =
+                        TupleDescAttr(descriptor, requested_attno - 1);
+                    const Size datum_bytes = datumGetSize(
+                        value, attribute->attbyval, attribute->attlen);
+                    if (datum_bytes
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - g_counters.late_fetch_bytes) {
+                        terminal[reference] = BIOSEQ_CACHE_STATUS_ERROR;
+                        break;
+                    }
+                    value_bytes = static_cast<std::uint64_t>(datum_bytes);
+                }
                 const BioseqCacheStatusV1 status = sink->emit_value(
                     sink->opaque,
                     reference,
@@ -1505,6 +1967,8 @@ void emit_batch_failure_statuses(
                     terminal[reference] = status;
                     break;
                 }
+                ++g_counters.late_fetch_values;
+                g_counters.late_fetch_bytes += value_bytes;
             }
         }
         ExecClearTuple(slot);
@@ -1533,7 +1997,13 @@ void provider_explain_domain(
         return;
     }
     const bool valid = parse_plan_nodes(
-        plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr);
+        plan_domain_nodes,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr);
     if (sink->property_text != nullptr) {
         sink->property_text(
             sink->opaque,
@@ -1759,12 +2229,26 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     EState* estate,
     BioseqCacheDigestSinkV1* sink) {
     ++g_counters.runtime_digest;
-    if (persisted_mapping_fault_active()
-        && !mutate_persisted_mapping_plan(estate)) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+    if (persisted_mapping_fault_active()) {
+        if (estate == nullptr || estate->es_plannedstmt == nullptr) {
+            return BIOSEQ_CACHE_STATUS_ERROR;
+        }
+        if (g_persisted_mapping_fault_statement
+                != estate->es_plannedstmt) {
+            if (!mutate_persisted_mapping_plan(estate)) {
+                return BIOSEQ_CACHE_STATUS_ERROR;
+            }
+            g_persisted_mapping_fault_statement = estate->es_plannedstmt;
+        }
     }
     if (!parse_plan_nodes(
-            plan_domain_nodes, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+            plan_domain_nodes,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     auto digest = digest_plan_nodes(plan_domain_nodes);
@@ -1847,6 +2331,7 @@ void apply_mapping_fault(
         case MappingFault::None:
         case MappingFault::DecoratedBoundarySchemaMismatch:
         case MappingFault::DecoratedLineageSchemaMismatch:
+        case MappingFault::LateFetchErrorOnce:
         case MappingFault::PersistedWrongTopTag:
         case MappingFault::PersistedShortTop:
         case MappingFault::PersistedLongTop:
@@ -2108,6 +2593,7 @@ void apply_mapping_fault(
     const Plan* provider_plan,
     BioseqCachePlanDigestRecipeV1* output) {
     ++g_counters.build_recipe;
+    std::size_t required_boundary_count = 0;
     if (provider_plan == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)
         || !IsA(provider_plan, CustomScan)) {
@@ -2116,9 +2602,17 @@ void apply_mapping_fault(
     const auto* scan = reinterpret_cast<const CustomScan*>(provider_plan);
     if (scan->methods != &provider_scan_methods()
         || !parse_plan_nodes(
-            scan->custom_private, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+            scan->custom_private,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            &required_boundary_count)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
+    g_counters.last_recipe_required_boundary_count =
+        required_boundary_count;
     const auto digest = digest_plan_nodes(scan->custom_private);
     output->struct_size = sizeof(*output);
     output->flags = 0;
@@ -2128,9 +2622,6 @@ void apply_mapping_fault(
         copyObject(scan->custom_private));
     std::memcpy(
         output->expected_generation_digest, digest.data(), digest.size());
-    if (g_digest_fault == DigestFault::RecipeMismatch) {
-        output->expected_generation_digest[0] ^= 0xa5U;
-    }
     return BIOSEQ_CACHE_STATUS_OK;
 }
 

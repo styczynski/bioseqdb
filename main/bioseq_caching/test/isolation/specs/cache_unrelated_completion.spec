@@ -2,6 +2,15 @@
 # BUILDING with a waiter; registry state changes stay isolated by full key.
 setup
 {
+  DO $$
+  BEGIN
+    PERFORM bioseq_cache.invalidate_all();
+    PERFORM bioseq_cache_test.request_janitor_sweep();
+    IF EXISTS (SELECT 1 FROM bioseq_cache.entries()) THEN
+      RAISE EXCEPTION 'bioseq_cache unified registry did not drain';
+    END IF;
+  END
+  $$;
   CREATE TABLE qc_unrelated_completion(
     id integer PRIMARY KEY,
     bucket integer NOT NULL,
