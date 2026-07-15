@@ -2552,24 +2552,13 @@ public:
         return sealed_;
     }
 
-    /// Replace the prevalidated maximum with the final report-once delta.
+    /// Publish the Runtime-prevalidated final report-once delta. Runtime's
+    /// claim plan proves componentwise boundedness before its irreversible
+    /// report-once commit, so this post-finalizer step is only a fixed write.
     void publish_cache_metrics(
         const PersistedGpuCacheMetricsEvidence& metrics) noexcept {
-        const PersistedGpuCacheMetricsEvidence maximum =
-            operation_.cache_metrics;
-        sealed_ = sealed_ && metrics.accepted() && maximum.accepted()
-            && metrics.token_identity == maximum.token_identity
-            && metrics.pipeline_cache_loads
-                <= maximum.pipeline_cache_loads
-            && metrics.pipeline_cache_seed_bytes
-                <= maximum.pipeline_cache_seed_bytes
-            && metrics.pipeline_cache_load_ns
-                <= maximum.pipeline_cache_load_ns
-            && metrics.pipeline_creates <= maximum.pipeline_creates
-            && metrics.pipeline_creation_ns
-                <= maximum.pipeline_creation_ns;
-        cache_metrics_published_ = true;
         operation_.cache_metrics = metrics;
+        cache_metrics_published_ = true;
     }
     [[nodiscard]] bool cache_metrics_published() const noexcept {
         return cache_metrics_published_;
@@ -2699,6 +2688,91 @@ public:
     }
     [[nodiscard]] bool accepted() const noexcept {
         return operation_count_ != 0u && job_count_ != 0u && complete();
+    }
+    /// Bind the immutable ledger back to the canonical statement aggregate.
+    [[nodiscard]] bool matches_pipeline(
+        const PipelineExecutionStats& stats) const noexcept {
+        if (!accepted()
+            || !PipelineExecutionStats::can_retain_full_attestation(stats)
+            || stats.actual_backend != ExecutedBackend::vulkan_gpu
+            || stats.actual_target_index_source != TargetIndexSource::persisted
+            || stats.attempted_alignment_jobs != job_count_
+            || stats.fully_attested_alignment_jobs != job_count_
+            || stats.persisted_generation_id == 0u
+            || stats.persisted_source_identity == 0u
+            || !environment_is_valid_for_backend(
+                stats.environment, ExecutedBackend::vulkan_gpu)) {
+            return false;
+        }
+        std::uint64_t cache_loads = 0u;
+        std::uint64_t cache_seed_bytes = 0u;
+        std::uint64_t cache_load_ns = 0u;
+        std::uint64_t pipeline_creates = 0u;
+        std::uint64_t pipeline_creation_ns = 0u;
+        std::uint64_t seed_dispatches = 0u;
+        std::uint64_t chain_dispatches = 0u;
+        std::uint64_t backtrack_dispatches = 0u;
+        const auto add = [](std::uint64_t& destination,
+                            const std::uint64_t value) noexcept {
+            if (value > (std::numeric_limits<std::uint64_t>::max)()
+                    - destination) {
+                return false;
+            }
+            destination += value;
+            return true;
+        };
+        for (const PersistedGpuOperationEvidenceChunk* chunk = head_.get();
+             chunk != nullptr; chunk = chunk->next()) {
+            const auto& operation = chunk->operation();
+            if (operation.generation_id != stats.persisted_generation_id
+                || operation.source_identity
+                    != stats.persisted_source_identity
+                || operation.environment.device_uuid
+                    != stats.environment.gpu_device_uuid
+                || operation.environment.seed_sha256
+                    != stats.environment.gpu_pipeline_cache_seed_sha256
+                || operation.environment.seed_size
+                    != stats.environment.gpu_pipeline_cache_seed_size
+                || operation.environment.manifest_checksum
+                    != stats.environment
+                        .gpu_pipeline_cache_manifest_checksum
+                || !add(cache_loads,
+                    operation.cache_metrics.pipeline_cache_loads)
+                || !add(cache_seed_bytes,
+                    operation.cache_metrics.pipeline_cache_seed_bytes)
+                || !add(cache_load_ns,
+                    operation.cache_metrics.pipeline_cache_load_ns)
+                || !add(pipeline_creates,
+                    operation.cache_metrics.pipeline_creates)
+                || !add(pipeline_creation_ns,
+                    operation.cache_metrics.pipeline_creation_ns)) {
+                return false;
+            }
+            for (const auto& job : chunk->jobs()) {
+                if (!add(seed_dispatches,
+                        job.direct_count_dispatches
+                            + job.direct_emit_dispatches)
+                    || !add(chain_dispatches, job.chain_dispatches)
+                    || !add(backtrack_dispatches,
+                        job.chain_backtrack_dispatches)) {
+                    return false;
+                }
+            }
+        }
+        return cache_loads
+                == stats.operational.gpu_pipeline_cache_loads
+            && cache_seed_bytes
+                == stats.operational.gpu_pipeline_cache_seed_bytes
+            && cache_load_ns
+                == stats.operational.gpu_pipeline_cache_load_ns
+            && pipeline_creates
+                == stats.operational.gpu_pipeline_creates
+            && pipeline_creation_ns
+                == stats.operational.gpu_pipeline_creation_ns
+            && seed_dispatches == stats.operational.gpu_seed_dispatches
+            && chain_dispatches == stats.operational.gpu_chain_dispatches
+            && backtrack_dispatches
+                == stats.operational.gpu_chain_backtrack_dispatches;
     }
     [[nodiscard]] bool saturated() const noexcept { return saturated_; }
     [[nodiscard]] std::uint64_t dropped_operation_count() const noexcept {

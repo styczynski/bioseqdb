@@ -63,6 +63,8 @@ struct AlignmentExecutionCollector {
     std::uint32_t nested_alignment_executor_count = 0;
     bool lifecycle_counter_saturated = false;
     std::vector<AlignmentNodeStats> alignment_nodes{};
+    bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger
+        persisted_gpu_operation_evidence{};
 };
 
 /*
@@ -80,6 +82,8 @@ struct AlignmentExecutionSnapshot {
     bool partial = false;
     bool fully_drained = false;
     bioseq::pipeline_stats::PipelineExecutionStats pipeline{};
+    bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger
+        persisted_gpu_operation_evidence{};
 };
 
 /*
@@ -189,6 +193,21 @@ inline void ensure_alignment_node_registered(
     handle.binding->root->alignment_nodes.push_back(AlignmentNodeStats{
         .scan_node_id = handle.scan_node_id,
     });
+}
+
+/// Borrow the statement-root ledger through the same non-owning binding used
+/// for node stats. The scheduler may never retain it beyond executor cleanup.
+[[nodiscard]] inline bioseq::pipeline_stats::
+PersistedGpuOperationEvidenceLedger*
+borrow_persisted_gpu_operation_evidence_sink(
+        AlignmentNodeRegistrationHandle& handle) {
+    if (!handle.bound() || handle.binding->retired
+        || handle.binding->root == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq persisted GPU evidence sink is unavailable")));
+    }
+    return &handle.binding->root->persisted_gpu_operation_evidence;
 }
 
 /* Merge one successfully completed, non-empty dispatch buffer exactly once. */

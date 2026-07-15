@@ -859,6 +859,9 @@ private:
     // owner keeps it registered until every batch/scanner is drained; buffer
     // destruction never dereferences it and never changes its registration.
     Snapshot scan_snapshot       = nullptr;
+    // Borrowed from the statement-root AlignmentExecutionCollector.
+    bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
+        persisted_gpu_operation_evidence_sink = nullptr;
     MemoryContext batch_payload_ctx = nullptr;
     std::array<std::vector<SM::fetch_request>, SM::bucket_count>
         per_bucket_target_requests{};
@@ -888,6 +891,18 @@ public:
     explicit TupleDispatchBuffer(const size_t estimated_tuple_count) {
         buffered_entries.reserve(estimated_tuple_count * 2);
         output_cursors.reserve(estimated_tuple_count * 2);
+    }
+
+    /// Bind the sole statement-root owner used by every batch/node/rescan.
+    void bind_persisted_gpu_operation_evidence_sink(
+        bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink) {
+        if (persisted_gpu_operation_evidence_sink != nullptr
+            && persisted_gpu_operation_evidence_sink != &sink) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq persisted GPU evidence sink changed during execution")));
+        }
+        persisted_gpu_operation_evidence_sink = &sink;
     }
 
     /*
@@ -2025,6 +2040,8 @@ public:
             scanner_pg_ctx.caches = join_scanner_pg_cache;
             scanner_pg_ctx.parent_mctx = batch_payload_ctx;
             scanner_pg_ctx.snapshot = scan_snapshot;
+            scanner_pg_ctx.persisted_gpu_operation_evidence_sink =
+                persisted_gpu_operation_evidence_sink;
             scanner_pg_ctx.user_relid = user_relid;
             scanner_pg_ctx.index_read_requirement = index_read_requirement;
             scanner_pg_ctx.read_index_active = read_sequence_index_active;
@@ -2759,6 +2776,8 @@ public:
         scanner_pg_ctx.caches             = scanner_pg_cache;
         scanner_pg_ctx.parent_mctx        = batch_payload_ctx;
         scanner_pg_ctx.snapshot           = scan_snapshot;
+        scanner_pg_ctx.persisted_gpu_operation_evidence_sink =
+            persisted_gpu_operation_evidence_sink;
         // Populate per-row locators for the target column. The production
         // scanner_pg path uses these. Last-fragment padding is recomputed
         // inside process_sequences where the template parameter S (and thus

@@ -974,6 +974,137 @@ stage_persisted_shape_v5_coordinate_job(
     return job;
 }
 
+/// Copy one runtime cache audit into the pointer-free SQL ledger wire.
+[[nodiscard]] inline ::bioseq::pipeline_stats::
+PersistedGpuCacheMetricsEvidence
+persisted_gpu_cache_metrics_evidence(
+        const bioseq::gpu::vulkan::RuntimeGpuCacheMetricsAudit& source)
+        noexcept {
+    return {
+        .token_identity = source.token_identity,
+        .pipeline_cache_loads = source.gpu_pipeline_cache_loads,
+        .pipeline_cache_seed_bytes =
+            source.gpu_pipeline_cache_seed_bytes,
+        .pipeline_cache_load_ns = source.gpu_pipeline_cache_load_ns,
+        .pipeline_creates = source.gpu_pipeline_creates,
+        .pipeline_creation_ns = source.gpu_pipeline_creation_ns,
+    };
+}
+
+/// Copy one full-stage runtime job preview into the admitted ledger slot.
+[[nodiscard]] inline ::bioseq::pipeline_stats::PersistedGpuJobEvidence
+persisted_gpu_job_evidence(
+        const bioseq::gpu::vulkan::
+            PersistedShapeV5CoordinateJobEvidencePreview& source) noexcept {
+    const auto& audit = source.audit;
+    const auto& coordinate = audit.result;
+    const std::array<std::uint64_t, 4> submit_wait_identities{
+        audit.count_submit_wait_identity,
+        audit.emit_submit_wait_identity,
+        audit.sort_range_submit_wait_identity,
+        audit.chain_coordinate_submit_wait_identity,
+    };
+    ::bioseq::pipeline_stats::PersistedGpuJobEvidence result{
+        .logical_target_row = audit.logical_target_row,
+        .logical_query_ordinal = audit.logical_query_ordinal,
+        .query_index = audit.query_index,
+        .query_length = audit.query_record.query_len,
+        .target_length = audit.target_len,
+        .query_minimizer_count = audit.query_record.minimizer_count,
+        .query_tile_count = audit.query_tile_count,
+        .query_count_dispatches = audit.query_count_dispatches,
+        .query_scan_dispatches = audit.query_scan_dispatches,
+        .query_emit_dispatches = audit.query_emit_dispatches,
+        .query_completed_roundtrips = audit.query_completed_roundtrips,
+        .direct_count_dispatches = audit.direct_count_dispatches,
+        .direct_scan_dispatches = audit.direct_scan_dispatches,
+        .anchor_count = audit.anchor_count,
+        .direct_emit_dispatches = audit.direct_emit_dispatches,
+        .sort_operations = audit.sort_operations,
+        .range_build_dispatches = audit.range_build_dispatches,
+        .range_count = audit.range_count,
+        .chain_dispatches = audit.chain_dispatches,
+        .chain_backtrack_dispatches = audit.chain_backtrack_dispatches,
+        .coordinate_dispatches = audit.coordinate_dispatches,
+        .count_status_checks = audit.count_status_checks,
+        .emit_status_checks = audit.emit_status_checks,
+        .status_or = audit.status_or,
+        .result_readbacks = audit.result_readbacks,
+        .coordinate_vote_dispatches = audit.coordinate_vote_dispatches,
+        .cpu_or_simd_biological_calls =
+            audit.cpu_or_simd_biological_calls,
+        .recompute_calls = audit.recompute_calls,
+        .fallback_calls = audit.fallback_calls,
+        .coordinate = {
+            .query_start = coordinate.query_start,
+            .query_end = coordinate.query_end,
+            .target_start = coordinate.target_start,
+            .target_end = coordinate.target_end,
+            .match_length = coordinate.match_length,
+            .block_length = coordinate.block_length,
+            .chain_score = coordinate.chain_score,
+            .seed_count = coordinate.seed_count,
+            .is_reverse = coordinate.is_reverse != 0u,
+            .valid = coordinate.valid != 0u,
+        },
+    };
+    for (std::size_t i = 0u; i < result.submissions.size(); ++i) {
+        result.submissions[i] = {
+            .operation_identity =
+                source.shape_pipeline_operation_identity,
+            .ordinal = source.shape_submission_ordinals[i],
+            .submit_wait_identity = submit_wait_identities[i],
+        };
+    }
+    return result;
+}
+
+/// Populate the fixed operation envelope from the pre-finalizer runtime view.
+[[nodiscard]] inline ::bioseq::pipeline_stats::PersistedGpuOperationEvidence
+persisted_gpu_operation_evidence(
+        const bioseq::gpu::vulkan::
+            PersistedShapeV5CoordinateOperationEvidencePreview& source,
+        const ::bioseq::pipeline_stats::
+            PersistedShapeV5CoordinatePublicationCounts& publication,
+        const std::uint64_t generation_id,
+        const std::uint64_t source_identity,
+        const std::uint64_t cold_load_identity) noexcept {
+    const auto& acceptance = source.acceptance;
+    return {
+        .operation_identity = acceptance.operation_identity,
+        .publication = publication,
+        .published_jobs = publication.expected_jobs,
+        .publication_commits = 1u,
+        .query_pipeline_receipt_count =
+            acceptance.query_pipeline_receipt_count,
+        .shape_pipeline_receipt_count =
+            acceptance.shape_pipeline_receipt_count,
+        .submission_count = acceptance.committed_submission_count,
+        .query_pipeline_operation_identity =
+            source.query_pipeline_operation_identity,
+        .shape_pipeline_operation_identity =
+            source.shape_pipeline_operation_identity,
+        .query_submission_ordinals = source.query_submission_ordinals,
+        .seed_receipt_identity = acceptance.seed_receipt_identity,
+        .generation_id = generation_id,
+        .source_identity = source_identity,
+        .cold_load_identity = cold_load_identity,
+        .environment = {
+            .device_uuid = source.device_uuid,
+            .api_version = source.api_version,
+            .driver_version = source.driver_version,
+            .vendor_id = source.vendor_id,
+            .device_id = source.device_id,
+            .pipeline_cache_uuid = source.pipeline_cache_uuid,
+            .seed_sha256 = source.seed_sha256,
+            .seed_size = source.seed_size,
+            .manifest_checksum = source.manifest_checksum,
+        },
+        .cache_metrics = persisted_gpu_cache_metrics_evidence(
+            source.maximum_cache_metrics),
+    };
+}
+
 /// Conservative admission envelope for the N-job capacities that coexist
 /// between persisted Shape-V5 execution and atomic SQL publication.  The
 /// returned reservation covers transient proof/staging overlap; the result map
@@ -4927,16 +5058,80 @@ template <class S>
 								"persisted GPU Format-5 prospective stats are invalid");
 						}
 
+						/* SQL evidence is a separate admitted statement-root ledger. Build,
+						 * validate and preflight its complete operation image now: nothing may
+						 * allocate, search for duplicates or decide capacity after Runtime's
+						 * final immutable gate claims report-once cache authority. */
+						const auto operation_evidence_preview =
+							coord_run.operation_proof.operation_evidence_preview();
+						auto operation_evidence_chunk = ::bioseq::pipeline_stats::
+							PersistedGpuOperationEvidenceChunk::prepare(
+								direct_jobs.size());
+						if (!operation_evidence_preview.accepted()
+							|| operation_evidence_chunk == nullptr
+							|| scanner_pg_ctx->persisted_gpu_operation_evidence_sink
+								== nullptr
+							|| operation_evidence_preview.device_uuid
+								!= prepared_gpu_target->resident_view.device_uuid
+							|| operation_evidence_preview.acceptance.operation_identity
+								!= cache_metrics_preview.token_identity) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 SQL operation evidence is unavailable");
+						}
+						operation_evidence_chunk->operation() =
+							persisted_gpu_operation_evidence(
+								operation_evidence_preview,
+								publication_counts,
+								prepared_gpu_target->resident_view.generation_id,
+								prepared_gpu_target->resident_view.source_identity,
+								prepared_gpu_target->resident_view.cold_load_identity);
+						for (std::size_t problem_index = 0u;
+							 problem_index < direct_jobs.size(); ++problem_index) {
+							const auto job_evidence_preview = coord_run.operation_proof.
+								job_evidence_preview(problem_index);
+							if (!job_evidence_preview.has_value()
+								|| job_evidence_preview->audit.operation_identity
+									!= operation_evidence_preview.acceptance
+										.operation_identity
+								|| job_evidence_preview->audit.generation_id
+									!= prepared_gpu_target->resident_view.generation_id
+								|| job_evidence_preview->audit.source_identity
+									!= prepared_gpu_target->resident_view.source_identity
+								|| job_evidence_preview->audit.cold_load_identity
+									!= prepared_gpu_target->resident_view.cold_load_identity
+								|| job_evidence_preview->audit.logical_target_row
+									!= direct_jobs[problem_index].logical_target_row
+								|| job_evidence_preview->audit.logical_query_ordinal
+									!= direct_jobs[problem_index].logical_query_ordinal
+								|| job_evidence_preview->audit.query_index
+									!= direct_jobs[problem_index].query_index) {
+								throw bioseq::gpu::vulkan::VulkanRuntimeError(
+									"persisted GPU Format-5 SQL job evidence is inconsistent");
+							}
+							operation_evidence_chunk->jobs()[problem_index] =
+								persisted_gpu_job_evidence(*job_evidence_preview);
+						}
+						if (!operation_evidence_chunk->seal()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 SQL operation evidence did not seal");
+						}
+						auto operation_evidence_append =
+							scanner_pg_ctx->persisted_gpu_operation_evidence_sink
+								->prepare_append(operation_evidence_chunk);
+						if (!operation_evidence_append.accepted()) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 SQL evidence ledger rejected the operation");
+						}
+
 						/* Every allocation, row check and overflow check is complete.
 						 * The runtime finalizer validates the causal receipt union and
 						 * performs the final immutable-policy live gate before minting
 						 * this move-only authority. */
 						auto accepted_operation = runtime.
 							finalize_persisted_shape_v5_coordinate_operation(
-								std::move(coord_run.operation_proof));
+								std::move(coord_run.operation_proof),
+								operation_evidence_preview);
 						const auto& acceptance = accepted_operation.audit();
-						const bool accepted_operation_valid =
-							accepted_operation.accepted();
 						const auto& authoritative_environment =
 							accepted_operation.environment_binding();
 						const auto authoritative_cache_metrics =
@@ -4984,38 +5179,56 @@ template <class S>
 							persisted_shape_v5_gpu_cache_metrics_bounded_by(
 								authoritative_cache_metrics, cache_metrics_preview)));
 						static_assert(noexcept(cache_metrics_delta.consume()));
-						const auto commit_publication = [&]() noexcept -> bool {
-							const bool authority_exact = accepted_operation_valid
-								&& acceptance.accepted()
-								&& acceptance.expected_job_count == expected_jobs
-								&& acceptance.consumed_count == expected_jobs
-								&& acceptance.accepted_count == expected_jobs
-								&& acceptance.burned_count == 0u
-								&& cache_metrics_preview.token_identity
-									== acceptance.operation_identity
-								&& authoritative_cache_metrics.token_identity
-									== acceptance.operation_identity
-								&& ::bioseq::pipeline_stats::
-									persisted_shape_v5_gpu_environment_binding_matches(
-										authoritative_environment,
-										environment_preview)
-								&& ::bioseq::pipeline_stats::
-									persisted_shape_v5_gpu_cache_metrics_bounded_by(
-										authoritative_cache_metrics,
-										cache_metrics_preview)
-								&& (authoritative_cache_metrics.gpu_pipeline_cache_loads
-										== 0u
-									|| authoritative_cache_metrics
-										.gpu_pipeline_cache_seed_bytes
-										== authoritative_environment.seed_size)
-								&& cache_metrics_delta.accepted()
-								&& cache_metrics_delta.audit()
-									== authoritative_cache_metrics;
-							if (!authority_exact) return false;
+						static_assert(noexcept(
+							operation_evidence_chunk->publish_cache_metrics(
+								persisted_gpu_cache_metrics_evidence(
+									authoritative_cache_metrics))));
+						static_assert(noexcept(
+							scanner_pg_ctx->persisted_gpu_operation_evidence_sink
+								->commit_append(
+									std::move(operation_evidence_append),
+									std::move(operation_evidence_chunk))));
+						/* The finalizer compared this same preview before its live gate
+						 * and report-once claim. These are construction assertions, not a
+						 * recoverable post-finalizer rejection path. */
+						DEBUG_ASSERT(accepted_operation.accepted(),
+							"persisted GPU accepted operation authority vanished");
+						DEBUG_ASSERT(acceptance == operation_evidence_preview.acceptance,
+							"persisted GPU operation changed after finalizer");
+						DEBUG_ASSERT(acceptance.expected_job_count == expected_jobs,
+							"persisted GPU job count changed after finalizer");
+						DEBUG_ASSERT(::bioseq::pipeline_stats::
+							persisted_shape_v5_gpu_environment_binding_matches(
+								authoritative_environment, environment_preview),
+							"persisted GPU environment changed after finalizer");
+						DEBUG_ASSERT(::bioseq::pipeline_stats::
+							persisted_shape_v5_gpu_cache_metrics_bounded_by(
+								authoritative_cache_metrics, cache_metrics_preview),
+							"persisted GPU cache metrics exceeded preview");
+						DEBUG_ASSERT(cache_metrics_delta.accepted()
+							&& cache_metrics_delta.audit()
+								== authoritative_cache_metrics,
+							"persisted GPU cache token changed after finalizer");
+						const auto commit_publication = [
+							&authoritative_cache_metrics,
+							&cache_metrics_delta,
+							&results,
+							&staged_results,
+							&stats,
+							&prospective_stats,
+							&direct_job_rows,
+							&scanner_pg_ctx,
+							&prepared_gpu_target,
+							&expected_jobs,
+							&operation_evidence_chunk,
+							&operation_evidence_append]() noexcept {
+							operation_evidence_chunk->publish_cache_metrics(
+								persisted_gpu_cache_metrics_evidence(
+									authoritative_cache_metrics));
 							/* accepted() plus the exact audit equality above are consume()'s
 							 * complete precondition. Burn the one-shot authority now; no
 							 * rejecting edge may follow before SQL-visible publication. */
-							(void)cache_metrics_delta.consume();
+							cache_metrics_delta.consume();
 							results.swap(staged_results);
 							stats = prospective_stats;
 							for (const std::size_t row : direct_job_rows) {
@@ -5028,13 +5241,13 @@ template <class S>
 							}
 							prepared_gpu_target->dispatched_query_count += expected_jobs;
 							++prepared_gpu_target->dispatch_waves;
-							return true;
+							scanner_pg_ctx->persisted_gpu_operation_evidence_sink
+								->commit_append(
+									std::move(operation_evidence_append),
+									std::move(operation_evidence_chunk));
 						};
 						static_assert(noexcept(commit_publication()));
-						if (!commit_publication()) {
-							throw bioseq::gpu::vulkan::VulkanRuntimeError(
-								"persisted GPU Format-5 cache metrics token did not consume once");
-						}
+						commit_publication();
 						return results;
 					}
 					add_stage_host_time(

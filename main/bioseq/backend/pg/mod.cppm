@@ -366,6 +366,19 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 	if (frame->collector.lifecycle_counter_saturated) {
 		statement_stats.operational.stats_saturated = true;
 	}
+	frame->collector.persisted_gpu_operation_evidence.freeze();
+	const bool persisted_gpu_evidence_required =
+		statement_stats.actual_backend
+			== bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
+		&& statement_stats.actual_target_index_source
+			== bioseq::pipeline_stats::TargetIndexSource::persisted
+		&& statement_stats.fully_attested_alignment_jobs != 0;
+	if (persisted_gpu_evidence_required
+		&& !frame->collector.persisted_gpu_operation_evidence.
+			matches_pipeline(statement_stats)) {
+		statement_stats.operational.stats_saturated = true;
+		statement_stats.reclassify_all_attempted_jobs();
+	}
 
 	const std::int64_t execution_id = last_alignment_execution_id + 1;
 	last_alignment_execution_snapshot =
@@ -381,6 +394,8 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 			.partial = !fully_drained,
 			.fully_drained = fully_drained,
 			.pipeline = statement_stats,
+			.persisted_gpu_operation_evidence = std::move(
+				frame->collector.persisted_gpu_operation_evidence),
 		};
 	last_alignment_execution_id = execution_id;
 }
@@ -890,6 +905,246 @@ template<std::size_t N>
 	return result;
 }
 
+[[nodiscard]] std::string persisted_gpu_operation_evidence_json(
+		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+{
+	const auto& ledger = snapshot.persisted_gpu_operation_evidence;
+	const auto& stats = snapshot.pipeline;
+	const bool requires_evidence =
+		stats.actual_backend
+			== bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
+		&& stats.actual_target_index_source
+			== bioseq::pipeline_stats::TargetIndexSource::persisted;
+	const bool ledger_complete = ledger.complete();
+	const bool pipeline_matches = requires_evidence
+		? ledger.matches_pipeline(stats)
+		: ledger.operation_count() == 0u && ledger.job_count() == 0u;
+	const bool complete = ledger_complete && pipeline_matches;
+	const bool saturated = ledger.saturated()
+		|| stats.operational.stats_saturated;
+	const bool accepted = requires_evidence && snapshot.completed
+		&& !snapshot.partial && snapshot.fully_drained && complete
+		&& !saturated && ledger.dropped_operation_count() == 0u;
+
+	std::string result =
+		R"({"schema":"bioseq.persisted_gpu_operation_evidence","version":1)";
+	result.reserve(2048u + static_cast<std::size_t>(ledger.job_count()) * 1400u);
+	const auto append_unsigned = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append_signed = [&result](
+			const std::string_view key,
+			const std::int64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append_bool = [&result](
+			const std::string_view key,
+			const bool value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += value ? "true" : "false";
+	};
+	const auto append_hex = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":\"";
+		result += fixed_hex_u64(value);
+		result += '"';
+	};
+	append_signed("execution_id", snapshot.execution_id);
+	append_signed("backend_pid", snapshot.backend_pid);
+	append_unsigned("database_oid", snapshot.database_oid);
+	append_bool("completed", snapshot.completed);
+	append_bool("partial", snapshot.partial);
+	append_bool("fully_drained", snapshot.fully_drained);
+	append_bool("accepted", accepted);
+	append_bool("complete", complete);
+	append_bool("saturated", saturated);
+	append_unsigned(
+		"dropped_operation_count", ledger.dropped_operation_count());
+	append_unsigned("operation_count", ledger.operation_count());
+	append_unsigned(
+		"accepted_operation_count",
+		ledger.accepted() ? ledger.operation_count() : 0u);
+	append_unsigned(
+		"complete_operation_count",
+		ledger_complete ? ledger.operation_count() : 0u);
+	append_unsigned("job_count", ledger.job_count());
+	append_unsigned(
+		"accepted_job_count", ledger.accepted() ? ledger.job_count() : 0u);
+	result += R"(,"operations":[)";
+	bool first_operation = true;
+	for (const auto* chunk = ledger.head(); chunk != nullptr;
+		 chunk = chunk->next()) {
+		if (!first_operation) result += ',';
+		first_operation = false;
+		const auto& operation = chunk->operation();
+		const auto& publication = operation.publication;
+		const auto& environment = operation.environment;
+		const auto& cache = operation.cache_metrics;
+		result += '{';
+		result += R"("operation_identity":")";
+		result += fixed_hex_u64(operation.operation_identity);
+		result += '"';
+		append_unsigned("expected_jobs", publication.expected_jobs);
+		append_unsigned("proof_jobs", publication.proof_jobs);
+		append_unsigned("consumed_jobs", publication.consumed_jobs);
+		append_unsigned("accepted_jobs", publication.accepted_jobs);
+		append_unsigned("burned_jobs", publication.burned_jobs);
+		append_unsigned("pending_jobs", publication.pending_jobs);
+		append_unsigned("staged_jobs", publication.staged_jobs);
+		append_unsigned("published_jobs", operation.published_jobs);
+		append_unsigned("publication_commits", operation.publication_commits);
+		append_unsigned(
+			"query_pipeline_receipt_count",
+			operation.query_pipeline_receipt_count);
+		append_unsigned(
+			"shape_pipeline_receipt_count",
+			operation.shape_pipeline_receipt_count);
+		append_unsigned("submission_count", operation.submission_count);
+		append_hex(
+			"query_pipeline_operation_identity",
+			operation.query_pipeline_operation_identity);
+		append_hex(
+			"shape_pipeline_operation_identity",
+			operation.shape_pipeline_operation_identity);
+		result += R"(,"query_submission_ordinals":[)";
+		result += std::to_string(operation.query_submission_ordinals[0]);
+		result += ',';
+		result += std::to_string(operation.query_submission_ordinals[1]);
+		result += ']';
+		append_hex("seed_receipt_identity", operation.seed_receipt_identity);
+		append_hex("cache_token_identity", cache.token_identity);
+		append_unsigned("generation_id", operation.generation_id);
+		append_hex("source_identity", operation.source_identity);
+		append_hex("cold_load_identity", operation.cold_load_identity);
+		result += R"(,"source":"persisted_shape_v5")";
+		result += R"(,"environment":{"device_uuid":")";
+		result += fixed_hex_bytes(environment.device_uuid);
+		result += '"';
+		append_unsigned("api_version", environment.api_version);
+		append_unsigned("driver_version", environment.driver_version);
+		append_unsigned("vendor_id", environment.vendor_id);
+		append_unsigned("device_id", environment.device_id);
+		result += R"(,"pipeline_cache_uuid":")";
+		result += fixed_hex_bytes(environment.pipeline_cache_uuid);
+		result += R"(","seed_sha256":")";
+		result += fixed_hex_bytes(environment.seed_sha256);
+		result += '"';
+		append_unsigned("seed_size", environment.seed_size);
+		append_hex("manifest_checksum", environment.manifest_checksum);
+		result += '}';
+		result += R"(,"cache_metrics":{"pipeline_cache_loads":)";
+		result += std::to_string(cache.pipeline_cache_loads);
+		append_unsigned(
+			"pipeline_cache_seed_bytes", cache.pipeline_cache_seed_bytes);
+		append_unsigned("pipeline_cache_load_ns", cache.pipeline_cache_load_ns);
+		append_unsigned("pipeline_creates", cache.pipeline_creates);
+		append_unsigned("pipeline_creation_ns", cache.pipeline_creation_ns);
+		result += '}';
+		result += R"(,"jobs":[)";
+		bool first_job = true;
+		for (const auto& job : chunk->jobs()) {
+			if (!first_job) result += ',';
+			first_job = false;
+			result += '{';
+			result += R"("logical_target_row":)";
+			result += std::to_string(job.logical_target_row);
+			append_unsigned(
+				"logical_query_ordinal", job.logical_query_ordinal);
+			append_unsigned("query_index", job.query_index);
+			append_unsigned("query_length", job.query_length);
+			append_unsigned(
+				"query_minimizer_count", job.query_minimizer_count);
+			append_unsigned("query_tile_count", job.query_tile_count);
+			result += R"(,"query":{"count_dispatches":)";
+			result += std::to_string(job.query_count_dispatches);
+			append_unsigned("scan_dispatches", job.query_scan_dispatches);
+			append_unsigned("emit_dispatches", job.query_emit_dispatches);
+			append_unsigned(
+				"completed_roundtrips", job.query_completed_roundtrips);
+			result += '}';
+			result += R"(,"direct":{"count_dispatches":)";
+			result += std::to_string(job.direct_count_dispatches);
+			append_unsigned("scan_dispatches", job.direct_scan_dispatches);
+			append_unsigned("anchor_count", job.anchor_count);
+			append_unsigned("emit_dispatches", job.direct_emit_dispatches);
+			append_unsigned("sort_operations", job.sort_operations);
+			append_unsigned(
+				"range_build_dispatches", job.range_build_dispatches);
+			append_unsigned("range_count", job.range_count);
+			append_unsigned("chain_dispatches", job.chain_dispatches);
+			append_unsigned(
+				"chain_backtrack_dispatches",
+				job.chain_backtrack_dispatches);
+			append_unsigned(
+				"coordinate_dispatches", job.coordinate_dispatches);
+			result += '}';
+			result += R"(,"submissions":[)";
+			constexpr std::array<std::string_view, 4> stages{
+				"count", "emit", "sort_range", "chain_coordinate"};
+			for (std::size_t i = 0u; i < job.submissions.size(); ++i) {
+				if (i != 0u) result += ',';
+				const auto& submission = job.submissions[i];
+				result += R"({"stage":")";
+				result.append(stages[i]);
+				result += R"(","operation_identity":")";
+				result += fixed_hex_u64(submission.operation_identity);
+				result += R"(","ordinal":)";
+				result += std::to_string(submission.ordinal);
+				result += R"(,"submit_wait_identity":")";
+				result += fixed_hex_u64(submission.submit_wait_identity);
+				result += R"("})";
+			}
+			result += ']';
+			result += R"(,"status":{"count_checks":)";
+			result += std::to_string(job.count_status_checks);
+			append_unsigned("emit_checks", job.emit_status_checks);
+			append_unsigned("status_or", job.status_or);
+			append_unsigned("result_readbacks", job.result_readbacks);
+			result += '}';
+			result += R"(,"forbidden":{"coordinate_vote_dispatches":)";
+			result += std::to_string(job.coordinate_vote_dispatches);
+			append_unsigned(
+				"cpu_or_simd_biological_calls",
+				job.cpu_or_simd_biological_calls);
+			append_unsigned("recompute_calls", job.recompute_calls);
+			append_unsigned("fallback_calls", job.fallback_calls);
+			result += '}';
+			const auto& coordinate = job.coordinate;
+			result += R"(,"coordinate":{"valid":)";
+			result += coordinate.valid ? "true" : "false";
+			append_unsigned("query_start", coordinate.query_start);
+			append_unsigned("query_end", coordinate.query_end);
+			append_unsigned("target_start", coordinate.target_start);
+			append_unsigned("target_end", coordinate.target_end);
+			append_unsigned("match_length", coordinate.match_length);
+			append_unsigned("block_length", coordinate.block_length);
+			append_signed("chain_score", coordinate.chain_score);
+			append_signed("seed_count", coordinate.seed_count);
+			append_bool("is_reverse", coordinate.is_reverse);
+			result += '}';
+			result += '}';
+		}
+		result += ']';
+		result += '}';
+	}
+	result += ']';
+	result += '}';
+	return result;
+}
+
 [[nodiscard]] std::string cold_index_selective_probe_json(
 		const bioseq::storage::indexing::ColdIndexPreparationStatsPg& stats)
 {
@@ -1352,9 +1607,9 @@ Datum materialize_alignment_execution_stats(
 	rsinfo->setDesc = tuple_desc;
 
 	if (last_alignment_execution_snapshot.has_value()) {
-		/* One value copy is the immutable source for all twenty rows, including
-		 * both versioned JSON objects. */
-		const alignment_exec::AlignmentExecutionSnapshot snapshot =
+		/* The backend-local snapshot is immutable after ExecutorFinish. The
+		 * move-only evidence ledger is read repeatedly by const reference. */
+		const alignment_exec::AlignmentExecutionSnapshot& snapshot =
 			*last_alignment_execution_snapshot;
 		(void)validate_alignment_snapshot_environment(snapshot);
 		for (std::size_t stage_no = 0;
@@ -2019,11 +2274,28 @@ Datum bioseq_last_alignment_format5_reader_memory_evidence(PG_FUNCTION_ARGS) {
 	if (!last_alignment_execution_snapshot.has_value()) {
 		PG_RETURN_NULL();
 	}
-	const alignment_exec::AlignmentExecutionSnapshot snapshot =
+	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
 		*last_alignment_execution_snapshot;
 	(void)validate_alignment_snapshot_environment(snapshot);
 	const std::string encoded =
 		format5_reader_memory_evidence_json(snapshot);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+/* Exact accepted persisted Shape-V5 GPU operation/job causal ledger. */
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_last_alignment_persisted_gpu_operation_evidence_v1);
+Datum bioseq_last_alignment_persisted_gpu_operation_evidence_v1(
+		PG_FUNCTION_ARGS) {
+	if (!last_alignment_execution_snapshot.has_value()) {
+		PG_RETURN_NULL();
+	}
+	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+		*last_alignment_execution_snapshot;
+	(void)validate_alignment_snapshot_environment(snapshot);
+	const std::string encoded =
+		persisted_gpu_operation_evidence_json(snapshot);
 	PG_RETURN_DATUM(DirectFunctionCall1(
 		jsonb_in, CStringGetDatum(encoded.c_str())));
 }

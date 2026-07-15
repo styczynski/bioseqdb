@@ -976,13 +976,11 @@ public:
     [[nodiscard]] const RuntimeGpuCacheMetricsAudit& audit() const noexcept {
         return audit_;
     }
-    [[nodiscard]] std::optional<RuntimeGpuCacheMetricsAudit>
-    consume() noexcept {
-        if (!accepted()) return std::nullopt;
-        RuntimeGpuCacheMetricsAudit result = audit_;
+    void consume() noexcept {
+        DEBUG_ASSERT(accepted(),
+            "persisted GPU cache metrics token was not prevalidated");
         audit_ = {};
         issued_ = false;
-        return result;
     }
 
 private:
@@ -3660,6 +3658,9 @@ struct PersistedShapeV5CoordinateOperationAcceptanceAudit {
             && committed_submission_count >= 3u
             && seed_receipt_identity != 0u;
     }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedShapeV5CoordinateOperationAcceptanceAudit&)
+        const noexcept = default;
 };
 
 /// Allocation-free pre-finalizer view of the exact operation authority fields
@@ -3706,6 +3707,9 @@ struct PersistedShapeV5CoordinateOperationEvidencePreview {
                 seed_sha256.begin(), seed_sha256.end(),
                 [](const std::uint8_t value) { return value != 0u; });
     }
+    [[nodiscard]] constexpr bool operator==(
+        const PersistedShapeV5CoordinateOperationEvidencePreview&)
+        const noexcept = default;
 };
 
 /// Exact full-stage job payload plus its structured Shape submission receipts.
@@ -4359,7 +4363,9 @@ public:
     }
     [[nodiscard]] PersistedShapeV5CoordinateAcceptedOperation
     finalize_persisted_shape_v5_coordinate_operation(
-        PersistedShapeV5CoordinateOperationProof&& proof);
+        PersistedShapeV5CoordinateOperationProof&& proof,
+        const PersistedShapeV5CoordinateOperationEvidencePreview&
+            expected_preview);
 
     [[nodiscard]] Buffer create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     [[nodiscard]] Buffer create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
@@ -15156,11 +15162,17 @@ Runtime::run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip(
 
 PersistedShapeV5CoordinateAcceptedOperation
 Runtime::finalize_persisted_shape_v5_coordinate_operation(
-    PersistedShapeV5CoordinateOperationProof&& proof) {
+    PersistedShapeV5CoordinateOperationProof&& proof,
+    const PersistedShapeV5CoordinateOperationEvidencePreview&
+        expected_preview) {
     std::scoped_lock lock(mu_);
-    if (!proof.all_jobs_accepted()) {
+    const PersistedShapeV5CoordinateOperationEvidencePreview proof_preview =
+        proof.operation_evidence_preview();
+    if (!proof.all_jobs_accepted() || !expected_preview.accepted()
+        || !proof_preview.accepted()
+        || proof_preview != expected_preview) {
         throw VulkanRuntimeError(
-            "persisted Shape-V5 operation proof is not wholly accepted");
+            "persisted Shape-V5 operation proof/SQL preview is not wholly accepted");
     }
     const RuntimeGpuExecutionEnvironmentBinding environment_preview =
         proof.environment_preview();
@@ -15292,7 +15304,8 @@ Runtime::finalize_persisted_shape_v5_coordinate_operation(
         .seed_receipt_identity = query.seed_receipt_identity,
     };
     if (!environment.accepted() || environment != environment_preview
-        || !acceptance.accepted()) {
+        || !acceptance.accepted()
+        || acceptance != expected_preview.acceptance) {
         throw VulkanRuntimeError(
             "persisted Shape-V5 accepted authority payload is invalid");
     }

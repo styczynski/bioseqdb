@@ -490,6 +490,10 @@ public:
         // scanner_pg validates that it is registered MVCC state and never
         // changes its registration count.
         Snapshot                                         snapshot             = nullptr;
+        // Borrowed statement-root sink. It is required only by the accepted
+        // persisted Shape-V5 Vulkan route and never owns through hot stats.
+        ::bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
+            persisted_gpu_operation_evidence_sink = nullptr;
         // Per-row optional locator. nullopt means "use the inline pgseq_t at
         // target_hdrs[i]" — scanner_pg is then constructed in in-memory mode.
         std::array<std::optional<bioseq::storage::seq_locator>,

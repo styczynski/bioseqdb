@@ -6248,6 +6248,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		runtime.alignment_registration =
 			bioseq::pg::alignment_execution::bind_alignment_node(
 				estate, static_cast<std::uint32_t>(plan_node_id));
+		runtime.buffer.bind_persisted_gpu_operation_evidence_sink(
+			*bioseq::pg::alignment_execution::
+				borrow_persisted_gpu_operation_evidence_sink(
+					runtime.alignment_registration));
 	}
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() scan initialised successfully");
@@ -7672,6 +7676,10 @@ static void BioseqBatchJoin_BeginCustomScan(
 		runtime->alignment_registration =
 			bioseq::pg::alignment_execution::bind_alignment_node(
 				estate, static_cast<std::uint32_t>(plan_node_id));
+		runtime->buffer.bind_persisted_gpu_operation_evidence_sink(
+			*bioseq::pg::alignment_execution::
+				borrow_persisted_gpu_operation_evidence_sink(
+					runtime->alignment_registration));
 		  } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
 			converted_pg_error = error.release_error_data();
 		  } catch (...) {
