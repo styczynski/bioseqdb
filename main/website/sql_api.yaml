@@ -1,0 +1,9 @@
+schema: bioseq.website.sql_api/v1
+include_schemas: [bioseq, public]
+public_entities:
+  - sql:type:bioseq.seq
+  - sql:function:bioseq.len(bioseq.seq)
+  - sql:function:bioseq.symbol_count(bioseq.seq,text)
+  - sql:type:public.bioseq_aligner_options
+  - sql:function:public.mmsearch(bioseq.seq,bioseq.seq)
+  - sql:function:public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)
