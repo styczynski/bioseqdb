@@ -53,6 +53,8 @@ AddCommonTargetX(
   SOURCES
     "${BENCH_E2E_DIR}/bench_e2e_main.cpp"
     "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+  TESTS
+    "${BENCH_E2E_DIR}/bench_e2e_main_test.cpp"
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
   CXX_MOD_FILES
@@ -65,7 +67,20 @@ target_compile_definitions(bioseq_bench_e2e PRIVATE
   "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_configuration.json\""
   "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")   # default: PATH 'minimap2'
 
+if(TARGET bioseq_bench_e2e_tests_exec)
+  target_compile_definitions(bioseq_bench_e2e_tests_exec PRIVATE
+    BIOSEQ_E2E_CONTRACT_TEST=1
+    "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bioseq_bench_e2e\""
+    "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
+    "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_configuration.json\""
+    "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
+endif()
+
 if(APPLE)
     target_link_options(bioseq_bench_e2e PRIVATE
       -L/opt/homebrew/opt/llvm/lib/c++)
+    if(TARGET bioseq_bench_e2e_tests_exec)
+      target_link_options(bioseq_bench_e2e_tests_exec PRIVATE
+        -L/opt/homebrew/opt/llvm/lib/c++)
+    endif()
 endif()

@@ -9529,6 +9529,7 @@ void cleanup_sort_scan_input(
 }  // anonymous namespace
 HWY_AFTER_NAMESPACE();    // close the Highway per-target namespace
 
+#ifndef BIOSEQ_E2E_CONTRACT_TEST
 int main(int argc, char** argv) {
     log_configure(true); fmtlog::setLogLevel(fmtlog::INF);
     parse_e2e_cli_selection(argc, argv);
@@ -9572,3 +9573,4 @@ int main(int argc, char** argv) {
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
             "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));
 }
+#endif

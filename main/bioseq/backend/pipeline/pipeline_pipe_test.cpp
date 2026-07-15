@@ -2189,12 +2189,15 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     first.format5_reader_retained_position_count = 37;
     first.format5_reader_retained_position_capacity = 37;
     first.format5_reader_directory_capacity_bytes = 10;
+    first.format5_reader_query_hash_capacity_bytes = 7;
     first.format5_reader_query_record_capacity_bytes = 100;
     first.format5_reader_ordinal_route_capacity_bytes = 20;
     first.format5_reader_selected_extent_capacity_bytes = 30;
+    first.format5_reader_current_selected_control_capacity_bytes = 11;
     first.format5_reader_global_position_capacity_bytes = 296;
-    first.format5_reader_owned_capacity_bytes = 456;
-    first.format5_reader_admitted_bytes = 456;
+    first.format5_reader_control_payload_capacity_bytes = 13;
+    first.format5_reader_owned_capacity_bytes = 487;
+    first.format5_reader_admitted_bytes = 487;
     first.format5_reader_exact_position_image_checks = 1;
     first.format5_reader_retained_layout_checks = 1;
     aggregate.merge(first);
@@ -2214,9 +2217,13 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     REQUIRE(aggregate.format5_reader_position_append_growth_reservations == 0);
     REQUIRE(aggregate.format5_reader_retained_position_count == 37);
     REQUIRE(aggregate.format5_reader_retained_position_capacity == 37);
+    REQUIRE(aggregate.format5_reader_query_hash_capacity_bytes == 7);
+    REQUIRE(aggregate.format5_reader_current_selected_control_capacity_bytes
+            == 11);
     REQUIRE(aggregate.format5_reader_global_position_capacity_bytes == 296);
-    REQUIRE(aggregate.format5_reader_owned_capacity_bytes == 456);
-    REQUIRE(aggregate.format5_reader_admitted_bytes == 456);
+    REQUIRE(aggregate.format5_reader_control_payload_capacity_bytes == 13);
+    REQUIRE(aggregate.format5_reader_owned_capacity_bytes == 487);
+    REQUIRE(aggregate.format5_reader_admitted_bytes == 487);
     REQUIRE(aggregate.format5_reader_exact_position_image_checks == 1);
     REQUIRE(aggregate.format5_reader_exact_position_image_failures == 0);
     REQUIRE(aggregate.format5_reader_retained_layout_checks == 1);
@@ -2232,12 +2239,15 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     second.format5_reader_retained_position_count = 11;
     second.format5_reader_retained_position_capacity = 11;
     second.format5_reader_directory_capacity_bytes = 5;
+    second.format5_reader_query_hash_capacity_bytes = 3;
     second.format5_reader_query_record_capacity_bytes = 40;
     second.format5_reader_ordinal_route_capacity_bytes = 8;
     second.format5_reader_selected_extent_capacity_bytes = 12;
+    second.format5_reader_current_selected_control_capacity_bytes = 5;
     second.format5_reader_global_position_capacity_bytes = 87;
-    second.format5_reader_owned_capacity_bytes = 152;
-    second.format5_reader_admitted_bytes = 153;
+    second.format5_reader_control_payload_capacity_bytes = 7;
+    second.format5_reader_owned_capacity_bytes = 167;
+    second.format5_reader_admitted_bytes = 168;
     second.format5_reader_exact_position_image_checks = 1;
     second.format5_reader_exact_position_image_failures = 1;
     second.format5_reader_retained_layout_checks = 1;
@@ -2251,9 +2261,13 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     REQUIRE(aggregate.format5_reader_position_append_growth_reservations == 2);
     REQUIRE(aggregate.format5_reader_retained_position_count == 48);
     REQUIRE(aggregate.format5_reader_retained_position_capacity == 48);
+    REQUIRE(aggregate.format5_reader_query_hash_capacity_bytes == 10);
+    REQUIRE(aggregate.format5_reader_current_selected_control_capacity_bytes
+            == 16);
     REQUIRE(aggregate.format5_reader_global_position_capacity_bytes == 383);
-    REQUIRE(aggregate.format5_reader_owned_capacity_bytes == 608);
-    REQUIRE(aggregate.format5_reader_admitted_bytes == 609);
+    REQUIRE(aggregate.format5_reader_control_payload_capacity_bytes == 20);
+    REQUIRE(aggregate.format5_reader_owned_capacity_bytes == 654);
+    REQUIRE(aggregate.format5_reader_admitted_bytes == 655);
     REQUIRE(aggregate.format5_reader_exact_position_image_checks == 2);
     REQUIRE(aggregate.format5_reader_exact_position_image_failures == 1);
     REQUIRE(aggregate.format5_reader_retained_layout_checks == 2);
@@ -2264,15 +2278,29 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
     PipelineOperationalStats at_limit{};
     at_limit.cold_index_payload_bytes_scanned = sql_bigint_value_max;
     at_limit.format5_reader_retained_position_capacity = sql_bigint_value_max;
+    at_limit.format5_reader_query_hash_capacity_bytes = sql_bigint_value_max;
+    at_limit.format5_reader_current_selected_control_capacity_bytes =
+        sql_bigint_value_max;
+    at_limit.format5_reader_control_payload_capacity_bytes =
+        sql_bigint_value_max;
     PipelineOperationalStats overflow{};
     overflow.cold_index_payload_bytes_scanned = 1;
     overflow.format5_reader_retained_position_capacity = 1;
+    overflow.format5_reader_query_hash_capacity_bytes = 1;
+    overflow.format5_reader_current_selected_control_capacity_bytes = 1;
+    overflow.format5_reader_control_payload_capacity_bytes = 1;
     aggregate.merge(at_limit);
     aggregate.merge(overflow);
 
     REQUIRE(aggregate.cold_index_payload_bytes_scanned
             == sql_bigint_value_max);
     REQUIRE(aggregate.format5_reader_retained_position_capacity
+            == sql_bigint_value_max);
+    REQUIRE(aggregate.format5_reader_query_hash_capacity_bytes
+            == sql_bigint_value_max);
+    REQUIRE(aggregate.format5_reader_current_selected_control_capacity_bytes
+            == sql_bigint_value_max);
+    REQUIRE(aggregate.format5_reader_control_payload_capacity_bytes
             == sql_bigint_value_max);
     REQUIRE(aggregate.stats_saturated);
 }
