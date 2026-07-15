@@ -4803,19 +4803,62 @@ protected:
     using QueryRecord = PreparedQueryRecord<
         hash_type, Traits::global_controls_then_positions>;
 
-    struct SelectedControl {
+    struct DenseSelectedControl {
         std::size_t query_index = no_route;
         std::uint64_t position_end = 0;
     };
 
+    // Format 5 retains every authenticated control boundary but only the
+    // comparatively rare query routes.  Format 4 keeps its established dense
+    // record because its control and position phases interleave by segment.
+    using SelectedControl = std::conditional_t<
+        Traits::global_controls_then_positions,
+        std::uint64_t,
+        DenseSelectedControl>;
+
+    struct DenseSelectedControlState {
+        std::vector<DenseSelectedControl> controls;
+    };
+    struct ExactSelectedControlState {
+        std::unique_ptr<std::uint64_t[]> position_ends;
+        std::size_t control_count = 0;
+    };
+    using SelectedControlState = std::conditional_t<
+        Traits::global_controls_then_positions,
+        ExactSelectedControlState,
+        DenseSelectedControlState>;
+
+    static constexpr std::uint32_t no_narrow_route =
+        (std::numeric_limits<std::uint32_t>::max)();
+
+    struct SparseSelectedRoute {
+        std::uint32_t control_ordinal = 0;
+        std::uint32_t query_index = no_narrow_route;
+    };
+    static_assert(sizeof(SparseSelectedRoute) == 8u);
+
+    struct NoSelectedRoutes {};
+    struct AdaptiveSelectedRoutes {
+        std::unique_ptr<std::uint32_t[]> dense_routes;
+        std::unique_ptr<SparseSelectedRoute[]> sparse_routes;
+        std::size_t sparse_route_count = 0;
+        std::size_t next_sparse_route = 0;
+        bool uses_sparse = false;
+    };
+    using SelectedRouteState = std::conditional_t<
+        Traits::global_controls_then_positions,
+        AdaptiveSelectedRoutes,
+        NoSelectedRoutes>;
+
     struct SelectedExtent {
-        std::vector<SelectedControl> controls;
+        [[no_unique_address]] SelectedControlState control_state;
+        [[no_unique_address]] SelectedRouteState route_state;
         std::size_t next_control = 0;
         std::uint64_t next_position = 0;
         // The physical cursor consumes one control at a time.  A prior
         // position therefore belongs to the current control, not every
-        // retained control record.  next_position > position_begin is the
-        // exact validity bit and naturally resets at each control boundary.
+        // retained control record.  The validity bit resets exactly when the
+        // boundary cursor advances and remains live across payload chunks.
         std::uint64_t previous_position = 0;
         bool previous_position_valid = false;
         bool controls_complete = false;
@@ -4870,6 +4913,56 @@ protected:
     };
     mutable ProtocolMemoryEvidence protocol_memory_evidence_{};
 
+    [[nodiscard]] static std::size_t selected_control_count_(
+            const SelectedExtent& extent) noexcept {
+        if constexpr (Traits::global_controls_then_positions) {
+            return extent.control_state.control_count;
+        } else {
+            return extent.control_state.controls.size();
+        }
+    }
+
+    [[nodiscard]] static std::uint64_t selected_position_end_(
+            const SelectedExtent& extent,
+            std::size_t control_index) noexcept {
+        if constexpr (Traits::global_controls_then_positions) {
+            return extent.control_state.position_ends[control_index];
+        } else {
+            return extent.control_state.controls[control_index].position_end;
+        }
+    }
+
+    [[nodiscard]] static std::uint64_t
+    selected_extent_control_capacity_bytes_(
+            const SelectedExtent& extent) noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t bytes = 0u;
+        if constexpr (Traits::global_controls_then_positions) {
+            bytes = saturating_mul(
+                static_cast<std::uint64_t>(
+                    extent.control_state.control_count),
+                sizeof(std::uint64_t));
+            if (extent.route_state.uses_sparse) {
+                bytes = saturating_add(bytes, saturating_mul(
+                    static_cast<std::uint64_t>(
+                        extent.route_state.sparse_route_count),
+                    sizeof(SparseSelectedRoute)));
+            } else if (extent.route_state.dense_routes) {
+                bytes = saturating_add(bytes, saturating_mul(
+                    static_cast<std::uint64_t>(
+                        extent.control_state.control_count),
+                    sizeof(std::uint32_t)));
+            }
+        } else {
+            bytes = saturating_mul(
+                static_cast<std::uint64_t>(
+                    extent.control_state.controls.capacity()),
+                sizeof(DenseSelectedControl));
+        }
+        return bytes;
+    }
+
     TraitDrivenPreparedQueryCore() = default;
     TraitDrivenPreparedQueryCore(
         TraitDrivenPreparedQueryCore&&) noexcept = default;
@@ -4907,7 +5000,8 @@ protected:
         add(protocol_ordinal_to_selected_.capacity(), sizeof(std::size_t));
         add(protocol_selected_extents_.capacity(), sizeof(SelectedExtent));
         for (const SelectedExtent& extent : protocol_selected_extents_) {
-            add(extent.controls.capacity(), sizeof(SelectedControl));
+            bytes = saturating_add(
+                bytes, selected_extent_control_capacity_bytes_(extent));
         }
         if (protocol_session_) {
             add(protocol_session_->control_bytes.capacity(), sizeof(std::byte));
@@ -5045,9 +5139,7 @@ protected:
         for (const SelectedExtent& extent : protocol_selected_extents_) {
             selected_control_capacity_bytes = saturating_add(
                 selected_control_capacity_bytes,
-                saturating_mul(
-                    static_cast<std::uint64_t>(extent.controls.capacity()),
-                    sizeof(SelectedControl)));
+                selected_extent_control_capacity_bytes_(extent));
         }
         const std::uint64_t owned_capacity_bytes =
             protocol_owned_capacity_bytes();
@@ -5496,6 +5588,14 @@ protected:
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
+        if constexpr (Traits::global_controls_then_positions) {
+            // UINT32_MAX remains the dense no-route sentinel.  A Format-5
+            // query image must therefore leave it unavailable as an index.
+            if (protocol_query_hashes_.size() >= no_narrow_route) {
+                return protocol_poison<void>(
+                    MinimizerGenerationWireError::arithmetic_overflow);
+            }
+        }
 
         const auto entries = this->directory_.entries();
         std::size_t selected_count = 0;
@@ -5627,13 +5727,25 @@ protected:
         std::uint64_t transient = bioseq::parallelism::saturating_mul(
             entry.control_element_count,
             sizeof(typename WireOps::control_type));
-        // Keep every control in an intersected extent. Besides query routing,
-        // these records preserve strict per-control position-order validation
-        // for authenticated controls whose hashes were not queried.
+        // Keep every boundary in an intersected extent for strict per-control
+        // position-order validation. Format 5 stores query routes sparsely;
+        // admit the conservative all-routes peak before the one decode pass.
         const std::uint64_t retained_control_count =
             selected_index == no_route ? 0u : entry.control_element_count;
         std::uint64_t retained = bioseq::parallelism::saturating_mul(
             retained_control_count, sizeof(SelectedControl));
+        if constexpr (Traits::global_controls_then_positions) {
+            // One dense u32 route image is always built.  Sparse conversion
+            // happens only below 50% density, so its peak is bounded by one
+            // additional dense-image worth of bytes.
+            const std::uint64_t dense_route_bytes =
+                bioseq::parallelism::saturating_mul(
+                    retained_control_count, sizeof(std::uint32_t));
+            retained = bioseq::parallelism::saturating_add(
+                retained, dense_route_bytes);
+            retained = bioseq::parallelism::saturating_add(
+                retained, dense_route_bytes);
+        }
         const std::uint64_t additional =
             bioseq::parallelism::saturating_add(transient, retained);
         const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
@@ -5686,9 +5798,31 @@ protected:
                 if (selected_index == no_route) return {};
                 SelectedExtent& selected =
                     protocol_selected_extents_[selected_index];
-                const std::size_t retained_before = selected.controls.size();
-                selected.controls.reserve(decoded->size());
+                const std::size_t retained_before =
+                    selected_control_count_(selected);
+                if (retained_before != 0u || selected.controls_complete) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::row_order);
+                }
+                if constexpr (Traits::global_controls_then_positions) {
+                    if (decoded->size() != 0u) {
+                        selected.control_state.position_ends =
+                            std::make_unique_for_overwrite<std::uint64_t[]>(
+                                decoded->size());
+                        selected.route_state.dense_routes =
+                            std::make_unique_for_overwrite<std::uint32_t[]>(
+                                decoded->size());
+                        std::fill_n(
+                            selected.route_state.dense_routes.get(),
+                            decoded->size(), no_narrow_route);
+                    }
+                    selected.control_state.control_count = decoded->size();
+                } else {
+                    selected.control_state.controls.reserve(decoded->size());
+                }
                 std::uint64_t expected_position_begin = 0u;
+                std::size_t control_ordinal = 0u;
+                std::size_t routed_control_count = 0u;
                 for (const auto& control : *decoded) {
                     const std::size_t query_index =
                         query_index_for_hash(WireOps::hash(control));
@@ -5725,28 +5859,79 @@ protected:
                             record.positions_complete = false;
                         }
                     }
-                    selected.controls.push_back(SelectedControl{
-                        .query_index = query_index,
-                        .position_end = end,
-                    });
+                    if constexpr (Traits::global_controls_then_positions) {
+                        selected.control_state.position_ends[
+                            control_ordinal] = end;
+                        if (query_index != no_route) {
+                            if (query_index >= no_narrow_route) {
+                                return std::unexpected(
+                                    MinimizerGenerationWireError::
+                                        arithmetic_overflow);
+                            }
+                            selected.route_state.dense_routes[
+                                control_ordinal] =
+                                    static_cast<std::uint32_t>(query_index);
+                            ++routed_control_count;
+                        }
+                    } else {
+                        selected.control_state.controls.push_back(
+                            SelectedControl{
+                                .query_index = query_index,
+                                .position_end = end,
+                            });
+                    }
+                    ++control_ordinal;
                 }
                 if (expected_position_begin
                         != entry.position_element_count) {
                     return std::unexpected(
                         MinimizerGenerationWireError::control_range);
                 }
+                if constexpr (Traits::global_controls_then_positions) {
+                    const std::size_t control_count =
+                        selected.control_state.control_count;
+                    if (control_count <= no_narrow_route
+                        && routed_control_count
+                            < control_count - routed_control_count) {
+                        if (routed_control_count != 0u) {
+                            selected.route_state.sparse_routes =
+                                std::make_unique_for_overwrite<
+                                    SparseSelectedRoute[]>(
+                                        routed_control_count);
+                        }
+                        std::size_t sparse_index = 0u;
+                        for (std::size_t ordinal = 0u;
+                             ordinal < control_count; ++ordinal) {
+                            const std::uint32_t query_route =
+                                selected.route_state.dense_routes[ordinal];
+                            if (query_route == no_narrow_route) continue;
+                            selected.route_state.sparse_routes[
+                                sparse_index++] = SparseSelectedRoute{
+                                    .control_ordinal =
+                                        static_cast<std::uint32_t>(ordinal),
+                                    .query_index = query_route,
+                                };
+                        }
+                        if (sparse_index != routed_control_count) {
+                            return std::unexpected(
+                                MinimizerGenerationWireError::element_count);
+                        }
+                        selected.route_state.sparse_route_count =
+                            routed_control_count;
+                        selected.route_state.dense_routes.reset();
+                        selected.route_state.uses_sparse = true;
+                    }
+                }
                 add_memory_evidence_(
                     protocol_memory_evidence_.
                         retained_selected_control_records,
                     static_cast<std::uint64_t>(
-                        selected.controls.size() - retained_before));
+                        selected_control_count_(selected)
+                            - retained_before));
                 add_memory_evidence_(
                     protocol_memory_evidence_.
                         retained_selected_control_capacity_bytes,
-                    bioseq::parallelism::saturating_mul(
-                        static_cast<std::uint64_t>(
-                            selected.controls.capacity()),
-                        sizeof(SelectedControl)));
+                    selected_extent_control_capacity_bytes_(selected));
                 selected.controls_complete = true;
                 return {};
             } catch (const std::bad_alloc&) {
@@ -5890,16 +6075,67 @@ protected:
                 payload.subspan(offset, width), *core, this->profile_);
             if (!decoded) return std::unexpected(decoded.error());
             if (selected != nullptr) {
-                while (selected->next_control < selected->controls.size()
+                while (selected->next_control
+                            < selected_control_count_(*selected)
                        && selected->next_position
-                            >= selected->controls[selected->next_control]
-                                .position_end) {
+                            >= selected_position_end_(
+                                *selected, selected->next_control)) {
+                    if constexpr (Traits::global_controls_then_positions) {
+                        auto& routes = selected->route_state;
+                        if (routes.uses_sparse
+                            && routes.next_sparse_route
+                                < routes.sparse_route_count) {
+                            const std::uint32_t route_ordinal =
+                                routes.sparse_routes[
+                                    routes.next_sparse_route]
+                                    .control_ordinal;
+                            if (route_ordinal < selected->next_control) {
+                                return std::unexpected(
+                                    MinimizerGenerationWireError::
+                                        element_count);
+                            }
+                            if (route_ordinal == selected->next_control) {
+                                ++routes.next_sparse_route;
+                            }
+                        }
+                    }
                     ++selected->next_control;
                     selected->previous_position_valid = false;
                 }
-                if (selected->next_control < selected->controls.size()) {
-                    SelectedControl& control =
-                        selected->controls[selected->next_control];
+                if (selected->next_control
+                        < selected_control_count_(*selected)) {
+                    std::size_t query_index = no_route;
+                    if constexpr (Traits::global_controls_then_positions) {
+                        const auto& routes = selected->route_state;
+                        if (routes.uses_sparse) {
+                            if (routes.next_sparse_route
+                                    < routes.sparse_route_count) {
+                                const SparseSelectedRoute& route =
+                                    routes.sparse_routes[
+                                        routes.next_sparse_route];
+                                if (route.control_ordinal
+                                        < selected->next_control) {
+                                    return std::unexpected(
+                                        MinimizerGenerationWireError::
+                                            element_count);
+                                }
+                                if (route.control_ordinal
+                                        == selected->next_control) {
+                                    query_index = route.query_index;
+                                }
+                            }
+                        } else if (!routes.dense_routes) {
+                            return std::unexpected(
+                                MinimizerGenerationWireError::element_count);
+                        } else {
+                            const std::uint32_t route = routes.dense_routes[
+                                selected->next_control];
+                            if (route != no_narrow_route) query_index = route;
+                        }
+                    } else {
+                        query_index = selected->control_state.controls[
+                            selected->next_control].query_index;
+                    }
                     if (selected->previous_position_valid
                         && *decoded <= selected->previous_position) {
                         return std::unexpected(
@@ -5907,9 +6143,9 @@ protected:
                     }
                     selected->previous_position = *decoded;
                     selected->previous_position_valid = true;
-                    if (control.query_index != no_route) {
+                    if (query_index != no_route) {
                         QueryRecord& record =
-                            protocol_query_records_[control.query_index];
+                            protocol_query_records_[query_index];
                         if (auto appended = append_retained_position(
                                 record, *decoded); !appended) {
                             return appended;
@@ -6125,20 +6361,61 @@ protected:
         } else if (positions && selected) {
             SelectedExtent& extent =
                 protocol_selected_extents_[selected_index];
-            while (extent.next_control < extent.controls.size()
+            while (extent.next_control < selected_control_count_(extent)
                    && extent.next_position
-                        >= extent.controls[extent.next_control].position_end) {
+                        >= selected_position_end_(
+                            extent, extent.next_control)) {
+                if constexpr (Traits::global_controls_then_positions) {
+                    auto& routes = extent.route_state;
+                    if (routes.uses_sparse
+                        && routes.next_sparse_route
+                            < routes.sparse_route_count) {
+                        const std::uint32_t route_ordinal =
+                            routes.sparse_routes[
+                                routes.next_sparse_route].control_ordinal;
+                        if (route_ordinal < extent.next_control) {
+                            return protocol_poison<void>(
+                                MinimizerGenerationWireError::element_count);
+                        }
+                        if (route_ordinal == extent.next_control) {
+                            ++routes.next_sparse_route;
+                        }
+                    }
+                }
                 ++extent.next_control;
                 extent.previous_position_valid = false;
             }
+            bool routes_complete = true;
+            if constexpr (Traits::global_controls_then_positions) {
+                const auto& routes = extent.route_state;
+                routes_complete = routes.uses_sparse
+                    ? !routes.dense_routes
+                        && routes.next_sparse_route
+                            == routes.sparse_route_count
+                    : !routes.sparse_routes
+                        && (selected_control_count_(extent) == 0u
+                            || routes.dense_routes != nullptr);
+            }
             if (!extent.controls_complete
                 || extent.next_position != entry.position_element_count
-                || extent.next_control != extent.controls.size()) {
+                || extent.next_control != selected_control_count_(extent)
+                || !routes_complete) {
                 return protocol_poison<void>(
                     MinimizerGenerationWireError::element_count);
             }
             extent.positions_complete = true;
-            std::vector<SelectedControl>{}.swap(extent.controls);
+            if constexpr (Traits::global_controls_then_positions) {
+                extent.control_state.position_ends.reset();
+                extent.control_state.control_count = 0u;
+                extent.route_state.dense_routes.reset();
+                extent.route_state.sparse_routes.reset();
+                extent.route_state.sparse_route_count = 0u;
+                extent.route_state.next_sparse_route = 0u;
+                extent.route_state.uses_sparse = false;
+            } else {
+                std::vector<SelectedControl>{}.swap(
+                    extent.control_state.controls);
+            }
         }
         protocol_session_.reset();
         this->permit_.shrink_to(protocol_owned_capacity_bytes());
@@ -6509,9 +6786,7 @@ public:
         for (const auto& extent : this->protocol_selected_extents_) {
             current_selected_control_capacity_bytes = saturating_add(
                 current_selected_control_capacity_bytes,
-                saturating_mul(
-                    static_cast<std::uint64_t>(extent.controls.capacity()),
-                    sizeof(typename ProtocolCore::SelectedControl)));
+                this->selected_extent_control_capacity_bytes_(extent));
         }
         const std::uint64_t query_record_capacity_bytes = saturating_mul(
             static_cast<std::uint64_t>(

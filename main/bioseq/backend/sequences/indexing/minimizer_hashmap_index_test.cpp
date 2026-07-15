@@ -8573,13 +8573,17 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
             corrupt.bytes, 2u,
             test_read_le<std::uint16_t>(corrupt.bytes, 0u));
         recompute_row_checksum(corrupt);
+        // Hash 1 is deliberately absent from the query union: every control
+        // boundary must still enforce strict order without retaining the old
+        // 16-byte route-and-boundary record beside it.
+        const std::array<std::uint64_t, 1> unqueried_hash{2u};
         auto made = PreparedShapeV5QueryReader::begin(
             admission,
             generation->head,
             generation->manifest,
             test_shape_v5_expected_compatibility(10u),
             generation->directory.encoded_bytes(),
-            queries,
+            unqueried_hash,
             10u);
         REQUIRE(made.has_value());
         for (std::size_t index = 0;
@@ -8760,9 +8764,9 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         >= query_count * sizeof(std::uint64_t));
     REQUIRE(evidence.decoded_control_records == query_count);
     REQUIRE(evidence.retained_selected_control_records == query_count);
-    REQUIRE(evidence.selected_control_size_bytes == 16u);
+    REQUIRE(evidence.selected_control_size_bytes == 8u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
-        >= query_count * evidence.selected_control_size_bytes);
+        == query_count * (sizeof(std::uint64_t) + sizeof(std::uint32_t)));
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(evidence.global_position_capacity_bytes
         == evidence.retained_position_capacity * sizeof(std::uint64_t));
@@ -8818,8 +8822,8 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.retained_selected_control_records
         == sparse_evidence.decoded_control_records);
     REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
-        >= sparse_evidence.decoded_control_records
-            * sparse_evidence.selected_control_size_bytes);
+        == sparse_evidence.decoded_control_records * sizeof(std::uint64_t)
+            + sizeof(std::uint32_t) * 2u);
     REQUIRE(sparse_evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(sparse_evidence.retained_layout_equation_holds());
     REQUIRE(sparse_evidence.owned_capacity_bytes
