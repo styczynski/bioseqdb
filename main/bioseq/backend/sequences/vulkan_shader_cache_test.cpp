@@ -4869,9 +4869,17 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
           "[vulkan][metal-archive-receipt]") {
     auto& admission =
         bioseq::parallelism::MemoryAdmissionController::instance();
-    const std::uint64_t reserved_before = admission.reserved_bytes();
     auto accepted = accepted_runtime_metal_archive_configuration();
     REQUIRE(accepted.accepted());
+    const std::uint64_t retained_seed_bytes =
+        accepted.seed_image->receipt().retained_capacity_bytes();
+    const std::uint64_t reserved_with_seed = admission.reserved_bytes();
+    REQUIRE(reserved_with_seed >= retained_seed_bytes);
+    // The first qualification also process-retains the installed helper. Keep
+    // that intentional singleton reservation in the baseline while proving
+    // that this configuration's seed and derived image release independently.
+    const std::uint64_t process_qualification_baseline =
+        reserved_with_seed - retained_seed_bytes;
     const auto identity = gv::runtime_metal_archive_set_identity(
         accepted.archives);
     CHECK(identity.accepted());
@@ -4890,6 +4898,7 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
         CHECK((*admitted)->retained_capacity_bytes()
               <= (*admitted)->peak_admitted_bytes());
     }
+    CHECK(admission.reserved_bytes() == reserved_with_seed);
 
     SECTION("configuration rejects missing immutable identities") {
         auto invalid = accepted;
@@ -4993,7 +5002,7 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
               != identity);
     }
     accepted = {};
-    CHECK(admission.reserved_bytes() == reserved_before);
+    CHECK(admission.reserved_bytes() == process_qualification_baseline);
 }
 
 TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",

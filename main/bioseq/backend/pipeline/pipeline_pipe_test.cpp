@@ -638,6 +638,9 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap, baseline + (std::uint64_t{1} << 23u)));
+    constexpr std::uint64_t two_job_chunk_retained_bytes =
+        sizeof(PersistedGpuOperationEvidenceChunk)
+        + 2u * sizeof(PersistedGpuJobEvidence);
 
     REQUIRE(PersistedGpuOperationEvidenceChunk::prepare(0u) == nullptr);
     REQUIRE(PersistedGpuOperationEvidenceChunk::prepare(
@@ -820,6 +823,7 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
             0x3000u;
         REQUIRE_FALSE(wrong_shape_domain->seal());
     }
+    REQUIRE(admission.reserved_bytes() == baseline);
 
     const auto require_qualification_rejection = [&make_chunk](
             const auto& mutate) {
@@ -861,14 +865,22 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
     require_qualification_rejection([](auto& qualification) {
         qualification.saturated = true;
     });
+    REQUIRE(admission.reserved_bytes() == baseline);
 
-    auto zero_numeric_device_ids = make_chunk(0x1060u, 0x2060u, 36u);
-    REQUIRE(zero_numeric_device_ids != nullptr);
-    zero_numeric_device_ids->operation().environment.vendor_id = 0u;
-    zero_numeric_device_ids->operation().environment.device_id = 0u;
-    zero_numeric_device_ids->operation().cache_qualification.vendor_id = 0u;
-    zero_numeric_device_ids->operation().cache_qualification.device_id = 0u;
-    REQUIRE(zero_numeric_device_ids->seal());
+    {
+        auto zero_numeric_device_ids = make_chunk(0x1060u, 0x2060u, 36u);
+        REQUIRE(zero_numeric_device_ids != nullptr);
+        REQUIRE(admission.reserved_bytes()
+                == baseline + two_job_chunk_retained_bytes);
+        zero_numeric_device_ids->operation().environment.vendor_id = 0u;
+        zero_numeric_device_ids->operation().environment.device_id = 0u;
+        zero_numeric_device_ids->operation().cache_qualification.vendor_id =
+            0u;
+        zero_numeric_device_ids->operation().cache_qualification.device_id =
+            0u;
+        REQUIRE(zero_numeric_device_ids->seal());
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
 
     {
         PersistedGpuOperationEvidenceLedger ledger{};
@@ -910,6 +922,7 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
         REQUIRE(first_read == std::vector<std::uint64_t>{0x1000u, 0x1001u});
         REQUIRE(second_read == first_read);
     }
+    REQUIRE(admission.reserved_bytes() == baseline);
 
     const auto require_cross_operation_rejection = [&make_chunk,
             &publish_final_cache](const auto& mutate) {
