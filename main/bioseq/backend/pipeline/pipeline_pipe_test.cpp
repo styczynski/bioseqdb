@@ -679,7 +679,7 @@ TEST_CASE("persisted GPU SQL ledger is admitted, causal, and immutable across wa
             qualification.helper_build_identity.begin());
         qualification.helper_build_identity_size =
             static_cast<std::uint32_t>(helper_build.size());
-        constexpr std::string_view helper_source = "installed_sibling";
+        constexpr std::string_view helper_source = "installed-sibling";
         std::copy(
             helper_source.begin(), helper_source.end(),
             qualification.helper_source.begin());

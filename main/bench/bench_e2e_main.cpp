@@ -1787,9 +1787,9 @@ inline constexpr auto kPersistedGpuOperationEvidenceKeys =
         "completed", "partial", "fully_drained", "accepted", "complete",
         "saturated", "dropped_operation_count", "operation_count",
         "accepted_operation_count", "complete_operation_count", "job_count",
-        "accepted_job_count", "operations",
+        "accepted_job_count", "cache_qualification", "operations",
     });
-static_assert(kPersistedGpuOperationEvidenceKeys.size() == 18);
+static_assert(kPersistedGpuOperationEvidenceKeys.size() == 19);
 
 inline constexpr auto kPersistedGpuOperationKeys =
     std::to_array<std::string_view>({
@@ -1799,11 +1799,27 @@ inline constexpr auto kPersistedGpuOperationKeys =
         "query_pipeline_receipt_count", "shape_pipeline_receipt_count",
         "submission_count", "query_pipeline_operation_identity",
         "shape_pipeline_operation_identity", "query_submission_ordinals",
-        "seed_receipt_identity", "cache_token_identity", "generation_id",
-        "source_identity", "cold_load_identity", "source", "environment",
-        "cache_metrics", "jobs",
+        "seed_receipt_identity", "cache_token_identity",
+        "cache_qualification_identity", "generation_id", "source_identity",
+        "cold_load_identity", "source", "environment", "cache_metrics",
+        "jobs",
     });
-static_assert(kPersistedGpuOperationKeys.size() == 25);
+static_assert(kPersistedGpuOperationKeys.size() == 26);
+
+inline constexpr auto kPersistedGpuCacheQualificationKeys =
+    std::to_array<std::string_view>({
+        "version", "identity", "accepted", "saturated", "archive_count",
+        "archive_bytes", "archive_checksum", "receipt_count", "hash_passes",
+        "hashed_bytes", "private_files_created", "private_files_unlinked",
+        "live_private_paths", "pipeline_filesystem_hash_passes",
+        "pipeline_filesystem_hashed_bytes", "helper_protocol_version",
+        "helper_build_identity", "helper_source", "helper_executable_size",
+        "helper_executable_sha256", "helper_metal_registry_id", "device_uuid",
+        "api_version", "driver_version", "vendor_id", "device_id",
+        "pipeline_cache_uuid", "seed_receipt_identity", "seed_sha256",
+        "seed_size", "manifest_checksum",
+    });
+static_assert(kPersistedGpuCacheQualificationKeys.size() == 31);
 
 inline constexpr auto kPersistedGpuEnvironmentKeys =
     std::to_array<std::string_view>({
@@ -2232,7 +2248,7 @@ void capture_format5_reader_memory_evidence(
     out.format5_reader_memory_evidence = evidence;
 }
 
-/// Validate and retain the immediate post-v2 persisted-GPU operation ledger.
+/// Validate and retain the immediate cache-qualified persisted-GPU ledger.
 void capture_persisted_gpu_operation_evidence(
         const it::row_t& row,
         E2eOutput& out) {
@@ -2245,7 +2261,7 @@ void capture_persisted_gpu_operation_evidence(
     if (!json_has_exact_keys(evidence, kPersistedGpuOperationEvidenceKeys)
         || required_json_text(evidence, "schema")
             != "bioseq.persisted_gpu_operation_evidence"
-        || required_json_counter(evidence, "version") != 1) {
+        || required_json_counter(evidence, "version") != 2) {
         abort_pipeline_proof_capture(
             "persisted GPU operation evidence has the wrong exact schema");
     }
@@ -2278,6 +2294,13 @@ void capture_persisted_gpu_operation_evidence(
         required_json_counter(evidence, "accepted_job_count");
     const nlohmann::json& operations =
         required_json_array(evidence, "operations");
+    const bool expects_persisted_gpu = out.actual_backend == "vulkan_gpu"
+        && out.actual_target_index_source == "persisted";
+    const auto qualification_found = evidence.find("cache_qualification");
+    if (qualification_found == evidence.end()) {
+        abort_pipeline_proof_capture(
+            "persisted GPU cache qualification is absent");
+    }
 
     if (execution_id != out.alignment_execution_id
         || backend_pid != out.alignment_backend_pid
@@ -2294,6 +2317,147 @@ void capture_persisted_gpu_operation_evidence(
             != static_cast<std::int64_t>(operations.size())) {
         abort_pipeline_proof_capture(
             "persisted GPU operation evidence operation count is inconsistent");
+    }
+
+    std::string qualification_identity;
+    std::string qualification_seed_receipt_identity;
+    std::string qualification_device_uuid;
+    std::string qualification_pipeline_cache_uuid;
+    std::string qualification_seed_sha256;
+    std::string qualification_manifest_checksum;
+    std::int64_t qualification_api_version = 0;
+    std::int64_t qualification_driver_version = 0;
+    std::int64_t qualification_vendor_id = 0;
+    std::int64_t qualification_device_id = 0;
+    std::int64_t qualification_seed_size = 0;
+    bool cache_qualification_equations_valid = !expects_persisted_gpu;
+    if (expects_persisted_gpu) {
+        if (!qualification_found->is_object()
+            || !json_has_exact_keys(
+                *qualification_found,
+                kPersistedGpuCacheQualificationKeys)) {
+            abort_pipeline_proof_capture(
+                "persisted GPU cache qualification has the wrong exact schema");
+        }
+        const nlohmann::json& qualification = *qualification_found;
+        const std::int64_t qualification_version =
+            required_json_counter(qualification, "version");
+        qualification_identity = required_json_hex_identity(
+            qualification, "identity", 16);
+        const bool qualification_accepted =
+            required_json_boolean(qualification, "accepted");
+        const bool qualification_saturated =
+            required_json_boolean(qualification, "saturated");
+        const std::int64_t archive_count =
+            required_json_counter(qualification, "archive_count");
+        const std::int64_t archive_bytes =
+            required_json_counter(qualification, "archive_bytes");
+        (void)required_json_hex_identity(
+            qualification, "archive_checksum", 16);
+        const std::int64_t receipt_count =
+            required_json_counter(qualification, "receipt_count");
+        const std::int64_t hash_passes =
+            required_json_counter(qualification, "hash_passes");
+        const std::int64_t hashed_bytes =
+            required_json_counter(qualification, "hashed_bytes");
+        const std::int64_t private_files_created = required_json_counter(
+            qualification, "private_files_created");
+        const std::int64_t private_files_unlinked = required_json_counter(
+            qualification, "private_files_unlinked");
+        const std::int64_t live_private_paths = required_json_counter(
+            qualification, "live_private_paths");
+        const std::int64_t pipeline_filesystem_hash_passes =
+            required_json_counter(
+                qualification, "pipeline_filesystem_hash_passes");
+        const std::int64_t pipeline_filesystem_hashed_bytes =
+            required_json_counter(
+                qualification, "pipeline_filesystem_hashed_bytes");
+        const std::int64_t helper_protocol_version = required_json_counter(
+            qualification, "helper_protocol_version");
+        const std::string& helper_build_identity = required_json_text(
+            qualification, "helper_build_identity");
+        const std::string& helper_source =
+            required_json_text(qualification, "helper_source");
+        const std::int64_t helper_executable_size = required_json_counter(
+            qualification, "helper_executable_size");
+        (void)required_json_hex_identity(
+            qualification, "helper_executable_sha256", 64);
+        (void)required_json_hex_identity(
+            qualification, "helper_metal_registry_id", 16);
+        qualification_device_uuid = required_json_hex_identity(
+            qualification, "device_uuid", 32);
+        qualification_api_version =
+            required_json_counter(qualification, "api_version");
+        qualification_driver_version =
+            required_json_counter(qualification, "driver_version");
+        qualification_vendor_id =
+            required_json_counter(qualification, "vendor_id");
+        qualification_device_id =
+            required_json_counter(qualification, "device_id");
+        qualification_pipeline_cache_uuid = required_json_hex_identity(
+            qualification, "pipeline_cache_uuid", 32);
+        qualification_seed_receipt_identity = required_json_hex_identity(
+            qualification, "seed_receipt_identity", 16);
+        qualification_seed_sha256 = required_json_hex_identity(
+            qualification, "seed_sha256", 64);
+        qualification_seed_size =
+            required_json_counter(qualification, "seed_size");
+        qualification_manifest_checksum = required_json_hex_identity(
+            qualification, "manifest_checksum", 16);
+
+        const bool helper_build_valid = !helper_build_identity.empty()
+            && helper_build_identity.size() <= 128u
+            && std::all_of(
+                helper_build_identity.begin(), helper_build_identity.end(),
+                [](const unsigned char value) {
+                    return value >= 0x20u && value <= 0x7eu
+                        && value != static_cast<unsigned char>('"')
+                        && value != static_cast<unsigned char>('\\');
+                });
+        const bool numeric_driver_identity_valid =
+            qualification_api_version > 0
+            && qualification_driver_version > 0
+            && qualification_api_version
+                <= (std::numeric_limits<std::uint32_t>::max)()
+            && qualification_driver_version
+                <= (std::numeric_limits<std::uint32_t>::max)()
+            && qualification_vendor_id
+                <= (std::numeric_limits<std::uint32_t>::max)()
+            && qualification_device_id
+                <= (std::numeric_limits<std::uint32_t>::max)();
+        const std::string canonical_driver = numeric_driver_identity_valid
+            ? fmt::format(
+                "api={:08x};driver={:08x};vendor={:08x};device={:08x};pcuuid={}",
+                static_cast<std::uint32_t>(qualification_api_version),
+                static_cast<std::uint32_t>(qualification_driver_version),
+                static_cast<std::uint32_t>(qualification_vendor_id),
+                static_cast<std::uint32_t>(qualification_device_id),
+                qualification_pipeline_cache_uuid)
+            : std::string{};
+        cache_qualification_equations_valid = qualification_version == 2
+            && qualification_accepted && !qualification_saturated
+            && archive_count > 0 && archive_bytes > 0
+            && receipt_count == archive_count && hash_passes == 1
+            && hashed_bytes == archive_bytes
+            && private_files_created == archive_count
+            && private_files_unlinked == archive_count
+            && live_private_paths == 0
+            && pipeline_filesystem_hash_passes == 0
+            && pipeline_filesystem_hashed_bytes == 0
+            && helper_protocol_version == 2 && helper_build_valid
+            && helper_source == "installed-sibling"
+            && helper_executable_size > 0
+            && numeric_driver_identity_valid
+            && qualification_device_uuid == out.gpu_device_uuid
+            && canonical_driver == out.gpu_driver
+            && qualification_seed_sha256
+                == out.gpu_pipeline_cache_seed_sha256
+            && qualification_seed_size == out.gpu_pipeline_cache_seed_size
+            && qualification_manifest_checksum
+                == out.gpu_pipeline_cache_manifest_checksum;
+    } else if (!qualification_found->is_null()) {
+        abort_pipeline_proof_capture(
+            "non-persisted-GPU evidence retained cache qualification");
     }
 
     bool operation_equations_valid = true;
@@ -2357,6 +2521,9 @@ void capture_persisted_gpu_operation_evidence(
         const std::string& cache_token_identity =
             required_json_hex_identity(
                 operation, "cache_token_identity", 16);
+        const std::string& cache_qualification_identity =
+            required_json_hex_identity(
+                operation, "cache_qualification_identity", 16);
         const std::int64_t generation_id =
             required_json_counter(operation, "generation_id");
         const std::string& source_identity = required_json_hex_identity(
@@ -2397,7 +2564,7 @@ void capture_persisted_gpu_operation_evidence(
             environment, "manifest_checksum", 16);
 
         const bool numeric_driver_identity_valid = api_version > 0
-            && driver_version > 0 && vendor_id > 0 && device_id > 0
+            && driver_version > 0
             && api_version <= (std::numeric_limits<std::uint32_t>::max)()
             && driver_version <= (std::numeric_limits<std::uint32_t>::max)()
             && vendor_id <= (std::numeric_limits<std::uint32_t>::max)()
@@ -2662,10 +2829,22 @@ void capture_persisted_gpu_operation_evidence(
             && operation_identity == shape_operation_identity
             && query_operation_identity != shape_operation_identity
             && cache_token_identity == operation_identity
+            && cache_qualification_identity == qualification_identity
+            && seed_receipt_identity
+                == qualification_seed_receipt_identity
             && seed_receipt_matches && cold_load_matches
             && generation_id == out.persisted_generation_id
             && source_identity == out.persisted_source_identity
-            && source == "persisted_shape_v5";
+            && source == "persisted_shape_v5"
+            && device_uuid == qualification_device_uuid
+            && api_version == qualification_api_version
+            && driver_version == qualification_driver_version
+            && vendor_id == qualification_vendor_id
+            && device_id == qualification_device_id
+            && pipeline_cache_uuid == qualification_pipeline_cache_uuid
+            && seed_sha256 == qualification_seed_sha256
+            && seed_size == qualification_seed_size
+            && manifest_checksum == qualification_manifest_checksum;
         const bool publication_valid = expected_jobs > 0
             && proof_jobs == expected_jobs
             && consumed_jobs == expected_jobs
@@ -2709,9 +2888,8 @@ void capture_persisted_gpu_operation_evidence(
         && accepted_job_count == out.fully_attested_alignment_jobs
         && out.unattested_alignment_jobs == 0
         && output_coordinate_witness
+        && cache_qualification_equations_valid
         && operation_equations_valid && aggregate_cache_valid;
-    const bool expects_persisted_gpu = out.actual_backend == "vulkan_gpu"
-        && out.actual_target_index_source == "persisted";
     const bool exact_empty_non_gpu_evidence = !producer_accepted && complete
         && !saturated && dropped_operation_count == 0
         && operation_count == 0 && accepted_operation_count == 0
@@ -2755,12 +2933,12 @@ void capture_alignment_statement_stats(
     const it::rowset_t rows = it::query_rows(
         connection,
         "SELECT * FROM bioseq.last_alignment_execution_stats_v2();");
-    // This must be the very next SQL statement on the same backend.  Retain
+    // This must be the very next SQL statement on the same backend. Retain
     // its scalar value now, before any other diagnostic query can obscure the
-    // one-shot operation ledger bound to the v2 execution identity.
+    // one-shot cache-qualified ledger bound to the execution identity.
     const it::row_t persisted_gpu_operation_row = it::query_one(
         connection,
-        "SELECT bioseq.last_alignment_persisted_gpu_operation_evidence_v1();");
+        "SELECT bioseq.last_alignment_persisted_gpu_operation_evidence_v2();");
     if (rows.size() != kStageCount) {
         abort_pipeline_proof_capture(
             "alignment snapshot did not return exactly 20 stage rows");

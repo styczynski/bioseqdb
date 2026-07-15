@@ -2176,7 +2176,6 @@ struct PersistedGpuEnvironmentEvidence {
 
     [[nodiscard]] bool accepted() const noexcept {
         return api_version != 0u && driver_version != 0u
-            && vendor_id != 0u && device_id != 0u
             && seed_size != 0u && seed_size <= sql_bigint_value_max
             && manifest_checksum != 0u
             && std::any_of(
@@ -2281,13 +2280,13 @@ struct PersistedGpuCacheQualificationEvidence {
             && safe_text(
                 helper_build_identity, helper_build_identity_size)
             && safe_text(helper_source, helper_source_size)
-            && helper_source_text() == "installed_sibling"
+            && helper_source_text() == "installed-sibling"
             && helper_executable_size != 0u
             && helper_executable_size <= sql_bigint_value_max
             && nonzero(helper_executable_sha256)
             && helper_metal_registry_id != 0u
             && nonzero(device_uuid) && api_version != 0u
-            && driver_version != 0u && vendor_id != 0u && device_id != 0u
+            && driver_version != 0u
             && nonzero(pipeline_cache_uuid)
             && seed_receipt_identity != 0u && nonzero(seed_sha256)
             && seed_size != 0u && seed_size <= sql_bigint_value_max

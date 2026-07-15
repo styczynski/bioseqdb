@@ -492,12 +492,20 @@ TEST_CASE("alignment execution SRF is empty before the first published root",
         "SELECT (bioseq."
         "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
         == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() IS NULL)::int;")
+        == 1);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(last_alignment_stats(ctx).empty());
     REQUIRE(last_alignment_stats_v2(ctx).empty());
     REQUIRE(query_scalar_int(ctx,
         "SELECT (bioseq."
         "last_alignment_persisted_gpu_operation_evidence_v1() IS NULL)::int;")
+        == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() IS NULL)::int;")
         == 1);
 }
 
@@ -761,6 +769,14 @@ TEST_CASE("persisted GPU SQL evidence is exact-empty and immutable for completed
         "SELECT bioseq."
         "last_alignment_persisted_gpu_operation_evidence_v1()::text;");
     REQUIRE(second == first);
+    const std::string first_v2 = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()::text;");
+    const std::string second_v2 = query_scalar(ctx,
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()::text;");
+    REQUIRE(second_v2 == first_v2);
+    REQUIRE(first_v2 != first);
 
     const row_t proof = query_one(ctx,
         "WITH evidence AS MATERIALIZED ("
@@ -824,6 +840,53 @@ TEST_CASE("persisted GPU SQL evidence is exact-empty and immutable for completed
         "FROM evidence CROSS JOIN stats;");
     REQUIRE(proof.size() == 11u);
     for (const auto& assertion : proof) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t v2_proof = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2() AS value"
+        "), stats AS ("
+        " SELECT execution_id, backend_pid, database_oid, completed, partial,"
+        "        fully_drained"
+        " FROM bioseq.last_alignment_execution_stats_v2()"
+        " WHERE stage='query_sketch'"
+        ") SELECT "
+        "jsonb_typeof(value)='object', "
+        "(SELECT count(*) FROM jsonb_object_keys(value))=19 "
+        "AND value ?& ARRAY["
+        " 'schema','version','execution_id','backend_pid','database_oid',"
+        " 'completed','partial','fully_drained','accepted','complete',"
+        " 'saturated','dropped_operation_count','operation_count',"
+        " 'accepted_operation_count','complete_operation_count','job_count',"
+        " 'accepted_job_count','cache_qualification','operations']::text[], "
+        "value->>'schema'='bioseq.persisted_gpu_operation_evidence' "
+        "AND (value->>'version')::bigint=2, "
+        "(value->>'execution_id')::bigint=stats.execution_id "
+        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+        "AND (value->>'database_oid')::bigint=stats.database_oid, "
+        "(value->>'completed')::boolean=stats.completed "
+        "AND (value->>'partial')::boolean=stats.partial "
+        "AND (value->>'fully_drained')::boolean=stats.fully_drained, "
+        "NOT (value->>'accepted')::boolean "
+        "AND (value->>'complete')::boolean "
+        "AND NOT (value->>'saturated')::boolean, "
+        "(value->>'dropped_operation_count')::bigint=0 "
+        "AND (value->>'operation_count')::bigint=0 "
+        "AND (value->>'accepted_operation_count')::bigint=0 "
+        "AND (value->>'complete_operation_count')::bigint=0 "
+        "AND (value->>'job_count')::bigint=0 "
+        "AND (value->>'accepted_job_count')::bigint=0, "
+        "jsonb_typeof(value->'operations')='array' "
+        "AND jsonb_array_length(value->'operations')=0, "
+        "jsonb_typeof(value->'cache_qualification')='null', "
+        "(SELECT provolatile='v' AND proparallel='r' "
+        " FROM pg_proc WHERE oid='bioseq."
+        "last_alignment_persisted_gpu_operation_evidence_v2()'::regprocedure) "
+        "FROM evidence CROSS JOIN stats;");
+    REQUIRE(v2_proof.size() == 9u);
+    for (const auto& assertion : v2_proof) {
         REQUIRE(assertion.value_or("") == "t");
     }
 }

@@ -928,7 +928,8 @@ template<std::size_t N>
 }
 
 [[nodiscard]] std::string persisted_gpu_operation_evidence_json(
-		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+		const alignment_exec::AlignmentExecutionSnapshot& snapshot,
+		const bool include_cache_qualification_v2)
 {
 	const auto& ledger = snapshot.persisted_gpu_operation_evidence;
 	const auto& stats = snapshot.pipeline;
@@ -944,12 +945,28 @@ template<std::size_t N>
 	const bool complete = ledger_complete && pipeline_matches;
 	const bool saturated = ledger.saturated()
 		|| stats.operational.stats_saturated;
+	const auto* first_chunk = ledger.head();
+	const bioseq::pipeline_stats::PersistedGpuCacheQualificationEvidence*
+		cache_qualification = first_chunk == nullptr
+		? nullptr
+		: &first_chunk->operation().cache_qualification;
+	bool cache_qualification_complete = cache_qualification != nullptr
+		&& cache_qualification->accepted();
+	for (const auto* chunk = first_chunk; chunk != nullptr;
+		 chunk = chunk->next()) {
+		cache_qualification_complete = cache_qualification_complete
+			&& chunk->operation().cache_qualification
+				== *cache_qualification;
+	}
 	const bool accepted = requires_evidence && snapshot.completed
 		&& !snapshot.partial && snapshot.fully_drained && complete
-		&& !saturated && ledger.dropped_operation_count() == 0u;
+		&& !saturated && ledger.dropped_operation_count() == 0u
+		&& (!include_cache_qualification_v2
+			|| cache_qualification_complete);
 
 	std::string result =
-		R"({"schema":"bioseq.persisted_gpu_operation_evidence","version":1)";
+		R"({"schema":"bioseq.persisted_gpu_operation_evidence","version":)";
+	result += include_cache_qualification_v2 ? "2" : "1";
 	result.reserve(2048u + static_cast<std::size_t>(ledger.job_count()) * 1400u);
 	const auto append_unsigned = [&result](
 			const std::string_view key,
@@ -984,6 +1001,28 @@ template<std::size_t N>
 		result += fixed_hex_u64(value);
 		result += '"';
 	};
+	const auto append_text = [&result](
+			const std::string_view key,
+			const std::string_view value) {
+		constexpr std::string_view hex = "0123456789abcdef";
+		result += ",\"";
+		result.append(key);
+		result += "\":\"";
+		for (const unsigned char byte : value) {
+			if (byte == static_cast<unsigned char>('"')
+				|| byte == static_cast<unsigned char>('\\')) {
+				result += '\\';
+				result += static_cast<char>(byte);
+			} else if (byte < 0x20u || byte > 0x7eu) {
+				result += "\\u00";
+				result += hex[byte >> 4u];
+				result += hex[byte & 0x0fu];
+			} else {
+				result += static_cast<char>(byte);
+			}
+		}
+		result += '"';
+	};
 	append_signed("execution_id", snapshot.execution_id);
 	append_signed("backend_pid", snapshot.backend_pid);
 	append_unsigned("database_oid", snapshot.database_oid);
@@ -1005,6 +1044,77 @@ template<std::size_t N>
 	append_unsigned("job_count", ledger.job_count());
 	append_unsigned(
 		"accepted_job_count", ledger.accepted() ? ledger.job_count() : 0u);
+	if (include_cache_qualification_v2) {
+		result += R"(,"cache_qualification":)";
+		if (cache_qualification == nullptr) {
+			result += "null";
+		} else {
+			const auto& qualification = *cache_qualification;
+			result += R"({"version":)";
+			result += std::to_string(qualification.version);
+			append_hex("identity", qualification.identity);
+			append_bool("accepted", qualification.accepted());
+			append_bool("saturated", qualification.saturated);
+			append_unsigned("archive_count", qualification.archive_count);
+			append_unsigned("archive_bytes", qualification.archive_bytes);
+			append_hex("archive_checksum", qualification.archive_checksum);
+			append_unsigned("receipt_count", qualification.receipt_count);
+			append_unsigned("hash_passes", qualification.hash_passes);
+			append_unsigned("hashed_bytes", qualification.hashed_bytes);
+			append_unsigned(
+				"private_files_created",
+				qualification.private_files_created);
+			append_unsigned(
+				"private_files_unlinked",
+				qualification.private_files_unlinked);
+			append_unsigned(
+				"live_private_paths", qualification.live_private_paths);
+			append_unsigned(
+				"pipeline_filesystem_hash_passes",
+				qualification.pipeline_filesystem_hash_passes);
+			append_unsigned(
+				"pipeline_filesystem_hashed_bytes",
+				qualification.pipeline_filesystem_hashed_bytes);
+			append_unsigned(
+				"helper_protocol_version",
+				qualification.helper_protocol_version);
+			append_text(
+				"helper_build_identity",
+				qualification.helper_build_identity_text());
+			append_text(
+				"helper_source", qualification.helper_source_text());
+			append_unsigned(
+				"helper_executable_size",
+				qualification.helper_executable_size);
+			result += R"(,"helper_executable_sha256":")";
+			result += fixed_hex_bytes(
+				qualification.helper_executable_sha256);
+			result += '"';
+			append_hex(
+				"helper_metal_registry_id",
+				qualification.helper_metal_registry_id);
+			result += R"(,"device_uuid":")";
+			result += fixed_hex_bytes(qualification.device_uuid);
+			result += '"';
+			append_unsigned("api_version", qualification.api_version);
+			append_unsigned("driver_version", qualification.driver_version);
+			append_unsigned("vendor_id", qualification.vendor_id);
+			append_unsigned("device_id", qualification.device_id);
+			result += R"(,"pipeline_cache_uuid":")";
+			result += fixed_hex_bytes(qualification.pipeline_cache_uuid);
+			result += '"';
+			append_hex(
+				"seed_receipt_identity",
+				qualification.seed_receipt_identity);
+			result += R"(,"seed_sha256":")";
+			result += fixed_hex_bytes(qualification.seed_sha256);
+			result += '"';
+			append_unsigned("seed_size", qualification.seed_size);
+			append_hex(
+				"manifest_checksum", qualification.manifest_checksum);
+			result += '}';
+		}
+	}
 	result += R"(,"operations":[)";
 	bool first_operation = true;
 	for (const auto* chunk = ledger.head(); chunk != nullptr;
@@ -1048,6 +1158,11 @@ template<std::size_t N>
 		result += ']';
 		append_hex("seed_receipt_identity", operation.seed_receipt_identity);
 		append_hex("cache_token_identity", cache.token_identity);
+		if (include_cache_qualification_v2) {
+			append_hex(
+				"cache_qualification_identity",
+				operation.cache_qualification.identity);
+		}
 		append_unsigned("generation_id", operation.generation_id);
 		append_hex("source_identity", operation.source_identity);
 		append_hex("cold_load_identity", operation.cold_load_identity);
@@ -2317,7 +2432,24 @@ Datum bioseq_last_alignment_persisted_gpu_operation_evidence_v1(
 		*last_completed_alignment_evidence_snapshot;
 	(void)validate_alignment_snapshot_environment(snapshot);
 	const std::string encoded =
-		persisted_gpu_operation_evidence_json(snapshot);
+		persisted_gpu_operation_evidence_json(snapshot, false);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+/* Cache-qualified v2 persisted Shape-V5 GPU operation/job causal ledger. */
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_last_alignment_persisted_gpu_operation_evidence_v2);
+Datum bioseq_last_alignment_persisted_gpu_operation_evidence_v2(
+		PG_FUNCTION_ARGS) {
+	if (!last_completed_alignment_evidence_snapshot.has_value()) {
+		PG_RETURN_NULL();
+	}
+	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+		*last_completed_alignment_evidence_snapshot;
+	(void)validate_alignment_snapshot_environment(snapshot);
+	const std::string encoded =
+		persisted_gpu_operation_evidence_json(snapshot, true);
 	PG_RETURN_DATUM(DirectFunctionCall1(
 		jsonb_in, CStringGetDatum(encoded.c_str())));
 }
