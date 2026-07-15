@@ -3067,6 +3067,7 @@ TEST_CASE("DOC0372 PostgreSQL finalizes SIMD chaining policy after the last over
 
     SECTION("RMQ and Vulkan overrides never carry the bounded SIMD policy") {
         exec_sql(ctx, "SET bioseq.aligner.chaining_algorithm = 'simd_mm2';");
+        exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
         for (const int ordinal : {2, 3}) {
             CAPTURE(ordinal);
             const std::string sql = fmt::format(
@@ -3079,6 +3080,9 @@ TEST_CASE("DOC0372 PostgreSQL finalizes SIMD chaining policy after the last over
             REQUIRE_FALSE(plan_contains(
                 plan,
                 "simd_chaining_policy: bounded_batch_approximate"));
+            if (ordinal == 3) {
+                REQUIRE(plan_contains(plan, "| ChainStage: Vulkan tiled DP"));
+            }
         }
     }
 }
