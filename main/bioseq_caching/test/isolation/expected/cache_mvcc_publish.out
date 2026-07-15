@@ -1,0 +1,56 @@
+Parsed test spec with 4 sessions
+
+starting permutation: mvcc_arm mvcc_producer_mode mvcc_produce mvcc_paused mvcc_write mvcc_release mvcc_consumer_mode mvcc_consume mvcc_state
+reset_stats
+-----------
+           
+(1 row)
+
+step mvcc_arm: SELECT bioseq_cache_test.arm_pause('before_terminal_publish');
+arm_pause
+---------
+         
+(1 row)
+
+step mvcc_producer_mode: SET bioseq.query_cache_optimisation_mode = 'same';
+step mvcc_produce: 
+  SELECT count(*) AS rows, sum(id) AS id_sum FROM qc_mvcc;
+ <waiting ...>
+step mvcc_paused: SELECT bioseq_cache_test.wait_until_paused('before_terminal_publish');
+wait_until_paused
+-----------------
+                 
+(1 row)
+
+step mvcc_write: INSERT INTO qc_mvcc VALUES (4, 'committed');
+step mvcc_release: SELECT bioseq_cache_test.release_pause('before_terminal_publish');
+release_pause
+-------------
+             
+(1 row)
+
+step mvcc_produce: <... completed>
+rows|id_sum
+----+------
+   3|     6
+(1 row)
+
+step mvcc_consumer_mode: SET bioseq.query_cache_optimisation_mode = 'same';
+step mvcc_consume: 
+  SELECT count(*) AS rows, sum(id) AS id_sum FROM qc_mvcc;
+
+rows|id_sum
+----+------
+   4|    10
+(1 row)
+
+step mvcc_state: 
+  SELECT count(*) FILTER (WHERE state = 'FAILED') AS failed,
+         count(*) FILTER (WHERE state = 'COMPLETE') AS complete
+  FROM bioseq_cache_test.entry_states();
+
+failed|complete
+------+--------
+     1|       1
+(1 row)
+

@@ -1,0 +1,21 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<section class="hero">
+  <p class="eyebrow">{{ page.eyebrow }}</p>
+  <h1>{{ page.headline }}</h1>
+  <p class="lede">{{ page.lede }}</p>
+  <p class="hero-actions">
+    <a class="button primary" href="{{ nav.documentation }}">Read the docs</a>
+    <a class="button" href="{{ nav.tutorials }}">See the tutorials</a>
+  </p>
+  <p class="install"><code>{{ page.install }}</code></p>
+</section>
+<section class="landing-reference" aria-labelledby="landing-ref-h">
+  <h2 id="landing-ref-h">Explore the reference</h2>
+  <ul class="card-grid">
+    <li class="card"><a href="{{ nav.reference }}">C++ and SQL API reference</a></li>
+    <li class="card"><a href="{{ nav.tutorials }}">Tutorials</a></li>
+    <li class="card"><a href="{{ nav.documentation }}">Documentation home</a></li>
+  </ul>
+</section>
+{% endblock %}

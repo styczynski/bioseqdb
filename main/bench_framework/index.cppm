@@ -48,7 +48,9 @@ module;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <exception>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -56,6 +58,7 @@ module;
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <span>
@@ -63,7 +66,9 @@ module;
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <sys/stat.h>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
@@ -183,6 +188,13 @@ struct ConfigValue {
 /// Per-algorithm parameter map: param_name -> value (with defaults filled in).
 using ParamMap = std::map<std::string, ConfigValue>;
 
+/// Framework-resolved execution tuple exposed read-only to `on_input` through
+/// RunConstraints after matrix expansion and `cases=` pruning.
+struct ResolvedExecutionTuple {
+    std::string algorithm_name{};
+    ParamMap params{};
+};
+
 /**
  * @brief Resource budget hints returned by the user's resource estimator.
  *
@@ -211,6 +223,13 @@ struct RunConstraints {
     /// flight on this batch. Released as soon as the loop exits.
     /// Default 0 = no reservation.
     std::size_t extra_memory = 0;
+    /// Framework-owned, stable-order execution tuples that will actually run
+    /// against this batch's cached Input. The framework fills this after
+    /// matrix expansion and `cases=` pruning, replacing any estimator-provided
+    /// contents before `on_input` observes the value. Input builders may use
+    /// it to avoid preparing algorithm/policy-specific untimed fixtures for
+    /// rows that cannot run in this batch.
+    std::vector<ResolvedExecutionTuple> execution_tuples{};
 };
 
 /**
@@ -223,10 +242,37 @@ struct ErasedBenchmark {
     std::string title;
     std::string benchmark_key;
     std::string config_path;
+    bool raw_samples_enabled = false;
     /// Owns the typed lambdas + iteration loop. Invoked once by `run()`
     /// after concurrency arbitration.
     std::function<void(struct BenchmarkContext&)> execute;
 };
+
+/// Test-only process-local fault seam for the durable raw-evidence syscalls.
+/// Production callers leave this at `none`; unlike the removed environment
+/// variable, this cannot be enabled accidentally by an inherited process
+/// environment. Tests must reset the seam after each injected run.
+enum class RawEvidenceIoFaultForTesting : std::uint8_t {
+    none,
+    short_write,
+    partial_write_failure,
+    sync_failure,
+};
+
+void set_raw_evidence_io_fault_for_testing(
+    RawEvidenceIoFaultForTesting fault) noexcept;
+
+/// Test-only corruption seam for proving paired schedule evidence fails
+/// closed. It changes only the retained evidence coordinates after the real
+/// scheduler has selected the correct execution order.
+enum class PairedScheduleEvidenceFaultForTesting : std::uint8_t {
+    none,
+    wrong_shuffle_seed,
+    wrong_first_tuple_order_position,
+};
+
+void set_paired_schedule_evidence_fault_for_testing(
+    PairedScheduleEvidenceFaultForTesting fault) noexcept;
 
 namespace detail {
 
@@ -248,8 +294,11 @@ namespace detail {
  * captured callable objects must be safe to invoke concurrently across
  * batches (typically pure functions of their arguments).
  *
- * `on_estimate_resources`, `on_input`, `on_cleanup`, and `on_evaluate`
- * MUST NOT throw — the framework does not catch user exceptions.
+ * `on_estimate_resources` MUST NOT throw because it also runs on the driver
+ * during enqueue. Worker-side callback failures are caught at the scheduler
+ * boundary: independent batches drain, the original exception is rethrown at
+ * the explicit join, and `run()` writes completed samples as a failed partial
+ * report instead of allowing `~BatchScheduler() noexcept` to terminate.
  *
  * @param title             Human-readable label echoed in the report's `title` field.
  * @param benchmark_key     Unique key used (a) to look up the matching block in
@@ -276,7 +325,10 @@ namespace detail {
  *                          `Input` instance. Must not throw.
  * @param on_run            Runs the algorithm. Wraps the timing window for the
  *                          built-in `wall_clock_ns` metric. Called sequentially
- *                          inside one batch, concurrently across batches.
+ *                          inside one batch, concurrently across batches. An
+ *                          escaped exception aborts the current batch and is
+ *                          owned by the scheduler until the explicit join;
+ *                          it never first emerges from scheduler destruction.
  * @param on_evaluate       Returns evaluation metrics computed from the algorithm
  *                          output. Receives the same `Input` that was fed to
  *                          `on_run` so the evaluator can run an independent
@@ -322,7 +374,12 @@ template<typename Input, typename Output>
     std::function<void(std::string_view data_dir,
                        std::string_view test_case_name,
                        simdjson::dom::element test_case_data,
-                       const Input& input)> on_cleanup = {});
+                       const Input& input)> on_cleanup = {},
+    std::function<std::string(std::string_view algorithm_name,
+                              const ParamMap& params,
+                              const Input& input,
+                              const Output& output)>
+        serialize_raw_sample_payload = {});
 
 /**
  * @brief Run all benchmarks. Returns 0 on success, 1 if any rule violated
@@ -352,6 +409,27 @@ template<typename... Benchmarks>
 // ---------------------------------------------------------------------------
 
 namespace bioseq::bench_framework {
+
+namespace detail {
+inline std::atomic<RawEvidenceIoFaultForTesting>
+    raw_evidence_io_fault_for_testing{
+        RawEvidenceIoFaultForTesting::none};
+inline std::atomic<PairedScheduleEvidenceFaultForTesting>
+    paired_schedule_evidence_fault_for_testing{
+        PairedScheduleEvidenceFaultForTesting::none};
+}  // namespace detail
+
+void set_raw_evidence_io_fault_for_testing(
+        const RawEvidenceIoFaultForTesting fault) noexcept {
+    detail::raw_evidence_io_fault_for_testing.store(
+        fault, std::memory_order_release);
+}
+
+void set_paired_schedule_evidence_fault_for_testing(
+        const PairedScheduleEvidenceFaultForTesting fault) noexcept {
+    detail::paired_schedule_evidence_fault_for_testing.store(
+        fault, std::memory_order_release);
+}
 
 /// Canonical compile-time profiler args used by the framework. Timing-only
 /// is enough for `wall_clock_ns`; the framework does not need PMU counters
@@ -572,15 +650,26 @@ inline constexpr std::array<BuiltinMetricEntry, 22> kBuiltinMetricRegistry{ {
     return std::nullopt;
 }
 
-/// Match expression — picks a subset of execution tuples by algorithm key
-/// and a partial parameter assignment. Empty `match` map means "any tuple
-/// for this algorithm".
+/// Match expression — picks a subset of execution tuples by algorithm key,
+/// partial parameter assignment, and optional source coordinates. Empty
+/// `match` means "any tuple for this algorithm"; empty `test_case` and
+/// `region` mean every configured test case and `all_regions`, respectively.
+/// Keeping the source coordinates on each side lets one within-run rule
+/// compare two differently named instrumentation regions without deriving or
+/// replacing either raw metric in the report.
 struct RuleSelector {
     std::string algorithm_key;
     ParamMap    match{};
+    std::string test_case{};
+    std::string region{};
 };
 
 struct RuleComparator {
+    enum class PairingMode : std::uint8_t {
+        independent_aggregates,
+        by_iteration_ratio,
+    };
+
     CompareOp op = CompareOp::Equal;
     double    threshold_pct = 0.0;
     double    tolerance_pct = 0.0;
@@ -589,6 +678,23 @@ struct RuleComparator {
     /// median) for backward-compatibility with pre-V5 rules that
     /// hardcoded median behaviour.
     Aggregate aggregate = Aggregate::P50;
+    /// The historical/default rule path reduces LHS and RHS independently.
+    /// Opt-in paired rules instead build one LHS/RHS ratio for each logical
+    /// repeat and reduce that ratio vector. This removes run-position drift
+    /// from latency comparisons when the scheduler is repetition-major.
+    PairingMode pairing = PairingMode::independent_aggregates;
+    /// Reference ratio used as the paired comparator's RHS. Keeping this
+    /// separate from `tolerance_pct` makes a rule state "report_76 ratio R
+    /// with N% relative noise" directly, including baselines greater than 1.
+    double paired_baseline = 1.0;
+    bool paired_baseline_explicit = false;
+    /// Diagnostic rules still emit findings/evidence but do not fail the
+    /// process. Defaults true so every historical rule remains authoritative.
+    bool blocking = true;
+    /// Number of leading logical repeats excluded from a paired ratio. The
+    /// raw samples remain intact, so repeat zero can be reported separately
+    /// as first-repeat evidence while steady-state comparison starts at one.
+    std::size_t warmup_repetitions = 0;
 };
 
 struct Rule {
@@ -681,12 +787,18 @@ struct TestCaseSpec {
 };
 
 struct BenchmarkConfig {
+    enum class IterationOrderMode : std::uint8_t {
+        item_major,
+        interleaved_seeded,
+    };
     std::string config_path;
     std::string benchmark_key;
     std::string description;
     bool fast = false;
     ConcurrencyOpts concurrency{};
     bool by_regions = false;
+    IterationOrderMode iteration_order = IterationOrderMode::item_major;
+    std::uint64_t iteration_order_seed = 0;
     /// Tag labels for `--filter tags=...` selection. REQUIRED in the config
     /// JSON (may be an empty array). Order preserved as declared; duplicates
     /// allowed but meaningless. A benchmark with an empty `tags` list can
@@ -701,11 +813,110 @@ struct BenchmarkConfig {
     std::map<std::string, AlgorithmSchema> algorithm_schemas{};
     /// Metrics declared by this benchmark. Iteration order preserved.
     std::vector<MetricSpec> metrics{};
+
+    /// Optional fail-closed acceptance contract for benchmarks whose result is
+    /// only meaningful when the complete declared comparison matrix ran.  The
+    /// algorithm list names exact report rows (one expanded tuple per name),
+    /// while the test-case map fixes the exact iteration count for each row.
+    /// An empty algorithm list keeps the historical permissive behaviour.
+    struct AcceptanceContract {
+        struct NamedRegionSampleMultiplicity {
+            std::string algorithm{};
+            std::string test_case{};
+            std::string region{};
+            std::string metric{};
+            std::size_t exact_samples = 0;
+
+            [[nodiscard]] auto coordinate() const noexcept {
+                return std::tie(algorithm, test_case, region, metric);
+            }
+        };
+
+        std::vector<std::string> exact_algorithm_rows{};
+        std::map<std::string, std::size_t> exact_test_case_iterations{};
+        bool require_named_region_iteration_coverage = false;
+        /// Historical descriptor-weighted total. For every coordinate the
+        /// total must divide by its accepted iteration count; that quotient is
+        /// the exact raw descriptor count required in each logical iteration.
+        std::vector<NamedRegionSampleMultiplicity>
+            exact_named_region_sample_multiplicities{};
+
+        [[nodiscard]] bool enabled() const noexcept {
+            return !exact_algorithm_rows.empty();
+        }
+    } acceptance{};
 };
 
 struct ExecutionTuple {
     std::string algorithm_name;
     ParamMap    params{};      // every parameter resolved (declared or defaulted)
+};
+
+/// Exact scheduler coordinates observed by one completed Cell iteration.
+/// Paired-rule evidence records these values rather than reconstructing the
+/// configured shuffle after the run, so a malformed execution order cannot be
+/// presented as if it followed the requested interleaved schedule.
+struct IterationScheduleSample {
+    std::size_t repeat = 0;
+    std::size_t order_position = 0;
+    std::uint64_t shuffle_seed = 0;
+};
+
+/// Fully resolved source route for one side of a paired named-stage rule.
+/// The tuple index and complete parameter map distinguish two expanded tuples
+/// that happen to share an algorithm name.
+struct PairedRuleRouteEvidence {
+    std::string algorithm{};
+    ParamMap params{};
+    std::size_t tuple_index = 0;
+    std::string test_case{};
+    std::string region{};
+    std::string metric{};
+};
+
+/// Lossless inputs used to form one logical repeat ratio. Named regions may
+/// contain multiple same-name descriptors, so the descriptor samples are
+/// retained beside the reduced logical values used by the comparator.
+struct PairedRuleRepeatEvidence {
+    std::size_t repeat = 0;
+    bool included_after_warmup = false;
+    std::vector<double> numerator_samples{};
+    std::vector<double> denominator_samples{};
+    bool numerator_value_present = false;
+    bool denominator_value_present = false;
+    double numerator_value = 0.0;
+    double denominator_value = 0.0;
+    bool ratio_present = false;
+    double ratio = 0.0;
+    bool numerator_schedule_present = false;
+    bool denominator_schedule_present = false;
+    IterationScheduleSample numerator_schedule{};
+    IterationScheduleSample denominator_schedule{};
+    bool schedule_identity_matches = false;
+};
+
+/// Reconstructable result of one resolved paired named-stage gate. This is the
+/// single evidence object shared by the final report and the crash-resilient
+/// debug JSONL stream; neither writer derives its own ratios or identities.
+struct PairedRuleEvidence {
+    std::string config_path{};
+    std::string benchmark_key{};
+    std::string rule_name{};
+    std::string test_case{};
+    std::string metric{};
+    RuleComparator comparator{};
+    PairedRuleRouteEvidence numerator_route{};
+    PairedRuleRouteEvidence denominator_route{};
+    std::size_t benchmark_index = 0;
+    std::size_t test_case_index = 0;
+    std::size_t group_index = 0;
+    std::string schedule_mode{};
+    std::uint64_t configured_schedule_seed = 0;
+    std::vector<PairedRuleRepeatEvidence> repeats{};
+    std::array<bool, 2> inputs_present{false, false};
+    bool observed_paired_ratio_present = false;
+    double observed_paired_ratio = 0.0;
+    bool accepted = false;
 };
 
 /// One (test_case × group × execution_tuple) cell holding iteration
@@ -732,6 +943,13 @@ struct ExecutionTuple {
 /// mutex around its writes. (Pre-V11 needed `samples_mu` because the
 /// flat work-unit list let two threads race the same cell across
 /// concurrent iterations of a single tuple — V11 deletes that path.)
+/// Raw descriptor emission counts for one completed logical iteration:
+/// region name -> metric name -> number of same-name descriptor samples.
+/// Unlike the aggregate `samples` vectors this retains iteration boundaries,
+/// which strict acceptance needs to reject skewed historical-P50 weighting.
+using NamedRegionIterationSampleCounts =
+    std::map<std::string, std::map<std::string, std::size_t>>;
+
 struct Cell {
     const TestCaseSpec*  test_case = nullptr;
     const ExecutionTuple* tuple = nullptr;
@@ -746,12 +964,35 @@ struct Cell {
     /// upper-bound + 1). Cached on every cell so the writer does not
     /// have to re-derive it from the global state.
     std::size_t          group_count = 1;
+    /// Stable index in BenchmarkExecutionState::execution_tuples. Required
+    /// because distinct parameter tuples may share one algorithm name.
+    std::size_t          tuple_index = 0;
 
     /// region_name -> metric_name -> sample values. "all_regions" is a
     /// synthetic bucket holding the iteration-level wall_clock_ns and every
     /// counter / evaluation metric. Per-region buckets only appear when
     /// `BenchmarkConfig::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
+    /// Named instrumentation buckets may contain more than one descriptor
+    /// with the same name.  Keep their raw samples unchanged for historical
+    /// ratio compatibility, but separately count at most one contribution per
+    /// (iteration, region name, metric).  Strict acceptance can therefore
+    /// prove all scheduled iterations contributed without assuming raw sample
+    /// count == iteration count.
+    std::map<std::string, std::map<std::string, std::size_t>>
+        named_region_iteration_contributions{};
+    /// One entry per completed local iteration when strict named-region
+    /// acceptance is active. The outer vector supplies collision-free local
+    /// ordinals; group merging rebases them by concatenating in group-index
+    /// order instead of treating each group's local repeat 0 as the same run.
+    std::vector<NamedRegionIterationSampleCounts>
+        named_region_iteration_sample_counts{};
+    /// Actual scheduler coordinates for every completed iteration when this
+    /// benchmark contains at least one paired named-stage rule.
+    std::vector<IterationScheduleSample> iteration_schedule_samples{};
+    /// Lossless benchmark-specific JSON objects, one per completed
+    /// iteration. Written only by this cell's single batch worker.
+    std::vector<std::string> raw_samples{};
 
     Cell() = default;
     Cell(const Cell&) = delete;
@@ -785,6 +1026,12 @@ struct BenchmarkExecutionState {
     std::vector<TestCaseSpec>           test_cases{};
     std::vector<ExecutionTuple>         execution_tuples{};
     std::vector<std::unique_ptr<Cell>>  cells{};
+    /// Every resolved paired named-stage gate, including accepted gates. The
+    /// report writer emits this vector and the debug sink streams the same
+    /// objects as soon as post-run evaluation completes.
+    std::vector<PairedRuleEvidence>     paired_rule_evidence{};
+    bool                                raw_samples_enabled = false;
+    std::size_t                         driver_benchmark_index = 0;
     /// Per-case (per matrix.over key) debug progress for `--debug`. Keyed by
     /// ExecutionTuple::algorithm_name (== case name). std::map keeps stable
     /// references; populated before the parallel run, read-only structure
@@ -881,6 +1128,19 @@ struct Violation {
     /// Index 0 = LHS aggregate; index 1 = RHS aggregate. Mirrors the spec's
     /// `"args": [...]` field on the output.
     std::array<double, 2> args{0.0, 0.0};
+    /// False marks a selected source that is missing, explicitly not measured,
+    /// or contains a non-finite sample. Unavailable rule inputs are themselves
+    /// violations, preventing hardware skips, NaNs, or a renamed/bypassed
+    /// instrumented stage from silently disabling its gate.
+    std::array<bool, 2> args_present{true, true};
+    /// Independent rules report [lhs aggregate, rhs aggregate]. Paired rules
+    /// report [aggregate(lhs[i] / rhs[i]), configured paired baseline]. Keep
+    /// the mode explicit so
+    /// report consumers never mistake a paired ratio for a source duration.
+    RuleComparator::PairingMode comparison_mode =
+        RuleComparator::PairingMode::independent_aggregates;
+    std::size_t warmup_repetitions = 0;
+    bool blocking = true;
 };
 
 /// Comparator payload for a regression rule. `threshold%` is forbidden by
@@ -982,6 +1242,7 @@ struct ValidationDiag;
 class  MemoryBudget;
 class  BatchScheduler;
 class  DebugReportSink;
+class  DurableRawEvidenceSink;
 
 }  // namespace detail
 
@@ -1036,6 +1297,9 @@ struct BenchmarkContext {
     /// Crash-resilient JSONL event sink for `--debug`. nullptr == no debug
     /// stream. Points at run_impl's `DebugReportSink` (outlives every closure).
     detail::DebugReportSink*                        debug_sink = nullptr;
+    /// Durable raw sidecar sink. A raw-enabled iteration is incomplete until
+    /// its append and fsync succeed.
+    detail::DurableRawEvidenceSink*                 raw_evidence_sink = nullptr;
 };
 
 // ----------------- ConfigValue::from_simdjson -----------------
@@ -1399,6 +1663,12 @@ struct ScheduledBatch {
     /// Memory reservation requested by `on_estimate_resources`.
     std::size_t      base_bytes        = 0;
     std::size_t      extra_bytes       = 0;
+    /// Checked once on the enqueueing thread from `base_bytes + extra_bytes`.
+    /// Keeping the canonical total here prevents the scheduler's sort,
+    /// admission, finish, and diagnostic paths from independently repeating
+    /// potentially-overflowing arithmetic.  Enqueue rejects any value that
+    /// cannot be represented by this signed accounting type.
+    std::int64_t     total_bytes       = 0;
     /// Body executed by the TBB task pool. Wrapped at admission time
     /// by an enclosing lambda that owns a `ScopedSchedulerFinish` so
     /// the reservation always releases on every return path.
@@ -1439,7 +1709,8 @@ class BatchScheduler;
 /// RAII guard installed by the scheduler around every enqueued body.
 /// `~ScopedSchedulerFinish` calls `BatchScheduler::notify_batch_finished`
 /// so any return path (normal, diagnostic-emit, exception inside
-/// `cpptrace::try_catch` catchers) decrements reservations exactly once.
+/// `cpptrace::try_catch` catchers, or an escaped worker exception captured by
+/// the scheduler wrapper) decrements reservations exactly once.
 struct ScopedSchedulerFinish {
     BatchScheduler* scheduler;
     std::size_t     scheduler_id;
@@ -1482,7 +1753,30 @@ public:
         running_.store(false, std::memory_order_release);
         cv_.notify_all();
         if (thread_.joinable()) thread_.join();
-        tg_.wait();      // tg_'s dtor would throw missing_wait otherwise
+        // The normal owner calls wait_for_completion(), whose non-noexcept
+        // boundary is the one and only place allowed to publish a worker
+        // exception. Keep the defensive destructor drain (TBB requires a
+        // wait before task_group destruction), but never let an unexpected
+        // task-group exception turn noexcept destruction into std::terminate.
+        // Worker bodies themselves are caught and stored by the admission
+        // wrapper below, so this is only a last-resort TBB guard.
+        try {
+            (void)tg_.wait();
+        } catch (const std::exception& error) {
+            std::fprintf(stderr,
+                "[bench_framework] BatchScheduler destructor suppressed an "
+                "unexpected task-group exception after the explicit join "
+                "boundary was bypassed: %s\n",
+                error.what());
+            std::fflush(stderr);
+        } catch (...) {
+            std::fputs(
+                "[bench_framework] BatchScheduler destructor suppressed an "
+                "unexpected non-std task-group exception after the explicit "
+                "join boundary was bypassed\n",
+                stderr);
+            std::fflush(stderr);
+        }
     }
 
     BatchScheduler(const BatchScheduler&) = delete;
@@ -1516,15 +1810,44 @@ public:
     }
 
     /// Block until every enqueued batch has either completed or been
-    /// aborted. Called once by `run_impl` after the outer benchmark
+    /// aborted, join the TBB task group, then rethrow the first captured
+    /// worker exception. Called once by `run_impl` after the outer benchmark
     /// loop joins (which, given `wait_for_benchmark` is also called
-    /// per-closure, should already be a no-op — kept for defence in
-    /// depth).
-    void wait_for_completion() noexcept {
-        std::unique_lock<std::mutex> guard(mu_);
-        cv_.wait(guard, [this] {
-            return total_finished_ >= total_enqueued_;
-        });
+    /// per-closure, should already be a no-op for lifetime purposes). This is
+    /// intentionally non-noexcept: it is the worker-error ownership boundary.
+    void wait_for_completion() {
+        {
+            std::unique_lock<std::mutex> guard(mu_);
+            cv_.wait(guard, [this] {
+                return total_finished_ >= total_enqueued_;
+            });
+        }
+
+        // `notify_batch_finished` runs from a scope guard just before its TBB
+        // wrapper returns. Waiting on the counters alone can therefore beat
+        // the wrapper by a few instructions. Join the task group here, at a
+        // deliberately non-noexcept boundary, before observing the captured
+        // worker error. Because every worker body is caught below, TBB has no
+        // user exception of its own to defer into BatchScheduler's destructor.
+        (void)tg_.wait();
+
+        std::exception_ptr worker_exception;
+        {
+            std::lock_guard<std::mutex> guard(mu_);
+            worker_exception = first_worker_exception_;
+        }
+        if (worker_exception != nullptr) {
+            std::rethrow_exception(worker_exception);
+        }
+    }
+
+    /// Number of worker bodies that escaped through the user callback seam.
+    /// The explicit join rethrows the first exception; this count lets the
+    /// report diagnostic disclose whether further failures were captured
+    /// while the scheduler drained the remaining independent batches.
+    [[nodiscard]] std::size_t worker_exception_count() const noexcept {
+        std::lock_guard<std::mutex> guard(mu_);
+        return worker_exception_count_;
     }
 
     /// Called from the body's `ScopedSchedulerFinish` destructor.
@@ -1543,11 +1866,12 @@ public:
                 });
             DEBUG_ASSERT(it != running_batches_.end(),
                 "BatchScheduler::notify_batch_finished: id not found");
-            const auto need = static_cast<std::int64_t>(
-                                   it->base_bytes + it->extra_bytes);
-            reserved_bytes_ -= need;
-            DEBUG_ASSERT(reserved_bytes_ >= 0,
+            const auto need = it->total_bytes;
+            DEBUG_ASSERT(need >= 0,
+                "BatchScheduler stored a negative total byte requirement");
+            DEBUG_ASSERT(reserved_bytes_ >= need,
                 "BatchScheduler reserved_bytes_ underflow");
+            reserved_bytes_ -= need;
             decrement_or_erase_locked(active_bench_lock_holder_,
                                        it->benchmark_index, it->bench_lock);
             decrement_or_erase_locked(running_per_benchmark_,
@@ -1635,23 +1959,30 @@ private:
         // §4.17).
         std::stable_sort(pending_.begin(), pending_.end(),
             [](const ScheduledBatch& lhs, const ScheduledBatch& rhs) noexcept {
-                return (lhs.base_bytes + lhs.extra_bytes)
-                     < (rhs.base_bytes + rhs.extra_bytes);
+                return lhs.total_bytes < rhs.total_bytes;
             });
 
         auto pending_iter = pending_.begin();
         while (pending_iter != pending_.end()) {
-            const auto need = static_cast<std::uint64_t>(
-                                   pending_iter->base_bytes
-                                 + pending_iter->extra_bytes);
-            const bool fits = need <= available;
+            const bool total_nonnegative = pending_iter->total_bytes >= 0;
+            DEBUG_ASSERT(total_nonnegative,
+                "BatchScheduler stored a negative total byte requirement");
+            const auto need = total_nonnegative
+                ? static_cast<std::uint64_t>(pending_iter->total_bytes)
+                : (std::numeric_limits<std::uint64_t>::max)();
+            const bool signed_accounting_fits =
+                total_nonnegative && reserved_bytes_ >= 0
+                && pending_iter->total_bytes
+                    <= (std::numeric_limits<std::int64_t>::max)()
+                        - reserved_bytes_;
+            const bool fits = need <= available && signed_accounting_fits;
             const bool bench_ok = bench_lock_admissible_locked(*pending_iter);
             const bool concurrency_ok =
                 concurrency_admissible_locked(*pending_iter);
 
             if (fits && bench_ok && concurrency_ok) {
                 available -= need;
-                reserved_bytes_ += static_cast<std::int64_t>(need);
+                reserved_bytes_ += pending_iter->total_bytes;
                 if (pending_iter->bench_lock) {
                     ++active_bench_lock_holder_[pending_iter->benchmark_index];
                 }
@@ -1673,7 +2004,11 @@ private:
                 const auto running_id = running_ptr->scheduler_id;
                 arena_.enqueue([this, running_ptr, running_id] {
                     ScopedSchedulerFinish finish_guard{this, running_id};
-                    running_ptr->body();
+                    try {
+                        running_ptr->body();
+                    } catch (...) {
+                        capture_worker_exception(std::current_exception());
+                    }
                 }, tg_);
             } else {
                 // Update idle clock for the rejected batch. While
@@ -1737,13 +2072,41 @@ private:
     [[nodiscard]] bool bench_lock_admissible_locked(
         const ScheduledBatch& batch) const noexcept
     {
-        if (active_bench_lock_holder_.empty()) return true;
-        // Some benchmark currently holds the bench-lock. Only
-        // batches from THE SAME benchmark may join it. (This
-        // preserves V12's "isolate from siblings" semantics while
-        // permitting intra-benchmark parallelism.)
-        const auto& holder_pair = *active_bench_lock_holder_.begin();
-        return batch.benchmark_index == holder_pair.first;
+        if (!active_bench_lock_holder_.empty()) {
+            // A lock holder is one globally exclusive batch. No second locked
+            // or unlocked batch may join it, including work from the same
+            // benchmark.
+            return false;
+        }
+
+        const auto oldest_pending_lock = std::min_element(
+            pending_.begin(), pending_.end(),
+            [](const ScheduledBatch& lhs,
+               const ScheduledBatch& rhs) noexcept {
+                const auto lhs_id = lhs.bench_lock
+                    ? lhs.scheduler_id
+                    : (std::numeric_limits<std::size_t>::max)();
+                const auto rhs_id = rhs.bench_lock
+                    ? rhs.scheduler_id
+                    : (std::numeric_limits<std::size_t>::max)();
+                return lhs_id < rhs_id;
+            });
+        const bool has_pending_lock = oldest_pending_lock != pending_.end()
+            && oldest_pending_lock->bench_lock;
+        const std::size_t lock_id = has_pending_lock
+            ? oldest_pending_lock->scheduler_id
+            : (std::numeric_limits<std::size_t>::max)();
+
+        if (batch.bench_lock) {
+            // Only the oldest lock may acquire, and it must wait until every
+            // previously admitted unlocked batch has drained.
+            return batch.scheduler_id == lock_id
+                && running_batches_.empty();
+        }
+        // Pending-lock barrier: older unlocked work may drain/admit, but work
+        // enqueued after the oldest lock cannot leapfrog it due to the
+        // scheduler's size-based sort.
+        return !has_pending_lock || batch.scheduler_id < lock_id;
     }
 
     [[nodiscard]] bool concurrency_admissible_locked(
@@ -1752,6 +2115,19 @@ private:
         if (!batch.concurrency_serial) return true;
         const auto it = running_per_benchmark_.find(batch.benchmark_index);
         return it == running_per_benchmark_.end() || it->second == 0;
+    }
+
+    /// Capture every escaped worker failure before the TBB task returns.
+    /// `std::exception_ptr` keeps the original dynamic exception (including
+    /// typed memory-admission diagnostics) alive without translating it on a
+    /// worker thread. The first failure is rethrown by wait_for_completion;
+    /// the count records additional failures without replacing root cause.
+    void capture_worker_exception(std::exception_ptr failure) noexcept {
+        std::lock_guard<std::mutex> guard(mu_);
+        ++worker_exception_count_;
+        if (first_worker_exception_ == nullptr) {
+            first_worker_exception_ = std::move(failure);
+        }
     }
 
     /// Helper used by `notify_batch_finished` to decrement-or-erase a
@@ -1789,6 +2165,8 @@ private:
     std::size_t                  total_enqueued_  = 0;
     std::size_t                  total_finished_  = 0;
     std::int64_t                 reserved_bytes_  = 0;
+    std::exception_ptr           first_worker_exception_{};
+    std::size_t                  worker_exception_count_ = 0;
 
     /// `benchmark_index → count of running bench_lock=true batches`.
     /// Empty ⇒ no benchmark holds the bench-lock. Non-empty ⇒ exactly
@@ -2002,6 +2380,15 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "examples": [ ["gpu", "e2e"], [] ]
         },
         "concurrency": { "$ref": "#/definitions/concurrency" },
+        "iteration_order": {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "enum": ["item_major", "interleaved_seeded"] },
+            "seed": { "type": "integer", "minimum": 0 }
+          }
+        },
         "matrix": { "$ref": "#/definitions/matrix" }
       },
       "examples": [
@@ -2086,6 +2473,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "default": false,
           "description": "If true, the report splits per-iteration wall_clock_ns by instrumentation region (every named bioseq::instr::region scope contributes its own bucket). When false, only the synthetic 'all_regions' bucket is emitted."
         },
+        "acceptance": { "$ref": "#/definitions/acceptance_contract" },
         "metrics": {
           "title": "MetricSpecs",
           "type": "object",
@@ -2094,6 +2482,48 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "propertyNames": { "minLength": 1 },
           "additionalProperties": { "$ref": "#/definitions/metric_spec" }
         }
+      }
+    },
+    "acceptance_contract": {
+      "title": "CompleteMatrixAcceptanceContract",
+      "description": "Fail-closed contract for a comparison benchmark that is meaningful only when its exact matrix completes. The expanded matrix must contain exactly one tuple for each listed algorithm, matrix.for must exactly equal exact_test_case_iterations, case filters may not prune rows, and every row/test-case pair must emit the configured number of finite wall-clock samples.",
+      "type": "object",
+      "required": ["exact_algorithm_rows", "exact_test_case_iterations", "require_named_region_iteration_coverage", "exact_named_region_sample_multiplicities"],
+      "additionalProperties": false,
+      "properties": {
+        "exact_algorithm_rows": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "exact_test_case_iterations": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "type": "integer", "minimum": 1 }
+        },
+        "require_named_region_iteration_coverage": {
+          "type": "boolean"
+        },
+        "exact_named_region_sample_multiplicities": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/named_region_sample_multiplicity" }
+        }
+      }
+    },
+    "named_region_sample_multiplicity": {
+      "title": "NamedRegionSampleMultiplicity",
+      "description": "Exact raw descriptor-weighted sample count for one named rule source. The count must divide evenly by that test case's accepted iteration count; the quotient is also enforced for every individual iteration. This preserves historical P50 weighting and its per-run topology rather than allowing duplicate descriptors to move between iterations.",
+      "type": "object",
+      "required": ["algorithm", "test_case", "region", "metric", "exact_samples"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "type": "string", "minLength": 1 },
+        "test_case": { "type": "string", "minLength": 1 },
+        "region": { "type": "string", "minLength": 1, "not": { "const": "all_regions" } },
+        "metric": { "type": "string", "minLength": 1 },
+        "exact_samples": { "type": "integer", "minimum": 1 }
       }
     },
     "metric_spec": {
@@ -2206,7 +2636,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "rule": {
       "title": "Rule",
-      "description": "A 4-tuple [name, lhs_selector, comparator, rhs_selector] expressed as a JSON array. The rule iterates over every (lhs_cell, rhs_cell) pair where the selectors match for the same test_case, takes the median of each side's metric array under 'all_regions', and applies the comparator.",
+      "description": "A 4-tuple [name, lhs_selector, comparator, rhs_selector] expressed as a JSON array. The rule iterates over every (lhs_cell, rhs_cell) pair where the selectors match. Selectors may independently scope the source test_case and instrumentation region; omitted source coordinates mean every configured test case and 'all_regions'. By default the configured aggregate is taken independently from each untouched source metric array. pairing=by_iteration_ratio instead forms lhs[i]/rhs[i] for every aligned logical repeat (after warmup_repetitions) and aggregates those ratios.",
       "type": "array",
       "minItems": 4,
       "maxItems": 4,
@@ -2229,7 +2659,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "selector": {
       "title": "RuleSelector",
-      "description": "Partial-match selector for one side of a rule. The 'key' field names the algorithm; every other field is a (param_name, expected_value) constraint. Only the constrained params must match — others are wildcarded. The algorithm name and every constraint key + value are validated semantically against the algorithm's parameter schema in 'params'.",
+      "description": "Partial-match selector for one side of a rule. The 'key' field names the algorithm. Reserved optional fields 'test_case' and 'region' select the source cell and instrumentation bucket; every other field is a (param_name, expected_value) constraint. Only constrained params must match. The algorithm, source test case, and parameter values are validated semantically.",
       "type": "object",
       "required": ["key"],
       "additionalProperties": true,
@@ -2242,10 +2672,21 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "type": "string",
           "minLength": 1,
           "description": "Algorithm name (must appear in top-level 'params')."
+        },
+        "test_case": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional exact test-case scope. The name must be present in this benchmark's matrix.for map."
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional exact report region. Omit for all_regions; named regions require a region/loop metric and matrix.by_regions=true."
         }
       },
       "examples": [
         { "key": "bioseq", "MinimizerAlgorithmType": "SCALAR", "w": 10 },
+        { "key": "bioseq", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" },
         { "key": "minimap2" }
       ]
     },
@@ -2257,7 +2698,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "comparator": {
       "title": "RuleComparator",
-      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nBoth sides are reduced via the optional 'aggregate' field (default 'p50' for backward compatibility with pre-V5 median behaviour).\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
+      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nBy default both source arrays are reduced independently via aggregate. pairing=by_iteration_ratio first forms the logical-repeat vector lhs[i]/rhs[i], discards warmup_repetitions leading pairs, reduces that vector via aggregate, and compares the result against paired_baseline (default 1.0). This makes tolerance% a direct relative noise allowance around the historical ratio. If a named region has duplicate same-name descriptors, aggregate first reduces that repeat's descriptor partition to one logical value. Paired rules require an exclusive serial, one-group, interleaved benchmark and fail closed on missing/non-finite samples or a zero RHS.\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
       "oneOf": [
         {
           "title": "OrderedComparator",
@@ -2281,7 +2722,29 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
               "default": 0,
               "description": "Slack relaxing the threshold. 100 makes the rule always pass — flagged as a warning."
             },
-            "aggregate": { "$ref": "#/definitions/aggregate_enum" }
+            "aggregate": { "$ref": "#/definitions/aggregate_enum" },
+            "pairing": {
+              "type": "string",
+              "enum": ["independent", "by_iteration_ratio"],
+              "default": "independent"
+            },
+            "paired_baseline": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1.0,
+              "description": "Historical/reference ratio used as the RHS only for by_iteration_ratio."
+            },
+            "blocking": {
+              "type": "boolean",
+              "default": true,
+              "description": "False records a diagnostic finding without failing the benchmark process."
+            },
+            "warmup_repetitions": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Leading logical repeats excluded only from a paired ratio; raw samples remain available."
+            }
           },
           "examples": [
             { "compare": "<", "threshold%": 10, "tolerance%": 1, "aggregate": "p99" }
@@ -2302,7 +2765,29 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
               "default": 0,
               "description": "Tolerance window around RHS, in percent. 100 makes the rule always pass — flagged as a warning."
             },
-            "aggregate": { "$ref": "#/definitions/aggregate_enum" }
+            "aggregate": { "$ref": "#/definitions/aggregate_enum" },
+            "pairing": {
+              "type": "string",
+              "enum": ["independent", "by_iteration_ratio"],
+              "default": "independent"
+            },
+            "paired_baseline": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 1.0,
+              "description": "Historical/reference ratio used as the RHS only for by_iteration_ratio."
+            },
+            "blocking": {
+              "type": "boolean",
+              "default": true,
+              "description": "False records a diagnostic finding without failing the benchmark process."
+            },
+            "warmup_repetitions": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Leading logical repeats excluded only from a paired ratio; raw samples remain available."
+            }
           },
           "examples": [
             { "compare": "=", "tolerance%": 1 }
@@ -2416,12 +2901,24 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
 inline constexpr std::string_view kBenchReportSchema = R"json({
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "BenchFrameworkReport",
-  "description": "Output report.json produced by bioseq::bench_framework. Top-level fields: 'meta' (run identity), 'rule_violations' (every rule that didn't pass), 'regressions' (cross-run regression entries), 'sanity_warnings' (hardcoded end-of-run anomaly checks; non-blocking) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
+  "description": "Output report.json produced by bioseq::bench_framework. Top-level fields include 'meta' (run identity), 'raw_evidence' (durable raw sidecar authority), 'paired_rule_evidence' (reconstructable named-stage gate inputs and outcomes), 'rule_violations' (every rule that didn't pass), 'regressions' (cross-run regression entries), 'sanity_warnings' (hardcoded end-of-run anomaly checks; non-blocking) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
   "type": "object",
-  "required": ["meta", "rule_violations", "regressions", "sanity_warnings", "benchmarks"],
+  "required": ["meta", "raw_evidence", "paired_rule_evidence", "rule_violations", "regressions", "sanity_warnings", "benchmarks"],
   "additionalProperties": false,
   "properties": {
     "meta": { "$ref": "#/definitions/meta" },
+    "raw_evidence": {
+      "description": "Durable raw sidecar manifest, or null when no selected benchmark requested raw evidence.",
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/raw_evidence_manifest" }
+      ]
+    },
+    "paired_rule_evidence": {
+      "type": "array",
+      "description": "Lossless evaluator inputs and outcomes for every resolved paired named-stage rule, including accepted rules.",
+      "items": { "$ref": "#/definitions/paired_rule_evidence" }
+    },
     "rule_violations": {
       "type": "array",
       "description": "Every rule that failed to pass. Empty when all rules were satisfied.",
@@ -2467,11 +2964,107 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/param_value" }
     },
+    "paired_rule_route": {
+      "type": "object",
+      "required": ["algorithm", "params", "tuple_index", "test_case", "region", "metric"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "type": "string" },
+        "params": { "$ref": "#/definitions/param_value_object" },
+        "tuple_index": { "type": "integer", "minimum": 0 },
+        "test_case": { "type": "string" },
+        "region": { "type": "string" },
+        "metric": { "type": "string" }
+      }
+    },
+    "paired_schedule_sample": {
+      "type": "object",
+      "required": ["repeat", "order_position", "shuffle_seed"],
+      "additionalProperties": false,
+      "properties": {
+        "repeat": { "type": "integer", "minimum": 0 },
+        "order_position": { "type": "integer", "minimum": 0 },
+        "shuffle_seed": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+      }
+    },
+    "paired_rule_repeat": {
+      "type": "object",
+      "required": ["repeat", "included_after_warmup", "numerator_samples", "denominator_samples", "numerator_value", "denominator_value", "ratio", "numerator_schedule", "denominator_schedule", "schedule_identity_matches"],
+      "additionalProperties": false,
+      "properties": {
+        "repeat": { "type": "integer", "minimum": 0 },
+        "included_after_warmup": { "type": "boolean" },
+        "numerator_samples": { "type": "array", "items": { "type": ["number", "null"] } },
+        "denominator_samples": { "type": "array", "items": { "type": ["number", "null"] } },
+        "numerator_value": { "type": ["number", "null"] },
+        "denominator_value": { "type": ["number", "null"] },
+        "ratio": { "type": ["number", "null"] },
+        "numerator_schedule": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/paired_schedule_sample" }
+          ]
+        },
+        "denominator_schedule": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/paired_schedule_sample" }
+          ]
+        },
+        "schedule_identity_matches": { "type": "boolean" }
+      }
+    },
+    "paired_rule_evidence": {
+      "title": "PairedRuleEvidence",
+      "type": "object",
+      "required": ["location", "benchmark", "rule_name", "test_case", "metric", "comparison_mode", "numerator_route", "denominator_route", "comparator", "schedule_identity", "repeats", "inputs_present", "observed_paired_ratio", "accepted"],
+      "additionalProperties": false,
+      "properties": {
+        "location": { "type": "string" },
+        "benchmark": { "type": "string" },
+        "rule_name": { "type": "string" },
+        "test_case": { "type": "string" },
+        "metric": { "type": "string" },
+        "comparison_mode": { "const": "paired_iteration_ratio" },
+        "numerator_route": { "$ref": "#/definitions/paired_rule_route" },
+        "denominator_route": { "$ref": "#/definitions/paired_rule_route" },
+        "comparator": {
+          "type": "object",
+          "required": ["operator", "threshold_pct", "tolerance_pct", "aggregate", "paired_baseline", "warmup_repetitions", "blocking"],
+          "additionalProperties": false,
+          "properties": {
+            "operator": { "type": "string", "enum": ["<", ">", "="] },
+            "threshold_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "tolerance_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "aggregate": { "type": "string" },
+            "paired_baseline": { "type": "number" },
+            "warmup_repetitions": { "type": "integer", "minimum": 0 },
+            "blocking": { "type": "boolean" }
+          }
+        },
+        "schedule_identity": {
+          "type": "object",
+          "required": ["mode", "configured_seed", "benchmark_index", "test_case_index", "group_index"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "enum": ["interleaved_seeded", "item_major"] },
+            "configured_seed": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+            "benchmark_index": { "type": "integer", "minimum": 0 },
+            "test_case_index": { "type": "integer", "minimum": 0 },
+            "group_index": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/paired_rule_repeat" } },
+        "inputs_present": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "boolean" } },
+        "observed_paired_ratio": { "type": ["number", "null"] },
+        "accepted": { "type": "boolean" }
+      }
+    },
     "violation": {
       "title": "RuleViolation",
-      "description": "One failed rule, with the (LHS, RHS) execution_tuple that triggered the failure and the median aggregate values that were compared.",
+      "description": "One failed within-run rule, with the (LHS, RHS) execution_tuple and the values passed to its comparator.",
       "type": "object",
-      "required": ["location", "benchmark", "rule_name", "execution_tuple", "test_case", "metric", "args"],
+      "required": ["location", "benchmark", "rule_name", "execution_tuple", "test_case", "metric", "comparison_mode", "warmup_repetitions", "blocking", "args", "args_present"],
       "additionalProperties": false,
       "properties": {
         "location":  { "type": "string", "description": "Path to the config file the rule comes from." },
@@ -2486,12 +3079,33 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         },
         "test_case": { "type": "string", "description": "Name of the test_case the rule fired against." },
         "metric":    { "type": "string", "description": "Metric name compared by the rule." },
+        "comparison_mode": {
+          "type": "string",
+          "enum": ["independent_aggregates", "paired_iteration_ratio"],
+          "description": "Independent mode reports the two source aggregates. Paired mode reports an aggregate of per-repeat ratios against its configured paired_baseline."
+        },
+        "warmup_repetitions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of leading repeats excluded from a paired comparison (zero for independent comparisons)."
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "True means this finding contributes to the process exit status; false is diagnostic-only."
+        },
         "args": {
-          "description": "[lhs_aggregate, rhs_aggregate]. Both numbers are the median of the metric's sample array under 'all_regions'.",
+          "description": "Independent: [lhs_aggregate, rhs_aggregate]. Paired: [aggregate(lhs[i]/rhs[i]), paired_baseline]. Raw per-iteration source metrics remain unchanged in the benchmark evidence.",
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
           "items": { "type": "number" }
+        },
+        "args_present": {
+          "description": "[lhs_present, rhs_present]. A false entry means the selected source is missing, explicitly not measured, or contains a non-finite sample. Unavailability always fails the rule and the corresponding args entry is the JSON-safe placeholder 0.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "boolean" }
         }
       }
     },
@@ -2512,6 +3126,105 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         "execution_tuples": {
           "type": "array",
           "items": { "$ref": "#/definitions/execution_tuple_record" }
+        },
+        "raw_samples": {
+          "type": "array",
+          "description": "Lossless framework envelopes plus benchmark-specific raw evidence for raw-enabled benchmarks.",
+          "items": { "$ref": "#/definitions/raw_sample" }
+        }
+      }
+    },
+    "raw_sample": {
+      "title": "RawSample",
+      "type": "object",
+      "required": ["schema", "benchmark", "test_case", "algorithm", "group_index", "group_count", "tuple_index", "repeat", "params", "outer_e2e_ns", "raw_record_id", "schedule", "record_checksum"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": { "type": "integer", "const": 1 },
+        "benchmark": { "type": "string", "minLength": 1 },
+        "test_case": { "type": "string", "minLength": 1 },
+        "algorithm": { "type": "string", "minLength": 1 },
+        "group_index": { "type": "integer", "minimum": 0 },
+        "group_count": { "type": "integer", "minimum": 1 },
+        "tuple_index": { "type": "integer", "minimum": 0 },
+        "repeat": { "type": "integer", "minimum": 0 },
+        "params": { "$ref": "#/definitions/param_value_object" },
+        "outer_e2e_ns": { "type": "integer", "minimum": 0 },
+        "raw_record_id": { "type": "integer", "minimum": 0 },
+        "schedule": { "$ref": "#/definitions/raw_schedule" },
+        "record_checksum": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+      }
+    },
+    "raw_schedule": {
+      "type": "object",
+      "required": ["benchmark_index", "test_case_index", "tuple_index", "group_index", "repeat", "mode", "configured_seed", "shuffle_seed", "order_position"],
+      "additionalProperties": false,
+      "properties": {
+        "benchmark_index": { "type": "integer", "minimum": 0 },
+        "test_case_index": { "type": "integer", "minimum": 0 },
+        "tuple_index": { "type": "integer", "minimum": 0 },
+        "group_index": { "type": "integer", "minimum": 0 },
+        "repeat": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "string", "enum": ["item_major", "interleaved_seeded"] },
+        "configured_seed": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "shuffle_seed": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "order_position": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "raw_duration_summary": {
+      "type": "object",
+      "required": ["count", "min", "p50", "mean", "p95"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "min": { "type": ["integer", "null"], "minimum": 0 },
+        "p50": { "type": ["integer", "null"], "minimum": 0 },
+        "mean": { "type": ["number", "null"], "minimum": 0 },
+        "p95": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "raw_evidence_cell": {
+      "type": "object",
+      "required": ["benchmark", "test_case", "algorithm", "tuple_index", "group_index", "record_count", "schedule_sorted_checksum", "outer_e2e_ns", "first_repeat_outer_e2e_ns", "steady_state_outer_e2e_ns", "index_and_map_ns"],
+      "additionalProperties": false,
+      "properties": {
+        "benchmark": { "type": "string", "minLength": 1 },
+        "test_case": { "type": "string", "minLength": 1 },
+        "algorithm": { "type": "string", "minLength": 1 },
+        "tuple_index": { "type": "integer", "minimum": 0 },
+        "group_index": { "type": "integer", "minimum": 0 },
+        "record_count": { "type": "integer", "minimum": 0 },
+        "schedule_sorted_checksum": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "outer_e2e_ns": { "$ref": "#/definitions/raw_duration_summary" },
+        "first_repeat_outer_e2e_ns": {
+          "$ref": "#/definitions/raw_duration_summary",
+          "description": "Repeat-zero duration kept separate from steady state. This is not necessarily globally cold because rows may share process/runtime state."
+        },
+        "steady_state_outer_e2e_ns": {
+          "$ref": "#/definitions/raw_duration_summary",
+          "description": "Durations for repeats one and later."
+        },
+        "index_and_map_ns": { "$ref": "#/definitions/raw_duration_summary" }
+      }
+    },
+    "raw_evidence_manifest": {
+      "type": "object",
+      "required": ["schema", "path", "run_id", "complete", "record_count", "prefix_bytes", "append_order_checksum", "schedule_sorted_checksum", "outer_e2e_ns", "index_and_map_ns", "cells"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "type": "integer", "const": 1 },
+        "path": { "type": "string", "pattern": "^report_[0-9]+\\.raw\\.jsonl$" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "complete": { "type": "boolean", "const": true },
+        "record_count": { "type": "integer", "minimum": 0 },
+        "prefix_bytes": { "type": "integer", "minimum": 1 },
+        "append_order_checksum": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "schedule_sorted_checksum": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "outer_e2e_ns": { "$ref": "#/definitions/raw_duration_summary" },
+        "index_and_map_ns": { "$ref": "#/definitions/raw_duration_summary" },
+        "cells": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/raw_evidence_cell" }
         }
       }
     },
@@ -2963,6 +3676,22 @@ inline void drain_diagnostics_to_context(
                 return selector;
             }
             selector.algorithm_key = std::string{algorithm_name};
+        } else if (field.key == "test_case") {
+            std::string_view test_case_name;
+            if (field.value.get(test_case_name) != simdjson::SUCCESS) {
+                bioseq_log<ERR>("[bench_framework] rule selector 'test_case' is not a string");
+                parse_ok = false;
+                return selector;
+            }
+            selector.test_case = std::string{test_case_name};
+        } else if (field.key == "region") {
+            std::string_view region_name;
+            if (field.value.get(region_name) != simdjson::SUCCESS) {
+                bioseq_log<ERR>("[bench_framework] rule selector 'region' is not a string");
+                parse_ok = false;
+                return selector;
+            }
+            selector.region = std::string{region_name};
         } else {
             selector.match.emplace(std::string{field.key},
                                    ConfigValue::from_simdjson(field.value));
@@ -3003,11 +3732,12 @@ parse_compare_and_tolerance(
     return std::pair{*parsed_op, tolerance_pct};
 }
 
-/// Parse a rule's `{ compare, threshold%, tolerance%, aggregate }`
-/// quad. `compare` is mandatory; the two `%` fields default to zero;
+/// Parse a rule's comparator object. `compare` is mandatory; the two `%`
+/// fields and `warmup_repetitions` default to zero;
 /// `aggregate` defaults to `"p50"` (the legacy median behaviour for
-/// pre-V5 rules). See `comparator_passes` for how the values turn into
-/// a pass/fail decision and `aggregate_samples` for the reduction.
+/// pre-V5 rules); `pairing` defaults to independent source reductions. See
+/// `comparator_passes` for how the values turn into a pass/fail decision and
+/// `aggregate_samples` for the reduction.
 [[nodiscard]] inline RuleComparator parse_rule_comparator(
     simdjson::dom::object cmp_obj,
     bool& parse_ok)
@@ -3031,6 +3761,43 @@ parse_compare_and_tolerance(
             parse_ok = false;
         } else {
             out.aggregate = *parsed;
+        }
+    }
+
+    std::string_view pairing_text;
+    if (cmp_obj["pairing"].get(pairing_text) == simdjson::SUCCESS) {
+        if (pairing_text == "independent") {
+            out.pairing =
+                RuleComparator::PairingMode::independent_aggregates;
+        } else if (pairing_text == "by_iteration_ratio") {
+            out.pairing = RuleComparator::PairingMode::by_iteration_ratio;
+        } else {
+            bioseq_log<ERR>(
+                "[bench_framework] rule comparator: unknown pairing '{}'",
+                pairing_text);
+            parse_ok = false;
+        }
+    }
+    double paired_baseline = 1.0;
+    if (cmp_obj["paired_baseline"].get(paired_baseline)
+        == simdjson::SUCCESS) {
+        out.paired_baseline = paired_baseline;
+        out.paired_baseline_explicit = true;
+    }
+    bool blocking = true;
+    if (cmp_obj["blocking"].get(blocking) == simdjson::SUCCESS) {
+        out.blocking = blocking;
+    }
+    std::uint64_t warmup_repetitions = 0;
+    if (cmp_obj["warmup_repetitions"].get(warmup_repetitions)
+        == simdjson::SUCCESS) {
+        if (warmup_repetitions
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+            parse_ok = false;
+        } else {
+            out.warmup_repetitions =
+                static_cast<std::size_t>(warmup_repetitions);
         }
     }
     return out;
@@ -3384,6 +4151,40 @@ parse_compare_and_tolerance(
         // configs surface as validation errors.
     }
 
+    simdjson::dom::object iteration_order_obj;
+    if (benchmark_obj["iteration_order"].get(iteration_order_obj)
+        == simdjson::SUCCESS) {
+        std::string_view mode;
+        if (iteration_order_obj["mode"].get(mode) != simdjson::SUCCESS) {
+            parse_ok = false;
+        } else if (mode == "item_major") {
+            benchmark.iteration_order =
+                BenchmarkConfig::IterationOrderMode::item_major;
+            simdjson::dom::element explicit_seed;
+            if (iteration_order_obj["seed"].get(explicit_seed)
+                == simdjson::SUCCESS) {
+                parse_ok = false;
+            }
+        } else if (mode == "interleaved_seeded") {
+            benchmark.iteration_order =
+                BenchmarkConfig::IterationOrderMode::interleaved_seeded;
+            std::uint64_t seed = 0;
+            if (iteration_order_obj["seed"].get(seed)
+                != simdjson::SUCCESS) {
+                parse_ok = false;
+            } else {
+                benchmark.iteration_order_seed = seed;
+            }
+        } else {
+            parse_ok = false;
+        }
+        if (!parse_ok) {
+            bioseq_log<ERR>(
+                "[bench_framework] benchmark '{}' has invalid iteration_order",
+                benchmark.benchmark_key);
+        }
+    }
+
     simdjson::dom::object matrix_obj;
     if (benchmark_obj["matrix"].get(matrix_obj) != simdjson::SUCCESS) {
         bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix'", benchmark.benchmark_key);
@@ -3393,6 +4194,97 @@ parse_compare_and_tolerance(
     bool by_regions_flag = false;
     if (matrix_obj["by_regions"].get(by_regions_flag) == simdjson::SUCCESS) {
         benchmark.by_regions = by_regions_flag;
+    }
+
+    simdjson::dom::object acceptance_obj;
+    if (matrix_obj["acceptance"].get(acceptance_obj) == simdjson::SUCCESS) {
+        simdjson::dom::array exact_algorithms;
+        if (acceptance_obj["exact_algorithm_rows"].get(exact_algorithms)
+            != simdjson::SUCCESS) {
+            parse_ok = false;
+        } else {
+            for (auto entry : exact_algorithms) {
+                std::string_view algorithm;
+                if (entry.get(algorithm) != simdjson::SUCCESS) {
+                    parse_ok = false;
+                    continue;
+                }
+                benchmark.acceptance.exact_algorithm_rows.emplace_back(
+                    algorithm);
+            }
+        }
+
+        simdjson::dom::object exact_test_cases;
+        if (acceptance_obj["exact_test_case_iterations"].get(exact_test_cases)
+            != simdjson::SUCCESS) {
+            parse_ok = false;
+        } else {
+            for (auto field : exact_test_cases) {
+                std::int64_t iterations = 0;
+                if (field.value.get(iterations) != simdjson::SUCCESS
+                    || iterations <= 0) {
+                    parse_ok = false;
+                    continue;
+                }
+                benchmark.acceptance.exact_test_case_iterations.emplace(
+                    std::string{field.key},
+                    static_cast<std::size_t>(iterations));
+            }
+        }
+
+        bool require_named_coverage = false;
+        if (acceptance_obj["require_named_region_iteration_coverage"].get(
+                require_named_coverage) != simdjson::SUCCESS) {
+            parse_ok = false;
+        } else {
+            benchmark.acceptance.require_named_region_iteration_coverage =
+                require_named_coverage;
+        }
+
+        simdjson::dom::array exact_named_multiplicities;
+        if (acceptance_obj["exact_named_region_sample_multiplicities"].get(
+                exact_named_multiplicities) != simdjson::SUCCESS) {
+            parse_ok = false;
+        } else {
+            for (auto entry : exact_named_multiplicities) {
+                simdjson::dom::object object;
+                if (entry.get(object) != simdjson::SUCCESS) {
+                    parse_ok = false;
+                    continue;
+                }
+                BenchmarkConfig::AcceptanceContract::
+                    NamedRegionSampleMultiplicity multiplicity;
+                std::string_view algorithm;
+                std::string_view test_case;
+                std::string_view region;
+                std::string_view metric;
+                std::int64_t exact_samples = 0;
+                if (object["algorithm"].get(algorithm) != simdjson::SUCCESS
+                    || object["test_case"].get(test_case) != simdjson::SUCCESS
+                    || object["region"].get(region) != simdjson::SUCCESS
+                    || object["metric"].get(metric) != simdjson::SUCCESS
+                    || object["exact_samples"].get(exact_samples)
+                        != simdjson::SUCCESS
+                    || exact_samples <= 0) {
+                    parse_ok = false;
+                    continue;
+                }
+                multiplicity.algorithm = std::string{algorithm};
+                multiplicity.test_case = std::string{test_case};
+                multiplicity.region = std::string{region};
+                multiplicity.metric = std::string{metric};
+                multiplicity.exact_samples =
+                    static_cast<std::size_t>(exact_samples);
+                benchmark.acceptance
+                    .exact_named_region_sample_multiplicities.push_back(
+                        std::move(multiplicity));
+            }
+        }
+        if (!parse_ok) {
+            bioseq_log<ERR>(
+                "[bench_framework] benchmark '{}' has invalid matrix.acceptance",
+                benchmark.benchmark_key);
+        }
     }
 
     simdjson::dom::object for_obj;
@@ -3611,8 +4503,9 @@ struct ConfigParseOutcome {
 //   - every value in matrix.over.<algorithm>.<parameter> matches the
 //     parameter's declared type (and 'enum', if present)
 //   - matrix.for.<test_case> references a declared test case
-//   - rule selectors point at a declared algorithm and only mention
-//     declared parameters with type-correct values
+//   - rule selectors point at a declared algorithm/test case and only mention
+//     declared parameters with type-correct values; named source regions are
+//     used only with by-regions region/loop metrics
 //   - rule names are unique within a benchmark
 //   - threshold% / tolerance% of exactly 100 raises a warning ("rule will
 //     always pass")
@@ -3766,10 +4659,151 @@ struct ConfigParseOutcome {
         }
     }
 
+    // 2a. A complete-matrix acceptance contract is deliberately redundant
+    // with matrix.for/matrix.over: the second declaration freezes the exact
+    // acceptance shape so an accidental config edit cannot silently redefine
+    // what a "complete" report means.
+    if (config.acceptance.enabled()) {
+        const std::set<std::string> expected_algorithms{
+            config.acceptance.exact_algorithm_rows.begin(),
+            config.acceptance.exact_algorithm_rows.end()};
+        std::set<std::string> configured_algorithms;
+        for (const auto& [algorithm, ignored] : config.matrix_over) {
+            (void)ignored;
+            configured_algorithms.insert(algorithm);
+        }
+        if (configured_algorithms != expected_algorithms) {
+            error("acceptance_algorithm_matrix_mismatch",
+                  "matrix.acceptance.exact_algorithm_rows",
+                  "exact_algorithm_rows must equal matrix.over keys exactly");
+        }
+
+        const std::map<std::string, std::size_t> configured_test_cases{
+            config.for_each.begin(), config.for_each.end()};
+        if (configured_test_cases
+            != config.acceptance.exact_test_case_iterations) {
+            error("acceptance_test_case_matrix_mismatch",
+                  "matrix.acceptance.exact_test_case_iterations",
+                  "exact_test_case_iterations must equal matrix.for exactly");
+        }
+        if (config.acceptance.require_named_region_iteration_coverage
+            && !config.by_regions) {
+            error("acceptance_named_region_coverage_requires_by_regions",
+                  "matrix.acceptance.require_named_region_iteration_coverage",
+                  "named-region iteration coverage requires matrix.by_regions=true");
+        }
+
+        using NamedSourceCoordinate =
+            std::tuple<std::string, std::string, std::string, std::string>;
+        std::set<NamedSourceCoordinate> named_rule_sources;
+        const auto add_named_rule_source =
+            [&config, &named_rule_sources](
+                const RuleSelector& selector,
+                const std::string& metric_name) {
+                if (selector.region.empty()
+                    || selector.region == "all_regions") return;
+                if (!selector.test_case.empty()) {
+                    named_rule_sources.emplace(
+                        selector.algorithm_key, selector.test_case,
+                        selector.region, metric_name);
+                    return;
+                }
+                for (const auto& [test_case, ignored] : config.for_each) {
+                    (void)ignored;
+                    named_rule_sources.emplace(
+                        selector.algorithm_key, test_case,
+                        selector.region, metric_name);
+                }
+            };
+        for (const auto& metric : config.metrics) {
+            for (const auto& rule : metric.rules) {
+                add_named_rule_source(rule.lhs, metric.name);
+                add_named_rule_source(rule.rhs, metric.name);
+            }
+        }
+
+        std::set<NamedSourceCoordinate> configured_multiplicities;
+        for (const auto& multiplicity :
+             config.acceptance.exact_named_region_sample_multiplicities) {
+            const NamedSourceCoordinate coordinate{
+                multiplicity.algorithm,
+                multiplicity.test_case,
+                multiplicity.region,
+                multiplicity.metric};
+            if (!configured_multiplicities.insert(coordinate).second) {
+                error("acceptance_duplicate_named_region_multiplicity",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      fmt::format("duplicate exact multiplicity for '{}'/{} region '{}' metric '{}'",
+                                  multiplicity.algorithm,
+                                  multiplicity.test_case,
+                                  multiplicity.region,
+                                  multiplicity.metric));
+            }
+            if (!expected_algorithms.contains(multiplicity.algorithm)) {
+                error("acceptance_named_region_unknown_algorithm",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      fmt::format("named-region multiplicity references algorithm '{}' outside exact_algorithm_rows",
+                                  multiplicity.algorithm));
+            }
+            const auto test_case_it =
+                config.acceptance.exact_test_case_iterations.find(
+                    multiplicity.test_case);
+            if (test_case_it
+                == config.acceptance.exact_test_case_iterations.end()) {
+                error("acceptance_named_region_unknown_test_case",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      fmt::format("named-region multiplicity references test case '{}' outside exact_test_case_iterations",
+                                  multiplicity.test_case));
+            } else if (multiplicity.exact_samples < test_case_it->second) {
+                error("acceptance_named_region_multiplicity_below_iterations",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      fmt::format("named-region multiplicity {} for '{}'/{} region '{}' is below its {} required contributing iterations",
+                                  multiplicity.exact_samples,
+                                  multiplicity.algorithm,
+                                  multiplicity.test_case,
+                                  multiplicity.region,
+                                  test_case_it->second));
+            } else if (multiplicity.exact_samples % test_case_it->second
+                       != 0) {
+                error("acceptance_named_region_multiplicity_not_uniform",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      fmt::format("named-region multiplicity {} for '{}'/{} region '{}' cannot be distributed uniformly across {} required iterations",
+                                  multiplicity.exact_samples,
+                                  multiplicity.algorithm,
+                                  multiplicity.test_case,
+                                  multiplicity.region,
+                                  test_case_it->second));
+            }
+            const bool metric_declared = std::any_of(
+                config.metrics.begin(), config.metrics.end(),
+                [&multiplicity](const MetricSpec& metric) {
+                    return metric.name == multiplicity.metric;
+                });
+            if (!metric_declared) {
+                error("acceptance_named_region_unknown_metric",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      fmt::format("named-region multiplicity references undeclared metric '{}'",
+                                  multiplicity.metric));
+            }
+        }
+        if (config.acceptance.require_named_region_iteration_coverage) {
+            if (configured_multiplicities != named_rule_sources) {
+                error("acceptance_named_region_multiplicity_set_mismatch",
+                      "matrix.acceptance.exact_named_region_sample_multiplicities",
+                      "exact named-region multiplicities must cover every named rule source exactly, with no missing or unused coordinates");
+            }
+        } else if (!configured_multiplicities.empty()) {
+            error("acceptance_named_region_multiplicity_without_coverage",
+                  "matrix.acceptance.exact_named_region_sample_multiplicities",
+                  "exact named-region multiplicities require require_named_region_iteration_coverage=true");
+        }
+    }
+
     // 3. Walk every rule. Selector validation, rule name uniqueness,
     //    threshold/tolerance always-pass warnings.
     std::set<std::string> seen_rule_names;
-    auto validate_selector = [&](const RuleSelector& selector,
+    auto validate_selector = [&schemas, &config, &error](const RuleSelector& selector,
+                                  const MetricSpec& metric,
                                   std::string_view rule_name,
                                   std::string_view metric_name,
                                   std::string_view side) {
@@ -3782,6 +4816,39 @@ struct ConfigParseOutcome {
                   fmt::format("rule selector references algorithm '{}' which is not declared in 'params'",
                               selector.algorithm_key));
             return;
+        }
+        const bool test_case_is_configured = std::any_of(
+            config.for_each.begin(), config.for_each.end(),
+            [&selector](const auto& entry) noexcept {
+                return entry.first == selector.test_case;
+            });
+        if (!selector.test_case.empty() && !test_case_is_configured) {
+            error("unknown_rule_test_case",
+                  base_loc + ".test_case",
+                  fmt::format("rule selector scopes test_case '{}' which is not present in this benchmark's matrix.for map",
+                              selector.test_case));
+        }
+        if (!selector.region.empty() && selector.region != "all_regions") {
+            const bool source_has_named_regions =
+                metric.declared_source == MetricSource::Region
+                || metric.declared_source == MetricSource::Loop;
+            if (!source_has_named_regions) {
+                error("rule_region_requires_region_metric",
+                      base_loc + ".region",
+                      fmt::format("rule selector scopes region '{}' but metric '{}' is not a region/loop metric",
+                                  selector.region, metric.name));
+            } else if (!config.by_regions) {
+                error("rule_region_requires_by_regions",
+                      base_loc + ".region",
+                      fmt::format("rule selector scopes region '{}' but matrix.by_regions is false",
+                                  selector.region));
+            } else if (!metric.region.empty()
+                       && metric.region != selector.region) {
+                error("rule_region_conflicts_with_metric_filter",
+                      base_loc + ".region",
+                      fmt::format("rule selector scopes region '{}' but metric '{}' is collected only for region '{}'",
+                                  selector.region, metric.name, metric.region));
+            }
         }
         for (const auto& [match_param, match_value] : selector.match) {
             const auto* param_schema = find_param_schema(
@@ -3852,8 +4919,97 @@ struct ConfigParseOutcome {
                       fmt::format("rule name '{}' is used more than once in this benchmark; rule names must be unique",
                                   rule.name));
             }
-            validate_selector(rule.lhs, rule.name, metric.name, "lhs");
-            validate_selector(rule.rhs, rule.name, metric.name, "rhs");
+            validate_selector(rule.lhs, metric, rule.name, metric.name, "lhs");
+            validate_selector(rule.rhs, metric, rule.name, metric.name, "rhs");
+            if (!rule.lhs.test_case.empty() && !rule.rhs.test_case.empty()
+                && rule.lhs.test_case != rule.rhs.test_case) {
+                error("rule_test_case_mismatch",
+                      fmt::format("matrix.metrics.{}.rules.{}", metric.name, rule.name),
+                      fmt::format("rule selectors name different test cases ('{}' vs '{}'); within-run rules compare sources from one test case",
+                                  rule.lhs.test_case, rule.rhs.test_case));
+            }
+
+            const bool paired = rule.cmp.pairing
+                == RuleComparator::PairingMode::by_iteration_ratio;
+            const std::string comparator_location = fmt::format(
+                "matrix.metrics.{}.rules.{}.comparator",
+                metric.name, rule.name);
+            if (!paired && rule.cmp.warmup_repetitions != 0) {
+                error("warmup_requires_paired_rule",
+                      comparator_location + ".warmup_repetitions",
+                      "warmup_repetitions is meaningful only when pairing is by_iteration_ratio");
+            }
+            if (!paired && rule.cmp.paired_baseline_explicit) {
+                error("paired_baseline_requires_paired_rule",
+                      comparator_location + ".paired_baseline",
+                      "paired_baseline is meaningful only when pairing is by_iteration_ratio");
+            }
+            if (paired) {
+                if (!std::isfinite(rule.cmp.paired_baseline)
+                    || rule.cmp.paired_baseline <= 0.0) {
+                    error("paired_baseline_invalid",
+                          comparator_location + ".paired_baseline",
+                          "paired_baseline must be finite and greater than zero");
+                }
+                if (!config.concurrency.bench_lock
+                    || config.concurrency.concurrency
+                    || config.iteration_order
+                        != BenchmarkConfig::IterationOrderMode::interleaved_seeded) {
+                    error("paired_rule_requires_serial_interleaving",
+                          comparator_location + ".pairing",
+                          "by_iteration_ratio requires bench_lock=true, concurrency=false and iteration_order.mode=interleaved_seeded");
+                }
+
+                const bool lhs_named = !rule.lhs.region.empty()
+                    && rule.lhs.region != "all_regions";
+                const bool rhs_named = !rule.rhs.region.empty()
+                    && rule.rhs.region != "all_regions";
+                if ((lhs_named || rhs_named)
+                    && metric.kind != MetricKind::RegionTotalNs) {
+                    error("paired_named_region_requires_total_ns",
+                          comparator_location + ".pairing",
+                          "paired named-region rules currently support only region_total_ns, whose duplicate same-name descriptors can be partitioned and reduced exactly per repeat");
+                }
+                if ((lhs_named || rhs_named)
+                    && (!config.acceptance.enabled()
+                        || !config.acceptance
+                                .require_named_region_iteration_coverage)) {
+                    error("paired_named_region_requires_strict_provenance",
+                          comparator_location + ".pairing",
+                          "paired named-region rules require the strict acceptance contract and per-iteration named-region provenance");
+                }
+
+                for (const auto& [test_case_name, iterations] :
+                     config.for_each) {
+                    if ((!rule.lhs.test_case.empty()
+                         && rule.lhs.test_case != test_case_name)
+                        || (!rule.rhs.test_case.empty()
+                            && rule.rhs.test_case != test_case_name)) {
+                        continue;
+                    }
+                    const auto test_case_it = std::find_if(
+                        state.test_cases.begin(), state.test_cases.end(),
+                        [&test_case_name](const TestCaseSpec& spec) {
+                            return spec.name == test_case_name;
+                        });
+                    if (test_case_it == state.test_cases.end()
+                        || test_case_it->concurrency != 1) {
+                        error("paired_rule_requires_one_group",
+                              comparator_location + ".pairing",
+                              fmt::format(
+                                  "by_iteration_ratio requires test case '{}' to declare concurrency=1 so repeat ordinals are globally unique",
+                                  test_case_name));
+                    }
+                    if (iterations <= rule.cmp.warmup_repetitions) {
+                        error("paired_rule_warmup_consumes_all_repeats",
+                              comparator_location + ".warmup_repetitions",
+                              fmt::format(
+                                  "warmup_repetitions={} leaves no paired samples for test case '{}' with {} iterations",
+                                  rule.cmp.warmup_repetitions,
+                                  test_case_name, iterations));
+                    }
+                }
+            }
 
             // Always-pass warnings.
             if (rule.cmp.threshold_pct == 100.0) {
@@ -3872,11 +5028,9 @@ struct ConfigParseOutcome {
     return diagnostics;
 }
 
-/// Post-run validation. The only check here is "every declared
-/// `type: evaluation` metric was emitted at least once by the user's
-/// `on_evaluate` handler". We can only see this after the iteration loop
-/// finished; missing keys are an error (the evaluation handler is the
-/// authoritative source for evaluation-typed metrics).
+/// Post-run validation. Checks evaluation-metric emission and, when present,
+/// the exact complete-matrix acceptance contract. These checks require the
+/// final merged iteration state and therefore cannot run during config parse.
 [[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_post_run(
     const BenchmarkExecutionState& state) noexcept
 {
@@ -3908,9 +5062,263 @@ struct ConfigParseOutcome {
     for (const auto& cell_ptr : state.cells) {
         if (!cell_ptr->samples.empty()) { any_iteration_ran = true; break; }
     }
+
+    if (state.config.acceptance.enabled()) {
+        const auto& contract = state.config.acceptance;
+        std::map<std::string, std::size_t> tuple_counts;
+        for (const auto& tuple : state.execution_tuples) {
+            ++tuple_counts[tuple.algorithm_name];
+        }
+        const std::set<std::string> expected_algorithms{
+            contract.exact_algorithm_rows.begin(),
+            contract.exact_algorithm_rows.end()};
+        std::set<std::string> actual_algorithms;
+        for (const auto& [algorithm, count] : tuple_counts) {
+            actual_algorithms.insert(algorithm);
+            if (count != 1) {
+                diagnostics.push_back({
+                    ValidationDiag::Severity::Error,
+                    "acceptance_execution_tuple_multiplicity",
+                    semantic_location(state, "matrix.acceptance"),
+                    fmt::format("acceptance row '{}' expanded to {} tuples; exactly one is required",
+                                algorithm, count),
+                });
+            }
+        }
+        if (actual_algorithms != expected_algorithms
+            || state.execution_tuples.size()
+                != contract.exact_algorithm_rows.size()) {
+            diagnostics.push_back({
+                ValidationDiag::Severity::Error,
+                "acceptance_execution_rows_incomplete",
+                semantic_location(state, "matrix.acceptance"),
+                fmt::format("complete-matrix acceptance requires exactly {} configured rows; {} expanded rows were present",
+                            contract.exact_algorithm_rows.size(),
+                            state.execution_tuples.size()),
+            });
+        }
+
+        std::map<std::pair<std::string, std::string>, std::size_t>
+            completed_wall_samples;
+        std::map<std::pair<std::string, std::string>, bool>
+            wall_samples_all_finite;
+        std::size_t completed_total = 0;
+        for (const auto& cell_ptr : state.cells) {
+            const auto key = std::pair{
+                cell_ptr->tuple->algorithm_name,
+                cell_ptr->test_case->name};
+            auto& all_finite = wall_samples_all_finite[key];
+            if (!completed_wall_samples.contains(key)) all_finite = true;
+            const auto region_it = cell_ptr->samples.find("all_regions");
+            if (region_it == cell_ptr->samples.end()) continue;
+            const auto wall_it = region_it->second.find("wall_clock_ns");
+            if (wall_it == region_it->second.end()) continue;
+            completed_wall_samples[key] += wall_it->second.size();
+            completed_total += wall_it->second.size();
+            all_finite = all_finite
+                && std::all_of(wall_it->second.begin(), wall_it->second.end(),
+                    [](double value) noexcept { return std::isfinite(value); });
+        }
+
+        std::size_t expected_total = 0;
+        for (const auto& algorithm : contract.exact_algorithm_rows) {
+            for (const auto& [test_case, iterations] :
+                 contract.exact_test_case_iterations) {
+                expected_total += iterations;
+                const auto key = std::pair{algorithm, test_case};
+                const std::size_t completed = completed_wall_samples[key];
+                const bool all_finite = wall_samples_all_finite.contains(key)
+                    && wall_samples_all_finite.at(key);
+                if (completed != iterations || !all_finite) {
+                    diagnostics.push_back({
+                        ValidationDiag::Severity::Error,
+                        "acceptance_iteration_matrix_incomplete",
+                        semantic_location(state, "matrix.acceptance"),
+                        fmt::format("acceptance row '{}'/{} completed {} finite wall-clock samples; exactly {} are required",
+                                    algorithm, test_case, completed,
+                                    iterations),
+                    });
+                }
+            }
+        }
+        if (completed_total != expected_total) {
+            diagnostics.push_back({
+                ValidationDiag::Severity::Error,
+                "acceptance_execution_total_incomplete",
+                semantic_location(state, "matrix.acceptance"),
+                fmt::format("complete-matrix acceptance requires exactly {} executions; {} completed wall-clock samples were recorded",
+                            expected_total, completed_total),
+                });
+        }
+
+
+        using NamedSourceCoordinate =
+            std::tuple<std::string, std::string, std::string, std::string>;
+        std::map<NamedSourceCoordinate, std::size_t> raw_named_sample_counts;
+
+        // Preserve each logical iteration's same-name descriptor count.
+        // `repeat` is local to a group, so merging by that numeric ID would
+        // collide (every group has a repeat zero). Instead concatenate each
+        // cell's already ordered local vector in explicit group-index order;
+        // the resulting vector positions are fresh global ordinals for this
+        // accepted (tuple, test-case) pair.
+        using IterationMultiplicityPair =
+            std::pair<const ExecutionTuple*, std::string>;
+        std::map<IterationMultiplicityPair, std::vector<const Cell*>>
+            multiplicity_cells_by_pair;
+        for (const auto& cell_ptr : state.cells) {
+            multiplicity_cells_by_pair[
+                {cell_ptr->tuple, cell_ptr->test_case->name}]
+                    .push_back(cell_ptr.get());
+            for (const auto& [region_name, metric_samples] :
+                 cell_ptr->samples) {
+                if (region_name == "all_regions") continue;
+                for (const auto& [metric_name, samples] : metric_samples) {
+                    raw_named_sample_counts[NamedSourceCoordinate{
+                        cell_ptr->tuple->algorithm_name,
+                        cell_ptr->test_case->name,
+                        region_name,
+                        metric_name}] += samples.size();
+                }
+            }
+        }
+
+        std::map<IterationMultiplicityPair,
+                 std::vector<NamedRegionIterationSampleCounts>>
+            merged_iteration_multiplicities;
+        for (auto& [pair_key, pair_cells] : multiplicity_cells_by_pair) {
+            std::sort(
+                pair_cells.begin(), pair_cells.end(),
+                [](const Cell* lhs, const Cell* rhs) noexcept {
+                    return lhs->group_index < rhs->group_index;
+                });
+            auto& merged = merged_iteration_multiplicities[pair_key];
+            for (const Cell* cell : pair_cells) {
+                merged.insert(
+                    merged.end(),
+                    cell->named_region_iteration_sample_counts.begin(),
+                    cell->named_region_iteration_sample_counts.end());
+            }
+        }
+
+        std::map<std::string, const ExecutionTuple*> unique_tuple_by_algorithm;
+        std::set<std::string> duplicate_tuple_algorithms;
+        for (const auto& tuple : state.execution_tuples) {
+            if (!unique_tuple_by_algorithm.emplace(
+                    tuple.algorithm_name, &tuple).second) {
+                duplicate_tuple_algorithms.insert(tuple.algorithm_name);
+            }
+        }
+        for (const auto& algorithm : duplicate_tuple_algorithms) {
+            unique_tuple_by_algorithm.erase(algorithm);
+        }
+
+        const auto count_for_iteration = [](
+                const NamedRegionIterationSampleCounts& counts,
+                const std::string& region,
+                const std::string& metric) noexcept {
+            const auto region_it = counts.find(region);
+            if (region_it == counts.end()) return std::size_t{0};
+            const auto metric_it = region_it->second.find(metric);
+            return metric_it == region_it->second.end()
+                ? std::size_t{0}
+                : metric_it->second;
+        };
+        for (const auto& multiplicity :
+             contract.exact_named_region_sample_multiplicities) {
+            const NamedSourceCoordinate coordinate{
+                multiplicity.algorithm,
+                multiplicity.test_case,
+                multiplicity.region,
+                multiplicity.metric};
+            const std::size_t actual = raw_named_sample_counts[coordinate];
+            if (actual != multiplicity.exact_samples) {
+                diagnostics.push_back({
+                    ValidationDiag::Severity::Error,
+                    "acceptance_named_region_multiplicity_mismatch",
+                    semantic_location(state, "matrix.acceptance"),
+                    fmt::format("acceptance source '{}'/{} region '{}' metric '{}' emitted {} raw descriptor samples; exactly {} are required",
+                                multiplicity.algorithm,
+                                multiplicity.test_case,
+                                multiplicity.region,
+                                multiplicity.metric,
+                                actual,
+                                multiplicity.exact_samples),
+                });
+            }
+
+            const auto iterations_it =
+                contract.exact_test_case_iterations.find(
+                    multiplicity.test_case);
+            const auto tuple_it = unique_tuple_by_algorithm.find(
+                multiplicity.algorithm);
+            if (iterations_it
+                    == contract.exact_test_case_iterations.end()
+                || iterations_it->second == 0
+                || multiplicity.exact_samples % iterations_it->second != 0
+                || tuple_it == unique_tuple_by_algorithm.end()) {
+                // Pre-run semantic validation already reports malformed
+                // contracts/tuple multiplicity. Avoid manufacturing a second
+                // distribution diagnosis from an undefined quotient.
+                continue;
+            }
+
+            const std::size_t expected_iterations = iterations_it->second;
+            const std::size_t expected_per_iteration =
+                multiplicity.exact_samples / expected_iterations;
+            const auto merged_it = merged_iteration_multiplicities.find(
+                {tuple_it->second, multiplicity.test_case});
+            static const std::vector<NamedRegionIterationSampleCounts>
+                empty_iteration_counts;
+            const auto& merged_counts =
+                merged_it == merged_iteration_multiplicities.end()
+                    ? empty_iteration_counts
+                    : merged_it->second;
+
+            std::vector<std::size_t> distribution;
+            distribution.reserve(merged_counts.size());
+            bool distribution_matches =
+                merged_counts.size() == expected_iterations;
+            for (const auto& iteration_counts : merged_counts) {
+                const std::size_t count = count_for_iteration(
+                    iteration_counts,
+                    multiplicity.region,
+                    multiplicity.metric);
+                distribution.push_back(count);
+                distribution_matches = distribution_matches
+                    && count == expected_per_iteration;
+            }
+            if (!distribution_matches) {
+                std::string rendered_distribution{"["};
+                for (std::size_t index = 0;
+                     index < distribution.size(); ++index) {
+                    if (index != 0) rendered_distribution += ',';
+                    rendered_distribution +=
+                        std::to_string(distribution[index]);
+                }
+                rendered_distribution += ']';
+                diagnostics.push_back({
+                    ValidationDiag::Severity::Error,
+                    "acceptance_named_region_iteration_multiplicity_mismatch",
+                    semantic_location(state, "matrix.acceptance"),
+                    fmt::format("acceptance source '{}'/{} region '{}' metric '{}' emitted per-iteration raw descriptor distribution {}; exactly {} samples in each of {} iterations are required",
+                                multiplicity.algorithm,
+                                multiplicity.test_case,
+                                multiplicity.region,
+                                multiplicity.metric,
+                                rendered_distribution,
+                                expected_per_iteration,
+                                expected_iterations),
+                });
+            }
+        }
+    }
+
     if (!any_iteration_ran) {
         diagnostics.push_back({
-            ValidationDiag::Severity::Warning,
+            state.config.acceptance.enabled()
+                ? ValidationDiag::Severity::Error
+                : ValidationDiag::Severity::Warning,
             "benchmark_did_not_run",
             semantic_location(state, "matrix"),
             "benchmark did not execute any iteration (matrix.for entries either name unknown test cases or set iterations to 0); evaluation-metric coverage check skipped"
@@ -4135,6 +5543,10 @@ struct ConfigParseOutcome {
                         any_remains = true; break;
                     }
                 }
+                // In a targeted run `matching_states` contains only the selected
+                // benchmark subset.  A globally valid rule may appear to exclude
+                // every case solely because the other benchmarks were filtered
+                // out.  Complete runs retain the strict over-coverage error.
                 if (!any_remains && !covered_test_cases.empty()) {
                     error("regression_excludes_all", base_loc,
                         fmt::format("regression rule '{}' excludes every test_case its matching benchmarks would run on; the rule can never fire (use a narrower 'exclude_cases' or remove it)",
@@ -4313,7 +5725,9 @@ split_iterations(std::size_t iterations, std::size_t groups) {
         }
 
         const auto split = split_iterations(iterations, group_count);
-        for (const auto& tuple : state.execution_tuples) {
+        for (std::size_t tuple_index = 0;
+             tuple_index < state.execution_tuples.size(); ++tuple_index) {
+            const auto& tuple = state.execution_tuples[tuple_index];
             for (std::size_t group_index = 0; group_index < split.size(); ++group_index) {
                 auto cell = std::make_unique<Cell>();
                 cell->test_case        = &state.test_cases[test_case_index];
@@ -4322,6 +5736,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
                 cell->iterations       = split[group_index];
                 cell->group_index      = group_index;
                 cell->group_count      = split.size();
+                cell->tuple_index      = tuple_index;
                 cells.push_back(std::move(cell));
             }
         }
@@ -4547,6 +5962,7 @@ inline void combine_loop(
 inline void append_iteration_samples(
     Cell& cell,
     bool by_regions,
+    bool track_named_region_iteration_sample_counts,
     bioseq::instr::ProfilerBlock<profiler_args_t>& profiler_block,
     double iteration_wall_clock_ns,
     const std::vector<MetricSpec>& metrics,
@@ -4556,6 +5972,13 @@ inline void append_iteration_samples(
 {
     auto& all_regions = cell.samples["all_regions"];
     all_regions["wall_clock_ns"].push_back(iteration_wall_clock_ns);
+
+    NamedRegionIterationSampleCounts* iteration_named_sample_counts = nullptr;
+    if (track_named_region_iteration_sample_counts) {
+        cell.named_region_iteration_sample_counts.emplace_back();
+        iteration_named_sample_counts =
+            &cell.named_region_iteration_sample_counts.back();
+    }
 
     const auto descriptor_total = bioseq::instr::descriptor_count();
     std::size_t counter_index = 0;
@@ -4601,6 +6024,17 @@ inline void append_iteration_samples(
 
         CrossDescriptorAccumulator accumulator;
         const bool restrict_to_one_region = !metric.region.empty();
+        std::set<std::string> named_regions_contributed;
+        const auto append_named_region_sample =
+            [&cell, &metric, &named_regions_contributed,
+             iteration_named_sample_counts](const char* region_name,
+                                             double value) {
+                cell.samples[region_name][metric.name].push_back(value);
+                named_regions_contributed.emplace(region_name);
+                if (iteration_named_sample_counts != nullptr) {
+                    ++(*iteration_named_sample_counts)[region_name][metric.name];
+                }
+            };
 
         // Walk every visited descriptor whose name and kind match the
         // metric's source family.
@@ -4623,11 +6057,12 @@ inline void append_iteration_samples(
                      || entry->combiner == MetricCombiner::BranchMissRatio) {
                         if (auto ratio = ratio_per_region(entry->kind, *region_agg);
                             ratio.has_value()) {
-                            cell.samples[descriptor->name][metric.name].push_back(*ratio);
+                            append_named_region_sample(descriptor->name, *ratio);
                         }
                     } else {
-                        cell.samples[descriptor->name][metric.name]
-                            .push_back(extract_from_region(entry->kind, *region_agg));
+                        append_named_region_sample(
+                            descriptor->name,
+                            extract_from_region(entry->kind, *region_agg));
                     }
                 }
             } else if (entry->source == MetricSource::Loop) {
@@ -4639,14 +6074,19 @@ inline void append_iteration_samples(
                      || entry->combiner == MetricCombiner::LoopWorkPerIter) {
                         if (auto ratio = ratio_per_loop(entry->kind, *loop_agg);
                             ratio.has_value()) {
-                            cell.samples[descriptor->name][metric.name].push_back(*ratio);
+                            append_named_region_sample(descriptor->name, *ratio);
                         }
                     } else {
-                        cell.samples[descriptor->name][metric.name]
-                            .push_back(extract_from_loop(entry->kind, *loop_agg));
+                        append_named_region_sample(
+                            descriptor->name,
+                            extract_from_loop(entry->kind, *loop_agg));
                     }
                 }
             }
+        }
+
+        for (const auto& region_name : named_regions_contributed) {
+            ++cell.named_region_iteration_contributions[region_name][metric.name];
         }
 
         if (auto finalised = finalise_combined_metric(accumulator, entry->combiner, entry->percentile);
@@ -5021,7 +6461,7 @@ inline void BatchScheduler::emit_idle_timeout_locked(
         "peer batches running — giving up",
         batch.test_case_name, batch.group_index,
         kMaxIdleWaitingTime.count(),
-        batch.base_bytes + batch.extra_bytes);
+        batch.total_bytes);
     push_runtime_diagnostic(*batch.context,
         ValidationDiag::Severity::Error,
         "memory_budget_constraint_timeout", batch.location_str, reason);
@@ -5340,6 +6780,26 @@ kAggregatedStatsRegistry{ {
         [](double value) { return std::isfinite(value); });
 }
 
+/// Strict availability predicate for within-run relative gates. Regression
+/// report aggregation may intentionally summarize the finite subset, but a
+/// controlled comparison cannot discard a failed/NaN iteration and still
+/// claim the configured relationship held. `expected_samples == 0` is used by
+/// named instrumentation regions because two descriptors may intentionally
+/// share one name (for example scalar XXL_HIFI has two `mm_sketch` descriptor
+/// samples per iteration). Strict matrices validate those sources with the
+/// separate per-iteration named-region provenance map. `all_regions` sources
+/// pass the configured iteration count and therefore require exactly one
+/// completed finite value per scheduled iteration.
+[[nodiscard]] inline bool has_complete_finite_samples(
+    const std::vector<double>& samples,
+    std::size_t expected_samples = 0) noexcept
+{
+    return !samples.empty()
+        && (expected_samples == 0 || samples.size() == expected_samples)
+        && std::all_of(samples.begin(), samples.end(),
+            [](const double value) { return std::isfinite(value); });
+}
+
 /// A benchmark can mark an execution cell as "not measured" by returning only
 /// non-finite evaluation metrics. Wall-clock still exists because the framework
 /// times `on_run`, but regression rules must not compare a deliberate skip's
@@ -5575,12 +7035,87 @@ kAggregatedStatsRegistry{ {
     return value;
 }
 
+// ----------------- Deterministic iteration schedule -----------------
+
+[[nodiscard]] constexpr std::uint64_t raw_fnv1a64_update(
+        std::uint64_t state, std::string_view text) noexcept {
+    for (const unsigned char byte : text) {
+        state ^= byte;
+        state *= 1099511628211ULL;
+    }
+    return state;
+}
+
+[[nodiscard]] constexpr std::uint64_t raw_fnv1a64_update_u64(
+        std::uint64_t state, const std::uint64_t value) noexcept {
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        state ^= static_cast<unsigned char>(value >> shift);
+        state *= 1099511628211ULL;
+    }
+    return state;
+}
+
+/// Collision-safe canonical FNV-1a identity for one repetition. Strings are
+/// length-prefixed and integers are fixed-width little-endian, so identities
+/// cannot alias through delimiter characters or decimal formatting.
+[[nodiscard]] constexpr std::uint64_t raw_schedule_identity(
+        std::string_view benchmark,
+        std::string_view test_case,
+        const std::size_t group_index,
+        const std::size_t repeat) noexcept {
+    std::uint64_t state = 14695981039346656037ULL;
+    state = raw_fnv1a64_update_u64(state, benchmark.size());
+    state = raw_fnv1a64_update(state, benchmark);
+    state = raw_fnv1a64_update_u64(state, test_case.size());
+    state = raw_fnv1a64_update(state, test_case);
+    state = raw_fnv1a64_update_u64(state, group_index);
+    return raw_fnv1a64_update_u64(state, repeat);
+}
+
+[[nodiscard]] constexpr std::uint64_t raw_splitmix64_next(
+        std::uint64_t& state) noexcept {
+    std::uint64_t value = (state += 0x9e3779b97f4a7c15ULL);
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+[[nodiscard]] constexpr std::uint64_t raw_schedule_shuffle_seed(
+        const std::uint64_t configured_seed,
+        std::string_view benchmark,
+        std::string_view test_case,
+        const std::size_t group_index,
+        const std::size_t repeat) noexcept {
+    std::uint64_t state = configured_seed ^ raw_schedule_identity(
+        benchmark, test_case, group_index, repeat);
+    return raw_splitmix64_next(state);
+}
+static_assert(raw_schedule_identity("bench_raw", "ONE", 0, 0)
+    == 0xaf43da99ec9a27b8ULL);
+static_assert(raw_schedule_shuffle_seed(
+    370, "bench_raw", "ONE", 0, 0) == 0xd0a0823f87782282ULL);
+
+/// Exact deterministic schedule: descending Fisher-Yates driven by a
+/// SplitMix64 stream whose recorded seed is derived from the configured seed
+/// and the FNV identity above.
+[[nodiscard]] inline std::vector<std::size_t> raw_fisher_yates_order(
+        const std::size_t count, const std::uint64_t shuffle_seed) {
+    std::vector<std::size_t> order(count);
+    for (std::size_t index = 0; index < count; ++index) order[index] = index;
+    std::uint64_t state = shuffle_seed;
+    for (std::size_t remaining = count; remaining > 1; --remaining) {
+        const std::size_t swap_index = static_cast<std::size_t>(
+            raw_splitmix64_next(state) % remaining);
+        std::swap(order[remaining - 1], order[swap_index]);
+    }
+    return order;
+}
+
 // ----------------- Rule evaluation -----------------
 
-/// True iff `tuple` satisfies every constraint in `selector`. The selector's
-/// `algorithm_key` must equal the tuple's algorithm name, and every
-/// `(param_name, expected_value)` in `selector.match` must appear in the
-/// tuple's params with the expected value. Empty `match` matches everything.
+/// True iff `tuple` satisfies the algorithm/parameter portion of `selector`.
+/// Source coordinates (`test_case`, `region`) are applied by the rule
+/// evaluator after it selects the corresponding report cell.
 [[nodiscard]] inline bool selector_matches(
     const RuleSelector& selector,
     const ExecutionTuple& tuple) noexcept
@@ -5681,6 +7216,12 @@ using SampleMap = std::map<std::string, std::map<std::string, std::vector<double
 using MergedSamplesByPair =
     std::map<std::pair<const ExecutionTuple*, std::string>, SampleMap>;
 
+using NamedRegionIterationCoverage =
+    std::map<std::string, std::map<std::string, std::size_t>>;
+using MergedNamedRegionCoverageByPair =
+    std::map<std::pair<const ExecutionTuple*, std::string>,
+             NamedRegionIterationCoverage>;
+
 [[nodiscard]] inline MergedSamplesByPair merged_samples_for_state(
     const BenchmarkExecutionState& state)
 {
@@ -5697,6 +7238,42 @@ using MergedSamplesByPair =
                 cells_for_pair.data(), cells_for_pair.size()));
     }
     return merged;
+}
+
+/// Sum the per-cell, per-iteration named-region contribution markers across
+/// groups. Duplicate descriptors with the same name contribute one marker per
+/// iteration, so the final value can be compared directly with matrix.for.
+[[nodiscard]] inline MergedNamedRegionCoverageByPair
+merged_named_region_coverage_for_state(
+    const BenchmarkExecutionState& state)
+{
+    MergedNamedRegionCoverageByPair merged;
+    for (const auto& cell_ptr : state.cells) {
+        auto& target = merged[{cell_ptr->tuple, cell_ptr->test_case->name}];
+        for (const auto& [region_name, metric_counts] :
+             cell_ptr->named_region_iteration_contributions) {
+            for (const auto& [metric_name, count] : metric_counts) {
+                target[region_name][metric_name] += count;
+            }
+        }
+    }
+    return merged;
+}
+
+[[nodiscard]] inline std::size_t fetch_merged_named_region_coverage(
+    const MergedNamedRegionCoverageByPair& merged,
+    const ExecutionTuple* tuple,
+    const std::string& test_case_name,
+    const std::string& region_name,
+    const std::string& metric_name) noexcept
+{
+    const auto pair_it = merged.find({tuple, test_case_name});
+    if (pair_it == merged.end()) return 0;
+    const auto region_it = pair_it->second.find(region_name);
+    if (region_it == pair_it->second.end()) return 0;
+    const auto metric_it = region_it->second.find(metric_name);
+    if (metric_it == region_it->second.end()) return 0;
+    return metric_it->second;
 }
 
 /// Merge only the cells belonging to `case_name` (== ExecutionTuple::
@@ -5735,18 +7312,378 @@ using MergedSamplesByPair =
     return &metric_it->second;
 }
 
+/// One value per logical repeat for paired rule evaluation. The ordinary
+/// report arrays remain untouched for historical compatibility. Named
+/// `region_total_ns` sources can contain multiple descriptors with the same
+/// name, so their strict per-iteration descriptor counts partition the raw
+/// vector and each partition is reduced with the rule's configured aggregate
+/// into one repeat value. This retains the historical descriptor semantics
+/// without pairing unrelated run-level percentiles.
+struct LogicalIterationSeries {
+    std::vector<double> values{};
+    std::vector<std::vector<double>> descriptor_samples{};
+    std::vector<IterationScheduleSample> schedule_samples{};
+    std::size_t tuple_index = 0;
+    std::size_t test_case_index = 0;
+    std::size_t group_index = 0;
+    bool schedule_complete = false;
+    bool complete = false;
+};
+
+[[nodiscard]] inline LogicalIterationSeries logical_iteration_series(
+    const BenchmarkExecutionState& state,
+    const ExecutionTuple* tuple,
+    const std::string& test_case_name,
+    const std::string& region_name,
+    const std::string& metric_name,
+    const Aggregate descriptor_aggregate)
+{
+    LogicalIterationSeries result;
+    const Cell* selected_cell = nullptr;
+    for (const auto& cell_ptr : state.cells) {
+        if (cell_ptr->tuple != tuple
+            || cell_ptr->test_case->name != test_case_name) {
+            continue;
+        }
+        // Paired rules are semantically restricted to one group. Retain this
+        // runtime guard so a malformed/bypassed config cannot collide local
+        // repeat ordinals while still producing an accepted ratio.
+        if (selected_cell != nullptr || cell_ptr->group_count != 1
+            || cell_ptr->group_index != 0) {
+            return result;
+        }
+        selected_cell = cell_ptr.get();
+    }
+    if (selected_cell == nullptr) return result;
+    result.tuple_index = selected_cell->tuple_index;
+    result.test_case_index = selected_cell->test_case_index;
+    result.group_index = selected_cell->group_index;
+    if (selected_cell->iteration_schedule_samples.size()
+            == selected_cell->iterations) {
+        result.schedule_samples = selected_cell->iteration_schedule_samples;
+        result.schedule_complete = true;
+        for (std::size_t repeat = 0;
+             repeat < result.schedule_samples.size(); ++repeat) {
+            if (result.schedule_samples[repeat].repeat != repeat) {
+                result.schedule_complete = false;
+                break;
+            }
+        }
+    }
+
+    const auto region_it = selected_cell->samples.find(region_name);
+    if (region_it == selected_cell->samples.end()) return result;
+    const auto metric_it = region_it->second.find(metric_name);
+    if (metric_it == region_it->second.end()) return result;
+    const auto& raw_values = metric_it->second;
+
+    if (region_name == "all_regions") {
+        if (raw_values.size() != selected_cell->iterations) return result;
+        result.values = raw_values;
+        result.descriptor_samples.reserve(raw_values.size());
+        for (const double raw_value : raw_values) {
+            result.descriptor_samples.push_back({raw_value});
+        }
+        result.complete = true;
+        return result;
+    }
+
+    if (metric_name != "region_total_ns"
+        || selected_cell->named_region_iteration_sample_counts.size()
+            != selected_cell->iterations) {
+        return result;
+    }
+    result.values.reserve(selected_cell->iterations);
+    result.descriptor_samples.reserve(selected_cell->iterations);
+    std::size_t raw_cursor = 0;
+    for (const auto& iteration_counts :
+         selected_cell->named_region_iteration_sample_counts) {
+        const auto named_it = iteration_counts.find(region_name);
+        if (named_it == iteration_counts.end()) return {};
+        const auto count_it = named_it->second.find(metric_name);
+        if (count_it == named_it->second.end() || count_it->second == 0
+            || count_it->second > raw_values.size() - raw_cursor) {
+            return {};
+        }
+        std::vector<double> descriptor_values;
+        descriptor_values.reserve(count_it->second);
+        for (std::size_t descriptor_index = 0;
+             descriptor_index < count_it->second; ++descriptor_index) {
+            descriptor_values.push_back(raw_values[raw_cursor++]);
+        }
+        result.values.push_back(
+            aggregate_samples(descriptor_aggregate, descriptor_values));
+        result.descriptor_samples.push_back(std::move(descriptor_values));
+    }
+    if (raw_cursor != raw_values.size()) return {};
+    result.complete = true;
+    return result;
+}
+
+[[nodiscard]] inline std::optional<double> aggregate_paired_ratios(
+    const RuleComparator& comparator,
+    const LogicalIterationSeries& lhs,
+    const LogicalIterationSeries& rhs)
+{
+    if (!lhs.complete || !rhs.complete
+        || lhs.values.size() != rhs.values.size()
+        || comparator.warmup_repetitions >= lhs.values.size()) {
+        return std::nullopt;
+    }
+    std::vector<double> ratios;
+    ratios.reserve(lhs.values.size() - comparator.warmup_repetitions);
+    for (std::size_t repeat = comparator.warmup_repetitions;
+         repeat < lhs.values.size(); ++repeat) {
+        const double numerator = lhs.values[repeat];
+        const double denominator = rhs.values[repeat];
+        if (!std::isfinite(numerator) || !std::isfinite(denominator)
+            || denominator == 0.0) {
+            return std::nullopt;
+        }
+        const double ratio = numerator / denominator;
+        if (!std::isfinite(ratio)) return std::nullopt;
+        ratios.push_back(ratio);
+    }
+    if (ratios.empty()) return std::nullopt;
+    return aggregate_samples(comparator.aggregate, ratios);
+}
+
+/// Materialize the exact inputs and result of one resolved paired named-stage
+/// rule. Schedule matching is part of acceptance: a numerical ratio cannot be
+/// accepted when the two source cells lack the actual interleaved coordinates
+/// needed to prove that repeat N was compared with repeat N.
+[[nodiscard]] inline PairedRuleEvidence make_paired_rule_evidence(
+    const BenchmarkExecutionState& state,
+    const Rule& rule,
+    const std::string& test_case_name,
+    const std::string& lhs_region,
+    const std::string& rhs_region,
+    const ExecutionTuple* lhs_tuple,
+    const ExecutionTuple* rhs_tuple,
+    const std::size_t iterations,
+    const bool lhs_source_present,
+    const bool rhs_source_present,
+    const LogicalIterationSeries& lhs,
+    const LogicalIterationSeries& rhs,
+    const std::optional<double> observed_paired_ratio)
+{
+    PairedRuleEvidence evidence;
+    evidence.config_path = state.config.config_path;
+    evidence.benchmark_key = state.config.benchmark_key;
+    evidence.rule_name = rule.name;
+    evidence.test_case = test_case_name;
+    evidence.metric = rule.metric_name;
+    evidence.comparator = rule.cmp;
+    evidence.benchmark_index = state.driver_benchmark_index;
+    evidence.group_index = 0;
+    evidence.schedule_mode = state.config.iteration_order
+            == BenchmarkConfig::IterationOrderMode::interleaved_seeded
+        ? "interleaved_seeded" : "item_major";
+    evidence.configured_schedule_seed = state.config.iteration_order_seed;
+
+    const auto lhs_tuple_index = static_cast<std::size_t>(
+        lhs_tuple - state.execution_tuples.data());
+    const auto rhs_tuple_index = static_cast<std::size_t>(
+        rhs_tuple - state.execution_tuples.data());
+    evidence.numerator_route = PairedRuleRouteEvidence{
+        .algorithm = lhs_tuple->algorithm_name,
+        .params = lhs_tuple->params,
+        .tuple_index = lhs_tuple_index,
+        .test_case = test_case_name,
+        .region = lhs_region,
+        .metric = rule.metric_name,
+    };
+    evidence.denominator_route = PairedRuleRouteEvidence{
+        .algorithm = rhs_tuple->algorithm_name,
+        .params = rhs_tuple->params,
+        .tuple_index = rhs_tuple_index,
+        .test_case = test_case_name,
+        .region = rhs_region,
+        .metric = rule.metric_name,
+    };
+
+    bool test_case_found = false;
+    for (std::size_t test_case_index = 0;
+         test_case_index < state.test_cases.size(); ++test_case_index) {
+        if (state.test_cases[test_case_index].name == test_case_name) {
+            evidence.test_case_index = test_case_index;
+            test_case_found = true;
+            break;
+        }
+    }
+
+    std::vector<std::size_t> scheduled_tuple_indices;
+    bool schedule_topology_matches = test_case_found
+        && state.config.iteration_order
+            == BenchmarkConfig::IterationOrderMode::interleaved_seeded;
+    for (const auto& cell : state.cells) {
+        if (cell->test_case->name != test_case_name) continue;
+        if (cell->group_count != 1 || cell->group_index != 0
+            || cell->test_case_index != evidence.test_case_index) {
+            schedule_topology_matches = false;
+            continue;
+        }
+        scheduled_tuple_indices.push_back(cell->tuple_index);
+    }
+    const auto tuple_is_scheduled = [&scheduled_tuple_indices](
+            const std::size_t tuple_index) {
+        return std::find(
+            scheduled_tuple_indices.begin(),
+            scheduled_tuple_indices.end(), tuple_index)
+            != scheduled_tuple_indices.end();
+    };
+    schedule_topology_matches = schedule_topology_matches
+        && !scheduled_tuple_indices.empty()
+        && tuple_is_scheduled(lhs_tuple_index)
+        && tuple_is_scheduled(rhs_tuple_index)
+        && std::set<std::size_t>(
+               scheduled_tuple_indices.begin(),
+               scheduled_tuple_indices.end()).size()
+            == scheduled_tuple_indices.size();
+
+    evidence.repeats.reserve(iterations);
+    bool every_schedule_identity_matches = schedule_topology_matches
+        && lhs.schedule_complete && rhs.schedule_complete
+        && lhs.group_index == 0 && rhs.group_index == 0
+        && lhs.test_case_index == evidence.test_case_index
+        && rhs.test_case_index == evidence.test_case_index
+        && lhs.schedule_samples.size() == iterations
+        && rhs.schedule_samples.size() == iterations;
+    for (std::size_t repeat = 0; repeat < iterations; ++repeat) {
+        PairedRuleRepeatEvidence repeat_evidence;
+        repeat_evidence.repeat = repeat;
+        repeat_evidence.included_after_warmup =
+            repeat >= rule.cmp.warmup_repetitions;
+
+        if (repeat < lhs.descriptor_samples.size()) {
+            repeat_evidence.numerator_samples = lhs.descriptor_samples[repeat];
+        }
+        if (repeat < rhs.descriptor_samples.size()) {
+            repeat_evidence.denominator_samples = rhs.descriptor_samples[repeat];
+        }
+        if (repeat < lhs.values.size()
+            && std::isfinite(lhs.values[repeat])) {
+            repeat_evidence.numerator_value_present = true;
+            repeat_evidence.numerator_value = lhs.values[repeat];
+        }
+        if (repeat < rhs.values.size()
+            && std::isfinite(rhs.values[repeat])) {
+            repeat_evidence.denominator_value_present = true;
+            repeat_evidence.denominator_value = rhs.values[repeat];
+        }
+        if (repeat_evidence.numerator_value_present
+            && repeat_evidence.denominator_value_present
+            && repeat_evidence.denominator_value != 0.0) {
+            const double ratio = repeat_evidence.numerator_value
+                / repeat_evidence.denominator_value;
+            if (std::isfinite(ratio)) {
+                repeat_evidence.ratio_present = true;
+                repeat_evidence.ratio = ratio;
+            }
+        }
+
+        if (lhs.schedule_complete
+            && repeat < lhs.schedule_samples.size()) {
+            repeat_evidence.numerator_schedule_present = true;
+            repeat_evidence.numerator_schedule = lhs.schedule_samples[repeat];
+        }
+        if (rhs.schedule_complete
+            && repeat < rhs.schedule_samples.size()) {
+            repeat_evidence.denominator_schedule_present = true;
+            repeat_evidence.denominator_schedule = rhs.schedule_samples[repeat];
+        }
+        const std::uint64_t expected_shuffle_seed =
+            raw_schedule_shuffle_seed(
+                state.config.iteration_order_seed,
+                state.config.benchmark_key,
+                test_case_name, evidence.group_index, repeat);
+        const auto expected_order = raw_fisher_yates_order(
+            scheduled_tuple_indices.size(), expected_shuffle_seed);
+        std::optional<std::size_t> expected_numerator_position;
+        std::optional<std::size_t> expected_denominator_position;
+        for (std::size_t position = 0;
+             position < expected_order.size(); ++position) {
+            const std::size_t scheduled_index = expected_order[position];
+            if (scheduled_index >= scheduled_tuple_indices.size()) {
+                schedule_topology_matches = false;
+                continue;
+            }
+            const std::size_t scheduled_tuple =
+                scheduled_tuple_indices[scheduled_index];
+            if (scheduled_tuple == lhs_tuple_index) {
+                expected_numerator_position = position;
+            }
+            if (scheduled_tuple == rhs_tuple_index) {
+                expected_denominator_position = position;
+            }
+        }
+        const bool numerator_schedule_matches =
+            repeat_evidence.numerator_schedule_present
+            && repeat_evidence.numerator_schedule.repeat == repeat
+            && repeat_evidence.numerator_schedule.shuffle_seed
+                == expected_shuffle_seed
+            && expected_numerator_position.has_value()
+            && repeat_evidence.numerator_schedule.order_position
+                == *expected_numerator_position;
+        const bool denominator_schedule_matches =
+            repeat_evidence.denominator_schedule_present
+            && repeat_evidence.denominator_schedule.repeat == repeat
+            && repeat_evidence.denominator_schedule.shuffle_seed
+                == expected_shuffle_seed
+            && expected_denominator_position.has_value()
+            && repeat_evidence.denominator_schedule.order_position
+                == *expected_denominator_position;
+        repeat_evidence.schedule_identity_matches =
+            schedule_topology_matches
+            && numerator_schedule_matches
+            && denominator_schedule_matches;
+        every_schedule_identity_matches =
+            every_schedule_identity_matches
+            && repeat_evidence.schedule_identity_matches;
+        evidence.repeats.push_back(std::move(repeat_evidence));
+    }
+
+    evidence.inputs_present = {
+        lhs_source_present && lhs.complete && lhs.schedule_complete,
+        rhs_source_present && rhs.complete && rhs.schedule_complete,
+    };
+    evidence.observed_paired_ratio_present =
+        evidence.inputs_present[0] && evidence.inputs_present[1]
+        && every_schedule_identity_matches
+        && observed_paired_ratio.has_value()
+        && std::isfinite(*observed_paired_ratio);
+    if (evidence.observed_paired_ratio_present) {
+        evidence.observed_paired_ratio = *observed_paired_ratio;
+        evidence.accepted = comparator_passes(
+            rule.cmp, evidence.observed_paired_ratio,
+            rule.cmp.paired_baseline);
+    }
+    return evidence;
+}
+
 /// Apply every rule against every test case and collect failures. With
 /// V11's per-group cells, samples are merged once per `(tuple,
 /// test_case)` *before* the rule loop so LHS/RHS aggregates are computed
 /// from the same merged sample arrays the report writer will emit.
-inline void evaluate_rules(const BenchmarkExecutionState& state,
-                            std::vector<Violation>& violations)
+inline void evaluate_rules(
+    const BenchmarkExecutionState& state,
+    std::vector<Violation>& violations,
+    std::vector<PairedRuleEvidence>& paired_rule_evidence)
 {
     const auto merged = merged_samples_for_state(state);
+    const auto named_region_coverage =
+        merged_named_region_coverage_for_state(state);
 
     for (const auto& metric : state.config.metrics) {
         for (const auto& rule : metric.rules) {
-            for (const auto& [test_case_name, _iterations] : state.config.for_each) {
+            for (const auto& [test_case_name, iterations] : state.config.for_each) {
+                if (iterations == 0) continue;
+                if ((!rule.lhs.test_case.empty()
+                     && rule.lhs.test_case != test_case_name)
+                    || (!rule.rhs.test_case.empty()
+                        && rule.rhs.test_case != test_case_name)) {
+                    continue;
+                }
                 // Collect tuple* on each side so we evaluate the rule
                 // exactly once per (LHS_tuple, RHS_tuple) pair, never
                 // duplicated across groups.
@@ -5756,20 +7693,117 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
                     if (selector_matches(rule.lhs, tuple)) lhs_tuples.push_back(&tuple);
                     if (selector_matches(rule.rhs, tuple)) rhs_tuples.push_back(&tuple);
                 }
+                const std::string lhs_region = rule.lhs.region.empty()
+                    ? std::string{"all_regions"}
+                    : rule.lhs.region;
+                const std::string rhs_region = rule.rhs.region.empty()
+                    ? std::string{"all_regions"}
+                    : rule.rhs.region;
                 for (const auto* lhs_tuple : lhs_tuples) {
                     for (const auto* rhs_tuple : rhs_tuples) {
                         const auto* lhs_samples = fetch_merged_samples(
                             merged, lhs_tuple, test_case_name,
-                            "all_regions", rule.metric_name);
+                            lhs_region, rule.metric_name);
                         const auto* rhs_samples = fetch_merged_samples(
                             merged, rhs_tuple, test_case_name,
-                            "all_regions", rule.metric_name);
-                        if (lhs_samples == nullptr || rhs_samples == nullptr) continue;
-                        const double lhs_aggregate = aggregate_samples(
-                            rule.cmp.aggregate, *lhs_samples);
-                        const double rhs_aggregate = aggregate_samples(
-                            rule.cmp.aggregate, *rhs_samples);
-                        if (comparator_passes(rule.cmp, lhs_aggregate, rhs_aggregate)) continue;
+                            rhs_region, rule.metric_name);
+                        const auto source_is_measured =
+                            [&merged, &test_case_name](
+                                const ExecutionTuple* tuple) noexcept {
+                                const auto source_it = merged.find(
+                                    {tuple, test_case_name});
+                                if (source_it == merged.end()) return false;
+                                const auto all_regions_it =
+                                    source_it->second.find("all_regions");
+                                return all_regions_it != source_it->second.end()
+                                    && !region_has_nonfinite_evaluation_sentinel(
+                                        all_regions_it->second);
+                            };
+                        const std::size_t lhs_expected_samples =
+                            lhs_region == "all_regions" ? iterations : 0;
+                        const std::size_t rhs_expected_samples =
+                            rhs_region == "all_regions" ? iterations : 0;
+                        const auto named_region_is_complete =
+                            [&state, &named_region_coverage, &test_case_name,
+                             iterations](const ExecutionTuple* tuple,
+                                         const std::string& region,
+                                         const std::string& metric_name) noexcept {
+                                return region == "all_regions"
+                                    || !state.config.acceptance
+                                            .require_named_region_iteration_coverage
+                                    || fetch_merged_named_region_coverage(
+                                           named_region_coverage, tuple,
+                                           test_case_name, region, metric_name)
+                                           == iterations;
+                            };
+                        bool lhs_present = lhs_samples != nullptr
+                            && has_complete_finite_samples(
+                                *lhs_samples, lhs_expected_samples)
+                            && named_region_is_complete(
+                                lhs_tuple, lhs_region, rule.metric_name)
+                            && source_is_measured(lhs_tuple);
+                        bool rhs_present = rhs_samples != nullptr
+                            && has_complete_finite_samples(
+                                *rhs_samples, rhs_expected_samples)
+                            && named_region_is_complete(
+                                rhs_tuple, rhs_region, rule.metric_name)
+                            && source_is_measured(rhs_tuple);
+                        double lhs_aggregate = lhs_present
+                            ? aggregate_samples(rule.cmp.aggregate, *lhs_samples)
+                            : 0.0;
+                        double rhs_aggregate = rhs_present
+                            ? aggregate_samples(rule.cmp.aggregate, *rhs_samples)
+                            : 0.0;
+                        std::optional<bool> paired_named_stage_accepted;
+                        if (rule.cmp.pairing
+                            == RuleComparator::PairingMode::by_iteration_ratio) {
+                            const bool lhs_source_present = lhs_present;
+                            const bool rhs_source_present = rhs_present;
+                            const auto lhs_logical = logical_iteration_series(
+                                state, lhs_tuple, test_case_name,
+                                lhs_region, rule.metric_name,
+                                rule.cmp.aggregate);
+                            const auto rhs_logical = logical_iteration_series(
+                                state, rhs_tuple, test_case_name,
+                                rhs_region, rule.metric_name,
+                                rule.cmp.aggregate);
+                            const auto paired_ratio = aggregate_paired_ratios(
+                                rule.cmp, lhs_logical, rhs_logical);
+                            bool paired_present = lhs_present
+                                && rhs_present && paired_ratio.has_value();
+                            const bool named_stage = lhs_region != "all_regions"
+                                || rhs_region != "all_regions";
+                            if (named_stage) {
+                                auto evidence = make_paired_rule_evidence(
+                                    state, rule, test_case_name,
+                                    lhs_region, rhs_region,
+                                    lhs_tuple, rhs_tuple, iterations,
+                                    lhs_source_present, rhs_source_present,
+                                    lhs_logical, rhs_logical, paired_ratio);
+                                paired_present =
+                                    evidence.observed_paired_ratio_present;
+                                paired_named_stage_accepted = evidence.accepted;
+                                paired_rule_evidence.push_back(
+                                    std::move(evidence));
+                            }
+                            lhs_present = paired_present;
+                            rhs_present = paired_present;
+                            lhs_aggregate = paired_present
+                                ? *paired_ratio : 0.0;
+                            // A paired rule compares aggregate(lhs[i]/rhs[i])
+                            // against its explicit historical/reference ratio.
+                            rhs_aggregate = paired_present
+                                ? rule.cmp.paired_baseline : 0.0;
+                        }
+                        const bool rule_accepted =
+                            paired_named_stage_accepted.has_value()
+                            ? *paired_named_stage_accepted
+                            : lhs_present && rhs_present
+                                && comparator_passes(
+                                    rule.cmp, lhs_aggregate, rhs_aggregate);
+                        if (rule_accepted) {
+                            continue;
+                        }
 
                         Violation violation;
                         violation.config_path     = state.config.config_path;
@@ -5782,6 +7816,11 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
                         violation.rhs_algorithm   = rhs_tuple->algorithm_name;
                         violation.rhs_full_params = rhs_tuple->params;
                         violation.args            = {lhs_aggregate, rhs_aggregate};
+                        violation.args_present    = {lhs_present, rhs_present};
+                        violation.comparison_mode = rule.cmp.pairing;
+                        violation.warmup_repetitions =
+                            rule.cmp.warmup_repetitions;
+                        violation.blocking = rule.cmp.blocking;
                         violations.push_back(std::move(violation));
                     }
                 }
@@ -5943,6 +7982,47 @@ struct ParsedHistoricalReport {
         }
         if (overflowed) continue;
         if (!max_index.has_value() || parsed > *max_index) {
+            max_index = parsed;
+        }
+    }
+    return max_index;
+}
+
+/// Allocation guard for crash-left raw sidecars.  A sidecar is created with
+/// O_EXCL before any benchmark work, so a crashed run may have no matching
+/// report_<N>.json.  Treat both completed reports and orphan sidecars as used
+/// indices; gaps are evidence and must never be overwritten.
+[[nodiscard]] inline std::optional<std::size_t> max_existing_run_artifact_index(
+    const std::filesystem::path& report_dir) noexcept
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(report_dir, ec) || ec) return std::nullopt;
+    std::optional<std::size_t> max_index =
+        max_existing_report_index(report_dir);
+    for (const auto& entry : std::filesystem::directory_iterator(report_dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec) || ec) continue;
+        const std::string filename = entry.path().filename().string();
+        constexpr std::string_view prefix = "report_";
+        constexpr std::string_view suffix = ".raw.jsonl";
+        if (!filename.starts_with(prefix) || !filename.ends_with(suffix)
+            || filename.size() <= prefix.size() + suffix.size()) {
+            continue;
+        }
+        const std::string_view digits{filename.data() + prefix.size(),
+            filename.size() - prefix.size() - suffix.size()};
+        std::size_t parsed = 0;
+        bool valid = !digits.empty();
+        for (const char ch : digits) {
+            if (ch < '0' || ch > '9'
+                || parsed > ((std::numeric_limits<std::size_t>::max)()
+                        - static_cast<std::size_t>(ch - '0')) / 10) {
+                valid = false;
+                break;
+            }
+            parsed = parsed * 10 + static_cast<std::size_t>(ch - '0');
+        }
+        if (valid && (!max_index.has_value() || parsed > *max_index)) {
             max_index = parsed;
         }
     }
@@ -7149,6 +9229,268 @@ inline void emit_execution_tuple_record(simdjson::builder::string_builder& build
     });
 }
 
+/// Emit a finite floating-point value or JSON null when the evaluator marked
+/// the value unavailable/non-finite. Reports therefore remain valid JSON while
+/// preserving fail-closed availability evidence.
+inline void emit_paired_finite_or_null(
+    simdjson::builder::string_builder& builder,
+    const bool present,
+    const double value)
+{
+    if (present && std::isfinite(value)) {
+        builder.append(value);
+    } else {
+        builder.append_null();
+    }
+}
+
+/// Emit every raw descriptor sample in one logical repeat. A non-finite source
+/// is represented by null and separately causes the rule input to be absent.
+inline void emit_paired_descriptor_samples(
+    simdjson::builder::string_builder& builder,
+    const std::vector<double>& samples)
+{
+    builder.start_array();
+    bool first = true;
+    for (const double sample : samples) {
+        if (!first) builder.append_comma();
+        first = false;
+        emit_paired_finite_or_null(
+            builder, std::isfinite(sample), sample);
+    }
+    builder.end_array();
+}
+
+/// Emit one resolved numerator/denominator route identity.
+inline void emit_paired_rule_route(
+    simdjson::builder::string_builder& builder,
+    const PairedRuleRouteEvidence& route)
+{
+    emit_object_with_body(builder, [&route](auto& inner) {
+        emit_kv_string(inner, "algorithm", route.algorithm);
+        inner.append_comma();
+        emit_kv_with_body(inner, "params", [&route](auto& params_builder) {
+            emit_param_object(params_builder, route.params);
+        });
+        inner.append_comma();
+        emit_key(inner, "tuple_index");
+        inner.append(route.tuple_index);
+        inner.append_comma();
+        emit_kv_string(inner, "test_case", route.test_case);
+        inner.append_comma();
+        emit_kv_string(inner, "region", route.region);
+        inner.append_comma();
+        emit_kv_string(inner, "metric", route.metric);
+    });
+}
+
+/// Emit an actually observed scheduler coordinate, or null if the cell did not
+/// retain one. Seeds are fixed-width hexadecimal strings to avoid JSON-number
+/// precision loss in independent JavaScript readers.
+inline void emit_paired_schedule_sample(
+    simdjson::builder::string_builder& builder,
+    const bool present,
+    const IterationScheduleSample& schedule)
+{
+    if (!present) {
+        builder.append_null();
+        return;
+    }
+    emit_object_with_body(builder, [&schedule](auto& inner) {
+        emit_key(inner, "repeat");
+        inner.append(schedule.repeat);
+        inner.append_comma();
+        emit_key(inner, "order_position");
+        inner.append(schedule.order_position);
+        inner.append_comma();
+        emit_kv_string(
+            inner, "shuffle_seed",
+            fmt::format("{:016x}", schedule.shuffle_seed));
+    });
+}
+
+/// Serialize one paired named-stage gate. This exact serializer is used by the
+/// final report and by each PAIRED_RULE_EVIDENCE debug event.
+inline void emit_paired_rule_evidence_record(
+    simdjson::builder::string_builder& builder,
+    const PairedRuleEvidence& evidence)
+{
+    std::string_view comparison_operator = "=";
+    switch (evidence.comparator.op) {
+        case CompareOp::LessThan: comparison_operator = "<"; break;
+        case CompareOp::GreaterThan: comparison_operator = ">"; break;
+        case CompareOp::Equal: comparison_operator = "="; break;
+    }
+    emit_object_with_body(builder,
+        [&evidence, comparison_operator](auto& inner) {
+            emit_kv_string(inner, "location", evidence.config_path);
+            inner.append_comma();
+            emit_kv_string(inner, "benchmark", evidence.benchmark_key);
+            inner.append_comma();
+            emit_kv_string(inner, "rule_name", evidence.rule_name);
+            inner.append_comma();
+            emit_kv_string(inner, "test_case", evidence.test_case);
+            inner.append_comma();
+            emit_kv_string(inner, "metric", evidence.metric);
+            inner.append_comma();
+            emit_kv_string(
+                inner, "comparison_mode", "paired_iteration_ratio");
+            inner.append_comma();
+            emit_kv_with_body(
+                inner, "numerator_route", [&evidence](auto& route_builder) {
+                    emit_paired_rule_route(
+                        route_builder, evidence.numerator_route);
+                });
+            inner.append_comma();
+            emit_kv_with_body(
+                inner, "denominator_route", [&evidence](auto& route_builder) {
+                    emit_paired_rule_route(
+                        route_builder, evidence.denominator_route);
+                });
+            inner.append_comma();
+            emit_kv_with_body(
+                inner, "comparator",
+                [&evidence, comparison_operator](auto& comparator_builder) {
+                    emit_object_with_body(
+                        comparator_builder,
+                        [&evidence, comparison_operator](auto& comparator) {
+                            emit_kv_string(
+                                comparator, "operator", comparison_operator);
+                            comparator.append_comma();
+                            emit_key(comparator, "threshold_pct");
+                            comparator.append(
+                                evidence.comparator.threshold_pct);
+                            comparator.append_comma();
+                            emit_key(comparator, "tolerance_pct");
+                            comparator.append(
+                                evidence.comparator.tolerance_pct);
+                            comparator.append_comma();
+                            emit_kv_string(
+                                comparator, "aggregate",
+                                aggregate_name(evidence.comparator.aggregate));
+                            comparator.append_comma();
+                            emit_key(comparator, "paired_baseline");
+                            comparator.append(
+                                evidence.comparator.paired_baseline);
+                            comparator.append_comma();
+                            emit_key(comparator, "warmup_repetitions");
+                            comparator.append(
+                                evidence.comparator.warmup_repetitions);
+                            comparator.append_comma();
+                            emit_key(comparator, "blocking");
+                            comparator.append(evidence.comparator.blocking);
+                        });
+                });
+            inner.append_comma();
+            emit_kv_with_body(
+                inner, "schedule_identity", [&evidence](auto& schedule_builder) {
+                    emit_object_with_body(
+                        schedule_builder, [&evidence](auto& schedule) {
+                            emit_kv_string(
+                                schedule, "mode", evidence.schedule_mode);
+                            schedule.append_comma();
+                            emit_kv_string(
+                                schedule, "configured_seed",
+                                fmt::format(
+                                    "{:016x}",
+                                    evidence.configured_schedule_seed));
+                            schedule.append_comma();
+                            emit_key(schedule, "benchmark_index");
+                            schedule.append(evidence.benchmark_index);
+                            schedule.append_comma();
+                            emit_key(schedule, "test_case_index");
+                            schedule.append(evidence.test_case_index);
+                            schedule.append_comma();
+                            emit_key(schedule, "group_index");
+                            schedule.append(evidence.group_index);
+                        });
+                });
+            inner.append_comma();
+            emit_kv_with_body(inner, "repeats", [&evidence](auto& repeats) {
+                repeats.start_array();
+                bool first_repeat = true;
+                for (const auto& repeat : evidence.repeats) {
+                    if (!first_repeat) repeats.append_comma();
+                    first_repeat = false;
+                    emit_object_with_body(repeats, [&repeat](auto& item) {
+                        emit_key(item, "repeat");
+                        item.append(repeat.repeat);
+                        item.append_comma();
+                        emit_key(item, "included_after_warmup");
+                        item.append(repeat.included_after_warmup);
+                        item.append_comma();
+                        emit_kv_with_body(
+                            item, "numerator_samples",
+                            [&repeat](auto& samples) {
+                                emit_paired_descriptor_samples(
+                                    samples, repeat.numerator_samples);
+                            });
+                        item.append_comma();
+                        emit_kv_with_body(
+                            item, "denominator_samples",
+                            [&repeat](auto& samples) {
+                                emit_paired_descriptor_samples(
+                                    samples, repeat.denominator_samples);
+                            });
+                        item.append_comma();
+                        emit_key(item, "numerator_value");
+                        emit_paired_finite_or_null(
+                            item, repeat.numerator_value_present,
+                            repeat.numerator_value);
+                        item.append_comma();
+                        emit_key(item, "denominator_value");
+                        emit_paired_finite_or_null(
+                            item, repeat.denominator_value_present,
+                            repeat.denominator_value);
+                        item.append_comma();
+                        emit_key(item, "ratio");
+                        emit_paired_finite_or_null(
+                            item, repeat.ratio_present, repeat.ratio);
+                        item.append_comma();
+                        emit_kv_with_body(
+                            item, "numerator_schedule",
+                            [&repeat](auto& schedule) {
+                                emit_paired_schedule_sample(
+                                    schedule,
+                                    repeat.numerator_schedule_present,
+                                    repeat.numerator_schedule);
+                            });
+                        item.append_comma();
+                        emit_kv_with_body(
+                            item, "denominator_schedule",
+                            [&repeat](auto& schedule) {
+                                emit_paired_schedule_sample(
+                                    schedule,
+                                    repeat.denominator_schedule_present,
+                                    repeat.denominator_schedule);
+                            });
+                        item.append_comma();
+                        emit_key(item, "schedule_identity_matches");
+                        item.append(repeat.schedule_identity_matches);
+                    });
+                }
+                repeats.end_array();
+            });
+            inner.append_comma();
+            emit_kv_with_body(
+                inner, "inputs_present", [&evidence](auto& present) {
+                    present.start_array();
+                    present.append(evidence.inputs_present[0]);
+                    present.append_comma();
+                    present.append(evidence.inputs_present[1]);
+                    present.end_array();
+                });
+            inner.append_comma();
+            emit_key(inner, "observed_paired_ratio");
+            emit_paired_finite_or_null(
+                inner, evidence.observed_paired_ratio_present,
+                evidence.observed_paired_ratio);
+            inner.append_comma();
+            emit_key(inner, "accepted");
+            inner.append(evidence.accepted);
+        });
+}
+
 // ----------------- --debug JSONL event sink -----------------
 
 /// Append-only, crash-resilient JSONL event sink for `--debug`. One instance
@@ -7217,6 +9559,27 @@ public:
         write_line_(b);
     }
 
+    /// Persist one complete paired named-stage evaluation immediately after
+    /// the benchmark finishes. write_line_ flushes the independent JSON object
+    /// before the final report is assembled, preserving the evidence on crash.
+    void emit_paired_rule_evidence(const PairedRuleEvidence& evidence) {
+        simdjson::builder::string_builder builder;
+        emit_object_with_body(builder, [&evidence](auto& object) {
+            emit_kv_string(
+                object, "event", "PAIRED_RULE_EVIDENCE");
+            object.append_comma();
+            emit_key(object, "timestamp");
+            object.append(now_unix_millis());
+            object.append_comma();
+            emit_kv_with_body(
+                object, "evidence", [&evidence](auto& evidence_builder) {
+                    emit_paired_rule_evidence_record(
+                        evidence_builder, evidence);
+                });
+        });
+        write_line_(builder);
+    }
+
     void emit_execution_finished(std::string_view results_path) {
         simdjson::builder::string_builder b;
         emit_object_with_body(b, [&results_path](auto& o){
@@ -7246,6 +9609,814 @@ private:
     std::mutex             mu_;
 };
 
+[[nodiscard]] inline std::string raw_hex64(std::uint64_t value) {
+    return fmt::format("{:016x}", value);
+}
+
+[[nodiscard]] inline std::string raw_record_checksum(
+        nlohmann::json record) {
+    record.erase("record_checksum");
+    return raw_hex64(raw_fnv1a64_update(
+        14695981039346656037ULL, record.dump()));
+}
+
+[[nodiscard]] inline std::optional<std::uint64_t> raw_json_u64(
+        const nlohmann::json& object, std::string_view key) noexcept {
+    const auto found = object.find(std::string{key});
+    if (found == object.end()) return std::nullopt;
+    if (found->is_number_unsigned()) return found->get<std::uint64_t>();
+    if (found->is_number_integer()) {
+        const auto value = found->get<std::int64_t>();
+        if (value >= 0) return static_cast<std::uint64_t>(value);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline nlohmann::json raw_duration_summary(
+        std::vector<std::uint64_t> samples) {
+    nlohmann::json result = nlohmann::json::object();
+    result["count"] = samples.size();
+    if (samples.empty()) {
+        result["min"] = nullptr;
+        result["p50"] = nullptr;
+        result["mean"] = nullptr;
+        result["p95"] = nullptr;
+        return result;
+    }
+    std::sort(samples.begin(), samples.end());
+    const auto percentile = [&samples](const std::size_t percent) {
+        const std::size_t index =
+            (percent * samples.size() + 99) / 100 - 1;
+        return samples[index];
+    };
+    long double sum = 0;
+    for (const auto sample : samples) sum += sample;
+    result["min"] = samples.front();
+    result["p50"] = percentile(50);
+    result["mean"] = static_cast<double>(
+        sum / static_cast<long double>(samples.size()));
+    result["p95"] = percentile(95);
+    return result;
+}
+
+[[nodiscard]] constexpr std::size_t raw_nearest_rank_index(
+        std::size_t count, std::size_t percentile) noexcept {
+    return count == 0 ? 0 : (percentile * count + 99) / 100 - 1;
+}
+static_assert(raw_nearest_rank_index(3, 50) == 1);
+static_assert(raw_nearest_rank_index(4, 50) == 1);
+static_assert(raw_nearest_rank_index(20, 95) == 18);
+
+/// Power-loss-resilient raw evidence stream.  The mutex establishes the one
+/// authoritative completion order; a Cell is mutated only after the exact
+/// line and fsync have succeeded.
+class DurableRawEvidenceSink {
+public:
+    DurableRawEvidenceSink(
+            std::filesystem::path path,
+            std::string run_id)
+        : path_(std::move(path)), run_id_(std::move(run_id)),
+          io_fault_(raw_evidence_io_fault_for_testing.load(
+              std::memory_order_acquire)) {
+        std::error_code ec;
+        if (path_.has_parent_path()) {
+            std::filesystem::create_directories(path_.parent_path(), ec);
+        }
+        fd_ = ::open(path_.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_CLOEXEC,
+            0600);
+        if (fd_ < 0) {
+            poisoned_ = true;
+            bioseq_log<ERR>(
+                "[bench_framework] raw evidence O_EXCL open failed for '{}': {}",
+                path_.string(), std::strerror(errno));
+            return;
+        }
+        const nlohmann::json header{
+            {"kind", "header"},
+            {"schema", 1},
+            {"run_id", run_id_},
+        };
+        header_line_ = header.dump();
+        if (!append_line_locked(header_line_)) {
+            poisoned_ = true;
+        }
+    }
+
+    ~DurableRawEvidenceSink() noexcept {
+        if (fd_ >= 0) (void)::close(fd_);
+    }
+
+    DurableRawEvidenceSink(const DurableRawEvidenceSink&) = delete;
+    DurableRawEvidenceSink& operator=(const DurableRawEvidenceSink&) = delete;
+
+    [[nodiscard]] bool ok() const noexcept {
+        std::lock_guard<std::mutex> guard(mu_);
+        return fd_ >= 0 && !poisoned_;
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+    [[nodiscard]] std::optional<std::string> append_sample(
+            std::string_view unfinalized_record,
+            const std::size_t benchmark_index,
+            const std::size_t test_case_index,
+            const std::size_t tuple_index,
+            const std::size_t group_index,
+            const std::size_t repeat,
+            const std::string_view order_mode,
+            const std::uint64_t configured_seed,
+            const std::uint64_t shuffle_seed,
+            const std::size_t order_position) {
+        std::lock_guard<std::mutex> guard(mu_);
+        if (poisoned_ || sealed_ || fd_ < 0) return std::nullopt;
+        nlohmann::json record = nlohmann::json::parse(
+            unfinalized_record, nullptr, false);
+        if (record.is_discarded() || !record.is_object()
+            || record.contains("raw_record_id")
+            || record.contains("schedule")
+            || record.contains("record_checksum")) {
+            poisoned_ = true;
+            return std::nullopt;
+        }
+        record["raw_record_id"] = next_record_id_;
+        record["schedule"] = nlohmann::json{
+            {"benchmark_index", benchmark_index},
+            {"test_case_index", test_case_index},
+            {"tuple_index", tuple_index},
+            {"group_index", group_index},
+            {"repeat", repeat},
+            {"mode", order_mode},
+            {"configured_seed", raw_hex64(configured_seed)},
+            {"shuffle_seed", raw_hex64(shuffle_seed)},
+            {"order_position", order_position},
+        };
+        record["record_checksum"] = raw_record_checksum(record);
+        const std::string finalized = record.dump();
+        if (!append_line_locked(finalized)) {
+            poisoned_ = true;
+            return std::nullopt;
+        }
+        records_.push_back(finalized);
+        ++next_record_id_;
+        return finalized;
+    }
+
+    [[nodiscard]] bool seal_and_validate(
+        const std::map<std::string,
+            std::unique_ptr<BenchmarkExecutionState>>& reports) {
+        std::lock_guard<std::mutex> guard(mu_);
+        if (sealed_) return manifest_.value("complete", false);
+        bool valid = !poisoned_ && fd_ >= 0;
+        std::map<std::uint64_t, std::string> embedded_by_id;
+        std::vector<std::pair<std::string, std::string>> scheduled_checksums;
+        std::vector<std::uint64_t> all_durations;
+        std::vector<std::uint64_t> all_index_and_map_durations;
+        using RawBatchKey = std::tuple<std::size_t, std::size_t, std::size_t>;
+        using RawOrderEntry =
+            std::tuple<std::uint64_t, std::size_t, std::size_t,
+                       std::size_t, std::uint64_t>;
+        std::map<RawBatchKey, std::vector<RawOrderEntry>> actual_order;
+        nlohmann::json cell_summaries = nlohmann::json::array();
+
+        for (const auto& [benchmark_key, state_ptr] : reports) {
+            const auto& state = *state_ptr;
+            if (!state.raw_samples_enabled) continue;
+            for (const auto& cell_ptr : state.cells) {
+                const Cell& cell = *cell_ptr;
+                const auto region = cell.samples.find("all_regions");
+                const bool has_wall = region != cell.samples.end()
+                    && region->second.contains("wall_clock_ns");
+                const std::vector<double>* wall = has_wall
+                    ? &region->second.at("wall_clock_ns") : nullptr;
+                const bool has_measured_region = region != cell.samples.end()
+                    && region->second.contains("measured_region_ns_manual");
+                const std::vector<double>* measured_region = has_measured_region
+                    ? &region->second.at("measured_region_ns_manual") : nullptr;
+                if (cell.raw_samples.size() != cell.iterations
+                    || wall == nullptr || wall->size() != cell.iterations
+                    || (measured_region != nullptr
+                        && measured_region->size() != cell.iterations)) {
+                    valid = false;
+                }
+                std::vector<std::uint64_t> cell_durations;
+                std::vector<std::uint64_t> cell_first_repeat_durations;
+                std::vector<std::uint64_t> cell_steady_state_durations;
+                std::vector<std::uint64_t> cell_index_and_map_durations;
+                std::vector<std::string> cell_checksums;
+                std::set<std::size_t> seen_repeats;
+                for (const std::string& serialized : cell.raw_samples) {
+                    nlohmann::json record = nlohmann::json::parse(
+                        serialized, nullptr, false);
+                    if (record.is_discarded() || !record.is_object()) {
+                        valid = false;
+                        continue;
+                    }
+                    const auto id = raw_json_u64(record, "raw_record_id");
+                    const auto repeat = raw_json_u64(record, "repeat");
+                    const auto duration = raw_json_u64(record, "outer_e2e_ns");
+                    const auto index_and_map = raw_json_u64(
+                        record, "index_and_map_ns");
+                    const auto group = raw_json_u64(record, "group_index");
+                    const auto tuple = raw_json_u64(record, "tuple_index");
+                    const auto checksum_it = record.find("record_checksum");
+                    const auto schedule_it = record.find("schedule");
+                    if (!id.has_value() || !repeat.has_value()
+                        || !duration.has_value() || !group.has_value()
+                        || !tuple.has_value() || checksum_it == record.end()
+                        || !checksum_it->is_string()
+                        || schedule_it == record.end()
+                        || !schedule_it->is_object()) {
+                        valid = false;
+                        continue;
+                    }
+                    const auto schedule_benchmark = raw_json_u64(
+                        *schedule_it, "benchmark_index");
+                    const auto schedule_case = raw_json_u64(
+                        *schedule_it, "test_case_index");
+                    const auto schedule_tuple = raw_json_u64(
+                        *schedule_it, "tuple_index");
+                    const auto schedule_group = raw_json_u64(
+                        *schedule_it, "group_index");
+                    const auto schedule_repeat = raw_json_u64(
+                        *schedule_it, "repeat");
+                    const auto schedule_order = raw_json_u64(
+                        *schedule_it, "order_position");
+                    const auto shuffle_seed_it =
+                        schedule_it->find("shuffle_seed");
+                    const std::uint64_t expected_shuffle_seed =
+                        raw_schedule_shuffle_seed(
+                            state.config.iteration_order_seed,
+                            state.config.benchmark_key,
+                            cell.test_case->name,
+                            cell.group_index,
+                            static_cast<std::size_t>(*repeat));
+                    const std::string expected_mode = state.config.iteration_order
+                            == BenchmarkConfig::IterationOrderMode::interleaved_seeded
+                        ? "interleaved_seeded" : "item_major";
+                    const bool identity_valid =
+                        record.value("benchmark", std::string{}) == benchmark_key
+                        && record.value("test_case", std::string{})
+                            == cell.test_case->name
+                        && record.value("algorithm", std::string{})
+                            == cell.tuple->algorithm_name
+                        && *group == cell.group_index
+                        && *tuple == cell.tuple_index
+                        && *repeat < cell.iterations
+                        && schedule_benchmark.has_value()
+                        && *schedule_benchmark
+                            == state.driver_benchmark_index
+                        && schedule_case == cell.test_case_index
+                        && schedule_tuple == cell.tuple_index
+                        && schedule_group == cell.group_index
+                        && schedule_repeat == repeat
+                        && schedule_order.has_value()
+                        && *schedule_order < state.execution_tuples.size()
+                        && schedule_it->value("mode", std::string{})
+                            == expected_mode
+                        && schedule_it->value(
+                                "configured_seed", std::string{})
+                            == raw_hex64(state.config.iteration_order_seed)
+                        && shuffle_seed_it != schedule_it->end()
+                        && shuffle_seed_it->is_string()
+                        && shuffle_seed_it->get<std::string>()
+                            == raw_hex64(expected_shuffle_seed)
+                        && schedule_it->size() == 9
+                        && checksum_it->get<std::string>()
+                            == raw_record_checksum(record)
+                        && seen_repeats.insert(
+                            static_cast<std::size_t>(*repeat)).second;
+                    if (!identity_valid || wall == nullptr
+                        || *repeat >= wall->size()
+                        || (*wall)[*repeat] != static_cast<double>(*duration)) {
+                        valid = false;
+                    }
+                    if (schedule_benchmark.has_value()
+                        && schedule_case.has_value()
+                        && schedule_group.has_value()
+                        && schedule_order.has_value()) {
+                        actual_order[RawBatchKey{
+                            static_cast<std::size_t>(*schedule_benchmark),
+                            static_cast<std::size_t>(*schedule_case),
+                            static_cast<std::size_t>(*schedule_group)}]
+                            .emplace_back(
+                                *id,
+                                static_cast<std::size_t>(*repeat),
+                                static_cast<std::size_t>(*schedule_order),
+                                cell.tuple_index,
+                                expected_shuffle_seed);
+                    }
+                    if (index_and_map.has_value() != (measured_region != nullptr)
+                        || (index_and_map.has_value()
+                            && (*repeat >= measured_region->size()
+                                || (*measured_region)[*repeat]
+                                    != static_cast<double>(*index_and_map)))) {
+                        valid = false;
+                    }
+                    if (!embedded_by_id.emplace(*id, serialized).second) {
+                        valid = false;
+                    }
+                    const std::string checksum = checksum_it->get<std::string>();
+                    const std::string schedule_key = fmt::format(
+                        "{:020}:{:020}:{:020}:{:020}:{:020}",
+                        schedule_benchmark.value_or(0),
+                        schedule_case.value_or(0),
+                        schedule_tuple.value_or(0),
+                        schedule_group.value_or(0),
+                        schedule_repeat.value_or(0));
+                    scheduled_checksums.emplace_back(schedule_key, checksum);
+                    cell_checksums.push_back(checksum);
+                    cell_durations.push_back(*duration);
+                    if (repeat.has_value() && *repeat == 0) {
+                        cell_first_repeat_durations.push_back(*duration);
+                    } else if (repeat.has_value()) {
+                        cell_steady_state_durations.push_back(*duration);
+                    }
+                    all_durations.push_back(*duration);
+                    if (index_and_map.has_value()) {
+                        cell_index_and_map_durations.push_back(*index_and_map);
+                        all_index_and_map_durations.push_back(*index_and_map);
+                    }
+                }
+                std::sort(cell_checksums.begin(), cell_checksums.end());
+                std::uint64_t cell_hash = 14695981039346656037ULL;
+                for (const auto& checksum : cell_checksums) {
+                    cell_hash = raw_fnv1a64_update(cell_hash, checksum);
+                }
+                cell_summaries.push_back(nlohmann::json{
+                    {"benchmark", benchmark_key},
+                    {"test_case", cell.test_case->name},
+                    {"algorithm", cell.tuple->algorithm_name},
+                    {"tuple_index", cell.tuple_index},
+                    {"group_index", cell.group_index},
+                    {"record_count", cell.raw_samples.size()},
+                    {"schedule_sorted_checksum", raw_hex64(cell_hash)},
+                    {"outer_e2e_ns", raw_duration_summary(cell_durations)},
+                    {"first_repeat_outer_e2e_ns",
+                        raw_duration_summary(cell_first_repeat_durations)},
+                    {"steady_state_outer_e2e_ns",
+                        raw_duration_summary(cell_steady_state_durations)},
+                    {"index_and_map_ns",
+                        raw_duration_summary(cell_index_and_map_durations)},
+                });
+            }
+        }
+
+        for (const auto& [benchmark_key, state_ptr] : reports) {
+            (void)benchmark_key;
+            const auto& state = *state_ptr;
+            if (!state.raw_samples_enabled) continue;
+            std::map<std::pair<std::size_t, std::size_t>,
+                std::vector<const Cell*>> expected_batches;
+            for (const auto& cell : state.cells) {
+                expected_batches[{cell->test_case_index, cell->group_index}]
+                    .push_back(cell.get());
+            }
+            for (auto& [case_group, cells] : expected_batches) {
+                std::sort(cells.begin(), cells.end(),
+                    [](const Cell* lhs, const Cell* rhs) {
+                        return lhs->tuple_index < rhs->tuple_index;
+                    });
+                auto found = actual_order.find(RawBatchKey{
+                    state.driver_benchmark_index,
+                    case_group.first,
+                    case_group.second});
+                if (found == actual_order.end()) {
+                    if (std::any_of(cells.begin(), cells.end(),
+                            [](const Cell* cell) {
+                                return cell->iterations != 0;
+                            })) valid = false;
+                    continue;
+                }
+                auto actual = found->second;
+                std::sort(actual.begin(), actual.end());
+                using ObservedOrder = std::tuple<
+                    std::size_t, std::size_t, std::size_t, std::uint64_t>;
+                std::vector<ObservedOrder> observed;
+                for (const auto& [raw_id, repeat, order_position,
+                                  tuple_index, shuffle_seed] : actual) {
+                    (void)raw_id;
+                    observed.emplace_back(
+                        repeat, order_position, tuple_index, shuffle_seed);
+                }
+                std::vector<ObservedOrder> expected;
+                if (state.config.iteration_order
+                    == BenchmarkConfig::IterationOrderMode::interleaved_seeded) {
+                    const std::size_t iterations = cells.empty()
+                        ? 0 : cells.front()->iterations;
+                    for (std::size_t repeat = 0; repeat < iterations; ++repeat) {
+                        const std::uint64_t shuffle_seed =
+                            raw_schedule_shuffle_seed(
+                                state.config.iteration_order_seed,
+                                state.config.benchmark_key,
+                                cells.front()->test_case->name,
+                                case_group.second, repeat);
+                        const auto order = raw_fisher_yates_order(
+                            cells.size(), shuffle_seed);
+                        for (std::size_t position = 0;
+                             position < order.size(); ++position) {
+                            expected.emplace_back(
+                                repeat,
+                                position,
+                                cells[order[position]]->tuple_index,
+                                shuffle_seed);
+                        }
+                    }
+                } else {
+                    for (std::size_t position = 0;
+                         position < cells.size(); ++position) {
+                        const Cell* cell = cells[position];
+                        for (std::size_t repeat = 0;
+                             repeat < cell->iterations; ++repeat) {
+                            const std::uint64_t shuffle_seed =
+                                raw_schedule_shuffle_seed(
+                                    state.config.iteration_order_seed,
+                                    state.config.benchmark_key,
+                                    cell->test_case->name,
+                                    case_group.second, repeat);
+                            expected.emplace_back(
+                                repeat, position, cell->tuple_index,
+                                shuffle_seed);
+                        }
+                    }
+                }
+                if (observed != expected) valid = false;
+            }
+        }
+
+        if (embedded_by_id.size() != records_.size()) valid = false;
+        std::uint64_t append_hash = 14695981039346656037ULL;
+        for (std::size_t index = 0; index < records_.size(); ++index) {
+            nlohmann::json record = nlohmann::json::parse(
+                records_[index], nullptr, false);
+            const auto id = record.is_discarded()
+                ? std::nullopt : raw_json_u64(record, "raw_record_id");
+            if (!id.has_value() || *id != index
+                || !embedded_by_id.contains(index)
+                || embedded_by_id[index] != records_[index]) {
+                valid = false;
+            }
+            const std::string checksum_value = record.is_discarded()
+                ? std::string{}
+                : record.value("record_checksum", std::string{});
+            append_hash = raw_fnv1a64_update(
+                append_hash, checksum_value);
+        }
+        std::sort(scheduled_checksums.begin(), scheduled_checksums.end());
+        std::uint64_t schedule_hash = 14695981039346656037ULL;
+        for (const auto& [key, checksum] : scheduled_checksums) {
+            schedule_hash = raw_fnv1a64_update(schedule_hash, key);
+            schedule_hash = raw_fnv1a64_update(schedule_hash, checksum);
+        }
+        manifest_ = nlohmann::json{
+            {"schema", 1},
+            {"path", path_.filename().string()},
+            {"run_id", run_id_},
+            // Completion is deliberately false until the close/reopen prefix
+            // validation below has made the sidecar bytes authoritative.
+            {"complete", false},
+            {"record_count", embedded_by_id.size()},
+            {"prefix_bytes", header_line_.size() + 1
+                + std::accumulate(records_.begin(), records_.end(),
+                    std::size_t{0}, [](const std::size_t total,
+                                      const std::string& record) {
+                        return total + record.size() + 1;
+                    })},
+            {"append_order_checksum", raw_hex64(append_hash)},
+            {"schedule_sorted_checksum", raw_hex64(schedule_hash)},
+            {"outer_e2e_ns", raw_duration_summary(all_durations)},
+            {"index_and_map_ns",
+                raw_duration_summary(all_index_and_map_durations)},
+            {"cells", std::move(cell_summaries)},
+        };
+        sealed_ = true;
+        if (fd_ >= 0) {
+            (void)::close(fd_);
+            fd_ = -1;
+        }
+
+        // Phase 1 authority: there is no completion footer yet. Reopen and
+        // validate the exact header + record prefix (including byte count and
+        // absence of any suffix) while completion remains false everywhere.
+        const bool prefix_valid = validate_authoritative_locked(
+            embedded_by_id, manifest_, false);
+        if (!valid || !prefix_valid) {
+            manifest_["complete"] = false;
+            (void)append_terminal_footer_locked(false);
+            return false;
+        }
+
+        // Only the successful prefix reread authorises a complete=true
+        // footer. Append it durably, then perform a second close/reopen parse.
+        manifest_["complete"] = true;
+        if (!append_terminal_footer_locked(true)
+            || !validate_authoritative_locked(
+                embedded_by_id, manifest_, true)) {
+            // A torn footer or post-prefix mutation must never leave true as
+            // the terminal authority. Best-effort append an explicit false
+            // footer after first restoring line framing.
+            manifest_["complete"] = false;
+            (void)append_terminal_footer_locked(false);
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] const nlohmann::json& manifest() const noexcept {
+        return manifest_;
+    }
+
+private:
+    [[nodiscard]] bool validate_authoritative_locked(
+            const std::map<std::uint64_t, std::string>& embedded_by_id,
+            const nlohmann::json& expected_manifest,
+            const bool expect_completion_footer) const {
+        const auto authoritative = read_authoritative_file_locked();
+        if (!authoritative.has_value() || authoritative->empty()
+            || authoritative->back() != '\n') {
+            return false;
+        }
+        const std::size_t expected_records = expected_manifest.value(
+            "record_count", std::size_t{0});
+        const std::size_t prefix_bytes = expected_manifest.value(
+            "prefix_bytes", std::size_t{0});
+        const nlohmann::json expected_footer{
+            {"kind", "footer"},
+            {"schema", 1},
+            {"manifest", expected_manifest},
+        };
+        const std::string footer_line = expected_footer.dump();
+        const std::size_t expected_bytes = prefix_bytes
+            + (expect_completion_footer ? footer_line.size() + 1 : 0);
+        if (prefix_bytes == 0 || authoritative->size() != expected_bytes) {
+            return false;
+        }
+
+        std::vector<std::string_view> lines;
+        std::size_t begin = 0;
+        while (begin < authoritative->size()) {
+            const std::size_t newline = authoritative->find('\n', begin);
+            if (newline == std::string::npos || newline == begin) return false;
+            lines.emplace_back(
+                authoritative->data() + begin, newline - begin);
+            begin = newline + 1;
+        }
+        const std::size_t expected_line_count = expected_records + 1
+            + (expect_completion_footer ? 1 : 0);
+        if (lines.size() != expected_line_count) return false;
+
+        const nlohmann::json header = nlohmann::json::parse(
+            lines.front(), nullptr, false);
+        const nlohmann::json expected_header = nlohmann::json::parse(
+            header_line_, nullptr, false);
+        if (header.is_discarded() || !header.is_object()
+            || lines.front() != header_line_
+            || header.size() != 3 || header != expected_header
+            || header.value("kind", std::string{}) != "header"
+            || header.value("schema", 0) != 1
+            || header.value("run_id", std::string{}) != run_id_) {
+            return false;
+        }
+        if (expect_completion_footer) {
+            const nlohmann::json footer = nlohmann::json::parse(
+                lines.back(), nullptr, false);
+            if (footer.is_discarded() || !footer.is_object()
+                || lines.back() != footer_line
+                || footer.size() != 3 || footer != expected_footer
+                || footer.value("kind", std::string{}) != "footer"
+                || footer.value("schema", 0) != 1
+                || !footer.contains("manifest")
+                || footer["manifest"] != expected_manifest) {
+                return false;
+            }
+        }
+
+        std::uint64_t disk_append_hash = 14695981039346656037ULL;
+        std::uint64_t disk_schedule_hash = 14695981039346656037ULL;
+        std::vector<std::pair<std::string, std::string>>
+            disk_scheduled_checksums;
+        std::vector<std::uint64_t> disk_outer;
+        std::vector<std::uint64_t> disk_index_and_map;
+        for (std::size_t index = 0; index < expected_records; ++index) {
+            const nlohmann::json record = nlohmann::json::parse(
+                lines[index + 1], nullptr, false);
+            const auto id = record.is_discarded()
+                ? std::nullopt : raw_json_u64(record, "raw_record_id");
+            const auto outer = record.is_discarded()
+                ? std::nullopt : raw_json_u64(record, "outer_e2e_ns");
+            const auto measured = record.is_discarded()
+                ? std::nullopt : raw_json_u64(record, "index_and_map_ns");
+            if (record.is_discarded() || !record.is_object()
+                || record.contains("kind") || !id.has_value()
+                || *id != index || !outer.has_value()
+                || !record.contains("schedule")
+                || !record["schedule"].is_object()
+                || record["schedule"].size() != 9
+                || !record.contains("record_checksum")
+                || !record["record_checksum"].is_string()
+                || record["record_checksum"].get<std::string>()
+                    != raw_record_checksum(record)
+                || !embedded_by_id.contains(index)
+                || lines[index + 1] != embedded_by_id.at(index)
+                || nlohmann::json::parse(
+                        embedded_by_id.at(index), nullptr, false) != record) {
+                return false;
+            }
+            const auto& schedule = record["schedule"];
+            if (!raw_json_u64(schedule, "benchmark_index").has_value()
+                || !raw_json_u64(schedule, "test_case_index").has_value()
+                || !raw_json_u64(schedule, "tuple_index").has_value()
+                || !raw_json_u64(schedule, "group_index").has_value()
+                || !raw_json_u64(schedule, "repeat").has_value()
+                || !raw_json_u64(schedule, "order_position").has_value()
+                || !schedule.contains("mode")
+                || !schedule["mode"].is_string()
+                || !schedule.contains("configured_seed")
+                || !schedule["configured_seed"].is_string()
+                || !schedule.contains("shuffle_seed")
+                || !schedule["shuffle_seed"].is_string()) {
+                return false;
+            }
+            const std::string checksum =
+                record["record_checksum"].get<std::string>();
+            disk_append_hash = raw_fnv1a64_update(
+                disk_append_hash, checksum);
+            disk_outer.push_back(*outer);
+            if (measured.has_value()) disk_index_and_map.push_back(*measured);
+            const std::string schedule_key = fmt::format(
+                "{:020}:{:020}:{:020}:{:020}:{:020}",
+                *raw_json_u64(schedule, "benchmark_index"),
+                *raw_json_u64(schedule, "test_case_index"),
+                *raw_json_u64(schedule, "tuple_index"),
+                *raw_json_u64(schedule, "group_index"),
+                *raw_json_u64(schedule, "repeat"));
+            disk_scheduled_checksums.emplace_back(schedule_key, checksum);
+        }
+        std::sort(disk_scheduled_checksums.begin(),
+            disk_scheduled_checksums.end());
+        for (const auto& [key, checksum] : disk_scheduled_checksums) {
+            disk_schedule_hash = raw_fnv1a64_update(disk_schedule_hash, key);
+            disk_schedule_hash = raw_fnv1a64_update(
+                disk_schedule_hash, checksum);
+        }
+        return expected_manifest.value(
+                    "append_order_checksum", std::string{})
+                    == raw_hex64(disk_append_hash)
+            && expected_manifest.value(
+                    "schedule_sorted_checksum", std::string{})
+                    == raw_hex64(disk_schedule_hash)
+            && expected_manifest["outer_e2e_ns"]
+                    == raw_duration_summary(disk_outer)
+            && expected_manifest["index_and_map_ns"]
+                    == raw_duration_summary(disk_index_and_map);
+    }
+
+    [[nodiscard]] static bool write_all_fd(
+            const int fd, std::string_view bytes) noexcept {
+        std::size_t written = 0;
+        while (written < bytes.size()) {
+            const ssize_t count = ::write(
+                fd, bytes.data() + written, bytes.size() - written);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return false;
+            written += static_cast<std::size_t>(count);
+        }
+        return true;
+    }
+
+    /// Terminal footers use a fresh descriptor and the real robust syscalls,
+    /// intentionally independent of the sample-write test seam. This lets a
+    /// poisoned/torn sample path still publish an explicit complete=false
+    /// terminal authority whenever the filesystem remains writable.
+    [[nodiscard]] bool append_terminal_footer_locked(
+            const bool complete) noexcept {
+        manifest_["complete"] = complete;
+        const std::string footer = nlohmann::json{
+            {"kind", "footer"},
+            {"schema", 1},
+            {"manifest", manifest_},
+        }.dump() + '\n';
+        const int footer_fd = ::open(
+            path_.c_str(), O_RDWR | O_APPEND | O_CLOEXEC);
+        if (footer_fd < 0) return false;
+        bool ok = true;
+        struct stat status{};
+        if (::fstat(footer_fd, &status) != 0 || status.st_size < 0) {
+            ok = false;
+        } else if (status.st_size > 0) {
+            char last = '\0';
+            ssize_t read_count = -1;
+            do {
+                read_count = ::pread(
+                    footer_fd, &last, 1, status.st_size - 1);
+            } while (read_count < 0 && errno == EINTR);
+            if (read_count != 1) {
+                ok = false;
+            } else if (last != '\n') {
+                ok = write_all_fd(footer_fd, "\n");
+            }
+        }
+        if (ok) ok = write_all_fd(footer_fd, footer);
+        if (ok) {
+            while (::fsync(footer_fd) != 0) {
+                if (errno == EINTR) continue;
+                ok = false;
+                break;
+            }
+        }
+        (void)::close(footer_fd);
+        return ok;
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    read_authoritative_file_locked() const {
+        const int read_fd = ::open(path_.c_str(), O_RDONLY | O_CLOEXEC);
+        if (read_fd < 0) return std::nullopt;
+        struct stat status{};
+        if (::fstat(read_fd, &status) != 0 || !S_ISREG(status.st_mode)
+            || status.st_size < 0) {
+            (void)::close(read_fd);
+            return std::nullopt;
+        }
+        std::string bytes(static_cast<std::size_t>(status.st_size), '\0');
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const ssize_t count = ::read(
+                read_fd, bytes.data() + offset, bytes.size() - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                (void)::close(read_fd);
+                return std::nullopt;
+            }
+            offset += static_cast<std::size_t>(count);
+        }
+        char extra = '\0';
+        ssize_t suffix = -1;
+        do {
+            suffix = ::read(read_fd, &extra, 1);
+        } while (suffix < 0 && errno == EINTR);
+        (void)::close(read_fd);
+        if (suffix != 0) return std::nullopt;
+        return bytes;
+    }
+
+    [[nodiscard]] bool append_line_locked(std::string_view payload) noexcept {
+        if (fd_ < 0 || poisoned_) return false;
+        std::string line{payload};
+        line.push_back('\n');
+        std::size_t written = 0;
+        while (written < line.size()) {
+            std::size_t request = line.size() - written;
+            if (io_fault_
+                == RawEvidenceIoFaultForTesting::short_write) {
+                request = std::min<std::size_t>(request, 3);
+            } else if (io_fault_
+                           == RawEvidenceIoFaultForTesting::partial_write_failure
+                       && append_line_calls_ > 0) {
+                request = std::min<std::size_t>(request, 3);
+            }
+            const ssize_t result = ::write(
+                fd_, line.data() + written, request);
+            if (result < 0 && errno == EINTR) continue;
+            if (result <= 0) return false;
+            written += static_cast<std::size_t>(result);
+            if (io_fault_
+                    == RawEvidenceIoFaultForTesting::partial_write_failure
+                && append_line_calls_ > 0) {
+                errno = EIO;
+                return false;
+            }
+        }
+        if (io_fault_ == RawEvidenceIoFaultForTesting::sync_failure
+            && append_line_calls_ > 0) {
+            errno = EIO;
+            return false;
+        }
+        while (::fsync(fd_) != 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        ++append_line_calls_;
+        return true;
+    }
+
+    std::filesystem::path path_{};
+    std::string run_id_{};
+    mutable std::mutex mu_{};
+    int fd_ = -1;
+    bool poisoned_ = false;
+    bool sealed_ = false;
+    std::uint64_t next_record_id_ = 0;
+    std::size_t append_line_calls_ = 0;
+    RawEvidenceIoFaultForTesting io_fault_ =
+        RawEvidenceIoFaultForTesting::none;
+    std::string header_line_{};
+    std::vector<std::string> records_{};
+    nlohmann::json manifest_ = nlohmann::json::object();
+};
+
 /// Decrement one cell's case counter; on the 0-transition claim the single
 /// CASE_RESULTS emit. Reaching 0 here means every cell of the case ran its
 /// item loop (so the case necessarily `started`). Safe under concurrency: the
@@ -7268,6 +10439,63 @@ inline void debug_finish_cell(BenchmarkContext& context,
 // sink: the sink's CASE_RESULTS serializer reuses emit_execution_tuple_record
 // + the aggregation helpers, all of which are defined above this point.
 
+[[nodiscard]] inline nlohmann::json raw_param_map_json(const ParamMap& params) {
+    nlohmann::json result = nlohmann::json::object();
+    for (const auto& [name, value] : params) {
+        switch (value.kind) {
+            case ConfigValue::Kind::String:
+                result[name] = value.string_value;
+                break;
+            case ConfigValue::Kind::Integer:
+                result[name] = value.integer_value;
+                break;
+            case ConfigValue::Kind::Double:
+                result[name] = value.double_value;
+                break;
+            case ConfigValue::Kind::Boolean:
+                result[name] = value.boolean_value;
+                break;
+            case ConfigValue::Kind::NonScalar:
+                result[name] = value.string_value;
+                break;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::optional<std::string> make_raw_sample_record(
+        const std::string_view payload,
+        const BenchmarkExecutionState& state,
+        const Cell& cell,
+        const std::size_t repeat,
+        const std::uint64_t outer_e2e_ns) noexcept {
+    auto record = nlohmann::json::parse(payload, nullptr, false);
+    if (record.is_discarded() || !record.is_object()) {
+        return std::nullopt;
+    }
+    constexpr std::array<std::string_view, 13> reserved{
+        "schema", "benchmark", "test_case", "algorithm", "group_index",
+        "group_count", "tuple_index", "repeat", "params", "outer_e2e_ns",
+        "raw_record_id", "schedule", "record_checksum",
+    };
+    for (const std::string_view key : reserved) {
+        if (record.contains(std::string{key})) {
+            return std::nullopt;
+        }
+    }
+    record["schema"] = 1;
+    record["benchmark"] = state.config.benchmark_key;
+    record["test_case"] = cell.test_case->name;
+    record["algorithm"] = cell.tuple->algorithm_name;
+    record["group_index"] = cell.group_index;
+    record["group_count"] = cell.group_count;
+    record["tuple_index"] = cell.tuple_index;
+    record["repeat"] = repeat;
+    record["params"] = raw_param_map_json(cell.tuple->params);
+    record["outer_e2e_ns"] = outer_e2e_ns;
+    return record.dump();
+}
+
 template<typename Input, typename Output>
 inline void run_typed_benchmark(
     BenchmarkExecutionState& state,
@@ -7276,7 +10504,8 @@ inline void run_typed_benchmark(
     const std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>& on_input,
     const std::function<Output(std::string_view, const ParamMap&, const Input&)>& on_run,
     const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)>& on_evaluate,
-    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup)
+    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup,
+    const std::function<std::string(std::string_view, const ParamMap&, const Input&, const Output&)>& serialize_raw_sample_payload)
 {
     using bioseq::instr::installed_profiler_scope;
     using bioseq::instr::ProfilerBlock;
@@ -7284,6 +10513,25 @@ inline void run_typed_benchmark(
     const std::string                 data_dir = context.data_dir;
     const auto counter_handles = resolve_counter_handles(state.config.metrics);
     const bool by_regions = state.config.by_regions;
+    const bool track_named_region_iteration_sample_counts =
+        state.config.acceptance.enabled()
+        && state.config.acceptance
+               .require_named_region_iteration_coverage;
+    bool track_paired_named_stage_evidence = false;
+    for (const auto& metric : state.config.metrics) {
+        for (const auto& rule : metric.rules) {
+            if (rule.cmp.pairing
+                    == RuleComparator::PairingMode::by_iteration_ratio
+                && (!rule.lhs.region.empty() || !rule.rhs.region.empty())) {
+                track_paired_named_stage_evidence = true;
+                break;
+            }
+        }
+        if (track_paired_named_stage_evidence) break;
+    }
+    const auto paired_schedule_evidence_fault =
+        paired_schedule_evidence_fault_for_testing.load(
+            std::memory_order_acquire);
 
     // Pre-built batch list: one batch per (test_case, group). Items
     // inside a batch run sequentially against one cached Input.
@@ -7315,9 +10563,17 @@ inline void run_typed_benchmark(
     auto batches_ptr = std::make_unique<std::vector<WorkBatch>>(std::move(batches));
 
     /// Run exactly one iteration of one cell against `input`. Hot path.
-    auto run_one_iteration = [&context, &state, by_regions, &counter_handles,
-                                &on_run, &on_evaluate](Cell& cell,
-                                                          const Input& input) {
+    auto run_one_iteration = [&context, &state, by_regions,
+                                track_named_region_iteration_sample_counts,
+                                track_paired_named_stage_evidence,
+                                paired_schedule_evidence_fault,
+                                &counter_handles,
+                                &on_run, &on_evaluate,
+                                &serialize_raw_sample_payload](Cell& cell,
+                                                               const Input& input,
+                                                               const std::size_t repeat,
+                                                               const std::size_t order_position,
+                                                               const std::uint64_t shuffle_seed) -> bool {
         const auto& tuple = *cell.tuple;
 
         ProfilerBlock<profiler_args_t> profiler_block{};
@@ -7335,11 +10591,92 @@ inline void run_typed_benchmark(
         const auto evaluation_metrics =
             on_evaluate(tuple.algorithm_name, tuple.params, input, output);
 
-        append_iteration_samples(cell, by_regions, profiler_block,
-                                  iteration_wall_clock_ns, state.config.metrics,
-                                  counters_before, counters_after, evaluation_metrics);
+        std::optional<std::string> raw_sample;
+        if (serialize_raw_sample_payload) {
+            const std::string payload = serialize_raw_sample_payload(
+                tuple.algorithm_name, tuple.params, input, output);
+            const auto elapsed = t_end_ns >= t_begin_ns
+                ? static_cast<std::uint64_t>(t_end_ns - t_begin_ns)
+                : std::uint64_t{0};
+            raw_sample = make_raw_sample_record(
+                payload, state, cell, repeat, elapsed);
+            if (!raw_sample.has_value()) {
+                push_runtime_diagnostic(
+                    context, ValidationDiag::Severity::Error,
+                    "raw_sample_payload_invalid",
+                    runtime_location(state.config.config_path,
+                        state.config.benchmark_key,
+                        cell.test_case->name, cell.group_index),
+                    "raw payload must be one JSON object without reserved "
+                    "framework fields");
+                return false;
+            }
+            if (context.raw_evidence_sink == nullptr) {
+                push_runtime_diagnostic(
+                    context, ValidationDiag::Severity::Error,
+                    "raw_evidence_sink_missing",
+                    state.config.benchmark_key,
+                    "raw-enabled benchmark has no durable evidence sink");
+                return false;
+            }
+            raw_sample = context.raw_evidence_sink->append_sample(
+                *raw_sample,
+                context.benchmark_index,
+                cell.test_case_index,
+                cell.tuple_index,
+                cell.group_index,
+                repeat,
+                state.config.iteration_order
+                        == BenchmarkConfig::IterationOrderMode::interleaved_seeded
+                    ? std::string_view{"interleaved_seeded"}
+                    : std::string_view{"item_major"},
+                state.config.iteration_order_seed,
+                shuffle_seed,
+                order_position);
+            if (!raw_sample.has_value()) {
+                push_runtime_diagnostic(
+                    context, ValidationDiag::Severity::Error,
+                    "raw_evidence_append_failed",
+                    context.raw_evidence_sink->path().string(),
+                    "durable raw evidence append or fsync failed; sink is "
+                    "poisoned and the batch will run cleanup before failing");
+                return false;
+            }
+        }
+
+        // Cell completion is downstream of durable append.  A crash can leave
+        // a sidecar prefix, never an in-memory/report sample with no durable
+        // counterpart.
+        append_iteration_samples(
+            cell, by_regions,
+            track_named_region_iteration_sample_counts,
+            profiler_block,
+            iteration_wall_clock_ns, state.config.metrics,
+            counters_before, counters_after, evaluation_metrics);
+        if (track_paired_named_stage_evidence) {
+            std::size_t evidence_order_position = order_position;
+            std::uint64_t evidence_shuffle_seed = shuffle_seed;
+            if (paired_schedule_evidence_fault
+                    == PairedScheduleEvidenceFaultForTesting::wrong_shuffle_seed) {
+                ++evidence_shuffle_seed;
+            } else if (paired_schedule_evidence_fault
+                           == PairedScheduleEvidenceFaultForTesting::wrong_first_tuple_order_position
+                       && cell.tuple_index == 0) {
+                ++evidence_order_position;
+            }
+            cell.iteration_schedule_samples.push_back(
+                IterationScheduleSample{
+                    .repeat = repeat,
+                    .order_position = evidence_order_position,
+                    .shuffle_seed = evidence_shuffle_seed,
+                });
+        }
+        if (raw_sample.has_value()) {
+            cell.raw_samples.push_back(std::move(*raw_sample));
+        }
 
         progress_tick_iteration(context, cell);
+        return true;
     };
 
     /// Run every iteration of one item. V16: NO LOCKS — bench-lock and
@@ -7348,21 +10685,33 @@ inline void run_typed_benchmark(
     /// global mutex. This is what restores cross-batch parallelism
     /// (the V12 cross_bench_mu writer-lock was the dominant
     /// bottleneck on bench_v10 — see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §0.2).
-    auto run_item_iterations = [run_one_iteration](
-        const WorkBatchItem& item, const Input& input)
+    auto run_item_iterations = [&state, run_one_iteration](
+        const WorkBatchItem& item, const Input& input,
+        const std::size_t order_position,
+        const std::size_t group_index)
     {
         for (std::size_t iter = 0; iter < item.cell->iterations; ++iter) {
-            run_one_iteration(*item.cell, input);
+            const std::uint64_t shuffle_seed = raw_schedule_shuffle_seed(
+                state.config.iteration_order_seed,
+                state.config.benchmark_key,
+                item.cell->test_case->name,
+                group_index,
+                iter);
+            if (!run_one_iteration(
+                    *item.cell, input, iter, order_position,
+                    shuffle_seed)) return false;
         }
+        return true;
     };
 
     /// V16 batch body — no memory acquire/release, no cross_bench_mu.
     /// Called from TBB worker after the scheduler has admitted the
     /// batch. The reservation lives entirely scheduler-side.
-    auto run_one_batch_unblocked = [&context, &state, &on_estimate_resources,
+    auto run_one_batch_unblocked = [&context, &state,
                                        &on_input, &on_cleanup,
                                        &data_dir, &group_slots,
-                                       run_item_iterations](WorkBatch& batch)
+                                       run_item_iterations,
+                                       run_one_iteration](WorkBatch& batch)
     {
         const auto& spec = state.test_cases[batch.test_case_index];
         auto& slot = (*group_slots)[batch.batch_index];
@@ -7370,11 +10719,11 @@ inline void run_typed_benchmark(
             state.config.config_path, state.config.benchmark_key,
             spec.name, batch.group_index);
 
-        // 1. Estimate resources (still needed: on_input wants
-        //    `slot.constraints`). The scheduler already reserved the
-        //    same numbers — re-evaluating here is cheap.
-        slot.constraints = on_estimate_resources(
-            data_dir, spec.name, spec.data);
+        // 1. `slot.constraints` is the exact value computed once on the
+        //    enqueueing thread and used by scheduler admission. Re-running the
+        //    estimator here could reserve one amount and hand a different
+        //    amount to `on_input`, and it violates the public once-only
+        //    callback contract.
 
         // 2. on_input with retries. Permanent failure aborts the
         //    batch (scheduler releases on body return).
@@ -7394,9 +10743,38 @@ inline void run_typed_benchmark(
         }
         slot.input = std::move(built_input);
 
-        // 3. Iterate items × iterations. Lock-free; scheduler enforced
-        //    exclusion.
+        // 3. Iterate items × iterations. Raw E2E comparison blocks declare a
+        //    seeded repetition-major order: every algorithm runs once before
+        //    any receives its next repetition. Each repetition uses the exact
+        //    identity-derived SplitMix64 / descending Fisher-Yates schedule
+        //    recorded beside the raw sample. This prevents
+        //    backend/cache position from being confounded with algorithm.
         progress_mark_test_case_start(context, batch);
+        const bool interleaved = state.config.iteration_order
+            == BenchmarkConfig::IterationOrderMode::interleaved_seeded;
+        if (interleaved
+            && (!state.config.concurrency.bench_lock
+                || state.config.concurrency.concurrency
+                || batch.items.empty()
+                || std::any_of(batch.items.begin(), batch.items.end(),
+                    [&batch](const WorkBatchItem& item) {
+                        return item.cell->iterations
+                            != batch.items.front().cell->iterations;
+                    }))) {
+            const std::string reason =
+                "interleaved_seeded requires bench_lock=true, "
+                "concurrency=false and equal positive item iteration counts";
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "invalid_interleaved_schedule", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            if (on_cleanup) {
+                cleanup_with_retry(context, batch, spec.name, location_str,
+                    [&] { on_cleanup(data_dir, spec.name, spec.data,
+                        *slot.input); });
+            }
+            slot.input.reset();
+            return;
+        }
         for (auto& item : batch.items) {
             progress_update_label(context, batch, item, state.config.benchmark_key);
             // --debug CASE_STARTED: first time any cell of this case begins.
@@ -7406,11 +10784,54 @@ inline void run_typed_benchmark(
                     context.debug_sink->emit_case_started(state.config.benchmark_key,
                                                           item.cell->tuple->algorithm_name);
             }
-            run_item_iterations(item, *slot.input);
-            progress_tick_item_done(context, batch);
-            // --debug: incremental CASE_RESULTS on the case counter's 0-transition.
-            if (context.debug_sink != nullptr)
-                debug_finish_cell(context, state, item.cell->tuple->algorithm_name);
+        }
+        bool iteration_failed = false;
+        if (interleaved) {
+            const std::size_t iterations =
+                batch.items.front().cell->iterations;
+            for (std::size_t repeat = 0; repeat < iterations; ++repeat) {
+                const std::uint64_t shuffle_seed =
+                    raw_schedule_shuffle_seed(
+                        state.config.iteration_order_seed,
+                        state.config.benchmark_key,
+                        spec.name,
+                        batch.group_index,
+                        repeat);
+                const auto order = raw_fisher_yates_order(
+                    batch.items.size(), shuffle_seed);
+                for (std::size_t position = 0;
+                     position < order.size(); ++position) {
+                    auto& item = batch.items[order[position]];
+                    progress_update_label(
+                        context, batch, item, state.config.benchmark_key);
+                    if (!run_one_iteration(
+                            *item.cell, *slot.input, repeat,
+                            position, shuffle_seed)) {
+                        iteration_failed = true;
+                        break;
+                    }
+                }
+                if (iteration_failed) break;
+            }
+        } else {
+            for (std::size_t position = 0;
+                 position < batch.items.size(); ++position) {
+                auto& item = batch.items[position];
+                if (!run_item_iterations(
+                        item, *slot.input, position, batch.group_index)) {
+                    iteration_failed = true;
+                    break;
+                }
+            }
+        }
+        if (!iteration_failed) {
+            for (auto& item : batch.items) {
+                progress_tick_item_done(context, batch);
+                if (context.debug_sink != nullptr) {
+                    debug_finish_cell(
+                        context, state, item.cell->tuple->algorithm_name);
+                }
+            }
         }
 
         // 4. Cleanup with retries — warning on permanent failure.
@@ -7419,7 +10840,13 @@ inline void run_typed_benchmark(
                 [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
         }
         slot.input.reset();
-        progress_mark_group_done(context, batch);
+        if (iteration_failed) {
+            progress_mark_batch_aborted(
+                context, batch,
+                "durable raw evidence failure aborted the batch after cleanup");
+        } else {
+            progress_mark_group_done(context, batch);
+        }
     };
 
     // V16 enqueue path — replaces the V12 `tbb::parallel_for_each`
@@ -7432,13 +10859,48 @@ inline void run_typed_benchmark(
 
     for (auto& batch : *batches_ptr) {
         const auto& spec = state.test_cases[batch.test_case_index];
-        const auto constraints = on_estimate_resources(
+        auto constraints = on_estimate_resources(
             data_dir, spec.name, spec.data);
-        const std::size_t total_required =
-            constraints.base_memory + constraints.extra_memory;
+        constraints.execution_tuples.clear();
+        constraints.execution_tuples.reserve(batch.items.size());
+        for (const auto& item : batch.items) {
+            DEBUG_ASSERT(item.tuple != nullptr,
+                "work-batch item must retain its expanded execution tuple");
+            constraints.execution_tuples.push_back(ResolvedExecutionTuple{
+                .algorithm_name = item.tuple->algorithm_name,
+                .params = item.tuple->params,
+            });
+        }
+        auto& slot = (*group_slots)[batch.batch_index];
+        slot.constraints = constraints;
+        const bool total_overflow = constraints.extra_memory
+            > (std::numeric_limits<std::size_t>::max)()
+                - constraints.base_memory;
+        // Saturate the diagnostic value on overflow, but reject before the
+        // scheduler sees the batch.  This is the sole base+extra computation;
+        // every later scheduler path consumes `ScheduledBatch::total_bytes`.
+        const std::size_t total_required = total_overflow
+            ? (std::numeric_limits<std::size_t>::max)()
+            : constraints.base_memory + constraints.extra_memory;
         const auto location_str = runtime_location(
             state.config.config_path, state.config.benchmark_key,
             spec.name, batch.group_index);
+
+        constexpr std::size_t max_signed_scheduler_bytes =
+            static_cast<std::size_t>(
+                (std::numeric_limits<std::int64_t>::max)());
+        if (total_overflow || total_required > max_signed_scheduler_bytes) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) has an unrepresentable memory request: "
+                "base={} B, extra={} B, saturated_total={} B",
+                spec.name, batch.group_index,
+                constraints.base_memory, constraints.extra_memory,
+                total_required);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "memory_budget_not_satisfiable", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            continue;       // do not enqueue or convert to signed accounting
+        }
 
         // G1.d  Hard error: combined requirements exceed total system RAM.
         if (total_required >= sys_at_enqueue.total_bytes) {
@@ -7470,6 +10932,7 @@ inline void run_typed_benchmark(
         sb.concurrency_serial = !state.config.concurrency.concurrency;
         sb.base_bytes         = constraints.base_memory;
         sb.extra_bytes        = constraints.extra_memory;
+        sb.total_bytes        = static_cast<std::int64_t>(total_required);
         sb.group_for_ui       = progress_group_for(
             context, batch.test_case_index, batch.group_index);
         sb.location_str       = location_str;
@@ -7522,7 +10985,8 @@ inline void run_typed_benchmark(
     const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
     const std::vector<Violation>& violations,
     const std::vector<RegressionEntry>& regressions,
-    const std::vector<SanityWarning>& sanity_warnings)
+    const std::vector<SanityWarning>& sanity_warnings,
+    const nlohmann::json& raw_evidence_manifest)
 {
     constexpr std::size_t kInitialCapacity = 1u << 18;  // 256 KiB up front
     simdjson::builder::string_builder builder{kInitialCapacity};
@@ -7580,12 +11044,33 @@ inline void run_typed_benchmark(
             inner.append_comma();
             emit_kv_string(inner, "metric",    violation.metric);
             inner.append_comma();
+            emit_kv_string(
+                inner, "comparison_mode",
+                violation.comparison_mode
+                        == RuleComparator::PairingMode::by_iteration_ratio
+                    ? std::string_view{"paired_iteration_ratio"}
+                    : std::string_view{"independent_aggregates"});
+            inner.append_comma();
+            emit_key(inner, "warmup_repetitions");
+            inner.append(violation.warmup_repetitions);
+            inner.append_comma();
+            emit_key(inner, "blocking");
+            inner.append(violation.blocking);
+            inner.append_comma();
             emit_kv_with_body(inner, "args", [&](auto& args_b) {
                 args_b.start_array();
                 args_b.append(violation.args[0]);
                 args_b.append_comma();
                 args_b.append(violation.args[1]);
                 args_b.end_array();
+            });
+            inner.append_comma();
+            emit_kv_with_body(inner, "args_present", [&](auto& present_b) {
+                present_b.start_array();
+                present_b.append(violation.args_present[0]);
+                present_b.append_comma();
+                present_b.append(violation.args_present[1]);
+                present_b.end_array();
             });
         });
     };
@@ -7688,6 +11173,41 @@ inline void run_typed_benchmark(
                         });
                     tuples_b.end_array();
                 });
+                if (state.raw_samples_enabled) {
+                    inner.append_comma();
+                    emit_kv_with_body(inner, "raw_samples", [&](auto& raw_b) {
+                        raw_b.start_array();
+                        std::vector<std::pair<std::uint64_t, const std::string*>>
+                            ordered_raw;
+                        for (const auto& cell : state.cells) {
+                            for (const std::string& raw_sample : cell->raw_samples) {
+                                const nlohmann::json parsed =
+                                    nlohmann::json::parse(
+                                        raw_sample, nullptr, false);
+                                const auto id = parsed.is_discarded()
+                                    ? std::nullopt
+                                    : raw_json_u64(parsed, "raw_record_id");
+                                DEBUG_ASSERT(id.has_value(),
+                                    "validated raw sample lost raw_record_id");
+                                if (id.has_value()) {
+                                    ordered_raw.emplace_back(*id, &raw_sample);
+                                }
+                            }
+                        }
+                        std::sort(ordered_raw.begin(), ordered_raw.end(),
+                            [](const auto& lhs, const auto& rhs) {
+                                return lhs.first < rhs.first;
+                            });
+                        bool first_raw = true;
+                        for (const auto& [id, raw_sample] : ordered_raw) {
+                            (void)id;
+                            if (!first_raw) raw_b.append_comma();
+                            first_raw = false;
+                            raw_b.append_raw(*raw_sample);
+                        }
+                        raw_b.end_array();
+                    });
+                }
             });
         });
     };
@@ -7718,6 +11238,32 @@ inline void run_typed_benchmark(
         emit_kv_with_body(root_b, "meta", [&](auto& meta_b) {
             emit_meta(meta_b);
         });
+        root_b.append_comma();
+        emit_key(root_b, "raw_evidence");
+        if (raw_evidence_manifest.is_null()) {
+            root_b.append_null();
+        } else {
+            root_b.append_raw(raw_evidence_manifest.dump());
+        }
+        root_b.append_comma();
+        emit_kv_with_body(
+            root_b, "paired_rule_evidence", [&reports](auto& evidence_array) {
+                evidence_array.start_array();
+                bool first_evidence = true;
+                for (const auto& [benchmark_key, state] : reports) {
+                    (void)benchmark_key;
+                    for (const auto& evidence :
+                         state->paired_rule_evidence) {
+                        if (!first_evidence) {
+                            evidence_array.append_comma();
+                        }
+                        first_evidence = false;
+                        emit_paired_rule_evidence_record(
+                            evidence_array, evidence);
+                    }
+                }
+                evidence_array.end_array();
+            });
         root_b.append_comma();
         emit_kv_with_body(root_b, "rule_violations", [&](auto& arr_b) {
             arr_b.start_array();
@@ -7845,12 +11391,23 @@ inline void print_violations(const std::vector<Violation>& violations) noexcept 
         violations.size(), violations.size() == 1 ? "" : "s");
 
     for (const auto& violation : violations) {
+        const bool paired = violation.comparison_mode
+            == RuleComparator::PairingMode::by_iteration_ratio;
         std::fprintf(stderr,
-            "[%s] %s (test_case=%s, metric=%s)\n",
+            "[%s] %s (test_case=%s, metric=%s, comparison=%s, warmup=%zu, %s)\n",
             violation.benchmark_key.c_str(),
             violation.rule_name.c_str(),
             violation.test_case.c_str(),
-            violation.metric.c_str());
+            violation.metric.c_str(),
+            paired ? "paired_iteration_ratio" : "independent_aggregates",
+            violation.warmup_repetitions,
+            violation.blocking ? "BLOCKING" : "diagnostic");
+        if (!violation.args_present[0] || !violation.args_present[1]) {
+            std::fprintf(stderr,
+                "    selected source unavailable: LHS=%s RHS=%s\n",
+                violation.args_present[0] ? "present" : "UNAVAILABLE",
+                violation.args_present[1] ? "present" : "UNAVAILABLE");
+        }
         const auto lhs_param_text = format_param_map(violation.lhs_full_params);
         const auto rhs_param_text = format_param_map(violation.rhs_full_params);
         // Mirror the JSON writer's RHS-dedup: when both selectors named the
@@ -7861,21 +11418,25 @@ inline void print_violations(const std::vector<Violation>& violations) noexcept 
             && lhs_param_text == rhs_param_text;
         if (same_side) {
             std::fprintf(stderr,
-                "    self-compare on %s { %s }\n        LHS median = %.6g\n        RHS median = %.6g\n",
+                "    self-compare on %s { %s }\n        LHS %s = %.6g\n        RHS %s = %.6g\n",
                 violation.lhs_algorithm.c_str(),
                 lhs_param_text.c_str(),
+                paired ? "paired-ratio aggregate" : "aggregate",
                 violation.args[0],
+                paired ? "paired baseline" : "aggregate",
                 violation.args[1]);
         } else {
             std::fprintf(stderr,
-                "    LHS %s { %s }\n        median = %.6g\n",
+                "    LHS %s { %s }\n        %s = %.6g\n",
                 violation.lhs_algorithm.c_str(),
                 lhs_param_text.c_str(),
+                paired ? "paired-ratio aggregate" : "aggregate",
                 violation.args[0]);
             std::fprintf(stderr,
-                "    RHS %s { %s }\n        median = %.6g\n",
+                "    RHS %s { %s }\n        %s = %.6g\n",
                 violation.rhs_algorithm.c_str(),
                 rhs_param_text.c_str(),
+                paired ? "paired baseline" : "aggregate",
                 violation.args[1]);
         }
         std::fprintf(stderr, "\n");
@@ -9698,14 +13259,16 @@ struct BenchmarkFilterMetadata {
     std::string              benchmark_key;
     std::vector<std::string> tags;        // <key>.tags
     std::vector<std::string> case_names;  // keys of <key>.matrix.over
+    bool                     fast = false;
+    bool                     complete_matrix_acceptance = false;
     bool                     parsed_ok = false;  // false => treat as no tags/no cases
 };
 
-/// Best-effort extraction of (tags, over-keys) for one benchmark block.
+/// Best-effort extraction of selection/acceptance metadata for one benchmark.
 /// Never fails the run — on any parse problem returns parsed_ok=false and the
 /// closure's full parse will surface the real schema error later. Reads
-/// exactly the two fields `parse_benchmark_block` walks (`tags`, `matrix.over`
-/// keys); keep the two field reads in sync if the config layout ever changes.
+/// `fast`, `tags`, `matrix.over` keys and the presence of an exact
+/// acceptance contract; keep these reads in sync with parse_benchmark_block.
 [[nodiscard]] inline BenchmarkFilterMetadata extract_filter_metadata(
     const std::string& config_path, const std::string& benchmark_key) noexcept {
     BenchmarkFilterMetadata meta;
@@ -9717,6 +13280,8 @@ struct BenchmarkFilterMetadata {
     if (parser.parse(body).get(root) != simdjson::SUCCESS) return meta;
     simdjson::dom::object bench_obj;
     if (root[benchmark_key].get(bench_obj) != simdjson::SUCCESS) return meta;
+    bool fast = false;
+    if (bench_obj["fast"].get(fast) == simdjson::SUCCESS) meta.fast = fast;
     simdjson::dom::array tags_array;
     if (bench_obj["tags"].get(tags_array) == simdjson::SUCCESS) {
         for (auto t : tags_array) {
@@ -9725,9 +13290,18 @@ struct BenchmarkFilterMetadata {
         }
     }
     simdjson::dom::object matrix_obj, over_obj;
-    if (bench_obj["matrix"].get(matrix_obj) == simdjson::SUCCESS
-        && matrix_obj["over"].get(over_obj) == simdjson::SUCCESS) {
-        for (auto kv : over_obj) meta.case_names.emplace_back(kv.key);
+    if (bench_obj["matrix"].get(matrix_obj) == simdjson::SUCCESS) {
+        if (matrix_obj["over"].get(over_obj) == simdjson::SUCCESS) {
+            for (auto kv : over_obj) meta.case_names.emplace_back(kv.key);
+        }
+        simdjson::dom::object acceptance_obj;
+        simdjson::dom::array exact_rows;
+        if (matrix_obj["acceptance"].get(acceptance_obj)
+                == simdjson::SUCCESS
+            && acceptance_obj["exact_algorithm_rows"].get(exact_rows)
+                == simdjson::SUCCESS) {
+            meta.complete_matrix_acceptance = true;
+        }
     }
     meta.parsed_ok = true;
     return meta;
@@ -9773,7 +13347,7 @@ struct BenchmarkFilterMetadata {
     // so the hoist is behaviour-preserving.
     const std::filesystem::path report_dir_path{report_dir};
     const std::size_t current_index =
-        max_existing_report_index(report_dir_path).value_or(0) + 1;
+        max_existing_run_artifact_index(report_dir_path).value_or(0) + 1;
 
     bioseq_log<INF>("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
                  report_dir, data_dir, benchmarks.size());
@@ -9897,6 +13471,52 @@ struct BenchmarkFilterMetadata {
                 "filter_unknown_benchmark", "cli:--filter benchmark",
                 fmt::format("benchmark key '{}' matches no registered benchmark", k) });
         }
+
+        // An explicitly named benchmark must never turn into a successful
+        // empty report merely because --fast excludes it. Tag-only fast
+        // sweeps retain the historical skip behaviour.
+        if (cli.fast_filter && f.benchmark) {
+            for (std::size_t i = 0; i < selected.size(); ++i) {
+                if (!meta[i].parsed_ok || meta[i].fast) continue;
+                const bool explicitly_selected = std::find(
+                    f.benchmark->begin(), f.benchmark->end(),
+                    selected[i].benchmark_key) != f.benchmark->end();
+                if (explicitly_selected) {
+                    filter_diags.push_back({
+                        ValidationDiag::Severity::Error,
+                        "explicit_benchmark_excluded_by_fast",
+                        "cli:--fast",
+                        fmt::format("benchmark '{}' was explicitly selected but declares fast=false; rerun without --fast",
+                                    selected[i].benchmark_key),
+                    });
+                }
+            }
+        }
+
+        // A complete-matrix gate may be targeted with an all-row cases list,
+        // but a filter that removes even one declared row invalidates the
+        // acceptance claim and is rejected before any work starts.
+        if (f.cases) {
+            for (std::size_t i = 0; i < selected.size(); ++i) {
+                if (!runnable[i] || !meta[i].complete_matrix_acceptance) continue;
+                const bool keeps_every_row = std::all_of(
+                    meta[i].case_names.begin(), meta[i].case_names.end(),
+                    [&f](const std::string& row) {
+                        return std::find(f.cases->begin(), f.cases->end(), row)
+                            != f.cases->end();
+                    });
+                if (!keeps_every_row) {
+                    filter_diags.push_back({
+                        ValidationDiag::Severity::Error,
+                        "complete_matrix_case_filter_prunes_rows",
+                        "cli:--filter cases",
+                        fmt::format("benchmark '{}' declares complete-matrix acceptance; cases= must retain all {} algorithm rows",
+                                    selected[i].benchmark_key,
+                                    meta[i].case_names.size()),
+                    });
+                }
+            }
+        }
         // Warning: unknown case (KEPT-subset scope, per the prompt).
         if (f.cases) for (const auto& c : *f.cases) {
             bool known = false;
@@ -9948,6 +13568,30 @@ struct BenchmarkFilterMetadata {
         if (debug_sink->ok()) debug_sink_ptr = debug_sink.get();
         bioseq_log<INF>("[bench_framework] --debug: streaming events to {}",
                         debug_path.string());
+    }
+
+    std::unique_ptr<DurableRawEvidenceSink> raw_evidence_sink;
+    DurableRawEvidenceSink* raw_evidence_sink_ptr = nullptr;
+    const bool raw_evidence_requested = std::any_of(
+        selected.begin(), selected.end(),
+        [](const ErasedBenchmark& benchmark) {
+            return benchmark.raw_samples_enabled;
+        });
+    if (raw_evidence_requested) {
+        const auto raw_path = report_dir_path
+            / fmt::format("report_{}.raw.jsonl", current_index);
+        const std::string run_id = fmt::format(
+            "{}:{}:{}", current_index, run_meta.created, ::getpid());
+        raw_evidence_sink = std::make_unique<DurableRawEvidenceSink>(
+            raw_path, run_id);
+        if (!raw_evidence_sink->ok()) {
+            std::fprintf(stderr,
+                "[bench_framework] RAW-EVIDENCE-OPEN-FAIL path=%s\n",
+                raw_path.c_str());
+            std::fflush(stderr);
+            return 1;
+        }
+        raw_evidence_sink_ptr = raw_evidence_sink.get();
     }
 
     // Process-wide memory budget shared by every benchmark closure.
@@ -10019,7 +13663,8 @@ struct BenchmarkFilterMetadata {
          &regression_rules_by_config,
          &scheduler,
          &case_allow_list,
-         &debug_sink_ptr] {
+         &debug_sink_ptr,
+         &raw_evidence_sink_ptr] {
             oneapi::tbb::parallel_for_each(
                 benchmark_indices.begin(),
                 benchmark_indices.end(),
@@ -10038,7 +13683,8 @@ struct BenchmarkFilterMetadata {
                  &regression_rules_by_config,
                  &scheduler,
                  &case_allow_list,
-                 &debug_sink_ptr](std::size_t benchmark_index) {
+                 &debug_sink_ptr,
+                 &raw_evidence_sink_ptr](std::size_t benchmark_index) {
                     ErasedBenchmark& erased = selected[benchmark_index];
                     BenchmarkContext context;
                     context.data_dir                  = data_dir;
@@ -10057,18 +13703,55 @@ struct BenchmarkFilterMetadata {
                     context.scheduler                  = &scheduler;
                     context.filter_cases = case_allow_list ? &*case_allow_list : nullptr;
                     context.debug_sink   = debug_sink_ptr;
+                    context.raw_evidence_sink = raw_evidence_sink_ptr;
 
                     erased.execute(context);
                 });
         });
 
-    // Defence-in-depth: every closure already drains its own batches
-    // via `wait_for_benchmark` before returning. Should be a no-op,
-    // but guarantees correctness if a future closure forgets the wait.
-    scheduler.wait_for_completion();
+    // Defence-in-depth: every closure already drains its own batches via
+    // `wait_for_benchmark` before returning. This explicit, non-noexcept join
+    // is also the ownership boundary for exceptions captured from TBB worker
+    // bodies. Keep the exception until after the progress thread joins, then
+    // turn it into a blocking diagnostic so completed samples still produce a
+    // useful partial report instead of terminating in ~BatchScheduler().
+    std::exception_ptr worker_exception;
+    try {
+        scheduler.wait_for_completion();
+    } catch (...) {
+        worker_exception = std::current_exception();
+    }
 
     progress.running.store(false, std::memory_order_relaxed);
     progress_thread.join();
+
+    if (worker_exception != nullptr) {
+        const auto failure_count = scheduler.worker_exception_count();
+        try {
+            std::rethrow_exception(worker_exception);
+        } catch (const std::exception& error) {
+            diagnostics.push_back(ValidationDiag{
+                ValidationDiag::Severity::Error,
+                "batch_worker_exception",
+                "BatchScheduler::wait_for_completion",
+                fmt::format(
+                    "captured {} worker-task exception(s); first failure: {}. "
+                    "Completed samples are retained in this partial report",
+                    failure_count, error.what()),
+            });
+        } catch (...) {
+            diagnostics.push_back(ValidationDiag{
+                ValidationDiag::Severity::Error,
+                "batch_worker_exception",
+                "BatchScheduler::wait_for_completion",
+                fmt::format(
+                    "captured {} worker-task exception(s); first failure was "
+                    "non-std. Completed samples are retained in this partial "
+                    "report",
+                    failure_count),
+            });
+        }
+    }
 
     // Cross-config validation of regression rules. Runs serially after
     // every closure has registered its state (so we can resolve
@@ -10079,6 +13762,22 @@ struct BenchmarkFilterMetadata {
         std::lock_guard<std::mutex> guard(diagnostics_mu);
         for (auto& diag : regression_validation_diags) {
             diagnostics.push_back(std::move(diag));
+        }
+    }
+
+    nlohmann::json raw_evidence_manifest = nullptr;
+    if (raw_evidence_sink_ptr != nullptr) {
+        const bool raw_evidence_valid =
+            raw_evidence_sink_ptr->seal_and_validate(reports);
+        raw_evidence_manifest = raw_evidence_sink_ptr->manifest();
+        if (!raw_evidence_valid) {
+            diagnostics.push_back(ValidationDiag{
+                ValidationDiag::Severity::Error,
+                "raw_evidence_validation_failed",
+                raw_evidence_sink_ptr->path().string(),
+                "durable raw evidence did not match every Cell, schedule, "
+                "checksum, record id and wall-clock sample",
+            });
         }
     }
 
@@ -10119,7 +13818,8 @@ struct BenchmarkFilterMetadata {
     bioseq_log<INF>("[bench_framework] all benchmarks finished, writing report...");
     const auto output_path = report_path_for_index(report_dir_path, current_index);
     const auto report_path = write_report(output_path, run_meta, reports,
-                                           violations, regressions, sanity_warnings);
+                                           violations, regressions, sanity_warnings,
+                                           raw_evidence_manifest);
     if (!report_path.empty()) {
         bioseq_log<INF>("[bench_framework] wrote {}", report_path);
     }
@@ -10151,7 +13851,10 @@ struct BenchmarkFilterMetadata {
     // contribute to the exit code (the user spec calls them out as
     // "not blocking, however they should be printed to stderr at the
     // end"). The summary above is the operator-visible surface.
-    return (violations.empty()
+    const bool blocking_rule_violation = std::any_of(
+        violations.begin(), violations.end(),
+        [](const Violation& violation) { return violation.blocking; });
+    return (!blocking_rule_violation
             && regressions.empty()
             && !diagnostics_had_errors
             && !regression_eval_had_errors
@@ -10171,12 +13874,15 @@ template<typename Input, typename Output>
     std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)> on_input,
     std::function<Output(std::string_view, const ParamMap&, const Input&)> on_run,
     std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)> on_evaluate,
-    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)> on_cleanup)
+    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)> on_cleanup,
+    std::function<std::string(std::string_view, const ParamMap&, const Input&, const Output&)>
+        serialize_raw_sample_payload)
 {
     ErasedBenchmark erased;
     erased.title         = std::move(title);
     erased.benchmark_key = std::move(benchmark_key);
     erased.config_path   = std::move(config_path);
+    erased.raw_samples_enabled = static_cast<bool>(serialize_raw_sample_payload);
 
     erased.execute = [erased_title              = erased.title,
                        erased_benchmark_key      = erased.benchmark_key,
@@ -10185,11 +13891,14 @@ template<typename Input, typename Output>
                        captured_on_input         = std::move(on_input),
                        captured_on_run           = std::move(on_run),
                        captured_on_evaluate      = std::move(on_evaluate),
-                       captured_on_cleanup       = std::move(on_cleanup)
+                       captured_on_cleanup       = std::move(on_cleanup),
+                       captured_raw_serializer   = std::move(serialize_raw_sample_payload)
                       ](BenchmarkContext& context) {
         auto state_holder = std::make_unique<detail::BenchmarkExecutionState>();
         auto& state = *state_holder;
         state.title = erased_title;
+        state.raw_samples_enabled = static_cast<bool>(captured_raw_serializer);
+        state.driver_benchmark_index = context.benchmark_index;
 
         // Always publish a `setup_done` signal to the renderer on the
         // way out, even from early-return paths. Otherwise an aborted
@@ -10364,7 +14073,8 @@ template<typename Input, typename Output>
                                                     captured_on_input,
                                                     captured_on_run,
                                                     captured_on_evaluate,
-                                                    captured_on_cleanup);
+                                                    captured_on_cleanup,
+                                                    captured_raw_serializer);
 
         // 4. Post-run validation: missing-evaluation-metric check.
         auto post_run_diagnostics = detail::semantic_validate_post_run(state);
@@ -10372,7 +14082,14 @@ template<typename Input, typename Output>
 
         // 5. Evaluate rules and stash this benchmark's report data.
         std::vector<detail::Violation> local_violations;
-        detail::evaluate_rules(state, local_violations);
+        detail::evaluate_rules(
+            state, local_violations, state.paired_rule_evidence);
+
+        if (context.debug_sink != nullptr) {
+            for (const auto& evidence : state.paired_rule_evidence) {
+                context.debug_sink->emit_paired_rule_evidence(evidence);
+            }
+        }
 
         if (context.violations != nullptr && context.violations_mu != nullptr) {
             std::lock_guard<std::mutex> guard(*context.violations_mu);

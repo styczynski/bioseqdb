@@ -1,0 +1,19 @@
+title: Bioseq
+short_description: PostgreSQL-native biological sequence analysis.
+canonical_origin: https://styczynski.github.io
+default_base_path: /bioseqdb/
+repository_url: https://github.com/styczynski/bioseqdb
+source_url_template: https://github.com/styczynski/bioseqdb/blob/{revision}/{path}#L{line}
+default_social_image: static/media/social_card.png
+status_label: Alpha
+copyright_holder: Bioseq contributors
+copyright_year: 2026
+navigation:
+  documentation: Documentation
+  tutorials: Tutorials
+  reference: Reference
+cpp_public_modules:
+  - module: bioseq.io.public_api
+    primary_interface: main/bioseq/io/public_api.cppm
+required_documentation_entities:
+  - sql:type:bioseq.seq

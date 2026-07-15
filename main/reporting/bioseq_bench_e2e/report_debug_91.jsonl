@@ -1,0 +1,3 @@
+{"event":"BENCHMARK_STARTED","timestamp":1784103544224,"benchmark_name":"bench_e2e"}
+{"event":"CASE_STARTED","timestamp":1784104050426,"benchmark_name":"bench_e2e","case_name":"bioseq_block_simd_dp_two_stack_nthash_just_index"}
+{"event":"CASE_STARTED","timestamp":1784104050437,"benchmark_name":"bench_e2e","case_name":"minimap2_just_index"}

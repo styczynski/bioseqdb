@@ -64,11 +64,22 @@
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
+          "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
           "VCPKG_CRT_LINKAGE": "static",
           "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "test-opt",
+        "inherits": "bench-opt",
+        "displayName": "Optimised unit/integration test config",
+        "description": "Isolated bench-opt-equivalent tree with BIOSEQ_TEST_INDEXES enabled. Keeping test hooks/descriptors in build/test-opt prevents benchmark binaries in build/bench-opt from silently carrying failure-injection branches or test-only indexes.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
         }
       },
       {
@@ -81,11 +92,86 @@
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
           "VCPKG_CRT_LINKAGE": "static",
           "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "test-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Optimised unit/integration test config with debug artefacts",
+        "description": "Debug/inspect analogue of test-opt with BIOSEQ_TEST_INDEXES enabled in its own build tree.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "cache-opt",
+        "inherits": "bench-opt",
+        "displayName": "Independent bioseq_cache optimized build",
+        "description": "Cache-only C++26 module tree with deterministic test hooks; skips Bioseq sequence, GPU, paper and benchmark dependencies.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_TARGET_TRIPLET": null,
+          "CMAKE_OSX_ARCHITECTURES": null,
+          "VCPKG_TARGET_ARCHITECTURE": null,
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "cache-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Independent bioseq_cache debug/inspect build",
+        "description": "Debug-artifact analogue of cache-opt with DWARF and per-module compiler outputs for MCP inspect.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_TARGET_TRIPLET": null,
+          "CMAKE_OSX_ARCHITECTURES": null,
+          "VCPKG_TARGET_ARCHITECTURE": null,
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "cache-bioseq-opt",
+        "inherits": "bench-opt",
+        "displayName": "Bioseq plus bioseq_cache integration build",
+        "description": "Combined provider tree retaining the Bioseq manifest while enabling cache test hooks and private-cluster integration targets.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "cache-bioseq-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Bioseq plus bioseq_cache debug/inspect build",
+        "description": "Combined provider tree with cache hooks, DWARF and per-module compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
         }
       },
       {
@@ -106,11 +192,137 @@
           "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
           "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
           "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+          "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
           "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
           "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports",
           "VCPKG_TARGET_ARCHITECTURE": "x64",
           "BIOSEQ_HEAVY_JOBS": "4"
+        }
+      },
+      {
+        "name": "aws-x64-linux-debug",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang debug/inspect config",
+        "description": "AWS Clang production-flavor tree with DWARF and per-TU compiler artefacts; test hooks remain disabled.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++ -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "website-aws-x64-linux",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang static documentation website build",
+        "description": "Clang-22 core tree that enables the static documentation website. The website structural pass consumes this tree's Clang-22 BMIs/compile database; the isolated code generator itself still builds with GCC 16.1 via BioseqCodegen.cmake. Cache and papers are off; a private PostgreSQL cluster is used for runnable SQL.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "OFF",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "ON",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+          "BIOSEQ_WEBSITE_VERSION": "v0.1",
+          "BIOSEQ_WEBSITE_VERSION_ARTIFACTS": ""
+        }
+      },
+      {
+        "name": "website-aws-x64-linux-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang website debug/inspect config",
+        "description": "Website Clang tree with DWARF and per-TU compiler artefacts for saved-temp diagnostics; website artifacts are not inspect targets.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "OFF",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "ON",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+          "BIOSEQ_WEBSITE_VERSION": "v0.1",
+          "BIOSEQ_WEBSITE_VERSION_ARTIFACTS": ""
+        }
+      },
+      {
+        "name": "test-aws-x64-linux",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang unit/integration test config",
+        "description": "Isolated AWS Clang test tree with BIOSEQ_TEST_INDEXES enabled; production AWS benchmark binaries remain hook-free.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "test-aws-x64-linux-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang unit/integration debug config",
+        "description": "Isolated AWS Clang test tree with failure hooks, DWARF and per-TU compiler artefacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang independent bioseq_cache build",
+        "description": "Cache-only AWS Clang/libc++ tree inheriting the platform ABI, overlay and compiler environment.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang independent bioseq_cache debug build",
+        "description": "Cache-only AWS Clang/libc++ tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache-bioseq",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang Bioseq plus bioseq_cache build",
+        "description": "Combined AWS Clang/libc++ provider integration tree retaining the Bioseq manifest.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache-bioseq-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang Bioseq plus bioseq_cache debug build",
+        "description": "Combined AWS Clang/libc++ provider integration tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
         }
       },
       {
@@ -128,12 +340,102 @@
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body",
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
+          "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "x64-linux",
           "VCPKG_TARGET_ARCHITECTURE": "x64",
           "BIOSEQ_HEAVY_JOBS": "4",
           "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL": "O1",
           "BIOSEQ_GCC_TYPED_DISPATCH_JOBS": "1",
           "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-debug",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC debug/inspect config",
+        "description": "AWS GCC production-flavor tree with DWARF and per-TU compiler artefacts; test hooks remain disabled.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "test-aws-x64-linux-gcc161",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC unit/integration test config",
+        "description": "Isolated AWS GCC test tree with BIOSEQ_TEST_INDEXES enabled; production AWS benchmark binaries remain hook-free.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "test-aws-x64-linux-gcc161-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC unit/integration debug config",
+        "description": "Isolated AWS GCC test tree with failure hooks, DWARF and per-TU compiler artefacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC independent bioseq_cache build",
+        "description": "Cache-only AWS GCC/libstdc++ tree inheriting the platform ABI and compiler environment.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC independent bioseq_cache debug build",
+        "description": "Cache-only AWS GCC/libstdc++ tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache-bioseq",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC Bioseq plus bioseq_cache build",
+        "description": "Combined AWS GCC/libstdc++ provider integration tree retaining the Bioseq manifest.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache-bioseq-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC Bioseq plus bioseq_cache debug build",
+        "description": "Combined AWS GCC/libstdc++ provider integration tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
         }
       },
       {
@@ -145,6 +447,7 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Release",
+          "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",

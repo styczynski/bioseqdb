@@ -27,7 +27,10 @@ struct ChainingPipelineKey {
 
 [[nodiscard]] ShaderKind checked_shader_kind(std::uint32_t raw);
 
-/// Shared shader-cache ABI key. Only these fields affect emitted SPIR-V.
+/// Shared shader-cache compile-request identity. Depending on ShaderKind, a
+/// field may be an established selector/sentinel rather than the reflected
+/// SPIR-V execution geometry; use `expected_shader_workgroup_size(key)` for the
+/// latter.
 struct ShaderVariantKey {
     std::uint32_t kind = 0;
     std::uint32_t tile_size = 384;
@@ -69,6 +72,24 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sketch_emit_words):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_seed_count):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_seed_emit):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_persisted_directory_select):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_validate):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_accumulate_occurrences):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_finalize_max_occ):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_allocate_anchor_prefix):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_emit_global_anchors):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_build_sort_segments):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_adapt_query_sketch):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_prepare_indirect):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_clear_state):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_finalize_query_adapter):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_finalize_validation):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_control):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_authorize):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_position):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_grouped32_stream_seal):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_shape_v5_seed_count):
+        case static_cast<std::uint32_t>(ShaderKind::phase_c_shape_v5_seed_emit):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_histogram):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scan):
         case static_cast<std::uint32_t>(ShaderKind::phase_c_sort_radix_scatter):
@@ -91,6 +112,7 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_dense_scatter_generic):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_dna4):
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_generic):
+        case static_cast<std::uint32_t>(ShaderKind::align_extend_banded_affine):
         case static_cast<std::uint32_t>(ShaderKind::align_extend_simple_cigar):
             return static_cast<ShaderKind>(raw);
         default:
@@ -134,6 +156,12 @@ struct VulkanStaticVariantInputs {
         static_cast<std::uint32_t>(kind), tile_size, local_size, max_span};
 }
 
+[[nodiscard]] inline ShaderWorkgroupSize expected_shader_workgroup_size(
+    const ShaderVariantKey& key)
+{
+    return expected_shader_workgroup_size(key.to_request());
+}
+
 [[nodiscard]] inline constexpr bool is_chain_key(
     const ShaderVariantKey& key) noexcept
 {
@@ -172,9 +200,35 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::phase_c_prefix_scan_add:
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:
+        case ShaderKind::phase_c_persisted_directory_select:
         case ShaderKind::phase_c_index_mark_runs:
         case ShaderKind::phase_c_index_emit_buckets:
             return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
+        case ShaderKind::phase_c_grouped32_validate:
+        case ShaderKind::phase_c_grouped32_accumulate_occurrences:
+        case ShaderKind::phase_c_grouped32_finalize_max_occ:
+        case ShaderKind::phase_c_grouped32_allocate_anchor_prefix:
+        case ShaderKind::phase_c_grouped32_emit_global_anchors:
+        case ShaderKind::phase_c_grouped32_build_sort_segments:
+        case ShaderKind::phase_c_grouped32_adapt_query_sketch:
+        case ShaderKind::phase_c_grouped32_prepare_indirect:
+        case ShaderKind::phase_c_grouped32_clear_state:
+        case ShaderKind::phase_c_grouped32_finalize_query_adapter:
+        case ShaderKind::phase_c_grouped32_finalize_validation:
+        case ShaderKind::phase_c_grouped32_stream_control:
+        case ShaderKind::phase_c_grouped32_stream_authorize:
+        case ShaderKind::phase_c_grouped32_stream_position:
+        case ShaderKind::phase_c_grouped32_stream_seal:
+            // max_span is an explicit ABI identity axis for this family, not a
+            // biological span: value 2 means grouped32 GPU ABI2.
+            return key.tile_size == 384u && key.local_size == 128u
+                && key.max_span == 2u;
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            // max_span is an ABI identity axis: value 3 is persisted Shape
+            // Format-5 GPU ABI3, not a biological seed span.
+            return key.tile_size == 384u && key.local_size == 128u
+                && key.max_span == 3u;
         case ShaderKind::phase_c_chain_range_build:
             return key.tile_size == 384u && key.local_size == 1u && key.max_span == 1u;
         case ShaderKind::phase_c_coordinate_reduce:
@@ -196,6 +250,9 @@ struct VulkanStaticVariantInputs {
         case ShaderKind::seq_sort_prefix_check_generic:
             return key.tile_size == 384u && key.local_size == 256u
                 && key.max_span == 0u;
+        case ShaderKind::align_extend_banded_affine:
+            return key.tile_size == 384u && key.local_size == 1u
+                && key.max_span == 512u;
         case ShaderKind::align_extend_simple_cigar:
             return key.tile_size == 384u
                 && (key.local_size == 1u || key.local_size == 64u)
@@ -238,6 +295,12 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::phase_c_prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_count, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_seed_emit, 384u, 128u, 1u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_shape_v5_seed_count, 384u, 128u, 3u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_shape_v5_seed_emit, 384u, 128u, 3u));
+    emit(make_shader_key(
+        ShaderKind::phase_c_persisted_directory_select, 384u, 128u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_histogram, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_scan, 384u, 1u, 1u));
     emit(make_shader_key(ShaderKind::phase_c_sort_radix_scatter, 384u, 1u, 1u));
@@ -259,8 +322,32 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::seq_sort_dense_scatter_generic, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_prefix_check_dna4, 384u, 256u, 0u));
     emit(make_shader_key(ShaderKind::seq_sort_prefix_check_generic, 384u, 256u, 0u));
+    emit(make_shader_key(ShaderKind::align_extend_banded_affine, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 64u, 512u));
+}
+
+/// Explicit, measurable grouped32 ABI2 preseed set. It is intentionally not
+/// part of `for_each_static_shader_variant`, so current supervisor startup and
+/// the production static-cache digest pay no compilation or archive cost.
+template <class Fn>
+inline void for_each_inactive_grouped32_shader_variant(Fn&& visit)
+{
+    const auto emit = [&visit](ShaderKind kind) {
+        const auto key = make_shader_key(kind, 384u, 128u, 2u);
+        if (valid_shader_variant_key(key)) visit(key);
+    };
+    emit(ShaderKind::phase_c_grouped32_validate);
+    emit(ShaderKind::phase_c_grouped32_accumulate_occurrences);
+    emit(ShaderKind::phase_c_grouped32_finalize_max_occ);
+    emit(ShaderKind::phase_c_grouped32_allocate_anchor_prefix);
+    emit(ShaderKind::phase_c_grouped32_emit_global_anchors);
+    emit(ShaderKind::phase_c_grouped32_build_sort_segments);
+    emit(ShaderKind::phase_c_grouped32_adapt_query_sketch);
+    emit(ShaderKind::phase_c_grouped32_prepare_indirect);
+    emit(ShaderKind::phase_c_grouped32_clear_state);
+    emit(ShaderKind::phase_c_grouped32_finalize_query_adapter);
+    emit(ShaderKind::phase_c_grouped32_finalize_validation);
 }
 
 } // namespace bioseq::gpu::vulkan

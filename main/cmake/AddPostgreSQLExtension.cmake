@@ -28,7 +28,7 @@ find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
-  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN)
+  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN SCHEMA)
   # SHARED_MODULE_LIBS: object/static libraries that export FILE_SET
   # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
   # produced visible without rebuilding the module sources for every target —
@@ -299,11 +299,24 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
         COMPONENT ${EXTENSION_COMPONENT}
       )
     endif()
-    # Generate .control file
-    string(REPLACE ";" ", " EXTENSION_REQUIRES "${EXTENSION_REQUIRES}")
+    # Generate .control file. Independent extensions omit `requires` entirely;
+    # fixed-schema extensions emit the control property explicitly.
+    if(EXTENSION_REQUIRES)
+      string(REPLACE ";" ", " EXTENSION_REQUIRES "${EXTENSION_REQUIRES}")
+      set(EXTENSION_REQUIRES_CONTROL_LINE
+        "requires = '${EXTENSION_REQUIRES}'")
+    else()
+      set(EXTENSION_REQUIRES_CONTROL_LINE "")
+    endif()
+    if(EXTENSION_SCHEMA)
+      set(EXTENSION_SCHEMA_CONTROL_LINE
+        "schema = '${EXTENSION_SCHEMA}'")
+    else()
+      set(EXTENSION_SCHEMA_CONTROL_LINE "")
+    endif()
     configure_file(
-      ${CMAKE_SOURCE_DIR}/cmake/control.in
-      ${EXTENSION_NAME}.control
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/control.in"
+      "${EXTENSION_NAME}.control"
     )
 
     # Generate .sql install file

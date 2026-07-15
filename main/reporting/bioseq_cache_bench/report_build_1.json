@@ -1,0 +1,4528 @@
+{
+  "benchmark": "bioseq_cache",
+  "build_tree_dso": "/home/ubuntu/bioseqdb/main/build/cache-opt/bioseq_caching/bioseq_cache.so",
+  "cases": [
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "dsa_hot_tier",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 882037,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 882037,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 12105000,
+          "p95_ns": 12434300,
+          "p99_ns": 12443660,
+          "raw_samples_ns": [
+            11929000,
+            12407000,
+            11822000,
+            12029000,
+            12446000,
+            12268000,
+            12105000
+          ]
+        },
+        "execution_ms": 12.105,
+        "p50_ns": 31649307,
+        "p95_ns": 32653367,
+        "p99_ns": 32827662,
+        "planning": {
+          "p50_ns": 306000,
+          "p95_ns": 333200,
+          "p99_ns": 339440,
+          "raw_samples_ns": [
+            304000,
+            296000,
+            313000,
+            291000,
+            315000,
+            341000,
+            306000
+          ]
+        },
+        "planning_ms": 0.306,
+        "raw_samples_ns": [
+          31383707,
+          32145006,
+          31958543,
+          31649307,
+          31324513,
+          31069757,
+          32871236
+        ],
+        "speedup_vs_disabled": 0.7742197957130625,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 9352621,
+            "p95": 9503833,
+            "p99": 9522429,
+            "raw_samples": [
+              9431772,
+              9208397,
+              9262124,
+              9352621,
+              9449596,
+              9527078,
+              9004954
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 631925,
+            "p95": 642141,
+            "p99": 643397,
+            "raw_samples": [
+              637273,
+              622180,
+              625810,
+              631925,
+              638477,
+              643712,
+              608434
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 27592275,
+          "p95_ns": 28120174,
+          "p99_ns": 28218187,
+          "raw_samples_ns": [
+            27592275,
+            27593492,
+            28242691,
+            27161680,
+            26722653,
+            26956751,
+            27834304
+          ],
+          "status": "measured"
+        }
+      },
+      "correctness": {
+        "multiset_sha256": "a41ff08d5f580560ee8f1ddaf14c306994e71312ec5f75c5980ca9147f8c8002",
+        "passed": true,
+        "row_count": 20000,
+        "stdout_bytes": 296004
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 1772000,
+          "p95_ns": 2279500,
+          "p99_ns": 2331100,
+          "raw_samples_ns": [
+            1657000,
+            1740000,
+            1772000,
+            1964000,
+            2129000,
+            2344000,
+            1637000
+          ]
+        },
+        "execution_ms": 1.772,
+        "p50_ns": 24503520,
+        "p95_ns": 24503520,
+        "p99_ns": 24503520,
+        "planning": {
+          "p50_ns": 237000,
+          "p95_ns": 609999,
+          "p99_ns": 732399,
+          "raw_samples_ns": [
+            230000,
+            231000,
+            230000,
+            237000,
+            253000,
+            239000,
+            763000
+          ]
+        },
+        "planning_ms": 0.237,
+        "raw_samples_ns": [
+          24503520
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 12080060,
+            "p95": 12080060,
+            "p99": 12080060,
+            "raw_samples": [
+              12080060
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 816209,
+            "p95": 816209,
+            "p99": 816209,
+            "raw_samples": [
+              816209
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 19509877,
+          "p95_ns": 19509877,
+          "p99_ns": 19509877,
+          "raw_samples_ns": [
+            19509877
+          ],
+          "status": "measured"
+        }
+      },
+      "key": "narrow_fixed_rows",
+      "ordered": false,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 27592275,
+          "p95_ns": 28120174,
+          "p99_ns": 28218187,
+          "raw_samples_ns": [
+            27592275,
+            27593492,
+            28242691,
+            27161680,
+            26722653,
+            26956751,
+            27834304
+          ],
+          "status": "measured"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": 81.97110864071774,
+        "p50_ns": 44589327,
+        "p95_ns": 44589327,
+        "p99_ns": 44589327,
+        "raw_samples_ns": [
+          44589327
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 6638449,
+            "p95": 6638449,
+            "p99": 6638449,
+            "raw_samples": [
+              6638449
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 448537,
+            "p95": 448537,
+            "p99": 448537,
+            "raw_samples": [
+              448537
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 40320642,
+          "p95_ns": 40320642,
+          "p99_ns": 40320642,
+          "raw_samples_ns": [
+            40320642
+          ],
+          "status": "measured"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 400000
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 882037,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 882037,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 882037
+        }
+      },
+      "same_mode_planning_overhead_percent": 29.113924050632917,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 400000,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882037
+      }
+    },
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "wide_nullable",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 1094381,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 1094381,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 9106000,
+          "p95_ns": 9766900,
+          "p99_ns": 9782980,
+          "raw_samples_ns": [
+            9039000,
+            9106000,
+            9720000,
+            9047000,
+            9701000,
+            9787000,
+            8657000
+          ]
+        },
+        "execution_ms": 9.106,
+        "p50_ns": 24515651,
+        "p95_ns": 24726748,
+        "p99_ns": 24780873,
+        "planning": {
+          "p50_ns": 437000,
+          "p95_ns": 472000,
+          "p99_ns": 481600,
+          "raw_samples_ns": [
+            430000,
+            409000,
+            437000,
+            484000,
+            444000,
+            441000,
+            398000
+          ]
+        },
+        "planning_ms": 0.437,
+        "raw_samples_ns": [
+          24558074,
+          24568884,
+          22762213,
+          24515651,
+          24794405,
+          24451935,
+          23108494
+        ],
+        "speedup_vs_disabled": 0.6943780934065344,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 42506682,
+            "p95": 45575284,
+            "p99": 45739931,
+            "raw_samples": [
+              42433254,
+              42414584,
+              45781093,
+              42506682,
+              42028796,
+              42617445,
+              45095063
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 81580,
+            "p95": 87469,
+            "p99": 87785,
+            "raw_samples": [
+              81439,
+              81403,
+              87864,
+              81580,
+              80663,
+              81793,
+              86548
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 21704579,
+          "p95_ns": 22486939,
+          "p99_ns": 22541721,
+          "raw_samples_ns": [
+            21880503,
+            21704579,
+            20649707,
+            21556267,
+            22327157,
+            22555417,
+            20881704
+          ],
+          "status": "measured"
+        }
+      },
+      "correctness": {
+        "multiset_sha256": "2cce7d0b94bc5e2487d84af573d3a45214486427bb74f586b7ad0f7d3d0b69cb",
+        "passed": true,
+        "row_count": 2000,
+        "stdout_bytes": 1042079
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 368000,
+          "p95_ns": 383100,
+          "p99_ns": 386220,
+          "raw_samples_ns": [
+            368000,
+            374000,
+            374000,
+            362000,
+            355000,
+            387000,
+            354000
+          ]
+        },
+        "execution_ms": 0.368,
+        "p50_ns": 17023131,
+        "p95_ns": 17023131,
+        "p99_ns": 17023131,
+        "planning": {
+          "p50_ns": 334000,
+          "p95_ns": 607699,
+          "p99_ns": 687139,
+          "raw_samples_ns": [
+            376000,
+            334000,
+            333000,
+            333000,
+            707000,
+            331000,
+            357000
+          ]
+        },
+        "planning_ms": 0.334,
+        "raw_samples_ns": [
+          17023131
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 61215472,
+            "p95": 61215472,
+            "p99": 61215472,
+            "raw_samples": [
+              61215472
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 117487,
+            "p95": 117487,
+            "p99": 117487,
+            "raw_samples": [
+              117487
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 12784306,
+          "p95_ns": 12784306,
+          "p99_ns": 12784306,
+          "raw_samples_ns": [
+            12784306
+          ],
+          "status": "measured"
+        }
+      },
+      "key": "wide_nullable_rows",
+      "ordered": false,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 21704579,
+          "p95_ns": 22486939,
+          "p99_ns": 22541721,
+          "raw_samples_ns": [
+            21880503,
+            21704579,
+            20649707,
+            21556267,
+            22327157,
+            22555417,
+            20881704
+          ],
+          "status": "measured"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": 65.40777956769527,
+        "p50_ns": 28157583,
+        "p95_ns": 28157583,
+        "p99_ns": 28157583,
+        "raw_samples_ns": [
+          28157583
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 37008822,
+            "p95": 37008822,
+            "p99": 37008822,
+            "raw_samples": [
+              37008822
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 71028,
+            "p95": 71028,
+            "p99": 71028,
+            "raw_samples": [
+              71028
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 25747574,
+          "p95_ns": 25747574,
+          "p99_ns": 25747574,
+          "raw_samples_ns": [
+            25747574
+          ],
+          "status": "measured"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 1045336
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 1094381,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 1094381,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 1094381
+        }
+      },
+      "same_mode_planning_overhead_percent": 30.838323353293408,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 1045336,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 1094381
+      }
+    },
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "file_tier_candidate",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 4196485,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 4196485,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 35585000,
+          "p95_ns": 37410700,
+          "p99_ns": 37566940,
+          "raw_samples_ns": [
+            35585000,
+            36721000,
+            37606000,
+            36955000,
+            35284000,
+            35186000,
+            34240000
+          ]
+        },
+        "execution_ms": 35.585,
+        "p50_ns": 67811751,
+        "p95_ns": 76227601,
+        "p99_ns": 76306371,
+        "planning": {
+          "p50_ns": 317000,
+          "p95_ns": 343900,
+          "p99_ns": 345580,
+          "raw_samples_ns": [
+            298000,
+            339000,
+            346000,
+            308000,
+            326000,
+            317000,
+            295000
+          ]
+        },
+        "planning_ms": 0.317,
+        "raw_samples_ns": [
+          62433088,
+          76326064,
+          75997855,
+          66456052,
+          67811751,
+          62777172,
+          68243397
+        ],
+        "speedup_vs_disabled": 0.45703040465656164,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 61855813,
+            "p95": 67074270,
+            "p99": 67162648,
+            "raw_samples": [
+              67184743,
+              54955683,
+              55193018,
+              63117667,
+              61855813,
+              66816501,
+              61464569
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 943,
+            "p95": 1023,
+            "p99": 1024,
+            "raw_samples": [
+              1025,
+              838,
+              842,
+              963,
+              943,
+              1019,
+              937
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 54079962,
+          "p95_ns": 62081125,
+          "p99_ns": 62507285,
+          "raw_samples_ns": [
+            49317833,
+            62613826,
+            60838157,
+            54079962,
+            53258023,
+            51865059,
+            54279114
+          ],
+          "status": "measured"
+        }
+      },
+      "correctness": {
+        "multiset_sha256": "edd4c39cd50afb79062093cd029074c9198eac707516573e202e95b8b14f8dd2",
+        "passed": true,
+        "row_count": 64,
+        "stdout_bytes": 4194551
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 46000,
+          "p95_ns": 50700,
+          "p99_ns": 50940,
+          "raw_samples_ns": [
+            46000,
+            40000,
+            51000,
+            50000,
+            40000,
+            40000,
+            49000
+          ]
+        },
+        "execution_ms": 0.046,
+        "p50_ns": 30992032,
+        "p95_ns": 30992032,
+        "p99_ns": 30992032,
+        "planning": {
+          "p50_ns": 227000,
+          "p95_ns": 921799,
+          "p99_ns": 1006759,
+          "raw_samples_ns": [
+            674000,
+            227000,
+            1028000,
+            227000,
+            247000,
+            208000,
+            213000
+          ]
+        },
+        "planning_ms": 0.227,
+        "raw_samples_ns": [
+          30992032
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 135342884,
+            "p95": 135342884,
+            "p99": 135342884,
+            "raw_samples": [
+              135342884
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 2065,
+            "p95": 2065,
+            "p99": 2065,
+            "raw_samples": [
+              2065
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 17189244,
+          "p95_ns": 17189244,
+          "p99_ns": 17189244,
+          "raw_samples_ns": [
+            17189244
+          ],
+          "status": "measured"
+        }
+      },
+      "key": "large_toasted_values",
+      "ordered": false,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 54079962,
+          "p95_ns": 62081125,
+          "p99_ns": 62507285,
+          "raw_samples_ns": [
+            49317833,
+            62613826,
+            60838157,
+            54079962,
+            53258023,
+            51865059,
+            54279114
+          ],
+          "status": "measured"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": 125.91053403661947,
+        "p50_ns": 70014265,
+        "p95_ns": 70014265,
+        "p99_ns": 70014265,
+        "raw_samples_ns": [
+          70014265
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 59909948,
+            "p95": 59909948,
+            "p99": 59909948,
+            "raw_samples": [
+              59909948
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 914,
+            "p95": 914,
+            "p99": 914,
+            "raw_samples": [
+              914
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 58475715,
+          "p95_ns": 58475715,
+          "p99_ns": 58475715,
+          "raw_samples_ns": [
+            58475715
+          ],
+          "status": "measured"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 4194816
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 4196485,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 4196485,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 4196485
+        }
+      },
+      "same_mode_planning_overhead_percent": 39.647577092511014,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 4194816,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 4196485
+      }
+    },
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "empty",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 405,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 405,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 495000,
+          "p95_ns": 632899,
+          "p99_ns": 665779,
+          "raw_samples_ns": [
+            485000,
+            674000,
+            494000,
+            537000,
+            509000,
+            490000,
+            495000
+          ]
+        },
+        "execution_ms": 0.495,
+        "p50_ns": 10627220,
+        "p95_ns": 12034499,
+        "p99_ns": 12378894,
+        "planning": {
+          "p50_ns": 796000,
+          "p95_ns": 1253299,
+          "p99_ns": 1303460,
+          "raw_samples_ns": [
+            982000,
+            796000,
+            496000,
+            1107000,
+            460000,
+            483000,
+            1316000
+          ]
+        },
+        "planning_ms": 0.796,
+        "raw_samples_ns": [
+          9894979,
+          10867008,
+          10404191,
+          10627220,
+          10378565,
+          11030016,
+          12464993
+        ],
+        "speedup_vs_disabled": 1.0459489875997674,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "raw_samples": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "raw_samples": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "The query returned no rows, so it has no first-row timestamp.",
+          "raw_samples_ns": [],
+          "status": "not_applicable"
+        }
+      },
+      "correctness": {
+        "multiset_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "passed": true,
+        "row_count": 0,
+        "stdout_bytes": 0
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 33000,
+          "p95_ns": 48699,
+          "p99_ns": 53739,
+          "raw_samples_ns": [
+            34000,
+            33000,
+            34000,
+            55000,
+            32000,
+            31000,
+            32000
+          ]
+        },
+        "execution_ms": 0.033,
+        "p50_ns": 11115530,
+        "p95_ns": 11115530,
+        "p99_ns": 11115530,
+        "planning": {
+          "p50_ns": 380000,
+          "p95_ns": 431900,
+          "p99_ns": 433580,
+          "raw_samples_ns": [
+            376000,
+            427000,
+            434000,
+            380000,
+            413000,
+            348000,
+            352000
+          ]
+        },
+        "planning_ms": 0.38,
+        "raw_samples_ns": [
+          11115530
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "raw_samples": [
+              0
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "raw_samples": [
+              0
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "The query returned no rows, so it has no first-row timestamp.",
+          "raw_samples_ns": [],
+          "status": "not_applicable"
+        }
+      },
+      "key": "empty_result",
+      "ordered": false,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "The query returned no rows, so it has no first-row timestamp.",
+          "raw_samples_ns": [],
+          "status": "not_applicable"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": -6.660546100815705,
+        "p50_ns": 10375175,
+        "p95_ns": 10375175,
+        "p99_ns": 10375175,
+        "raw_samples_ns": [
+          10375175
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "raw_samples": [
+              0
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "raw_samples": [
+              0
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "The query returned no rows, so it has no first-row timestamp.",
+          "raw_samples_ns": [],
+          "status": "not_applicable"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 0
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 405,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 405,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 405
+        }
+      },
+      "same_mode_planning_overhead_percent": 109.47368421052633,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 0,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 405
+      }
+    },
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "selective",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 1285,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 1285,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 501000,
+          "p95_ns": 895099,
+          "p99_ns": 1018219,
+          "raw_samples_ns": [
+            498000,
+            1049000,
+            500000,
+            521000,
+            496000,
+            536000,
+            501000
+          ]
+        },
+        "execution_ms": 0.501,
+        "p50_ns": 11129341,
+        "p95_ns": 11932426,
+        "p99_ns": 11966633,
+        "planning": {
+          "p50_ns": 392000,
+          "p95_ns": 448200,
+          "p99_ns": 452040,
+          "raw_samples_ns": [
+            437000,
+            392000,
+            453000,
+            389000,
+            376000,
+            374000,
+            431000
+          ]
+        },
+        "planning_ms": 0.392,
+        "raw_samples_ns": [
+          10496257,
+          10796415,
+          11975185,
+          11832655,
+          11129341,
+          11155015,
+          9743181
+        ],
+        "speedup_vs_disabled": 1.1261169012612697,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 21384,
+            "p95": 23901,
+            "p99": 24321,
+            "raw_samples": [
+              22674,
+              22044,
+              19874,
+              20113,
+              21384,
+              21335,
+              24427
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 1797,
+            "p95": 2007,
+            "p99": 2043,
+            "raw_samples": [
+              1905,
+              1852,
+              1670,
+              1690,
+              1797,
+              1792,
+              2052
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 10181711,
+          "p95_ns": 10795323,
+          "p99_ns": 10885069,
+          "raw_samples_ns": [
+            9886349,
+            10181711,
+            10530982,
+            10907506,
+            10533563,
+            9689760,
+            9159378
+          ],
+          "status": "measured"
+        }
+      },
+      "correctness": {
+        "multiset_sha256": "842c2edeba32ba807e89c442f89490c8caad19701104bfc99af744f30ab9f845",
+        "passed": true,
+        "row_count": 20,
+        "stdout_bytes": 238
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 1689000,
+          "p95_ns": 2020700,
+          "p99_ns": 2020940,
+          "raw_samples_ns": [
+            2020000,
+            1625000,
+            2021000,
+            1689000,
+            2005999,
+            1668000,
+            1606000
+          ]
+        },
+        "execution_ms": 1.689,
+        "p50_ns": 12532939,
+        "p95_ns": 12532939,
+        "p99_ns": 12532939,
+        "planning": {
+          "p50_ns": 316000,
+          "p95_ns": 339700,
+          "p99_ns": 347140,
+          "raw_samples_ns": [
+            295000,
+            349000,
+            313000,
+            318000,
+            316000,
+            317000,
+            289000
+          ]
+        },
+        "planning_ms": 0.316,
+        "raw_samples_ns": [
+          12532939
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 18989,
+            "p95": 18989,
+            "p99": 18989,
+            "raw_samples": [
+              18989
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 1595,
+            "p95": 1595,
+            "p99": 1595,
+            "raw_samples": [
+              1595
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 11953874,
+          "p95_ns": 11953874,
+          "p99_ns": 11953874,
+          "raw_samples_ns": [
+            11953874
+          ],
+          "status": "measured"
+        }
+      },
+      "key": "highly_selective_result",
+      "ordered": false,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 10181711,
+          "p95_ns": 10795323,
+          "p99_ns": 10885069,
+          "raw_samples_ns": [
+            9886349,
+            10181711,
+            10530982,
+            10907506,
+            10533563,
+            9689760,
+            9159378
+          ],
+          "status": "measured"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": 7.236044155325419,
+        "p50_ns": 13439828,
+        "p95_ns": 13439828,
+        "p99_ns": 13439828,
+        "raw_samples_ns": [
+          13439828
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 17708,
+            "p95": 17708,
+            "p99": 17708,
+            "raw_samples": [
+              17708
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 1488,
+            "p95": 1488,
+            "p99": 1488,
+            "raw_samples": [
+              1488
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 12807106,
+          "p95_ns": 12807106,
+          "p99_ns": 12807106,
+          "raw_samples_ns": [
+            12807106
+          ],
+          "status": "measured"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 320
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 1285,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 1285,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 1285
+        }
+      },
+      "same_mode_planning_overhead_percent": 24.05063291139241,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 320,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 1285
+      }
+    },
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "ordered",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 882029,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 882029,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 12530000,
+          "p95_ns": 13225900,
+          "p99_ns": 13253980,
+          "raw_samples_ns": [
+            12530000,
+            12315000,
+            12315000,
+            12139000,
+            12900000,
+            13261000,
+            13144000
+          ]
+        },
+        "execution_ms": 12.53,
+        "p50_ns": 36385845,
+        "p95_ns": 44650006,
+        "p99_ns": 45279888,
+        "planning": {
+          "p50_ns": 395000,
+          "p95_ns": 659199,
+          "p99_ns": 744639,
+          "raw_samples_ns": [
+            364000,
+            367000,
+            395000,
+            766000,
+            395000,
+            365000,
+            410000
+          ]
+        },
+        "planning_ms": 0.395,
+        "raw_samples_ns": [
+          30766997,
+          37823145,
+          35407697,
+          45437359,
+          42812852,
+          36385845,
+          33397222
+        ],
+        "speedup_vs_disabled": 0.8486547172396298,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 6535178,
+            "p95": 7546067,
+            "p99": 7692150,
+            "raw_samples": [
+              7728671,
+              6286838,
+              6715714,
+              5233314,
+              5554126,
+              6535178,
+              7119993
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 549664,
+            "p95": 634688,
+            "p99": 646975,
+            "raw_samples": [
+              650047,
+              528776,
+              564848,
+              440166,
+              467149,
+              549664,
+              598852
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 32082801,
+          "p95_ns": 40801855,
+          "p99_ns": 41170919,
+          "raw_samples_ns": [
+            27325509,
+            34031390,
+            31421365,
+            41263186,
+            39725418,
+            32082801,
+            30411987
+          ],
+          "status": "measured"
+        }
+      },
+      "correctness": {
+        "ordered_sha256": "8b8cb7d3b29eb5c07b3a51bbbfdee6a79ecb59c42be3f226f6aab7c6e9147286",
+        "passed": true,
+        "row_count": 20000,
+        "stdout_bytes": 237788
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 12063000,
+          "p95_ns": 12310000,
+          "p99_ns": 12343600,
+          "raw_samples_ns": [
+            12089000,
+            10925000,
+            12063000,
+            11852000,
+            11182000,
+            12212000,
+            12352000
+          ]
+        },
+        "execution_ms": 12.063,
+        "p50_ns": 30879019,
+        "p95_ns": 30879019,
+        "p99_ns": 30879019,
+        "planning": {
+          "p50_ns": 276000,
+          "p95_ns": 288900,
+          "p99_ns": 290580,
+          "raw_samples_ns": [
+            276000,
+            278000,
+            268000,
+            284000,
+            269000,
+            276000,
+            291000
+          ]
+        },
+        "planning_ms": 0.276,
+        "raw_samples_ns": [
+          30879019
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 7700633,
+            "p95": 7700633,
+            "p99": 7700633,
+            "raw_samples": [
+              7700633
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 647688,
+            "p95": 647688,
+            "p99": 647688,
+            "raw_samples": [
+              647688
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 27348992,
+          "p95_ns": 27348992,
+          "p99_ns": 27348992,
+          "raw_samples_ns": [
+            27348992
+          ],
+          "status": "measured"
+        }
+      },
+      "key": "ordered_result",
+      "ordered": true,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 32082801,
+          "p95_ns": 40801855,
+          "p99_ns": 41170919,
+          "raw_samples_ns": [
+            27325509,
+            34031390,
+            31421365,
+            41263186,
+            39725418,
+            32082801,
+            30411987
+          ],
+          "status": "measured"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": 67.20239396206208,
+        "p50_ns": 51630459,
+        "p95_ns": 51630459,
+        "p99_ns": 51630459,
+        "raw_samples_ns": [
+          51630459
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 4605575,
+            "p95": 4605575,
+            "p99": 4605575,
+            "raw_samples": [
+              4605575
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 387368,
+            "p95": 387368,
+            "p99": 387368,
+            "raw_samples": [
+              387368
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 48277494,
+          "p95_ns": 48277494,
+          "p99_ns": 48277494,
+          "raw_samples_ns": [
+            48277494
+          ],
+          "status": "measured"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 400000
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 882029,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 882029,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 882029
+        }
+      },
+      "same_mode_planning_overhead_percent": 43.11594202898551,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 400000,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882029
+      }
+    },
+    {
+      "cache_behavior": {
+        "completed_hits": 14,
+        "explain_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "minimum_expected_completed_hits": 14,
+        "passed": true,
+        "publications": 1
+      },
+      "category": "limit",
+      "completed_hit": {
+        "actual_cache_actions": [
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result",
+          "[Hit] exact final result"
+        ],
+        "cache_janitor": [
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running",
+          "running"
+        ],
+        "cache_readiness": [
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready",
+          "generic-mvcc-ready"
+        ],
+        "cache_storage": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 3845,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 3845,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "execution": {
+          "p50_ns": 520000,
+          "p95_ns": 850099,
+          "p99_ns": 939619,
+          "raw_samples_ns": [
+            586000,
+            589000,
+            962000,
+            520000,
+            518000,
+            512000,
+            511000
+          ]
+        },
+        "execution_ms": 0.52,
+        "p50_ns": 10949238,
+        "p95_ns": 11485786,
+        "p99_ns": 11601922,
+        "planning": {
+          "p50_ns": 415000,
+          "p95_ns": 442700,
+          "p99_ns": 442940,
+          "raw_samples_ns": [
+            394000,
+            415000,
+            443000,
+            402000,
+            442000,
+            420000,
+            398000
+          ]
+        },
+        "planning_ms": 0.415,
+        "raw_samples_ns": [
+          11101866,
+          10949238,
+          10243087,
+          10710513,
+          10544418,
+          11147055,
+          11630957
+        ],
+        "speedup_vs_disabled": 0.9319974595492398,
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 70872,
+            "p95": 75108,
+            "p99": 75628,
+            "raw_samples": [
+              69898,
+              70872,
+              75758,
+              72452,
+              73593,
+              69614,
+              66718
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 9133,
+            "p95": 9678,
+            "p99": 9745,
+            "raw_samples": [
+              9007,
+              9133,
+              9762,
+              9336,
+              9483,
+              8970,
+              8597
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 10061395,
+          "p95_ns": 10848875,
+          "p99_ns": 10978635,
+          "raw_samples_ns": [
+            10245720,
+            10037981,
+            9534025,
+            10061395,
+            9959722,
+            10470411,
+            11011075
+          ],
+          "status": "measured"
+        }
+      },
+      "correctness": {
+        "ordered_sha256": "bda1548b74a2998450ab765cc488415a3519dc705d6561f0f0225d2657ff2588",
+        "passed": true,
+        "row_count": 100,
+        "stdout_bytes": 776
+      },
+      "disabled": {
+        "actual_cache_actions": [],
+        "cache_janitor": [],
+        "cache_readiness": [],
+        "cache_storage": {
+          "detail": "No cache CustomScan was present in structured EXPLAIN.",
+          "status": "unavailable",
+          "value": null
+        },
+        "execution": {
+          "p50_ns": 84000,
+          "p95_ns": 106499,
+          "p99_ns": 112499,
+          "raw_samples_ns": [
+            84000,
+            114000,
+            89000,
+            84000,
+            88000,
+            82000,
+            82000
+          ]
+        },
+        "execution_ms": 0.084,
+        "p50_ns": 10204662,
+        "p95_ns": 10204662,
+        "p99_ns": 10204662,
+        "planning": {
+          "p50_ns": 313000,
+          "p95_ns": 761699,
+          "p99_ns": 910739,
+          "raw_samples_ns": [
+            948000,
+            296000,
+            319000,
+            313000,
+            312000,
+            290000,
+            327000
+          ]
+        },
+        "planning_ms": 0.313,
+        "raw_samples_ns": [
+          10204662
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 76043,
+            "p95": 76043,
+            "p99": 76043,
+            "raw_samples": [
+              76043
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 9799,
+            "p95": 9799,
+            "p99": 9799,
+            "raw_samples": [
+              9799
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 9353303,
+          "p95_ns": 9353303,
+          "p99_ns": 9353303,
+          "raw_samples_ns": [
+            9353303
+          ],
+          "status": "measured"
+        }
+      },
+      "key": "limit_exact_result",
+      "ordered": true,
+      "prevalidation": {
+        "client_first_row_inclusive": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 10061395,
+          "p95_ns": 10848875,
+          "p99_ns": 10978635,
+          "raw_samples_ns": [
+            10245720,
+            10037981,
+            9534025,
+            10061395,
+            9959722,
+            10470411,
+            11011075
+          ],
+          "status": "measured"
+        },
+        "detail": "Completed-hit first-row time includes mandatory full-store prevalidation, but is not reported as an isolated duration.",
+        "isolated_duration": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        }
+      },
+      "producer": {
+        "baseline_delta_percent": 25.541012529371383,
+        "p50_ns": 12811036,
+        "p95_ns": 12811036,
+        "p99_ns": 12811036,
+        "raw_samples_ns": [
+          12811036
+        ],
+        "throughput": {
+          "output_bytes_per_second": {
+            "p50": 60572,
+            "p95": 60572,
+            "p99": 60572,
+            "raw_samples": [
+              60572
+            ],
+            "unit": "bytes/s"
+          },
+          "rows_per_second": {
+            "p50": 7805,
+            "p95": 7805,
+            "p99": 7805,
+            "raw_samples": [
+              7805
+            ],
+            "unit": "rows/s"
+          }
+        },
+        "time_to_first_row": {
+          "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+          "p50_ns": 12192322,
+          "p95_ns": 12192322,
+          "p99_ns": 12192322,
+          "raw_samples_ns": [
+            12192322
+          ],
+          "status": "measured"
+        }
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 1600
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "storage_explain": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 3845,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 3845,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 3845
+        }
+      },
+      "same_mode_planning_overhead_percent": 32.587859424920126,
+      "stats": {
+        "completed_hits": 14,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 1600,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 3845
+      }
+    }
+  ],
+  "compiler": "unknown",
+  "core": {
+    "benchmarks": [
+      {
+        "name": "column_encode",
+        "operations": 4096,
+        "p50_ns": 2465076,
+        "p95_ns": 3383096,
+        "p99_ns": 3383096,
+        "raw_samples_ns": [
+          3383096,
+          2276830,
+          3032283,
+          2728218,
+          2465076,
+          2440797,
+          2200035
+        ]
+      },
+      {
+        "name": "column_full_prevalidation",
+        "operations": 115976,
+        "p50_ns": 803450,
+        "p95_ns": 1203995,
+        "p99_ns": 1203995,
+        "raw_samples_ns": [
+          1203995,
+          779159,
+          803450,
+          836521,
+          817118,
+          796777,
+          774698
+        ]
+      },
+      {
+        "name": "column_validate_decode",
+        "operations": 4096,
+        "p50_ns": 1159345,
+        "p95_ns": 1468849,
+        "p99_ns": 1468849,
+        "raw_samples_ns": [
+          1163658,
+          1103683,
+          1116183,
+          1422807,
+          1131709,
+          1468849,
+          1159345
+        ]
+      },
+      {
+        "name": "admission_reserve_release",
+        "operations": 100000,
+        "p50_ns": 488889,
+        "p95_ns": 611233,
+        "p99_ns": 611233,
+        "raw_samples_ns": [
+          465064,
+          611233,
+          454364,
+          489090,
+          477605,
+          603938,
+          488889
+        ]
+      },
+      {
+        "name": "memory_copy_reference",
+        "operations": 64,
+        "p50_ns": 253915,
+        "p95_ns": 289193,
+        "p99_ns": 289193,
+        "raw_samples_ns": [
+          289193,
+          260945,
+          241746,
+          241374,
+          254809,
+          253915,
+          241256
+        ]
+      }
+    ],
+    "correctness": {
+      "actual_ordered_checksum": "8e70868ae6cff525",
+      "admission_final_reserved_bytes": 0,
+      "column_blob_digest": "522da75391b438aaf1812bd370d23a696ee6d3e9a0aa76ec90207c853d2696e9",
+      "expected_ordered_checksum": "8e70868ae6cff525",
+      "memory_copy_guard": 118,
+      "passed": true,
+      "row_count": 4096
+    },
+    "metrics": {
+      "encoded_logical_bytes": 86016,
+      "encoded_stored_bytes": 115976,
+      "fixed_decode_bytes_per_second": 14132117,
+      "full_block_prevalidation_bytes": 115976,
+      "full_block_prevalidation_p50_ns": 803450,
+      "full_block_prevalidation_p95_ns": 1203995,
+      "full_block_prevalidation_p99_ns": 1203995,
+      "memory_copy_bytes_per_second": 29232081602,
+      "row_group_count": 1
+    },
+    "rows": 4096,
+    "samples": 7,
+    "schema_version": 1
+  },
+  "eviction_pressure": {
+    "correctness": {
+      "first_ordered_sha256": "f30fc14e9b3364f9dc2b86bb32c85d7d0190d0cb9fe4687701586d80de62b1b7",
+      "last_ordered_sha256": "14067c9649e990642be425fdde746f5b5453fe5894b0377aa521f416a5c428a5",
+      "passed": true,
+      "row_count_per_request": 4
+    },
+    "eviction_observed": true,
+    "fill_latency": {
+      "p50_ns": 12213979,
+      "p95_ns": 14616401,
+      "p99_ns": 16648918,
+      "raw_samples_ns": [
+        12182241,
+        11653179,
+        12063758,
+        12616843,
+        12046143,
+        12302503,
+        11858133,
+        12503968,
+        11602448,
+        11994284,
+        11193500,
+        11027328,
+        12073444,
+        12280171,
+        12141861,
+        11107394,
+        12311054,
+        11784267,
+        12065792,
+        12511364,
+        11527292,
+        12197323,
+        10947060,
+        11741870,
+        12429522,
+        10796504,
+        12279364,
+        11894107,
+        12243553,
+        12061316,
+        11425888,
+        11470694,
+        11642383,
+        11371661,
+        12745106,
+        12331532,
+        12035981,
+        13255766,
+        12352983,
+        10965502,
+        12626115,
+        11358559,
+        12164705,
+        12176950,
+        12435465,
+        12495220,
+        12760091,
+        12688039,
+        13551983,
+        16641322,
+        13030611,
+        12668954,
+        13543873,
+        11941653,
+        13844498,
+        16793245,
+        15045796,
+        12594974,
+        13670460,
+        12531481,
+        11715337,
+        12340770,
+        11400003,
+        12136256,
+        11693021,
+        12074673,
+        11772299,
+        11730497,
+        13060007,
+        12661558,
+        12198712,
+        12229247,
+        11809763,
+        11412691,
+        13921846,
+        11825334,
+        11836225,
+        11164552,
+        12177707,
+        12744486,
+        12965424,
+        12977213,
+        13832141,
+        12873183,
+        13922948,
+        12877631,
+        11477879,
+        13626987,
+        14347700,
+        14669240,
+        14269653,
+        14694352,
+        14598788,
+        13259038,
+        12180078,
+        11546463
+      ]
+    },
+    "fill_time_to_first_row": {
+      "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+      "p50_ns": 11291662,
+      "p95_ns": 13361015,
+      "p99_ns": 14711251,
+      "raw_samples_ns": [
+        11537453,
+        11003554,
+        10951549,
+        11679281,
+        10999765,
+        11674026,
+        11239684,
+        11573862,
+        10705112,
+        11297273,
+        10526140,
+        10367638,
+        11450919,
+        11642404,
+        11508057,
+        10224676,
+        11647760,
+        11124444,
+        10768208,
+        10957896,
+        10900649,
+        11158353,
+        10250728,
+        11097266,
+        11784610,
+        10178746,
+        11628087,
+        10993991,
+        10995150,
+        11203503,
+        10724953,
+        10823791,
+        10659629,
+        10738287,
+        10824683,
+        11682491,
+        11383344,
+        11914214,
+        11462130,
+        10232520,
+        11252645,
+        10515401,
+        11266916,
+        10972159,
+        11538117,
+        11572462,
+        11205852,
+        11286051,
+        12671969,
+        16582774,
+        12409180,
+        11705518,
+        12658394,
+        11109676,
+        13129826,
+        13345380,
+        14364398,
+        11385639,
+        12137710,
+        11547637,
+        11124630,
+        11014393,
+        10756064,
+        11468737,
+        11092850,
+        10467029,
+        11143023,
+        10682548,
+        12306284,
+        11898012,
+        11598736,
+        10884058,
+        10902872,
+        10781480,
+        12271867,
+        11195094,
+        10913000,
+        10451301,
+        11471850,
+        11797006,
+        11654263,
+        12353598,
+        13140533,
+        12225060,
+        13034419,
+        12299171,
+        10305056,
+        12513977,
+        13407922,
+        14612750,
+        14208680,
+        12964031,
+        12540096,
+        11621913,
+        11279770,
+        10717309
+      ],
+      "status": "measured"
+    },
+    "key": "eviction_pressure",
+    "maximum_requests": 1152,
+    "newest_revisit": {
+      "time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 10779274,
+        "p95_ns": 10779274,
+        "p99_ns": 10779274,
+        "raw_samples_ns": [
+          10779274
+        ],
+        "status": "measured"
+      },
+      "was_hit": true
+    },
+    "oldest_revisit": {
+      "time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 10738707,
+        "p95_ns": 10738707,
+        "p99_ns": 10738707,
+        "raw_samples_ns": [
+          10738707
+        ],
+        "status": "measured"
+      },
+      "was_miss": true
+    },
+    "requests_until_observation": 96,
+    "runtime_storage_at_pressure": {
+      "child_executions": {
+        "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "dsa_hot_bytes": {
+        "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "entry_count": 64,
+      "file_bytes": {
+        "detail": "No file-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "logical_bytes": {
+        "source_field": "logical_bytes",
+        "status": "measured",
+        "value": 4096
+      },
+      "prevalidation_duration_ns": {
+        "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "stored_bytes": {
+        "source_field": "stored_bytes",
+        "status": "measured",
+        "value": 49472
+      }
+    },
+    "stats_after_fill": {
+      "completed_hits": 0,
+      "evictions": 32,
+      "fallbacks": 0,
+      "inflight_waits": 0,
+      "invalidations": 0,
+      "logical_bytes": 6144,
+      "produced": 96,
+      "reuse_hits": 0,
+      "stored_bytes": 74208
+    },
+    "stats_after_revisits": {
+      "completed_hits": 1,
+      "evictions": 34,
+      "fallbacks": 0,
+      "inflight_waits": 0,
+      "invalidations": 0,
+      "logical_bytes": 6272,
+      "produced": 98,
+      "reuse_hits": 0,
+      "stored_bytes": 75754
+    },
+    "trigger_query": {
+      "eviction_counter_advanced": true,
+      "p50_ns": 12095782,
+      "p95_ns": 12095782,
+      "p99_ns": 12095782,
+      "raw_samples_ns": [
+        12095782
+      ],
+      "time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 11482638,
+        "p95_ns": 11482638,
+        "p99_ns": 11482638,
+        "raw_samples_ns": [
+          11482638
+        ],
+        "status": "measured"
+      }
+    }
+  },
+  "fanout": [
+    {
+      "child_execution_count": {
+        "detail": "The admin API exposes successful publications, not child Begin or source execution counts; this value cannot prove that a waiter never initialized its child.",
+        "status": "inferred",
+        "value": 1
+      },
+      "clients": 2,
+      "correctness": {
+        "multiset_sha256": "a41ff08d5f580560ee8f1ddaf14c306994e71312ec5f75c5980ca9147f8c8002",
+        "passed": true,
+        "row_count": 20000
+      },
+      "key": "inflight_fanout_2",
+      "p50_ns": 96098145,
+      "p95_ns": 101913617,
+      "p99_ns": 102430548,
+      "producer_throughput": {
+        "output_bytes_per_second": {
+          "p50": 3302270,
+          "p95": 3302270,
+          "p99": 3302270,
+          "raw_samples": [
+            3302270
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 223123,
+          "p95": 223123,
+          "p99": 223123,
+          "raw_samples": [
+            223123
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "producer_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 84652303,
+        "p95_ns": 84652303,
+        "p99_ns": 84652303,
+        "raw_samples_ns": [
+          84652303
+        ],
+        "status": "measured"
+      },
+      "raw_samples_ns": [
+        89636509,
+        102559781
+      ],
+      "release_to_all_complete_ns": 73628609,
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 400000
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 882037
+        }
+      },
+      "stats": {
+        "completed_hits": 1,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 1,
+        "invalidations": 0,
+        "logical_bytes": 400000,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882037
+      },
+      "throughput": {
+        "output_bytes_per_second": {
+          "p50": 3094215,
+          "p95": 3281464,
+          "p99": 3298108,
+          "raw_samples": [
+            3302270,
+            2886160
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 209065,
+          "p95": 221717,
+          "p99": 222841,
+          "raw_samples": [
+            223123,
+            195008
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 91650680,
+        "p95_ns": 97949219,
+        "p99_ns": 98509089,
+        "raw_samples_ns": [
+          84652303,
+          98649057
+        ],
+        "status": "measured"
+      },
+      "wait_duration": {
+        "release_to_waiter_completion": {
+          "p50_ns": 61190464,
+          "p95_ns": 61190464,
+          "p99_ns": 61190464,
+          "raw_samples_ns": [
+            61190464
+          ]
+        },
+        "server_condition_variable_duration": {
+          "detail": "The runtime exposes waiter counts but no per-waiter CV timestamps.",
+          "status": "unavailable",
+          "value": null
+        },
+        "status": "partially_measured",
+        "waiters_observed_to_release_ns": 2391
+      },
+      "waiter_throughput": {
+        "output_bytes_per_second": {
+          "p50": 2886160,
+          "p95": 2886160,
+          "p99": 2886160,
+          "raw_samples": [
+            2886160
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 195008,
+          "p95": 195008,
+          "p99": 195008,
+          "raw_samples": [
+            195008
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "waiter_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 98649057,
+        "p95_ns": 98649057,
+        "p99_ns": 98649057,
+        "raw_samples_ns": [
+          98649057
+        ],
+        "status": "measured"
+      }
+    },
+    {
+      "child_execution_count": {
+        "detail": "The admin API exposes successful publications, not child Begin or source execution counts; this value cannot prove that a waiter never initialized its child.",
+        "status": "inferred",
+        "value": 1
+      },
+      "clients": 8,
+      "correctness": {
+        "multiset_sha256": "a41ff08d5f580560ee8f1ddaf14c306994e71312ec5f75c5980ca9147f8c8002",
+        "passed": true,
+        "row_count": 20000
+      },
+      "key": "inflight_fanout_8",
+      "p50_ns": 172169169,
+      "p95_ns": 209202990,
+      "p99_ns": 218452478,
+      "producer_throughput": {
+        "output_bytes_per_second": {
+          "p50": 3438639,
+          "p95": 3438639,
+          "p99": 3438639,
+          "raw_samples": [
+            3438639
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 232337,
+          "p95": 232337,
+          "p99": 232337,
+          "raw_samples": [
+            232337
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "producer_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 77184718,
+        "p95_ns": 77184718,
+        "p99_ns": 77184718,
+        "raw_samples_ns": [
+          77184718
+        ],
+        "status": "measured"
+      },
+      "raw_samples_ns": [
+        86081709,
+        176972801,
+        187730965,
+        117272065,
+        220764850,
+        167365537,
+        187157805,
+        136205281
+      ],
+      "release_to_all_complete_ns": 204863492,
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 400000
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 882037
+        }
+      },
+      "stats": {
+        "completed_hits": 7,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 7,
+        "invalidations": 0,
+        "logical_bytes": 400000,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882037
+      },
+      "throughput": {
+        "output_bytes_per_second": {
+          "p50": 1720601,
+          "p95": 3118542,
+          "p99": 3374619,
+          "raw_samples": [
+            3438639,
+            1672596,
+            1576745,
+            2524079,
+            1340811,
+            1768607,
+            1581574,
+            2173219
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 116254,
+          "p95": 210709,
+          "p99": 228011,
+          "raw_samples": [
+            232337,
+            113011,
+            106535,
+            170543,
+            90594,
+            119498,
+            106861,
+            146837
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 145594438,
+        "p95_ns": 149989082,
+        "p99_ns": 150108142,
+        "raw_samples_ns": [
+          77184718,
+          150137908,
+          149712691,
+          106015663,
+          147733810,
+          147260517,
+          143928360,
+          97183558
+        ],
+        "status": "measured"
+      },
+      "wait_duration": {
+        "release_to_waiter_completion": {
+          "p50_ns": 145491132,
+          "p95_ns": 182893750,
+          "p99_ns": 190033216,
+          "raw_samples_ns": [
+            145491132,
+            156534491,
+            87028297,
+            191818083,
+            138846660,
+            162070307,
+            114903143
+          ]
+        },
+        "server_condition_variable_duration": {
+          "detail": "The runtime exposes waiter counts but no per-waiter CV timestamps.",
+          "status": "unavailable",
+          "value": null
+        },
+        "status": "partially_measured",
+        "waiters_observed_to_release_ns": 2752
+      },
+      "waiter_throughput": {
+        "output_bytes_per_second": {
+          "p50": 1672596,
+          "p95": 2418820,
+          "p99": 2503027,
+          "raw_samples": [
+            1672596,
+            1576745,
+            2524079,
+            1340811,
+            1768607,
+            1581574,
+            2173219
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 113011,
+          "p95": 163431,
+          "p99": 169120,
+          "raw_samples": [
+            113011,
+            106535,
+            170543,
+            90594,
+            119498,
+            106861,
+            146837
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "waiter_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 147260517,
+        "p95_ns": 150010342,
+        "p99_ns": 150112394,
+        "raw_samples_ns": [
+          150137908,
+          149712691,
+          106015663,
+          147733810,
+          147260517,
+          143928360,
+          97183558
+        ],
+        "status": "measured"
+      }
+    },
+    {
+      "child_execution_count": {
+        "detail": "The admin API exposes successful publications, not child Begin or source execution counts; this value cannot prove that a waiter never initialized its child.",
+        "status": "inferred",
+        "value": 1
+      },
+      "clients": 32,
+      "correctness": {
+        "multiset_sha256": "a41ff08d5f580560ee8f1ddaf14c306994e71312ec5f75c5980ca9147f8c8002",
+        "passed": true,
+        "row_count": 20000
+      },
+      "key": "inflight_fanout_32",
+      "p50_ns": 581219252,
+      "p95_ns": 786602032,
+      "p99_ns": 817439868,
+      "producer_throughput": {
+        "output_bytes_per_second": {
+          "p50": 1356285,
+          "p95": 1356285,
+          "p99": 1356285,
+          "raw_samples": [
+            1356285
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 91639,
+          "p95": 91639,
+          "p99": 91639,
+          "raw_samples": [
+            91639
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "producer_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 176813201,
+        "p95_ns": 176813201,
+        "p99_ns": 176813201,
+        "raw_samples_ns": [
+          176813201
+        ],
+        "status": "measured"
+      },
+      "raw_samples_ns": [
+        218246127,
+        575376069,
+        675988154,
+        551559812,
+        641959011,
+        809920225,
+        472956963,
+        820818259,
+        579274443,
+        571513938,
+        632000700,
+        628641623,
+        726968904,
+        482207950,
+        613244074,
+        566405609,
+        361175412,
+        592386747,
+        454495028,
+        583164062,
+        767523511,
+        637988995,
+        576082570,
+        363678362,
+        636534962,
+        682218082,
+        521714568,
+        456647304,
+        731347765,
+        460728743,
+        208894290,
+        659758375
+      ],
+      "release_to_all_complete_ns": 773895519,
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 1,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 400000
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 882037
+        }
+      },
+      "stats": {
+        "completed_hits": 31,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 31,
+        "invalidations": 0,
+        "logical_bytes": 400000,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882037
+      },
+      "throughput": {
+        "output_bytes_per_second": {
+          "p50": 509286,
+          "p95": 1061084,
+          "p99": 1398180,
+          "raw_samples": [
+            1356285,
+            514453,
+            437883,
+            536667,
+            461094,
+            365473,
+            625858,
+            360620,
+            510990,
+            517929,
+            468360,
+            470862,
+            407175,
+            613851,
+            482685,
+            522600,
+            819557,
+            499680,
+            651281,
+            507582,
+            385661,
+            463964,
+            513822,
+            813916,
+            465023,
+            433884,
+            567367,
+            648211,
+            404737,
+            642469,
+            1417003,
+            448655
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 34410,
+          "p95": 71693,
+          "p99": 94470,
+          "raw_samples": [
+            91639,
+            34759,
+            29586,
+            36260,
+            31154,
+            24693,
+            42287,
+            24365,
+            34525,
+            34994,
+            31645,
+            31814,
+            27511,
+            41475,
+            32613,
+            35310,
+            55374,
+            33761,
+            44004,
+            34295,
+            26057,
+            31348,
+            34717,
+            54993,
+            31420,
+            29316,
+            38335,
+            43797,
+            27346,
+            43409,
+            95742,
+            30314
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 410532203,
+        "p95_ns": 467832081,
+        "p99_ns": 476182752,
+        "raw_samples_ns": [
+          176813201,
+          434076243,
+          431819592,
+          356673244,
+          450410225,
+          478571794,
+          371236489,
+          427473232,
+          470865210,
+          363392413,
+          465350431,
+          339273086,
+          410976563,
+          405533410,
+          421381054,
+          420782358,
+          285280741,
+          450004773,
+          397904380,
+          374528767,
+          443762582,
+          432180705,
+          426785181,
+          257428980,
+          403138862,
+          410087844,
+          408038376,
+          287221834,
+          427477004,
+          279011800,
+          124274509,
+          416690348
+        ],
+        "status": "measured"
+      },
+      "wait_duration": {
+        "release_to_waiter_completion": {
+          "p50_ns": 514926603,
+          "p95_ns": 695942776,
+          "p99_ns": 696116718,
+          "raw_samples_ns": [
+            446778947,
+            548362593,
+            424504559,
+            515124145,
+            683684990,
+            347475882,
+            696128508,
+            460592775,
+            453922933,
+            518395520,
+            519065164,
+            618803596,
+            380679031,
+            515597775,
+            469830854,
+            275795854,
+            514926603,
+            380039034,
+            511345592,
+            696089210,
+            569091112,
+            515544548,
+            306055170,
+            580371809,
+            635343387,
+            477149499,
+            415092046,
+            695796342,
+            427071565,
+            176995670,
+            635230566
+          ]
+        },
+        "server_condition_variable_duration": {
+          "detail": "The runtime exposes waiter counts but no per-waiter CV timestamps.",
+          "status": "unavailable",
+          "value": null
+        },
+        "status": "partially_measured",
+        "waiters_observed_to_release_ns": 2046
+      },
+      "waiter_throughput": {
+        "output_bytes_per_second": {
+          "p50": 507582,
+          "p95": 816736,
+          "p99": 1237769,
+          "raw_samples": [
+            514453,
+            437883,
+            536667,
+            461094,
+            365473,
+            625858,
+            360620,
+            510990,
+            517929,
+            468360,
+            470862,
+            407175,
+            613851,
+            482685,
+            522600,
+            819557,
+            499680,
+            651281,
+            507582,
+            385661,
+            463964,
+            513822,
+            813916,
+            465023,
+            433884,
+            567367,
+            648211,
+            404737,
+            642469,
+            1417003,
+            448655
+          ],
+          "unit": "bytes/s"
+        },
+        "rows_per_second": {
+          "p50": 34295,
+          "p95": 55183,
+          "p99": 83631,
+          "raw_samples": [
+            34759,
+            29586,
+            36260,
+            31154,
+            24693,
+            42287,
+            24365,
+            34525,
+            34994,
+            31645,
+            31814,
+            27511,
+            41475,
+            32613,
+            35310,
+            55374,
+            33761,
+            44004,
+            34295,
+            26057,
+            31348,
+            34717,
+            54993,
+            31420,
+            29316,
+            38335,
+            43797,
+            27346,
+            43409,
+            95742,
+            30314
+          ],
+          "unit": "rows/s"
+        }
+      },
+      "waiter_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 410976563,
+        "p95_ns": 468107820,
+        "p99_ns": 476259818,
+        "raw_samples_ns": [
+          434076243,
+          431819592,
+          356673244,
+          450410225,
+          478571794,
+          371236489,
+          427473232,
+          470865210,
+          363392413,
+          465350431,
+          339273086,
+          410976563,
+          405533410,
+          421381054,
+          420782358,
+          285280741,
+          450004773,
+          397904380,
+          374528767,
+          443762582,
+          432180705,
+          426785181,
+          257428980,
+          403138862,
+          410087844,
+          408038376,
+          287221834,
+          427477004,
+          279011800,
+          124274509,
+          416690348
+        ],
+        "status": "measured"
+      }
+    }
+  ],
+  "git_commit": "6adf08551c26438161d1a7846e38b69623e3aa66",
+  "invalidation": [
+    {
+      "correctness": {
+        "multiset_sha256": "19f4996e8f898a8b78fba940d75452e59012a82f587e61ee31fb9535862c0e55",
+        "ordered_sha256": "0875e0325d919549403c981f597d5deb24ebb51de3b9f2f059e3b34a3f546863",
+        "passed": true,
+        "row_count": 20001
+      },
+      "invalidation_observed": true,
+      "key": "insert_invalidation",
+      "operation_ns": 10083078,
+      "post_write_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 45069762,
+        "p95_ns": 45069762,
+        "p99_ns": 45069762,
+        "raw_samples_ns": [
+          45069762
+        ],
+        "status": "measured"
+      },
+      "producer_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 47554979,
+        "p95_ns": 47554979,
+        "p99_ns": 47554979,
+        "raw_samples_ns": [
+          47554979
+        ],
+        "status": "measured"
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 2,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 800020
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 1764118
+        }
+      },
+      "stats_after_write": {
+        "completed_hits": 0,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 1,
+        "logical_bytes": 800020,
+        "produced": 2,
+        "reuse_hits": 0,
+        "stored_bytes": 1764118
+      },
+      "stats_before_write": {
+        "completed_hits": 0,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 400000,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882037
+      }
+    },
+    {
+      "correctness": {
+        "multiset_sha256": "67d6766607090774ac79398a42fb6ce8cf23ad4f3ee9b00186b48eebd0ed5c10",
+        "ordered_sha256": "65e5e57032864d53aee133969c4b4ff10d75e2b31057f163462eedcd8cd8a318",
+        "passed": true,
+        "row_count": 20001
+      },
+      "invalidation_observed": true,
+      "key": "update_invalidation",
+      "operation_ns": 13044318,
+      "post_write_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 50742810,
+        "p95_ns": 50742810,
+        "p99_ns": 50742810,
+        "raw_samples_ns": [
+          50742810
+        ],
+        "status": "measured"
+      },
+      "producer_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 54822713,
+        "p95_ns": 54822713,
+        "p99_ns": 54822713,
+        "raw_samples_ns": [
+          54822713
+        ],
+        "status": "measured"
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 2,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 800040
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 1764162
+        }
+      },
+      "stats_after_write": {
+        "completed_hits": 0,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 1,
+        "logical_bytes": 800040,
+        "produced": 2,
+        "reuse_hits": 0,
+        "stored_bytes": 1764162
+      },
+      "stats_before_write": {
+        "completed_hits": 0,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 400020,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882081
+      }
+    },
+    {
+      "correctness": {
+        "multiset_sha256": "d66b1ecf4b0b4a1592613a076c79f52178553bf85aecc586ee0ae185f02169be",
+        "ordered_sha256": "976a03b53c0892d182c919ab67491214f5144f9a721b306781ba199b1d0163d7",
+        "passed": true,
+        "row_count": 20000
+      },
+      "invalidation_observed": true,
+      "key": "delete_invalidation",
+      "operation_ns": 10468557,
+      "post_write_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 44021465,
+        "p95_ns": 44021465,
+        "p99_ns": 44021465,
+        "raw_samples_ns": [
+          44021465
+        ],
+        "status": "measured"
+      },
+      "producer_time_to_first_row": {
+        "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+        "p50_ns": 44353098,
+        "p95_ns": 44353098,
+        "p99_ns": 44353098,
+        "raw_samples_ns": [
+          44353098
+        ],
+        "status": "measured"
+      },
+      "runtime_storage": {
+        "child_executions": {
+          "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "dsa_hot_bytes": {
+          "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "entry_count": 2,
+        "file_bytes": {
+          "detail": "No file-tier byte counter is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "logical_bytes": {
+          "source_field": "logical_bytes",
+          "status": "measured",
+          "value": 800020
+        },
+        "prevalidation_duration_ns": {
+          "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+          "status": "unavailable",
+          "value": null
+        },
+        "stored_bytes": {
+          "source_field": "stored_bytes",
+          "status": "measured",
+          "value": 1764118
+        }
+      },
+      "stats_after_write": {
+        "completed_hits": 0,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 1,
+        "logical_bytes": 800020,
+        "produced": 2,
+        "reuse_hits": 0,
+        "stored_bytes": 1764118
+      },
+      "stats_before_write": {
+        "completed_hits": 0,
+        "evictions": 0,
+        "fallbacks": 0,
+        "inflight_waits": 0,
+        "invalidations": 0,
+        "logical_bytes": 400020,
+        "produced": 1,
+        "reuse_hits": 0,
+        "stored_bytes": 882081
+      }
+    }
+  ],
+  "passed": false,
+  "preset": "unknown",
+  "private_cluster": true,
+  "schema_version": 1,
+  "storage": {
+    "filesystem_free_bytes": 308865835008,
+    "filesystem_total_bytes": 518933680128,
+    "filesystem_used_bytes": 210051067904,
+    "runtime_admin": {
+      "child_executions": {
+        "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "dsa_hot_bytes": {
+        "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "entry_count": 1,
+      "file_bytes": {
+        "detail": "No file-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "logical_bytes": {
+        "source_field": "logical_bytes",
+        "status": "measured",
+        "value": 400000
+      },
+      "prevalidation_duration_ns": {
+        "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "storage_explain": {
+        "backend": "attached",
+        "bootstrap": "ready",
+        "file_ceiling_bytes": 137438953472,
+        "hot_ceiling_bytes": 268435456,
+        "manifest_count": 1,
+        "peak_reserved_file_bytes": 0,
+        "peak_reserved_hot_bytes": 882037,
+        "reserved_file_bytes": 0,
+        "reserved_hot_bytes": 882037,
+        "status": "measured",
+        "waiter_references": 0
+      },
+      "stored_bytes": {
+        "source_field": "stored_bytes",
+        "status": "measured",
+        "value": 882037
+      }
+    }
+  },
+  "thresholds": [
+    {
+      "actual": null,
+      "detail": "Core fragment owns no-hook versus disabled-hook microplanning comparison.",
+      "limit": "<5",
+      "name": "disabled_planning_overhead_percent",
+      "passed": null,
+      "status": "not_applicable"
+    },
+    {
+      "actual": null,
+      "detail": "Core/SQL baseline comparison; only applicable to one-second scans.",
+      "limit": "<1 for source execution >=1s",
+      "name": "disabled_execution_overhead_percent",
+      "passed": null,
+      "status": "not_applicable"
+    },
+    {
+      "actual": 81.97110864071774,
+      "detail": "Same-mode first producer versus disabled reference wall time.",
+      "limit": "<10",
+      "name": "compact_result_producer_overhead_percent",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": 0.7742197957130625,
+      "detail": "Threshold is conditional on source execution duration.",
+      "limit": ">=5 when source exceeds 1s",
+      "name": "completed_hit_speedup",
+      "passed": null,
+      "status": "not_applicable"
+    },
+    {
+      "actual": {
+        "2": {
+          "detail": "The admin API exposes successful publications, not child Begin or source execution counts; this value cannot prove that a waiter never initialized its child.",
+          "status": "inferred",
+          "value": 1
+        },
+        "8": {
+          "detail": "The admin API exposes successful publications, not child Begin or source execution counts; this value cannot prove that a waiter never initialized its child.",
+          "status": "inferred",
+          "value": 1
+        },
+        "32": {
+          "detail": "The admin API exposes successful publications, not child Begin or source execution counts; this value cannot prove that a waiter never initialized its child.",
+          "status": "inferred",
+          "value": 1
+        }
+      },
+      "detail": "Successful publication counts are not treated as direct child execution measurements. The threshold becomes applicable only when the runtime exposes an executor counter.",
+      "limit": "exactly 1 for 2/8/32 clients",
+      "name": "one_child_execution_under_fanout",
+      "passed": null,
+      "status": "not_applicable"
+    },
+    {
+      "actual": true,
+      "detail": "Ordered or multiset SHA-256 and row count versus disabled execution.",
+      "limit": "no mismatch",
+      "name": "row_and_checksum_correctness",
+      "passed": true,
+      "status": "pass"
+    },
+    {
+      "actual": {
+        "empty_result": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        },
+        "highly_selective_result": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        },
+        "large_toasted_values": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        },
+        "limit_exact_result": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        },
+        "narrow_fixed_rows": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        },
+        "ordered_result": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        },
+        "wide_nullable_rows": {
+          "completed_hits": 14,
+          "explain_actions": [
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result",
+            "[Hit] exact final result"
+          ],
+          "minimum_expected_completed_hits": 14,
+          "passed": true,
+          "publications": 1
+        }
+      },
+      "detail": "Direct executions and structured EXPLAIN must both observe completed exact hits rather than silent child passthrough.",
+      "limit": "one publication and completed manifest hits for every SQL case",
+      "name": "manifest_exact_hit_behavior",
+      "passed": true,
+      "status": "pass"
+    },
+    {
+      "actual": {
+        "delete_invalidation": true,
+        "insert_invalidation": true,
+        "update_invalidation": true
+      },
+      "detail": "Each post-write result is also checksum-checked against disabled mode.",
+      "limit": "every write forces a miss/new production",
+      "name": "insert_update_delete_invalidation",
+      "passed": true,
+      "status": "pass"
+    },
+    {
+      "actual": {
+        "eviction_observed": true,
+        "requests": 96,
+        "trigger_advanced": true
+      },
+      "detail": "Unique tiny exact results are inserted in bounded batches until pressure is observed.",
+      "limit": "bounded entries and a later request advances evictions",
+      "name": "eviction_under_pressure",
+      "passed": true,
+      "status": "pass"
+    },
+    {
+      "actual": true,
+      "detail": "An unadapted generic dependency must conservatively reject a completed entry after an unrelated committed write.",
+      "limit": "post-commit execution is a miss, not a completed hit",
+      "name": "conservative_unrelated_commit_rejection",
+      "passed": true,
+      "status": "pass"
+    },
+    {
+      "actual": 64,
+      "detail": "The test API requests cleanup and the benchmark waits for bounded entry disappearance; worker-side duration is not inferred.",
+      "limit": 0,
+      "name": "ttl_cleanup_bounded",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": 308865835008,
+      "detail": "Free space at report creation; cache internal policy remains authoritative.",
+      "limit": ">=1073741824",
+      "name": "disk_free_space_floor",
+      "passed": true,
+      "status": "pass"
+    },
+    {
+      "actual": {
+        "compact": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 882037,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 882037,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "large_toasted": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 4196485,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 4196485,
+          "status": "measured",
+          "waiter_references": 0
+        }
+      },
+      "detail": "Values come from structured EXPLAIN's production storage runtime snapshot after mandatory hit prevalidation.",
+      "limit": "all reservations within ceilings; compact observes DSA and large TOAST observes file tier",
+      "name": "internal_storage_tier_metrics",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": {
+        "decode": 14132117.0,
+        "memory_copy": 29232081602.0
+      },
+      "detail": "Measured by the standalone cache core benchmark.",
+      "limit": "decode >= memory-copy reference",
+      "name": "fixed_decode_memory_copy_order_bandwidth",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": null,
+      "detail": "Provider-only threshold belongs to cache-bioseq-bench.",
+      "limit": "unaffected provider partition remains reusable",
+      "name": "provider_partition_fragment_reuse",
+      "passed": null,
+      "status": "not_applicable"
+    },
+    {
+      "actual": null,
+      "detail": "Correctness is covered by isolation/TAP; provider-scale latency belongs to the provider report.",
+      "limit": "no material producer latency change",
+      "name": "waiter_cancel_producer_latency",
+      "passed": null,
+      "status": "not_applicable"
+    }
+  ],
+  "timestamp_utc": "2026-07-14T11:28:49.471362+00:00",
+  "ttl_eviction": {
+    "entries_remaining": 64,
+    "eviction_ns": 10040421106,
+    "key": "ttl_cleanup",
+    "runtime_storage_after": {
+      "child_executions": {
+        "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "dsa_hot_bytes": {
+        "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "entry_count": 64,
+      "file_bytes": {
+        "detail": "No file-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "logical_bytes": {
+        "source_field": "logical_bytes",
+        "status": "measured",
+        "value": 803968
+      },
+      "prevalidation_duration_ns": {
+        "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "stored_bytes": {
+        "source_field": "stored_bytes",
+        "status": "measured",
+        "value": 1812000
+      }
+    },
+    "stats_after": {
+      "completed_hits": 0,
+      "evictions": 0,
+      "fallbacks": 0,
+      "inflight_waits": 0,
+      "invalidations": 0,
+      "logical_bytes": 400000,
+      "produced": 1,
+      "reuse_hits": 0,
+      "stored_bytes": 882037
+    },
+    "stats_before": {
+      "completed_hits": 0,
+      "evictions": 0,
+      "fallbacks": 0,
+      "inflight_waits": 0,
+      "invalidations": 0,
+      "logical_bytes": 400000,
+      "produced": 1,
+      "reuse_hits": 0,
+      "stored_bytes": 882037
+    }
+  },
+  "unrelated_commit": {
+    "conservative_rejection_observed": true,
+    "correctness": {
+      "multiset_sha256": "a41ff08d5f580560ee8f1ddaf14c306994e71312ec5f75c5980ca9147f8c8002",
+      "passed": true,
+      "row_count": 20000
+    },
+    "key": "conservative_unrelated_commit",
+    "post_commit_time_to_first_row": {
+      "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+      "p50_ns": 40381307,
+      "p95_ns": 40381307,
+      "p99_ns": 40381307,
+      "raw_samples_ns": [
+        40381307
+      ],
+      "status": "measured"
+    },
+    "producer_time_to_first_row": {
+      "detail": "Client-observed time to the first psql result byte; it includes planning, execution, cache prevalidation, decoding, and transport.",
+      "p50_ns": 43714921,
+      "p95_ns": 43714921,
+      "p99_ns": 43714921,
+      "raw_samples_ns": [
+        43714921
+      ],
+      "status": "measured"
+    },
+    "runtime_storage": {
+      "child_executions": {
+        "detail": "No executor child-Begin/execution count is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "dsa_hot_bytes": {
+        "detail": "No DSA/hot-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "entry_count": 64,
+      "file_bytes": {
+        "detail": "No file-tier byte counter is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "logical_bytes": {
+        "source_field": "logical_bytes",
+        "status": "measured",
+        "value": 803968
+      },
+      "prevalidation_duration_ns": {
+        "detail": "No isolated prevalidation duration is exposed by the generic admin API.",
+        "status": "unavailable",
+        "value": null
+      },
+      "stored_bytes": {
+        "source_field": "stored_bytes",
+        "status": "measured",
+        "value": 1812000
+      }
+    },
+    "stats_after_commit": {
+      "completed_hits": 0,
+      "evictions": 0,
+      "fallbacks": 0,
+      "inflight_waits": 0,
+      "invalidations": 1,
+      "logical_bytes": 800000,
+      "produced": 2,
+      "reuse_hits": 0,
+      "stored_bytes": 1764074
+    },
+    "stats_before_commit": {
+      "completed_hits": 0,
+      "evictions": 0,
+      "fallbacks": 0,
+      "inflight_waits": 0,
+      "invalidations": 0,
+      "logical_bytes": 400000,
+      "produced": 1,
+      "reuse_hits": 0,
+      "stored_bytes": 882037
+    },
+    "unrelated_commit_ns": 10509645
+  },
+  "violations": [
+    {
+      "actual": 81.97110864071774,
+      "detail": "Same-mode first producer versus disabled reference wall time.",
+      "limit": "<10",
+      "name": "compact_result_producer_overhead_percent",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": 64,
+      "detail": "The test API requests cleanup and the benchmark waits for bounded entry disappearance; worker-side duration is not inferred.",
+      "limit": 0,
+      "name": "ttl_cleanup_bounded",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": {
+        "compact": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 882037,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 882037,
+          "status": "measured",
+          "waiter_references": 0
+        },
+        "large_toasted": {
+          "backend": "attached",
+          "bootstrap": "ready",
+          "file_ceiling_bytes": 137438953472,
+          "hot_ceiling_bytes": 268435456,
+          "manifest_count": 1,
+          "peak_reserved_file_bytes": 0,
+          "peak_reserved_hot_bytes": 4196485,
+          "reserved_file_bytes": 0,
+          "reserved_hot_bytes": 4196485,
+          "status": "measured",
+          "waiter_references": 0
+        }
+      },
+      "detail": "Values come from structured EXPLAIN's production storage runtime snapshot after mandatory hit prevalidation.",
+      "limit": "all reservations within ceilings; compact observes DSA and large TOAST observes file tier",
+      "name": "internal_storage_tier_metrics",
+      "passed": false,
+      "status": "fail"
+    },
+    {
+      "actual": {
+        "decode": 14132117.0,
+        "memory_copy": 29232081602.0
+      },
+      "detail": "Measured by the standalone cache core benchmark.",
+      "limit": "decode >= memory-copy reference",
+      "name": "fixed_decode_memory_copy_order_bandwidth",
+      "passed": false,
+      "status": "fail"
+    }
+  ]
+}

@@ -1,0 +1,216 @@
+{
+  "params": {
+    "bioseq_block_gpu_dp_gpu_seed_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Focused restart-cold Format-5/ABI3 GPU just_index coordinate-only scheduler proof"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_sequence",
+        "enum": [
+          "minimizers_per_sequence"
+        ]
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": [
+          "task_parallel"
+        ]
+      }
+    }
+  },
+  "test_cases": {
+    "E2E_FORMAT5_GPU_JUST_INDEX_COORD_SMOKE": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "format5_gpu_just_index_coord_smoke",
+        "reference_length": 500000,
+        "fragment_count": 4,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 100,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "minimap2_split_bp": 500000,
+        "cigar_projection": false,
+        "just_index_setup_only": "minimizers_per_sequence",
+        "skip_minimap2_baseline_setup": true,
+        "seed": 3715004
+      },
+      "description": "Four coordinate-only queries against one restart-cold 500 kbp PostgreSQL target with an untimed Format-5/ABI3 generation"
+    }
+  },
+  "bench_e2e": {
+    "tags": [
+      "e2e",
+      "gpu",
+      "format5",
+      "just-index",
+      "coordinate-only",
+      "smoke"
+    ],
+    "description": "Small production proof for direct authenticated PostgreSQL Format-5 GPU loading and multi-query coordinate execution",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "matrix": {
+      "for": {
+        "E2E_FORMAT5_GPU_JUST_INDEX_COORD_SMOKE": 1
+      },
+      "over": {
+        "bioseq_block_gpu_dp_gpu_seed_just_index": {
+          "minimizer_index": [
+            "minimizers_per_sequence"
+          ],
+          "pipeline_mode": [
+            "task_parallel"
+          ]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "match_count": {
+          "type": "evaluation"
+        },
+        "found_fraction": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "pipeline_proof_present": {
+          "type": "evaluation"
+        },
+        "pipeline_proof_accepted": {
+          "type": "evaluation"
+        },
+        "requested_backend_vulkan_gpu": {
+          "type": "evaluation"
+        },
+        "actual_backend_vulkan_gpu": {
+          "type": "evaluation"
+        },
+        "actual_backend_mixed_invalid": {
+          "type": "evaluation"
+        },
+        "attempted_alignment_jobs": {
+          "type": "evaluation"
+        },
+        "persisted_index_rows": {
+          "type": "evaluation"
+        },
+        "gpu_seed_dispatches": {
+          "type": "evaluation"
+        },
+        "gpu_chain_dispatches": {
+          "type": "evaluation"
+        },
+        "gpu_chain_backtrack_dispatches": {
+          "type": "evaluation"
+        },
+        "gpu_extend_dispatches": {
+          "type": "evaluation"
+        },
+        "backend_declines": {
+          "type": "evaluation"
+        },
+        "backend_fallbacks": {
+          "type": "evaluation"
+        },
+        "host_query_hash_readbacks": {
+          "type": "evaluation"
+        },
+        "host_target_symbol_packing_calls": {
+          "type": "evaluation"
+        },
+        "cold_index_payload_bytes_delivered": {
+          "type": "evaluation"
+        },
+        "format5_reader_capacity_accounting_passes": {
+          "type": "evaluation"
+        },
+        "format5_reader_global_position_storage_preparations": {
+          "type": "evaluation"
+        },
+        "format5_reader_global_position_storage_allocations": {
+          "type": "evaluation"
+        },
+        "format5_reader_position_append_growth_reservations": {
+          "type": "evaluation"
+        },
+        "format5_reader_retained_position_count": {
+          "type": "evaluation"
+        },
+        "format5_reader_retained_position_capacity": {
+          "type": "evaluation"
+        },
+        "format5_reader_directory_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_query_hash_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_query_record_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_ordinal_route_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_selected_extent_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_current_selected_control_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_global_position_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_control_payload_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_owned_capacity_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_admitted_bytes": {
+          "type": "evaluation"
+        },
+        "format5_reader_exact_position_image_checks": {
+          "type": "evaluation"
+        },
+        "format5_reader_exact_position_image_failures": {
+          "type": "evaluation"
+        },
+        "format5_reader_retained_layout_checks": {
+          "type": "evaluation"
+        },
+        "format5_reader_retained_layout_failures": {
+          "type": "evaluation"
+        },
+        "format5_reader_memory_evidence_saturated": {
+          "type": "evaluation"
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "rules": []
+        }
+      }
+    }
+  },
+  "regression_rules": []
+}

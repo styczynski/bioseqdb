@@ -1,0 +1,275 @@
+Parsed test spec with 1 sessions
+
+starting permutation: validity_init validity_relation validity_mode validity_generic validity_prepare_source validity_freeze_source validity_source validity_source_state validity_reset_counters validity_prepare validity_freeze validity_digest_fault validity_digest_execute validity_digest_stats validity_digest_references validity_digest_clear validity_deallocate
+reset_stats
+-----------
+           
+(1 row)
+
+step validity_init: SELECT bioseq_cache_test.provider_init();
+provider_init
+-------------
+             
+(1 row)
+
+step validity_relation: SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_validity');
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step validity_mode: SET bioseq.query_cache_optimisation_mode = 'reuse';
+step validity_generic: SET plan_cache_mode = force_generic_plan;
+step validity_prepare_source: 
+  PREPARE cache_provider_validity_source AS
+  SELECT row_id
+  FROM cache_provider_iso_validity
+  WHERE nullable_value <= 10
+  ORDER BY row_id;
+
+step validity_freeze_source: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_validity_source', 1, 0);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step validity_source: 
+  EXECUTE cache_provider_validity_source;
+
+row_id
+------
+     2
+     3
+     4
+     5
+(4 rows)
+
+step validity_source_state: 
+  SELECT count(*) = 1 AS one_complete_source
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ReusableCoverage' AND state = 'COMPLETE';
+
+one_complete_source
+-------------------
+t                  
+(1 row)
+
+step validity_reset_counters: 
+  SELECT bioseq_cache_test.provider_reset();
+  SELECT bioseq_cache.reset_stats();
+
+provider_reset
+--------------
+              
+(1 row)
+
+reset_stats
+-----------
+           
+(1 row)
+
+step validity_prepare: 
+  PREPARE cache_provider_validity AS
+  SELECT row_id
+  FROM cache_provider_iso_validity
+  WHERE nullable_value >= 5
+  ORDER BY row_id;
+
+step validity_freeze: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_validity', 1, 1);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step validity_digest_fault: SELECT bioseq_cache_test.provider_set_digest_fault('runtime_mismatch');
+provider_set_digest_fault
+-------------------------
+                         
+(1 row)
+
+step validity_digest_execute: EXECUTE cache_provider_validity;
+row_id
+------
+     3
+     4
+     5
+     6
+(4 rows)
+
+step validity_digest_stats: 
+  SELECT
+    (stats->>'executor_rows')::bigint = 4 AS retained_child_once,
+    (stats->>'late_fetch_batch')::bigint = 0 AS no_cached_branch,
+    (stats->>'late_fetch_references')::bigint = 0 AS no_cached_references,
+    cache_stats.fallbacks = 1 AS one_fail_open_fallback
+  FROM (SELECT bioseq_cache_test.provider_stats() AS stats) AS provider
+  CROSS JOIN bioseq_cache.stats() AS cache_stats;
+
+retained_child_once|no_cached_branch|no_cached_references|one_fail_open_fallback
+-------------------+----------------+--------------------+----------------------
+t                  |t               |t                   |t                     
+(1 row)
+
+step validity_digest_references: 
+  SELECT coalesce(sum(waiters), 0) = 0 AS no_waiters,
+         coalesce(sum(readers), 0) = 0 AS no_readers,
+         coalesce(sum((dependencies->>'planner_pins')::bigint), 0) = 0
+           AS no_planner_pins
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ReusableCoverage';
+
+no_waiters|no_readers|no_planner_pins
+----------+----------+---------------
+t         |t         |t              
+(1 row)
+
+step validity_digest_clear: SELECT bioseq_cache_test.provider_set_digest_fault('none');
+provider_set_digest_fault
+-------------------------
+                         
+(1 row)
+
+step validity_deallocate: 
+  DEALLOCATE cache_provider_validity_source;
+  DEALLOCATE cache_provider_validity;
+
+
+starting permutation: validity_init validity_relation validity_mode validity_generic validity_prepare_source validity_freeze_source validity_source validity_source_state validity_reset_counters validity_prepare validity_freeze validity_shutdown validity_unregistered_execute validity_unregistered_stats validity_unregistered_references validity_deallocate
+reset_stats
+-----------
+           
+(1 row)
+
+step validity_init: SELECT bioseq_cache_test.provider_init();
+provider_init
+-------------
+             
+(1 row)
+
+step validity_relation: SELECT bioseq_cache_test.provider_use_relation('cache_provider_iso_validity');
+provider_use_relation
+---------------------
+                     
+(1 row)
+
+step validity_mode: SET bioseq.query_cache_optimisation_mode = 'reuse';
+step validity_generic: SET plan_cache_mode = force_generic_plan;
+step validity_prepare_source: 
+  PREPARE cache_provider_validity_source AS
+  SELECT row_id
+  FROM cache_provider_iso_validity
+  WHERE nullable_value <= 10
+  ORDER BY row_id;
+
+step validity_freeze_source: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_validity_source', 1, 0);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step validity_source: 
+  EXECUTE cache_provider_validity_source;
+
+row_id
+------
+     2
+     3
+     4
+     5
+(4 rows)
+
+step validity_source_state: 
+  SELECT count(*) = 1 AS one_complete_source
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ReusableCoverage' AND state = 'COMPLETE';
+
+one_complete_source
+-------------------
+t                  
+(1 row)
+
+step validity_reset_counters: 
+  SELECT bioseq_cache_test.provider_reset();
+  SELECT bioseq_cache.reset_stats();
+
+provider_reset
+--------------
+              
+(1 row)
+
+reset_stats
+-----------
+           
+(1 row)
+
+step validity_prepare: 
+  PREPARE cache_provider_validity AS
+  SELECT row_id
+  FROM cache_provider_iso_validity
+  WHERE nullable_value >= 5
+  ORDER BY row_id;
+
+step validity_freeze: 
+  SELECT bioseq_cache_test.assert_prepared_reusable_plan(
+    'cache_provider_validity', 1, 1);
+
+assert_prepared_reusable_plan
+-----------------------------
+                             
+(1 row)
+
+step validity_shutdown: SELECT bioseq_cache_test.provider_shutdown();
+provider_shutdown
+-----------------
+                 
+(1 row)
+
+step validity_unregistered_execute: EXECUTE cache_provider_validity;
+row_id
+------
+     3
+     4
+     5
+     6
+(4 rows)
+
+step validity_unregistered_stats: 
+  SELECT
+    (stats->>'executor_rows')::bigint = 4 AS retained_child_once,
+    (stats->>'late_fetch_batch')::bigint = 0 AS no_cached_branch,
+    (stats->>'late_fetch_references')::bigint = 0 AS no_cached_references,
+    cache_stats.fallbacks = 1 AS one_fail_open_fallback
+  FROM (SELECT bioseq_cache_test.provider_stats() AS stats) AS provider
+  CROSS JOIN bioseq_cache.stats() AS cache_stats;
+
+retained_child_once|no_cached_branch|no_cached_references|one_fail_open_fallback
+-------------------+----------------+--------------------+----------------------
+t                  |t               |t                   |t                     
+(1 row)
+
+step validity_unregistered_references: 
+  SELECT coalesce(sum(waiters), 0) = 0 AS no_waiters,
+         coalesce(sum(readers), 0) = 0 AS no_readers,
+         coalesce(sum((dependencies->>'planner_pins')::bigint), 0) = 0
+           AS no_planner_pins
+  FROM bioseq_cache.entries()
+  WHERE kind = 'ReusableCoverage';
+
+no_waiters|no_readers|no_planner_pins
+----------+----------+---------------
+t         |t         |t              
+(1 row)
+
+step validity_deallocate: 
+  DEALLOCATE cache_provider_validity_source;
+  DEALLOCATE cache_provider_validity;
+

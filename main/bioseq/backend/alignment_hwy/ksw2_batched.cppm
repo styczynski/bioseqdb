@@ -242,12 +242,21 @@ template <bool Reverse,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
     const ScoringMatrix<QR>&           scoring_matrix,
     const Minimap2Params&              params,
-    std::int32_t                       align_bandwidth)
+    std::int32_t                       align_bandwidth,
+    Ksw2BatchedExecutionProof*         execution_proof,
+    bool                               long_fill)
 {
     if (fill.query_len <= 0 || fill.target_len <= 0) {
         fill.fill_score = 0;
         fill.zdropped = false;
         return;
+    }
+
+    if (execution_proof != nullptr) {
+        execution_proof->record_nonempty_fill(
+            static_cast<std::uint64_t>(fill.query_len),
+            static_cast<std::uint64_t>(fill.target_len),
+            long_fill);
     }
 
     KswFlags flags;
@@ -343,7 +352,8 @@ void ksw2_extz2_batched_inner(
     const Minimap2Params&              params,
     std::int32_t                       bucket_max_q,
     std::int32_t                       bucket_max_t,
-    std::int32_t                       bucket_max_bw)
+    std::int32_t                       bucket_max_bw,
+    Ksw2BatchedExecutionProof*         execution_proof)
 {
     (void)bucket_max_q;
     (void)bucket_max_t;
@@ -353,7 +363,8 @@ void ksw2_extz2_batched_inner(
     for (std::size_t l = 0; l < n_fills && l < Lanes; ++l) {
         detail_ksw2_batched::run_single_fill<Reverse>(
             fills[l], query_seq, target_seq,
-            scoring_matrix, params, align_bandwidth);
+            scoring_matrix, params, align_bandwidth,
+            execution_proof, /*long_fill=*/false);
     }
 }
 
@@ -369,7 +380,8 @@ void execute_buckets(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
     const ScoringMatrix<QR>&           scoring_matrix,
-    const Minimap2Params&              params)
+    const Minimap2Params&              params,
+    Ksw2BatchedExecutionProof*         execution_proof)
 {
     using D = hn::ScalableTag<std::int16_t>;
     constexpr std::size_t Lanes = hn::MaxLanes(D{});
@@ -386,11 +398,13 @@ void execute_buckets(
                 if (reverse) {
                     detail_ksw2_batched::run_single_fill<true>(
                         fill, query_seq, target_seq,
-                        scoring_matrix, params, align_bandwidth);
+                        scoring_matrix, params, align_bandwidth,
+                        execution_proof, /*long_fill=*/true);
                 } else {
                     detail_ksw2_batched::run_single_fill<false>(
                         fill, query_seq, target_seq,
-                        scoring_matrix, params, align_bandwidth);
+                        scoring_matrix, params, align_bandwidth,
+                        execution_proof, /*long_fill=*/true);
                 }
             }
             continue;
@@ -398,16 +412,22 @@ void execute_buckets(
         for (std::size_t i = 0; i < bucket_fills.size(); i += Lanes) {
             const std::size_t lane_count = std::min(Lanes,
                 bucket_fills.size() - i);
+            if (execution_proof != nullptr) {
+                execution_proof->record_short_bucket_dispatch(
+                    static_cast<std::uint64_t>(lane_count));
+            }
             if (reverse) {
                 ksw2_extz2_batched_inner<Lanes, true, QR, TR>(
                     bucket_fills.data() + i, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
-                    bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max);
+                    bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
+                    execution_proof);
             } else {
                 ksw2_extz2_batched_inner<Lanes, false, QR, TR>(
                     bucket_fills.data() + i, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
-                    bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max);
+                    bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
+                    execution_proof);
             }
         }
     }
@@ -504,8 +524,14 @@ void align_regions_batched(
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>&            query_seq,
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>&            target_seq,
     const ScoringMatrix<QR>&                     scoring_matrix,
-    const Minimap2Params&                        params)
+    const Minimap2Params&                        params,
+    Ksw2BatchedExecutionProof* execution_proof = nullptr)
 {
+    if (execution_proof != nullptr) {
+        *execution_proof = {};
+        execution_proof->record_invocation(
+            static_cast<std::uint64_t>(regions.size()));
+    }
     auto& ctx = ::context::current();
     auto chain_scope = ctx.push<::context::Arena::Chain>();
 
@@ -665,9 +691,13 @@ void align_regions_batched(
     }
 
     // Phases B / C / D — bucketing, execution, stitch.
+    if (execution_proof != nullptr) {
+        execution_proof->record_collected_fills(
+            static_cast<std::uint64_t>(fills.size()));
+    }
     auto buckets = bucket_fills_by_geometry(fills, params);
     execute_buckets<QR, TR>(buckets, query_seq, target_seq,
-                            scoring_matrix, params);
+                            scoring_matrix, params, execution_proof);
     stitch_cigars_into_regions(regions, fills);
 
     // Update per-region coordinates and length fields — mirrors the

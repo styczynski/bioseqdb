@@ -25,10 +25,12 @@ columnar
 compile-errors
 design-prompt
 doc0294
+documentation
 engineering-overview
 gpu
 gzip-io
 highway-simd
+http-client
 implementation
 io-reader
 json-schema
@@ -57,9 +59,12 @@ plotly
 postgres
 postgres-query
 postgres-ux
+prefilter
 profiling
 refactor
 seal
+sequence-database
+sequence-slices
 setup
 sidecar
 simd-sort
@@ -71,4 +76,5 @@ template-pipeline
 testing
 tests
 todo
+tooling
 viewer

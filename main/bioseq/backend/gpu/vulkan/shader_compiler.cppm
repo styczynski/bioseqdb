@@ -78,6 +78,35 @@ enum class ShaderKind : std::uint8_t {
     seq_sort_prefix_check_generic,
     align_extend_banded_affine,
     align_extend_simple_cigar,
+    // Appended to preserve every established ShaderKind cache ordinal.
+    // DOC0371: consume resident query-minimizer words plus the authoritative
+    // encoded revision-3 directory and return only selected directory ordinals.
+    phase_c_persisted_directory_select,
+    // Inactive format-4 ABI2 kernels. Appended so every established shader
+    // cache ordinal remains stable; no production runtime route selects these.
+    phase_c_grouped32_validate,
+    phase_c_grouped32_accumulate_occurrences,
+    phase_c_grouped32_finalize_max_occ,
+    phase_c_grouped32_allocate_anchor_prefix,
+    phase_c_grouped32_emit_global_anchors,
+    phase_c_grouped32_build_sort_segments,
+    phase_c_grouped32_adapt_query_sketch,
+    phase_c_grouped32_prepare_indirect,
+    phase_c_grouped32_clear_state,
+    phase_c_grouped32_finalize_query_adapter,
+    phase_c_grouped32_finalize_validation,
+    // DOC0371 bounded persisted format-4 target stream.  These are distinct
+    // from the older aggregate-residency ABI2 prototypes above: controls and
+    // positions are consumed in separate bounded-slot phases.
+    phase_c_grouped32_stream_control,
+    phase_c_grouped32_stream_authorize,
+    phase_c_grouped32_stream_position,
+    phase_c_grouped32_stream_seal,
+    // Direct persisted Format-5/ABI3 seed lookup.  These kernels consume the
+    // variable-width SoA control and segment-local position byte streams; no
+    // host-side control decode or target-index rebuild is part of this path.
+    phase_c_shape_v5_seed_count,
+    phase_c_shape_v5_seed_emit,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -99,6 +128,21 @@ enum class DescriptorLayoutKind : std::uint8_t {
     seq_sort,   // DOC0346 — { SeqWords, Descs, KeysOrIndex, ValsOrRanges }
     align_extension,  // { QuerySymbols, TargetSymbols, Jobs, Results }
     align_extension_cigar,  // { QuerySymbols, TargetSymbols, Jobs, Results, Cigar, Traceback }
+    phase_c_persisted_directory_select,
+    // Thirteen-buffer common ABI2 layout. Keeping one explicit layout makes the
+    // inactive kernels cache-compatible without creating a live runtime path.
+    phase_c_grouped32_abi2,
+    // Existing packed sketch output -> grouped32 query-record adapter. The
+    // preparation pass uses the core layout so it can length-check partitions
+    // and query records before generating an indirect validation command.
+    phase_c_grouped32_adapter_abi2,
+    // Nine-buffer raw format-4 streaming layout.  It deliberately has no
+    // aggregate control+position resident-set binding.
+    phase_c_grouped32_stream,
+    // Nine-buffer direct Format-5 seed layout: query minimizer words,
+    // resident partition descriptors, raw control words, raw position words,
+    // query records, counts, prefix, anchors, and anchor keys.
+    phase_c_shape_v5_seed,
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -107,12 +151,13 @@ enum class DescriptorLayoutKind : std::uint8_t {
 {
     switch (kind) {
         case DescriptorLayoutKind::chain_tiled_dp:        return 4;
-        case DescriptorLayoutKind::seed_lookup:           return 5;
+        case DescriptorLayoutKind::seed_lookup:           return 6;
         case DescriptorLayoutKind::anchor_sort:           return 2;
         // DOC0310 Phase C layouts.
         case DescriptorLayoutKind::phase_c_sketch:        return 9;
         case DescriptorLayoutKind::phase_c_scan:          return 3;
         case DescriptorLayoutKind::phase_c_seed:          return 8;
+        case DescriptorLayoutKind::phase_c_persisted_directory_select: return 4;
         case DescriptorLayoutKind::phase_c_sort:          return 5;
         case DescriptorLayoutKind::phase_c_index:         return 7;
         case DescriptorLayoutKind::phase_c_chain_range:   return 6;
@@ -121,6 +166,10 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::seq_sort:               return 4;
         case DescriptorLayoutKind::align_extension:        return 4;
         case DescriptorLayoutKind::align_extension_cigar:  return 6;
+        case DescriptorLayoutKind::phase_c_grouped32_abi2: return 13;
+        case DescriptorLayoutKind::phase_c_grouped32_adapter_abi2: return 9;
+        case DescriptorLayoutKind::phase_c_grouped32_stream: return 9;
+        case DescriptorLayoutKind::phase_c_shape_v5_seed: return 9;
     }
     return 0;
 }
@@ -141,6 +190,29 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_prefix_scan_add:     return DescriptorLayoutKind::phase_c_scan;
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:           return DescriptorLayoutKind::phase_c_seed;
+        case ShaderKind::phase_c_persisted_directory_select:
+            return DescriptorLayoutKind::phase_c_persisted_directory_select;
+        case ShaderKind::phase_c_grouped32_validate:
+        case ShaderKind::phase_c_grouped32_accumulate_occurrences:
+        case ShaderKind::phase_c_grouped32_finalize_max_occ:
+        case ShaderKind::phase_c_grouped32_allocate_anchor_prefix:
+        case ShaderKind::phase_c_grouped32_emit_global_anchors:
+        case ShaderKind::phase_c_grouped32_build_sort_segments:
+        case ShaderKind::phase_c_grouped32_prepare_indirect:
+        case ShaderKind::phase_c_grouped32_clear_state:
+        case ShaderKind::phase_c_grouped32_finalize_validation:
+            return DescriptorLayoutKind::phase_c_grouped32_abi2;
+        case ShaderKind::phase_c_grouped32_adapt_query_sketch:
+        case ShaderKind::phase_c_grouped32_finalize_query_adapter:
+            return DescriptorLayoutKind::phase_c_grouped32_adapter_abi2;
+        case ShaderKind::phase_c_grouped32_stream_control:
+        case ShaderKind::phase_c_grouped32_stream_authorize:
+        case ShaderKind::phase_c_grouped32_stream_position:
+        case ShaderKind::phase_c_grouped32_stream_seal:
+            return DescriptorLayoutKind::phase_c_grouped32_stream;
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            return DescriptorLayoutKind::phase_c_shape_v5_seed;
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return DescriptorLayoutKind::phase_c_sort;
@@ -176,7 +248,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
 [[nodiscard]] constexpr std::uint32_t push_constant_size(ShaderKind kind) noexcept {
     switch (kind) {
         case ShaderKind::chain_tiled_dp_u64:    return 36;  // ChainingPushConstants
-        case ShaderKind::seed_lookup_anchors:   return 36;  //  9 × uint32
+        case ShaderKind::seed_lookup_anchors:   return 44;  // 11 x uint32
         case ShaderKind::sort_anchors_bitonic:  return 0;
         // DOC0310 Phase C — per-family push blocks (see runtime.cppm structs).
         case ShaderKind::phase_c_sketch_tile:
@@ -187,6 +259,30 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_prefix_scan_add:     return 16;  // ScanPushC (4 × u32)
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:           return 52;  // SeedPushC (13 × u32)
+        case ShaderKind::phase_c_persisted_directory_select:
+            return 32;  // GpuPersistedDirectorySelectionPush
+        case ShaderKind::phase_c_grouped32_validate:
+        case ShaderKind::phase_c_grouped32_accumulate_occurrences:
+        case ShaderKind::phase_c_grouped32_finalize_max_occ:
+        case ShaderKind::phase_c_grouped32_allocate_anchor_prefix:
+        case ShaderKind::phase_c_grouped32_emit_global_anchors:
+        case ShaderKind::phase_c_grouped32_build_sort_segments:
+        case ShaderKind::phase_c_grouped32_clear_state:
+        case ShaderKind::phase_c_grouped32_finalize_validation:
+            return 72;  // GpuGrouped32Abi2Push
+        case ShaderKind::phase_c_grouped32_adapt_query_sketch:
+        case ShaderKind::phase_c_grouped32_finalize_query_adapter:
+            return 64;  // GpuGrouped32SketchAdapterPush
+        case ShaderKind::phase_c_grouped32_prepare_indirect:
+            return 48;  // GpuGrouped32IndirectPreparePush
+        case ShaderKind::phase_c_grouped32_stream_control:
+        case ShaderKind::phase_c_grouped32_stream_authorize:
+        case ShaderKind::phase_c_grouped32_stream_position:
+        case ShaderKind::phase_c_grouped32_stream_seal:
+            return 80;  // GpuGrouped32StreamPush
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            return 72;  // GpuShapeV5SeedPush
         case ShaderKind::phase_c_sort_radix_histogram:
         case ShaderKind::phase_c_sort_radix_scan:
         case ShaderKind::phase_c_sort_radix_scatter:  return 20;  // SortPushC (5 × u32)
@@ -218,9 +314,11 @@ enum class DescriptorLayoutKind : std::uint8_t {
 }
 
 /// One shader-compilation request. `tile_size`, `local_size`, and `max_span`
-/// are substituted as compile-time `#define`s before glslang runs; only those
-/// three affect the emitted SPIR-V (shared-array lengths). The remaining fields
-/// describe the runtime push-constant routing and are carried for the pipeline
+/// are substituted as compile-time `#define`s before glslang runs. A shader may
+/// intentionally bake a fixed workgroup geometry instead of consuming
+/// `LOCAL_SIZE_X`; `expected_shader_workgroup_size()` is the authoritative
+/// compile/cache/runtime ABI for that distinction. The remaining fields
+/// describe runtime push-constant routing and are carried for the pipeline
 /// cache key (DOC0307 §4.5, §12).
 struct ShaderCompileRequest {
     ShaderKind kind;
@@ -232,6 +330,36 @@ struct ShaderCompileRequest {
     std::uint32_t unit_bits = 0;
     std::uint32_t bits_per_char = 0;
 };
+
+struct ShaderWorkgroupSize {
+    std::uint32_t x = 1;
+    std::uint32_t y = 1;
+    std::uint32_t z = 1;
+
+    [[nodiscard]] bool operator==(const ShaderWorkgroupSize&) const = default;
+};
+
+/// Compile-time execution geometry encoded in SPIR-V. Most kernels consume the
+/// request's LOCAL_SIZE_X macro. The radix kernels deliberately keep their
+/// established cache-key sentinel (`local_size == 1`) while their algorithm
+/// requires one lane per radix bin. Keep this mapping explicit: treating a key
+/// selector as reflected execution metadata rejects valid AOT artifacts and
+/// makes archive publication/completeness disagree.
+[[nodiscard]] inline constexpr ShaderWorkgroupSize expected_shader_workgroup_size(
+    const ShaderCompileRequest& request) noexcept
+{
+    switch (request.kind) {
+        case ShaderKind::phase_c_sort_radix_histogram:
+        case ShaderKind::phase_c_sort_radix_scan:
+        case ShaderKind::phase_c_sort_radix_scatter:
+            return ShaderWorkgroupSize{256u, 1u, 1u};
+        case ShaderKind::phase_c_chain_range_build:
+        case ShaderKind::align_extend_banded_affine:
+            return ShaderWorkgroupSize{1u, 1u, 1u};
+        default:
+            return ShaderWorkgroupSize{request.local_size, 1u, 1u};
+    }
+}
 
 /// Thrown by `compile_shader_spirv` on a rejected request or a glslang
 /// parse/link failure. The Vulkan runtime catches this and re-wraps it as a
@@ -477,6 +605,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Slots { GpuMinimizerSlot sl
 layout(std430, set = 0, binding = 2) readonly buffer Positions { uint64_t positions[]; };
 layout(std430, set = 0, binding = 3) readonly buffer PrefixCounts { uint prefix_counts[]; };
 layout(std430, set = 0, binding = 4) buffer Anchors { AnchorWire anchors[]; };
+layout(std430, set = 0, binding = 5) buffer AnchorKeys { uint64_t anchor_keys[]; };
 
 layout(push_constant) uniform Params {
     uint minimizer_count;
@@ -487,8 +616,14 @@ layout(push_constant) uniform Params {
     uint query_len;
     uint kmer_size;
     uint slot_mask;
+    uint bucket_count;
     uint exact_anchor_count;
+    uint target_ref_bits;
 } pc;
+
+uint64_t anchor_sort_key(uint rev, uint64_t ref_position) {
+    return (uint64_t(rev) << pc.target_ref_bits) | ref_position;
+}
 
 uint64_t read_min_hash(uint i) {
     if (pc.word_kind == 0u) {
@@ -543,6 +678,16 @@ uint64_t splitmix64(uint64_t x) {
 }
 
 uint find_slot(uint64_t hash) {
+    if (pc.bucket_count != 0u) {
+        uint lo = 0u;
+        uint hi = pc.bucket_count;
+        while (lo < hi) {
+            uint mid = lo + ((hi - lo) >> 1u);
+            if (slots[mid].hash < hash) lo = mid + 1u; else hi = mid;
+        }
+        if (lo < pc.bucket_count && slots[lo].hash == hash) return lo;
+        return 0xffffffffu;
+    }
     uint p = uint(splitmix64(hash)) & pc.slot_mask;
     for (uint step = 0u; step <= pc.slot_mask; ++step) {
         GpuMinimizerSlot s = slots[p];
@@ -583,14 +728,14 @@ void main() {
         anchors[dst].query_position = query_position;
         anchors[dst].is_reverse = rev;
         anchors[dst].span_flags_segment = span_flags_segment;
+        anchor_keys[dst] = anchor_sort_key(rev, target >> 1);
     }
 }
 )GLSL";
 
 /// DOC0307 §7.2 — per-query bitonic anchor sort. One workgroup sorts up to
 /// LOCAL_SIZE_X anchors by `ref_bits()` in shared memory. Larger anchor sets
-/// (range length > LOCAL_SIZE_X) are left untouched and the runtime CPU-sorts
-/// the downloaded anchors instead.
+/// are routed to the stable device radix path; host sorting is forbidden.
 constexpr std::string_view kSortAnchorsBitonicBody = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
@@ -802,16 +947,29 @@ bool query_gate_accepts(uint64_t hash) {
     if (pc.query_gate_word_count == 0u) return true;
     uint bit = uint(hash & uint64_t(pc.query_gate_mask));
     uint word = bit >> 5u;
-    if (word >= pc.query_gate_word_count) return true;
+    // A malformed non-empty gate must never broaden the accepted target set.
+    if (word >= pc.query_gate_word_count) return false;
     return (query_gate_words[word] & (1u << (bit & 31u))) != 0u;
 }
 
 		const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
+	const uint TARGET_EMIT_COMPLETE = 0x80000000u;
+	const uint TARGET_EMIT_STATUS_CAPACITY = 1u;
+	const uint TARGET_EMIT_STATUS_PARITY = 2u;
 	uint g_seq_word_offset;
 	uint g_local_count;
 	uint g_out_base;
 	uint g_owned_lo;
 	uint g_owned_hi;
+	uint g_expected_count;
+	bool g_target_emit_failed;
+
+void fail_target_emit(uint status) {
+    // Failure-only telemetry. The successful deterministic target route has no
+    // append/status atomics at all.
+    atomicOr(counters[2], status);
+    g_target_emit_failed = true;
+}
 
 void write_minimizer(uint dst, Sketch s) {
     // dst is tile-local; the global minimizer index is g_out_base + dst.
@@ -862,15 +1020,9 @@ void emit_one(TileC t, Sketch s, uint emit_pos) {
     if (!query_gate_accepts(s.hash)) return;
     uint dst = g_local_count;
     g_local_count = g_local_count + 1u;
-    // emit_mode 3 is a query-gated count-only pass. emit_mode 2 (DOC0311
-    // single-pass) atomically reserves output slots; the pairs are radix-sorted
-    // by hash afterwards, so the arbitrary emission order is irrelevant.
-    // counters[0] is the running total (= tm); counters[1] is the output
-    // capacity guard so an under-estimate cannot write out of bounds.
-    if (pc.emit_mode == 3u) {
-        atomicAdd(counters[0], 1u);
-        return;
-    }
+    // emit_mode 2 is retained for the independent sorted-pair API. Target-index
+    // construction uses mode 0 tile counts + prefix scan followed by mode 1;
+    // it never enters this global append-atomic branch.
     if (pc.emit_mode == 2u) {
         uint gmin = atomicAdd(counters[0], 1u);
         if (gmin >= counters[1]) return;
@@ -881,9 +1033,19 @@ void emit_one(TileC t, Sketch s, uint emit_pos) {
     }
     if (pc.emit_mode == 1u) {
         if (pc.emit_pairs == 1u) {
-            // Target index path: write (hash, pos_strand) parallel arrays for the
-            // device radix sort. `out_words` is reinterpreted as uint64 hashes.
-            uint gmin = g_out_base + dst;
+            // Target index path: every tile owns exactly the half-open prefix
+            // range [offset, offset + counted). Never let a divergent second
+            // pass overwrite a neighbouring tile or exceed exact capacity T.
+            if (g_target_emit_failed || dst >= g_expected_count) {
+                fail_target_emit(TARGET_EMIT_STATUS_PARITY);
+                return;
+            }
+            uint64_t gmin64 = uint64_t(g_out_base) + uint64_t(dst);
+            if (gmin64 >= uint64_t(counters[1])) {
+                fail_target_emit(TARGET_EMIT_STATUS_CAPACITY);
+                return;
+            }
+            uint gmin = uint(gmin64);
             out_words[gmin * 2u + 0u] = uint(s.hash);
             out_words[gmin * 2u + 1u] = uint(s.hash >> 32);
             out_pair_vals[gmin] = (uint64_t(s.pos) << 1) | uint64_t(s.strand);
@@ -915,6 +1077,17 @@ void process_tile(uint tile_id) {
     uint loop_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : min(t.bp_count, t.tile_hi);
     g_local_count = 0u;
     g_out_base = (pc.emit_mode == 1u) ? tile_offsets[tile_id] : 0u;
+    g_expected_count = 0u;
+    g_target_emit_failed = false;
+    if (pc.emit_mode == 1u && pc.emit_pairs == 1u) {
+        g_expected_count = tile_counts[tile_id];
+        uint64_t range_end =
+            uint64_t(g_out_base) + uint64_t(g_expected_count);
+        if ((g_expected_count & TARGET_EMIT_COMPLETE) != 0u
+            || range_end > uint64_t(counters[1])) {
+            fail_target_emit(TARGET_EMIT_STATUS_CAPACITY);
+        }
+    }
 
     // Rolling canonical-kmer hash constants (constant per tile).
     uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
@@ -1027,6 +1200,17 @@ void process_tile(uint tile_id) {
 
     if (pc.emit_mode == 0u) {
         tile_counts[tile_id] = g_local_count;
+    } else if (pc.emit_mode == 1u && pc.emit_pairs == 1u) {
+        // One invocation owns each tile count word, so completion publication
+        // needs no atomic. The host accepts the result only when every marker
+        // agrees with the adjacent prefix offsets and exact T.
+        if (!g_target_emit_failed
+            && g_local_count == g_expected_count
+            && (g_local_count & TARGET_EMIT_COMPLETE) == 0u) {
+            tile_counts[tile_id] = TARGET_EMIT_COMPLETE | g_local_count;
+        } else {
+            fail_target_emit(TARGET_EMIT_STATUS_PARITY);
+        }
     }
 }
 
@@ -1060,16 +1244,20 @@ layout(push_constant) uniform Params {
 } pc;
 void main() {
     if (gl_LocalInvocationID.x != 0u) return;
-    uint block = gl_WorkGroupID.x;
-    if (block >= pc.num_blocks) return;
-    uint lo = block * pc.block_size;
-    uint hi = min(lo + pc.block_size, pc.element_count);
-    uint running = 0u;
-    for (uint i = lo; i < hi; ++i) {
-        out_prefix[i] = running;
-        running += in_data[i];
+    // Grid-stride blocks let callers clamp dispatch X to the physical-device
+    // limit without dropping logical scan blocks on XXL inputs.
+    for (uint block = gl_WorkGroupID.x;
+         block < pc.num_blocks;
+         block += gl_NumWorkGroups.x) {
+        uint lo = block * pc.block_size;
+        uint hi = min(lo + pc.block_size, pc.element_count);
+        uint running = 0u;
+        for (uint i = lo; i < hi; ++i) {
+            out_prefix[i] = running;
+            running += in_data[i];
+        }
+        block_sums[block] = running;
     }
-    block_sums[block] = running;
 }
 )GLSL";
 
@@ -1100,9 +1288,11 @@ void main() {
         return;
     }
     // pass 1: add the scanned block offset to every element.
-    if (gid >= pc.element_count) return;
-    uint block = gid / pc.block_size;
-    out_prefix[gid] += block_sums[block];
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gid; i < pc.element_count; i += stride) {
+        uint block = i / pc.block_size;
+        out_prefix[i] += block_sums[block];
+    }
 }
 )GLSL";
 
@@ -1197,17 +1387,19 @@ uint64_t splitmix64(uint64_t x) {
 }
 uint find_slot(uint64_t hash) {
     if (pc.bucket_count != 0u) {
-        // GPU-built index: dense buckets sorted by hash → binary search.
+        // Hash-sorted dense representation → binary search. It may be built
+        // by the GPU index builder or selected explicitly by the bounded
+        // legacy materializer; bucket_count attests the representation.
         uint lo = 0u;
         uint hi = pc.bucket_count;
         while (lo < hi) {
-            uint mid = (lo + hi) >> 1u;
+            uint mid = lo + ((hi - lo) >> 1u);
             if (slots[mid].hash < hash) lo = mid + 1u; else hi = mid;
         }
         if (lo < pc.bucket_count && slots[lo].hash == hash) return lo;
         return 0xffffffffu;
     }
-    // CPU-uploaded fallback index: open-addressed linear probe.
+    // Open-addressed representation → linear probe.
     uint p = uint(splitmix64(hash)) & pc.slot_mask;
     for (uint step = 0u; step <= pc.slot_mask; ++step) {
         GpuMinimizerSlot s = slots[p];
@@ -1303,11 +1495,2882 @@ void main() {
 }
 )GLSL";
 
+/// Direct persisted Format-5/ABI3 seed count/emit.  One workgroup owns one
+/// query record and its lanes stride over query minimizers.  Each minimizer is
+/// matched against the selected resident partition descriptors, binary-searches
+/// the raw variable-width SoA hash arrays, and sums occurrences across every
+/// position segment before applying `max_occ`.  Emit rereads the authenticated
+/// prefix ranges and variable-width segment-local positions directly; it never
+/// constructs a CPU-decoded slot table or a widened/globalized position array.
+constexpr std::string_view kPhaseCShapeV5SeedBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+const uint SHAPE_V5_ABI_VERSION = 3u;
+const uint SHAPE_V5_REQUIRED_FLAGS = 7u;
+const uint SHAPE_V5_STATUS_CONTRACT = 1u;
+const uint SHAPE_V5_STATUS_QUERY = 2u;
+const uint SHAPE_V5_STATUS_CONTROL = 4u;
+const uint SHAPE_V5_STATUS_POSITION = 8u;
+const uint SHAPE_V5_STATUS_EMISSION = 16u;
+
+struct ShapeV5Partition {
+    uint partition_id;
+    uint directory_ordinal;
+    uint position_segment;
+    uint flags;
+    uint64_t hash_byte_offset;
+    uint64_t prefix_byte_offset;
+    uint64_t count_byte_offset;
+    uint64_t position_byte_offset;
+    uint control_count;
+    uint position_count;
+    uint hash_width;
+    uint offset_width;
+    uint count_width;
+    uint position_width;
+    uint64_t low_hash;
+    uint64_t high_hash;
+    uint64_t segment_base_bp;
+    uint64_t segment_end_bp;
+};
+struct ShapeV5QueryRecord {
+    uint minimizer_offset;
+    uint minimizer_count;
+    uint query_len;
+    uint flags;
+};
+struct AnchorWire {
+    uint64_t ref_position;
+    uint64_t query_position;
+    uint is_reverse;
+    uint span_flags_segment;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer MinWords {
+    uint min_words[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer Partitions {
+    ShapeV5Partition partitions[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer RawControls {
+    uint control_words[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer RawPositions {
+    uint position_words[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer QueryRecords {
+    ShapeV5QueryRecord query_records[];
+};
+layout(std430, set = 0, binding = 5) buffer Counts {
+    uint counts[];
+};
+layout(std430, set = 0, binding = 6) readonly buffer PrefixCounts {
+    uint prefix[];
+};
+layout(std430, set = 0, binding = 7) buffer Anchors {
+    AnchorWire anchors[];
+};
+layout(std430, set = 0, binding = 8) buffer AnchorKeys {
+    uint64_t anchor_keys[];
+};
+
+layout(push_constant) uniform Params {
+    uint abi_version;
+    uint words32_per_minimizer;
+    uint word_kind;
+    uint hash_shift;
+    uint pos_bits;
+    uint kmer_size;
+    uint partition_count;
+    uint max_occ;
+    uint emit_mode;
+    uint record_count;
+    uint target_ref_bits;
+    uint query_minimizer_count;
+    uint control_word_count;
+    uint position_word_count;
+    uint anchor_capacity;
+    uint max_occ_cap_lo;
+    uint max_occ_cap_hi;
+    uint status_index;
+} pc;
+
+void shape_signal_status(uint status_bit) {
+    if (pc.status_index < uint(counts.length())) {
+        atomicOr(counts[pc.status_index], status_bit);
+    }
+}
+
+bool shape_width_valid(uint width) {
+    return width == 2u || width == 4u || width == 8u;
+}
+
+bool shape_aligned(uint64_t byte_offset, uint width) {
+    return shape_width_valid(width)
+        && (byte_offset & uint64_t(width - 1u)) == uint64_t(0);
+}
+
+bool shape_byte_range_valid(
+    uint64_t byte_offset,
+    uint width,
+    uint word_count)
+{
+    if (!shape_aligned(byte_offset, width)) return false;
+    uint64_t byte_limit = uint64_t(word_count) * uint64_t(4u);
+    return byte_offset <= byte_limit
+        && uint64_t(width) <= byte_limit - byte_offset;
+}
+
+bool shape_scalar_address(
+    uint64_t base,
+    uint index,
+    uint width,
+    out uint64_t byte_offset)
+{
+    uint64_t relative = uint64_t(index) * uint64_t(width);
+    byte_offset = base + relative;
+    return byte_offset >= base;
+}
+
+bool shape_read_control_scalar(
+    uint64_t byte_offset,
+    uint width,
+    out uint64_t value)
+{
+    value = uint64_t(0);
+    if (!shape_byte_range_valid(
+            byte_offset, width, pc.control_word_count)) {
+        return false;
+    }
+    uint word_index = uint(byte_offset >> 2u);
+    uint shift = uint(byte_offset & uint64_t(3u)) * 8u;
+    if (width == 2u) {
+        value = uint64_t((control_words[word_index] >> shift) & 0xffffu);
+        return true;
+    }
+    if (width == 4u) {
+        value = uint64_t(control_words[word_index]);
+        return true;
+    }
+    value = uint64_t(control_words[word_index])
+        | (uint64_t(control_words[word_index + 1u]) << 32u);
+    return true;
+}
+
+bool shape_read_position_scalar(
+    uint64_t byte_offset,
+    uint width,
+    out uint64_t value)
+{
+    value = uint64_t(0);
+    if (!shape_byte_range_valid(
+            byte_offset, width, pc.position_word_count)) {
+        return false;
+    }
+    uint word_index = uint(byte_offset >> 2u);
+    uint shift = uint(byte_offset & uint64_t(3u)) * 8u;
+    if (width == 2u) {
+        value = uint64_t((position_words[word_index] >> shift) & 0xffffu);
+        return true;
+    }
+    if (width == 4u) {
+        value = uint64_t(position_words[word_index]);
+        return true;
+    }
+    value = uint64_t(position_words[word_index])
+        | (uint64_t(position_words[word_index + 1u]) << 32u);
+    return true;
+}
+
+uint64_t shape_max_occ_cap() {
+    return uint64_t(pc.max_occ_cap_lo)
+        | (uint64_t(pc.max_occ_cap_hi) << 32u);
+}
+
+bool shape_partition_valid(ShapeV5Partition descriptor) {
+    if (descriptor.flags != SHAPE_V5_REQUIRED_FLAGS
+        || descriptor.control_count == 0u
+        || descriptor.position_count == 0u
+        || descriptor.low_hash > descriptor.high_hash
+        || descriptor.segment_base_bp >= descriptor.segment_end_bp
+        || !shape_width_valid(descriptor.hash_width)
+        || !shape_width_valid(descriptor.offset_width)
+        || !shape_width_valid(descriptor.count_width)
+        || !shape_width_valid(descriptor.position_width)
+        || !shape_aligned(
+            descriptor.hash_byte_offset, descriptor.hash_width)
+        || !shape_aligned(
+            descriptor.prefix_byte_offset, descriptor.offset_width)
+        || !shape_aligned(
+            descriptor.count_byte_offset, descriptor.count_width)
+        || !shape_aligned(
+            descriptor.position_byte_offset, descriptor.position_width)) {
+        return false;
+    }
+    uint position_bits = descriptor.position_width * 8u;
+    uint64_t maximum_segment_span = uint64_t(1)
+        << (position_bits - 1u);
+    return descriptor.segment_end_bp - descriptor.segment_base_bp
+        <= maximum_segment_span;
+}
+
+uint64_t shape_read_min_hash(uint index) {
+    if (pc.word_kind == 0u) {
+        uint packed = min_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+        return uint64_t(raw) >> pc.hash_shift;
+    }
+    uint base = index * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) {
+        return uint64_t(min_words[base]) >> pc.hash_shift;
+    }
+    if (pc.word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base])
+            | (uint64_t(min_words[base + 1u]) << 32u);
+        return raw >> pc.hash_shift;
+    }
+    uint64_t high = uint64_t(min_words[base + 2u])
+        | (uint64_t(min_words[base + 3u]) << 32u);
+    return high >> 8u;
+}
+
+uint64_t shape_read_min_position(uint index) {
+    if (pc.word_kind == 0u) {
+        uint packed = min_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+        uint mask = pc.pos_bits >= 15u
+            ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        return uint64_t(raw & mask);
+    }
+    uint base = index * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) {
+        uint mask = pc.pos_bits >= 31u
+            ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        return uint64_t(min_words[base] & mask);
+    }
+    if (pc.word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base])
+            | (uint64_t(min_words[base + 1u]) << 32u);
+        uint64_t mask = pc.pos_bits >= 63u
+            ? ~uint64_t(0)
+            : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
+        return raw & mask;
+    }
+    return uint64_t(min_words[base])
+        | (uint64_t(min_words[base + 1u]) << 32u);
+}
+
+bool shape_query_words_valid(uint index) {
+    if (pc.word_kind > 3u || pc.words32_per_minimizer == 0u) return false;
+    if (pc.word_kind == 0u) {
+        return uint64_t(index >> 1u) < uint64_t(min_words.length());
+    }
+    uint required_words = pc.word_kind == 1u
+        ? 1u : pc.word_kind == 2u ? 2u : 4u;
+    if (pc.words32_per_minimizer < required_words) return false;
+    uint64_t end = (uint64_t(index) + uint64_t(1u))
+        * uint64_t(pc.words32_per_minimizer);
+    return end <= uint64_t(min_words.length());
+}
+
+// Returns 0 for no hash in this partition, 1 for an admitted range, and 2 for
+// malformed bytes.  The terminal prefix is authoritative; the saturated count
+// is checked against it and the persisted generation cap before use.
+uint shape_find_control(
+    ShapeV5Partition descriptor,
+    uint64_t wanted_hash,
+    out uint64_t position_begin,
+    out uint64_t position_end,
+    out uint64_t saturated_count)
+{
+    position_begin = uint64_t(0);
+    position_end = uint64_t(0);
+    saturated_count = uint64_t(0);
+    if (!shape_partition_valid(descriptor)) return 2u;
+    if (wanted_hash < descriptor.low_hash
+        || wanted_hash > descriptor.high_hash) {
+        return 0u;
+    }
+    uint lo = 0u;
+    uint hi = descriptor.control_count;
+    while (lo < hi) {
+        uint mid = lo + ((hi - lo) >> 1u);
+        uint64_t address;
+        uint64_t stored_hash;
+        if (!shape_scalar_address(
+                descriptor.hash_byte_offset,
+                mid,
+                descriptor.hash_width,
+                address)
+            || !shape_read_control_scalar(
+                address, descriptor.hash_width, stored_hash)) {
+            return 2u;
+        }
+        if (stored_hash < wanted_hash) lo = mid + 1u; else hi = mid;
+    }
+    if (lo >= descriptor.control_count) return 0u;
+    uint64_t hash_address;
+    uint64_t stored_hash;
+    if (!shape_scalar_address(
+            descriptor.hash_byte_offset,
+            lo,
+            descriptor.hash_width,
+            hash_address)
+        || !shape_read_control_scalar(
+            hash_address, descriptor.hash_width, stored_hash)) {
+        return 2u;
+    }
+    if (stored_hash != wanted_hash) return 0u;
+
+    uint64_t begin_address;
+    uint64_t end_address;
+    uint64_t count_address;
+    if (!shape_scalar_address(
+            descriptor.prefix_byte_offset,
+            lo,
+            descriptor.offset_width,
+            begin_address)
+        || !shape_scalar_address(
+            descriptor.prefix_byte_offset,
+            lo + 1u,
+            descriptor.offset_width,
+            end_address)
+        || !shape_scalar_address(
+            descriptor.count_byte_offset,
+            lo,
+            descriptor.count_width,
+            count_address)
+        || !shape_read_control_scalar(
+            begin_address, descriptor.offset_width, position_begin)
+        || !shape_read_control_scalar(
+            end_address, descriptor.offset_width, position_end)
+        || !shape_read_control_scalar(
+            count_address, descriptor.count_width, saturated_count)
+        || position_begin >= position_end
+        || position_end > uint64_t(descriptor.position_count)) {
+        return 2u;
+    }
+    uint64_t exact_count = position_end - position_begin;
+    uint64_t cap = shape_max_occ_cap();
+    if (cap == ~uint64_t(0)) return 2u;
+    uint64_t expected_saturated = exact_count > cap
+        ? cap + uint64_t(1u) : exact_count;
+    return saturated_count == expected_saturated ? 1u : 2u;
+}
+
+bool shape_count_hash(uint64_t hash, out uint accepted_count) {
+    accepted_count = 0u;
+    uint64_t total = uint64_t(0);
+    uint64_t threshold = uint64_t(pc.max_occ);
+    for (uint partition_index = 0u;
+         partition_index < pc.partition_count;
+         ++partition_index) {
+        uint64_t position_begin;
+        uint64_t position_end;
+        uint64_t saturated_count;
+        uint status = shape_find_control(
+            partitions[partition_index],
+            hash,
+            position_begin,
+            position_end,
+            saturated_count);
+        if (status == 2u) return false;
+        if (status == 0u) continue;
+        if (saturated_count > threshold) {
+            accepted_count = 0u;
+            return true;
+        }
+        uint64_t exact_count = position_end - position_begin;
+        if (total > threshold || exact_count > threshold - total) {
+            accepted_count = 0u;
+            return true;
+        }
+        total += exact_count;
+    }
+    accepted_count = uint(total);
+    return true;
+}
+
+uint64_t shape_anchor_sort_key(uint reverse, uint64_t ref_position) {
+    if (pc.target_ref_bits >= 63u) {
+        return (uint64_t(reverse) << 63u) | ref_position;
+    }
+    return (uint64_t(reverse) << pc.target_ref_bits) | ref_position;
+}
+
+bool shape_global_contract_valid() {
+    uint64_t cap = shape_max_occ_cap();
+    return pc.abi_version == SHAPE_V5_ABI_VERSION
+        && pc.emit_mode <= 1u
+        && pc.kmer_size != 0u
+        && pc.kmer_size <= 255u
+        && pc.hash_shift < 64u
+        && pc.pos_bits < 64u
+        && pc.target_ref_bits <= 63u
+        && cap != ~uint64_t(0)
+        && uint64_t(pc.max_occ) <= cap
+        && pc.partition_count != 0u
+        && pc.partition_count <= uint(partitions.length())
+        && pc.record_count == 1u
+        && uint(query_records.length()) >= 1u
+        && pc.query_minimizer_count != 0u
+        && pc.status_index != 0u
+        && pc.status_index < uint(counts.length())
+        && pc.status_index == uint(prefix.length())
+        && pc.control_word_count <= uint(control_words.length())
+        && pc.position_word_count <= uint(position_words.length())
+        && pc.anchor_capacity <= uint(anchors.length())
+        && pc.anchor_capacity <= uint(anchor_keys.length());
+}
+
+void main() {
+    uint record_index = gl_WorkGroupID.x;
+    bool contract_valid = shape_global_contract_valid();
+    if (!contract_valid || record_index != 0u) {
+        shape_signal_status(SHAPE_V5_STATUS_CONTRACT);
+        return;
+    }
+    ShapeV5QueryRecord record = query_records[record_index];
+    uint64_t query_end = uint64_t(record.minimizer_offset)
+        + uint64_t(record.minimizer_count);
+    bool record_valid = query_end <= uint64_t(pc.query_minimizer_count)
+        && record.minimizer_count == pc.status_index
+        && record.query_len >= pc.kmer_size
+        && record.flags == 0u;
+    if (!record_valid) {
+        shape_signal_status(SHAPE_V5_STATUS_QUERY);
+        return;
+    }
+
+    for (uint local_index = gl_LocalInvocationID.x;
+         local_index < record.minimizer_count;
+         local_index += gl_WorkGroupSize.x) {
+        uint minimizer_index = record.minimizer_offset + local_index;
+        if (pc.emit_mode == 0u) counts[local_index] = 0u;
+        if (minimizer_index >= pc.query_minimizer_count
+            || !shape_query_words_valid(minimizer_index)) {
+            shape_signal_status(SHAPE_V5_STATUS_QUERY);
+            continue;
+        }
+
+        uint64_t hash = shape_read_min_hash(minimizer_index);
+        uint accepted_count = 0u;
+        if (!shape_count_hash(hash, accepted_count)) {
+            shape_signal_status(SHAPE_V5_STATUS_CONTROL);
+            continue;
+        }
+        if (pc.emit_mode == 0u) {
+            counts[local_index] = accepted_count;
+            continue;
+        }
+        if (counts[local_index] != accepted_count) {
+            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            continue;
+        }
+        if (accepted_count == 0u) continue;
+
+        uint64_t destination = uint64_t(prefix[local_index]);
+        if (destination > uint64_t(pc.anchor_capacity)
+            || uint64_t(accepted_count)
+                > uint64_t(pc.anchor_capacity) - destination) {
+            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            continue;
+        }
+        uint64_t query_encoded = shape_read_min_position(minimizer_index);
+        uint64_t query_bp = query_encoded >> 1u;
+        uint query_strand = uint(query_encoded & uint64_t(1u));
+        if (query_bp >= uint64_t(record.query_len)
+            || query_bp + uint64_t(1u) < uint64_t(pc.kmer_size)) {
+            shape_signal_status(SHAPE_V5_STATUS_QUERY);
+            continue;
+        }
+        uint64_t reverse_base = uint64_t(record.query_len)
+            + uint64_t(pc.kmer_size) - uint64_t(2u);
+        uint emitted = 0u;
+        bool emission_valid = true;
+        for (uint partition_index = 0u;
+             emission_valid && partition_index < pc.partition_count;
+             ++partition_index) {
+            ShapeV5Partition descriptor = partitions[partition_index];
+            uint64_t position_begin;
+            uint64_t position_end;
+            uint64_t saturated_count;
+            uint status = shape_find_control(
+                descriptor,
+                hash,
+                position_begin,
+                position_end,
+                saturated_count);
+            if (status == 2u) {
+                shape_signal_status(SHAPE_V5_STATUS_CONTROL);
+                emission_valid = false;
+                break;
+            }
+            if (status == 0u) continue;
+            for (uint64_t position_index = position_begin;
+                 position_index < position_end;
+                 ++position_index) {
+                uint64_t position_address;
+                uint64_t target_encoded;
+                if (!shape_scalar_address(
+                        descriptor.position_byte_offset,
+                        uint(position_index),
+                        descriptor.position_width,
+                        position_address)
+                    || !shape_read_position_scalar(
+                        position_address,
+                        descriptor.position_width,
+                        target_encoded)) {
+                    shape_signal_status(SHAPE_V5_STATUS_POSITION);
+                    emission_valid = false;
+                    break;
+                }
+                uint64_t local_bp = target_encoded >> 1u;
+                uint64_t segment_span = descriptor.segment_end_bp
+                    - descriptor.segment_base_bp;
+                if (local_bp >= segment_span || emitted >= accepted_count) {
+                    shape_signal_status(
+                        local_bp >= segment_span
+                            ? SHAPE_V5_STATUS_POSITION
+                            : SHAPE_V5_STATUS_EMISSION);
+                    emission_valid = false;
+                    break;
+                }
+                uint target_strand = uint(target_encoded & uint64_t(1u));
+                uint reverse = target_strand ^ query_strand;
+                uint64_t ref_position = descriptor.segment_base_bp + local_bp;
+                uint64_t query_position = reverse != 0u
+                    ? reverse_base - query_bp : query_bp;
+                uint64_t output_index = destination + uint64_t(emitted);
+                anchors[uint(output_index)].ref_position = ref_position;
+                anchors[uint(output_index)].query_position = query_position;
+                anchors[uint(output_index)].is_reverse = reverse;
+                anchors[uint(output_index)].span_flags_segment =
+                    pc.kmer_size & 0xffu;
+                anchor_keys[uint(output_index)] =
+                    shape_anchor_sort_key(reverse, ref_position);
+                ++emitted;
+            }
+        }
+        // A validated immutable resident generation makes this equality
+        // deterministic between count and emit.  No CPU/SIMD repair path is
+        // provided if the resident bytes change or fail validation.
+        if (!emission_valid || emitted != accepted_count) {
+            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+        }
+    }
+}
+)GLSL";
+
+// DOC0371 persisted-index foundation. One workgroup deliberately owns the
+// complete target-wide query union: all lanes mark a global bitset, synchronize,
+// then lane zero compacts it in stable directory order. This avoids exposing a
+// host query-hash vector and gives the later PG reader only opaque ordinals.
+// The authoritative directory is the header-free revision-3 96-byte entry
+// stream (24 little-endian uint words per entry).
+constexpr std::string_view kPhaseCPersistedDirectorySelectBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer MinWords { uint min_words[]; };
+layout(std430, set = 0, binding = 1) readonly buffer DirectoryWords { uint directory_words[]; };
+layout(std430, set = 0, binding = 2) buffer SelectedBits { uint selected_bits[]; };
+layout(std430, set = 0, binding = 3) buffer SelectedOrdinals { uint selected_ordinals[]; };
+
+layout(push_constant) uniform Params {
+    uint minimizer_count;
+    uint minimizer_word_kind;
+    uint minimizer_words32_per_record;
+    uint hash_shift;
+    uint directory_entry_count;
+    uint reserved_directory;
+    uint bitset_word_count;
+    uint reserved;
+} pc;
+
+uint64_t read_min_hash(uint i) {
+    if (pc.minimizer_word_kind == 0u) {
+        uint packed = min_words[i >> 1u];
+        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
+        return uint64_t(raw) >> pc.hash_shift;
+    }
+    uint base = i * pc.minimizer_words32_per_record;
+    if (pc.minimizer_word_kind == 1u) {
+        return uint64_t(min_words[base]) >> pc.hash_shift;
+    }
+    if (pc.minimizer_word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base])
+            | (uint64_t(min_words[base + 1u]) << 32);
+        return raw >> pc.hash_shift;
+    }
+    uint64_t high = uint64_t(min_words[base + 2u])
+        | (uint64_t(min_words[base + 3u]) << 32);
+    return high >> 8;
+}
+
+uint64_t directory_u64(uint ordinal, uint word_offset) {
+    uint base = ordinal * 24u + word_offset;
+    return uint64_t(directory_words[base])
+        | (uint64_t(directory_words[base + 1u]) << 32);
+}
+
+void main() {
+    for (uint i = gl_LocalInvocationID.x; i < pc.minimizer_count;
+        i += gl_WorkGroupSize.x) {
+        uint64_t hash = read_min_hash(i);
+        // Scan the complete authoritative directory. Hash ranges repeat once
+        // per persisted position core, so a caller-supplied segment filter
+        // would silently omit valid target anchors.
+        for (uint ordinal = 0u; ordinal < pc.directory_entry_count; ++ordinal) {
+            uint64_t low_hash = directory_u64(ordinal, 2u);
+            uint64_t high_hash = directory_u64(ordinal, 4u);
+            if (low_hash <= hash && hash <= high_hash) {
+                atomicOr(selected_bits[ordinal >> 5u], 1u << (ordinal & 31u));
+            }
+        }
+    }
+    memoryBarrierBuffer();
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0u) {
+        uint count = 0u;
+        for (uint ordinal = 0u; ordinal < pc.directory_entry_count; ++ordinal) {
+            uint present = selected_bits[ordinal >> 5u] >> (ordinal & 31u);
+            if ((present & 1u) != 0u) {
+                selected_ordinals[1u + count] = ordinal;
+                ++count;
+            }
+        }
+        selected_ordinals[0] = count;
+    }
+}
+)GLSL";
+
+// Inactive format-4 ABI2 shader family. The core kernels share one exact
+// std430 contract. Controls and positions are the authenticated persisted
+// payload itself: a 12-byte control array plus 4-byte segment-local positions.
+// Production dispatch is intentionally absent until a PG resident authority
+// and hardware-fence execution proof are wired atomically.
+constexpr std::string_view kPhaseCGrouped32Abi2Common = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct Grouped32Partition {
+    uint partition_id;
+    uint directory_ordinal;
+    uint position_segment;
+    uint control_offset;
+    uint control_count;
+    uint position_offset;
+    uint position_count;
+    uint low_hash;
+    uint high_hash;
+    uint flags;
+    uint64_t segment_base_bp;
+    uint64_t segment_end_bp;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct Grouped32Control {
+    uint hash;
+    uint position_offset;
+    uint position_count;
+};
+
+struct Grouped32QueryMinimizer {
+    uint hash;
+    uint query_bp_strand;
+    uint occurrence_index;
+    uint query_record_index;
+};
+
+struct Grouped32QueryRecord {
+    uint minimizer_offset;
+    uint minimizer_count;
+    uint query_length;
+    uint query_state_index;
+    uint occurrence_offset;
+    uint anchor_base;
+    uint anchor_capacity;
+    uint flags;
+    uint64_t batch_join_ordinal;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct Grouped32OccurrenceState {
+    uint global_count;
+    uint accepted_count;
+    uint anchor_offset;
+    uint emitted_count;
+};
+
+struct Grouped32QueryState {
+    uint anchor_count;
+    uint rejected_minimizers;
+    uint completed_minimizers;
+    uint status;
+};
+
+struct Grouped32GlobalAnchor {
+    uint64_t ref_position;
+    uint64_t query_position;
+    uint is_reverse;
+    uint span_flags_segment;
+};
+
+struct Grouped32AnchorRadixKey {
+    uint64_t ref_position;
+    uint is_reverse;
+    uint query_state_index;
+};
+
+struct Grouped32SortSegment {
+    uint anchor_begin;
+    uint anchor_count;
+    uint query_state_index;
+    uint flags;
+    uint64_t batch_join_ordinal;
+};
+
+struct Grouped32ValidationState {
+    uint status;
+    uint failed_partitions;
+    uint controls_checked;
+    uint positions_checked;
+    uint completed_workgroups;
+    uint expected_workgroups;
+    uint completion;
+    uint reserved;
+};
+
+struct Grouped32QueryAdapterState {
+    uint status;
+    uint completed_records;
+    uint expected_records;
+    uint total_minimizers;
+    uint max_query_minimizers;
+    uint completion;
+    uint reserved0;
+    uint reserved1;
+};
+
+struct Grouped32DispatchIndirectCommand {
+    uint group_count_x;
+    uint group_count_y;
+    uint group_count_z;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Partitions {
+    Grouped32Partition partitions[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer Controls {
+    Grouped32Control controls[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer Positions {
+    uint local_positions[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer QueryRecords {
+    Grouped32QueryRecord query_records[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer QueryMinimizers {
+    Grouped32QueryMinimizer query_minimizers[];
+};
+layout(std430, set = 0, binding = 5) buffer OccurrenceStates {
+    Grouped32OccurrenceState occurrence_states[];
+};
+layout(std430, set = 0, binding = 6) buffer QueryStates {
+    Grouped32QueryState query_states[];
+};
+layout(std430, set = 0, binding = 7) buffer GlobalAnchors {
+    Grouped32GlobalAnchor global_anchors[];
+};
+layout(std430, set = 0, binding = 8) buffer ValidationStates {
+    Grouped32ValidationState validation_states[];
+};
+layout(std430, set = 0, binding = 9) buffer IndirectCommands {
+    Grouped32DispatchIndirectCommand indirect_commands[];
+};
+layout(std430, set = 0, binding = 10) buffer AnchorRadixKeys {
+    Grouped32AnchorRadixKey anchor_radix_keys[];
+};
+layout(std430, set = 0, binding = 11) buffer SortSegments {
+    Grouped32SortSegment sort_segments[];
+};
+layout(std430, set = 0, binding = 12) buffer AdapterStates {
+    Grouped32QueryAdapterState adapter_states[];
+};
+
+layout(push_constant) uniform Params {
+    uint partition_count;
+    uint query_record_count;
+    uint query_minimizer_capacity;
+    uint occurrence_count;
+    uint control_count;
+    uint position_count;
+    uint anchor_capacity;
+    uint max_occ;
+    uint kmer_size;
+    uint validation_index;
+    uint validation_state_count;
+    uint indirect_base;
+    uint indirect_command_count;
+    uint max_partition_groups_y;
+    uint max_workgroups_x;
+    uint flags;
+    uint adapter_state_index;
+    uint adapter_state_count;
+} pc;
+
+const uint G32_DESCRIPTOR_BOUNDS = 1u << 0u;
+const uint G32_DESCRIPTOR_IDENTITY = 1u << 1u;
+const uint G32_SEGMENT_BOUNDS = 1u << 2u;
+const uint G32_CONTROL_ORDER = 1u << 3u;
+const uint G32_CONTROL_POSITIONS = 1u << 4u;
+const uint G32_POSITION_BOUNDS = 1u << 5u;
+const uint G32_POSITION_ORDER = 1u << 6u;
+const uint G32_QUERY_BOUNDS = 1u << 7u;
+const uint G32_ANCHOR_CAPACITY = 1u << 8u;
+const uint G32_EMITTED_COUNT = 1u << 9u;
+const uint G32_OCCURRENCE_OVERFLOW = 1u << 10u;
+const uint G32_VALIDATION_GATE = 1u << 11u;
+const uint G32_ADAPTER_STATE = 1u << 12u;
+const uint G32_INDIRECT_BOUNDS = 1u << 13u;
+const uint G32_SORT_OWNERSHIP = 1u << 14u;
+
+const uint G32_COMPLETION_PENDING = 0u;
+const uint G32_COMPLETION_ACCEPTED = 1u;
+const uint G32_COMPLETION_REJECTED = 2u;
+
+const uint G32_STAGE_VALIDATE = 0u;
+const uint G32_STAGE_ACCUMULATE = 1u;
+const uint G32_STAGE_FINALIZE = 2u;
+const uint G32_STAGE_ALLOCATE = 3u;
+const uint G32_STAGE_SORT_SEGMENTS = 4u;
+const uint G32_STAGE_EMIT = 5u;
+const uint G32_STAGE_RADIX = 6u;
+const uint G32_STAGE_COUNT = 7u;
+
+bool grouped32_validation_addressable() {
+    return pc.validation_index < uint(validation_states.length());
+}
+
+bool grouped32_validation_bound() {
+    return pc.validation_state_count <= uint(validation_states.length())
+        && pc.validation_index < pc.validation_state_count;
+}
+
+bool grouped32_adapter_addressable() {
+    return pc.adapter_state_index < uint(adapter_states.length());
+}
+
+bool grouped32_adapter_bound() {
+    return pc.adapter_state_count <= uint(adapter_states.length())
+        && pc.adapter_state_index < pc.adapter_state_count;
+}
+
+bool grouped32_core_buffers_bound() {
+    return pc.partition_count <= uint(partitions.length())
+        && pc.control_count <= uint(controls.length())
+        && pc.position_count <= uint(local_positions.length())
+        && pc.query_record_count <= uint(query_records.length())
+        && pc.query_record_count <= uint(query_states.length())
+        && pc.query_record_count <= uint(sort_segments.length())
+        && pc.query_minimizer_capacity <= uint(query_minimizers.length())
+        && pc.occurrence_count <= uint(occurrence_states.length())
+        && pc.anchor_capacity <= uint(global_anchors.length())
+        && pc.anchor_capacity <= uint(anchor_radix_keys.length())
+        && pc.validation_state_count <= uint(validation_states.length())
+        && pc.indirect_command_count <= uint(indirect_commands.length())
+        && pc.adapter_state_count <= uint(adapter_states.length());
+}
+
+uint grouped32_query_minimizer_count() {
+    if (!grouped32_core_buffers_bound() || !grouped32_adapter_bound()) return 0u;
+    Grouped32QueryAdapterState state = adapter_states[pc.adapter_state_index];
+    if (state.completion != G32_COMPLETION_ACCEPTED || state.status != 0u
+        || state.total_minimizers > pc.query_minimizer_capacity
+        || state.total_minimizers > pc.occurrence_count) {
+        return 0u;
+    }
+    return state.total_minimizers;
+}
+
+bool grouped32_indirect_stage_bound(uint stage) {
+    return stage < G32_STAGE_COUNT
+        && pc.indirect_command_count <= uint(indirect_commands.length())
+        && uint64_t(pc.indirect_base) + uint64_t(stage)
+            < uint64_t(pc.indirect_command_count);
+}
+
+void grouped32_fail(uint status_bit) {
+    if (grouped32_validation_addressable()) {
+        atomicOr(validation_states[pc.validation_index].status, status_bit);
+    }
+}
+
+bool grouped32_validation_gate_open() {
+    if (!grouped32_core_buffers_bound()) {
+        grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+        return false;
+    }
+    if (!grouped32_validation_bound()) {
+        grouped32_fail(G32_VALIDATION_GATE);
+        return false;
+    }
+    if (!grouped32_adapter_bound()) {
+        grouped32_fail(G32_ADAPTER_STATE);
+        return false;
+    }
+    Grouped32ValidationState validation =
+        validation_states[pc.validation_index];
+    Grouped32QueryAdapterState adapter =
+        adapter_states[pc.adapter_state_index];
+    return validation.completion == G32_COMPLETION_ACCEPTED
+        && validation.status == 0u
+        && adapter.completion == G32_COMPLETION_ACCEPTED
+        && adapter.status == 0u;
+}
+
+uint grouped32_ceil_div(uint value, uint divisor) {
+    return divisor == 0u ? 0u : value / divisor + (value % divisor != 0u ? 1u : 0u);
+}
+
+void grouped32_zero_command(uint stage) {
+    if (!grouped32_indirect_stage_bound(stage)) return;
+    uint command = pc.indirect_base + stage;
+    indirect_commands[command].group_count_x = 0u;
+    indirect_commands[command].group_count_y = 0u;
+    indirect_commands[command].group_count_z = 0u;
+}
+
+void grouped32_write_command(uint stage, uint x, uint y, uint z) {
+    if (!grouped32_indirect_stage_bound(stage)) {
+        grouped32_fail(G32_INDIRECT_BOUNDS);
+        return;
+    }
+    uint command = pc.indirect_base + stage;
+    indirect_commands[command].group_count_x = x;
+    indirect_commands[command].group_count_y = y;
+    indirect_commands[command].group_count_z = z;
+}
+
+bool grouped32_partition_bounds_safe(Grouped32Partition p) {
+    return uint64_t(p.control_offset) + uint64_t(p.control_count)
+            <= uint64_t(pc.control_count)
+        && uint64_t(p.position_offset) + uint64_t(p.position_count)
+            <= uint64_t(pc.position_count);
+}
+
+bool grouped32_query_record_safe(
+    uint record_index,
+    Grouped32QueryRecord record)
+{
+    uint query_minimizer_count = grouped32_query_minimizer_count();
+    uint64_t minimizer_end = uint64_t(record.minimizer_offset)
+        + uint64_t(record.minimizer_count);
+    uint64_t occurrence_end = uint64_t(record.occurrence_offset)
+        + uint64_t(record.minimizer_count);
+    uint64_t anchor_end = uint64_t(record.anchor_base)
+        + uint64_t(record.anchor_capacity);
+    if (record_index >= pc.query_record_count
+        || record.query_state_index != record_index
+        || record.query_state_index >= pc.query_record_count
+        || record.occurrence_offset != record.minimizer_offset
+        || minimizer_end > uint64_t(query_minimizer_count)
+        || occurrence_end > uint64_t(pc.occurrence_count)
+        || anchor_end > uint64_t(pc.anchor_capacity)
+        || record.query_length > 0x80000000u
+        || (record.minimizer_count != 0u
+            && (pc.kmer_size != 15u || record.query_length < 15u))
+        || record.flags != 0u || record.reserved0 != 0u
+        || record.reserved1 != 0u) {
+        grouped32_fail(G32_QUERY_BOUNDS);
+        return false;
+    }
+    return true;
+}
+
+bool grouped32_query_minimizer_safe(
+    uint minimizer_index,
+    Grouped32QueryMinimizer minimizer,
+    out Grouped32QueryRecord record)
+{
+    if (minimizer.query_record_index >= pc.query_record_count
+        || minimizer.occurrence_index >= pc.occurrence_count) {
+        grouped32_fail(G32_QUERY_BOUNDS);
+        return false;
+    }
+    record = query_records[minimizer.query_record_index];
+    if (!grouped32_query_record_safe(
+            minimizer.query_record_index, record)
+        || minimizer_index < record.minimizer_offset
+        || uint64_t(minimizer_index)
+            >= uint64_t(record.minimizer_offset)
+                + uint64_t(record.minimizer_count)
+        || minimizer.occurrence_index != minimizer_index
+        || pc.kmer_size != 15u
+        || record.query_length > 0x80000000u
+        || record.query_length < pc.kmer_size
+        || (minimizer.query_bp_strand >> 1u) >= record.query_length
+        || (minimizer.query_bp_strand >> 1u) + 1u < pc.kmer_size) {
+        grouped32_fail(G32_QUERY_BOUNDS);
+        return false;
+    }
+    return true;
+}
+
+bool grouped32_find_control(
+    Grouped32Partition part,
+    uint hash,
+    out Grouped32Control found)
+{
+    uint lo = 0u;
+    uint hi = part.control_count;
+    while (lo < hi) {
+        uint mid = lo + ((hi - lo) >> 1u);
+        Grouped32Control control = controls[part.control_offset + mid];
+        if (control.hash < hash) lo = mid + 1u; else hi = mid;
+    }
+    if (lo < part.control_count) {
+        Grouped32Control control = controls[part.control_offset + lo];
+        if (control.hash == hash) {
+            found = control;
+            return true;
+        }
+    }
+    return false;
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32ClearStateMain = R"GLSL(
+void main() {
+    bool validation_addressable = grouped32_validation_addressable();
+    bool adapter_addressable = grouped32_adapter_addressable();
+    if (!validation_addressable || !adapter_addressable) return;
+    if (!grouped32_core_buffers_bound()
+        || !grouped32_validation_bound() || !grouped32_adapter_bound()
+        || pc.kmer_size != 15u || pc.flags != 0u
+        || uint64_t(pc.indirect_base) + uint64_t(G32_STAGE_COUNT)
+            > uint64_t(pc.indirect_command_count)) {
+        if (gl_GlobalInvocationID.x == 0u) {
+            validation_states[pc.validation_index].status =
+                G32_DESCRIPTOR_BOUNDS;
+            validation_states[pc.validation_index].completion =
+                G32_COMPLETION_REJECTED;
+            adapter_states[pc.adapter_state_index].status =
+                G32_DESCRIPTOR_BOUNDS;
+            adapter_states[pc.adapter_state_index].completion =
+                G32_COMPLETION_REJECTED;
+        }
+        return;
+    }
+
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint index = gl_GlobalInvocationID.x;
+         index < pc.occurrence_count; index += stride) {
+        occurrence_states[index].global_count = 0u;
+        occurrence_states[index].accepted_count = 0u;
+        occurrence_states[index].anchor_offset = 0u;
+        occurrence_states[index].emitted_count = 0u;
+    }
+    for (uint index = gl_GlobalInvocationID.x;
+         index < pc.query_record_count; index += stride) {
+        query_states[index].anchor_count = 0u;
+        query_states[index].rejected_minimizers = 0u;
+        query_states[index].completed_minimizers = 0u;
+        query_states[index].status = 0u;
+        sort_segments[index].anchor_begin = 0u;
+        sort_segments[index].anchor_count = 0u;
+        sort_segments[index].query_state_index = index;
+        sort_segments[index].flags = 0u;
+        sort_segments[index].batch_join_ordinal = uint64_t(0);
+    }
+    for (uint stage = gl_GlobalInvocationID.x;
+         stage < G32_STAGE_COUNT; stage += stride) {
+        uint command = pc.indirect_base + stage;
+        indirect_commands[command].group_count_x = 0u;
+        indirect_commands[command].group_count_y = 0u;
+        indirect_commands[command].group_count_z = 0u;
+    }
+    memoryBarrierBuffer();
+    barrier();
+    if (gl_GlobalInvocationID.x == 0u) {
+        Grouped32QueryAdapterState adapter;
+        adapter.status = 0u;
+        adapter.completed_records = 0u;
+        adapter.expected_records = pc.query_record_count;
+        adapter.total_minimizers = 0u;
+        adapter.max_query_minimizers = 0u;
+        adapter.completion = G32_COMPLETION_PENDING;
+        adapter.reserved0 = 0u;
+        adapter.reserved1 = 0u;
+        adapter_states[pc.adapter_state_index] = adapter;
+
+        Grouped32ValidationState validation;
+        validation.status = 0u;
+        validation.failed_partitions = 0u;
+        validation.controls_checked = 0u;
+        validation.positions_checked = 0u;
+        validation.completed_workgroups = 0u;
+        validation.expected_workgroups = 0u;
+        validation.completion = G32_COMPLETION_PENDING;
+        validation.reserved = 0u;
+        validation_states[pc.validation_index] = validation;
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32FinalizeValidationMain = R"GLSL(
+uint grouped32_capped_groups(uint count) {
+    uint groups = grouped32_ceil_div(count, gl_WorkGroupSize.x);
+    return min(groups, pc.max_workgroups_x);
+}
+
+void grouped32_publish_validated_commands(uint query_minimizer_count) {
+    uint query_groups = grouped32_capped_groups(query_minimizer_count);
+    uint record_groups = grouped32_capped_groups(pc.query_record_count);
+    uint partition_groups = min(pc.partition_count, pc.max_partition_groups_y);
+    grouped32_write_command(
+        G32_STAGE_ACCUMULATE, query_groups,
+        query_groups == 0u ? 0u : partition_groups, 1u);
+    grouped32_write_command(G32_STAGE_FINALIZE, query_groups, 1u, 1u);
+    grouped32_write_command(G32_STAGE_ALLOCATE, record_groups, 1u, 1u);
+    grouped32_write_command(G32_STAGE_SORT_SEGMENTS, record_groups, 1u, 1u);
+    grouped32_write_command(
+        G32_STAGE_EMIT, query_groups,
+        query_groups == 0u ? 0u : partition_groups, 1u);
+    grouped32_zero_command(G32_STAGE_RADIX);
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u
+        || !grouped32_validation_addressable()) return;
+    if (!grouped32_core_buffers_bound()
+        || !grouped32_validation_bound() || !grouped32_adapter_bound()) {
+        grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+        validation_states[pc.validation_index].completion =
+            G32_COMPLETION_REJECTED;
+        return;
+    }
+    for (uint stage = 0u; stage < G32_STAGE_COUNT; ++stage) {
+        grouped32_zero_command(stage);
+    }
+    Grouped32ValidationState state =
+        validation_states[pc.validation_index];
+    Grouped32QueryAdapterState adapter =
+        adapter_states[pc.adapter_state_index];
+    uint query_minimizer_count = grouped32_query_minimizer_count();
+    uint required_workgroups = max(1u, grouped32_ceil_div(
+        max(pc.partition_count,
+            max(pc.query_record_count, query_minimizer_count)),
+        gl_WorkGroupSize.x));
+    bool accepted = gl_NumWorkGroups.x == 1u
+        && gl_NumWorkGroups.y == 1u && gl_NumWorkGroups.z == 1u
+        && state.completion == G32_COMPLETION_PENDING
+        && state.expected_workgroups == required_workgroups
+        && state.completed_workgroups == state.expected_workgroups
+        && state.status == 0u && state.reserved == 0u
+        && adapter.completion == G32_COMPLETION_ACCEPTED
+        && adapter.status == 0u && adapter.reserved0 == 0u
+        && adapter.reserved1 == 0u
+        && adapter.expected_records == pc.query_record_count
+        && adapter.completed_records == adapter.expected_records
+        && adapter.total_minimizers == query_minimizer_count
+        && pc.kmer_size == 15u && pc.flags == 0u
+        && pc.max_workgroups_x != 0u
+        && required_workgroups <= pc.max_workgroups_x
+        && pc.partition_count <= pc.max_partition_groups_y
+        && uint64_t(pc.indirect_base) + uint64_t(G32_STAGE_COUNT)
+            <= uint64_t(pc.indirect_command_count);
+    if (accepted) {
+        grouped32_publish_validated_commands(query_minimizer_count);
+        accepted = validation_states[pc.validation_index].status == 0u;
+    }
+    memoryBarrierBuffer();
+    validation_states[pc.validation_index].completion = accepted
+        ? G32_COMPLETION_ACCEPTED : G32_COMPLETION_REJECTED;
+    if (!accepted && validation_states[pc.validation_index].status == 0u) {
+        validation_states[pc.validation_index].status = G32_VALIDATION_GATE;
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32ValidateMain = R"GLSL(
+void main() {
+    if (!grouped32_validation_addressable()) return;
+    if (!grouped32_core_buffers_bound() || !grouped32_validation_bound()) {
+        if (gl_GlobalInvocationID.x == 0u) {
+            grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+        }
+        return;
+    }
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint query_minimizer_count = grouped32_query_minimizer_count();
+    if (gl_GlobalInvocationID.x == 0u) {
+        bool index_axes_disagree = pc.partition_count == 0u
+            ? pc.control_count != 0u || pc.position_count != 0u
+            : pc.control_count == 0u || pc.position_count == 0u;
+        if (index_axes_disagree) grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+        if (!grouped32_adapter_bound()) {
+            grouped32_fail(G32_ADAPTER_STATE);
+        } else {
+            Grouped32QueryAdapterState adapter =
+                adapter_states[pc.adapter_state_index];
+            if (adapter.completion != G32_COMPLETION_ACCEPTED
+                || adapter.status != 0u
+                || adapter.total_minimizers > pc.query_minimizer_capacity
+                || adapter.total_minimizers > pc.occurrence_count) {
+                grouped32_fail(G32_ADAPTER_STATE);
+            }
+        }
+        if (pc.occurrence_count < query_minimizer_count
+            || (pc.query_record_count == 0u
+                && query_minimizer_count != 0u)) {
+            grouped32_fail(G32_QUERY_BOUNDS);
+        }
+        if (pc.kmer_size != 15u || pc.flags != 0u
+            || pc.max_workgroups_x == 0u
+            || (pc.partition_count != 0u
+                && pc.max_partition_groups_y == 0u)) {
+            grouped32_fail(G32_DESCRIPTOR_IDENTITY);
+        }
+        if (grouped32_ceil_div(query_minimizer_count, gl_WorkGroupSize.x)
+                > pc.max_workgroups_x
+            || grouped32_ceil_div(pc.query_record_count, gl_WorkGroupSize.x)
+                > pc.max_workgroups_x
+            || pc.partition_count > pc.max_partition_groups_y) {
+            grouped32_fail(G32_INDIRECT_BOUNDS);
+        }
+        if (uint64_t(pc.indirect_base) + uint64_t(G32_STAGE_COUNT)
+                > uint64_t(pc.indirect_command_count)) {
+            grouped32_fail(G32_INDIRECT_BOUNDS);
+        }
+        Grouped32ValidationState state =
+            validation_states[pc.validation_index];
+        if (gl_NumWorkGroups.y != 1u || gl_NumWorkGroups.z != 1u
+            || state.expected_workgroups != gl_NumWorkGroups.x
+            || state.completion != G32_COMPLETION_PENDING) {
+            grouped32_fail(G32_VALIDATION_GATE);
+        }
+    }
+    for (uint ordinal = gl_GlobalInvocationID.x;
+         ordinal < pc.partition_count; ordinal += stride) {
+        Grouped32Partition part = partitions[ordinal];
+        bool failed = false;
+        if (!grouped32_partition_bounds_safe(part)
+            || part.control_count == 0u
+            || part.position_count == 0u) {
+            grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+            failed = true;
+        }
+        if (part.directory_ordinal != ordinal
+            || part.flags != 0u
+            || part.reserved0 != 0u
+            || part.reserved1 != 0u) {
+            grouped32_fail(G32_DESCRIPTOR_IDENTITY);
+            failed = true;
+        }
+        uint64_t control_end = uint64_t(part.control_offset)
+            + uint64_t(part.control_count);
+        uint64_t position_end = uint64_t(part.position_offset)
+            + uint64_t(part.position_count);
+        if ((ordinal == 0u
+                && (part.control_offset != 0u
+                    || part.position_offset != 0u))
+            || (ordinal != 0u
+                && (uint64_t(partitions[ordinal - 1u].control_offset)
+                        + uint64_t(partitions[ordinal - 1u].control_count)
+                            != uint64_t(part.control_offset)
+                    || uint64_t(partitions[ordinal - 1u].position_offset)
+                        + uint64_t(partitions[ordinal - 1u].position_count)
+                            != uint64_t(part.position_offset)))
+            || (ordinal + 1u == pc.partition_count
+                && (control_end != uint64_t(pc.control_count)
+                    || position_end != uint64_t(pc.position_count)))) {
+            grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+            failed = true;
+        }
+        if (ordinal != 0u) {
+            Grouped32Partition previous = partitions[ordinal - 1u];
+            bool ordered = part.partition_id > previous.partition_id
+                && (part.position_segment
+                    == previous.position_segment
+                ? part.segment_base_bp == previous.segment_base_bp
+                    && part.segment_end_bp == previous.segment_end_bp
+                    && part.low_hash > previous.high_hash
+                : part.position_segment > previous.position_segment
+                    && part.segment_base_bp >= previous.segment_end_bp);
+            if (!ordered) {
+                grouped32_fail(G32_DESCRIPTOR_IDENTITY);
+                failed = true;
+            }
+        }
+        if (part.segment_base_bp >= part.segment_end_bp
+            || part.segment_end_bp - part.segment_base_bp
+                > uint64_t(0x80000000u)
+            || part.low_hash > part.high_hash) {
+            grouped32_fail(G32_SEGMENT_BOUNDS);
+            failed = true;
+        }
+        if (!grouped32_partition_bounds_safe(part)
+            || part.control_count == 0u
+            || part.position_count == 0u
+            || part.segment_base_bp >= part.segment_end_bp) {
+            if (failed) {
+                atomicAdd(
+                    validation_states[pc.validation_index].failed_partitions,
+                    1u);
+            }
+            continue;
+        }
+
+        uint expected_position_offset = 0u;
+        uint previous_hash = 0u;
+        bool have_previous_hash = false;
+        uint checked_positions = 0u;
+        for (uint local_control = 0u;
+             local_control < part.control_count; ++local_control) {
+            Grouped32Control control =
+                controls[part.control_offset + local_control];
+            if ((have_previous_hash && control.hash <= previous_hash)
+                || control.hash < part.low_hash
+                || control.hash > part.high_hash) {
+                grouped32_fail(G32_CONTROL_ORDER);
+                failed = true;
+            }
+            if (control.position_count == 0u
+                || control.position_offset != expected_position_offset
+                || uint64_t(control.position_offset)
+                    + uint64_t(control.position_count)
+                        > uint64_t(part.position_count)) {
+                grouped32_fail(G32_CONTROL_POSITIONS);
+                failed = true;
+                continue;
+            }
+            previous_hash = control.hash;
+            have_previous_hash = true;
+            expected_position_offset =
+                control.position_offset + control.position_count;
+
+            uint previous_position = 0u;
+            bool have_previous_position = false;
+            for (uint local_position = 0u;
+                 local_position < control.position_count; ++local_position) {
+                uint encoded = local_positions[
+                    part.position_offset + control.position_offset
+                    + local_position];
+                uint local_bp = encoded >> 1u;
+                if (uint64_t(local_bp)
+                    >= part.segment_end_bp - part.segment_base_bp) {
+                    grouped32_fail(G32_POSITION_BOUNDS);
+                    failed = true;
+                }
+                if (have_previous_position && encoded <= previous_position) {
+                    grouped32_fail(G32_POSITION_ORDER);
+                    failed = true;
+                }
+                previous_position = encoded;
+                have_previous_position = true;
+                ++checked_positions;
+            }
+        }
+        if (!have_previous_hash
+            || controls[part.control_offset].hash != part.low_hash
+            || previous_hash != part.high_hash
+            || expected_position_offset != part.position_count) {
+            grouped32_fail(G32_CONTROL_POSITIONS);
+            failed = true;
+        }
+        atomicAdd(
+            validation_states[pc.validation_index].controls_checked,
+            part.control_count);
+        atomicAdd(
+            validation_states[pc.validation_index].positions_checked,
+            checked_positions);
+        if (failed) {
+            atomicAdd(
+                validation_states[pc.validation_index].failed_partitions, 1u);
+        }
+    }
+
+    // Query records are device-produced ABI, not host biological metadata.
+    // Validate their complete, non-overlapping slices in the same inactive
+    // structural pass. A future indirect dispatch must size this stage from
+    // max(partition_count, query_record_count, query_minimizer_count).
+    for (uint record_index = gl_GlobalInvocationID.x;
+         record_index < pc.query_record_count; record_index += stride) {
+        Grouped32QueryRecord record = query_records[record_index];
+        uint64_t minimizer_end = uint64_t(record.minimizer_offset)
+            + uint64_t(record.minimizer_count);
+        uint64_t anchor_end = uint64_t(record.anchor_base)
+            + uint64_t(record.anchor_capacity);
+        bool invalid = record.query_state_index != record_index
+            || record.occurrence_offset != record.minimizer_offset
+            || minimizer_end > uint64_t(query_minimizer_count)
+            || anchor_end > uint64_t(pc.anchor_capacity)
+            || record.query_length > 0x80000000u
+            || record.flags != 0u
+            || record.reserved0 != 0u
+            || record.reserved1 != 0u;
+        if (record_index == 0u) {
+            invalid = invalid || record.minimizer_offset != 0u;
+        } else {
+            Grouped32QueryRecord previous = query_records[record_index - 1u];
+            invalid = invalid
+                || uint64_t(previous.minimizer_offset)
+                    + uint64_t(previous.minimizer_count)
+                        != uint64_t(record.minimizer_offset)
+                || uint64_t(previous.anchor_base)
+                    + uint64_t(previous.anchor_capacity)
+                        > uint64_t(record.anchor_base)
+                || previous.batch_join_ordinal >= record.batch_join_ordinal;
+        }
+        if (record_index + 1u == pc.query_record_count) {
+            invalid = invalid
+                || minimizer_end != uint64_t(query_minimizer_count);
+        }
+        if (record.minimizer_count != 0u
+            && (pc.kmer_size != 15u || record.query_length < 15u)) {
+            invalid = true;
+        }
+        if (invalid) grouped32_fail(G32_QUERY_BOUNDS);
+    }
+    for (uint minimizer_index = gl_GlobalInvocationID.x;
+         minimizer_index < query_minimizer_count;
+         minimizer_index += stride) {
+        Grouped32QueryMinimizer minimizer = query_minimizers[minimizer_index];
+        Grouped32QueryRecord record;
+        if (!grouped32_query_minimizer_safe(
+                minimizer_index, minimizer, record)) {
+            continue;
+        }
+    }
+
+    // Workgroups only publish their completion count. A separately dispatched
+    // finalize shader consumes it after the typed compute-write/read barrier.
+    memoryBarrierBuffer();
+    barrier();
+    if (gl_LocalInvocationID.x == 0u) {
+        uint prior = atomicAdd(
+            validation_states[pc.validation_index].completed_workgroups, 1u);
+        uint expected =
+            validation_states[pc.validation_index].expected_workgroups;
+        if (prior + 1u > expected) {
+            grouped32_fail(G32_VALIDATION_GATE);
+        }
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32AccumulateOccurrencesMain = R"GLSL(
+void grouped32_saturating_target_add(uint occurrence_index, uint increment) {
+    // max_occ only supplies a safe saturation ceiling. No partition or segment
+    // is filtered here; the separate finalize kernel decides acceptance after
+    // every matching partition has contributed to this one global accumulator.
+    uint ceiling = pc.max_occ == 0xffffffffu
+        ? 0xffffffffu : pc.max_occ + 1u;
+    uint observed = occurrence_states[occurrence_index].global_count;
+    for (;;) {
+        if (observed >= ceiling) {
+            if (pc.max_occ == 0xffffffffu && increment != 0u) {
+                grouped32_fail(G32_OCCURRENCE_OVERFLOW);
+            }
+            return;
+        }
+        if (pc.max_occ == 0xffffffffu
+            && increment > 0xffffffffu - observed) {
+            // With filtering disabled a wrapped u32 would look accepted while
+            // losing anchors. Saturate for memory safety and poison proof.
+            grouped32_fail(G32_OCCURRENCE_OVERFLOW);
+        }
+        uint next = observed + min(increment, ceiling - observed);
+        uint prior = atomicCompSwap(
+            occurrence_states[occurrence_index].global_count,
+            observed,
+            next);
+        if (prior == observed) return;
+        observed = prior;
+    }
+}
+
+void main() {
+    if (!grouped32_validation_gate_open()) return;
+    uint query_minimizer_count = grouped32_query_minimizer_count();
+    uint minimizer_stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint partition_stride = gl_NumWorkGroups.y;
+    for (uint minimizer_index = gl_GlobalInvocationID.x;
+         minimizer_index < query_minimizer_count;
+         minimizer_index += minimizer_stride) {
+        Grouped32QueryMinimizer minimizer = query_minimizers[minimizer_index];
+        Grouped32QueryRecord record;
+        if (!grouped32_query_minimizer_safe(
+                minimizer_index, minimizer, record)) {
+            continue;
+        }
+        for (uint partition_index = gl_GlobalInvocationID.y;
+             partition_index < pc.partition_count;
+             partition_index += partition_stride) {
+            Grouped32Partition part = partitions[partition_index];
+            if (!grouped32_partition_bounds_safe(part)) {
+                grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+                continue;
+            }
+            if (part.segment_base_bp >= part.segment_end_bp
+                || part.segment_end_bp - part.segment_base_bp
+                    > uint64_t(0x80000000u)) {
+                grouped32_fail(G32_SEGMENT_BOUNDS);
+                continue;
+            }
+            if (minimizer.hash < part.low_hash
+                || minimizer.hash > part.high_hash) {
+                continue;
+            }
+            Grouped32Control control;
+            if (grouped32_find_control(part, minimizer.hash, control)) {
+                grouped32_saturating_target_add(
+                    minimizer.occurrence_index, control.position_count);
+            }
+        }
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32FinalizeMaxOccMain = R"GLSL(
+void main() {
+    if (!grouped32_validation_gate_open()) return;
+    uint query_minimizer_count = grouped32_query_minimizer_count();
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint minimizer_index = gl_GlobalInvocationID.x;
+         minimizer_index < query_minimizer_count;
+         minimizer_index += stride) {
+        Grouped32QueryMinimizer minimizer = query_minimizers[minimizer_index];
+        Grouped32QueryRecord record;
+        if (!grouped32_query_minimizer_safe(
+                minimizer_index, minimizer, record)) {
+            continue;
+        }
+        uint total = occurrence_states[minimizer.occurrence_index].global_count;
+        uint accepted = total <= pc.max_occ ? total : 0u;
+        occurrence_states[minimizer.occurrence_index].accepted_count = accepted;
+        occurrence_states[minimizer.occurrence_index].anchor_offset = 0u;
+        occurrence_states[minimizer.occurrence_index].emitted_count = 0u;
+        if (accepted == 0u && total != 0u) {
+            atomicAdd(
+                query_states[record.query_state_index].rejected_minimizers,
+                1u);
+        }
+        atomicAdd(
+            query_states[record.query_state_index].completed_minimizers, 1u);
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32AllocateAnchorPrefixMain = R"GLSL(
+void main() {
+    if (!grouped32_validation_gate_open()) return;
+    // Coarse scan candidate: one invocation owns one complete query slice.
+    // Benchmark it against hierarchical_segmented_scan before activation.
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint record_index = gl_GlobalInvocationID.x;
+        record_index < pc.query_record_count; record_index += stride) {
+        Grouped32QueryRecord record = query_records[record_index];
+        if (!grouped32_query_record_safe(record_index, record)) continue;
+        uint64_t total = uint64_t(0);
+        bool occurrence_bounds_valid = true;
+        for (uint local = 0u; local < record.minimizer_count; ++local) {
+            uint64_t occurrence_index_wide = uint64_t(record.occurrence_offset)
+                + uint64_t(local);
+            if (occurrence_index_wide >= uint64_t(pc.occurrence_count)) {
+                grouped32_fail(G32_QUERY_BOUNDS);
+                occurrence_bounds_valid = false;
+                break;
+            }
+            uint occurrence_index = uint(occurrence_index_wide);
+            total += uint64_t(
+                occurrence_states[occurrence_index].accepted_count);
+        }
+        if (!occurrence_bounds_valid) continue;
+        if (total > uint64_t(record.anchor_capacity)) {
+            query_states[record.query_state_index].status = G32_ANCHOR_CAPACITY;
+            grouped32_fail(G32_ANCHOR_CAPACITY);
+            continue;
+        }
+        uint64_t cursor = uint64_t(record.anchor_base);
+        for (uint local = 0u; local < record.minimizer_count; ++local) {
+            uint64_t occurrence_index_wide = uint64_t(record.occurrence_offset)
+                + uint64_t(local);
+            if (occurrence_index_wide >= uint64_t(pc.occurrence_count)
+                || cursor > uint64_t(0xffffffffu)) {
+                grouped32_fail(G32_QUERY_BOUNDS);
+                occurrence_bounds_valid = false;
+                break;
+            }
+            uint occurrence_index = uint(occurrence_index_wide);
+            occurrence_states[occurrence_index].anchor_offset = uint(cursor);
+            occurrence_states[occurrence_index].emitted_count = 0u;
+            cursor += uint64_t(
+                occurrence_states[occurrence_index].accepted_count);
+        }
+        if (occurrence_bounds_valid) {
+            query_states[record.query_state_index].anchor_count = uint(total);
+        }
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32BuildSortSegmentsMain = R"GLSL(
+void main() {
+    if (!grouped32_validation_gate_open()) return;
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint record_index = gl_GlobalInvocationID.x;
+        record_index < pc.query_record_count; record_index += stride) {
+        Grouped32QueryRecord record = query_records[record_index];
+        if (!grouped32_query_record_safe(record_index, record)) continue;
+        Grouped32QueryState state = query_states[record.query_state_index];
+        if (state.status != 0u
+            || state.anchor_count > record.anchor_capacity) {
+            grouped32_fail(G32_SORT_OWNERSHIP);
+            continue;
+        }
+        sort_segments[record_index].anchor_begin = record.anchor_base;
+        sort_segments[record_index].anchor_count = state.anchor_count;
+        sort_segments[record_index].query_state_index = record.query_state_index;
+        sort_segments[record_index].flags = 0u;
+        sort_segments[record_index].batch_join_ordinal =
+            record.batch_join_ordinal;
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32EmitGlobalAnchorsMain = R"GLSL(
+void main() {
+    if (!grouped32_validation_gate_open()) return;
+    uint query_minimizer_count = grouped32_query_minimizer_count();
+    uint minimizer_stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint partition_stride = gl_NumWorkGroups.y;
+    for (uint minimizer_index = gl_GlobalInvocationID.x;
+         minimizer_index < query_minimizer_count;
+         minimizer_index += minimizer_stride) {
+        Grouped32QueryMinimizer minimizer = query_minimizers[minimizer_index];
+        Grouped32QueryRecord record;
+        if (!grouped32_query_minimizer_safe(
+                minimizer_index, minimizer, record)) {
+            continue;
+        }
+        uint accepted =
+            occurrence_states[minimizer.occurrence_index].accepted_count;
+        if (accepted == 0u) continue;
+        uint query_bp = minimizer.query_bp_strand >> 1u;
+        uint query_strand = minimizer.query_bp_strand & 1u;
+        uint64_t reverse_base = uint64_t(record.query_length)
+            + uint64_t(pc.kmer_size) - uint64_t(2);
+
+        for (uint partition_index = gl_GlobalInvocationID.y;
+             partition_index < pc.partition_count;
+             partition_index += partition_stride) {
+            Grouped32Partition part = partitions[partition_index];
+            if (!grouped32_partition_bounds_safe(part)) {
+                grouped32_fail(G32_DESCRIPTOR_BOUNDS);
+                continue;
+            }
+            if (part.segment_base_bp >= part.segment_end_bp
+                || part.segment_end_bp - part.segment_base_bp
+                    > uint64_t(0x80000000u)) {
+                grouped32_fail(G32_SEGMENT_BOUNDS);
+                continue;
+            }
+            if (minimizer.hash < part.low_hash
+                || minimizer.hash > part.high_hash) {
+                continue;
+            }
+            Grouped32Control control;
+            if (!grouped32_find_control(part, minimizer.hash, control)) {
+                continue;
+            }
+            if (uint64_t(control.position_offset)
+                    + uint64_t(control.position_count)
+                        > uint64_t(part.position_count)) {
+                grouped32_fail(G32_CONTROL_POSITIONS);
+                continue;
+            }
+
+            uint emitted_before = atomicAdd(
+                occurrence_states[minimizer.occurrence_index].emitted_count,
+                control.position_count);
+            if (emitted_before > accepted
+                || control.position_count > accepted - emitted_before) {
+                grouped32_fail(G32_EMITTED_COUNT);
+                continue;
+            }
+            uint64_t anchor_base_wide = uint64_t(
+                occurrence_states[minimizer.occurrence_index].anchor_offset)
+                + uint64_t(emitted_before);
+            for (uint local = 0u; local < control.position_count; ++local) {
+                uint encoded = local_positions[
+                    part.position_offset + control.position_offset + local];
+                uint local_bp = encoded >> 1u;
+                if (uint64_t(local_bp)
+                    >= part.segment_end_bp - part.segment_base_bp) {
+                    grouped32_fail(G32_POSITION_BOUNDS);
+                    continue;
+                }
+                uint target_strand = encoded & 1u;
+                uint reverse = target_strand ^ query_strand;
+                uint64_t query_position = reverse != 0u
+                    ? reverse_base - uint64_t(query_bp)
+                    : uint64_t(query_bp);
+                uint64_t anchor_index_wide = anchor_base_wide
+                    + uint64_t(local);
+                if (anchor_index_wide >= uint64_t(pc.anchor_capacity)
+                    || anchor_index_wide < uint64_t(record.anchor_base)
+                    || anchor_index_wide
+                        >= uint64_t(record.anchor_base)
+                            + uint64_t(record.anchor_capacity)) {
+                    grouped32_fail(G32_ANCHOR_CAPACITY);
+                    continue;
+                }
+                uint anchor_index = uint(anchor_index_wide);
+                global_anchors[anchor_index].ref_position =
+                    part.segment_base_bp + uint64_t(local_bp);
+                global_anchors[anchor_index].query_position = query_position;
+                global_anchors[anchor_index].is_reverse = reverse;
+                global_anchors[anchor_index].span_flags_segment =
+                    pc.kmer_size & 0xffu;
+                anchor_radix_keys[anchor_index].ref_position =
+                    part.segment_base_bp + uint64_t(local_bp);
+                anchor_radix_keys[anchor_index].is_reverse = reverse;
+                anchor_radix_keys[anchor_index].query_state_index =
+                    record.query_state_index;
+            }
+        }
+    }
+}
+)GLSL";
+
+// Adapter from the existing device-resident Phase-C packed-sketch output to
+// grouped32 query records/minimizers. Biological hash/position decoding and
+// the total minimizer count remain on device; the host supplies only trusted
+// scheduling/query identity metadata. One workgroup owns one whole query so
+// record publication cannot race across queries. A COMPUTE_SHADER write ->
+// COMPUTE_SHADER read barrier is required before indirect preparation.
+constexpr std::string_view kPhaseCGrouped32AdaptQuerySketchBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct Grouped32SketchQueryPlan {
+    uint first_tile;
+    uint tile_count;
+    uint query_length;
+    uint query_state_index;
+    uint anchor_base;
+    uint anchor_capacity;
+    uint flags;
+    uint reserved0;
+    uint64_t batch_join_ordinal;
+    uint64_t reserved1;
+};
+struct Grouped32QueryRecord {
+    uint minimizer_offset;
+    uint minimizer_count;
+    uint query_length;
+    uint query_state_index;
+    uint occurrence_offset;
+    uint anchor_base;
+    uint anchor_capacity;
+    uint flags;
+    uint64_t batch_join_ordinal;
+    uint reserved0;
+    uint reserved1;
+};
+struct Grouped32QueryMinimizer {
+    uint hash;
+    uint query_bp_strand;
+    uint occurrence_index;
+    uint query_record_index;
+};
+struct Grouped32QueryAdapterState {
+    uint status;
+    uint completed_records;
+    uint expected_records;
+    uint total_minimizers;
+    uint max_query_minimizers;
+    uint completion;
+    uint reserved0;
+    uint reserved1;
+};
+struct Grouped32ValidationState {
+    uint status;
+    uint failed_partitions;
+    uint controls_checked;
+    uint positions_checked;
+    uint completed_workgroups;
+    uint expected_workgroups;
+    uint completion;
+    uint reserved;
+};
+struct Grouped32DispatchIndirectCommand {
+    uint group_count_x;
+    uint group_count_y;
+    uint group_count_z;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer PackedMinimizers {
+    uint packed_words[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer TileCounts {
+    uint tile_counts[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer TileOffsets {
+    uint tile_offsets[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer QueryPlans {
+    Grouped32SketchQueryPlan query_plans[];
+};
+layout(std430, set = 0, binding = 4) buffer QueryRecords {
+    Grouped32QueryRecord query_records[];
+};
+layout(std430, set = 0, binding = 5) buffer QueryMinimizers {
+    Grouped32QueryMinimizer query_minimizers[];
+};
+layout(std430, set = 0, binding = 6) buffer AdapterStates {
+    Grouped32QueryAdapterState adapter_states[];
+};
+layout(std430, set = 0, binding = 7) buffer ValidationStates {
+    Grouped32ValidationState validation_states[];
+};
+layout(std430, set = 0, binding = 8) buffer IndirectCommands {
+    Grouped32DispatchIndirectCommand indirect_commands[];
+};
+
+layout(push_constant) uniform Params {
+    uint query_plan_count;
+    uint tile_count;
+    uint packed_minimizer_capacity;
+    uint minimizer_word_kind;
+    uint minimizer_words32;
+    uint hash_shift;
+    uint pos_bits;
+    uint kmer_size;
+    uint adapter_state_index;
+    uint adapter_state_count;
+    uint validation_index;
+    uint validation_state_count;
+    uint indirect_base;
+    uint indirect_command_count;
+    uint max_workgroups_x;
+    uint max_partition_groups_y;
+} pc;
+
+const uint G32_QUERY_BOUNDS = 1u << 7u;
+const uint G32_DESCRIPTOR_BOUNDS = 1u << 0u;
+const uint G32_ADAPTER_STATE = 1u << 12u;
+const uint G32_INDIRECT_BOUNDS = 1u << 13u;
+const uint G32_COMPLETION_PENDING = 0u;
+const uint G32_COMPLETION_ACCEPTED = 1u;
+const uint G32_COMPLETION_REJECTED = 2u;
+const uint G32_STAGE_COUNT = 7u;
+
+shared uint g32a_begin;
+shared uint g32a_count;
+shared uint g32a_valid;
+
+bool g32a_state_addressable() {
+    return pc.adapter_state_index < uint(adapter_states.length());
+}
+bool g32a_state_bound() {
+    return pc.adapter_state_count <= uint(adapter_states.length())
+        && pc.adapter_state_index < pc.adapter_state_count;
+}
+bool g32a_buffers_bound() {
+    return pc.minimizer_words32 <= uint(packed_words.length())
+        && pc.tile_count <= uint(tile_counts.length())
+        && pc.tile_count <= uint(tile_offsets.length())
+        && pc.query_plan_count <= uint(query_plans.length())
+        && pc.query_plan_count <= uint(query_records.length())
+        && pc.packed_minimizer_capacity <= uint(query_minimizers.length())
+        && pc.adapter_state_count <= uint(adapter_states.length())
+        && pc.validation_state_count <= uint(validation_states.length())
+        && pc.indirect_command_count <= uint(indirect_commands.length());
+}
+void g32a_fail(uint bit) {
+    if (g32a_state_addressable()) {
+        atomicOr(adapter_states[pc.adapter_state_index].status, bit);
+    }
+    atomicAnd(g32a_valid, 0u);
+}
+bool g32a_word_bound(uint64_t word) {
+    return pc.minimizer_words32 <= uint(packed_words.length())
+        && word < uint64_t(pc.minimizer_words32);
+}
+
+bool g32a_decode(uint minimizer_index, out uint hash, out uint encoded) {
+    uint64_t hash64 = uint64_t(0);
+    uint64_t encoded64 = uint64_t(0);
+    if (pc.minimizer_word_kind == 0u) {
+        uint64_t word = uint64_t(minimizer_index) >> 1u;
+        if (!g32a_word_bound(word) || pc.hash_shift >= 16u) return false;
+        uint raw = (packed_words[uint(word)]
+            >> ((minimizer_index & 1u) * 16u)) & 0xffffu;
+        uint mask = pc.pos_bits >= 15u
+            ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        hash64 = uint64_t(raw >> pc.hash_shift);
+        encoded64 = uint64_t(raw & mask);
+    } else if (pc.minimizer_word_kind == 1u) {
+        uint64_t word = uint64_t(minimizer_index);
+        if (!g32a_word_bound(word) || pc.hash_shift >= 32u) return false;
+        uint raw = packed_words[uint(word)];
+        uint mask = pc.pos_bits >= 31u
+            ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        hash64 = uint64_t(raw) >> pc.hash_shift;
+        encoded64 = uint64_t(raw & mask);
+    } else if (pc.minimizer_word_kind == 2u) {
+        uint64_t word = uint64_t(minimizer_index) * uint64_t(2);
+        if (!g32a_word_bound(word + uint64_t(1))
+            || pc.hash_shift >= 64u) return false;
+        uint64_t raw = uint64_t(packed_words[uint(word)])
+            | (uint64_t(packed_words[uint(word + uint64_t(1))]) << 32u);
+        uint64_t mask = pc.pos_bits >= 63u
+            ? ~uint64_t(0)
+            : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
+        hash64 = raw >> pc.hash_shift;
+        encoded64 = raw & mask;
+    } else if (pc.minimizer_word_kind == 3u) {
+        uint64_t word = uint64_t(minimizer_index) * uint64_t(4);
+        if (!g32a_word_bound(word + uint64_t(3))) return false;
+        encoded64 = uint64_t(packed_words[uint(word)])
+            | (uint64_t(packed_words[uint(word + uint64_t(1))]) << 32u);
+        uint64_t high = uint64_t(packed_words[uint(word + uint64_t(2))])
+            | (uint64_t(packed_words[uint(word + uint64_t(3))]) << 32u);
+        if ((high & uint64_t(0xff)) != uint64_t(15)) return false;
+        hash64 = high >> 8u;
+    } else {
+        return false;
+    }
+    if (hash64 > uint64_t(0xffffffffu)
+        || encoded64 > uint64_t(0xffffffffu)) return false;
+    hash = uint(hash64);
+    encoded = uint(encoded64);
+    return true;
+}
+
+void main() {
+    uint record_index = gl_WorkGroupID.x;
+    if (record_index >= pc.query_plan_count || !g32a_state_addressable()) return;
+    if (gl_LocalInvocationID.x == 0u) {
+        g32a_valid = 1u;
+        g32a_begin = 0u;
+        g32a_count = 0u;
+        if (!g32a_buffers_bound() || !g32a_state_bound()) {
+            g32a_fail(G32_DESCRIPTOR_BOUNDS);
+        } else {
+        Grouped32QueryAdapterState state =
+            adapter_states[pc.adapter_state_index];
+        if (state.expected_records != pc.query_plan_count
+            || state.completion != G32_COMPLETION_PENDING
+            || state.reserved0 != 0u || state.reserved1 != 0u) {
+            g32a_fail(G32_ADAPTER_STATE);
+        }
+        if (pc.kmer_size != 15u || pc.pos_bits > 31u
+            || pc.minimizer_word_kind > 3u
+            || (pc.minimizer_word_kind <= 2u
+                && pc.hash_shift != pc.pos_bits + 1u)
+            || pc.max_workgroups_x == 0u
+            || pc.query_plan_count > pc.max_workgroups_x
+            || gl_NumWorkGroups.x != pc.query_plan_count
+            || gl_NumWorkGroups.y != 1u || gl_NumWorkGroups.z != 1u) {
+            g32a_fail(G32_QUERY_BOUNDS);
+        }
+        if (pc.validation_index >= pc.validation_state_count
+            || uint64_t(pc.indirect_base) + uint64_t(G32_STAGE_COUNT)
+                > uint64_t(pc.indirect_command_count)) {
+            g32a_fail(G32_INDIRECT_BOUNDS);
+        }
+
+        Grouped32SketchQueryPlan plan = query_plans[record_index];
+        uint64_t tile_end = uint64_t(plan.first_tile)
+            + uint64_t(plan.tile_count);
+        if (plan.query_state_index != record_index
+            || plan.tile_count == 0u || tile_end > uint64_t(pc.tile_count)
+            || plan.query_length > 0x80000000u
+            || plan.flags != 0u || plan.reserved0 != 0u
+            || plan.reserved1 != uint64_t(0)) {
+            g32a_fail(G32_QUERY_BOUNDS);
+        } else {
+            uint begin = tile_offsets[plan.first_tile];
+            uint64_t count64 = uint64_t(0);
+            for (uint local_tile = 0u; local_tile < plan.tile_count;
+                 ++local_tile) {
+                uint tile = plan.first_tile + local_tile;
+                uint offset = tile_offsets[tile];
+                if (uint64_t(offset) != uint64_t(begin) + count64) {
+                    g32a_fail(G32_QUERY_BOUNDS);
+                    break;
+                }
+                count64 += uint64_t(tile_counts[tile]);
+            }
+            if (uint64_t(begin) + count64
+                    > uint64_t(pc.packed_minimizer_capacity)
+                || count64 > uint64_t(0xffffffffu)
+                || (count64 != uint64_t(0) && plan.query_length < 15u)) {
+                g32a_fail(G32_QUERY_BOUNDS);
+            }
+            g32a_begin = begin;
+            g32a_count = uint(count64);
+        }
+
+        if (record_index == 0u) {
+            if (query_plans[record_index].first_tile != 0u
+                || g32a_begin != 0u) g32a_fail(G32_QUERY_BOUNDS);
+        } else {
+            Grouped32SketchQueryPlan previous = query_plans[record_index - 1u];
+            uint64_t previous_tile_end = uint64_t(previous.first_tile)
+                + uint64_t(previous.tile_count);
+            if (previous_tile_end
+                    != uint64_t(query_plans[record_index].first_tile)
+                || previous.batch_join_ordinal
+                    >= query_plans[record_index].batch_join_ordinal
+                || uint64_t(previous.anchor_base)
+                    + uint64_t(previous.anchor_capacity)
+                        > uint64_t(query_plans[record_index].anchor_base)) {
+                g32a_fail(G32_QUERY_BOUNDS);
+            }
+        }
+        if (record_index + 1u == pc.query_plan_count
+            && uint64_t(query_plans[record_index].first_tile)
+                + uint64_t(query_plans[record_index].tile_count)
+                    != uint64_t(pc.tile_count)) {
+            g32a_fail(G32_QUERY_BOUNDS);
+        }
+
+        if (g32a_valid == 0u) g32a_count = 0u;
+
+        query_records[record_index].minimizer_offset = g32a_begin;
+        query_records[record_index].minimizer_count = g32a_count;
+        query_records[record_index].query_length = plan.query_length;
+        query_records[record_index].query_state_index = record_index;
+        query_records[record_index].occurrence_offset = g32a_begin;
+        query_records[record_index].anchor_base = plan.anchor_base;
+        query_records[record_index].anchor_capacity = plan.anchor_capacity;
+        query_records[record_index].flags = 0u;
+        query_records[record_index].batch_join_ordinal =
+            plan.batch_join_ordinal;
+        query_records[record_index].reserved0 = 0u;
+        query_records[record_index].reserved1 = 0u;
+        atomicMax(adapter_states[pc.adapter_state_index].max_query_minimizers,
+                  g32a_count);
+        }
+    }
+    barrier();
+
+    for (uint local = gl_LocalInvocationID.x; local < g32a_count;
+         local += gl_WorkGroupSize.x) {
+        uint minimizer_index = g32a_begin + local;
+        uint hash = 0u;
+        uint encoded = 0u;
+        Grouped32SketchQueryPlan plan = query_plans[record_index];
+        if (!g32a_decode(minimizer_index, hash, encoded)
+            || (encoded >> 1u) >= plan.query_length
+            || (encoded >> 1u) + 1u < pc.kmer_size) {
+            g32a_fail(G32_QUERY_BOUNDS);
+            continue;
+        }
+        query_minimizers[minimizer_index].hash = hash;
+        query_minimizers[minimizer_index].query_bp_strand = encoded;
+        query_minimizers[minimizer_index].occurrence_index = minimizer_index;
+        query_minimizers[minimizer_index].query_record_index = record_index;
+    }
+    memoryBarrierBuffer();
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0u) {
+        // Contiguous query slices make max(end) the authoritative device-side
+        // total regardless of which workgroup reaches completion last.
+        atomicMax(adapter_states[pc.adapter_state_index].total_minimizers,
+                  g32a_begin + g32a_count);
+        uint prior = atomicAdd(
+            adapter_states[pc.adapter_state_index].completed_records, 1u);
+        uint expected = adapter_states[pc.adapter_state_index].expected_records;
+        if (prior + 1u > expected) {
+            g32a_fail(G32_ADAPTER_STATE);
+        }
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32FinalizeQueryAdapterBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+struct Grouped32SketchQueryPlan {
+    uint first_tile; uint tile_count; uint query_length; uint query_state_index;
+    uint anchor_base; uint anchor_capacity; uint flags; uint reserved0;
+    uint64_t batch_join_ordinal; uint64_t reserved1;
+};
+struct Grouped32QueryRecord {
+    uint minimizer_offset; uint minimizer_count; uint query_length;
+    uint query_state_index; uint occurrence_offset; uint anchor_base;
+    uint anchor_capacity; uint flags; uint64_t batch_join_ordinal;
+    uint reserved0; uint reserved1;
+};
+struct Grouped32QueryMinimizer {
+    uint hash; uint query_bp_strand; uint occurrence_index;
+    uint query_record_index;
+};
+struct Grouped32QueryAdapterState {
+    uint status; uint completed_records; uint expected_records;
+    uint total_minimizers; uint max_query_minimizers; uint completion;
+    uint reserved0; uint reserved1;
+};
+struct Grouped32ValidationState {
+    uint status; uint failed_partitions; uint controls_checked;
+    uint positions_checked; uint completed_workgroups;
+    uint expected_workgroups; uint completion; uint reserved;
+};
+struct Grouped32DispatchIndirectCommand {
+    uint group_count_x; uint group_count_y; uint group_count_z;
+};
+layout(std430, set = 0, binding = 0) readonly buffer PackedMinimizers {
+    uint packed_words[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer TileCounts {
+    uint tile_counts[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer TileOffsets {
+    uint tile_offsets[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer QueryPlans {
+    Grouped32SketchQueryPlan query_plans[];
+};
+layout(std430, set = 0, binding = 4) readonly buffer QueryRecords {
+    Grouped32QueryRecord query_records[];
+};
+layout(std430, set = 0, binding = 5) readonly buffer QueryMinimizers {
+    Grouped32QueryMinimizer query_minimizers[];
+};
+layout(std430, set = 0, binding = 6) buffer AdapterStates {
+    Grouped32QueryAdapterState adapter_states[];
+};
+layout(std430, set = 0, binding = 7) readonly buffer ValidationStates {
+    Grouped32ValidationState validation_states[];
+};
+layout(std430, set = 0, binding = 8) readonly buffer IndirectCommands {
+    Grouped32DispatchIndirectCommand indirect_commands[];
+};
+layout(push_constant) uniform Params {
+    uint query_plan_count; uint tile_count; uint packed_minimizer_capacity;
+    uint minimizer_word_kind; uint minimizer_words32; uint hash_shift;
+    uint pos_bits; uint kmer_size; uint adapter_state_index;
+    uint adapter_state_count; uint validation_index;
+    uint validation_state_count; uint indirect_base;
+    uint indirect_command_count; uint max_workgroups_x;
+    uint max_partition_groups_y;
+} pc;
+const uint G32_DESCRIPTOR_BOUNDS = 1u << 0u;
+const uint G32_ADAPTER_STATE = 1u << 12u;
+const uint G32_COMPLETION_PENDING = 0u;
+const uint G32_COMPLETION_ACCEPTED = 1u;
+const uint G32_COMPLETION_REJECTED = 2u;
+const uint G32_STAGE_COUNT = 7u;
+void main() {
+    bool state_addressable =
+        pc.adapter_state_index < uint(adapter_states.length());
+    if (gl_GlobalInvocationID.x != 0u || !state_addressable) return;
+    bool buffers_bound = pc.minimizer_words32 <= uint(packed_words.length())
+        && pc.tile_count <= uint(tile_counts.length())
+        && pc.tile_count <= uint(tile_offsets.length())
+        && pc.query_plan_count <= uint(query_plans.length())
+        && pc.query_plan_count <= uint(query_records.length())
+        && pc.packed_minimizer_capacity <= uint(query_minimizers.length())
+        && pc.adapter_state_count <= uint(adapter_states.length())
+        && pc.adapter_state_index < pc.adapter_state_count
+        && pc.validation_state_count <= uint(validation_states.length())
+        && pc.validation_index < pc.validation_state_count
+        && pc.indirect_command_count <= uint(indirect_commands.length())
+        && uint64_t(pc.indirect_base) + uint64_t(G32_STAGE_COUNT)
+            <= uint64_t(pc.indirect_command_count);
+    if (!buffers_bound) {
+        adapter_states[pc.adapter_state_index].status |= G32_DESCRIPTOR_BOUNDS;
+        adapter_states[pc.adapter_state_index].completion =
+            G32_COMPLETION_REJECTED;
+        return;
+    }
+    Grouped32QueryAdapterState state =
+        adapter_states[pc.adapter_state_index];
+    bool accepted = gl_NumWorkGroups.x == 1u
+        && gl_NumWorkGroups.y == 1u && gl_NumWorkGroups.z == 1u
+        && state.completion == G32_COMPLETION_PENDING
+        && state.expected_records == pc.query_plan_count
+        && state.completed_records == state.expected_records
+        && state.status == 0u && state.reserved0 == 0u
+        && state.reserved1 == 0u
+        && state.total_minimizers <= pc.packed_minimizer_capacity
+        && state.max_query_minimizers <= state.total_minimizers
+        && pc.kmer_size == 15u && pc.pos_bits <= 31u
+        && pc.minimizer_word_kind <= 3u
+        && (pc.minimizer_word_kind > 2u
+            || pc.hash_shift == pc.pos_bits + 1u)
+        && pc.max_workgroups_x != 0u
+        && pc.query_plan_count <= pc.max_workgroups_x;
+    if (accepted && pc.query_plan_count != 0u) {
+        Grouped32QueryRecord last = query_records[pc.query_plan_count - 1u];
+        accepted = uint64_t(last.minimizer_offset)
+                + uint64_t(last.minimizer_count)
+                    == uint64_t(state.total_minimizers);
+    } else if (accepted) {
+        accepted = state.total_minimizers == 0u;
+    }
+    adapter_states[pc.adapter_state_index].completion = accepted
+        ? G32_COMPLETION_ACCEPTED : G32_COMPLETION_REJECTED;
+    if (!accepted && adapter_states[pc.adapter_state_index].status == 0u) {
+        adapter_states[pc.adapter_state_index].status = G32_ADAPTER_STATE;
+    }
+}
+)GLSL";
+
+// Device-side command preparation. This pass is the only writer that resets
+// the bound validation token and opens the validation indirect command. The
+// command buffer inserts a COMPUTE_SHADER write -> INDIRECT_COMMAND_READ
+// barrier before vkCmdDispatchIndirect(validate), a compute-write/read barrier
+// before the separate validation finalizer, and only then a compute-write ->
+// indirect/compute barrier before downstream consumption.
+constexpr std::string_view kPhaseCGrouped32PrepareIndirectBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+struct Grouped32Partition {
+    uint partition_id;
+    uint directory_ordinal;
+    uint position_segment;
+    uint control_offset;
+    uint control_count;
+    uint position_offset;
+    uint position_count;
+    uint low_hash;
+    uint high_hash;
+    uint flags;
+    uint64_t segment_base_bp;
+    uint64_t segment_end_bp;
+    uint reserved0;
+    uint reserved1;
+};
+struct Grouped32QueryRecord {
+    uint minimizer_offset;
+    uint minimizer_count;
+    uint query_length;
+    uint query_state_index;
+    uint occurrence_offset;
+    uint anchor_base;
+    uint anchor_capacity;
+    uint flags;
+    uint64_t batch_join_ordinal;
+    uint reserved0;
+    uint reserved1;
+};
+struct Grouped32QueryAdapterState {
+    uint status;
+    uint completed_records;
+    uint expected_records;
+    uint total_minimizers;
+    uint max_query_minimizers;
+    uint completion;
+    uint reserved0;
+    uint reserved1;
+};
+struct Grouped32ValidationState {
+    uint status;
+    uint failed_partitions;
+    uint controls_checked;
+    uint positions_checked;
+    uint completed_workgroups;
+    uint expected_workgroups;
+    uint completion;
+    uint reserved;
+};
+struct Grouped32DispatchIndirectCommand {
+    uint group_count_x;
+    uint group_count_y;
+    uint group_count_z;
+};
+layout(std430, set = 0, binding = 0) readonly buffer Partitions {
+    Grouped32Partition partitions[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer QueryRecords {
+    Grouped32QueryRecord query_records[];
+};
+layout(std430, set = 0, binding = 12) readonly buffer AdapterStates {
+    Grouped32QueryAdapterState adapter_states[];
+};
+layout(std430, set = 0, binding = 8) buffer ValidationStates {
+    Grouped32ValidationState validation_states[];
+};
+layout(std430, set = 0, binding = 9) buffer IndirectCommands {
+    Grouped32DispatchIndirectCommand indirect_commands[];
+};
+layout(push_constant) uniform Params {
+    uint partition_count;
+    uint query_record_count;
+    uint adapter_state_index;
+    uint adapter_state_count;
+    uint validation_index;
+    uint validation_state_count;
+    uint indirect_base;
+    uint indirect_command_count;
+    uint max_workgroups_x;
+    uint max_partition_groups_y;
+    uint local_size_x;
+    uint flags;
+} pc;
+const uint G32_DESCRIPTOR_BOUNDS = 1u << 0u;
+const uint G32_ADAPTER_STATE = 1u << 12u;
+const uint G32_INDIRECT_BOUNDS = 1u << 13u;
+const uint G32_COMPLETION_PENDING = 0u;
+const uint G32_COMPLETION_ACCEPTED = 1u;
+const uint G32_COMPLETION_REJECTED = 2u;
+const uint G32_STAGE_VALIDATE = 0u;
+const uint G32_STAGE_COUNT = 7u;
+uint g32p_ceil_div(uint value, uint divisor) {
+    return divisor == 0u ? 0u
+        : value / divisor + (value % divisor != 0u ? 1u : 0u);
+}
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+    bool validation_addressable =
+        pc.validation_index < uint(validation_states.length());
+    if (!validation_addressable) return;
+    bool validation_bound =
+        pc.validation_state_count <= uint(validation_states.length())
+        && pc.validation_index < pc.validation_state_count;
+    bool adapter_bound =
+        pc.adapter_state_count <= uint(adapter_states.length())
+        && pc.adapter_state_index < pc.adapter_state_count;
+    bool indirect_bound =
+        pc.indirect_command_count <= uint(indirect_commands.length())
+        && uint64_t(pc.indirect_base)
+        + uint64_t(G32_STAGE_COUNT)
+            <= uint64_t(pc.indirect_command_count);
+    bool input_counts_bound =
+        pc.partition_count <= uint(partitions.length())
+        && pc.query_record_count <= uint(query_records.length());
+    if (!validation_bound || !adapter_bound || !indirect_bound
+        || !input_counts_bound) {
+        Grouped32ValidationState rejected;
+        rejected.status = !validation_bound || !input_counts_bound
+            ? G32_DESCRIPTOR_BOUNDS
+            : (!adapter_bound ? G32_ADAPTER_STATE : G32_INDIRECT_BOUNDS);
+        rejected.failed_partitions = 0u;
+        rejected.controls_checked = 0u;
+        rejected.positions_checked = 0u;
+        rejected.completed_workgroups = 0u;
+        rejected.expected_workgroups = 0u;
+        rejected.completion = G32_COMPLETION_REJECTED;
+        rejected.reserved = 0u;
+        validation_states[pc.validation_index] = rejected;
+        memoryBarrierBuffer();
+        return;
+    }
+    for (uint stage = 0u; stage < G32_STAGE_COUNT; ++stage) {
+        uint command = pc.indirect_base + stage;
+        indirect_commands[command].group_count_x = 0u;
+        indirect_commands[command].group_count_y = 0u;
+        indirect_commands[command].group_count_z = 0u;
+    }
+    Grouped32QueryAdapterState adapter =
+        adapter_states[pc.adapter_state_index];
+    Grouped32ValidationState validation;
+    validation.status = 0u;
+    validation.failed_partitions = 0u;
+    validation.controls_checked = 0u;
+    validation.positions_checked = 0u;
+    validation.completed_workgroups = 0u;
+    validation.expected_workgroups = 0u;
+    validation.completion = G32_COMPLETION_PENDING;
+    validation.reserved = 0u;
+    bool adapter_valid = adapter.completion == G32_COMPLETION_ACCEPTED
+        && adapter.status == 0u && adapter.reserved0 == 0u
+        && adapter.reserved1 == 0u && pc.local_size_x == LOCAL_SIZE_X
+        && pc.local_size_x != 0u && pc.max_workgroups_x != 0u
+        && adapter.expected_records == pc.query_record_count
+        && adapter.completed_records == adapter.expected_records
+        && pc.flags == 0u
+        && gl_NumWorkGroups.x == 1u && gl_NumWorkGroups.y == 1u
+        && gl_NumWorkGroups.z == 1u
+        && (pc.partition_count == 0u || pc.max_partition_groups_y != 0u);
+    uint maximum = max(pc.partition_count,
+        max(pc.query_record_count, adapter.total_minimizers));
+    uint groups = max(1u, g32p_ceil_div(maximum, pc.local_size_x));
+    bool dispatch_valid = groups <= pc.max_workgroups_x
+        && pc.partition_count <= pc.max_partition_groups_y;
+    bool valid = adapter_valid && dispatch_valid;
+    validation.expected_workgroups = min(groups, pc.max_workgroups_x);
+    if (!valid) {
+        validation.status = !adapter_valid
+            ? (adapter.status == 0u ? G32_ADAPTER_STATE : adapter.status)
+            : G32_INDIRECT_BOUNDS;
+        validation.completion = G32_COMPLETION_REJECTED;
+    }
+    validation_states[pc.validation_index] = validation;
+    memoryBarrierBuffer();
+    if (valid) {
+        uint command = pc.indirect_base + G32_STAGE_VALIDATE;
+        indirect_commands[command].group_count_x = groups;
+        indirect_commands[command].group_count_y = 1u;
+        indirect_commands[command].group_count_z = 1u;
+    }
+    memoryBarrierBuffer();
+}
+)GLSL";
+
+[[nodiscard]] std::string grouped32_abi2_body(std::string_view stage_main) {
+    std::string body;
+    body.reserve(kPhaseCGrouped32Abi2Common.size() + stage_main.size());
+    body += kPhaseCGrouped32Abi2Common;
+    body += stage_main;
+    return body;
+}
+
+// DOC0371 persisted format-4 streaming ABI.  Unlike the older aggregate ABI2
+// prototype, binding 1 contains exactly one bounded raw payload group: 12-byte
+// controls in stage 44 or 4-byte local positions in stage 46.  The only state
+// retained across groups is target-global occurrence/match/authorization state.
+constexpr std::string_view kPhaseCGrouped32StreamCommon = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct G32SPartition {
+    uint partition_id; uint directory_ordinal; uint position_segment;
+    uint control_offset; uint control_count; uint position_offset;
+    uint position_count; uint low_hash; uint high_hash; uint flags;
+    uint64_t segment_base_bp; uint64_t segment_end_bp;
+    uint reserved0; uint reserved1;
+};
+struct G32SQueryRecord {
+    uint minimizer_offset; uint minimizer_count; uint query_length;
+    uint query_state_index; uint occurrence_offset; uint anchor_base;
+    uint anchor_capacity; uint flags; uint64_t batch_join_ordinal;
+    uint reserved0; uint reserved1;
+};
+struct G32SQueryMinimizer {
+    uint hash; uint query_bp_strand; uint occurrence_index;
+    uint query_record_index;
+};
+struct G32SOccurrence {
+    uint global_count; uint accepted_count; uint anchor_offset;
+    uint emitted_count;
+};
+struct G32SMatch {
+    uint directory_ordinal; uint query_minimizer_index;
+    uint position_offset; uint position_count;
+};
+struct G32SState {
+    uint status; uint match_count; uint matched_anchor_upper_bound;
+    uint authorized_anchor_count; uint authorized_partition_count;
+    uint emitted_anchor_count; uint completion;
+    uint control_groups_completed; uint position_groups_completed;
+    uint authorization_digest_lo; uint authorization_digest_hi;
+    uint anchor_digest_lo; uint anchor_digest_hi;
+    uint reserved0; uint reserved1; uint reserved2;
+};
+struct G32SAnchor {
+    uint64_t ref_position; uint64_t query_position;
+    uint is_reverse; uint span_flags_segment;
+};
+
+layout(std430, set=0, binding=0) readonly buffer G32SPartitions {
+    G32SPartition partitions[];
+};
+layout(std430, set=0, binding=1) readonly buffer G32SRawPayload {
+    uint raw_words[];
+};
+layout(std430, set=0, binding=2) readonly buffer G32SQueryRecords {
+    G32SQueryRecord query_records[];
+};
+layout(std430, set=0, binding=3) readonly buffer G32SQueryMinimizers {
+    G32SQueryMinimizer query_minimizers[];
+};
+layout(std430, set=0, binding=4) buffer G32SOccurrences {
+    G32SOccurrence occurrences[];
+};
+layout(std430, set=0, binding=5) buffer G32SMatches {
+    G32SMatch matches[];
+};
+layout(std430, set=0, binding=6) buffer G32SStates {
+    G32SState stream_states[];
+};
+layout(std430, set=0, binding=7) buffer G32SAuthorizationFlags {
+    uint authorization_flags[];
+};
+layout(std430, set=0, binding=8) buffer G32SAnchors {
+    G32SAnchor anchors[];
+};
+
+layout(push_constant) uniform G32SParams {
+    uint partition_count; uint control_count; uint position_count;
+    uint query_record_count; uint query_minimizer_count;
+    uint occurrence_count; uint match_capacity; uint directory_entry_count;
+    uint anchor_capacity; uint max_occ; uint kmer_size; uint group_ordinal;
+    uint expected_control_groups; uint expected_position_groups;
+    uint query_identity_lo; uint query_identity_hi;
+    uint control_state_identity_lo; uint control_state_identity_hi;
+    uint target_buffer_identity_lo; uint target_buffer_identity_hi;
+} pc;
+
+const uint G32S_DESCRIPTOR = 1u << 0u;
+const uint G32S_CONTROL = 1u << 1u;
+const uint G32S_POSITION = 1u << 2u;
+const uint G32S_QUERY = 1u << 3u;
+const uint G32S_MATCH_CAPACITY = 1u << 4u;
+const uint G32S_COUNT_OVERFLOW = 1u << 5u;
+const uint G32S_PHASE = 1u << 6u;
+const uint G32S_ANCHOR_CAPACITY = 1u << 7u;
+const uint G32S_EMITTED_COUNT = 1u << 8u;
+
+void g32s_fail(uint bit) { atomicOr(stream_states[0].status, bit); }
+uint g32s_mix(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u;
+    x *= 0x846ca68bu; return x ^ (x >> 16u);
+}
+bool g32s_query_valid(uint qi, G32SQueryMinimizer q) {
+    if (qi >= pc.query_minimizer_count || q.occurrence_index != qi
+        || q.occurrence_index >= pc.occurrence_count
+        || q.query_record_index >= pc.query_record_count) {
+        g32s_fail(G32S_QUERY); return false;
+    }
+    G32SQueryRecord r = query_records[q.query_record_index];
+    uint64_t end = uint64_t(r.minimizer_offset) + uint64_t(r.minimizer_count);
+    if (r.query_state_index != q.query_record_index || r.flags != 0u
+        || r.reserved0 != 0u || r.reserved1 != 0u
+        || r.occurrence_offset != r.minimizer_offset
+        || qi < r.minimizer_offset || uint64_t(qi) >= end
+        || end > uint64_t(pc.query_minimizer_count)
+        || (q.query_bp_strand >> 1u) >= r.query_length
+        || (q.query_bp_strand >> 1u) + 1u < pc.kmer_size
+        || (r.minimizer_count != 0u
+            && (pc.kmer_size != 15u || r.query_length < pc.kmer_size))) {
+        g32s_fail(G32S_QUERY); return false;
+    }
+    return true;
+}
+bool g32s_partition_common_valid(G32SPartition p, uint required_flag) {
+    bool valid = p.flags == required_flag && p.reserved0 == 0u
+        && p.reserved1 == 0u && p.partition_id == p.directory_ordinal
+        && p.directory_ordinal < pc.directory_entry_count
+        && p.control_count != 0u && p.position_count != 0u
+        && p.low_hash <= p.high_hash
+        && p.segment_base_bp < p.segment_end_bp
+        && p.segment_end_bp - p.segment_base_bp <= uint64_t(0x80000000u);
+    if (!valid) g32s_fail(G32S_DESCRIPTOR);
+    return valid;
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32StreamControlMain = R"GLSL(
+void main() {
+    if (uint(stream_states.length()) == 0u
+        || pc.match_capacity > uint(matches.length())
+        || pc.partition_count > uint(partitions.length())
+        || pc.query_record_count > uint(query_records.length())
+        || pc.query_minimizer_count > uint(query_minimizers.length())
+        || pc.occurrence_count > uint(occurrences.length())
+        || pc.directory_entry_count > uint(authorization_flags.length())
+        || uint64_t(pc.control_count) * uint64_t(3u)
+            > uint64_t(raw_words.length())
+        || pc.query_minimizer_count != pc.occurrence_count
+        || stream_states[0].completion != 0u) {
+        if (uint(stream_states.length()) != 0u) g32s_fail(G32S_PHASE);
+        return;
+    }
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint pi = gl_GlobalInvocationID.x; pi < pc.partition_count; pi += stride) {
+        G32SPartition p = partitions[pi];
+        bool valid = g32s_partition_common_valid(p, 1u)
+            && p.position_offset == 0u
+            && uint64_t(p.control_offset) + uint64_t(p.control_count)
+                <= uint64_t(pc.control_count);
+        uint expected_position = 0u; uint previous_hash = 0u;
+        for (uint ci = 0u; valid && ci < p.control_count; ++ci) {
+            uint base = (p.control_offset + ci) * 3u;
+            uint hash = raw_words[base];
+            uint offset = raw_words[base + 1u];
+            uint count = raw_words[base + 2u];
+            valid = count != 0u && offset == expected_position
+                && uint64_t(offset) + uint64_t(count)
+                    <= uint64_t(p.position_count)
+                && (ci == 0u ? hash == p.low_hash : hash > previous_hash)
+                && hash >= p.low_hash && hash <= p.high_hash;
+            expected_position = offset + count; previous_hash = hash;
+        }
+        valid = valid && expected_position == p.position_count
+            && previous_hash == p.high_hash;
+        if (!valid) g32s_fail(G32S_CONTROL);
+    }
+
+    uint64_t pair_count = uint64_t(pc.partition_count)
+        * uint64_t(pc.query_minimizer_count);
+    for (uint64_t pair = uint64_t(gl_GlobalInvocationID.x); pair < pair_count;
+         pair += uint64_t(stride)) {
+        uint pi = uint(pair / uint64_t(pc.query_minimizer_count));
+        uint qi = uint(pair - uint64_t(pi) * uint64_t(pc.query_minimizer_count));
+        G32SPartition p = partitions[pi];
+        G32SQueryMinimizer q = query_minimizers[qi];
+        if (!g32s_partition_common_valid(p, 1u) || !g32s_query_valid(qi, q)
+            || q.hash < p.low_hash || q.hash > p.high_hash
+            || uint64_t(p.control_offset) + uint64_t(p.control_count)
+                > uint64_t(pc.control_count)) continue;
+        uint lo = 0u, hi = p.control_count;
+        while (lo < hi) {
+            uint mid = lo + ((hi - lo) >> 1u);
+            uint hash = raw_words[(p.control_offset + mid) * 3u];
+            if (hash < q.hash) lo = mid + 1u; else hi = mid;
+        }
+        if (lo == p.control_count) continue;
+        uint base = (p.control_offset + lo) * 3u;
+        if (raw_words[base] != q.hash) continue;
+        uint position_offset = raw_words[base + 1u];
+        uint position_count = raw_words[base + 2u];
+        uint match_index = atomicAdd(stream_states[0].match_count, 1u);
+        if (match_index >= pc.match_capacity) {
+            g32s_fail(G32S_MATCH_CAPACITY); continue;
+        }
+        matches[match_index].directory_ordinal = p.directory_ordinal;
+        matches[match_index].query_minimizer_index = qi;
+        matches[match_index].position_offset = position_offset;
+        matches[match_index].position_count = position_count;
+        uint ceiling = pc.max_occ == 0xffffffffu
+            ? 0xffffffffu : pc.max_occ + 1u;
+        uint observed = occurrences[qi].global_count;
+        for (;;) {
+            if (observed >= ceiling) break;
+            uint next = observed + min(position_count, ceiling - observed);
+            uint prior = atomicCompSwap(occurrences[qi].global_count, observed, next);
+            if (prior == observed) break;
+            observed = prior;
+        }
+        uint prior_upper = atomicAdd(
+            stream_states[0].matched_anchor_upper_bound, position_count);
+        if (prior_upper > 0xffffffffu - position_count) {
+            g32s_fail(G32S_COUNT_OVERFLOW);
+        }
+    }
+    if (gl_GlobalInvocationID.x == 0u) {
+        atomicAdd(stream_states[0].control_groups_completed, 1u);
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32StreamAuthorizeMain = R"GLSL(
+void main() {
+    if (gl_GlobalInvocationID.x != 0u
+        || uint(stream_states.length()) == 0u) return;
+    G32SState state = stream_states[0];
+    if (state.completion != 0u
+        || state.control_groups_completed != pc.expected_control_groups
+        || state.match_count > pc.match_capacity
+        || pc.match_capacity > uint(matches.length())
+        || pc.occurrence_count > uint(occurrences.length())
+        || pc.directory_entry_count > uint(authorization_flags.length())) {
+        g32s_fail(G32S_PHASE); return;
+    }
+    uint cursor = 0u;
+    for (uint oi = 0u; oi < pc.occurrence_count; ++oi) {
+        uint total = occurrences[oi].global_count;
+        uint accepted = total <= pc.max_occ ? total : 0u;
+        occurrences[oi].accepted_count = accepted;
+        occurrences[oi].anchor_offset = cursor;
+        occurrences[oi].emitted_count = 0u;
+        if (accepted > 0xffffffffu - cursor) {
+            g32s_fail(G32S_COUNT_OVERFLOW); return;
+        }
+        cursor += accepted;
+    }
+    for (uint mi = 0u; mi < state.match_count; ++mi) {
+        G32SMatch m = matches[mi];
+        if (m.directory_ordinal >= pc.directory_entry_count
+            || m.query_minimizer_index >= pc.occurrence_count) {
+            g32s_fail(G32S_DESCRIPTOR); continue;
+        }
+        if (occurrences[m.query_minimizer_index].accepted_count != 0u) {
+            authorization_flags[m.directory_ordinal] = 1u;
+        }
+    }
+    uint authorized = 0u;
+    uint ordinal_digest_lo = 0u, ordinal_digest_hi = 0u;
+    for (uint ordinal = 0u; ordinal < pc.directory_entry_count; ++ordinal) {
+        if (authorization_flags[ordinal] != 0u) {
+            // Compact in place.  The output cursor never passes the input
+            // ordinal, so no unread authorization flag is overwritten.
+            authorization_flags[authorized] = ordinal;
+            ordinal_digest_lo ^= g32s_mix(ordinal ^ authorized);
+            ordinal_digest_hi ^= g32s_mix(
+                ordinal ^ (authorized * 0x9e3779b9u));
+            ++authorized;
+        }
+    }
+    uint lo = g32s_mix(cursor ^ pc.query_identity_lo
+        ^ pc.control_state_identity_lo ^ authorized ^ ordinal_digest_lo);
+    uint hi = g32s_mix(state.match_count ^ pc.query_identity_hi
+        ^ pc.control_state_identity_hi ^ (authorized * 0x9e3779b9u)
+        ^ ordinal_digest_hi);
+    if ((lo | hi) == 0u) lo = 1u;
+    stream_states[0].authorized_anchor_count = cursor;
+    stream_states[0].authorized_partition_count = authorized;
+    stream_states[0].authorization_digest_lo = lo;
+    stream_states[0].authorization_digest_hi = hi;
+    if (cursor > state.matched_anchor_upper_bound) {
+        g32s_fail(G32S_COUNT_OVERFLOW);
+    }
+    memoryBarrierBuffer();
+    stream_states[0].completion = stream_states[0].status == 0u ? 1u : 0u;
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32StreamPositionMain = R"GLSL(
+void main() {
+    if (uint(stream_states.length()) == 0u
+        || stream_states[0].completion != 1u
+        || pc.partition_count > uint(partitions.length())
+        || pc.position_count > uint(raw_words.length())
+        || pc.anchor_capacity > uint(anchors.length())
+        || pc.match_capacity > uint(matches.length())) {
+        if (uint(stream_states.length()) != 0u) g32s_fail(G32S_PHASE);
+        return;
+    }
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint pi = gl_GlobalInvocationID.x; pi < pc.partition_count; pi += stride) {
+        G32SPartition p = partitions[pi];
+        bool valid = g32s_partition_common_valid(p, 2u)
+            && p.control_offset == 0u
+            && uint64_t(p.position_offset) + uint64_t(p.position_count)
+                <= uint64_t(pc.position_count);
+        uint previous = 0u;
+        for (uint i = 0u; valid && i < p.position_count; ++i) {
+            uint encoded = raw_words[p.position_offset + i];
+            uint local_bp = encoded >> 1u;
+            valid = uint64_t(local_bp) < p.segment_end_bp - p.segment_base_bp
+                && (i == 0u || encoded > previous);
+            previous = encoded;
+        }
+        if (!valid) g32s_fail(G32S_POSITION);
+    }
+    uint match_count = stream_states[0].match_count;
+    for (uint mi = gl_GlobalInvocationID.x; mi < match_count; mi += stride) {
+        G32SMatch m = matches[mi];
+        uint found = 0xffffffffu;
+        for (uint pi = 0u; pi < pc.partition_count; ++pi) {
+            if (partitions[pi].directory_ordinal == m.directory_ordinal) {
+                found = pi; break;
+            }
+        }
+        if (found == 0xffffffffu) continue;
+        G32SPartition p = partitions[found];
+        if (!g32s_partition_common_valid(p, 2u)
+            || m.query_minimizer_index >= pc.query_minimizer_count
+            || uint64_t(m.position_offset) + uint64_t(m.position_count)
+                > uint64_t(p.position_count)) {
+            g32s_fail(G32S_POSITION); continue;
+        }
+        G32SQueryMinimizer q = query_minimizers[m.query_minimizer_index];
+        if (!g32s_query_valid(m.query_minimizer_index, q)) continue;
+        uint accepted = occurrences[q.occurrence_index].accepted_count;
+        if (accepted == 0u) continue;
+        uint emitted_before = atomicAdd(
+            occurrences[q.occurrence_index].emitted_count, m.position_count);
+        if (emitted_before > accepted || m.position_count > accepted - emitted_before) {
+            g32s_fail(G32S_EMITTED_COUNT); continue;
+        }
+        uint anchor_output_offset =
+            occurrences[q.occurrence_index].anchor_offset + emitted_before;
+        G32SQueryRecord r = query_records[q.query_record_index];
+        uint query_bp = q.query_bp_strand >> 1u;
+        uint query_strand = q.query_bp_strand & 1u;
+        uint64_t reverse_base = uint64_t(r.query_length)
+            + uint64_t(pc.kmer_size) - uint64_t(2u);
+        for (uint i = 0u; i < m.position_count; ++i) {
+            uint encoded = raw_words[p.position_offset + m.position_offset + i];
+            uint local_bp = encoded >> 1u;
+            uint reverse = (encoded & 1u) ^ query_strand;
+            uint64_t output_index =
+                uint64_t(anchor_output_offset) + uint64_t(i);
+            if (output_index >= uint64_t(pc.anchor_capacity)
+                || uint64_t(local_bp) >= p.segment_end_bp - p.segment_base_bp) {
+                g32s_fail(G32S_ANCHOR_CAPACITY); continue;
+            }
+            anchors[uint(output_index)].ref_position =
+                p.segment_base_bp + uint64_t(local_bp);
+            anchors[uint(output_index)].query_position = reverse != 0u
+                ? reverse_base - uint64_t(query_bp) : uint64_t(query_bp);
+            anchors[uint(output_index)].is_reverse = reverse;
+            anchors[uint(output_index)].span_flags_segment = pc.kmer_size & 0xffu;
+        }
+        atomicAdd(stream_states[0].emitted_anchor_count, m.position_count);
+    }
+    if (gl_GlobalInvocationID.x == 0u) {
+        atomicAdd(stream_states[0].position_groups_completed, 1u);
+    }
+}
+)GLSL";
+
+constexpr std::string_view kPhaseCGrouped32StreamSealMain = R"GLSL(
+shared uint g32s_digest_lo[128];
+shared uint g32s_digest_hi[128];
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint dlo = 0u, dhi = 0u;
+    if (uint(stream_states.length()) == 0u || gl_NumWorkGroups.x != 1u
+        || stream_states[0].completion != 1u
+        || pc.anchor_capacity > uint(anchors.length())) {
+        if (uint(stream_states.length()) != 0u) g32s_fail(G32S_PHASE);
+    } else {
+        for (uint oi = lane; oi < pc.occurrence_count; oi += LOCAL_SIZE_X) {
+            if (occurrences[oi].emitted_count != occurrences[oi].accepted_count) {
+                g32s_fail(G32S_EMITTED_COUNT);
+            }
+        }
+        for (uint ai = lane; ai < pc.anchor_capacity; ai += LOCAL_SIZE_X) {
+            G32SAnchor a = anchors[ai];
+            uint ref_lo = uint(a.ref_position);
+            uint ref_hi = uint(a.ref_position >> 32u);
+            uint query_lo = uint(a.query_position);
+            uint query_hi = uint(a.query_position >> 32u);
+            dlo ^= g32s_mix(ref_lo ^ query_hi ^ a.is_reverse ^ ai);
+            dhi ^= g32s_mix(ref_hi ^ query_lo ^ a.span_flags_segment
+                ^ (ai * 0x9e3779b9u));
+        }
+    }
+    g32s_digest_lo[lane] = dlo; g32s_digest_hi[lane] = dhi;
+    memoryBarrierBuffer(); barrier();
+    for (uint width = LOCAL_SIZE_X >> 1u; width != 0u; width >>= 1u) {
+        if (lane < width) {
+            g32s_digest_lo[lane] ^= g32s_digest_lo[lane + width];
+            g32s_digest_hi[lane] ^= g32s_digest_hi[lane + width];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        if (stream_states[0].position_groups_completed
+                != pc.expected_position_groups
+            || stream_states[0].emitted_anchor_count != pc.anchor_capacity
+            || stream_states[0].authorized_anchor_count != pc.anchor_capacity) {
+            g32s_fail(G32S_EMITTED_COUNT);
+        }
+        uint lo = g32s_digest_lo[0] ^ pc.target_buffer_identity_lo
+            ^ stream_states[0].authorization_digest_lo;
+        uint hi = g32s_digest_hi[0] ^ pc.target_buffer_identity_hi
+            ^ stream_states[0].authorization_digest_hi;
+        if (pc.anchor_capacity != 0u && (lo | hi) == 0u) lo = 1u;
+        stream_states[0].anchor_digest_lo = lo;
+        stream_states[0].anchor_digest_hi = hi;
+        memoryBarrierBuffer();
+        if (stream_states[0].status == 0u) stream_states[0].completion = 2u;
+    }
+}
+)GLSL";
+
+[[nodiscard]] std::string grouped32_stream_body(std::string_view stage_main) {
+    std::string body;
+    body.reserve(kPhaseCGrouped32StreamCommon.size() + stage_main.size());
+    body += kPhaseCGrouped32StreamCommon;
+    body += stage_main;
+    return body;
+}
+
 /// DOC0310 §13 — device radix sort over parallel (key:uint64, value:uint64)
-/// arrays. One thread per workgroup processes a contiguous chunk; this keeps the
-/// scatter stable (in-chunk order preserved, chunks ordered by id) without
-/// shared-atomics. Histogram pass: per-chunk 256-bin counts of digit
-/// `(key >> radix_shift) & 0xff`.
+/// arrays. One 256-lane workgroup processes each contiguous chunk; lane 0
+/// assigns stable scatter destinations and all lanes move the values. Histogram
+/// pass: per-chunk 256-bin counts of digit `(key >> radix_shift) & 0xff`.
 constexpr std::string_view kPhaseCSortHistogramBody = R"GLSL(
 // Cooperative per-workgroup histogram: 256 threads (one per bin) zero and write
 // the shared histogram; all threads count this workgroup's chunk into it with
@@ -1333,9 +4396,15 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     sh_hist[tid] = 0u;
     barrier();
-    uint lo = wg * pc.elems_per_wg;
-    uint hi = min(lo + pc.elems_per_wg, pc.element_count);
-    for (uint i = lo + tid; i < hi; i += 256u) {
+    uint64_t lo64 = min(
+        uint64_t(wg) * uint64_t(pc.elems_per_wg),
+        uint64_t(pc.element_count));
+    uint lo = uint(lo64);
+    uint hi = uint(min(
+        lo64 + uint64_t(pc.elems_per_wg), uint64_t(pc.element_count)));
+    uint64_t chunk_n = uint64_t(hi) - uint64_t(lo);
+    for (uint64_t off = uint64_t(tid); off < chunk_n; off += uint64_t(256)) {
+        uint i = uint(lo64 + off);
         uint digit = uint((keys_in[i] >> pc.radix_shift) & uint64_t(0xff));
         atomicAdd(sh_hist[digit], 1u);
     }
@@ -1344,7 +4413,7 @@ void main() {
 }
 )GLSL";
 
-/// DOC0310 §13 — multi-level histogram scan. One workgroup (1 invocation)
+/// DOC0310 §13 — multi-level histogram scan. One 256-lane workgroup
 /// computes, for every (workgroup, bin), its stable global start offset:
 /// `bin_base[bin] + sum_{wg' < wg} hist[wg'][bin]`, where `bin_base` is the
 /// exclusive prefix over bin totals. Writes the offsets back into `histogram`.
@@ -1390,7 +4459,7 @@ void main() {
 }
 )GLSL";
 
-/// DOC0310 §13 — stable scatter. Each workgroup (1 invocation) re-walks its
+/// DOC0310 §13 — stable scatter. Each 256-lane workgroup re-walks its
 /// chunk in order, using the per-(wg,bin) global offsets from the scan as a
 /// running cursor.
 constexpr std::string_view kPhaseCSortScatterBody = R"GLSL(
@@ -1424,13 +4493,16 @@ void main() {
     uint wg = gl_WorkGroupID.x;
     if (wg >= pc.num_workgroups) return;
     uint tid = gl_LocalInvocationID.x;
-    uint lo = wg * pc.elems_per_wg;
-    uint hi = min(lo + pc.elems_per_wg, pc.element_count);
+    uint64_t lo64 = uint64_t(wg) * uint64_t(pc.elems_per_wg);
+    if (lo64 >= uint64_t(pc.element_count)) return;
+    uint lo = uint(lo64);
+    uint hi = uint(min(
+        lo64 + uint64_t(pc.elems_per_wg), uint64_t(pc.element_count)));
     sh_cursor[tid] = histogram[wg * 256u + tid];
     barrier();
     uint vw = pc.value_words;
-    for (uint block_lo = lo; block_lo < hi; block_lo += 512u) {
-        uint block_hi = min(block_lo + 512u, hi);
+    for (uint block_lo = lo; block_lo < hi;) {
+        uint block_hi = hi - block_lo < 512u ? hi : block_lo + 512u;
         uint block_n = block_hi - block_lo;
         if (tid == 0u) {
             for (uint i = 0u; i < block_n; ++i) {
@@ -1446,6 +4518,7 @@ void main() {
             for (uint w = 0u; w < vw; ++w) vals_out[dst * vw + w] = vals_in[(block_lo + i) * vw + w];
         }
         barrier();  // writes must finish before the next sub-block overwrites sh_dst
+        block_lo = block_hi;
     }
 }
 )GLSL";
@@ -1472,9 +4545,13 @@ layout(push_constant) uniform Params {
     uint pass;
 } pc;
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= pc.element_count) return;
-    flags[i] = (i == 0u || sorted_keys[i] != sorted_keys[i - 1u]) ? 1u : 0u;
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x;
+         i < pc.element_count;
+         i += stride) {
+        flags[i] =
+            (i == 0u || sorted_keys[i] != sorted_keys[i - 1u]) ? 1u : 0u;
+    }
 }
 )GLSL";
 
@@ -1501,13 +4578,16 @@ layout(push_constant) uniform Params {
     uint pass;
 } pc;
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= pc.element_count) return;
-    uint bidx = scanned[i] + flags[i] - 1u;
-    atomicAdd(buckets[bidx].pos_count, 1u);
-    if (flags[i] == 1u) {
-        buckets[bidx].hash = sorted_keys[i];
-        buckets[bidx].pos_offset = i;
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x;
+         i < pc.element_count;
+         i += stride) {
+        uint bidx = scanned[i] + flags[i] - 1u;
+        atomicAdd(buckets[bidx].pos_count, 1u);
+        if (flags[i] == 1u) {
+            buckets[bidx].hash = sorted_keys[i];
+            buckets[bidx].pos_offset = i;
+        }
     }
 }
 )GLSL";
@@ -2245,7 +5325,7 @@ layout(push_constant) uniform Params {
     uint reserved0;
 } pc;
 
-int max3(int a, int b, int c) {
+int bioseq_max3(int a, int b, int c) {
     return max(max(a, b), c);
 }
 
@@ -2314,7 +5394,8 @@ void solve_job(uint job_index) {
                 reject_job(job_index);
                 return;
             }
-            int diag = max3(prev_m[j - 1u], prev_i[j - 1u], prev_d[j - 1u])
+            int diag = bioseq_max3(
+                prev_m[j - 1u], prev_i[j - 1u], prev_d[j - 1u])
                 + substitution_score(query_symbol, target_symbol);
             int match_state = max(0, diag);
             int insert_state = max(
@@ -2326,7 +5407,8 @@ void solve_job(uint job_index) {
             curr_i[j] = insert_state;
             curr_d[j] = delete_state;
 
-            int cell_best = max3(match_state, insert_state, delete_state);
+            int cell_best = bioseq_max3(
+                match_state, insert_state, delete_state);
             if (cell_best > best_score) {
                 best_score = cell_best;
                 best_query_end = i;
@@ -4041,6 +7123,50 @@ enum class SeqSortStage : std::uint8_t {
         case ShaderKind::phase_c_seed_count:
         case ShaderKind::phase_c_seed_emit:
             return std::string{kPhaseCSeedBody};
+        case ShaderKind::phase_c_shape_v5_seed_count:
+        case ShaderKind::phase_c_shape_v5_seed_emit:
+            return std::string{kPhaseCShapeV5SeedBody};
+        case ShaderKind::phase_c_persisted_directory_select:
+            return std::string{kPhaseCPersistedDirectorySelectBody};
+        case ShaderKind::phase_c_grouped32_validate:
+            return grouped32_abi2_body(kPhaseCGrouped32ValidateMain);
+        case ShaderKind::phase_c_grouped32_accumulate_occurrences:
+            return grouped32_abi2_body(
+                kPhaseCGrouped32AccumulateOccurrencesMain);
+        case ShaderKind::phase_c_grouped32_finalize_max_occ:
+            return grouped32_abi2_body(kPhaseCGrouped32FinalizeMaxOccMain);
+        case ShaderKind::phase_c_grouped32_allocate_anchor_prefix:
+            return grouped32_abi2_body(
+                kPhaseCGrouped32AllocateAnchorPrefixMain);
+        case ShaderKind::phase_c_grouped32_emit_global_anchors:
+            return grouped32_abi2_body(
+                kPhaseCGrouped32EmitGlobalAnchorsMain);
+        case ShaderKind::phase_c_grouped32_build_sort_segments:
+            return grouped32_abi2_body(
+                kPhaseCGrouped32BuildSortSegmentsMain);
+        case ShaderKind::phase_c_grouped32_adapt_query_sketch:
+            return std::string{kPhaseCGrouped32AdaptQuerySketchBody};
+        case ShaderKind::phase_c_grouped32_prepare_indirect:
+            return std::string{kPhaseCGrouped32PrepareIndirectBody};
+        case ShaderKind::phase_c_grouped32_clear_state:
+            return grouped32_abi2_body(kPhaseCGrouped32ClearStateMain);
+        case ShaderKind::phase_c_grouped32_finalize_query_adapter:
+            return std::string{kPhaseCGrouped32FinalizeQueryAdapterBody};
+        case ShaderKind::phase_c_grouped32_finalize_validation:
+            return grouped32_abi2_body(
+                kPhaseCGrouped32FinalizeValidationMain);
+        case ShaderKind::phase_c_grouped32_stream_control:
+            return grouped32_stream_body(
+                kPhaseCGrouped32StreamControlMain);
+        case ShaderKind::phase_c_grouped32_stream_authorize:
+            return grouped32_stream_body(
+                kPhaseCGrouped32StreamAuthorizeMain);
+        case ShaderKind::phase_c_grouped32_stream_position:
+            return grouped32_stream_body(
+                kPhaseCGrouped32StreamPositionMain);
+        case ShaderKind::phase_c_grouped32_stream_seal:
+            return grouped32_stream_body(
+                kPhaseCGrouped32StreamSealMain);
         case ShaderKind::phase_c_sort_radix_histogram:
             return std::string{kPhaseCSortHistogramBody};
         case ShaderKind::phase_c_sort_radix_scan:

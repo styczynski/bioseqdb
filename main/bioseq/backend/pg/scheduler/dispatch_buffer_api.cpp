@@ -17,6 +17,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +28,8 @@ import bioseq.scheduler.dispatch_processor;
 import bioseq.scheduler.dispatch_buffer;
 import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
+import bioseq.sequences.pipe;
+import bioseq.indexing.type;
 
 namespace bioseq::scheduler {
 
@@ -40,54 +43,6 @@ using BufferImpl = TupleDispatchBuffer;
 
 [[nodiscard]] const BufferImpl* as_buffer(const void* ptr) noexcept {
     return static_cast<const BufferImpl*>(ptr);
-}
-
-[[nodiscard]] DispatchGpuBatchExecutionStats copy_gpu_stats(
-    const ::bioseq::simd::HWY_NAMESPACE::GpuBatchExecutionStats& src) {
-    DispatchGpuBatchExecutionStats dst{};
-    dst.gpu_batched_branch_taken = src.gpu_batched_branch_taken;
-    dst.gpu_problem_count = src.gpu_problem_count;
-    dst.gpu_wave_count = src.gpu_wave_count;
-    dst.gpu_segment_indexes_built = src.gpu_segment_indexes_built;
-    dst.gpu_segment_indexes_reused = src.gpu_segment_indexes_reused;
-    dst.gpu_seed_dispatches = src.gpu_seed_dispatches;
-    dst.gpu_chain_dispatches = src.gpu_chain_dispatches;
-    dst.gpu_extend_dispatches = src.gpu_extend_dispatches;
-    dst.cpu_fallback_rows = src.cpu_fallback_rows;
-    dst.simd_fallback_rows = src.simd_fallback_rows;
-    dst.vulkan_declines = src.vulkan_declines;
-    dst.gpu_batch_pipeline_ns = src.gpu_batch_pipeline_ns;
-    dst.gpu_query_sketch_ns = src.gpu_query_sketch_ns;
-    dst.gpu_target_dedup_ns = src.gpu_target_dedup_ns;
-    dst.gpu_target_plan_ns = src.gpu_target_plan_ns;
-    dst.gpu_index_build_ns = src.gpu_index_build_ns;
-    dst.gpu_problem_build_ns = src.gpu_problem_build_ns;
-    dst.gpu_seed_chain_runtime_ns = src.gpu_seed_chain_runtime_ns;
-    dst.gpu_cigar_jobs = src.gpu_cigar_jobs;
-    dst.gpu_cigar_bounded_jobs = src.gpu_cigar_bounded_jobs;
-    dst.gpu_cigar_exact_jobs = src.gpu_cigar_exact_jobs;
-    dst.gpu_cigar_unit_gap_jobs = src.gpu_cigar_unit_gap_jobs;
-    dst.gpu_cigar_gridded_jobs = src.gpu_cigar_gridded_jobs;
-    dst.gpu_cigar_query_symbols = src.gpu_cigar_query_symbols;
-    dst.gpu_cigar_target_symbols = src.gpu_cigar_target_symbols;
-    dst.gpu_cigar_packed_words = src.gpu_cigar_packed_words;
-    dst.gpu_cigar_traceback_words = src.gpu_cigar_traceback_words;
-    dst.gpu_cigar_prepare_ns = src.gpu_cigar_prepare_ns;
-    dst.gpu_cigar_symbol_pack_ns = src.gpu_cigar_symbol_pack_ns;
-    dst.gpu_cigar_classify_ns = src.gpu_cigar_classify_ns;
-    dst.gpu_cigar_runtime_ns = src.gpu_cigar_runtime_ns;
-    dst.gpu_cigar_decode_ns = src.gpu_cigar_decode_ns;
-    return dst;
-}
-
-[[nodiscard]] DispatchBatchExecutionStats copy_stats(
-    const ::bioseq::simd::HWY_NAMESPACE::BatchExecutionStats& src) {
-    DispatchBatchExecutionStats dst{};
-    dst.targets_considered = src.targets_considered;
-    dst.targets_with_prebuilt_index = src.targets_with_prebuilt_index;
-    dst.targets_recomputed_minimizers = src.targets_recomputed_minimizers;
-    dst.gpu = copy_gpu_stats(src.gpu);
-    return dst;
 }
 
 } // namespace
@@ -119,18 +74,34 @@ DispatchBufferRuntime& DispatchBufferRuntime::operator=(
 
 void DispatchBufferRuntime::configure_params(
     const bioseq::simd::active_target::Minimap2Params& params,
+    const bioseq::indexing::IndexReadRequirement index_read_requirement,
     const bool read_sequence_index,
     const Oid scan_user_relid,
     const Oid scan_user_database_oid,
     const Oid scan_user_tablespace_oid,
-    const Oid scan_user_main_relfilenode) {
+    const Oid scan_user_main_relfilenode,
+    Relation executor_relation,
+    Snapshot executor_snapshot) {
     as_buffer(impl)->configure_params(
         params,
+        index_read_requirement,
         read_sequence_index,
         scan_user_relid,
         scan_user_database_oid,
         scan_user_tablespace_oid,
-        scan_user_main_relfilenode);
+        scan_user_main_relfilenode,
+        executor_relation,
+        executor_snapshot);
+}
+
+void DispatchBufferRuntime::replace_executor_snapshot(
+    Snapshot executor_snapshot) {
+    as_buffer(impl)->replace_executor_snapshot(executor_snapshot);
+}
+
+void DispatchBufferRuntime::bind_persisted_gpu_operation_evidence_sink(
+    bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink) {
+    as_buffer(impl)->bind_persisted_gpu_operation_evidence_sink(sink);
 }
 
 void DispatchBufferRuntime::configure_mmsearch(
@@ -185,12 +156,87 @@ void DispatchBufferRuntime::add_extra_const_query(
     as_buffer(impl)->add_extra_const_query(std::move(query_varlena_bytes));
 }
 
+void DispatchBufferRuntime::configure_mmsearch_join(
+    const Oid target_relation_oid,
+    const AttrNumber target_storage_seq_attno,
+    const AttrNumber target_slot_seq_resno,
+    const AttrNumber target_slot_rowno_resno,
+    const AttrNumber query_slot_seq_resno,
+    std::string target_column_name,
+    const std::uint8_t alphabet_code,
+    const std::uint8_t storage_unit_byte_width) {
+    as_buffer(impl)->configure_mmsearch_join(
+        target_relation_oid,
+        target_storage_seq_attno,
+        target_slot_seq_resno,
+        target_slot_rowno_resno,
+        query_slot_seq_resno,
+        std::move(target_column_name),
+        alphabet_code,
+        storage_unit_byte_width);
+}
+
+void DispatchBufferRuntime::begin_join_target(
+    TupleTableSlot* locator_passthrough_target) {
+    as_buffer(impl)->begin_join_target(locator_passthrough_target);
+}
+
+namespace {
+
+[[nodiscard]] std::vector<BufferImpl::JoinQueryRef> translate_join_queries(
+    const std::span<const DispatchJoinQueryRef> queries) {
+    std::vector<BufferImpl::JoinQueryRef> translated;
+    translated.reserve(queries.size());
+    for (const DispatchJoinQueryRef& query : queries) {
+        translated.push_back(BufferImpl::JoinQueryRef{
+            query.ordinal, query.query_slot});
+    }
+    return translated;
+}
+
+} // namespace
+
+void DispatchBufferRuntime::prepare_join_target_queries(
+    const std::span<const DispatchJoinQueryRef> all_queries) {
+    const auto translated = translate_join_queries(all_queries);
+    as_buffer(impl)->prepare_join_target_queries(translated);
+}
+
+void DispatchBufferRuntime::set_join_query_batch(
+    const std::span<const DispatchJoinQueryRef> queries) {
+    const auto translated = translate_join_queries(queries);
+    as_buffer(impl)->set_join_query_batch(translated);
+}
+
+bool DispatchBufferRuntime::run_join_query_batch_and_build_cursors() {
+    return as_buffer(impl)->run_join_query_batch_and_build_cursors();
+}
+
+void DispatchBufferRuntime::finish_join_target() {
+    as_buffer(impl)->finish_join_target();
+}
+
+void DispatchBufferRuntime::reset_join_runtime_for_rescan() {
+    as_buffer(impl)->reset_join_runtime_for_rescan();
+}
+
+void DispatchBufferRuntime::abandon_join_runtime_after_pg_error_noexcept()
+    noexcept {
+    if (impl != nullptr) {
+        as_buffer(impl)->abandon_join_runtime_after_pg_error_noexcept();
+    }
+}
+
 void DispatchBufferRuntime::submit_scan(TupleTableSlot* scan_slot) {
     as_buffer(impl)->submit_scan(scan_slot);
 }
 
-void DispatchBufferRuntime::run_batch_and_build_cursors() {
-    as_buffer(impl)->run_batch_and_build_cursors();
+bool DispatchBufferRuntime::ready_to_dispatch() const {
+    return as_buffer(impl)->ready_to_dispatch();
+}
+
+bool DispatchBufferRuntime::run_batch_and_build_cursors() {
+    return as_buffer(impl)->run_batch_and_build_cursors();
 }
 
 void DispatchBufferRuntime::clear_slots() {
@@ -205,12 +251,14 @@ std::optional<DispatchNextOutput> DispatchBufferRuntime::read_next_output() {
     return DispatchNextOutput{
         next->entry->scan_slot_copy,
         next->entry->sequence_rowno,
+        next->query_ordinal,
         next->match,
     };
 }
 
-DispatchBatchExecutionStats DispatchBufferRuntime::execution_stats() const {
-    return copy_stats(as_buffer(impl)->execution_stats());
+bioseq::pipeline_stats::PipelineExecutionStats
+DispatchBufferRuntime::execution_stats() const {
+    return as_buffer(impl)->execution_stats();
 }
 
 std::size_t DispatchBufferRuntime::extra_query_count() const {
