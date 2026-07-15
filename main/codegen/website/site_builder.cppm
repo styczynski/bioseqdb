@@ -104,6 +104,29 @@ void run_website_smoke() {
         "<name>bioseq</name></compound></doxygenindex>");
     expect(compounds.size() == 1 && compounds.front().name == "bioseq", "doxygen index");
 
+    // Doxygen mixed-content mapping (§11.2): s->strikethrough, computeroutput->
+    // code span, safe ulink kept, unsafe ulink dropped to text + diagnostic,
+    // unknown tag diagnosed but text preserved, ndash -> exact Unicode.
+    const auto description = parse_doxygen_description(
+        "<detaileddescription><para>A <s>gone</s> "
+        "<computeroutput>bioseq.seq</computeroutput> "
+        "<ulink url=\"https://bioseq.test/x\">ok</ulink> "
+        "<ulink url=\"javascript:alert(1)\">bad</ulink> "
+        "range<ndash/>value <mystery>kept-text</mystery>.</para>"
+        "</detaileddescription>",
+        "bioseq::io::seq");
+    document_node description_root;
+    description_root.kind = document_node_kind::document;
+    description_root.children = description.nodes;
+    expect(count_kind(description_root, document_node_kind::strikethrough) == 1,
+           "doxygen s to strikethrough");
+    expect(count_kind(description_root, document_node_kind::code_span) == 1,
+           "doxygen computeroutput to code span");
+    expect(count_kind(description_root, document_node_kind::link) == 1,
+           "doxygen keeps only the safe ulink");
+    expect(description.diagnostics.size() == 2,
+           "doxygen unsafe-link and unknown-tag diagnostics");
+
     // entity merge + canonical id.
     documented_entity documented;
     documented.domain = entity_domain::cpp;
