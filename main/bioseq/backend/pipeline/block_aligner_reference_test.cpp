@@ -28,6 +28,7 @@ import bioseq.sequences.minimap_port;
 import bioseq.sequences.chaining.utils;
 import bioseq.common.context;
 import bioseq.storage.lazy;
+import bioseq.storage.scanner;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
@@ -236,6 +237,34 @@ void check_align_result_identical(
         .flags = 0,
         .segment_id = 0,
     };
+}
+
+[[nodiscard]] ::bioseq::chaining::Anchor make_anchor_at(
+        std::uint64_t reference_position,
+        std::uint64_t query_position,
+        std::uint8_t span = 1) {
+    return ::bioseq::chaining::Anchor{
+        .ref_position = reference_position,
+        .query_position = query_position,
+        .is_reverse = 0,
+        .query_span = span,
+        .flags = 0,
+        .segment_id = 0,
+    };
+}
+
+void check_region_alignment_identical(
+        const AlignRegion& optimized,
+        const AlignRegion& forced_dp) {
+    CHECK(optimized.query_start == forced_dp.query_start);
+    CHECK(optimized.query_end == forced_dp.query_end);
+    CHECK(optimized.ref_start == forced_dp.ref_start);
+    CHECK(optimized.ref_end == forced_dp.ref_end);
+    CHECK(optimized.dp_score == forced_dp.dp_score);
+    CHECK(optimized.dp_max_score == forced_dp.dp_max_score);
+    CHECK(optimized.has_alignment == forced_dp.has_alignment);
+    CHECK(optimized.cigar.size() == forced_dp.cigar.size());
+    CHECK(format_cigar(optimized.cigar) == format_cigar(forced_dp.cigar));
 }
 
 }  // namespace
@@ -542,6 +571,412 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
               .padded_sequence_allocations == 0);
     CHECK(reverse_subregion_optimized.construction.scratch_allocations == 0);
     CHECK(reverse_subregion_optimized.construction.trace_allocations == 0);
+}
+
+TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse windows",
+          "[block-aligner][global][packed-certificate][oracle]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+    const auto scoring = ScoringMatrix<dna4_u64>::generate(2, 4, 1);
+    BlockAlignerParams params = global_params(16, 64);
+    params.gap_open = 4;
+    params.gap_extend = 2;
+    const BlockGlobalGapCertificatePlan plan =
+        HwyBlockAligner::prepare_global_gap_certificate(scoring, params);
+    REQUIRE(plan.contract_supported);
+    REQUIRE(plan.generated_matrix_supported);
+
+    constexpr std::string_view cycle = "ACGT";
+    const auto patterned = [&](std::size_t length, std::size_t phase) {
+        std::string result(length, 'A');
+        for (std::size_t i = 0; i < length; ++i) {
+            result[i] = cycle[(i * 3u + i / 7u + phase) % cycle.size()];
+        }
+        return result;
+    };
+
+    const std::array<std::size_t, 8> lengths{
+        31u, 32u, 33u, 63u, 64u, 65u, 1025u, 1057u};
+    const std::array<std::size_t, 3> query_offsets{1u, 17u, 31u};
+    const std::array<std::size_t, 3> target_offsets{31u, 1u, 17u};
+    for (std::size_t case_index = 0; case_index < lengths.size();
+         ++case_index) {
+        const std::size_t length = lengths[case_index];
+        const std::size_t query_start =
+            query_offsets[case_index % query_offsets.size()];
+        const std::size_t target_start =
+            target_offsets[case_index % target_offsets.size()];
+        const std::string query_source = patterned(
+            query_start + length + 37u, case_index);
+        std::string target_source = patterned(
+            target_start + length + 29u, case_index + 11u);
+        target_source.replace(
+            target_start, length,
+            query_source.substr(query_start, length));
+
+        auto query_data = dna4_from_ascii(query_source);
+        auto target_data = dna4_from_ascii(target_source);
+        range_t query_range(query_data);
+        range_t target_range(target_data);
+        auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
+        auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+        const BlockPackedCertificateAttempt attempt =
+            HwyBlockAligner::try_packed_global_gap<false>(
+                lazy_query, lazy_target,
+                query_start, query_start + length,
+                target_start, target_start + length, plan);
+        REQUIRE(attempt.decision
+                == BlockPackedCertificateDecision::Certified);
+        CHECK(attempt.certificate.score
+              == static_cast<std::int32_t>(length * 2u));
+        CHECK(attempt.certificate.symbols == length);
+        CHECK(attempt.certificate.vector_batches > 0u);
+
+        const ReferenceRun forced_dp =
+            run_block_region_mode<false, false, dna4_u64>(
+                query_source, target_source,
+                query_start, query_start + length,
+                target_start, target_start + length,
+                scoring, params);
+        CHECK(attempt.certificate.score == forced_dp.result.score);
+        CHECK(forced_dp.result.max_q
+              == static_cast<std::int32_t>(length - 1u));
+        CHECK(forced_dp.result.max_t
+              == static_cast<std::int32_t>(length - 1u));
+        CHECK(packed_cigar_string(forced_dp.result.cigar)
+              == std::to_string(length) + "M");
+    }
+
+    // Nonzero reverse logical coordinates cross both packed-word and 1024
+    // boundaries.  The target is the exact canonical RC window consumed by
+    // the old aligner.
+    constexpr std::size_t reverse_query_start = 17u;
+    constexpr std::size_t reverse_target_start = 31u;
+    constexpr std::size_t reverse_length = 1057u;
+    const std::string reverse_query_source = patterned(
+        reverse_query_start + reverse_length + 43u, 5u);
+    const std::string reverse_full =
+        reverse_complement_ascii(reverse_query_source);
+    std::string reverse_target_source = patterned(
+        reverse_target_start + reverse_length + 19u, 9u);
+    reverse_target_source.replace(
+        reverse_target_start, reverse_length,
+        reverse_full.substr(reverse_query_start, reverse_length));
+    auto reverse_query_data = dna4_from_ascii(reverse_query_source);
+    auto reverse_target_data = dna4_from_ascii(reverse_target_source);
+    range_t reverse_query_range(reverse_query_data);
+    range_t reverse_target_range(reverse_target_data);
+    auto lazy_reverse_query =
+        bioseq::storage::make_lazy_in_memory(reverse_query_range);
+    auto lazy_reverse_target =
+        bioseq::storage::make_lazy_in_memory(reverse_target_range);
+    const BlockPackedCertificateAttempt reverse_attempt =
+        HwyBlockAligner::try_packed_global_gap<true>(
+            lazy_reverse_query, lazy_reverse_target,
+            reverse_query_start, reverse_query_start + reverse_length,
+            reverse_target_start, reverse_target_start + reverse_length,
+            plan);
+    REQUIRE(reverse_attempt.decision
+            == BlockPackedCertificateDecision::Certified);
+    const ReferenceRun reverse_forced =
+        run_block_region_mode<true, false, dna4_u64>(
+            reverse_query_source, reverse_target_source,
+            reverse_query_start, reverse_query_start + reverse_length,
+            reverse_target_start, reverse_target_start + reverse_length,
+            scoring, params);
+    CHECK(reverse_attempt.certificate.score == reverse_forced.result.score);
+    CHECK(packed_cigar_string(reverse_forced.result.cigar)
+          == std::to_string(reverse_length) + "M");
+
+    // The packed path scores substitutions exactly.  One substitution still
+    // proves the diagonal under q=4/e=2; three do not.  Under q=1/e=1 the
+    // one-substitution score equals the alternative bound and must reject to
+    // preserve the old traceback tie policy.
+    constexpr std::size_t decision_length = 65u;
+    constexpr std::size_t decision_query_start = 31u;
+    constexpr std::size_t decision_target_start = 17u;
+    const std::string decision_query_source = patterned(140u, 3u);
+    std::string decision_target_source = patterned(130u, 7u);
+    decision_target_source.replace(
+        decision_target_start, decision_length,
+        decision_query_source.substr(
+            decision_query_start, decision_length));
+    decision_target_source[decision_target_start + 5u] =
+        decision_target_source[decision_target_start + 5u] == 'A'
+            ? 'C' : 'A';
+    auto decision_query_data = dna4_from_ascii(decision_query_source);
+    auto decision_target_data = dna4_from_ascii(decision_target_source);
+    range_t decision_query_range(decision_query_data);
+    range_t decision_target_range(decision_target_data);
+    auto lazy_decision_query =
+        bioseq::storage::make_lazy_in_memory(decision_query_range);
+    auto lazy_decision_target =
+        bioseq::storage::make_lazy_in_memory(decision_target_range);
+    const auto one_substitution = HwyBlockAligner::try_packed_global_gap<false>(
+        lazy_decision_query, lazy_decision_target,
+        decision_query_start, decision_query_start + decision_length,
+        decision_target_start, decision_target_start + decision_length,
+        plan);
+    CHECK(one_substitution.decision
+          == BlockPackedCertificateDecision::Certified);
+    const ReferenceRun one_substitution_forced =
+        run_block_region_mode<false, false, dna4_u64>(
+            decision_query_source, decision_target_source,
+            decision_query_start,
+            decision_query_start + decision_length,
+            decision_target_start,
+            decision_target_start + decision_length,
+            scoring, params);
+    CHECK(one_substitution.certificate.score
+          == one_substitution_forced.result.score);
+    CHECK(packed_cigar_string(one_substitution_forced.result.cigar)
+          == std::to_string(decision_length) + "M");
+
+    decision_target_source[decision_target_start + 25u] =
+        decision_target_source[decision_target_start + 25u] == 'A'
+            ? 'C' : 'A';
+    decision_target_source[decision_target_start + 47u] =
+        decision_target_source[decision_target_start + 47u] == 'A'
+            ? 'C' : 'A';
+    auto rejected_target_data = dna4_from_ascii(decision_target_source);
+    range_t rejected_target_range(rejected_target_data);
+    auto lazy_rejected_target =
+        bioseq::storage::make_lazy_in_memory(rejected_target_range);
+    const auto rejected = HwyBlockAligner::try_packed_global_gap<false>(
+        lazy_decision_query, lazy_rejected_target,
+        decision_query_start, decision_query_start + decision_length,
+        decision_target_start, decision_target_start + decision_length,
+        plan);
+    CHECK(rejected.decision == BlockPackedCertificateDecision::Rejected);
+
+    BlockAlignerParams tie_params = params;
+    tie_params.gap_open = 1;
+    tie_params.gap_extend = 1;
+    const auto tie_plan = HwyBlockAligner::prepare_global_gap_certificate(
+        scoring, tie_params);
+    const auto tie = HwyBlockAligner::try_packed_global_gap<false>(
+        lazy_decision_query, lazy_decision_target,
+        decision_query_start, decision_query_start + decision_length,
+        decision_target_start, decision_target_start + decision_length,
+        tie_plan);
+    CHECK(tie.decision == BlockPackedCertificateDecision::Rejected);
+}
+
+TEST_CASE("Packed gap executor matches forced-old mixed production region",
+          "[block-aligner][routing][packed-certificate][oracle]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+    constexpr std::size_t query_length = 131u;
+    constexpr std::size_t target_length = 132u;
+    std::string query(query_length, 'A');
+    constexpr std::string_view cycle = "ACGT";
+    for (std::size_t i = 0; i < query.size(); ++i) {
+        query[i] = cycle[(i * 3u + i / 5u) % cycle.size()];
+    }
+    std::string target = query.substr(0, 98u)
+        + query.substr(98u) + "A";
+    for (const std::size_t mismatch : {70u, 80u, 90u}) {
+        target[mismatch] = target[mismatch] == 'A' ? 'C' : 'A';
+    }
+    REQUIRE(target.size() == target_length);
+
+    auto query_data = dna4_from_ascii(query);
+    auto target_data = dna4_from_ascii(target);
+    range_t query_range(query_data);
+    range_t target_range(target_data);
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
+    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto scoring = ScoringMatrix<dna4_u64>::generate(2, 4, 1);
+    std::vector<::bioseq::chaining::Anchor> anchors{
+        make_anchor_at(0u, 0u),
+        make_anchor_at(32u, 32u),
+        make_anchor_at(64u, 64u),
+        make_anchor_at(97u, 97u),
+        make_anchor_at(131u, 130u),
+    };
+    AlignRegion fixture;
+    fixture.seed_count = static_cast<std::int32_t>(anchors.size());
+    fixture.anchor_start = 0;
+    fixture.is_reverse = false;
+
+    Minimap2Params params;
+    params.match_score = 2;
+    params.mismatch_pen = 4;
+    params.gap_open1 = 4;
+    params.gap_ext1 = 2;
+    params.zdrop = 100;
+    params.max_gap = 64;
+    params.min_ksw_len = 1;
+    params.block_min_size = 16;
+    params.block_max_size = 64;
+    params.do_cigar = true;
+
+    AlignRegion optimized = fixture;
+    BlockAlignerExecutionProof optimized_proof;
+    align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER, true>(
+        std::span<AlignRegion>{&optimized, 1u},
+        std::span<const ::bioseq::chaining::Anchor>{
+            anchors.data(), anchors.size()},
+        lazy_query, lazy_target, scoring, params, &optimized_proof);
+    AlignRegion forced_dp = fixture;
+    BlockAlignerExecutionProof forced_proof;
+    align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER, false>(
+        std::span<AlignRegion>{&forced_dp, 1u},
+        std::span<const ::bioseq::chaining::Anchor>{
+            anchors.data(), anchors.size()},
+        lazy_query, lazy_target, scoring, params, &forced_proof);
+    check_region_alignment_identical(optimized, forced_dp);
+    CHECK(optimized_proof.accepted());
+    CHECK(forced_proof.accepted());
+    CHECK(optimized_proof.gap_executed == 4u);
+    CHECK(optimized_proof.simd_diagonal_certificate_calls == 2u);
+    CHECK(optimized_proof.simd_dp_cells > 0u);
+    CHECK(forced_proof.gap_executed == 4u);
+    CHECK(forced_proof.simd_diagonal_certificate_calls == 0u);
+    CHECK(forced_proof.simd_dp_cells > optimized_proof.simd_dp_cells);
+
+    params.do_cigar = false;
+    AlignRegion score_only_optimized = fixture;
+    BlockAlignerExecutionProof score_only_optimized_proof;
+    align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER, true>(
+        std::span<AlignRegion>{&score_only_optimized, 1u},
+        std::span<const ::bioseq::chaining::Anchor>{
+            anchors.data(), anchors.size()},
+        lazy_query, lazy_target, scoring, params,
+        &score_only_optimized_proof);
+    AlignRegion score_only_forced = fixture;
+    BlockAlignerExecutionProof score_only_forced_proof;
+    align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER, false>(
+        std::span<AlignRegion>{&score_only_forced, 1u},
+        std::span<const ::bioseq::chaining::Anchor>{
+            anchors.data(), anchors.size()},
+        lazy_query, lazy_target, scoring, params,
+        &score_only_forced_proof);
+    check_region_alignment_identical(score_only_optimized, score_only_forced);
+    CHECK(score_only_optimized.cigar.empty());
+    CHECK(score_only_optimized_proof.simd_diagonal_certificate_calls == 2u);
+    CHECK(score_only_optimized_proof.accepted());
+    CHECK(score_only_forced_proof.accepted());
+}
+
+TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks",
+          "[block-aligner][global][packed-certificate][fallback]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+    const auto scoring = ScoringMatrix<dna4_u64>::generate(2, 4, 1);
+    BlockAlignerParams params = global_params(16, 64);
+    params.gap_open = 4;
+    params.gap_extend = 2;
+    const auto plan = HwyBlockAligner::prepare_global_gap_certificate(
+        scoring, params);
+    std::string sequence(1057u, 'A');
+    constexpr std::string_view cycle = "ACGT";
+    for (std::size_t i = 0; i < sequence.size(); ++i) {
+        sequence[i] = cycle[(i * 3u + i / 9u) % cycle.size()];
+    }
+    auto query_data = dna4_from_ascii(sequence);
+    auto target_data = dna4_from_ascii(sequence);
+    range_t query_range(query_data);
+    range_t target_range(target_data);
+
+    using chunk1 = bioseq::storage::sequence_scanner_test_chunked<
+        std::uint64_t, 1>;
+    bioseq::storage::lazy_compact_sequence<dna4_u64, chunk1> fragmented_query{
+        chunk1::from_range(query_range)};
+    bioseq::storage::lazy_compact_sequence<dna4_u64, chunk1> fragmented_target{
+        chunk1::from_range(target_range)};
+    const auto fragmented_attempt =
+        HwyBlockAligner::try_packed_global_gap<false>(
+            fragmented_query, fragmented_target,
+            0u, sequence.size(), 0u, sequence.size(), plan);
+    CHECK(fragmented_attempt.decision
+          == BlockPackedCertificateDecision::NotEligible);
+    BlockAlignerExecutionProof fragmented_current_proof;
+    const KswAlignResult fragmented_current = HwyBlockAligner::align<
+        false, true>(
+            fragmented_query, fragmented_target,
+            0u, sequence.size(), 0u, sequence.size(), scoring, params,
+            &fragmented_current_proof);
+    BlockAlignerExecutionProof fragmented_forced_proof;
+    const KswAlignResult fragmented_forced = HwyBlockAligner::align<
+        false, false>(
+            fragmented_query, fragmented_target,
+            0u, sequence.size(), 0u, sequence.size(), scoring, params,
+            &fragmented_forced_proof);
+    check_align_result_identical(fragmented_current, fragmented_forced);
+    CHECK(fragmented_current_proof.simd_diagonal_certificate_calls == 1u);
+    CHECK(fragmented_forced_proof.simd_diagonal_certificate_calls == 0u);
+    CHECK(fragmented_current_proof.accepted());
+    CHECK(fragmented_forced_proof.accepted());
+
+    // Reverse fragmented coordinates use the current byte encoder too.
+    const std::string reverse_target_text =
+        reverse_complement_ascii(sequence);
+    auto reverse_target_data = dna4_from_ascii(reverse_target_text);
+    range_t reverse_target_range(reverse_target_data);
+    using chunk32 = bioseq::storage::sequence_scanner_test_chunked<
+        std::uint64_t, 32>;
+    bioseq::storage::lazy_compact_sequence<dna4_u64, chunk32> reverse_query{
+        chunk32::from_range(query_range)};
+    bioseq::storage::lazy_compact_sequence<dna4_u64, chunk32> reverse_target{
+        chunk32::from_range(reverse_target_range)};
+    const auto reverse_fragmented_attempt =
+        HwyBlockAligner::try_packed_global_gap<true>(
+            reverse_query, reverse_target,
+            0u, sequence.size(), 0u, sequence.size(), plan);
+    CHECK(reverse_fragmented_attempt.decision
+          == BlockPackedCertificateDecision::NotEligible);
+    BlockAlignerExecutionProof reverse_current_proof;
+    const KswAlignResult reverse_current = HwyBlockAligner::align<true, true>(
+        reverse_query, reverse_target,
+        0u, sequence.size(), 0u, sequence.size(), scoring, params,
+        &reverse_current_proof);
+    BlockAlignerExecutionProof reverse_forced_proof;
+    const KswAlignResult reverse_forced = HwyBlockAligner::align<true, false>(
+        reverse_query, reverse_target,
+        0u, sequence.size(), 0u, sequence.size(), scoring, params,
+        &reverse_forced_proof);
+    check_align_result_identical(reverse_current, reverse_forced);
+    CHECK(reverse_current_proof.simd_diagonal_certificate_calls == 1u);
+    CHECK(reverse_forced_proof.simd_diagonal_certificate_calls == 0u);
+
+    const auto dna5_scoring = ScoringMatrix<dna5_u64>::generate(2, 4, 1);
+    const std::string dna5_text = "ACGTNACGTACGTACGTACGTACGTACGTACG";
+    std::vector<seq::dna5> dna5_data(dna5_text.size());
+    for (std::size_t i = 0; i < dna5_text.size(); ++i) {
+        dna5_data[i].assign_char(dna5_text[i]);
+    }
+    using dna5_range_t = compact_sequence_range<dna5_u64>;
+    dna5_range_t dna5_query_range(dna5_data);
+    dna5_range_t dna5_target_range(dna5_data);
+    auto lazy_dna5_query =
+        bioseq::storage::make_lazy_in_memory(dna5_query_range);
+    auto lazy_dna5_target =
+        bioseq::storage::make_lazy_in_memory(dna5_target_range);
+    const auto dna5_plan = HwyBlockAligner::prepare_global_gap_certificate(
+        dna5_scoring, params);
+    const auto dna5_attempt = HwyBlockAligner::try_packed_global_gap<false>(
+        lazy_dna5_query, lazy_dna5_target,
+        0u, dna5_text.size(), 0u, dna5_text.size(), dna5_plan);
+    CHECK(dna5_attempt.decision
+          == BlockPackedCertificateDecision::NotEligible);
+
+    auto unsupported_scoring = scoring;
+    unsupported_scoring.at(0, 1) = 3;
+    unsupported_scoring.simd_scores[1] = 3;
+    REQUIRE(unsupported_scoring.block_layout_valid());
+    const auto unsupported_plan =
+        HwyBlockAligner::prepare_global_gap_certificate(
+            unsupported_scoring, params);
+    CHECK_FALSE(unsupported_plan.generated_matrix_supported);
+    auto resident_query = bioseq::storage::make_lazy_in_memory(query_range);
+    auto resident_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto unsupported_attempt =
+        HwyBlockAligner::try_packed_global_gap<false>(
+            resident_query, resident_target,
+            0u, sequence.size(), 0u, sequence.size(), unsupported_plan);
+    CHECK(unsupported_attempt.decision
+          == BlockPackedCertificateDecision::NotEligible);
 }
 
 TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",

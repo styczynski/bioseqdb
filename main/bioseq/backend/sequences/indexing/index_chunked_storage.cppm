@@ -146,10 +146,11 @@ inline constexpr auto slicing_tables = make_slicing_tables();
         const LinearOperator& operation,
         std::uint64_t value) noexcept {
     std::uint64_t result = 0;
-    for (std::size_t bit = 0; bit < operation.size(); ++bit) {
-        if ((value & (std::uint64_t{1} << bit)) != 0) {
-            result ^= operation[bit];
-        }
+    while (value != 0u) {
+        const std::size_t bit = static_cast<std::size_t>(
+            std::countr_zero(value));
+        result ^= operation[bit];
+        value &= value - 1u;
     }
     return result;
 }
@@ -175,6 +176,68 @@ inline constexpr auto slicing_tables = make_slicing_tables();
     operation = square_operator(operation); // four zero bits
     operation = square_operator(operation); // one zero byte
     return operation;
+}
+
+[[nodiscard]] constexpr LinearOperator identity_operator() noexcept {
+    LinearOperator identity{};
+    for (std::size_t bit = 0; bit < identity.size(); ++bit) {
+        identity[bit] = std::uint64_t{1} << bit;
+    }
+    return identity;
+}
+
+[[nodiscard]] constexpr LinearOperator compose_operators(
+        const LinearOperator& outer,
+        const LinearOperator& inner) noexcept {
+    LinearOperator composition{};
+    for (std::size_t bit = 0; bit < composition.size(); ++bit) {
+        composition[bit] = apply_operator(outer, inner[bit]);
+    }
+    return composition;
+}
+
+/// Precompose a fixed zero-byte advance at compile time. Keeping only the
+/// resulting 64 basis images costs 512 bytes and turns a matching runtime
+/// advance into one linear-operator application.
+[[nodiscard]] consteval LinearOperator make_zero_byte_advance_operator(
+        std::uint64_t zero_byte_count) noexcept {
+    LinearOperator result = identity_operator();
+    LinearOperator power = zero_byte_operator();
+    while (zero_byte_count != 0u) {
+        if ((zero_byte_count & 1u) != 0u) {
+            result = compose_operators(power, result);
+        }
+        zero_byte_count >>= 1u;
+        if (zero_byte_count != 0u) {
+            power = square_operator(power);
+        }
+    }
+    return result;
+}
+
+// Format-5's dominant full payload row. 8,064 has six set bits, so the
+// generic path otherwise performs six separate 64-bit operator scans.
+inline constexpr std::uint64_t full_row_byte_count = 8'064u;
+inline constexpr LinearOperator full_row_zero_byte_operator =
+    make_zero_byte_advance_operator(full_row_byte_count);
+
+/// Constant-evaluation fallback for arbitrary lengths. Runtime callers use
+/// the cached powers below; this avoids making their initialization part of
+/// the public constexpr contract.
+[[nodiscard]] constexpr std::uint64_t advance_zero_bytes_constexpr(
+        std::uint64_t checksum,
+        std::uint64_t zero_byte_count) noexcept {
+    LinearOperator power = zero_byte_operator();
+    while (zero_byte_count != 0u) {
+        if ((zero_byte_count & 1u) != 0u) {
+            checksum = apply_operator(power, checksum);
+        }
+        zero_byte_count >>= 1u;
+        if (zero_byte_count != 0u) {
+            power = square_operator(power);
+        }
+    }
+    return checksum;
 }
 
 inline const auto zero_byte_operator_powers = [] {
@@ -262,9 +325,19 @@ struct Crc64Ecma182 {
 /// Advance one zero-initialized, no-final-XOR CRC state by zero bytes. The
 /// persisted ECMA-182 convention is linear, so callers may combine already
 /// authenticated checksums without rereading their raw byte images.
-[[nodiscard]] inline std::uint64_t crc64_ecma182_advance_zero_bytes(
+[[nodiscard]] constexpr std::uint64_t crc64_ecma182_advance_zero_bytes(
         std::uint64_t checksum,
         std::uint64_t zero_byte_count) noexcept {
+    if (zero_byte_count == crc64_ecma182_detail::full_row_byte_count) {
+        return crc64_ecma182_detail::apply_operator(
+            crc64_ecma182_detail::full_row_zero_byte_operator, checksum);
+    }
+
+    if consteval {
+        return crc64_ecma182_detail::advance_zero_bytes_constexpr(
+            checksum, zero_byte_count);
+    }
+
     std::size_t power = 0;
     while (zero_byte_count != 0) {
         if ((zero_byte_count & 1u) != 0) {

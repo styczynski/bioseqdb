@@ -1425,6 +1425,37 @@ static_assert([] {
  * @tparam TargetRange  compact_sequence_range type for target
  * @tparam AlphabetDim  Scoring matrix dimension (default: alphabet_size + 1)
  */
+[[nodiscard]] constexpr bool block_aligner_native_penalties_representable(
+        const Minimap2Params& params) noexcept {
+    return params.gap_open1 > 0
+        && params.gap_ext1 > 0
+        && params.gap_open1 <= std::numeric_limits<int8_t>::max()
+        && params.gap_ext1 <= std::numeric_limits<int8_t>::max()
+        && params.gap_open1 + params.gap_ext1
+            <= -static_cast<int>(std::numeric_limits<int8_t>::min());
+}
+
+[[nodiscard]] inline BlockAlignerParams project_block_aligner_params(
+        const Minimap2Params& params,
+        BlockAlignerPhase phase) noexcept {
+    const bool is_extension = phase != BlockAlignerPhase::GapExtension;
+    return BlockAlignerParams{
+        .gap_open   = static_cast<int8_t>(params.gap_open1),
+        .gap_extend = static_cast<int8_t>(params.gap_ext1),
+        .min_size   = params.block_min_size,
+        .max_size   = params.block_max_size,
+        .x_drop     = is_extension ? params.zdrop : 0,
+        .mode       = is_extension
+            ? BlockAlignmentMode::XDrop
+            : BlockAlignmentMode::Global,
+        .input_order = phase == BlockAlignerPhase::LeftExtension
+            ? BlockInputOrder::Reversed
+            : BlockInputOrder::Forward,
+        .phase      = phase,
+        .trace      = params.do_cigar,
+    };
+}
+
 template<
     bool is_reversed,
     supports_compact_sequence_range QueryRange,
@@ -1505,6 +1536,7 @@ template<
  */
 template<
     bool is_reversed,
+    bool enable_diagonal_certificate = true,
     supports_compact_sequence_range QueryRange,
     supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
@@ -1522,13 +1554,7 @@ template<
     BlockAlignerExecutionProof* execution_proof)
 {
     const bool is_extension = phase != BlockAlignerPhase::GapExtension;
-    const bool native_penalties_representable = params.gap_open1 > 0
-        && params.gap_ext1 > 0
-        && params.gap_open1 <= std::numeric_limits<int8_t>::max()
-        && params.gap_ext1 <= std::numeric_limits<int8_t>::max()
-        && params.gap_open1 + params.gap_ext1
-            <= -static_cast<int>(std::numeric_limits<int8_t>::min());
-    if (!native_penalties_representable
+    if (!block_aligner_native_penalties_representable(params)
         || (is_extension && params.zdrop < 0)) {
         if (execution_proof != nullptr) {
             execution_proof->add(
@@ -1541,22 +1567,10 @@ template<
             static_cast<unsigned>(phase));
         std::abort();
     }
-    BlockAlignerParams ba_params{
-        .gap_open   = static_cast<int8_t>(params.gap_open1),
-        .gap_extend = static_cast<int8_t>(params.gap_ext1),
-        .min_size   = params.block_min_size,
-        .max_size   = params.block_max_size,
-        .x_drop     = is_extension ? params.zdrop : 0,
-        .mode       = is_extension
-            ? BlockAlignmentMode::XDrop
-            : BlockAlignmentMode::Global,
-        .input_order = phase == BlockAlignerPhase::LeftExtension
-            ? BlockInputOrder::Reversed
-            : BlockInputOrder::Forward,
-        .phase      = phase,
-        .trace      = params.do_cigar,
-    };
-    return HwyBlockAligner::align<is_reversed>(
+    const BlockAlignerParams ba_params = project_block_aligner_params(
+        params, phase);
+    return HwyBlockAligner::align<
+        is_reversed, enable_diagonal_certificate>(
         query_seq, target_seq,
         query_start, query_end, target_start, target_end,
         scoring_matrix, ba_params, execution_proof);
@@ -1662,13 +1676,40 @@ template <BaseAlignmentAlgorithmType base_alignment_algorithm,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>,
+          bool enable_diagonal_certificate = true>
 struct AlignOnePhase {
     const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  query_seq;
     const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq;
     const ScoringMatrix<QueryRange>&           scoring_matrix;
     const Minimap2Params&                      params;
     int32_t                                    align_bandwidth;
+
+    [[gnu::always_inline]] static bool apply_gap_fill_result(
+            AlignRegion& region,
+            const KswAlignResult& fill_result,
+            std::int64_t qe,
+            std::int64_t re,
+            std::int64_t& qs,
+            std::int64_t& rs,
+            std::int64_t& final_query_end,
+            std::int64_t& final_ref_end) {
+        if (!fill_result.cigar.empty()) {
+            append_cigar(region.cigar, fill_result.cigar);
+        }
+        if (fill_result.zdropped) {
+            final_ref_end = rs + (fill_result.max_t + 1);
+            final_query_end = qs + (fill_result.max_q + 1);
+            region.dp_score += fill_result.max;
+            return true;
+        }
+        final_ref_end = re;
+        final_query_end = qe;
+        region.dp_score += fill_result.score;
+        qs = qe;
+        rs = re;
+        return false;
+    }
 
     template <bool strand_reversed>
     [[gnu::always_inline]] void run(
@@ -1740,6 +1781,8 @@ struct AlignOnePhase {
             std::int64_t qs = seed_query_start;
             std::int64_t rs = seed_ref_start;
             bool zdropped_any = false;
+            BlockGlobalGapCertificatePlan packed_gap_plan{};
+            bool packed_gap_plan_ready = false;
             final_ref_end = seed_ref_start;
             final_query_end = seed_query_start;
             for (int32_t i = 1; i < region.seed_count; ++i) {
@@ -1760,19 +1803,108 @@ struct AlignOnePhase {
                     rs = re;
                     continue;
                 }
-                KswAlignResult fill_result;
                 if constexpr (base_alignment_algorithm == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
-                    fill_result = block_aligner_align_pair<strand_reversed>(
-                        query_seq, target_seq,
-                        static_cast<size_t>(qs),
-                        static_cast<size_t>(qe),
-                        static_cast<size_t>(rs),
-                        static_cast<size_t>(re),
-                        scoring_matrix, params,
-                        BlockAlignerPhase::GapExtension,
-                        block_execution_proof);
+                    BlockPackedCertificateAttempt packed_attempt{};
+                    if constexpr (enable_diagonal_certificate) {
+                        // Prepare the immutable matrix/contract state only
+                        // after the anchor walk produces its first valid gap.
+                        // Invalid minimap penalty projections remain on the
+                        // existing adapter path, which records and aborts.
+                        if (block_aligner_native_penalties_representable(
+                                params)) {
+                            if (!packed_gap_plan_ready) {
+                                packed_gap_plan =
+                                    HwyBlockAligner::prepare_global_gap_certificate(
+                                        scoring_matrix,
+                                        project_block_aligner_params(
+                                            params,
+                                            BlockAlignerPhase::GapExtension));
+                                packed_gap_plan_ready = true;
+                            }
+                            packed_attempt =
+                                HwyBlockAligner::try_packed_global_gap<
+                                    strand_reversed>(
+                                        query_seq, target_seq,
+                                        static_cast<size_t>(qs),
+                                        static_cast<size_t>(qe),
+                                        static_cast<size_t>(rs),
+                                        static_cast<size_t>(re),
+                                        packed_gap_plan);
+                        }
+                    }
+
+                    if (packed_attempt.decision
+                            == BlockPackedCertificateDecision::Certified) {
+                        const std::uint32_t match_length =
+                            static_cast<std::uint32_t>(
+                                packed_attempt.certificate.symbols);
+                        if (params.do_cigar) {
+                            if (!region.cigar.empty()
+                                && region.cigar.back().opcode
+                                    == CIGAR_MATCH) {
+                                region.cigar.back().length += match_length;
+                            } else {
+                                region.cigar.push_back(
+                                    CigarOp{match_length, CIGAR_MATCH});
+                            }
+                        }
+                        region.dp_score += packed_attempt.certificate.score;
+                        final_ref_end = re;
+                        final_query_end = qe;
+                        qs = qe;
+                        rs = re;
+                        HwyBlockAligner::record_certified_global_gap<
+                            strand_reversed>(
+                                packed_gap_plan,
+                                packed_attempt.certificate,
+                                block_execution_proof);
+                        continue;
+                    }
+
+                    // Construct shared result storage only for a real DP
+                    // fallback.  Certified gaps above therefore avoid even
+                    // the default std::vector state/destructor.
+                    KswAlignResult fill_result;
+                    if (packed_attempt.decision
+                            == BlockPackedCertificateDecision::Rejected) {
+                        // Exact packed bytes have already been scanned.  Run
+                        // the unchanged DP path without paying for the byte
+                        // certificate a second time.
+                        fill_result = block_aligner_align_pair<
+                            strand_reversed, false>(
+                                query_seq, target_seq,
+                                static_cast<size_t>(qs),
+                                static_cast<size_t>(qe),
+                                static_cast<size_t>(rs),
+                                static_cast<size_t>(re),
+                                scoring_matrix, params,
+                                BlockAlignerPhase::GapExtension,
+                                block_execution_proof);
+                    } else {
+                        // Fragmented storage, DNA5, unsupported matrices and
+                        // non-candidate geometry retain today's route,
+                        // including the existing byte certificate.
+                        fill_result = block_aligner_align_pair<
+                            strand_reversed,
+                            enable_diagonal_certificate>(
+                                query_seq, target_seq,
+                                static_cast<size_t>(qs),
+                                static_cast<size_t>(qe),
+                                static_cast<size_t>(rs),
+                                static_cast<size_t>(re),
+                                scoring_matrix, params,
+                                BlockAlignerPhase::GapExtension,
+                                block_execution_proof);
+                    }
+                    if (apply_gap_fill_result(
+                            region, fill_result, qe, re, qs, rs,
+                            final_query_end, final_ref_end)) {
+                        zdropped_any = true;
+                        break;
+                    }
                 } else {
-                    fill_result = ksw2_align_pair<strand_reversed>(
+                    KswAlignResult fill_result =
+                        ksw2_align_pair<strand_reversed>(
                         query_seq, target_seq,
                         static_cast<size_t>(qs),
                         static_cast<size_t>(qe),
@@ -1784,22 +1916,13 @@ struct AlignOnePhase {
                         block_execution_proof,
                         scalar_execution_proof,
                         ScalarKsw2Phase::gap);
+                    if (apply_gap_fill_result(
+                            region, fill_result, qe, re, qs, rs,
+                            final_query_end, final_ref_end)) {
+                        zdropped_any = true;
+                        break;
+                    }
                 }
-                if (!fill_result.cigar.empty()) {
-                    append_cigar(region.cigar, fill_result.cigar);
-                }
-                if (fill_result.zdropped) {
-                    final_ref_end = rs + (fill_result.max_t + 1);
-                    final_query_end = qs + (fill_result.max_q + 1);
-                    region.dp_score += fill_result.max;
-                    zdropped_any = true;
-                    break;
-                }
-                final_ref_end = re;
-                final_query_end = qe;
-                region.dp_score += fill_result.score;
-                qs = qe;
-                rs = re;
             }
             prior_phase_zdropped = zdropped_any;
         } else {
@@ -1869,6 +1992,7 @@ struct AlignOnePhase {
 
 template<
     BaseAlignmentAlgorithmType base_alignment_algorithm,
+    bool enable_diagonal_certificate = true,
     supports_compact_sequence_range QueryRange,
     supports_compact_sequence_range TargetRange,
     class Scanner = bioseq::storage::sequence_scanner_none<
@@ -1898,7 +2022,9 @@ void align_regions(
     // non-capturing functor `AlignOnePhase`.  Constructed once per region
     // batch with the kernel-invariant references; the per-region call
     // surface is `aligner.template run<is_reversed>(...)`.
-    const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange, Scanner> aligner{
+    const AlignOnePhase<
+        base_alignment_algorithm, QueryRange, TargetRange, Scanner,
+        enable_diagonal_certificate> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
     // Proof collection is opt-in, so the normal benchmark path allocates no

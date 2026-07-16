@@ -30,6 +30,7 @@ module;
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <variant>
 #include <vector>
 #include <utility>
 export module bioseq.indexing.minimizer_hashmap;
@@ -39,6 +40,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_index;
+export import bioseq.indexing.minimizer_hashmap_format6;
 import bioseq.sequences;                             // sequence_custom_alphabet, compact_sequence_range for bounded Paper windows
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
@@ -2239,6 +2241,83 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
         return std::unexpected(*error);
     }
     return manifest;
+}
+
+inline constexpr std::size_t kMaxGenerationHeadBytes =
+    kMinimizerFormat6HeadBytes;
+inline constexpr std::size_t kMaxManifestBytes =
+    kMinimizerFormat6ManifestBytes;
+static_assert(MinimizerGenerationHead::encoded_bytes == 64u);
+static_assert(MinimizerGenerationManifest::format5_encoded_bytes == 160u);
+static_assert(kMaxGenerationHeadBytes == 224u);
+static_assert(kMaxManifestBytes == 336u);
+
+enum class TaggedMinimizerGenerationWireError : std::uint8_t {
+    encoded_size,
+    format5,
+    format6,
+};
+
+using TaggedMinimizerGenerationHead = std::variant<
+    MinimizerGenerationHead, MinimizerFormat6Head>;
+using TaggedMinimizerGenerationManifest = std::variant<
+    MinimizerGenerationManifest, MinimizerFormat6Manifest>;
+
+/** Exact-length Format-5/Format-6 dispatch; older 128-byte manifests are not
+ * part of this tagged publication branch and cannot be widened implicitly. */
+[[nodiscard]] inline std::expected<
+    TaggedMinimizerGenerationHead, TaggedMinimizerGenerationWireError>
+decode_tagged_minimizer_generation_head(
+        std::span<const std::byte> input) noexcept {
+    if (input.size() == MinimizerGenerationHead::encoded_bytes) {
+        auto decoded = decode_minimizer_generation_head(input);
+        if (!decoded
+            || decoded->wire_format
+                != MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
+            return std::unexpected(
+                TaggedMinimizerGenerationWireError::format5);
+        }
+        return TaggedMinimizerGenerationHead{std::in_place_index<0>, *decoded};
+    }
+    if (input.size() == kMinimizerFormat6HeadBytes) {
+        auto decoded = decode_minimizer_format6_head(input);
+        if (!decoded) {
+            return std::unexpected(
+                TaggedMinimizerGenerationWireError::format6);
+        }
+        return TaggedMinimizerGenerationHead{std::in_place_index<1>, *decoded};
+    }
+    return std::unexpected(TaggedMinimizerGenerationWireError::encoded_size);
+}
+
+[[nodiscard]] inline std::expected<
+    TaggedMinimizerGenerationManifest, TaggedMinimizerGenerationWireError>
+decode_tagged_minimizer_generation_manifest(
+        std::span<const std::byte> input) noexcept {
+    if (input.size()
+        == MinimizerGenerationManifest::format5_encoded_bytes) {
+        auto decoded = decode_minimizer_generation_manifest(input);
+        if (!decoded
+            || decoded->wire_format
+                != MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
+            return std::unexpected(
+                TaggedMinimizerGenerationWireError::format5);
+        }
+        return TaggedMinimizerGenerationManifest{
+            std::in_place_index<0>, *decoded};
+    }
+    if (input.size() == kMinimizerFormat6ManifestBytes) {
+        auto decoded = decode_minimizer_format6_manifest(input);
+        if (!decoded) {
+            return std::unexpected(
+                TaggedMinimizerGenerationWireError::format6);
+        }
+        return TaggedMinimizerGenerationManifest{
+            std::in_place_index<1>, *decoded};
+    }
+    return std::unexpected(TaggedMinimizerGenerationWireError::encoded_size);
 }
 
 /// Validate invariants intrinsic to one decoded revision-3 directory entry.

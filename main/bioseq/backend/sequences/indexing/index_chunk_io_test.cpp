@@ -77,6 +77,23 @@ using Storage = FakeFragmentStorage<kMax>;
     return checksum;
 }
 
+/// Independent zero-byte state transition oracle. This deliberately does not
+/// use the production GF(2) operators or CRC lookup tables.
+[[nodiscard]] std::uint64_t reference_crc64_ecma182_advance_zero_bytes(
+        std::uint64_t checksum,
+        std::uint64_t zero_byte_count) noexcept {
+    while (zero_byte_count != 0u) {
+        for (unsigned bit = 0u; bit < 8u; ++bit) {
+            checksum = (checksum & (std::uint64_t{1u} << 63u)) != 0u
+                ? (checksum << 1u)
+                    ^ bioseq::indexing::kCrc64Ecma182Polynomial
+                : checksum << 1u;
+        }
+        --zero_byte_count;
+    }
+    return checksum;
+}
+
 // Deterministic byte fill for chunk (sub_key, global byte offset).
 [[nodiscard]] char fill_byte(index_sub_key_t sub_key, std::size_t global_off) {
     return (char)(((std::size_t)sub_key * 1315423911u + global_off * 2654435761u) & 0xFF);
@@ -270,6 +287,123 @@ TEST_CASE("CRC-64 bulk path matches the bit oracle for every boundary",
         0x0102030405060708ULL, -2, -3, 0x11223344U, 3,
         std::span<const std::byte>{runtime_blob})
         == 0x75AC50EBED1FCB63ULL);
+}
+
+TEST_CASE("CRC-64 full-row zero advance matches an independent state oracle",
+          "[indexing][chunk-io][crc][combine][differential]") {
+    using bioseq::indexing::Crc64Ecma182;
+    using bioseq::indexing::crc64_ecma182_concatenate;
+    using bioseq::indexing::crc64_ecma182_advance_zero_bytes;
+
+    constexpr std::uint64_t compile_time_state = 0xA5A5A5A55A5A5A5AULL;
+    constexpr std::uint64_t compile_time_one = [] {
+        Crc64Ecma182 crc{0xA5A5A5A55A5A5A5AULL};
+        crc.update_byte(0u);
+        return crc.checksum();
+    }();
+    constexpr std::uint64_t compile_time_almost_full =
+        crc64_ecma182_advance_zero_bytes(compile_time_state, 8'063u);
+    STATIC_REQUIRE(crc64_ecma182_advance_zero_bytes(
+        compile_time_state, 0u) == compile_time_state);
+    STATIC_REQUIRE(crc64_ecma182_advance_zero_bytes(
+        compile_time_state, 1u) == compile_time_one);
+    STATIC_REQUIRE(crc64_ecma182_advance_zero_bytes(
+        compile_time_state, 8'064u)
+        == crc64_ecma182_advance_zero_bytes(
+            compile_time_almost_full, 1u));
+
+    constexpr std::array<std::uint64_t, 6> edge_states{
+        0u,
+        1u,
+        std::uint64_t{1u} << 63u,
+        bioseq::indexing::kCrc64Ecma182Polynomial,
+        compile_time_state,
+        (std::numeric_limits<std::uint64_t>::max)(),
+    };
+    constexpr std::array<std::uint64_t, 17> edge_lengths{
+        0u, 1u, 2u, 7u, 8u, 15u, 16u, 63u, 64u,
+        127u, 255u, 1'023u, 8'063u, 8'064u, 8'065u,
+        16'127u, 16'128u,
+    };
+    for (const std::uint64_t state : edge_states) {
+        for (const std::uint64_t length : edge_lengths) {
+            INFO("edge state=" << state << " zero bytes=" << length);
+            REQUIRE(crc64_ecma182_advance_zero_bytes(state, length)
+                == reference_crc64_ecma182_advance_zero_bytes(
+                    state, length));
+        }
+    }
+
+    std::uint64_t random = 0xD1B54A32D192ED03ULL;
+    const auto next_random = [&random]() noexcept {
+        random ^= random >> 12u;
+        random ^= random << 25u;
+        random ^= random >> 27u;
+        return random *= 0x2545F4914F6CDD1DULL;
+    };
+    for (std::size_t iteration = 0u; iteration < 64u; ++iteration) {
+        const std::uint64_t state = next_random();
+        const std::uint64_t sampled_length = next_random() % 16'385u;
+        const std::uint64_t length = iteration % 8u == 0u
+            ? 8'064u
+            : sampled_length;
+        INFO("random iteration=" << iteration << " state=" << state
+            << " zero bytes=" << length);
+        REQUIRE(crc64_ecma182_advance_zero_bytes(state, length)
+            == reference_crc64_ecma182_advance_zero_bytes(state, length));
+    }
+
+    constexpr std::array<std::uint64_t, 9> tail_lengths{
+        0u, 1u, 7u, 8u, 15u, 16u, 63u, 255u, 1'024u,
+    };
+    for (const std::uint64_t tail_length : tail_lengths) {
+        const std::uint64_t state = next_random();
+        const std::uint64_t expected =
+            reference_crc64_ecma182_advance_zero_bytes(
+                state, 8'064u + tail_length);
+        const std::uint64_t full_row_state =
+            crc64_ecma182_advance_zero_bytes(state, 8'064u);
+        INFO("full-row tail bytes=" << tail_length << " state=" << state);
+        REQUIRE(crc64_ecma182_advance_zero_bytes(
+            full_row_state, tail_length) == expected);
+        REQUIRE(crc64_ecma182_advance_zero_bytes(
+            state, 8'064u + tail_length) == expected);
+    }
+
+    constexpr std::array<std::size_t, 8> suffix_lengths{
+        0u, 1u, 15u, 8'063u, 8'064u, 8'065u, 8'127u, 9'088u,
+    };
+    std::vector<std::byte> suffix(suffix_lengths.back());
+    for (std::byte& byte : suffix) {
+        byte = static_cast<std::byte>(next_random() & 0xffu);
+    }
+    for (const std::size_t suffix_length : suffix_lengths) {
+        const std::uint64_t left_state = next_random();
+        const auto bytes = std::span<const std::byte>{suffix}
+            .first(suffix_length);
+        const std::uint64_t right_checksum =
+            reference_crc64_ecma182(bytes);
+        const std::uint64_t expected =
+            reference_crc64_ecma182(bytes, left_state);
+        INFO("concatenated suffix bytes=" << suffix_length
+            << " left state=" << left_state);
+        REQUIRE(crc64_ecma182_concatenate(
+            left_state, right_checksum, suffix_length) == expected);
+    }
+
+    constexpr std::uint64_t maximum_length =
+        (std::numeric_limits<std::uint64_t>::max)();
+    constexpr std::uint64_t first_length = maximum_length / 2u;
+    constexpr std::uint64_t second_length = maximum_length - first_length;
+    const std::uint64_t maximum_direct =
+        crc64_ecma182_advance_zero_bytes(
+            compile_time_state, maximum_length);
+    const std::uint64_t maximum_composed =
+        crc64_ecma182_advance_zero_bytes(
+            crc64_ecma182_advance_zero_bytes(
+                compile_time_state, first_length),
+            second_length);
+    REQUIRE(maximum_direct == maximum_composed);
 }
 
 TEST_CASE("DOC0373 Format-5 PostgreSQL tuple batching flushes before row nine",

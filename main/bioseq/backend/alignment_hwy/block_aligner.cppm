@@ -1716,6 +1716,30 @@ struct BlockAlignerParams {
     bool trace = true;
 };
 
+enum class BlockPackedCertificateDecision : std::uint8_t {
+    NotEligible,
+    Rejected,
+    Certified,
+};
+
+/// Immutable per-region state for the resident DNA4/u64 gap certificate.
+/// Matrix/contract checks are deliberately hoisted out of the seed-pair loop;
+/// exact coordinates and packed sequence contents remain per-gap inputs.
+struct BlockGlobalGapCertificatePlan {
+    BlockAlignerParams params{};
+    std::int8_t match_score = 0;
+    std::int8_t mismatch_score = 0;
+    std::uint64_t scoring_identity = 0;
+    bool contract_supported = false;
+    bool generated_matrix_supported = false;
+};
+
+struct BlockPackedCertificateAttempt {
+    BlockPackedCertificateDecision decision =
+        BlockPackedCertificateDecision::NotEligible;
+    BlockDiagonalCertificate certificate{};
+};
+
 enum class BlockAlignerContractError : std::uint8_t {
     None,
     GapPenalty,
@@ -1768,6 +1792,96 @@ enum class BlockAlignerContractError : std::uint8_t {
         return BlockAlignerContractError::PhaseMode;
     }
     return BlockAlignerContractError::None;
+}
+
+template<supports_compact_sequence_range R,
+         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
+[[nodiscard]] bool ba_generated_diagonal_score_layout(
+        const ScoringMatrix<R>& scoring_matrix,
+        std::int8_t& match_score,
+        std::int8_t& mismatch_score) noexcept {
+    // AlphabetDim-1 is Block Aligner's NULL/padding sentinel.  The generated
+    // matrix has one score for equal biological ranks, one for unequal ranks,
+    // and one for any comparison involving the sentinel.
+    if constexpr (AlphabetDim < 3) return false;
+    constexpr size_t biological_ranks = AlphabetDim - 1;
+    match_score = scoring_matrix.at(0, 0);
+    mismatch_score = scoring_matrix.at(0, 1);
+    const std::int8_t ambiguity_score = scoring_matrix.at(
+        0, static_cast<int>(biological_ranks));
+    if (match_score < 0) return false;
+    for (size_t row = 0; row < AlphabetDim; ++row) {
+        for (size_t col = 0; col < AlphabetDim; ++col) {
+            const std::int8_t expected =
+                row == biological_ranks || col == biological_ranks
+                    ? ambiguity_score
+                    : row == col ? match_score : mismatch_score;
+            const std::int8_t observed = scoring_matrix.at(
+                static_cast<int>(row), static_cast<int>(col));
+            if (observed != expected || observed > match_score) return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] constexpr std::uint64_t ba_low_dna4_symbol_mask(
+        size_t symbol_count) noexcept {
+    return symbol_count == 32u
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : (std::uint64_t{1} << (symbol_count * 2u)) - 1u;
+}
+
+/// Load up to 32 LSB-first DNA4 ranks from an arbitrary base coordinate.
+/// The second storage unit is touched only when the requested window crosses
+/// the first unit boundary, so the final partial unit is never over-read.
+[[nodiscard]] HWY_INLINE std::uint64_t ba_load_forward_dna4_window(
+        const std::uint64_t* units,
+        size_t bp_start,
+        size_t symbol_count) noexcept {
+    constexpr size_t symbols_per_unit = 32u;
+    const size_t unit_index = bp_start / symbols_per_unit;
+    const size_t symbol_offset = bp_start % symbols_per_unit;
+    const size_t bit_offset = symbol_offset * 2u;
+    std::uint64_t packed = units[unit_index] >> bit_offset;
+    if (symbol_offset != 0u
+        && symbol_offset + symbol_count > symbols_per_unit) {
+        packed |= units[unit_index + 1u] << (64u - bit_offset);
+    }
+    return packed & ba_low_dna4_symbol_mask(symbol_count);
+}
+
+/// Reverse the order of 32 two-bit groups while retaining the bit order
+/// within each rank.  DNA4 complement is a subsequent XOR with 0b11/rank.
+[[nodiscard]] constexpr std::uint64_t ba_reverse_dna4_groups(
+        std::uint64_t packed) noexcept {
+    packed = ((packed & 0x0303030303030303ULL) << 6u)
+        | ((packed & 0x0c0c0c0c0c0c0c0cULL) << 2u)
+        | ((packed & 0x3030303030303030ULL) >> 2u)
+        | ((packed & 0xc0c0c0c0c0c0c0c0ULL) >> 6u);
+    return std::byteswap(packed);
+}
+
+template<bool is_reversed>
+[[nodiscard]] HWY_INLINE std::uint64_t ba_load_oriented_dna4_window(
+        const std::uint64_t* units,
+        size_t total_symbols,
+        size_t logical_start,
+        size_t symbol_count) noexcept {
+    if constexpr (!is_reversed) {
+        return ba_load_forward_dna4_window(
+            units, logical_start, symbol_count);
+    } else {
+        // Logical reverse-complement [start,start+n) maps to the descending
+        // forward-domain window [total-start-n,total-start).
+        const size_t source_high = total_symbols - logical_start;
+        const size_t source_low = source_high - symbol_count;
+        const std::uint64_t forward = ba_load_forward_dna4_window(
+            units, source_low, symbol_count);
+        const size_t inactive_symbols = 32u - symbol_count;
+        const std::uint64_t reversed = ba_reverse_dna4_groups(forward)
+            >> (inactive_symbols * 2u);
+        return reversed ^ ba_low_dna4_symbol_mask(symbol_count);
+    }
 }
 
 /// Prove that an equal-length Global alignment's coordinate diagonal is its
@@ -1829,21 +1943,11 @@ ba_try_global_diagonal_certificate(
     // AlphabetDim-1 itself is the aligner's NULL/padding sentinel.
     if constexpr (AlphabetDim < 3) return result;
     constexpr size_t biological_ranks = AlphabetDim - 1;
-    const int8_t match_score = scoring_matrix.at(0, 0);
-    const int8_t mismatch_score = scoring_matrix.at(0, 1);
-    const int8_t ambiguity_score = scoring_matrix.at(
-        0, static_cast<int>(biological_ranks));
-    if (match_score < 0) return result;
-    for (size_t row = 0; row < AlphabetDim; ++row) {
-        for (size_t col = 0; col < AlphabetDim; ++col) {
-            const int8_t expected =
-                row == biological_ranks || col == biological_ranks
-                    ? ambiguity_score
-                    : row == col ? match_score : mismatch_score;
-            const int8_t observed = scoring_matrix.at(
-                static_cast<int>(row), static_cast<int>(col));
-            if (observed != expected || observed > match_score) return result;
-        }
+    std::int8_t match_score = 0;
+    std::int8_t mismatch_score = 0;
+    if (!ba_generated_diagonal_score_layout<QueryRange, AlphabetDim>(
+            scoring_matrix, match_score, mismatch_score)) {
+        return result;
     }
 
     // Encode bounded chunks into stack storage in exactly the orientation the
@@ -1930,6 +2034,147 @@ ba_try_global_diagonal_certificate(
     result.score = static_cast<int32_t>(diagonal_score);
     result.symbols = n;
     return result;
+}
+
+/// Attempt the resident packed DNA4/u64 certificate without materialising
+/// byte ranks.  The three-way result is important to the caller:
+///
+///  * NotEligible: no packed content scan ran; preserve the current align()
+///    route, including its byte certificate for fragmented/DNA5 inputs.
+///  * Rejected: the exact packed content scan ran but could not prove the
+///    diagonal; enter forced-old DP so the same gap is not scanned twice.
+///  * Certified: caller may commit the exact score/endpoints/M run and record
+///    one logical Block execution through record_certified_global_gap().
+template<
+    bool is_reversed,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    class Scanner>
+[[nodiscard]] HWY_INLINE BlockPackedCertificateAttempt
+ba_try_packed_global_gap_certificate(
+        const bioseq::storage::lazy_compact_sequence<
+            QueryRange, Scanner>& query_seq,
+        const bioseq::storage::lazy_compact_sequence<
+            TargetRange, Scanner>& target_seq,
+        size_t query_start,
+        size_t query_end,
+        size_t target_start,
+        size_t target_end,
+        const BlockGlobalGapCertificatePlan& plan) noexcept {
+    BlockPackedCertificateAttempt attempt;
+    using query_traits = typename compact_sequence_range<QueryRange>::traits;
+    using target_traits = typename compact_sequence_range<TargetRange>::traits;
+    constexpr bool resident_dna4_u64 =
+        !Scanner::supports_fragments()
+        && std::same_as<typename query_traits::alphabet_type, seq::dna4>
+        && std::same_as<typename target_traits::alphabet_type, seq::dna4>
+        && std::same_as<typename query_traits::storage_unit, std::uint64_t>
+        && std::same_as<typename target_traits::storage_unit, std::uint64_t>
+        && query_traits::bits_per_char == 2u
+        && target_traits::bits_per_char == 2u
+        && query_traits::letters_per_unit == 32u
+        && target_traits::letters_per_unit == 32u
+        && query_traits::unit_leftover_bits == 0u
+        && target_traits::unit_leftover_bits == 0u;
+    if constexpr (!resident_dna4_u64) {
+        return attempt;
+    } else {
+        const bool ordered_coordinates = query_end >= query_start
+            && target_end >= target_start;
+        const size_t query_len = ordered_coordinates
+            ? query_end - query_start : 0u;
+        const size_t target_len = ordered_coordinates
+            ? target_end - target_start : 0u;
+        constexpr size_t packed_cigar_limit = static_cast<size_t>(
+            std::numeric_limits<std::uint32_t>::max() >> 4u);
+        if (!plan.contract_supported
+            || !plan.generated_matrix_supported
+            || plan.params.mode != BlockAlignmentMode::Global
+            || plan.params.phase != BlockAlignerPhase::GapExtension
+            || plan.params.input_order != BlockInputOrder::Forward
+            || !ordered_coordinates || query_len == 0u
+            || target_len != query_len
+            || query_end > query_seq.bp_size()
+            || target_end > target_seq.bp_size()
+            || query_len > static_cast<size_t>(
+                std::numeric_limits<std::int32_t>::max())
+            || (plan.params.trace && query_len > packed_cigar_limit)) {
+            return attempt;
+        }
+
+        const std::uint64_t* const query_units = query_seq.read_cptr(
+            query_seq.cbegin());
+        const std::uint64_t* const target_units = target_seq.read_cptr(
+            target_seq.cbegin());
+        const size_t query_total = static_cast<size_t>(query_seq.bp_size());
+        const size_t target_total = static_cast<size_t>(target_seq.bp_size());
+
+        // Extraction handles arbitrary base offsets one word at a time.  The
+        // staging arrays are completely initialized before each masked load;
+        // Highway then collapses and popcounts two-bit mismatches across the
+        // native packed-word lanes.
+        const hn::Repartition<std::uint64_t, BlockAlignerSimdTag> d64;
+        const size_t lanes = hn::Lanes(d64);
+        constexpr size_t max_packed_lanes = 4u;
+        alignas(64) std::array<std::uint64_t, max_packed_lanes> query_words{};
+        alignas(64) std::array<std::uint64_t, max_packed_lanes> target_words{};
+        const auto pair_low_bits = hn::Set(d64, 0x5555555555555555ULL);
+        const size_t word_count = ba_div_ceil(query_len, 32u);
+        std::uint64_t mismatch_symbols = 0;
+        for (size_t first_word = 0; first_word < word_count;
+             first_word += lanes) {
+            const size_t active_lanes = std::min(lanes,
+                word_count - first_word);
+            for (size_t lane = 0; lane < active_lanes; ++lane) {
+                const size_t symbol_offset = (first_word + lane) * 32u;
+                const size_t symbol_count = std::min(
+                    size_t{32}, query_len - symbol_offset);
+                query_words[lane] = ba_load_oriented_dna4_window<is_reversed>(
+                    query_units, query_total,
+                    query_start + symbol_offset, symbol_count);
+                target_words[lane] = ba_load_oriented_dna4_window<false>(
+                    target_units, target_total,
+                    target_start + symbol_offset, symbol_count);
+            }
+            const auto active = hn::FirstN(d64, active_lanes);
+            const auto query_packed = hn::MaskedLoad(
+                active, d64, query_words.data());
+            const auto target_packed = hn::MaskedLoad(
+                active, d64, target_words.data());
+            const auto different_bits = hn::Xor(query_packed, target_packed);
+            const auto different_symbols = hn::And(
+                hn::Or(different_bits, hn::ShiftRight<1>(different_bits)),
+                pair_low_bits);
+            const auto per_lane_mismatches = hn::PopulationCount(
+                different_symbols);
+            mismatch_symbols += hn::ReduceSum(
+                d64, hn::IfThenElseZero(active, per_lane_mismatches));
+            ++attempt.certificate.vector_batches;
+        }
+
+        attempt.decision = BlockPackedCertificateDecision::Rejected;
+        const std::uint64_t equal_symbols =
+            static_cast<std::uint64_t>(query_len) - mismatch_symbols;
+        const std::int64_t diagonal_score =
+            static_cast<std::int64_t>(equal_symbols) * plan.match_score
+            + static_cast<std::int64_t>(mismatch_symbols)
+                * plan.mismatch_score;
+        const std::int64_t alternative_upper_bound =
+            static_cast<std::int64_t>(query_len - 1u) * plan.match_score
+            - 2 * (static_cast<std::int64_t>(plan.params.gap_open)
+                + static_cast<std::int64_t>(plan.params.gap_extend));
+        if (diagonal_score <= alternative_upper_bound
+            || diagonal_score < std::numeric_limits<std::int32_t>::min()
+            || diagonal_score > std::numeric_limits<std::int32_t>::max()) {
+            return attempt;
+        }
+
+        attempt.decision = BlockPackedCertificateDecision::Certified;
+        attempt.certificate.certified = true;
+        attempt.certificate.score = static_cast<std::int32_t>(diagonal_score);
+        attempt.certificate.symbols = query_len;
+        return attempt;
+    }
 }
 
 [[nodiscard]] constexpr std::uint64_t block_aligner_config_identity(
@@ -2063,6 +2308,80 @@ inline void block_aligner_record_executed(
 
 class HwyBlockAligner {
 public:
+    template<
+        supports_compact_sequence_range R,
+        size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
+    [[nodiscard]] static BlockGlobalGapCertificatePlan
+    prepare_global_gap_certificate(
+            const ScoringMatrix<R>& scoring_matrix,
+            const BlockAlignerParams& params) noexcept {
+        BlockGlobalGapCertificatePlan plan{
+            .params = params,
+            .scoring_identity = scoring_matrix.block_semantic_identity(),
+        };
+        const size_t lanes = hn::Lanes(BlockAlignerSimdTag{});
+        plan.contract_supported = scoring_matrix.block_layout_valid()
+            && validate_block_aligner_contract(params, lanes)
+                == BlockAlignerContractError::None;
+        plan.generated_matrix_supported =
+            ba_generated_diagonal_score_layout<R, AlphabetDim>(
+                scoring_matrix, plan.match_score, plan.mismatch_score);
+        return plan;
+    }
+
+    template<
+        bool is_reversed,
+        supports_compact_sequence_range QueryRange,
+        supports_compact_sequence_range TargetRange,
+        class Scanner>
+    [[nodiscard]] static HWY_INLINE BlockPackedCertificateAttempt
+    try_packed_global_gap(
+            const bioseq::storage::lazy_compact_sequence<
+                QueryRange, Scanner>& query_seq,
+            const bioseq::storage::lazy_compact_sequence<
+                TargetRange, Scanner>& target_seq,
+            size_t query_start,
+            size_t query_end,
+            size_t target_start,
+            size_t target_end,
+            const BlockGlobalGapCertificatePlan& plan) noexcept {
+        return ba_try_packed_global_gap_certificate<is_reversed>(
+            query_seq, target_seq,
+            query_start, query_end, target_start, target_end, plan);
+    }
+
+    /// Commit the proof for a directly stitched certified gap.  The attempt
+    /// itself is side-effect free, so this is the sole eligible/executed
+    /// record for the logical Block call.
+    template<bool is_reversed>
+    static void record_certified_global_gap(
+            const BlockGlobalGapCertificatePlan& plan,
+            const BlockDiagonalCertificate& certificate,
+            BlockAlignerExecutionProof* execution_proof) noexcept {
+        if (execution_proof == nullptr) return;
+        if (!certificate.certified || certificate.symbols == 0u
+            || certificate.vector_batches == 0u) {
+            block_aligner_invariant_failure(
+                "attempted to record an invalid packed gap certificate");
+        }
+        const std::uint64_t config_identity = block_aligner_config_identity(
+            plan.params, plan.scoring_identity, is_reversed);
+        block_aligner_record_eligible(
+            *execution_proof, plan.params,
+            static_cast<size_t>(certificate.symbols),
+            static_cast<size_t>(certificate.symbols),
+            config_identity);
+        BlockCoreMetrics metrics;
+        metrics.diagonal_certified = true;
+        metrics.diagonal_certificate_vector_batches =
+            certificate.vector_batches;
+        metrics.diagonal_certificate_symbols = certificate.symbols;
+        block_aligner_record_executed(
+            *execution_proof, plan.params,
+            hn::Lanes(BlockAlignerSimdTag{}), false, metrics,
+            config_identity);
+    }
+
     /// Run block aligner on a sub-region of the given sequences.
     /// Returns KswAlignResult as the pipeline's shared result storage ABI.
     ///
