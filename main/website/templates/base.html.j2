@@ -20,11 +20,16 @@
 <script type="application/ld+json">{{ page.jsonld }}</script>
 {% block head_extra %}{% endblock %}
 </head>
-<body>
+<body id="page-top" class="{% block body_class %}docs-page{% endblock %}">
 <a class="skip-link" href="#main">Skip to main content</a>
-<header class="site-header">
+{% block header %}
+<header class="site-header docs-header">
   <nav class="site-nav" aria-label="Primary">
-    <a class="brand" href="{{ site.base_path }}">{{ site.title }}</a>
+    <a class="brand" href="{{ site.base_path }}">
+      <img class="brand-mark" src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="">
+      <span class="brand-word">Bioseq<span>DB</span></span>
+      <span class="docs-badge">Docs</span>
+    </a>
     <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-primary" aria-label="Toggle navigation menu">
       <span class="nav-toggle-bar" aria-hidden="true"></span>
       <span class="nav-toggle-bar" aria-hidden="true"></span>
@@ -32,9 +37,10 @@
     </button>
     <div class="nav-primary" id="nav-primary">
       <ul class="nav-links">
-        <li><a href="{{ nav.documentation }}">{{ site.nav.documentation }}</a></li>
-        <li><a href="{{ nav.tutorials }}">{{ site.nav.tutorials }}</a></li>
-        <li><a href="{{ nav.reference }}">{{ site.nav.reference }}</a></li>
+        <li><a href="{{ nav.documentation }}">Docs</a></li>
+        <li><a href="{{ site.base_path }}">Product</a></li>
+        <li><a href="{{ nav.tutorials }}">Tutorials</a></li>
+        <li><a href="{{ nav.reference }}">Reference</a></li>
       </ul>
       <div class="nav-actions">
         <a class="search-button" id="search-button" href="{{ nav.reference }}" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="search-dialog">
@@ -50,11 +56,12 @@
             <a class="version-all" href="{{ site.versions_page_url }}">All versions</a>
           </div>
         </details>
-        <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+        <a class="repo-link button-quiet" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
       </div>
     </div>
   </nav>
 </header>
+{% endblock %}
 <dialog class="search-dialog" id="search-dialog" data-search-index="{{ site.search_index_url }}" aria-label="Search documentation">
   <form class="search-form" method="dialog" role="search">
     <label class="search-label" for="search-input">Search documentation</label>
@@ -103,9 +110,47 @@
   </aside>
   {% endif %}
 </div>
+{% block footer %}
 <footer class="site-footer">
-  <p>&#169; {{ site.copyright_year }} {{ site.copyright_holder }}{% if site.status_label %} &#183; {{ site.status_label }}{% endif %} &#183; {{ site.version }}</p>
+  <div class="footer-watermark" aria-hidden="true">BioseqDB</div>
+  <div class="footer-inner">
+    <div class="footer-grid">
+      <div class="footer-intro">
+        <a class="brand footer-brand" href="{{ site.base_path }}">
+          <img class="brand-mark" src="{{ site.assets_base_url }}bioseq-mark.svg" width="32" height="32" alt="">
+          <span class="brand-word">Bioseq<span>DB</span></span>
+          <span class="docs-badge">Docs</span>
+        </a>
+        <p>SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+        <span class="open-source-badge"><span aria-hidden="true"></span>Free &amp; open source</span>
+      </div>
+      <div class="footer-column">
+        <p class="footer-title">Documentation</p>
+        <a href="{{ nav.documentation }}">Documentation home</a>
+        <a href="{{ nav.tutorials }}">Tutorials</a>
+        <a href="{{ nav.reference }}">API reference</a>
+      </div>
+      <div class="footer-column">
+        <p class="footer-title">Explore</p>
+        <a href="{{ site.base_path }}#workflow">Workflow</a>
+        <a href="{{ site.base_path }}#examples">Examples</a>
+        <a href="{{ site.base_path }}#capabilities">Capabilities</a>
+        <a href="{{ site.base_path }}#scale">Scale</a>
+      </div>
+      <div class="footer-column">
+        <p class="footer-title">Project</p>
+        <a href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+        <a href="{{ site.versions_page_url }}">All versions</a>
+        <span class="footer-status">{{ site.status_label }} &#183; {{ site.version }}</span>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>&#169; {{ site.copyright_year }} {{ site.copyright_holder }}</span>
+      <nav aria-label="Footer"><a href="{{ site.repository_url }}" rel="noreferrer">License</a><a href="#page-top">Back to top &#8593;</a></nav>
+    </div>
+  </div>
 </footer>
+{% endblock %}
 <script src="{{ site.prism_js_url }}"></script>
 <script type="module" src="{{ site.js_url }}"></script>
 {% block scripts %}{% endblock %}

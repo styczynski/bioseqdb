@@ -76,3 +76,4 @@ media:
     - { path: media/social_card.png, sha256: 5a09b23db5be89253ee80fdd9d2924e613d6b8b96c490774082b50989e6f0559 }
     - { path: media/sequence_column_type.png, sha256: dfaf4cd117ac78fd5a01401812db457dffdcb2348069bac2e2f1f4c7fca91322 }
     - { path: media/cinematic_band.mp4, sha256: 89890c8476f08f06ae289fdb3392ce938591b8b4d3a9ae8ecc3bb62d6189d5b0 }
+    - { path: media/vials.mp4, sha256: ece0916379e5539b6c7e4fc14cf4ee606731a75de79bb98045a6038c88f51512 }

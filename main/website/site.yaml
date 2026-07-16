@@ -1,5 +1,5 @@
-title: Bioseq
-short_description: PostgreSQL-native biological sequence analysis.
+title: BioseqDB
+short_description: Load FASTA and FASTQ data, store sequences beside metadata, and search them with ordinary SQL.
 # Production serves the published site/ tree at the domain root, so site/index.html
 # is https://bioseqdb.com/index.html. canonical_origin carries no trailing slash --
 # it is concatenated with default_base_path to form canonical/sitemap/og:image URLs.

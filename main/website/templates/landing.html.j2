@@ -13,26 +13,61 @@
    Context keys used: page.eyebrow / page.headline / page.lede / page.install,
    nav.documentation / nav.tutorials / nav.reference, site.status_label /
    site.repository_url / site.assets_base_url, and the examples.<slot> collection. #}
+{% block body_class %}landing-page{% endblock %}
+{% block header %}
+<header class="site-header landing-header">
+  <nav class="site-nav landing-nav" aria-label="Primary">
+    <a class="brand" href="{{ site.base_path }}">
+      <img class="brand-mark" src="{{ site.assets_base_url }}bioseq-mark.svg" width="34" height="34" alt="">
+      <span class="brand-word">Bioseq<span>DB</span></span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-primary" aria-label="Toggle navigation menu">
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+    </button>
+    <div class="nav-primary" id="nav-primary">
+      <ul class="nav-links landing-nav-links">
+        <li><a href="#workflow">Workflow</a></li>
+        <li><a href="#examples">Examples</a></li>
+        <li><a href="#capabilities">Capabilities</a></li>
+        <li><a href="#scale">Scale</a></li>
+      </ul>
+      <div class="nav-actions">
+        <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+        <a class="docs-button" href="{{ nav.documentation }}">Read the docs</a>
+      </div>
+    </div>
+  </nav>
+</header>
+{% endblock %}
 {% block main %}
 <section class="landing-hero" id="top">
+  <video class="landing-hero-video" autoplay muted loop playsinline preload="metadata" aria-hidden="true">
+    <source src="{{ site.assets_base_url }}media/vials.mp4" type="video/mp4">
+  </video>
+  <div class="landing-hero-shade landing-hero-shade-side" aria-hidden="true"></div>
+  <div class="landing-hero-shade landing-hero-shade-vertical" aria-hidden="true"></div>
   <div class="landing-hero-inner">
-    <p class="eyebrow">{{ page.eyebrow }}</p>
-    <h1 class="landing-hero-title">{{ page.headline }}</h1>
+    <p class="eyebrow hero-eyebrow"><span aria-hidden="true"></span>SQL-native sequence search</p>
+    <h1 class="landing-hero-title">Search biological sequences with plain <span>SQL</span>.</h1>
     <p class="lede landing-hero-lede">{{ page.lede }}</p>
     <p class="hero-actions">
       <a class="button primary" href="{{ nav.documentation }}">Read the docs</a>
       <a class="button" href="#examples">See the examples</a>
-      <a class="button" href="{{ nav.reference }}">API reference</a>
     </p>
-    <div class="install-row">
-      <span class="install-prompt" aria-hidden="true">$</span>
-      <code class="install-code" id="hero-install-code">{{ page.install }}</code>
-      <button type="button" class="copy-button" data-copy-target="hero-install-code" aria-label="Copy the install command">Copy</button>
+    <div class="hero-meta">
+      <div class="install-row">
+        <span class="install-prompt" aria-hidden="true">$</span>
+        <code class="install-code" id="hero-install-code">{{ page.install }}</code>
+        <button type="button" class="copy-button" data-copy-target="hero-install-code" aria-label="Copy the install command">Copy</button>
+      </div>
+      {% if site.status_label %}
+      <p class="hero-status"><span class="status-dot" aria-hidden="true"></span>{{ site.status_label }}</p>
+      {% endif %}
     </div>
-    {% if site.status_label %}
-    <p class="hero-status"><span class="status-dot" aria-hidden="true"></span>{{ site.status_label }}</p>
-    {% endif %}
   </div>
+  <div class="scroll-cue" aria-hidden="true"><span>Scroll</span><span>&#9662;</span></div>
 </section>
 
 <section class="landing-section" id="query" aria-labelledby="query-heading">
@@ -60,6 +95,17 @@
         <p>Bioseq supports different sequence alphabets and storage widths, chosen right in the column type modifier.</p>
       </li>
     </ul>
+  </div>
+</section>
+
+<section class="experience-strip" aria-label="Open-source project background">
+  <p><strong>Free and open source, forever.</strong> Built by a single maintainer, with experience from</p>
+  <div class="experience-logos">
+    <img src="{{ site.assets_base_url }}logos/google.png" alt="Google">
+    <img src="{{ site.assets_base_url }}logos/bytedance.png" alt="ByteDance">
+    <img src="{{ site.assets_base_url }}logos/goldman.png" alt="Goldman Sachs">
+    <img src="{{ site.assets_base_url }}logos/sumo.png" alt="Sumo Logic">
+    <img src="{{ site.assets_base_url }}logos/ef.png" alt="Entrepreneur First">
   </div>
 </section>
 
