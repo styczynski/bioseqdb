@@ -55,7 +55,14 @@ if(NOT _inside EQUAL 0)
 endif()
 file(MAKE_DIRECTORY "${_output_root}")
 
+# The base path must be a validated mount ("/" or "/seg/.../"); an empty value
+# would render root-relative asset URLs that 404 on nested pages (tutorials,
+# reference), so default an unset deployment base to the site root. Deployers set
+# BIOSEQ_WEBSITE_BASE_PATH (e.g. /bioseqdb/) for a subpath mount.
 set(_base_path "${BIOSEQ_WEBSITE_BASE_PATH}")
+if(_base_path STREQUAL "")
+  set(_base_path "/")
+endif()
 set(_revision "${BIOSEQ_WEBSITE_SOURCE_REVISION}")
 if(_revision STREQUAL "")
   # Resolve Git HEAD; empty stays empty and the generator falls back.
@@ -318,7 +325,7 @@ file(WRITE "${_cluster_child}"
 "  --schemas 'public,bioseq' --output '${_sql_entities}'\n"
 "exec \"${_gen}\" website execute \\\n"
 "  --source '${_source_dir}' --version '${_version}' \\\n"
-"  --site-config '${_site_config}' \\\n"
+"  --site-config '${_site_config}' --sql-api '${_sql_api}' \\\n"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
 "  --conninfo \"$CONN\" ${_drafts_flag} \\\n"
@@ -336,7 +343,7 @@ add_custom_command(
           --bootstrap "${_output_root}/create-extension.sql"
           -- bash "${_cluster_child}"
   DEPENDS ${_gen_dep} "${_stage_manifest}" "${_cluster_child}"
-          "${_cpp_entities}" "${_plan_json}"
+          "${_cpp_entities}" "${_plan_json}" "${_sql_api}"
           ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
@@ -432,11 +439,15 @@ add_custom_command(
   VERBATIM)
 
 # --- bioseq_website final target (§17.3 step 11) ------------------------------
+# The success stamp requires the atomic publish (§184) - which itself pulls in the
+# staging render, both validator stamps, and the pinned-browser acceptance - so the
+# default target drives the pipeline all the way to the swapped-in `site/`, not just
+# staging validation.
 set(_website_success "${_output_root}/site.success")
 add_custom_command(
   OUTPUT "${_website_success}"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_website_success}"
-  DEPENDS "${_html_validation_stamp}" "${_cpp_coverage}"
+  DEPENDS "${_publish_stamp}" "${_cpp_coverage}"
   COMMENT "website: publication success stamp"
   VERBATIM)
 add_custom_target(bioseq_website

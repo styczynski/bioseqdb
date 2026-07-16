@@ -252,7 +252,8 @@ struct site_model {
     std::vector<tutorial> tutorials;               // content stripped of hidden SQL
     std::vector<landing_example_view> landing_examples;
     std::vector<documented_entity> cpp_entities;   // base-independent route_path
-    std::vector<documented_entity> sql_entities;
+    std::vector<documented_entity> sql_entities;   // allowlisted public SQL pages
+    std::vector<documented_entity> omitted_sql_entities;  // §11.4 inventory-only
     std::uint32_t coverage_public_total{};
     std::uint32_t coverage_documented_total{};
     std::vector<std::string> coverage_missing;        // public, undocumented, non-fatal

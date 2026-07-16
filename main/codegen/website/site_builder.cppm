@@ -192,6 +192,36 @@ void run_website_smoke() {
                && coverage.fatal_missing.size() == 1,
            "coverage flags required undocumented entity");
 
+    // sql_api.yaml allowlist parsing (§9/§12.2): a closed schema of unique nonempty
+    // sequences - unquoted identifiers and exact canonical IDs.
+    const sql_api_configuration api = parse_sql_api(
+        "schema: bioseq.website.sql_api/v1\n"
+        "include_schemas: [bioseq, public]\n"
+        "public_entities:\n"
+        "  - sql:type:bioseq.seq\n"
+        "  - sql:function:bioseq.len(bioseq.seq)\n",
+        "sql_api.yaml");
+    expect(api.include_schemas.size() == 2 && api.public_entities.size() == 2
+               && api.include_schemas.front() == "bioseq"
+               && api.public_entities.back() == "sql:function:bioseq.len(bioseq.seq)",
+           "sql_api.yaml parses include schemas and public entities");
+    const auto sql_api_rejects = [](std::string_view yaml) {
+        try {
+            (void)parse_sql_api(yaml, "sql_api.yaml");
+            return false;
+        } catch (const std::exception&) {
+            return true;
+        }
+    };
+    expect(sql_api_rejects("schema: s\ninclude_schemas: [bioseq]\n"
+                           "public_entities: [sql:type:bioseq.seq]\nsurprise: 1\n")
+               && sql_api_rejects("schema: s\ninclude_schemas: [bioseq]\n"
+                                  "public_entities: [sql:type:bioseq.seq, "
+                                  "sql:type:bioseq.seq]\n")
+               && sql_api_rejects("schema: s\ninclude_schemas: []\n"
+                                  "public_entities: [sql:type:bioseq.seq]\n"),
+           "sql_api.yaml rejects unknown keys, duplicates, and empty sequences");
+
     // Clang 22 structural/export pass (§11.3): exported module members are
     // recorded with kind/signature; a non-exported namespace is excluded.
     const clang_structural_index clang_index = parse_clang_structural_index_from_code(
@@ -1021,6 +1051,46 @@ void resolve_entity_links(std::vector<document_node>& nodes,
     }
     if (const auto found = options.find("staged-extension-sha256"); found != options.end()) {
         model.staged_extension_sha256 = found->second;
+    }
+
+    // Apply the sql_api.yaml public-API allowlist (§11.4/§12.2): only the exact
+    // allowlisted canonical IDs that live in an included schema become SQL pages;
+    // every other captured extension member is recorded inventory-only. A listed ID
+    // that is unknown, in a non-included schema, or otherwise unmatched is fatal - the
+    // generator never rewrites canonical IDs to match an unexpected catalog (§13.2).
+    if (const auto found = options.find("sql-api"); found != options.end()) {
+        const std::string sql_api_yaml = read_file(found->second);
+        const sql_api_configuration api = parse_sql_api(sql_api_yaml, found->second);
+        const std::set<std::string, std::less<>> included_schemas(
+            api.include_schemas.begin(), api.include_schemas.end());
+        const std::set<std::string, std::less<>> allowlist(
+            api.public_entities.begin(), api.public_entities.end());
+        const auto schema_of = [](const documented_entity& entity) {
+            const std::size_t dot = entity.qualified_name.find('.');
+            return dot == std::string::npos
+                ? std::string() : entity.qualified_name.substr(0, dot);
+        };
+        std::vector<documented_entity> kept;
+        std::vector<documented_entity> omitted;
+        std::set<std::string, std::less<>> matched;
+        for (documented_entity& entity : model.sql_entities) {
+            if (allowlist.contains(entity.canonical_id)
+                && included_schemas.contains(schema_of(entity))) {
+                matched.insert(entity.canonical_id);
+                kept.push_back(std::move(entity));
+            } else {
+                omitted.push_back(std::move(entity));
+            }
+        }
+        for (const std::string& id : api.public_entities) {
+            if (!matched.contains(id)) {
+                throw std::runtime_error("sql_api.yaml public_entities lists '" + id
+                    + "', which is not a pg_depend member of extension bioseq in an "
+                    "included schema");
+            }
+        }
+        model.sql_entities = std::move(kept);
+        model.omitted_sql_entities = std::move(omitted);
     }
 
     const execution_target target = resolve_execution_target(options);
@@ -1932,9 +2002,12 @@ void rewrite_entity_link_routes(
     writer.emit(route(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json)
                           + ".json"),
                 tooltip_json);
-    if (!sql_entities.empty()) {
+    // catalog-inventory.json records the extension-owned candidates that the
+    // sql_api.yaml allowlist did NOT promote to pages (§11.4) - the inverse of the
+    // published SQL surface - so a reviewer can audit what stays inventory-only.
+    if (!model.omitted_sql_entities.empty()) {
         writer.emit(route(version + "/catalog-inventory.json"),
-                    serialize_sql_entities(sql_entities));
+                    serialize_sql_entities(model.omitted_sql_entities));
     }
 
     // Host-agnostic SEO / security deployment artifacts (§15.5).
@@ -2219,7 +2292,7 @@ void rewrite_entity_link_routes(
 [[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "source", "version", "site-config", "cpp-entities", "sql-entities",
-        "base-path", "source-revision", "output-model", "cpp-signature",
+        "sql-api", "base-path", "source-revision", "output-model", "cpp-signature",
         "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
         "port", "template-db"};
     static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};

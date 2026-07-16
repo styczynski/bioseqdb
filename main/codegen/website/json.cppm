@@ -803,6 +803,11 @@ namespace {
         sql_entities.push_back(serialize_entity(entity));
     }
     root["sql_entities"] = std::move(sql_entities);
+    boost::json::array omitted_sql_entities;
+    for (const documented_entity& entity : model.omitted_sql_entities) {
+        omitted_sql_entities.push_back(serialize_entity(entity));
+    }
+    root["omitted_sql_entities"] = std::move(omitted_sql_entities);
     boost::json::object coverage;
     coverage["public_total"] = static_cast<std::int64_t>(model.coverage_public_total);
     coverage["documented_total"] =
@@ -872,6 +877,12 @@ namespace {
     }
     for (const boost::json::value& entity : object.at("sql_entities").as_array()) {
         model.sql_entities.push_back(deserialize_one_entity(entity.as_object()));
+    }
+    if (const auto* omitted = object.if_contains("omitted_sql_entities")) {
+        for (const boost::json::value& entity : omitted->as_array()) {
+            model.omitted_sql_entities.push_back(
+                deserialize_one_entity(entity.as_object()));
+        }
     }
     const boost::json::object& coverage = object.at("coverage").as_object();
     model.coverage_public_total = static_cast<std::uint32_t>(
