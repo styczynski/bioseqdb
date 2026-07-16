@@ -49,8 +49,8 @@ DROP TABLE landing_hero_sequences;
 
 A `bioseq.seq` column records its alphabet and maximum length in the type modifier,
 so sequences are stored beside their metadata and read back with the ordinary
-sequence functions [[sql:bioseq.len(bioseq.seq)]] and
-[[sql:bioseq.symbol_count(bioseq.seq,text)]].
+sequence functions [[sql:bioseq.len]] and
+[[sql:bioseq.symbol_count]].
 
 ```sql runnable id=landing_sequence_storage timeout=10s
 -- bioseq:setup

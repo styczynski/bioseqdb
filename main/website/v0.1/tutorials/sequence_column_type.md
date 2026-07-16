@@ -34,8 +34,8 @@ The alphabet and maximum length are encoded in the PostgreSQL type modifier.
 ## Round-tripping sequence values
 
 The example below creates a small table, inserts two reads, and reads them back
-with their length and a per-symbol count. Use [[sql:bioseq.len(bioseq.seq)]] for
-the length in symbol units and [[sql:bioseq.symbol_count(bioseq.seq,text)]] to
+with their length and a per-symbol count. Use [[sql:bioseq.len]] for
+the length in symbol units and [[sql:bioseq.symbol_count]] to
 count occurrences of one symbol.
 
 ```sql runnable id=sequence_roundtrip timeout=10s
