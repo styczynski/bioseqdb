@@ -242,6 +242,18 @@ img, video { max-width: 100%; height: auto; }
 .doc-code code { font-family: var(--font-mono); font-size: 0.86rem; background: none; color: var(--text); }
 @media (max-width: 640px) { .doc-code pre { white-space: pre-wrap; word-break: break-word; } }
 
+/* Annotated code (§10.6): underlined match spans + numbered callout cards. The
+   orange/cyan alternation echoes the design; below 820px cards simply stack. */
+.doc-code mark.anno { background: transparent; color: inherit; border-bottom: 2px solid var(--accent-orange); }
+.doc-code mark.anno:nth-of-type(even) { border-bottom-color: var(--accent-cyan); }
+.anno-cards { list-style: none; margin: 0; padding: 12px 16px 16px; display: grid; gap: 10px; border-top: 1px solid var(--surface-border); background: rgba(255, 255, 255, 0.015); }
+.anno-card { display: flex; gap: 12px; align-items: flex-start; }
+.anno-card-num { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.72rem; color: #071320; background: var(--accent-orange); }
+.anno-card:nth-child(even) .anno-card-num { background: var(--accent-cyan); }
+.anno-card-title { margin: 0 0 4px; font-weight: 600; font-size: 0.9rem; color: var(--text); }
+.anno-card-body { color: var(--text-muted); font-size: 0.9rem; }
+.anno-card-body p { margin: 0; }
+
 .result-panel { border-top: 1px solid var(--surface-border); padding: 16px 20px 20px; background: rgba(70, 184, 222, 0.045); overflow-x: auto; }
 .result-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 13px; }
 .result-table caption { text-align: left; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); padding-bottom: 10px; }

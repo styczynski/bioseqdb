@@ -187,6 +187,20 @@ def _exercise_copy(page) -> None:
            "copy button did not accept keyboard focus")
 
 
+def _exercise_annotations(page) -> None:
+    """If an annotated code block is present (§10.6), verify each underlined match
+    span has a matching numbered callout card."""
+    marks = page.locator(".doc-code mark.anno")
+    count = marks.count()
+    if count == 0:
+        return
+    cards = page.locator(".anno-cards .anno-card")
+    _check(cards.count() == count,
+           f"{count} annotation mark(s) but {cards.count()} callout card(s)")
+    nums = page.locator(".anno-card .anno-card-num")
+    _check(nums.count() == count, "each callout card must carry a number badge")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -233,6 +247,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
             if label == "tutorial":
                 _exercise_tooltip(page)
                 _exercise_copy(page)
+                _exercise_annotations(page)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

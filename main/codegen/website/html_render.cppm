@@ -1,5 +1,6 @@
 module;
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -98,6 +99,19 @@ struct code_language_view {
     return id;
 }
 
+// Parses a small non-negative decimal from a node attribute (annotation range /
+// number). Stops at the first non-digit; absent/garbage yields 0.
+[[nodiscard]] std::size_t parse_index(std::string_view text) {
+    std::size_t value = 0;
+    for (const char character : text) {
+        if (character < '0' || character > '9') {
+            break;
+        }
+        value = value * 10 + static_cast<std::size_t>(character - '0');
+    }
+    return value;
+}
+
 // Accepts only inert href schemes: relative/fragment/absolute-path links and the
 // http(s)/mailto schemes. Anything else (javascript:, data:, vbscript:, unknown
 // scheme) collapses to a harmless fragment so a hostile link cannot execute.
@@ -188,6 +202,27 @@ struct html_writer {
             const code_language_view language =
                 classify_code_language(attribute_or(node, "language", ""));
             const std::string id = code_block_id(node.text, code_ordinal++);
+            // §10.6: an annotation directive was folded into a code_annotation child
+            // carrying a source range + number. Collect the ranges to underline the
+            // matched spans and the cards to render below. An annotated block skips the
+            // Prism class so the server-rendered <mark> spans survive (Prism rewrites
+            // <code> innerHTML). Copy still returns the exact source: <mark> holds the
+            // original substring, so textContent equals the source.
+            struct anno_span { std::size_t start; std::size_t len; std::size_t number; };
+            std::vector<anno_span> spans;
+            std::vector<const document_node*> cards;
+            for (const document_node& child : node.children) {
+                if (child.kind == document_node_kind::code_annotation) {
+                    spans.push_back({parse_index(attribute_or(child, "start", "0")),
+                                     parse_index(attribute_or(child, "len", "0")),
+                                     parse_index(attribute_or(child, "number", "0"))});
+                    cards.push_back(&child);
+                }
+            }
+            std::ranges::sort(spans, [](const anno_span& lhs, const anno_span& rhs) {
+                return lhs.start < rhs.start;
+            });
+            const bool annotated = !spans.empty();
             out += "<figure class=\"doc-code\"><figcaption class=\"doc-code-bar\">"
                    "<span class=\"doc-code-lang\">";
             append_escaped_text(out, language.label);
@@ -197,14 +232,52 @@ struct html_writer {
                    "<pre><code id=\"";
             append_escaped_attribute(out, id);
             out.push_back('"');
-            if (!language.prism_class.empty()) {
+            if (!language.prism_class.empty() && !annotated) {
                 out += " class=\"language-";
                 append_escaped_attribute(out, language.prism_class);
                 out.push_back('"');
             }
             out.push_back('>');
-            append_escaped_text(out, node.text);
-            out += "</code></pre></figure>";
+            if (spans.empty()) {
+                append_escaped_text(out, node.text);
+            } else {
+                const std::string_view text = node.text;
+                std::size_t cursor = 0;
+                for (const anno_span& span : spans) {
+                    if (span.start < cursor || span.start + span.len > text.size()) {
+                        continue;  // defensive: never emit an overlapping/out-of-range mark
+                    }
+                    append_escaped_text(out, text.substr(cursor, span.start - cursor));
+                    out += "<mark class=\"anno\" data-anno=\"";
+                    out += std::to_string(span.number);
+                    out += "\">";
+                    append_escaped_text(out, text.substr(span.start, span.len));
+                    out += "</mark>";
+                    cursor = span.start + span.len;
+                }
+                append_escaped_text(out, text.substr(cursor));
+            }
+            out += "</code></pre>";
+            if (annotated) {
+                std::ranges::sort(cards, [this](const document_node* lhs,
+                                                const document_node* rhs) {
+                    return parse_index(attribute_or(*lhs, "number", "0"))
+                        < parse_index(attribute_or(*rhs, "number", "0"));
+                });
+                out += "<ol class=\"anno-cards\">";
+                for (const document_node* card : cards) {
+                    out += "<li class=\"anno-card\"><span class=\"anno-card-num\" "
+                           "aria-hidden=\"true\">";
+                    out += std::to_string(parse_index(attribute_or(*card, "number", "0")));
+                    out += "</span><div class=\"anno-card-body\"><p class=\"anno-card-title\">";
+                    append_escaped_text(out, attribute_or(*card, "title", ""));
+                    out += "</p>";
+                    render_children(card->children);
+                    out += "</div></li>";
+                }
+                out += "</ol>";
+            }
+            out += "</figure>";
             break;
         }
         case document_node_kind::link: {

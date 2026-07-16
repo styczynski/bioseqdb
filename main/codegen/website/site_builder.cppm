@@ -485,6 +485,143 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
     }
 }
 
+// Processes §10.6 annotation directives over a tutorial's top-level blocks (fences
+// are top-level only, §10.5). Each `annotation target=... match=... title=...`
+// directive is matched against a PRIOR displayed block's decoded source and folded
+// into that block as a numbered code_annotation child (source range + parsed
+// commentary); the directive node is then removed from the render tree. A block
+// flagged `annotated` must gain at least one annotation, and a target's ranges may
+// not overlap - all fatal.
+void process_annotations(std::vector<document_node>& nodes, const std::string& where) {
+    struct block_ref {
+        std::string id;
+        std::size_t node_index;
+        std::string text;   // decoded, displayed source (visible phase for runnable)
+        bool annotated;
+        std::vector<std::pair<std::size_t, std::size_t>> ranges;  // start,len
+        std::size_t count;  // annotations attached so far
+    };
+    std::vector<block_ref> blocks;
+    const auto find_block = [&](const std::string& id) -> block_ref* {
+        for (block_ref& block : blocks) {
+            if (block.id == id) {
+                return &block;
+            }
+        }
+        return nullptr;
+    };
+    // Pass 1: index every displayed block (ordinary/runnable) in document order.
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const document_node& node = nodes[index];
+        if (node.kind != document_node_kind::code_block) {
+            continue;
+        }
+        const auto info = node.attributes.find("info");
+        if (info == node.attributes.end() || info->second.empty()) {
+            continue;
+        }
+        const fence_descriptor fence = parse_fence_info(info->second);
+        if (fence.kind == fence_kind::annotation) {
+            continue;
+        }
+        std::string text = fence.kind == fence_kind::runnable
+            ? split_sql_phases(node.text).visible : node.text;
+        blocks.push_back(block_ref{.id = fence.id, .node_index = index,
+                                   .text = std::move(text), .annotated = fence.annotated,
+                                   .ranges = {}, .count = 0});
+    }
+    // Pass 2: fold each annotation directive into its (prior) target block.
+    std::vector<std::size_t> directive_nodes;
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const document_node& node = nodes[index];
+        if (node.kind != document_node_kind::code_block) {
+            continue;
+        }
+        const auto info = node.attributes.find("info");
+        if (info == node.attributes.end() || info->second.empty()) {
+            continue;
+        }
+        const fence_descriptor fence = parse_fence_info(info->second);
+        if (fence.kind != fence_kind::annotation) {
+            continue;
+        }
+        block_ref* target = find_block(fence.target);
+        if (target == nullptr) {
+            throw std::runtime_error("annotation target '" + fence.target
+                + "' names no displayed block in " + where);
+        }
+        if (target->node_index >= index) {
+            throw std::runtime_error("annotation target '" + fence.target
+                + "' must be a prior displayed block in " + where);
+        }
+        std::vector<std::size_t> positions;
+        for (std::size_t pos = target->text.find(fence.match); pos != std::string::npos;
+             pos = target->text.find(fence.match, pos + 1)) {
+            positions.push_back(pos);
+        }
+        if (positions.empty()) {
+            throw std::runtime_error("annotation match '" + fence.match
+                + "' not found in block '" + fence.target + "' in " + where);
+        }
+        std::size_t start = 0;
+        if (fence.occurrence) {
+            if (*fence.occurrence > positions.size()) {
+                throw std::runtime_error("annotation occurrence "
+                    + std::to_string(*fence.occurrence) + " is out of range in " + where);
+            }
+            start = positions[*fence.occurrence - 1];
+        } else {
+            if (positions.size() != 1) {
+                throw std::runtime_error("annotation match '" + fence.match
+                    + "' appears " + std::to_string(positions.size())
+                    + " times; add occurrence=N in " + where);
+            }
+            start = positions.front();
+        }
+        const std::size_t len = fence.match.size();
+        for (const auto& [existing_start, existing_len] : target->ranges) {
+            if (start < existing_start + existing_len && existing_start < start + len) {
+                throw std::runtime_error("annotation ranges overlap in block '"
+                    + fence.target + "' in " + where);
+            }
+        }
+        target->ranges.emplace_back(start, len);
+        const std::size_t number = ++target->count;
+        document_node commentary = parse_markdown(node.text);
+        for (const document_node& child : commentary.children) {
+            if (child.kind != document_node_kind::code_block) {
+                continue;
+            }
+            const auto child_info = child.attributes.find("info");
+            if (child_info != child.attributes.end() && !child_info->second.empty()
+                && parse_fence_info(child_info->second).kind != fence_kind::ordinary) {
+                throw std::runtime_error("annotation commentary may not contain runnable "
+                    "SQL or another annotation in " + where);
+            }
+        }
+        document_node annotation;
+        annotation.kind = document_node_kind::code_annotation;
+        annotation.attributes["number"] = std::to_string(number);
+        annotation.attributes["start"] = std::to_string(start);
+        annotation.attributes["len"] = std::to_string(len);
+        annotation.attributes["title"] = fence.title;
+        annotation.attributes["match"] = fence.match;
+        annotation.children = std::move(commentary.children);
+        nodes[target->node_index].children.push_back(std::move(annotation));
+        directive_nodes.push_back(index);
+    }
+    for (const block_ref& block : blocks) {
+        if (block.annotated && block.count == 0) {
+            throw std::runtime_error("block '" + block.id
+                + "' is marked annotated but has no annotation in " + where);
+        }
+    }
+    for (auto directive = directive_nodes.rbegin(); directive != directive_nodes.rend();
+         ++directive) {
+        nodes.erase(nodes.begin() + static_cast<std::ptrdiff_t>(*directive));
+    }
+}
+
 // Parses the landing frontmatter `slots:` mapping (§15.2): each entry maps a
 // template slot name to the landing-page-local id of a runnable block. Returns the
 // mapping in declared order. The YAML here is a flat two-space-indented block of
@@ -680,6 +817,9 @@ void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
         collect_examples_and_queries(document, item.metadata.slug,
                                      version.path_component, item.sql_examples,
                                      item.entity_queries);
+        // Fold §10.6 annotation directives into their target blocks before the render
+        // copy is finalized (this also validates every fence's info string, §10.5).
+        process_annotations(item.content, item.source_path);
         // The render copy must not leak hidden setup/teardown SQL (§5.1).
         strip_runnable_fence_hidden_sql(item.content);
         std::map<std::string, int, std::less<>> local_ids;
@@ -1471,6 +1611,65 @@ void run_website_reference_smoke() {
                && container_json.find("read-abc") != std::string::npos
                && container_json.find("\"implemented_by\"") != std::string::npos,
            "container page view serializes child index and implemented-by link");
+
+    // §10.5 fence info grammar: quoted values carry commas/spaces/parens verbatim;
+    // duplicate scalar and unknown attributes are fatal.
+    const fence_descriptor ordinary_fence = parse_fence_info("sql id=demo annotated");
+    expect(ordinary_fence.kind == fence_kind::ordinary && ordinary_fence.id == "demo"
+               && ordinary_fence.annotated,
+           "ordinary fence parses id + annotated");
+    const fence_descriptor directive_fence = parse_fence_info(
+        "annotation target=demo match=\"bioseq.seq('dna4', 64)\" title=\"The type\"");
+    expect(directive_fence.kind == fence_kind::annotation
+               && directive_fence.target == "demo"
+               && directive_fence.match == "bioseq.seq('dna4', 64)"
+               && directive_fence.title == "The type",
+           "annotation directive keeps a spaced/parenthesized match verbatim");
+    const fence_descriptor entity_fence =
+        parse_fence_info("cpp entity=\"cpp:function:bioseq::io::seq::read(int, char)\"");
+    expect(entity_fence.entities.size() == 1
+               && entity_fence.entities.front().find(',') != std::string::npos,
+           "entity= carries a signature containing a comma as one value");
+    const auto is_fatal = [](std::string_view info) {
+        try {
+            parse_fence_info(info);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    expect(is_fatal("sql id=a id=b"), "duplicate scalar attribute is fatal");
+    expect(is_fatal("sql bogus=1"), "unknown attribute is fatal");
+    expect(is_fatal("text runnable"), "runnable is only valid on sql");
+
+    // §10.6 folding: the directive attaches to a PRIOR target as a numbered
+    // code_annotation child pointing at the matched source range, and is removed.
+    std::vector<document_node> annotated_doc;
+    document_node display_block;
+    display_block.kind = document_node_kind::code_block;
+    display_block.attributes["language"] = "sql";
+    display_block.attributes["info"] = "sql id=demo annotated";
+    display_block.text = "CREATE TABLE t (s bioseq.seq('dna4', 64));";
+    annotated_doc.push_back(std::move(display_block));
+    document_node directive_block;
+    directive_block.kind = document_node_kind::code_block;
+    directive_block.attributes["language"] = "annotation";
+    directive_block.attributes["info"] =
+        "annotation target=demo match=\"bioseq.seq('dna4', 64)\" title=\"The type\"";
+    directive_block.text = "The alphabet and length live in the type modifier.";
+    annotated_doc.push_back(std::move(directive_block));
+    process_annotations(annotated_doc, "self-test");
+    expect(annotated_doc.size() == 1 && !annotated_doc[0].children.empty()
+               && annotated_doc[0].children[0].kind == document_node_kind::code_annotation,
+           "annotation directive folds onto its target and the directive node is removed");
+    const document_node& folded = annotated_doc[0].children[0];
+    const std::size_t folded_start = std::stoul(folded.attributes.at("start"));
+    const std::size_t folded_len = std::stoul(folded.attributes.at("len"));
+    expect(folded.attributes.at("number") == "1"
+               && folded.attributes.at("title") == "The type"
+               && annotated_doc[0].text.substr(folded_start, folded_len)
+                      == "bioseq.seq('dna4', 64)",
+           "folded annotation carries number/title and a range over the matched source");
 }
 
 /// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
