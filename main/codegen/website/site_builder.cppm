@@ -707,6 +707,89 @@ void process_annotations(std::vector<document_node>& nodes, const std::string& w
     return slots;
 }
 
+// Build-report-only per-example telemetry (§18.3). Populated at each execution
+// point and read once by run_execute for the diagnostic build report; it is never
+// serialized into the site_model, its signature, or any published input hash
+// (§18.3, §180) — those all flow through serialize_site_model, which never touches
+// this accumulator. The generator runs one phase per process, single-threaded.
+struct example_run_telemetry {
+    std::vector<sql_example_measurement> measurements;
+    std::uint64_t peak_rows = 0;
+    std::uint64_t peak_cells = 0;
+    std::uint64_t peak_payload_bytes = 0;
+    std::uint64_t catalog_ms = 0;
+};
+
+[[nodiscard]] example_run_telemetry& example_telemetry() {
+    static example_run_telemetry instance;
+    return instance;
+}
+
+// Records one executed example's wall time and updates the running peak
+// rows/cells/payload observed across every result set it produced (§18.3).
+void record_example_run(std::string_view example_id, std::chrono::milliseconds elapsed,
+                        const sql_example_result& outcome) {
+    example_run_telemetry& telemetry = example_telemetry();
+    telemetry.measurements.push_back(
+        sql_example_measurement{std::string(example_id), elapsed});
+    for (const sql_result_set& set : outcome.visible_results) {
+        const std::uint64_t rows = set.rows.size();
+        const std::uint64_t cols = set.columns.size();
+        std::uint64_t payload = 0;
+        for (const std::vector<sql_cell>& row : set.rows) {
+            for (const sql_cell& cell : row) {
+                payload += cell.text.size();
+            }
+        }
+        telemetry.peak_rows = std::max(telemetry.peak_rows, rows);
+        telemetry.peak_cells = std::max(telemetry.peak_cells, rows * cols);
+        telemetry.peak_payload_bytes = std::max(telemetry.peak_payload_bytes, payload);
+    }
+}
+
+// Minimal JSON string escape for the diagnostic build report (§18.3); the report
+// is not routed through the model serializer, so it carries its own escaping.
+[[nodiscard]] std::string report_json_string(std::string_view value) {
+    std::string out = "\"";
+    for (const char raw : value) {
+        const unsigned char byte = static_cast<unsigned char>(raw);
+        switch (raw) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (byte < 0x20) {
+                static constexpr char hex[] = "0123456789abcdef";
+                out += "\\u00";
+                out.push_back(hex[byte >> 4]);
+                out.push_back(hex[byte & 0x0F]);
+            } else {
+                out.push_back(raw);
+            }
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+// Writes one phase's build-report fragment when --report-dir is configured (§18.3).
+// The report tree lives in the build directory, outside the published <site-root>,
+// and is never a site-manifest entry; a no-op when the option is absent so the phase
+// is unaffected in contexts that do not request a report.
+void write_report_fragment(
+    const std::map<std::string, std::string, std::less<>>& options,
+    std::string_view phase, const std::string& json_body) {
+    const auto found = options.find("report-dir");
+    if (found == options.end() || found->second.empty()) {
+        return;
+    }
+    std::error_code error;
+    fs::create_directories(fs::path(found->second), error);
+    write_if_different(fs::path(found->second) / (std::string(phase) + ".json"), json_body);
+}
+
 // Executes the landing page's runnable slots (§15.2) into database-independent
 // views. The template slot name comes from the authoritative frontmatter `slots:`
 // mapping, and every §15.2 binding error is fatal: a slot referencing an unknown
@@ -784,6 +867,7 @@ void process_annotations(std::vector<document_node>& nodes, const std::string& w
         if (have_connection) {
             std::expected<sql_example_result, diagnostic> outcome =
                 std::unexpected(diagnostic{});
+            const auto started = std::chrono::steady_clock::now();
             if (isolation) {
                 private_cluster_executor executor("");
                 outcome = executor.execute_isolated(example, *isolation);
@@ -791,10 +875,13 @@ void process_annotations(std::vector<document_node>& nodes, const std::string& w
                 private_cluster_executor executor(conninfo);
                 outcome = executor.execute(example);
             }
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
             if (!outcome) {
                 throw std::runtime_error("landing example '" + view.slot + "': ["
                     + outcome.error().code + "] " + outcome.error().message);
             }
+            record_example_run("landing:" + example.canonical_id, elapsed, *outcome);
             if (!outcome->visible_results.empty()) {
                 view.result = outcome->visible_results.front();
                 view.has_result = true;
@@ -1474,8 +1561,12 @@ void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
     const execution_target target = resolve_execution_target(options);
     if (target.have_connection && !target.probe_conninfo.empty()) {
         private_cluster_executor probe(target.probe_conninfo);
-        if (const std::expected<sql_catalog_snapshot, diagnostic> snapshot =
-                probe.read_catalog()) {
+        const auto catalog_started = std::chrono::steady_clock::now();
+        const std::expected<sql_catalog_snapshot, diagnostic> snapshot = probe.read_catalog();
+        example_telemetry().catalog_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - catalog_started).count());
+        if (snapshot) {
             model.postgres_server_version = snapshot->server_version;
             model.extension_version = snapshot->extension_version;
             if (model.staged_extension_sha256.empty()) {
@@ -1497,13 +1588,18 @@ void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
         std::map<std::string, sql_example_result, std::less<>> results;
         if (target.have_connection) {
             for (const sql_example& example : item.sql_examples) {
+                const auto started = std::chrono::steady_clock::now();
                 std::expected<sql_example_result, diagnostic> outcome =
                     run_one_example(target, example);
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started);
                 if (!outcome) {
                     throw std::runtime_error("tutorial '" + item.metadata.slug
                         + "' example '" + example.local_id + "': ["
                         + outcome.error().code + "] " + outcome.error().message);
                 }
+                record_example_run(item.metadata.slug + ":" + example.local_id, elapsed,
+                                   *outcome);
                 results.emplace(example.local_id, std::move(*outcome));
             }
         }
@@ -1720,9 +1816,10 @@ void run_website_reference_smoke() {
 [[nodiscard]] int run_plan(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "source", "version", "site-config", "templates", "static",
-        "base-path", "source-revision", "output"};
+        "base-path", "source-revision", "output", "report-dir"};
     static constexpr std::string_view flag_keys[] = {"include-drafts"};
     const auto options = parse_options(args, value_keys, flag_keys);
+    const auto phase_started = std::chrono::steady_clock::now();
     const fs::path source = require_option(options, "source");
     const std::string version_string = require_option(options, "version");
     const fs::path site_config_path = require_option(options, "site-config");
@@ -1747,6 +1844,16 @@ void run_website_reference_smoke() {
         std::move(base_path), std::move(revision), include_drafts);
     const std::string serialized = serialize_plan(plan);
     write_private_artifact(output, serialized);
+    std::uint64_t example_count = 0;
+    for (const tutorial& item : plan.tutorials) {
+        example_count += item.sql_examples.size();
+    }
+    const auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - phase_started).count();
+    write_report_fragment(options, "plan",
+        "{\"phase\":\"plan\",\"wall_ms\":" + std::to_string(phase_ms)
+            + ",\"tutorial_count\":" + std::to_string(plan.tutorials.size())
+            + ",\"example_count\":" + std::to_string(example_count) + "}\n");
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website plan: {}", error.what());
@@ -1799,7 +1906,7 @@ namespace {
 [[nodiscard]] int run_cpp_index(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "doxygen-xml", "compile-db", "reachable-units", "site-config",
-        "output", "coverage-output"};
+        "output", "coverage-output", "report-dir"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path doxygen_xml = require_option(options, "doxygen-xml");
     const fs::path compile_db = require_option(options, "compile-db");
@@ -1811,6 +1918,16 @@ namespace {
     const site_configuration config =
         parse_site_config(read_file(site_config_path), site_config_path.generic_string());
 
+    // Doxygen XML wall time, byte volume, and page-compound count (§18.3).
+    const auto doxygen_started = std::chrono::steady_clock::now();
+    std::uint64_t doxygen_xml_bytes = 0;
+    std::error_code walk_error;
+    for (const auto& entry : fs::recursive_directory_iterator(doxygen_xml, walk_error)) {
+        if (entry.is_regular_file()) {
+            doxygen_xml_bytes += entry.file_size();
+        }
+    }
+    std::uint64_t doxygen_compound_count = 0;
     std::vector<documented_entity> documented;
     const std::string index_xml = read_file(doxygen_xml / "index.xml");
     for (const doxygen_compound_ref& compound : parse_doxygen_index(index_xml)) {
@@ -1822,23 +1939,36 @@ namespace {
         if (!fs::exists(compound_path, error)) {
             continue;
         }
+        ++doxygen_compound_count;
         for (documented_entity& entity :
              parse_doxygen_compound(read_file(compound_path))) {
             documented.push_back(std::move(entity));
         }
     }
+    const auto doxygen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - doxygen_started).count();
 
+    const auto clang_started = std::chrono::steady_clock::now();
     std::vector<fs::path> units;
     for (const std::string& line : read_lines(reachable_units)) {
         units.emplace_back(line);
     }
     const clang_structural_index structural =
         parse_clang_structural_index(units, compile_db);
+    const auto clang_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - clang_started).count();
 
     const std::vector<documented_entity> merged =
         merge_cpp_entities(structural, documented);
     const coverage_report coverage = compute_coverage(
         merged, config.required_documentation_entities, {});
+
+    write_report_fragment(options, "cpp_index",
+        "{\"phase\":\"cpp_index\",\"doxygen_wall_ms\":" + std::to_string(doxygen_ms)
+            + ",\"doxygen_xml_bytes\":" + std::to_string(doxygen_xml_bytes)
+            + ",\"doxygen_compound_count\":" + std::to_string(doxygen_compound_count)
+            + ",\"clang_wall_ms\":" + std::to_string(clang_ms)
+            + ",\"entity_count\":" + std::to_string(merged.size()) + "}\n");
 
     write_if_different(output, serialize_cpp_entities(merged, structural.clang_version));
     std::vector<coverage_group_view> coverage_groups;
@@ -3172,7 +3302,7 @@ void decorate_code_entity_ranges(
         "templates", "static", "output", "base-path", "source-revision",
         "conninfo", "admin-conninfo", "socket-dir", "port", "template-db",
         "staged-extension-sha256", "cpp-signature",
-        "staging", "model-validation-stamp", "html-validation-stamp"};
+        "staging", "model-validation-stamp", "html-validation-stamp", "report-dir"};
     static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
     const auto options = parse_options(args, value_keys, flag_keys);
     const fs::path output = require_option(options, "output");
@@ -3332,6 +3462,53 @@ void decorate_code_entity_ranges(
     fs::remove(owner_marker, cleanup);
     fsync_directory(parent_or_dot(output));
     std::println("published site to {}", output.string());
+
+    // Aggregate the per-phase build-report fragments into a single diagnostic
+    // report beside the report tree, outside the published site and never a
+    // manifest entry (§18.3). Output/search-index byte volumes are measured from
+    // the just-published tree; every phase fragment is embedded verbatim (or null
+    // when a cached phase produced none this run).
+    if (const auto found = options.find("report-dir");
+        found != options.end() && !found->second.empty()) {
+        const fs::path report_dir(found->second);
+        const auto fragment = [&](std::string_view name) -> std::string {
+            std::error_code exists_error;
+            const fs::path path = report_dir / (std::string(name) + ".json");
+            if (!fs::exists(path, exists_error)) {
+                return "null";
+            }
+            std::string body = read_file(path);
+            while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
+                body.pop_back();
+            }
+            return body.empty() ? "null" : body;
+        };
+        std::uint64_t output_bytes = 0;
+        std::uint64_t search_index_bytes = 0;
+        std::error_code walk;
+        for (const auto& entry : fs::recursive_directory_iterator(output, walk)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            const std::uint64_t size = entry.file_size();
+            output_bytes += size;
+            if (entry.path().filename() == "search-index.json") {
+                search_index_bytes += size;
+            }
+        }
+        const std::string report =
+            "{\n  \"schema\": \"bioseq.website.build_report/v1\",\n"
+            "  \"plan\": " + fragment("plan") + ",\n"
+            "  \"cpp_index\": " + fragment("cpp_index") + ",\n"
+            "  \"execute\": " + fragment("execute") + ",\n"
+            "  \"render\": " + fragment("render") + ",\n"
+            "  \"output_bytes\": " + std::to_string(output_bytes) + ",\n"
+            "  \"search_index_bytes\": " + std::to_string(search_index_bytes) + ",\n"
+            "  \"warnings\": []\n}\n";
+        write_if_different(report_dir / "build-report.json", report);
+        std::println("wrote build report to {}",
+                     (report_dir / "build-report.json").string());
+    }
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website publish: {}", error.what());
@@ -3356,7 +3533,7 @@ void decorate_code_entity_ranges(
         "source", "version", "site-config", "cpp-entities", "sql-entities",
         "sql-api", "base-path", "source-revision", "output-model", "cpp-signature",
         "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
-        "port", "template-db"};
+        "port", "template-db", "report-dir"};
     static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
     const auto options = parse_options(args, value_keys, flag_keys);
     const fs::path source = require_option(options, "source");
@@ -3375,11 +3552,38 @@ void decorate_code_entity_ranges(
     if (const auto found = options.find("source-revision"); found != options.end()) {
         revision = found->second;
     }
+    // Reset the build-report telemetry so this process's execution stands alone,
+    // then run the executor-driven model build (which populates it, §18.3).
+    example_telemetry() = example_run_telemetry{};
+    const auto phase_started = std::chrono::steady_clock::now();
     const site_model model = build_site_model(
         source, version_string, config, site_yaml,
         plan_relative(site_config_path, source), std::move(base_path),
         std::move(revision), options.contains("include-drafts"), options);
     write_private_artifact(output_model, serialize_site_model(model));
+    const auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - phase_started).count();
+    const example_run_telemetry& telemetry = example_telemetry();
+    std::string examples_json = "[";
+    for (std::size_t index = 0; index < telemetry.measurements.size(); ++index) {
+        const sql_example_measurement& measurement = telemetry.measurements[index];
+        if (index > 0) {
+            examples_json.push_back(',');
+        }
+        examples_json += "{\"id\":" + report_json_string(measurement.example_id)
+            + ",\"elapsed_ms\":" + std::to_string(measurement.elapsed.count()) + "}";
+    }
+    examples_json.push_back(']');
+    write_report_fragment(options, "execute",
+        "{\"phase\":\"execute\",\"wall_ms\":" + std::to_string(phase_ms)
+            + ",\"catalog_wall_ms\":" + std::to_string(telemetry.catalog_ms)
+            + ",\"cpp_entity_count\":" + std::to_string(model.cpp_entities.size())
+            + ",\"sql_entity_count\":" + std::to_string(model.sql_entities.size())
+            + ",\"example_count\":" + std::to_string(telemetry.measurements.size())
+            + ",\"peak_rows\":" + std::to_string(telemetry.peak_rows)
+            + ",\"peak_cells\":" + std::to_string(telemetry.peak_cells)
+            + ",\"peak_payload_bytes\":" + std::to_string(telemetry.peak_payload_bytes)
+            + ",\"examples\":" + examples_json + "}\n");
     std::println("executed site model for {} -> {}", version_string, output_model.string());
     return 0;
 } catch (const cli_usage_error& error) {
@@ -3402,7 +3606,7 @@ void decorate_code_entity_ranges(
 [[nodiscard]] int run_render(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "model", "site-config", "templates", "static", "output", "base-path",
-        "source-revision", "model-validation-stamp"};
+        "source-revision", "model-validation-stamp", "report-dir"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path model_path = require_option(options, "model");
     const fs::path site_config_path = require_option(options, "site-config");
@@ -3421,9 +3625,22 @@ void decorate_code_entity_ranges(
     if (const auto found = options.find("source-revision"); found != options.end()) {
         revision = found->second;
     }
+    const auto phase_started = std::chrono::steady_clock::now();
     const site_model model = deserialize_site_model(read_file(model_path));
     const std::string manifest_hash = render_model_to_staging(
         model, config, base_path, revision, templates_dir, static_dir, staging);
+    const auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - phase_started).count();
+    std::uint64_t staged_html = 0;
+    std::error_code render_walk;
+    for (const auto& entry : fs::recursive_directory_iterator(staging, render_walk)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".html") {
+            ++staged_html;
+        }
+    }
+    write_report_fragment(options, "render",
+        "{\"phase\":\"render\",\"render_wall_ms\":" + std::to_string(phase_ms)
+            + ",\"page_count\":" + std::to_string(staged_html) + "}\n");
 
     // Owner-mark staging (§168) so only publish may exchange it, and write the
     // built-in model-validation stamp bound to the staged manifest hash.

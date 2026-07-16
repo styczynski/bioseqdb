@@ -55,6 +55,13 @@ if(NOT _inside EQUAL 0)
 endif()
 file(MAKE_DIRECTORY "${_output_root}")
 
+# Diagnostic build-report tree (§18.3): a sibling of the published site (never
+# under <output_root>/site, so it is never a manifest entry or a served route).
+# Each phase drops its own fragment here; publish aggregates them into
+# build-report.json. It lives in the build tree and carries no machine paths.
+set(_report_dir "${_output_root}/report")
+file(MAKE_DIRECTORY "${_report_dir}")
+
 # The base path must be a validated mount ("/" or "/seg/.../"); an empty value
 # would render root-relative asset URLs that 404 on nested pages (tutorials,
 # reference), so default an unset deployment base to the site root. Deployers set
@@ -222,6 +229,7 @@ add_custom_command(
           --source-revision "${_revision}"
           ${_plan_drafts_flag}
           --output "${_plan_json}"
+          --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_site_config}" "${_sql_api}"
           ${_tutorial_md} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
@@ -274,6 +282,7 @@ add_custom_command(
           --site-config "${_site_config}"
           --output "${_cpp_entities}"
           --coverage-output "${_cpp_coverage}"
+          --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_doxygen_stamp}" "${_plan_json}" "${_source_graph_json}"
           "${_compile_db}" "${_reachable_closure}"
   COMMENT "website: cpp_index (Doxygen/Clang merge + coverage over the closure)"
@@ -329,7 +338,8 @@ file(WRITE "${_cluster_child}"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
 "  --conninfo \"$CONN\" ${_drafts_flag} \\\n"
-"  --output-model '${_site_model}'\n")
+"  --output-model '${_site_model}' \\\n"
+"  --report-dir '${_report_dir}'\n")
 
 add_custom_command(
   OUTPUT "${_site_model}" "${_sql_entities}"
@@ -364,6 +374,7 @@ add_custom_command(
           --source-revision "${_revision}"
           --output "${_staging_dir}"
           --model-validation-stamp "${_model_validation_stamp}"
+          --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_site_model}" ${_template_files} ${_static_files}
   COMMENT "website: render resolved model into owner-marked staging (no database)"
   VERBATIM)
@@ -433,6 +444,7 @@ add_custom_command(
           --output "${_output_root}/site"
           --model-validation-stamp "${_model_validation_stamp}"
           --html-validation-stamp "${_html_validation_stamp}"
+          --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_staging_manifest}" "${_model_validation_stamp}"
           "${_html_validation_stamp}" ${_browser_dep}
   COMMENT "website: verify validator stamps and atomically publish staging"
