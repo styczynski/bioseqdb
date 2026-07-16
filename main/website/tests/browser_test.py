@@ -363,6 +363,30 @@ def _exercise_jsonld(page) -> None:
     _check("BreadcrumbList" in types, "JSON-LD has no BreadcrumbList")
 
 
+def _exercise_doc_frame(page, *, expect_toc: bool) -> None:
+    """Three-region doc frame (§15.1): a visual breadcrumb trail, a left
+    documentation-navigation rail, and — on article pages — an on-this-page
+    table of contents whose links target in-page anchors that exist."""
+    crumbs = page.locator("nav.breadcrumb ol li")
+    _check(crumbs.count() >= 2, "doc page has no breadcrumb trail")
+    _check(page.locator("nav.breadcrumb a[href]").count() >= 1,
+           "breadcrumb has no linked ancestor")
+    nav = page.locator("aside.doc-nav")
+    _check(nav.count() == 1, "doc page is missing its documentation-navigation rail")
+    _check(nav.locator("a[href]").count() >= 1, "doc-nav rail has no links")
+    toc = page.locator("aside.doc-toc")
+    if expect_toc and toc.count() == 1:
+        anchors = toc.locator("a[href^='#']")
+        count = anchors.count()
+        _check(count >= 1, "on-this-page TOC is present but empty")
+        for index in range(count):
+            target = (anchors.nth(index).get_attribute("href") or "")[1:]
+            if not target:
+                continue
+            found = page.evaluate("(id) => document.getElementById(id) !== null", target)
+            _check(found, f"on-this-page anchor #{target} has no matching element")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -416,9 +440,11 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_annotations(page)
                 _exercise_code_entities(page)
                 _exercise_jsonld(page)
+                _exercise_doc_frame(page, expect_toc=True)
             if label == "entity":
                 _exercise_entity(page)
                 _exercise_jsonld(page)
+                _exercise_doc_frame(page, expect_toc=True)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

@@ -181,7 +181,22 @@ struct html_writer {
                 level = 6;
             }
             const std::string tag = "h" + std::to_string(level);
-            wrap(tag, node);
+            // An on-this-page anchor (a generated [a-z0-9-] slug) becomes an id so
+            // the table of contents can link to the heading (§15.1).
+            const auto anchor = node.attributes.find("anchor");
+            if (anchor != node.attributes.end() && !anchor->second.empty()) {
+                out.push_back('<');
+                out += tag;
+                out += " id=\"";
+                out += anchor->second;
+                out += "\">";
+                render_children(node.children);
+                out += "</";
+                out += tag;
+                out.push_back('>');
+            } else {
+                wrap(tag, node);
+            }
             break;
         }
         case document_node_kind::emphasis: wrap("em", node); break;

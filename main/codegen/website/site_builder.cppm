@@ -2637,6 +2637,102 @@ void decorate_code_entity_ranges(
         }
     }
 
+    // Version-global left navigation (§15.1): every tutorial plus the two reference
+    // indexes. Bound as page.doc_nav on documentation pages so the frame is uniform.
+    std::string doc_nav = "[{\"label\":\"Tutorials\",\"items\":[";
+    {
+        bool first_nav = true;
+        for (const tutorial& item : model.tutorials) {
+            if (!first_nav) {
+                doc_nav += ",";
+            }
+            first_nav = false;
+            doc_nav += "{\"label\":" + json_text(item.metadata.title) + ",\"url\":"
+                + json_text(url(version + "/tutorials/" + item.metadata.slug + "/")) + "}";
+        }
+    }
+    doc_nav += "]},{\"label\":\"Reference\",\"items\":[";
+    doc_nav += "{\"label\":" + json_text("C++") + ",\"url\":"
+        + json_text(url(version + "/reference/cpp/")) + "},";
+    doc_nav += "{\"label\":" + json_text("SQL") + ",\"url\":"
+        + json_text(url(version + "/reference/sql/")) + "}]}]";
+
+    // On-this-page: assign a stable [a-z0-9-] anchor to every body heading and
+    // return its table-of-contents JSON. Dedupes collisions with a numeric suffix.
+    const auto heading_slug = [](std::string_view text) {
+        std::string slug;
+        bool previous_dash = false;
+        for (const char raw : text) {
+            const char lowered =
+                (raw >= 'A' && raw <= 'Z') ? static_cast<char>(raw - 'A' + 'a') : raw;
+            const bool ok = (lowered >= 'a' && lowered <= 'z')
+                || (lowered >= '0' && lowered <= '9');
+            if (ok) {
+                slug.push_back(lowered);
+                previous_dash = false;
+            } else if (!previous_dash) {
+                slug.push_back('-');
+                previous_dash = true;
+            }
+        }
+        while (!slug.empty() && slug.back() == '-') {
+            slug.pop_back();
+        }
+        std::size_t lead = 0;
+        while (lead < slug.size() && slug[lead] == '-') {
+            ++lead;
+        }
+        slug.erase(0, lead);
+        return slug.empty() ? std::string("section") : slug;
+    };
+    const auto node_plain_text = [](const document_node& node, auto&& self) -> std::string {
+        std::string text = node.text;
+        for (const document_node& child : node.children) {
+            text += self(child, self);
+        }
+        return text;
+    };
+    const auto build_on_this_page = [&](std::vector<document_node>& nodes) {
+        std::set<std::string> used;
+        std::string toc = "[";
+        bool first = true;
+        const auto walk = [&](std::vector<document_node>& list, auto&& self_walk) -> void {
+            for (document_node& node : list) {
+                if (node.kind == document_node_kind::heading) {
+                    const std::string text = node_plain_text(node, node_plain_text);
+                    const std::string base = heading_slug(text);
+                    std::string candidate = base;
+                    int suffix = 2;
+                    while (!used.insert(candidate).second) {
+                        candidate = base + "-" + std::to_string(suffix++);
+                    }
+                    node.attributes["anchor"] = candidate;
+                    int level = 2;
+                    const auto level_attr = node.attributes.find("level");
+                    if (level_attr != node.attributes.end()) {
+                        level = std::atoi(level_attr->second.c_str());
+                    }
+                    if (level < 2) {
+                        level = 2;
+                    }
+                    if (level > 3) {
+                        level = 3;
+                    }
+                    if (!first) {
+                        toc += ",";
+                    }
+                    first = false;
+                    toc += "{\"level\":" + std::to_string(level) + ",\"text\":" + json_text(text)
+                        + ",\"anchor\":" + json_text(candidate) + "}";
+                }
+                self_walk(node.children, self_walk);
+            }
+        };
+        walk(nodes, walk);
+        toc += "]";
+        return toc;
+    };
+
     const std::string landing_examples_json =
         serialize_landing_examples(model.landing_examples);
     render("index.html", "landing.html.j2",
@@ -2663,7 +2759,10 @@ void decorate_code_entity_ranges(
                + ",\"description\":" + json_text(config.short_description)
                + ",\"canonical\":" + json_text(canonical(version + "/index.html"))
                + ",\"coverage_url\":"
-               + json_text(url(version + "/documentation-coverage/")) + "}",
+               + json_text(url(version + "/documentation-coverage/"))
+               + ",\"breadcrumb\":"
+               + breadcrumb_json({{"Home", url("")}, {version, url(version + "/")}})
+               + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
     // Tutorials index and one page per published tutorial (§10, §16). Each tutorial's
@@ -2685,7 +2784,10 @@ void decorate_code_entity_ranges(
            "{\"title\":" + json_text("Tutorials")
                + ",\"description\":" + json_text("Bioseq tutorials for " + version)
                + ",\"canonical\":"
-               + json_text(canonical(version + "/tutorials/index.html")) + "}",
+               + json_text(canonical(version + "/tutorials/index.html"))
+               + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
+                     {version, url(version + "/")}, {"Tutorials", url(version + "/tutorials/")}})
+               + ",\"doc_nav\":" + doc_nav + "}",
            "tutorials", tutorial_cards);
     for (const tutorial& item : model.tutorials) {
         const std::string rel =
@@ -2694,6 +2796,7 @@ void decorate_code_entity_ranges(
         rewrite_entity_link_routes(body_nodes, route_by_id, tooltip_url);
         decorate_code_entity_ranges(body_nodes, route_by_id, qualified_by_id,
                                     tooltip_url, item.metadata.slug);
+        const std::string on_this_page = build_on_this_page(body_nodes);
         const std::string body = render_document_html(body_nodes);
         std::string page = "{\"title\":" + json_text(item.metadata.title)
             + ",\"description\":" + json_text(item.metadata.description)
@@ -2704,6 +2807,8 @@ void decorate_code_entity_ranges(
                   {version, url(version + "/")},
                   {"Tutorials", url(version + "/tutorials/")},
                   {item.metadata.title, url(version + "/tutorials/" + item.metadata.slug + "/")}})
+            + ",\"doc_nav\":" + doc_nav
+            + ",\"on_this_page\":" + on_this_page
             + ",\"body_html\":" + json_quote(body);
         page += ",\"previous_url\":";
         page += item.previous_slug
@@ -2724,7 +2829,10 @@ void decorate_code_entity_ranges(
                + ",\"canonical\":"
                + json_text(canonical(version + "/reference/index.html"))
                + ",\"cpp_url\":" + json_text(url(version + "/reference/cpp/"))
-               + ",\"sql_url\":" + json_text(url(version + "/reference/sql/")) + "}",
+               + ",\"sql_url\":" + json_text(url(version + "/reference/sql/"))
+               + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
+                     {version, url(version + "/")}, {"Reference", url(version + "/reference/")}})
+               + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
     const auto render_domain = [&](std::string_view domain, std::string_view label,
                                    const std::vector<documented_entity>& entities) {
@@ -2734,7 +2842,12 @@ void decorate_code_entity_ranges(
                "{\"title\":" + json_text(std::string(label) + " API")
                    + ",\"description\":"
                    + json_text(std::string(label) + " API reference")
-                   + ",\"canonical\":" + json_text(canonical(index_rel)) + "}",
+                   + ",\"canonical\":" + json_text(canonical(index_rel))
+                   + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
+                         {version, url(version + "/")}, {"Reference", url(version + "/reference/")},
+                         {std::string(label) + " API",
+                          url(version + "/reference/" + std::string(domain) + "/")}})
+                   + ",\"doc_nav\":" + doc_nav + "}",
                "entities", serialize_entity_array(entities));
         for (const documented_entity& entity : entities) {
             const std::string rel = entity_rel(entity) + "index.html";
@@ -2751,6 +2864,39 @@ void decorate_code_entity_ranges(
                       {std::string(label),
                        url(version + "/reference/" + std::string(domain) + "/")},
                       {entity.qualified_name, url(entity_rel(entity))}});
+            page += ",\"doc_nav\":" + doc_nav;
+            // Section table of contents (§15.1): fixed entity sections that are
+            // present, matched to the h2 anchors in entity.html.j2.
+            const bool has_backlinks =
+                backlinks_by_id.find(entity.canonical_id) != backlinks_by_id.end();
+            std::string entity_toc = "[";
+            bool toc_first = true;
+            const auto add_toc = [&](std::string_view text, std::string_view anchor) {
+                if (!toc_first) {
+                    entity_toc.push_back(',');
+                }
+                toc_first = false;
+                entity_toc += "{\"level\":2,\"text\":" + json_text(std::string(text))
+                    + ",\"anchor\":" + json_text(std::string(anchor)) + "}";
+            };
+            if (!entity.parameters.empty()) {
+                add_toc("Parameters", "parameters");
+            }
+            if (!entity.attributes.empty()) {
+                add_toc(entity.domain == entity_domain::sql ? "Attributes" : "Qualifiers",
+                        "attributes");
+            }
+            if (!entity.overload_members.empty()) {
+                add_toc("Overloads", "overloads");
+            }
+            if (!entity.child_members.empty()) {
+                add_toc("Members", "members");
+            }
+            if (has_backlinks) {
+                add_toc("Referenced by", "referenced-by");
+            }
+            entity_toc.push_back(']');
+            page += ",\"on_this_page\":" + entity_toc;
             // Detailed documentation body (trusted HTML, §12.3).
             page += ",\"detail_html\":";
             page += entity.documentation.empty()

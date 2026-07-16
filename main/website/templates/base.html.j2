@@ -65,9 +65,44 @@
   <p class="search-status" id="search-status" role="status" aria-live="polite"></p>
   <p class="search-fallback"><a href="{{ nav.reference }}">Browse the full reference index</a></p>
 </dialog>
-<main id="main">
+<div class="layout{% if page.doc_nav %} layout-doc{% endif %}">
+  {% if page.breadcrumb %}
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+    {% for c in page.breadcrumb %}
+      <li>{% if c.url %}<a href="{{ c.url }}">{{ c.name }}</a>{% else %}<span aria-current="page">{{ c.name }}</span>{% endif %}</li>
+    {% endfor %}
+    </ol>
+  </nav>
+  {% endif %}
+  {% if page.doc_nav %}
+  <aside class="doc-nav" aria-label="Documentation navigation">
+    <nav>
+    {% for s in page.doc_nav %}
+      <p class="doc-nav-title">{{ s.label }}</p>
+      <ul>
+      {% for i in s.items %}
+        <li><a href="{{ i.url }}">{{ i.label }}</a></li>
+      {% endfor %}
+      </ul>
+    {% endfor %}
+    </nav>
+  </aside>
+  {% endif %}
+  <main id="main">
 {% block main %}{% endblock %}
-</main>
+  </main>
+  {% if page.on_this_page %}
+  <aside class="doc-toc" aria-label="On this page">
+    <p class="doc-toc-title">On this page</p>
+    <ul>
+    {% for h in page.on_this_page %}
+      <li class="toc-l{{ h.level }}"><a href="#{{ h.anchor }}">{{ h.text }}</a></li>
+    {% endfor %}
+    </ul>
+  </aside>
+  {% endif %}
+</div>
 <footer class="site-footer">
   <p>&#169; {{ site.copyright_year }} {{ site.copyright_holder }}{% if site.status_label %} &#183; {{ site.status_label }}{% endif %} &#183; {{ site.version }}</p>
 </footer>
